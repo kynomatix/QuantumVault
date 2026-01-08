@@ -7,7 +7,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists } from "./drift-service";
 import { generateAgentWallet, getAgentUsdcBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
@@ -688,6 +688,7 @@ export async function registerRoutes(
     }
   });
 
+  // Bot deposit - transfer from main Drift account to bot's subaccount
   app.post("/api/bot/:botId/deposit", requireWallet, async (req, res) => {
     try {
       const { botId } = req.params;
@@ -700,25 +701,26 @@ export async function registerRoutes(
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      if (!bot.agentPublicKey) {
-        return res.status(400).json({ error: "Bot has no agent wallet" });
+      if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
+        return res.status(400).json({ error: "Bot has no Drift subaccount assigned" });
       }
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
       }
 
-      const result = await buildTransferToAgentTransaction(
+      const result = await buildTransferToSubaccountTransaction(
         req.walletAddress!,
-        bot.agentPublicKey,
+        bot.driftSubaccountId,
         amount
       );
       res.json(result);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Bot deposit error:", error);
-      res.status(500).json({ error: "Failed to build deposit transaction" });
+      res.status(500).json({ error: error.message || "Failed to build deposit transaction" });
     }
   });
 
+  // Bot withdraw - transfer from bot's subaccount back to main Drift account
   app.post("/api/bot/:botId/withdraw", requireWallet, async (req, res) => {
     try {
       const { botId } = req.params;
@@ -731,26 +733,26 @@ export async function registerRoutes(
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      if (!bot.agentPublicKey || !bot.agentPrivateKeyEncrypted) {
-        return res.status(400).json({ error: "Bot has no agent wallet" });
+      if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
+        return res.status(400).json({ error: "Bot has no Drift subaccount assigned" });
       }
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
       }
 
-      const result = await buildWithdrawFromAgentTransaction(
+      const result = await buildTransferFromSubaccountTransaction(
         req.walletAddress!,
-        bot.agentPublicKey,
-        bot.agentPrivateKeyEncrypted,
+        bot.driftSubaccountId,
         amount
       );
       res.json(result);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Bot withdraw error:", error);
-      res.status(500).json({ error: "Failed to build withdraw transaction" });
+      res.status(500).json({ error: error.message || "Failed to build withdraw transaction" });
     }
   });
 
+  // Bot balance - get subaccount balance from Drift
   app.get("/api/bot/:botId/balance", requireWallet, async (req, res) => {
     try {
       const { botId } = req.params;
@@ -762,13 +764,17 @@ export async function registerRoutes(
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      if (!bot.agentPublicKey) {
-        return res.status(400).json({ error: "Bot has no agent wallet" });
+      if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
+        return res.status(400).json({ error: "Bot has no Drift subaccount assigned" });
       }
 
-      const balance = await getAgentUsdcBalance(bot.agentPublicKey);
+      // Check if subaccount exists on-chain
+      const exists = await subaccountExists(req.walletAddress!, bot.driftSubaccountId);
+      const balance = exists ? await getDriftBalance(req.walletAddress!, bot.driftSubaccountId) : 0;
+      
       res.json({ 
-        agentPublicKey: bot.agentPublicKey,
+        driftSubaccountId: bot.driftSubaccountId,
+        subaccountExists: exists,
         usdcBalance: balance 
       });
     } catch (error) {

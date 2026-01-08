@@ -390,6 +390,247 @@ export async function getUsdcBalance(walletAddress: string): Promise<number> {
   }
 }
 
-export async function getDriftBalance(walletAddress: string): Promise<number> {
+export async function getDriftBalance(walletAddress: string, subAccountId: number = 0): Promise<number> {
+  // TODO: Parse actual Drift user account to get collateral balance
+  // For now, this returns 0 as a placeholder
   return 0;
+}
+
+// Initialize a new subaccount for a bot
+export async function buildInitializeSubaccountTransaction(
+  walletAddress: string,
+  subAccountId: number,
+  name: string = 'Bot'
+): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  
+  const userAccount = getUserAccountPDA(userPubkey, subAccountId);
+  const userStats = getUserStatsPDA(userPubkey);
+  
+  const instructions: TransactionInstruction[] = [];
+  
+  // Check if user stats exists (required for any subaccount)
+  const userStatsInfo = await connection.getAccountInfo(userStats);
+  if (!userStatsInfo) {
+    instructions.push(
+      createInitializeUserStatsInstruction(userPubkey, userStats)
+    );
+  }
+  
+  // Check if this subaccount already exists
+  const userAccountInfo = await connection.getAccountInfo(userAccount);
+  if (userAccountInfo) {
+    throw new Error(`Subaccount ${subAccountId} already exists`);
+  }
+  
+  // Initialize the subaccount
+  instructions.push(
+    createInitializeUserInstruction(userPubkey, userAccount, userStats, subAccountId, name)
+  );
+  
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  
+  const transaction = new Transaction({
+    feePayer: userPubkey,
+    blockhash,
+    lastValidBlockHeight,
+  });
+  
+  for (const ix of instructions) {
+    transaction.add(ix);
+  }
+  
+  const serializedTx = transaction.serialize({ 
+    requireAllSignatures: false,
+    verifySignatures: false 
+  }).toString('base64');
+  
+  return {
+    transaction: serializedTx,
+    blockhash,
+    lastValidBlockHeight,
+    message: `Initialize Drift subaccount ${subAccountId}`,
+  };
+}
+
+// Check if a subaccount exists
+export async function subaccountExists(
+  walletAddress: string,
+  subAccountId: number
+): Promise<boolean> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  const userAccount = getUserAccountPDA(userPubkey, subAccountId);
+  
+  const accountInfo = await connection.getAccountInfo(userAccount);
+  return accountInfo !== null;
+}
+
+// Create transfer collateral instruction between subaccounts
+function createTransferDepositInstruction(
+  userPubkey: PublicKey,
+  fromUserAccount: PublicKey,
+  toUserAccount: PublicKey,
+  userStats: PublicKey,
+  amount: BN,
+  marketIndex: number = 0
+): TransactionInstruction {
+  const discriminator = getAnchorDiscriminator('transferDeposit');
+  
+  const data = Buffer.alloc(8 + 2 + 8);
+  discriminator.copy(data, 0);
+  data.writeUInt16LE(marketIndex, 8);
+  amount.toArrayLike(Buffer, 'le', 8).copy(data, 10);
+
+  const keys = [
+    { pubkey: fromUserAccount, isSigner: false, isWritable: true },
+    { pubkey: toUserAccount, isSigner: false, isWritable: true },
+    { pubkey: userStats, isSigner: false, isWritable: true },
+    { pubkey: userPubkey, isSigner: true, isWritable: false },
+    { pubkey: DRIFT_STATE_PUBKEY, isSigner: false, isWritable: false },
+  ];
+
+  return new TransactionInstruction({
+    keys,
+    programId: DRIFT_PROGRAM_ID,
+    data,
+  });
+}
+
+// Transfer funds from main account (subaccount 0) to a bot's subaccount
+export async function buildTransferToSubaccountTransaction(
+  walletAddress: string,
+  toSubAccountId: number,
+  amountUsdc: number
+): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  
+  const fromUserAccount = getUserAccountPDA(userPubkey, 0); // Main account
+  const toUserAccount = getUserAccountPDA(userPubkey, toSubAccountId);
+  const userStats = getUserStatsPDA(userPubkey);
+  
+  // Check that both accounts exist
+  const [fromInfo, toInfo] = await Promise.all([
+    connection.getAccountInfo(fromUserAccount),
+    connection.getAccountInfo(toUserAccount)
+  ]);
+  
+  if (!fromInfo) {
+    throw new Error('Main Drift account not initialized. Please deposit to Drift first.');
+  }
+  
+  const instructions: TransactionInstruction[] = [];
+  
+  // If target subaccount doesn't exist, initialize it first
+  if (!toInfo) {
+    const userStatsInfo = await connection.getAccountInfo(userStats);
+    if (!userStatsInfo) {
+      instructions.push(
+        createInitializeUserStatsInstruction(userPubkey, userStats)
+      );
+    }
+    instructions.push(
+      createInitializeUserInstruction(userPubkey, toUserAccount, userStats, toSubAccountId, `Bot${toSubAccountId}`)
+    );
+  }
+  
+  const transferAmountLamports = Math.round(amountUsdc * 1_000_000);
+  if (transferAmountLamports <= 0) {
+    throw new Error('Invalid transfer amount');
+  }
+  
+  const transferAmount = new BN(transferAmountLamports);
+  
+  instructions.push(
+    createTransferDepositInstruction(
+      userPubkey,
+      fromUserAccount,
+      toUserAccount,
+      userStats,
+      transferAmount
+    )
+  );
+  
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  
+  const transaction = new Transaction({
+    feePayer: userPubkey,
+    blockhash,
+    lastValidBlockHeight,
+  });
+  
+  for (const ix of instructions) {
+    transaction.add(ix);
+  }
+  
+  const serializedTx = transaction.serialize({ 
+    requireAllSignatures: false,
+    verifySignatures: false 
+  }).toString('base64');
+  
+  return {
+    transaction: serializedTx,
+    blockhash,
+    lastValidBlockHeight,
+    message: `Transfer ${amountUsdc} USDC to subaccount ${toSubAccountId}`,
+  };
+}
+
+// Transfer funds from a bot's subaccount back to main account (subaccount 0)
+export async function buildTransferFromSubaccountTransaction(
+  walletAddress: string,
+  fromSubAccountId: number,
+  amountUsdc: number
+): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  
+  const fromUserAccount = getUserAccountPDA(userPubkey, fromSubAccountId);
+  const toUserAccount = getUserAccountPDA(userPubkey, 0); // Main account
+  const userStats = getUserStatsPDA(userPubkey);
+  
+  // Check that source account exists
+  const fromInfo = await connection.getAccountInfo(fromUserAccount);
+  if (!fromInfo) {
+    throw new Error(`Subaccount ${fromSubAccountId} not initialized`);
+  }
+  
+  const transferAmountLamports = Math.round(amountUsdc * 1_000_000);
+  if (transferAmountLamports <= 0) {
+    throw new Error('Invalid transfer amount');
+  }
+  
+  const transferAmount = new BN(transferAmountLamports);
+  
+  const instruction = createTransferDepositInstruction(
+    userPubkey,
+    fromUserAccount,
+    toUserAccount,
+    userStats,
+    transferAmount
+  );
+  
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  
+  const transaction = new Transaction({
+    feePayer: userPubkey,
+    blockhash,
+    lastValidBlockHeight,
+  });
+  
+  transaction.add(instruction);
+  
+  const serializedTx = transaction.serialize({ 
+    requireAllSignatures: false,
+    verifySignatures: false 
+  }).toString('base64');
+  
+  return {
+    transaction: serializedTx,
+    blockhash,
+    lastValidBlockHeight,
+    message: `Transfer ${amountUsdc} USDC from subaccount ${fromSubAccountId} to main account`,
+  };
 }

@@ -20,7 +20,7 @@ interface TradingBot {
   id: string;
   name: string;
   market: string;
-  agentPublicKey: string | null;
+  driftSubaccountId: number | null;
 }
 
 export function DepositWithdraw() {
@@ -37,7 +37,7 @@ export function DepositWithdraw() {
   const [mode, setMode] = useState<'deposit' | 'withdraw'>('deposit');
   const [amount, setAmount] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [initializingWallet, setInitializingWallet] = useState(false);
+  const [subaccountExists, setSubaccountExists] = useState(false);
 
   const tradingBots = (bots as TradingBot[]) || [];
   const selectedBot = tradingBots.find(b => b.id === selectedBotId);
@@ -54,12 +54,12 @@ export function DepositWithdraw() {
     setBotBalanceLoading(true);
     try {
       const res = await fetch(`/api/bot/${selectedBotId}/balance`, {
-        headers: { 'x-wallet-address': publicKeyString },
         credentials: 'include',
       });
       if (!res.ok) throw new Error('Failed to fetch balance');
       const data = await res.json();
       setBotBalance(data.usdcBalance ?? 0);
+      setSubaccountExists(data.subaccountExists ?? false);
       setHasFetchedBalance(true);
     } catch (error) {
       console.error('Error fetching bot balance:', error);
@@ -117,17 +117,11 @@ export function DepositWithdraw() {
       
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
       
-      let signature: string;
-      
-      if (mode === 'deposit') {
-        if (!solanaWallet.signTransaction) {
-          throw new Error('Wallet does not support signing');
-        }
-        const signedTx = await solanaWallet.signTransaction(transaction);
-        signature = await connection.sendRawTransaction(signedTx.serialize());
-      } else {
-        signature = await connection.sendRawTransaction(transaction.serialize());
+      if (!solanaWallet.signTransaction) {
+        throw new Error('Wallet does not support signing');
       }
+      const signedTx = await solanaWallet.signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
       
       await connection.confirmTransaction({
         signature,
@@ -155,41 +149,7 @@ export function DepositWithdraw() {
   };
 
   const hasNoBots = !botsLoading && tradingBots.length === 0;
-  const selectedBotNeedsWallet = selectedBot && !selectedBot.agentPublicKey;
-
-  const initializeAgentWallet = async () => {
-    if (!selectedBotId || !publicKeyString) return;
-    
-    setInitializingWallet(true);
-    try {
-      const res = await fetch(`/api/trading-bots/${selectedBotId}/init-wallet`, {
-        method: 'POST',
-        headers: { 'x-wallet-address': publicKeyString },
-        credentials: 'include',
-      });
-      
-      if (!res.ok) {
-        const error = await res.json();
-        throw new Error(error.error || 'Failed to initialize wallet');
-      }
-      
-      toast({ 
-        title: 'Agent Wallet Created!', 
-        description: 'Your bot now has its own wallet for trading.' 
-      });
-      await refetchBots();
-      await fetchBotBalance();
-    } catch (error: any) {
-      console.error('Init wallet error:', error);
-      toast({ 
-        title: 'Failed to initialize wallet', 
-        description: error.message,
-        variant: 'destructive' 
-      });
-    } finally {
-      setInitializingWallet(false);
-    }
-  };
+  const selectedBotHasSubaccount = selectedBot && selectedBot.driftSubaccountId !== null;
 
   return (
     <div className="gradient-border p-6 noise space-y-4">
@@ -236,65 +196,50 @@ export function DepositWithdraw() {
             </Select>
           </div>
 
-          {selectedBotNeedsWallet ? (
+          {!selectedBotHasSubaccount ? (
             <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4">
               <div className="flex items-start gap-3">
                 <AlertCircle className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" />
                 <div className="flex-1">
-                  <p className="text-sm font-medium text-yellow-500">Bot Wallet Not Initialized</p>
+                  <p className="text-sm font-medium text-yellow-500">Legacy Bot</p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    This bot needs a wallet to hold trading funds. Initialize it to start depositing.
+                    This bot was created before the subaccount system. Create a new bot to use isolated trading accounts.
                   </p>
-                  <Button
-                    size="sm"
-                    className="mt-3"
-                    onClick={initializeAgentWallet}
-                    disabled={initializingWallet}
-                    data-testid="button-init-wallet"
-                  >
-                    {initializingWallet ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Initializing...
-                      </>
-                    ) : (
-                      'Initialize Bot Wallet'
-                    )}
-                  </Button>
                 </div>
               </div>
             </div>
           ) : (
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-muted/30 rounded-xl p-4 border border-border/30">
-                <p className="text-sm text-muted-foreground">Wallet SOL</p>
-                <p className="text-2xl font-mono font-bold" data-testid="text-sol-balance">
-                  {balance?.toFixed(4) ?? '0'} SOL
-                </p>
-              </div>
-              <div className="bg-primary/5 rounded-xl p-4 border border-primary/30">
-                <p className="text-sm text-muted-foreground">Trading Capital</p>
-                {!hasFetchedBalance && botBalanceLoading ? (
-                  <div className="flex items-center gap-2">
-                    <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
-                    <span className="text-muted-foreground">Loading...</span>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <p className="text-2xl font-mono font-bold text-primary" data-testid="text-bot-balance">
-                      {botBalance.toFixed(2)} USDC
-                    </p>
-                    {botBalanceLoading && (
-                      <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {!selectedBotNeedsWallet && (
             <>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-muted/30 rounded-xl p-4 border border-border/30">
+                  <p className="text-sm text-muted-foreground">Wallet SOL</p>
+                  <p className="text-2xl font-mono font-bold" data-testid="text-sol-balance">
+                    {balance?.toFixed(4) ?? '0'} SOL
+                  </p>
+                </div>
+                <div className="bg-primary/5 rounded-xl p-4 border border-primary/30">
+                  <p className="text-sm text-muted-foreground">Subaccount #{selectedBot?.driftSubaccountId}</p>
+                  {!hasFetchedBalance && botBalanceLoading ? (
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                      <span className="text-muted-foreground">Loading...</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <p className="text-2xl font-mono font-bold text-primary" data-testid="text-bot-balance">
+                        {botBalance.toFixed(2)} USDC
+                      </p>
+                      {botBalanceLoading && (
+                        <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                      )}
+                    </div>
+                  )}
+                  {!subaccountExists && hasFetchedBalance && (
+                    <p className="text-xs text-muted-foreground mt-1">Not initialized yet</p>
+                  )}
+                </div>
+              </div>
+
               <div className="flex rounded-xl bg-muted/30 p-1">
                 <button
                   onClick={() => setMode('deposit')}
@@ -351,19 +296,19 @@ export function DepositWithdraw() {
                   ) : mode === 'deposit' ? (
                     <>
                       <ArrowDownToLine className="w-4 h-4 mr-2" />
-                      Deposit to Bot
+                      Transfer to Subaccount
                     </>
                   ) : (
                     <>
                       <ArrowUpFromLine className="w-4 h-4 mr-2" />
-                      Withdraw from Bot
+                      Transfer to Main Account
                     </>
                   )}
                 </Button>
               </div>
 
               <div className="text-xs text-muted-foreground text-center">
-                {selectedBot?.name ? `Managing: ${selectedBot.name}` : 'Select a bot to manage funds'}
+                {selectedBot?.name ? `Managing: ${selectedBot.name} (Subaccount #${selectedBot.driftSubaccountId})` : 'Select a bot to manage funds'}
               </div>
             </>
           )}
