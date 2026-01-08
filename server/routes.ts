@@ -92,7 +92,7 @@ export async function registerRoutes(
 
   app.get("/api/wallet/me", requireWallet, async (req, res) => {
     try {
-      const wallet = await storage.getWallet(req.walletAddress);
+      const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
@@ -106,7 +106,7 @@ export async function registerRoutes(
   // Trading bot CRUD routes
   app.get("/api/trading-bots", requireWallet, async (req, res) => {
     try {
-      const bots = await storage.getTradingBots(req.walletAddress);
+      const bots = await storage.getTradingBots(req.walletAddress!);
       res.json(bots);
     } catch (error) {
       console.error("Get trading bots error:", error);
@@ -138,10 +138,13 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Name and market are required" });
       }
 
+      // Ensure wallet exists before creating bot
+      await storage.getOrCreateWallet(req.walletAddress!);
+
       const webhookSecret = generateWebhookSecret();
 
       const bot = await storage.createTradingBot({
-        walletAddress: req.walletAddress,
+        walletAddress: req.walletAddress!,
         name,
         market,
         webhookSecret,
@@ -237,7 +240,7 @@ export async function registerRoutes(
   app.get("/api/bot-trades", requireWallet, async (req, res) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
-      const trades = await storage.getWalletBotTrades(req.walletAddress, limit);
+      const trades = await storage.getWalletBotTrades(req.walletAddress!, limit);
       res.json(trades);
     } catch (error) {
       console.error("Get wallet bot trades error:", error);
