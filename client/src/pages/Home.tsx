@@ -252,6 +252,7 @@ export default function Home() {
                 <Button 
                   size="lg" 
                   className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity text-lg px-8 py-6 glow"
+                  onClick={() => document.getElementById('dashboard')?.scrollIntoView({ behavior: 'smooth' })}
                   data-testid="button-hero-dashboard"
                 >
                   Go to Dashboard
