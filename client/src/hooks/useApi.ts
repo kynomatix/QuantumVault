@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useAuth } from "./useAuth";
+import { useWallet } from "./useWallet";
 
 // API fetch functions
 async function fetchBots(featured?: boolean) {
@@ -9,26 +9,26 @@ async function fetchBots(featured?: boolean) {
   return res.json();
 }
 
-async function fetchSubscriptions() {
-  const res = await fetch("/api/subscriptions", { credentials: "include" });
+async function fetchSubscriptions(walletAddress: string) {
+  const res = await fetch(`/api/subscriptions?wallet=${walletAddress}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch subscriptions");
   return res.json();
 }
 
-async function fetchPortfolio() {
-  const res = await fetch("/api/portfolio", { credentials: "include" });
+async function fetchPortfolio(walletAddress: string) {
+  const res = await fetch(`/api/portfolio?wallet=${walletAddress}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch portfolio");
   return res.json();
 }
 
-async function fetchPositions() {
-  const res = await fetch("/api/positions", { credentials: "include" });
+async function fetchPositions(walletAddress: string) {
+  const res = await fetch(`/api/positions?wallet=${walletAddress}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch positions");
   return res.json();
 }
 
-async function fetchTrades(limit?: number) {
-  const url = limit ? `/api/trades?limit=${limit}` : "/api/trades";
+async function fetchTrades(walletAddress: string, limit?: number) {
+  const url = limit ? `/api/trades?wallet=${walletAddress}&limit=${limit}` : `/api/trades?wallet=${walletAddress}`;
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch trades");
   return res.json();
@@ -41,11 +41,11 @@ async function fetchLeaderboard(limit?: number) {
   return res.json();
 }
 
-async function subscribeToBot(botId: string) {
+async function subscribeToBot(botId: string, walletAddress: string) {
   const res = await fetch("/api/subscriptions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ botId }),
+    body: JSON.stringify({ botId, walletAddress }),
     credentials: "include",
   });
   if (!res.ok) {
@@ -75,38 +75,38 @@ export function useBots(featured?: boolean) {
 }
 
 export function useSubscriptions() {
-  const { user } = useAuth();
+  const { publicKeyString } = useWallet();
   return useQuery({
-    queryKey: ["subscriptions"],
-    queryFn: fetchSubscriptions,
-    enabled: !!user,
+    queryKey: ["subscriptions", publicKeyString],
+    queryFn: () => fetchSubscriptions(publicKeyString!),
+    enabled: !!publicKeyString,
   });
 }
 
 export function usePortfolio() {
-  const { user } = useAuth();
+  const { publicKeyString } = useWallet();
   return useQuery({
-    queryKey: ["portfolio"],
-    queryFn: fetchPortfolio,
-    enabled: !!user,
+    queryKey: ["portfolio", publicKeyString],
+    queryFn: () => fetchPortfolio(publicKeyString!),
+    enabled: !!publicKeyString,
   });
 }
 
 export function usePositions() {
-  const { user } = useAuth();
+  const { publicKeyString } = useWallet();
   return useQuery({
-    queryKey: ["positions"],
-    queryFn: fetchPositions,
-    enabled: !!user,
+    queryKey: ["positions", publicKeyString],
+    queryFn: () => fetchPositions(publicKeyString!),
+    enabled: !!publicKeyString,
   });
 }
 
 export function useTrades(limit?: number) {
-  const { user } = useAuth();
+  const { publicKeyString } = useWallet();
   return useQuery({
-    queryKey: ["trades", limit],
-    queryFn: () => fetchTrades(limit),
-    enabled: !!user,
+    queryKey: ["trades", publicKeyString, limit],
+    queryFn: () => fetchTrades(publicKeyString!, limit),
+    enabled: !!publicKeyString,
   });
 }
 
@@ -119,8 +119,9 @@ export function useLeaderboard(limit?: number) {
 
 export function useSubscribeToBot() {
   const queryClient = useQueryClient();
+  const { publicKeyString } = useWallet();
   return useMutation({
-    mutationFn: subscribeToBot,
+    mutationFn: (botId: string) => subscribeToBot(botId, publicKeyString!),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
       queryClient.invalidateQueries({ queryKey: ["bots"] });
