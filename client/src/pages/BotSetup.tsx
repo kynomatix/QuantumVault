@@ -6,7 +6,6 @@ import { useToast } from '@/hooks/use-toast';
 import { 
   Bot, 
   Plus, 
-  Settings, 
   Trash2, 
   Copy, 
   Check,
@@ -17,7 +16,10 @@ import {
   TrendingUp,
   AlertCircle,
   ExternalLink,
-  RefreshCw
+  ChevronRight,
+  Zap,
+  Settings,
+  Eye
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -38,7 +40,7 @@ import {
   DialogTrigger,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 interface TradingBot {
   id: string;
@@ -50,11 +52,6 @@ interface TradingBot {
   side: string;
   leverage: number;
   maxPositionSize: string | null;
-  signalConfig: {
-    longKeyword?: string;
-    shortKeyword?: string;
-    exitKeyword?: string;
-  } | null;
   stats: {
     totalTrades: number;
     winningTrades: number;
@@ -97,17 +94,15 @@ export default function BotSetup() {
   const [botTrades, setBotTrades] = useState<BotTrade[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [showWebhookDialog, setShowWebhookDialog] = useState(false);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
   
   const [newBot, setNewBot] = useState({
     name: '',
     market: 'SOL-PERP',
     side: 'both',
     leverage: 1,
-    maxPositionSize: '',
-    longKeyword: 'LONG',
-    shortKeyword: 'SHORT',
-    exitKeyword: 'CLOSE',
+    maxPositionSize: '100',
   });
 
   useEffect(() => {
@@ -160,12 +155,7 @@ export default function BotSetup() {
           market: newBot.market,
           side: newBot.side,
           leverage: newBot.leverage,
-          maxPositionSize: newBot.maxPositionSize || null,
-          signalConfig: {
-            longKeyword: newBot.longKeyword,
-            shortKeyword: newBot.shortKeyword,
-            exitKeyword: newBot.exitKeyword,
-          },
+          maxPositionSize: newBot.maxPositionSize || '100',
         }),
       });
       
@@ -174,17 +164,15 @@ export default function BotSetup() {
         setBots([bot, ...bots]);
         setSelectedBot(bot);
         setShowCreateDialog(false);
+        setShowWebhookDialog(true);
         setNewBot({
           name: '',
           market: 'SOL-PERP',
           side: 'both',
           leverage: 1,
-          maxPositionSize: '',
-          longKeyword: 'LONG',
-          shortKeyword: 'SHORT',
-          exitKeyword: 'CLOSE',
+          maxPositionSize: '100',
         });
-        toast({ title: 'Bot created successfully!' });
+        toast({ title: 'Bot created! Copy your webhook details below.' });
       } else {
         const error = await res.json();
         toast({ title: 'Failed to create bot', description: error.error, variant: 'destructive' });
@@ -237,16 +225,30 @@ export default function BotSetup() {
     }
   };
 
-  const copyWebhookUrl = async (url: string) => {
-    await navigator.clipboard.writeText(url);
-    setCopiedUrl(true);
-    toast({ title: 'Webhook URL copied to clipboard' });
-    setTimeout(() => setCopiedUrl(false), 2000);
+  const copyToClipboard = async (text: string, field: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopiedField(field);
+    toast({ title: `${field} copied to clipboard` });
+    setTimeout(() => setCopiedField(null), 2000);
   };
 
   const selectBot = (bot: TradingBot) => {
     setSelectedBot(bot);
     fetchBotTrades(bot.id);
+  };
+
+  const getWebhookUrl = (bot: TradingBot) => {
+    const baseUrl = window.location.origin;
+    return `${baseUrl}/api/webhook/tradingview/${bot.id}?secret=${bot.webhookSecret}`;
+  };
+
+  const getMessageTemplate = (bot: TradingBot) => {
+    return JSON.stringify({
+      action: "{{strategy.order.action}}",
+      contracts: "{{strategy.order.contracts}}",
+      price: "{{close}}",
+      position_size: bot.maxPositionSize || "100"
+    }, null, 2);
   };
 
   if (!connected) {
@@ -276,8 +278,8 @@ export default function BotSetup() {
                 <Bot className="w-5 h-5 text-white" />
               </div>
               <div>
-                <h1 className="font-display font-bold text-xl">TradingView Bots</h1>
-                <p className="text-sm text-muted-foreground">Configure automated trading</p>
+                <h1 className="font-display font-bold text-xl">TradingView Signal Bot</h1>
+                <p className="text-sm text-muted-foreground">Connect your TradingView strategy to Drift Protocol</p>
               </div>
             </div>
           </div>
@@ -286,14 +288,17 @@ export default function BotSetup() {
             <DialogTrigger asChild>
               <Button className="bg-gradient-to-r from-primary to-accent" data-testid="button-create-bot">
                 <Plus className="w-4 h-4 mr-2" />
-                Create Bot
+                Create Signal Bot
               </Button>
             </DialogTrigger>
-            <DialogContent className="sm:max-w-[500px]">
+            <DialogContent className="sm:max-w-[450px]">
               <DialogHeader>
-                <DialogTitle>Create TradingView Bot</DialogTitle>
+                <DialogTitle className="flex items-center gap-2">
+                  <Zap className="w-5 h-5 text-primary" />
+                  Create Signal Bot
+                </DialogTitle>
                 <DialogDescription>
-                  Set up a bot to execute trades based on TradingView alerts
+                  Set up your bot, then copy the webhook URL and message to TradingView
                 </DialogDescription>
               </DialogHeader>
               
@@ -302,7 +307,7 @@ export default function BotSetup() {
                   <Label htmlFor="name">Bot Name</Label>
                   <Input
                     id="name"
-                    placeholder="My SOL Scalper"
+                    placeholder="e.g. SOL EMA Crossover"
                     value={newBot.name}
                     onChange={(e) => setNewBot({ ...newBot, name: e.target.value })}
                     data-testid="input-bot-name"
@@ -354,7 +359,7 @@ export default function BotSetup() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="maxSize">Max Position Size (USDC)</Label>
+                  <Label htmlFor="maxSize">Position Size (USDC per trade)</Label>
                   <Input
                     id="maxSize"
                     type="number"
@@ -363,51 +368,21 @@ export default function BotSetup() {
                     onChange={(e) => setNewBot({ ...newBot, maxPositionSize: e.target.value })}
                     data-testid="input-max-size"
                   />
-                </div>
-
-                <div className="p-4 rounded-lg bg-muted/50 space-y-3">
-                  <Label className="text-sm font-medium">TradingView Alert Keywords</Label>
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="space-y-1">
-                      <Label className="text-xs text-muted-foreground">Long</Label>
-                      <Input
-                        value={newBot.longKeyword}
-                        onChange={(e) => setNewBot({ ...newBot, longKeyword: e.target.value })}
-                        className="h-8 text-sm"
-                        data-testid="input-long-keyword"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs text-muted-foreground">Short</Label>
-                      <Input
-                        value={newBot.shortKeyword}
-                        onChange={(e) => setNewBot({ ...newBot, shortKeyword: e.target.value })}
-                        className="h-8 text-sm"
-                        data-testid="input-short-keyword"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs text-muted-foreground">Close</Label>
-                      <Input
-                        value={newBot.exitKeyword}
-                        onChange={(e) => setNewBot({ ...newBot, exitKeyword: e.target.value })}
-                        className="h-8 text-sm"
-                        data-testid="input-exit-keyword"
-                      />
-                    </div>
-                  </div>
+                  <p className="text-xs text-muted-foreground">Amount in USDC for each trade signal</p>
                 </div>
               </div>
 
               <DialogFooter>
-                <Button variant="outline" onClick={() => setShowCreateDialog(false)}>Cancel</Button>
+                <Button variant="outline" onClick={() => setShowCreateDialog(false)}>
+                  Cancel
+                </Button>
                 <Button 
-                  onClick={createBot} 
+                  onClick={createBot}
                   disabled={!newBot.name}
                   className="bg-gradient-to-r from-primary to-accent"
                   data-testid="button-confirm-create"
                 >
-                  Create Bot
+                  Create & Get Webhook
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -415,117 +390,266 @@ export default function BotSetup() {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-8">
-        <div className="grid lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-1 space-y-4">
-            <h2 className="font-semibold text-lg flex items-center gap-2">
-              <Bot className="w-5 h-5 text-primary" />
-              Your Bots ({bots.length})
-            </h2>
-            
-            {loading ? (
-              <div className="space-y-3">
-                {[1, 2, 3].map((i) => (
-                  <div key={i} className="gradient-border p-4 animate-pulse">
-                    <div className="h-5 bg-muted rounded w-2/3 mb-2" />
-                    <div className="h-4 bg-muted rounded w-1/2" />
+      <Dialog open={showWebhookDialog} onOpenChange={setShowWebhookDialog}>
+        <DialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-xl">
+              <Check className="w-6 h-6 text-emerald-500" />
+              Bot Created Successfully!
+            </DialogTitle>
+            <DialogDescription>
+              Copy the webhook URL and message below to your TradingView alert
+            </DialogDescription>
+          </DialogHeader>
+          
+          {selectedBot && (
+            <div className="space-y-6 py-4">
+              <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-500/10 to-primary/10 border border-emerald-500/20">
+                <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">1</span>
+                  Webhook URL
+                </h3>
+                <div className="relative">
+                  <div className="p-3 bg-background/80 rounded-lg font-mono text-sm break-all border">
+                    {getWebhookUrl(selectedBot)}
                   </div>
-                ))}
-              </div>
-            ) : bots.length === 0 ? (
-              <motion.div 
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="gradient-border p-8 text-center"
-              >
-                <Bot className="w-12 h-12 mx-auto mb-4 text-muted-foreground" />
-                <h3 className="font-semibold mb-2">No bots yet</h3>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Create your first TradingView bot to start automated trading
-                </p>
-                <Button 
-                  onClick={() => setShowCreateDialog(true)}
-                  className="bg-gradient-to-r from-primary to-accent"
-                >
-                  <Plus className="w-4 h-4 mr-2" />
-                  Create Bot
-                </Button>
-              </motion.div>
-            ) : (
-              <div className="space-y-3">
-                {bots.map((bot) => (
-                  <motion.div
-                    key={bot.id}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className={`gradient-border p-4 cursor-pointer transition-all hover:border-primary/50 ${
-                      selectedBot?.id === bot.id ? 'border-primary ring-1 ring-primary/20' : ''
-                    }`}
-                    onClick={() => selectBot(bot)}
-                    data-testid={`card-bot-${bot.id}`}
+                  <Button
+                    size="sm"
+                    className="absolute top-2 right-2"
+                    onClick={() => copyToClipboard(getWebhookUrl(selectedBot), 'Webhook URL')}
+                    data-testid="button-copy-webhook"
                   >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                          bot.isActive ? 'bg-green-500/20' : 'bg-muted'
-                        }`}>
-                          <Bot className={`w-5 h-5 ${bot.isActive ? 'text-green-400' : 'text-muted-foreground'}`} />
-                        </div>
-                        <div>
-                          <h3 className="font-medium">{bot.name}</h3>
-                          <p className="text-sm text-muted-foreground">{bot.market}</p>
-                        </div>
-                      </div>
-                      <div className={`px-2 py-1 rounded text-xs font-medium ${
-                        bot.isActive ? 'bg-green-500/20 text-green-400' : 'bg-muted text-muted-foreground'
-                      }`}>
-                        {bot.isActive ? 'Active' : 'Paused'}
-                      </div>
-                    </div>
-                    
-                    {bot.stats && (
-                      <div className="mt-3 pt-3 border-t border-border/50 flex items-center gap-4 text-sm">
-                        <span className="text-muted-foreground">
-                          Trades: <span className="text-foreground">{bot.stats.totalTrades}</span>
-                        </span>
-                        <span className={bot.stats.totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}>
-                          PnL: ${bot.stats.totalPnl.toFixed(2)}
-                        </span>
-                      </div>
-                    )}
-                  </motion.div>
-                ))}
+                    {copiedField === 'Webhook URL' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  Paste this in TradingView Alert → Notifications → Webhook URL
+                </p>
               </div>
-            )}
-          </div>
 
-          <div className="lg:col-span-2">
-            {selectedBot ? (
-              <motion.div
-                key={selectedBot.id}
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                className="space-y-6"
-              >
-                <div className="gradient-border p-6">
-                  <div className="flex items-start justify-between mb-6">
+              <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border border-primary/20">
+                <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">2</span>
+                  Alert Message
+                </h3>
+                <div className="relative">
+                  <pre className="p-3 bg-background/80 rounded-lg font-mono text-sm overflow-x-auto border">
+{getMessageTemplate(selectedBot)}
+                  </pre>
+                  <Button
+                    size="sm"
+                    className="absolute top-2 right-2"
+                    onClick={() => copyToClipboard(getMessageTemplate(selectedBot), 'Message')}
+                    data-testid="button-copy-message"
+                  >
+                    {copiedField === 'Message' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  Paste this in TradingView Alert → Message field (replace all existing content)
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-muted/50 border">
+                <h3 className="font-semibold mb-3 flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-primary" />
+                  How TradingView Placeholders Work
+                </h3>
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.action}}"}</code> → Automatically becomes "buy" or "sell"</p>
+                  <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.contracts}}"}</code> → Strategy's position size</p>
+                  <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{close}}"}</code> → Current price when alert fires</p>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl border border-yellow-500/30 bg-yellow-500/5">
+                <h3 className="font-semibold mb-2 flex items-center gap-2 text-yellow-600">
+                  <AlertCircle className="w-4 h-4" />
+                  Important
+                </h3>
+                <ul className="text-sm text-muted-foreground space-y-1">
+                  <li>• Your TradingView strategy must use <code className="px-1 py-0.5 bg-background rounded text-xs">strategy()</code> not <code className="px-1 py-0.5 bg-background rounded text-xs">indicator()</code></li>
+                  <li>• Webhook alerts require TradingView Essential plan or higher</li>
+                  <li>• Make sure your bot is activated before testing</li>
+                </ul>
+              </div>
+
+              <div className="flex gap-3">
+                <Button
+                  variant="outline"
+                  className="flex-1"
+                  onClick={() => window.open('https://www.tradingview.com/chart/', '_blank')}
+                >
+                  <ExternalLink className="w-4 h-4 mr-2" />
+                  Open TradingView
+                </Button>
+                <Button
+                  className="flex-1 bg-gradient-to-r from-primary to-accent"
+                  onClick={() => setShowWebhookDialog(false)}
+                  data-testid="button-done-setup"
+                >
+                  Done
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <main className="container mx-auto px-4 py-8">
+        {bots.length === 0 && !loading ? (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="max-w-2xl mx-auto text-center py-16"
+          >
+            <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center mx-auto mb-6">
+              <Bot className="w-10 h-10 text-primary" />
+            </div>
+            <h2 className="text-2xl font-display font-bold mb-3">Create Your First Signal Bot</h2>
+            <p className="text-muted-foreground mb-8 max-w-md mx-auto">
+              Connect your TradingView strategy to automatically execute trades on Drift Protocol. 
+              Just copy the webhook URL and message into your TradingView alert.
+            </p>
+            
+            <div className="grid md:grid-cols-3 gap-4 mb-8 text-left">
+              <div className="p-4 rounded-xl border bg-card/50">
+                <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center mb-3">
+                  <span className="text-primary font-bold">1</span>
+                </div>
+                <h3 className="font-semibold mb-1">Create Bot</h3>
+                <p className="text-sm text-muted-foreground">Choose your market and settings</p>
+              </div>
+              <div className="p-4 rounded-xl border bg-card/50">
+                <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center mb-3">
+                  <span className="text-primary font-bold">2</span>
+                </div>
+                <h3 className="font-semibold mb-1">Copy to TradingView</h3>
+                <p className="text-sm text-muted-foreground">Paste webhook URL & message into your alert</p>
+              </div>
+              <div className="p-4 rounded-xl border bg-card/50">
+                <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center mb-3">
+                  <span className="text-primary font-bold">3</span>
+                </div>
+                <h3 className="font-semibold mb-1">Auto Trade</h3>
+                <p className="text-sm text-muted-foreground">Trades execute when your strategy signals</p>
+              </div>
+            </div>
+            
+            <Button 
+              size="lg"
+              className="bg-gradient-to-r from-primary to-accent"
+              onClick={() => setShowCreateDialog(true)}
+              data-testid="button-create-first-bot"
+            >
+              <Plus className="w-5 h-5 mr-2" />
+              Create Signal Bot
+            </Button>
+          </motion.div>
+        ) : (
+          <div className="grid lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-1 space-y-4">
+              <h2 className="text-lg font-semibold">Your Bots</h2>
+              {loading ? (
+                <div className="space-y-3">
+                  {[1, 2].map(i => (
+                    <div key={i} className="h-24 rounded-xl bg-muted/50 animate-pulse" />
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {bots.map((bot) => (
+                    <motion.div
+                      key={bot.id}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className={`p-4 rounded-xl border cursor-pointer transition-all ${
+                        selectedBot?.id === bot.id 
+                          ? 'border-primary bg-primary/5' 
+                          : 'border-border/50 bg-card/50 hover:border-primary/50'
+                      }`}
+                      onClick={() => selectBot(bot)}
+                      data-testid={`bot-card-${bot.id}`}
+                    >
+                      <div className="flex items-start justify-between mb-2">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                            bot.isActive 
+                              ? 'bg-gradient-to-br from-primary to-accent' 
+                              : 'bg-muted'
+                          }`}>
+                            <Bot className={`w-5 h-5 ${bot.isActive ? 'text-white' : 'text-muted-foreground'}`} />
+                          </div>
+                          <div>
+                            <h3 className="font-semibold">{bot.name}</h3>
+                            <p className="text-sm text-muted-foreground">{bot.market}</p>
+                          </div>
+                        </div>
+                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                          bot.isActive 
+                            ? 'bg-emerald-500/20 text-emerald-400' 
+                            : 'bg-muted text-muted-foreground'
+                        }`}>
+                          {bot.isActive ? 'Active' : 'Paused'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-4 text-sm text-muted-foreground">
+                        <span>{bot.leverage}x Leverage</span>
+                        <span>${bot.maxPositionSize}/trade</span>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="lg:col-span-2">
+              {selectedBot ? (
+                <motion.div
+                  key={selectedBot.id}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="space-y-6"
+                >
+                  <div className="flex items-center justify-between">
                     <div>
-                      <h2 className="text-2xl font-display font-bold">{selectedBot.name}</h2>
-                      <p className="text-muted-foreground">{selectedBot.market} • {selectedBot.leverage}x leverage</p>
+                      <h2 className="text-xl font-display font-bold">{selectedBot.name}</h2>
+                      <p className="text-muted-foreground">{selectedBot.market} • {selectedBot.leverage}x</p>
                     </div>
                     <div className="flex items-center gap-2">
                       <Button
                         variant="outline"
-                        size="icon"
-                        onClick={() => toggleBot(selectedBot.id, !selectedBot.isActive)}
-                        data-testid="button-toggle-bot"
+                        size="sm"
+                        onClick={() => {
+                          setShowWebhookDialog(true);
+                        }}
+                        data-testid="button-view-webhook"
                       >
-                        {selectedBot.isActive ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                        <Eye className="w-4 h-4 mr-1" />
+                        View Webhook
                       </Button>
                       <Button
-                        variant="outline"
-                        size="icon"
-                        className="text-destructive hover:bg-destructive/10"
+                        variant={selectedBot.isActive ? "outline" : "default"}
+                        size="sm"
+                        onClick={() => toggleBot(selectedBot.id, !selectedBot.isActive)}
+                        className={!selectedBot.isActive ? "bg-gradient-to-r from-primary to-accent" : ""}
+                        data-testid="button-toggle-bot"
+                      >
+                        {selectedBot.isActive ? (
+                          <>
+                            <Pause className="w-4 h-4 mr-1" />
+                            Pause
+                          </>
+                        ) : (
+                          <>
+                            <Play className="w-4 h-4 mr-1" />
+                            Activate
+                          </>
+                        )}
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
                         onClick={() => deleteBot(selectedBot.id)}
                         data-testid="button-delete-bot"
                       >
@@ -534,158 +658,149 @@ export default function BotSetup() {
                     </div>
                   </div>
 
-                  <div className="p-4 rounded-lg bg-muted/50 mb-6">
-                    <div className="flex items-center justify-between mb-2">
-                      <Label className="text-sm font-medium flex items-center gap-2">
-                        <ExternalLink className="w-4 h-4" />
-                        TradingView Webhook URL
-                      </Label>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => copyWebhookUrl(selectedBot.webhookUrl || '')}
-                        data-testid="button-copy-webhook"
-                      >
-                        {copiedUrl ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-                        {copiedUrl ? 'Copied!' : 'Copy'}
-                      </Button>
-                    </div>
-                    <code className="text-xs text-muted-foreground break-all block p-2 bg-background rounded">
-                      {selectedBot.webhookUrl || 'Generating...'}
-                    </code>
-                    <p className="text-xs text-muted-foreground mt-2">
-                      Use this URL in your TradingView alert webhook settings
-                    </p>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-4 mb-6">
-                    <div className="p-4 rounded-lg bg-muted/30 text-center">
-                      <div className="text-2xl font-bold">{selectedBot.stats?.totalTrades || 0}</div>
-                      <div className="text-sm text-muted-foreground">Total Trades</div>
-                    </div>
-                    <div className="p-4 rounded-lg bg-muted/30 text-center">
-                      <div className="text-2xl font-bold text-green-400">
-                        {selectedBot.stats?.winningTrades || 0}
-                      </div>
-                      <div className="text-sm text-muted-foreground">Winning</div>
-                    </div>
-                    <div className="p-4 rounded-lg bg-muted/30 text-center">
-                      <div className={`text-2xl font-bold ${
-                        (selectedBot.stats?.totalPnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'
-                      }`}>
-                        ${(selectedBot.stats?.totalPnl || 0).toFixed(2)}
-                      </div>
-                      <div className="text-sm text-muted-foreground">Total PnL</div>
-                    </div>
-                  </div>
-
-                  <div className="p-4 rounded-lg bg-primary/5 border border-primary/20">
-                    <h4 className="font-medium mb-3 flex items-center gap-2">
-                      <Settings className="w-4 h-4" />
-                      Signal Configuration
-                    </h4>
-                    <div className="grid grid-cols-3 gap-4 text-sm">
-                      <div>
-                        <span className="text-muted-foreground">Long Keyword:</span>
-                        <span className="ml-2 font-mono text-green-400">
-                          {selectedBot.signalConfig?.longKeyword || 'LONG'}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-muted-foreground">Short Keyword:</span>
-                        <span className="ml-2 font-mono text-red-400">
-                          {selectedBot.signalConfig?.shortKeyword || 'SHORT'}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-muted-foreground">Close Keyword:</span>
-                        <span className="ml-2 font-mono text-yellow-400">
-                          {selectedBot.signalConfig?.exitKeyword || 'CLOSE'}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="gradient-border p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="font-semibold flex items-center gap-2">
-                      <TrendingUp className="w-5 h-5 text-primary" />
-                      Recent Trades
-                    </h3>
-                    <Button 
-                      variant="ghost" 
-                      size="sm" 
-                      onClick={() => fetchBotTrades(selectedBot.id)}
-                      data-testid="button-refresh-trades"
-                    >
-                      <RefreshCw className="w-4 h-4 mr-2" />
-                      Refresh
-                    </Button>
-                  </div>
-
-                  {botTrades.length === 0 ? (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <AlertCircle className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                      <p>No trades yet</p>
-                      <p className="text-sm">Trades will appear here when your bot executes</p>
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      {botTrades.map((trade) => (
-                        <div 
-                          key={trade.id} 
-                          className="flex items-center justify-between p-3 rounded-lg bg-muted/30"
-                          data-testid={`trade-${trade.id}`}
-                        >
-                          <div className="flex items-center gap-3">
-                            <div className={`px-2 py-1 rounded text-xs font-medium ${
-                              trade.side === 'LONG' ? 'bg-green-500/20 text-green-400' :
-                              trade.side === 'SHORT' ? 'bg-red-500/20 text-red-400' :
-                              'bg-yellow-500/20 text-yellow-400'
-                            }`}>
-                              {trade.side}
-                            </div>
-                            <div>
-                              <div className="font-medium">{trade.market}</div>
-                              <div className="text-xs text-muted-foreground">
-                                Size: {trade.size} @ ${parseFloat(trade.price).toFixed(2)}
-                              </div>
-                            </div>
+                  <Tabs defaultValue="webhook" className="w-full">
+                    <TabsList>
+                      <TabsTrigger value="webhook">Webhook Setup</TabsTrigger>
+                      <TabsTrigger value="trades">Trade History</TabsTrigger>
+                      <TabsTrigger value="stats">Stats</TabsTrigger>
+                    </TabsList>
+                    
+                    <TabsContent value="webhook" className="space-y-4 mt-4">
+                      <div className="p-4 rounded-xl border bg-card/50">
+                        <h3 className="font-semibold mb-3 flex items-center gap-2">
+                          <span className="w-5 h-5 rounded-full bg-primary text-white text-xs flex items-center justify-center">1</span>
+                          Webhook URL
+                        </h3>
+                        <div className="relative">
+                          <div className="p-3 bg-muted/50 rounded-lg font-mono text-sm break-all">
+                            {getWebhookUrl(selectedBot)}
                           </div>
-                          <div className="text-right">
-                            <div className={`text-sm font-medium ${
-                              trade.status === 'executed' ? 'text-green-400' :
-                              trade.status === 'pending' ? 'text-yellow-400' :
-                              'text-red-400'
-                            }`}>
-                              {trade.status}
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              {new Date(trade.executedAt).toLocaleString()}
-                            </div>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="absolute top-2 right-2"
+                            onClick={() => copyToClipboard(getWebhookUrl(selectedBot), 'Webhook URL')}
+                          >
+                            {copiedField === 'Webhook URL' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                          </Button>
+                        </div>
+                      </div>
+
+                      <div className="p-4 rounded-xl border bg-card/50">
+                        <h3 className="font-semibold mb-3 flex items-center gap-2">
+                          <span className="w-5 h-5 rounded-full bg-primary text-white text-xs flex items-center justify-center">2</span>
+                          Alert Message
+                        </h3>
+                        <div className="relative">
+                          <pre className="p-3 bg-muted/50 rounded-lg font-mono text-sm overflow-x-auto">
+{getMessageTemplate(selectedBot)}
+                          </pre>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="absolute top-2 right-2"
+                            onClick={() => copyToClipboard(getMessageTemplate(selectedBot), 'Message')}
+                          >
+                            {copiedField === 'Message' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                          </Button>
+                        </div>
+                      </div>
+
+                      <div className="p-4 rounded-xl border border-dashed bg-muted/20">
+                        <h3 className="font-semibold mb-2 flex items-center gap-2">
+                          <Sparkles className="w-4 h-4 text-primary" />
+                          TradingView Placeholders
+                        </h3>
+                        <div className="grid sm:grid-cols-2 gap-2 text-sm">
+                          <div className="flex items-center gap-2">
+                            <code className="px-2 py-1 bg-background rounded text-xs">{"{{strategy.order.action}}"}</code>
+                            <span className="text-muted-foreground">→ buy/sell</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <code className="px-2 py-1 bg-background rounded text-xs">{"{{close}}"}</code>
+                            <span className="text-muted-foreground">→ current price</span>
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  )}
+                      </div>
+                    </TabsContent>
+
+                    <TabsContent value="trades" className="mt-4">
+                      {botTrades.length === 0 ? (
+                        <div className="text-center py-12 text-muted-foreground">
+                          <TrendingUp className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                          <p>No trades yet</p>
+                          <p className="text-sm">Trades will appear here when your TradingView strategy sends signals</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {botTrades.map((trade) => (
+                            <div 
+                              key={trade.id} 
+                              className="p-3 rounded-lg border bg-card/50 flex items-center justify-between"
+                              data-testid={`trade-${trade.id}`}
+                            >
+                              <div className="flex items-center gap-3">
+                                <span className={`px-2 py-1 rounded text-xs font-medium ${
+                                  trade.side === 'long' 
+                                    ? 'bg-emerald-500/20 text-emerald-400' 
+                                    : 'bg-red-500/20 text-red-400'
+                                }`}>
+                                  {trade.side.toUpperCase()}
+                                </span>
+                                <div>
+                                  <p className="font-mono text-sm">{trade.market}</p>
+                                  <p className="text-xs text-muted-foreground">
+                                    {new Date(trade.executedAt).toLocaleString()}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <p className="font-mono">${trade.size}</p>
+                                <p className="text-xs text-muted-foreground">@ ${trade.price}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </TabsContent>
+
+                    <TabsContent value="stats" className="mt-4">
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="p-4 rounded-xl border bg-card/50 text-center">
+                          <p className="text-2xl font-bold font-mono">{selectedBot.stats?.totalTrades || 0}</p>
+                          <p className="text-sm text-muted-foreground">Total Trades</p>
+                        </div>
+                        <div className="p-4 rounded-xl border bg-card/50 text-center">
+                          <p className="text-2xl font-bold font-mono text-emerald-400">{selectedBot.stats?.winningTrades || 0}</p>
+                          <p className="text-sm text-muted-foreground">Winning</p>
+                        </div>
+                        <div className="p-4 rounded-xl border bg-card/50 text-center">
+                          <p className="text-2xl font-bold font-mono text-red-400">{selectedBot.stats?.losingTrades || 0}</p>
+                          <p className="text-sm text-muted-foreground">Losing</p>
+                        </div>
+                        <div className="p-4 rounded-xl border bg-card/50 text-center">
+                          <p className={`text-2xl font-bold font-mono ${
+                            (selectedBot.stats?.totalPnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                          }`}>
+                            ${(selectedBot.stats?.totalPnl || 0).toFixed(2)}
+                          </p>
+                          <p className="text-sm text-muted-foreground">Total PnL</p>
+                        </div>
+                      </div>
+                    </TabsContent>
+                  </Tabs>
+                </motion.div>
+              ) : (
+                <div className="flex items-center justify-center h-64 text-muted-foreground">
+                  <div className="text-center">
+                    <Settings className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                    <p>Select a bot to view details</p>
+                  </div>
                 </div>
-              </motion.div>
-            ) : (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="gradient-border p-12 text-center"
-              >
-                <Sparkles className="w-16 h-16 mx-auto mb-4 text-primary/50" />
-                <h3 className="text-xl font-semibold mb-2">Select a Bot</h3>
-                <p className="text-muted-foreground max-w-md mx-auto">
-                  Choose a bot from the list to view its configuration, webhook URL, and trading history
-                </p>
-              </motion.div>
-            )}
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </main>
     </div>
   );

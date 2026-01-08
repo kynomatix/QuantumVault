@@ -32,7 +32,7 @@ function generateWebhookUrl(botId: string, secret: string): string {
     : process.env.REPLIT_DEPLOYMENT_DOMAIN 
     ? `https://${process.env.REPLIT_DEPLOYMENT_DOMAIN}`
     : 'http://localhost:5000';
-  return `${baseUrl}/api/webhook/${botId}?secret=${secret}`;
+  return `${baseUrl}/api/webhook/tradingview/${botId}?secret=${secret}`;
 }
 
 export async function registerRoutes(
@@ -245,8 +245,8 @@ export async function registerRoutes(
     }
   });
 
-  // TradingView Webhook endpoint
-  app.post("/api/webhook/:botId", async (req, res) => {
+  // TradingView Webhook endpoint - receives signals from TradingView strategy alerts
+  app.post("/api/webhook/tradingview/:botId", async (req, res) => {
     const { botId } = req.params;
     const { secret } = req.query;
 
@@ -279,24 +279,58 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Bot is paused" });
       }
 
-      // Parse signal from TradingView alert
+      // Parse TradingView strategy signal
+      // Expected format: { action: "buy"|"sell", contracts: "1", price: "100.00", position_size: "100" }
       const payload = req.body;
-      const message = typeof payload === 'string' ? payload : payload.message || payload.text || JSON.stringify(payload);
-      
-      const signalConfig = bot.signalConfig as TradingBot['signalConfig'];
-      let side: 'long' | 'short' | 'close' | null = null;
+      let action: string | null = null;
+      let positionSize: string = bot.maxPositionSize || "100";
+      let price: string = "0";
 
-      if (signalConfig?.longKeyword && message.toUpperCase().includes(signalConfig.longKeyword.toUpperCase())) {
+      // Handle JSON payload from TradingView
+      if (typeof payload === 'object' && payload.action) {
+        action = payload.action.toLowerCase();
+        if (payload.position_size) positionSize = String(payload.position_size);
+        if (payload.contracts) positionSize = String(payload.contracts);
+        if (payload.price) price = String(payload.price);
+      } else if (typeof payload === 'string') {
+        // Try to parse as JSON
+        try {
+          const parsed = JSON.parse(payload);
+          action = parsed.action?.toLowerCase();
+          if (parsed.position_size) positionSize = String(parsed.position_size);
+          if (parsed.contracts) positionSize = String(parsed.contracts);
+          if (parsed.price) price = String(parsed.price);
+        } catch {
+          // Plain text - check for buy/sell keywords
+          const text = payload.toLowerCase();
+          if (text.includes('buy')) action = 'buy';
+          else if (text.includes('sell')) action = 'sell';
+        }
+      }
+
+      // Map TradingView action to trade side
+      let side: 'long' | 'short' | null = null;
+      if (action === 'buy') {
         side = 'long';
-      } else if (signalConfig?.shortKeyword && message.toUpperCase().includes(signalConfig.shortKeyword.toUpperCase())) {
+      } else if (action === 'sell') {
         side = 'short';
-      } else if (signalConfig?.exitKeyword && message.toUpperCase().includes(signalConfig.exitKeyword.toUpperCase())) {
-        side = 'close';
+      }
+
+      // Check if bot allows this side
+      if (side && bot.side !== 'both') {
+        if (bot.side === 'long' && side !== 'long') {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts long signals", processed: true });
+          return res.status(400).json({ error: "Bot only accepts long signals" });
+        }
+        if (bot.side === 'short' && side !== 'short') {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts short signals", processed: true });
+          return res.status(400).json({ error: "Bot only accepts short signals" });
+        }
       }
 
       if (!side) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "No valid signal found in message", processed: true });
-        return res.status(400).json({ error: "No valid signal found", message });
+        await storage.updateWebhookLog(log.id, { errorMessage: "No valid action found (expected buy or sell)", processed: true });
+        return res.status(400).json({ error: "No valid action found", received: payload });
       }
 
       // Create trade record (pending execution)
@@ -304,9 +338,9 @@ export async function registerRoutes(
         tradingBotId: botId,
         walletAddress: bot.walletAddress,
         market: bot.market,
-        side: side === 'close' ? 'CLOSE' : side.toUpperCase(),
-        size: bot.maxPositionSize || "1",
-        price: "0",
+        side: side.toUpperCase(),
+        size: positionSize,
+        price: price,
         status: "pending",
         webhookPayload: payload,
       });
@@ -315,7 +349,7 @@ export async function registerRoutes(
       // For now, simulate execution
       await storage.updateBotTrade(trade.id, {
         status: "executed",
-        price: "100.00",
+        price: price || "100.00",
         txSignature: `sim_${Date.now()}`,
       });
 
@@ -331,9 +365,11 @@ export async function registerRoutes(
 
       res.json({
         success: true,
-        signal: side,
+        action: action,
+        side: side,
         tradeId: trade.id,
         market: bot.market,
+        size: positionSize,
       });
     } catch (error) {
       console.error("Webhook processing error:", error);
