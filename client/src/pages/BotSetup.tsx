@@ -19,7 +19,9 @@ import {
   ChevronRight,
   Zap,
   Settings,
-  Eye
+  Eye,
+  Loader2,
+  Wallet
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -41,6 +43,9 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
+import { Transaction } from '@solana/web3.js';
+import { Buffer } from 'buffer';
 
 interface TradingBot {
   id: string;
@@ -87,6 +92,8 @@ const MARKETS = [
 export default function BotSetup() {
   const [, navigate] = useLocation();
   const { connected, publicKeyString } = useWallet();
+  const solanaWallet = useSolanaWallet();
+  const { connection } = useConnection();
   const { toast } = useToast();
   
   const [bots, setBots] = useState<TradingBot[]>([]);
@@ -95,6 +102,9 @@ export default function BotSetup() {
   const [loading, setLoading] = useState(true);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [showWebhookDialog, setShowWebhookDialog] = useState(false);
+  const [showAddEquityDialog, setShowAddEquityDialog] = useState(false);
+  const [equityAmount, setEquityAmount] = useState('');
+  const [isProcessingEquity, setIsProcessingEquity] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   
   const [newBot, setNewBot] = useState({
@@ -243,6 +253,73 @@ export default function BotSetup() {
     return `order {{strategy.order.action}} @ {{strategy.order.contracts}} filled on {{ticker}}. New strategy position is {{strategy.position_size}}`;
   };
 
+  const handleAddEquity = async () => {
+    if (!selectedBot || !equityAmount || parseFloat(equityAmount) <= 0) {
+      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    if (!solanaWallet.publicKey) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    setIsProcessingEquity(true);
+    try {
+      const response = await fetch(`/api/bot/${selectedBot.id}/deposit`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-wallet-address': solanaWallet.publicKey.toString(),
+        },
+        body: JSON.stringify({ amount: parseFloat(equityAmount) }),
+        credentials: 'include',
+      });
+
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to allocate equity');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = data;
+      
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      
+      if (!solanaWallet.signTransaction) {
+        throw new Error('Wallet does not support signing');
+      }
+      const signedTx = await solanaWallet.signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ 
+        title: 'Equity Allocated Successfully!', 
+        description: message 
+      });
+      
+      setEquityAmount('');
+      setShowAddEquityDialog(false);
+      
+      // Refresh bots to update balances
+      await fetchBots();
+    } catch (error: any) {
+      console.error('Equity allocation error:', error);
+      toast({ 
+        title: 'Failed to allocate equity', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsProcessingEquity(false);
+    }
+  };
+
   if (!connected) {
     return null;
   }
@@ -385,19 +462,17 @@ export default function BotSetup() {
                   <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">1</span>
                   Webhook URL
                 </h3>
-                <div className="relative">
-                  <div className="p-3 bg-background/80 rounded-lg font-mono text-sm break-all border">
-                    {getWebhookUrl(selectedBot)}
-                  </div>
-                  <Button
-                    size="sm"
-                    className="absolute top-2 right-2"
-                    onClick={() => copyToClipboard(getWebhookUrl(selectedBot), 'Webhook URL')}
-                    data-testid="button-copy-webhook"
-                  >
-                    {copiedField === 'Webhook URL' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                  </Button>
+                <div className="p-3 bg-background/80 rounded-lg font-mono text-sm border" style={{ wordBreak: 'break-word' }}>
+                  {getWebhookUrl(selectedBot)}
                 </div>
+                <Button
+                  className="w-full mt-3"
+                  onClick={() => copyToClipboard(getWebhookUrl(selectedBot), 'Webhook URL')}
+                  data-testid="button-copy-webhook"
+                >
+                  {copiedField === 'Webhook URL' ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
+                  {copiedField === 'Webhook URL' ? 'Copied!' : 'Copy Webhook URL'}
+                </Button>
                 <p className="text-xs text-muted-foreground mt-2">
                   Paste this in TradingView Alert → Notifications → Webhook URL
                 </p>
@@ -408,19 +483,17 @@ export default function BotSetup() {
                   <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">2</span>
                   Alert Message
                 </h3>
-                <div className="relative">
-                  <pre className="p-3 bg-background/80 rounded-lg font-mono text-sm overflow-x-auto border">
+                <pre className="p-3 bg-background/80 rounded-lg font-mono text-sm border whitespace-pre-wrap" style={{ wordBreak: 'break-word' }}>
 {getMessageTemplate()}
-                  </pre>
-                  <Button
-                    size="sm"
-                    className="absolute top-2 right-2"
-                    onClick={() => copyToClipboard(getMessageTemplate(), 'Message')}
-                    data-testid="button-copy-message"
-                  >
-                    {copiedField === 'Message' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                  </Button>
-                </div>
+                </pre>
+                <Button
+                  className="w-full mt-3"
+                  onClick={() => copyToClipboard(getMessageTemplate(), 'Message')}
+                  data-testid="button-copy-message"
+                >
+                  {copiedField === 'Message' ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
+                  {copiedField === 'Message' ? 'Copied!' : 'Copy Alert Message'}
+                </Button>
                 <p className="text-xs text-muted-foreground mt-2">
                   Paste this in TradingView Alert → Message field (replace all existing content)
                 </p>
@@ -478,6 +551,37 @@ export default function BotSetup() {
                 </ul>
               </div>
 
+              <div className="p-4 rounded-xl bg-gradient-to-br from-green-500/10 to-emerald-500/10 border border-green-500/20">
+                <h3 className="font-semibold text-lg mb-3 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-green-500 text-white text-sm flex items-center justify-center">4</span>
+                  Fund Your Bot
+                </h3>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Your bot needs equity to execute trades. Add USDC from your main account to start trading.
+                </p>
+                <div className="flex flex-col gap-2">
+                  <Button
+                    className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600"
+                    onClick={() => {
+                      setShowWebhookDialog(false);
+                      setShowAddEquityDialog(true);
+                    }}
+                    data-testid="button-add-equity-now"
+                  >
+                    <Wallet className="w-4 h-4 mr-2" />
+                    Add Equity Now
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="w-full text-muted-foreground"
+                    onClick={() => setShowWebhookDialog(false)}
+                    data-testid="button-add-equity-later"
+                  >
+                    I'll do this later
+                  </Button>
+                </div>
+              </div>
+
               <div className="flex gap-3">
                 <Button
                   variant="outline"
@@ -488,7 +592,8 @@ export default function BotSetup() {
                   Open TradingView
                 </Button>
                 <Button
-                  className="flex-1 bg-gradient-to-r from-primary to-accent"
+                  variant="secondary"
+                  className="flex-1"
                   onClick={() => setShowWebhookDialog(false)}
                   data-testid="button-done-setup"
                 >
@@ -497,6 +602,86 @@ export default function BotSetup() {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showAddEquityDialog} onOpenChange={setShowAddEquityDialog}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wallet className="w-5 h-5 text-green-500" />
+              Fund Your Bot
+            </DialogTitle>
+            <DialogDescription>
+              Add USDC from your main account to enable your bot to execute trades.
+            </DialogDescription>
+          </DialogHeader>
+          
+          {selectedBot && (
+            <div className="space-y-4 py-4">
+              <div className="p-3 rounded-lg bg-muted/50 border">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+                    <Bot className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <p className="font-semibold">{selectedBot.name}</p>
+                    <p className="text-sm text-muted-foreground">{selectedBot.market}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="equity-amount">Amount (USDC)</Label>
+                <Input
+                  id="equity-amount"
+                  type="number"
+                  placeholder="100"
+                  value={equityAmount}
+                  onChange={(e) => setEquityAmount(e.target.value)}
+                  className="font-mono"
+                  data-testid="input-equity-amount"
+                />
+                <p className="text-xs text-muted-foreground">
+                  This will be transferred from your main Drift account to this bot's subaccount.
+                </p>
+              </div>
+
+              <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+                <p className="text-xs text-yellow-600">
+                  Make sure you have sufficient USDC in your main Drift account before proceeding.
+                </p>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="flex-col gap-2 sm:flex-col">
+            <Button
+              className="w-full bg-gradient-to-r from-green-500 to-emerald-500"
+              onClick={handleAddEquity}
+              disabled={!equityAmount || parseFloat(equityAmount) <= 0 || isProcessingEquity}
+              data-testid="button-confirm-equity"
+            >
+              {isProcessingEquity ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Processing...
+                </>
+              ) : (
+                <>
+                  <Wallet className="w-4 h-4 mr-2" />
+                  Add Equity
+                </>
+              )}
+            </Button>
+            <Button
+              variant="ghost"
+              className="w-full"
+              onClick={() => setShowAddEquityDialog(false)}
+            >
+              Cancel
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
