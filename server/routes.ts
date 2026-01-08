@@ -280,29 +280,37 @@ export async function registerRoutes(
       }
 
       // Parse TradingView strategy signal
-      // Expected format: { action: "buy"|"sell", contracts: "1", price: "100.00", position_size: "100" }
+      // Expected format: "order buy @ 33.33 filled on SOLUSDT. New strategy position is 100"
       const payload = req.body;
       let action: string | null = null;
+      let contracts: string = "0";
       let positionSize: string = bot.maxPositionSize || "100";
-      let price: string = "0";
+      let ticker: string = "";
 
-      // Handle JSON payload from TradingView
-      if (typeof payload === 'object' && payload.action) {
-        action = payload.action.toLowerCase();
-        if (payload.position_size) positionSize = String(payload.position_size);
-        if (payload.contracts) positionSize = String(payload.contracts);
-        if (payload.price) price = String(payload.price);
-      } else if (typeof payload === 'string') {
-        // Try to parse as JSON
+      // Convert payload to string for parsing
+      const message = typeof payload === 'string' ? payload : 
+                      typeof payload === 'object' && payload.message ? payload.message :
+                      typeof payload === 'object' ? JSON.stringify(payload) : String(payload);
+
+      // Try regex parsing for TradingView format: "order buy @ 33.33 filled on TICKER. New strategy position is 100"
+      const regex = /order\s+(buy|sell)\s+@\s+([\d.]+)\s+filled\s+on\s+([A-Za-z0-9:\-/]+).*position\s+is\s+([-\d.]+)/i;
+      const match = message.match(regex);
+
+      if (match) {
+        action = match[1].toLowerCase();
+        contracts = match[2];
+        ticker = match[3];
+        positionSize = match[4];
+      } else {
+        // Fallback: try JSON parsing
         try {
-          const parsed = JSON.parse(payload);
-          action = parsed.action?.toLowerCase();
+          const parsed = typeof payload === 'object' ? payload : JSON.parse(message);
+          if (parsed.action) action = parsed.action.toLowerCase();
+          if (parsed.contracts) contracts = String(parsed.contracts);
           if (parsed.position_size) positionSize = String(parsed.position_size);
-          if (parsed.contracts) positionSize = String(parsed.contracts);
-          if (parsed.price) price = String(parsed.price);
         } catch {
-          // Plain text - check for buy/sell keywords
-          const text = payload.toLowerCase();
+          // Last resort: simple keyword detection
+          const text = message.toLowerCase();
           if (text.includes('buy')) action = 'buy';
           else if (text.includes('sell')) action = 'sell';
         }
@@ -334,13 +342,14 @@ export async function registerRoutes(
       }
 
       // Create trade record (pending execution)
+      // Use contracts as the trade size (what TradingView sent for this order)
       const trade = await storage.createBotTrade({
         tradingBotId: botId,
         walletAddress: bot.walletAddress,
         market: bot.market,
         side: side.toUpperCase(),
-        size: positionSize,
-        price: price,
+        size: contracts || positionSize,
+        price: "0",
         status: "pending",
         webhookPayload: payload,
       });
@@ -349,7 +358,7 @@ export async function registerRoutes(
       // For now, simulate execution
       await storage.updateBotTrade(trade.id, {
         status: "executed",
-        price: price || "100.00",
+        price: "0",
         txSignature: `sim_${Date.now()}`,
       });
 

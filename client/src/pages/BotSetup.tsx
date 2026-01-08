@@ -242,13 +242,8 @@ export default function BotSetup() {
     return `${baseUrl}/api/webhook/tradingview/${bot.id}?secret=${bot.webhookSecret}`;
   };
 
-  const getMessageTemplate = (bot: TradingBot) => {
-    return JSON.stringify({
-      action: "{{strategy.order.action}}",
-      contracts: "{{strategy.order.contracts}}",
-      price: "{{close}}",
-      position_size: bot.maxPositionSize || "100"
-    }, null, 2);
+  const getMessageTemplate = () => {
+    return `order {{strategy.order.action}} @ {{strategy.order.contracts}} filled on {{ticker}}. New strategy position is {{strategy.position_size}}`;
   };
 
   if (!connected) {
@@ -434,12 +429,12 @@ export default function BotSetup() {
                 </h3>
                 <div className="relative">
                   <pre className="p-3 bg-background/80 rounded-lg font-mono text-sm overflow-x-auto border">
-{getMessageTemplate(selectedBot)}
+{getMessageTemplate()}
                   </pre>
                   <Button
                     size="sm"
                     className="absolute top-2 right-2"
-                    onClick={() => copyToClipboard(getMessageTemplate(selectedBot), 'Message')}
+                    onClick={() => copyToClipboard(getMessageTemplate(), 'Message')}
                     data-testid="button-copy-message"
                   >
                     {copiedField === 'Message' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
@@ -450,15 +445,43 @@ export default function BotSetup() {
                 </p>
               </div>
 
+              <div className="p-4 rounded-xl bg-gradient-to-br from-blue-500/10 to-purple-500/10 border border-blue-500/20">
+                <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">3</span>
+                  TradingView Strategy Settings
+                </h3>
+                <p className="text-sm text-muted-foreground mb-3">
+                  In TradingView, go to your strategy's Settings → Properties and configure:
+                </p>
+                <div className="space-y-3 text-sm">
+                  <div className="flex items-center justify-between p-2 bg-background/50 rounded-lg">
+                    <span className="font-medium">Initial Capital</span>
+                    <span className="text-muted-foreground">Set to your total position size (e.g. 100 USDC)</span>
+                  </div>
+                  <div className="flex items-center justify-between p-2 bg-background/50 rounded-lg">
+                    <span className="font-medium">Default Order Size</span>
+                    <span className="text-muted-foreground">Size per entry (e.g. 33.33 for 3 entries)</span>
+                  </div>
+                  <div className="flex items-center justify-between p-2 bg-background/50 rounded-lg">
+                    <span className="font-medium">Pyramiding</span>
+                    <span className="text-muted-foreground">Number of orders allowed (e.g. 3 orders)</span>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground mt-3">
+                  Example: 100 USDC capital / 33.33 order size / 3 pyramiding = 3 entries of 33.33 each
+                </p>
+              </div>
+
               <div className="p-4 rounded-xl bg-muted/50 border">
                 <h3 className="font-semibold mb-3 flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-primary" />
-                  How TradingView Placeholders Work
+                  How The Placeholders Work
                 </h3>
                 <div className="space-y-2 text-sm text-muted-foreground">
-                  <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.action}}"}</code> → Automatically becomes "buy" or "sell"</p>
-                  <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.contracts}}"}</code> → Strategy's position size</p>
-                  <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{close}}"}</code> → Current price when alert fires</p>
+                  <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.action}}"}</code> → "buy" or "sell" from your strategy</p>
+                  <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.contracts}}"}</code> → Order size for this entry (e.g. 33.33)</p>
+                  <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.position_size}}"}</code> → Total position after this order</p>
+                  <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{ticker}}"}</code> → The trading symbol</p>
                 </div>
               </div>
 
@@ -468,7 +491,7 @@ export default function BotSetup() {
                   Important
                 </h3>
                 <ul className="text-sm text-muted-foreground space-y-1">
-                  <li>• Your TradingView strategy must use <code className="px-1 py-0.5 bg-background rounded text-xs">strategy()</code> not <code className="px-1 py-0.5 bg-background rounded text-xs">indicator()</code></li>
+                  <li>• Your script must use <code className="px-1 py-0.5 bg-background rounded text-xs">strategy()</code> not <code className="px-1 py-0.5 bg-background rounded text-xs">indicator()</code></li>
                   <li>• Webhook alerts require TradingView Essential plan or higher</li>
                   <li>• Make sure your bot is activated before testing</li>
                 </ul>
@@ -693,13 +716,13 @@ export default function BotSetup() {
                         </h3>
                         <div className="relative">
                           <pre className="p-3 bg-muted/50 rounded-lg font-mono text-sm overflow-x-auto">
-{getMessageTemplate(selectedBot)}
+{getMessageTemplate()}
                           </pre>
                           <Button
                             size="sm"
                             variant="secondary"
                             className="absolute top-2 right-2"
-                            onClick={() => copyToClipboard(getMessageTemplate(selectedBot), 'Message')}
+                            onClick={() => copyToClipboard(getMessageTemplate(), 'Message')}
                           >
                             {copiedField === 'Message' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                           </Button>
