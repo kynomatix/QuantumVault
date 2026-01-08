@@ -100,7 +100,6 @@ export default function BotSetup() {
   const [newBot, setNewBot] = useState({
     name: '',
     market: 'SOL-PERP',
-    side: 'both',
     leverage: 1,
     maxPositionSize: '100',
   });
@@ -153,7 +152,6 @@ export default function BotSetup() {
           walletAddress: publicKeyString,
           name: newBot.name,
           market: newBot.market,
-          side: newBot.side,
           leverage: newBot.leverage,
           maxPositionSize: newBot.maxPositionSize || '100',
         }),
@@ -168,7 +166,6 @@ export default function BotSetup() {
         setNewBot({
           name: '',
           market: 'SOL-PERP',
-          side: 'both',
           leverage: 1,
           maxPositionSize: '100',
         });
@@ -323,34 +320,18 @@ export default function BotSetup() {
                   </Select>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label>Trade Direction</Label>
-                    <Select value={newBot.side} onValueChange={(v) => setNewBot({ ...newBot, side: v })}>
-                      <SelectTrigger data-testid="select-side">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="both">Long & Short</SelectItem>
-                        <SelectItem value="long">Long Only</SelectItem>
-                        <SelectItem value="short">Short Only</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  
-                  <div className="space-y-2">
-                    <Label>Leverage</Label>
-                    <Select value={String(newBot.leverage)} onValueChange={(v) => setNewBot({ ...newBot, leverage: parseInt(v) })}>
-                      <SelectTrigger data-testid="select-leverage">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {[1, 2, 3, 5, 10, 20].map((lev) => (
-                          <SelectItem key={lev} value={String(lev)}>{lev}x</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
+                <div className="space-y-2">
+                  <Label>Leverage</Label>
+                  <Select value={String(newBot.leverage)} onValueChange={(v) => setNewBot({ ...newBot, leverage: parseInt(v) })}>
+                    <SelectTrigger data-testid="select-leverage">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[1, 2, 3, 5, 10, 20].map((lev) => (
+                        <SelectItem key={lev} value={String(lev)}>{lev}x</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div className="space-y-2">
