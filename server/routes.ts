@@ -113,6 +113,56 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/wallet/capital", requireWallet, async (req, res) => {
+    try {
+      const walletAddress = req.walletAddress!;
+      
+      const mainAccountBalance = await getDriftBalance(walletAddress, 0);
+      
+      const bots = await storage.getTradingBots(walletAddress);
+      
+      const botAllocations: Array<{
+        botId: string;
+        botName: string;
+        subaccountId: number;
+        balance: number;
+      }> = [];
+      
+      let allocatedToBot = 0;
+      let hasLegacyBots = false;
+      
+      for (const bot of bots) {
+        if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
+          hasLegacyBots = true;
+          continue;
+        }
+        
+        const balance = await getDriftBalance(walletAddress, bot.driftSubaccountId);
+        allocatedToBot += balance;
+        
+        botAllocations.push({
+          botId: bot.id,
+          botName: bot.name,
+          subaccountId: bot.driftSubaccountId,
+          balance,
+        });
+      }
+      
+      const totalEquity = mainAccountBalance + allocatedToBot;
+      
+      res.json({
+        mainAccountBalance,
+        allocatedToBot,
+        totalEquity,
+        botAllocations,
+        ...(hasLegacyBots && { warning: "Some legacy bots without subaccounts exist and are not included in the capital breakdown" }),
+      });
+    } catch (error) {
+      console.error("Get capital pool error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Trading bot CRUD routes
   app.get("/api/trading-bots", requireWallet, async (req, res) => {
     try {
