@@ -5,9 +5,14 @@ import { Input } from '@/components/ui/input';
 import { useWallet } from '@/hooks/useWallet';
 import { useTokenBalance } from '@/hooks/useTokenBalance';
 import { useToast } from '@/hooks/use-toast';
+import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
+import { Transaction } from '@solana/web3.js';
+import { Buffer } from 'buffer';
 
 export function DepositWithdraw() {
   const { balance, connected } = useWallet();
+  const solanaWallet = useSolanaWallet();
+  const { connection } = useConnection();
   const { 
     usdcBalance, 
     usdcLoading, 
@@ -19,6 +24,7 @@ export function DepositWithdraw() {
   const { toast } = useToast();
   const [mode, setMode] = useState<'deposit' | 'withdraw'>('deposit');
   const [amount, setAmount] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const handleCreateTokenAccount = async () => {
     try {
@@ -36,7 +42,7 @@ export function DepositWithdraw() {
     }
   };
 
-  const handleAction = () => {
+  const handleAction = async () => {
     if (!amount || parseFloat(amount) <= 0) {
       toast({ title: 'Enter a valid amount', variant: 'destructive' });
       return;
@@ -51,10 +57,59 @@ export function DepositWithdraw() {
       return;
     }
 
-    toast({ 
-      title: `${mode === 'deposit' ? 'Deposit' : 'Withdraw'} coming soon`, 
-      description: 'Drift Protocol integration in progress' 
-    });
+    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    setIsProcessing(true);
+    try {
+      const endpoint = mode === 'deposit' ? '/api/drift/deposit' : '/api/drift/withdraw';
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          walletAddress: solanaWallet.publicKey.toString(),
+          amount: parseFloat(amount),
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Transaction failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      
+      const signedTx = await solanaWallet.signTransaction(transaction);
+      
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ 
+        title: `${mode === 'deposit' ? 'Deposit' : 'Withdrawal'} Successful!`, 
+        description: message 
+      });
+      
+      setAmount('');
+      await fetchUsdcBalance();
+    } catch (error: any) {
+      console.error(`${mode} error:`, error);
+      toast({ 
+        title: `${mode === 'deposit' ? 'Deposit' : 'Withdrawal'} Failed`, 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   return (
@@ -189,10 +244,15 @@ export function DepositWithdraw() {
         <Button
           className="w-full"
           onClick={handleAction}
-          disabled={!amount || !tokenAccountExists}
+          disabled={!amount || !tokenAccountExists || isProcessing}
           data-testid={`button-${mode}`}
         >
-          {mode === 'deposit' ? (
+          {isProcessing ? (
+            <>
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              Processing...
+            </>
+          ) : mode === 'deposit' ? (
             <>
               <ArrowDownToLine className="w-4 h-4 mr-2" />
               Deposit to Drift

@@ -7,6 +7,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance } from "./drift-service";
 
 declare module "express-session" {
   interface SessionData {
@@ -594,6 +595,57 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get price error:", error);
       res.status(500).json({ error: "Failed to fetch price" });
+    }
+  });
+
+  app.post("/api/drift/deposit", async (req, res) => {
+    try {
+      const { walletAddress, amount } = req.body;
+      if (!walletAddress) {
+        return res.status(400).json({ error: "Wallet address required" });
+      }
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+      const result = await buildDepositTransaction(walletAddress, amount);
+      res.json(result);
+    } catch (error) {
+      console.error("Drift deposit error:", error);
+      res.status(500).json({ error: "Failed to build deposit transaction" });
+    }
+  });
+
+  app.post("/api/drift/withdraw", async (req, res) => {
+    try {
+      const { walletAddress, amount } = req.body;
+      if (!walletAddress) {
+        return res.status(400).json({ error: "Wallet address required" });
+      }
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+      const result = await buildWithdrawTransaction(walletAddress, amount);
+      res.json(result);
+    } catch (error) {
+      console.error("Drift withdraw error:", error);
+      res.status(500).json({ error: "Failed to build withdraw transaction" });
+    }
+  });
+
+  app.get("/api/drift/balance", async (req, res) => {
+    try {
+      const walletAddress = req.query.wallet as string;
+      if (!walletAddress) {
+        return res.status(400).json({ error: "Wallet address required" });
+      }
+      const [usdcBalance, driftBalance] = await Promise.all([
+        getUsdcBalance(walletAddress),
+        getDriftBalance(walletAddress),
+      ]);
+      res.json({ usdcBalance, driftBalance });
+    } catch (error) {
+      console.error("Drift balance error:", error);
+      res.status(500).json({ error: "Failed to fetch balances" });
     }
   });
 
