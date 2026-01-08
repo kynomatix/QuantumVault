@@ -271,13 +271,14 @@ export function DepositWithdraw() {
               </div>
               <div className="bg-primary/5 rounded-xl p-4 border border-primary/30">
                 <p className="text-sm text-muted-foreground">Trading Capital</p>
-                {botBalanceLoading ? (
-                  <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
-                ) : (
+                <div className="flex items-center gap-2">
                   <p className="text-2xl font-mono font-bold text-primary" data-testid="text-bot-balance">
                     {botBalance?.toFixed(2) ?? '0.00'} USDC
                   </p>
-                )}
+                  {botBalanceLoading && (
+                    <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                  )}
+                </div>
               </div>
             </div>
           )}

@@ -903,73 +903,67 @@ export default function AppPage() {
                 </div>
 
                 <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {activeBots.map((bot) => (
-                    <div key={bot.id} className="gradient-border p-5 noise" data-testid={`bot-card-${bot.id}`}>
-                      <div className="flex items-start justify-between mb-4">
-                        <div className="flex items-center gap-3">
-                          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-                            <Bot className="w-6 h-6 text-white" />
+                  {botsData && botsData.length > 0 ? (
+                    botsData.map((bot) => (
+                      <div key={bot.id} className="gradient-border p-5 noise" data-testid={`bot-card-${bot.id}`}>
+                        <div className="flex items-start justify-between mb-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+                              <Bot className="w-6 h-6 text-white" />
+                            </div>
+                            <div>
+                              <h3 className="font-display font-semibold">{bot.name}</h3>
+                              <p className="text-sm text-muted-foreground">{bot.market}</p>
+                            </div>
+                          </div>
+                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                            bot.isActive 
+                              ? 'bg-emerald-500/20 text-emerald-400' 
+                              : 'bg-yellow-500/20 text-yellow-400'
+                          }`}>
+                            {bot.isActive ? 'Active' : 'Paused'}
+                          </span>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-4 mb-4">
+                          <div>
+                            <p className="text-xs text-muted-foreground mb-1">Total Trades</p>
+                            <p className="text-xl font-bold font-mono">{(bot.stats as any)?.totalTrades ?? 0}</p>
                           </div>
                           <div>
-                            <h3 className="font-display font-semibold">{bot.name}</h3>
-                            <p className="text-sm text-muted-foreground">{bot.market}</p>
+                            <p className="text-xs text-muted-foreground mb-1">Total PnL</p>
+                            <p className={`text-xl font-bold font-mono ${((bot.stats as any)?.totalPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {((bot.stats as any)?.totalPnl ?? 0) >= 0 ? '+' : ''}${((bot.stats as any)?.totalPnl ?? 0).toFixed(2)}
+                            </p>
                           </div>
                         </div>
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          bot.status === 'running' 
-                            ? 'bg-emerald-500/20 text-emerald-400' 
-                            : 'bg-yellow-500/20 text-yellow-400'
-                        }`}>
-                          {bot.status}
-                        </span>
-                      </div>
-                      
-                      <div className="grid grid-cols-2 gap-4 mb-4">
-                        <div>
-                          <p className="text-xs text-muted-foreground mb-1">Total Trades</p>
-                          <p className="text-xl font-bold font-mono">{bot.trades}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground mb-1">Total PnL</p>
-                          <p className={`text-xl font-bold font-mono ${bot.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {bot.pnl >= 0 ? '+' : ''}${bot.pnl.toFixed(2)}
-                          </p>
-                        </div>
-                      </div>
 
-                      <div className="flex gap-2">
-                        <Button variant="outline" size="sm" className="flex-1" data-testid={`button-edit-bot-${bot.id}`}>
-                          <Settings className="w-4 h-4 mr-1" />
-                          Settings
-                        </Button>
-                        <Button 
-                          variant="outline" 
-                          size="sm" 
-                          className="flex-1"
-                          data-testid={`button-toggle-bot-${bot.id}`}
-                        >
-                          {bot.status === 'running' ? (
-                            <>
-                              <Minus className="w-4 h-4 mr-1" />
-                              Pause
-                            </>
-                          ) : (
-                            <>
-                              <Plus className="w-4 h-4 mr-1" />
-                              Start
-                            </>
-                          )}
-                        </Button>
+                        <div className="flex gap-2">
+                          <Button variant="outline" size="sm" className="flex-1" onClick={() => navigate('/bots')} data-testid={`button-edit-bot-${bot.id}`}>
+                            <Settings className="w-4 h-4 mr-1" />
+                            Settings
+                          </Button>
+                        </div>
                       </div>
+                    ))
+                  ) : (
+                    <div className="col-span-full text-center py-12 text-muted-foreground">
+                      <Bot className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                      <p className="font-medium mb-1">No bots created yet</p>
+                      <p className="text-sm">Create a TradingView bot to start automated trading</p>
                     </div>
-                  ))}
+                  )}
 
-                  <div className="border-2 border-dashed border-border/50 rounded-2xl p-8 flex flex-col items-center justify-center text-center hover:border-primary/50 transition-colors cursor-pointer" data-testid="button-add-new-bot">
+                  <div 
+                    className="border-2 border-dashed border-border/50 rounded-2xl p-8 flex flex-col items-center justify-center text-center hover:border-primary/50 transition-colors cursor-pointer" 
+                    onClick={() => navigate('/bots')}
+                    data-testid="button-add-new-bot"
+                  >
                     <div className="w-12 h-12 rounded-xl bg-muted/30 flex items-center justify-center mb-3">
                       <Plus className="w-6 h-6 text-muted-foreground" />
                     </div>
                     <p className="font-medium mb-1">Add New Bot</p>
-                    <p className="text-sm text-muted-foreground">Browse marketplace or create custom</p>
+                    <p className="text-sm text-muted-foreground">Create a TradingView signal bot</p>
                   </div>
                 </div>
               </motion.div>
