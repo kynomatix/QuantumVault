@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
-import { useAuth } from '@/hooks/useAuth';
+import { useWallet } from '@/hooks/useWallet';
 import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
@@ -97,7 +97,7 @@ type NavItem = 'dashboard' | 'trade' | 'marketplace' | 'bots' | 'leaderboard' | 
 
 export default function AppPage() {
   const [, navigate] = useLocation();
-  const { user, logout, loading: authLoading } = useAuth();
+  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading } = useWallet();
   const { toast } = useToast();
   const [activeNav, setActiveNav] = useState<NavItem>('dashboard');
   const [selectedMarket, setSelectedMarket] = useState(markets[0]);
@@ -118,18 +118,18 @@ export default function AppPage() {
   const subscribeBot = useSubscribeToBot();
   const updateSub = useUpdateSubscription();
 
-  // Redirect to landing if not authenticated
+  // Redirect to landing if wallet not connected
   useEffect(() => {
-    if (!authLoading && !user) {
+    if (!connecting && !connected) {
       navigate('/');
     }
-  }, [user, authLoading, navigate]);
+  }, [connected, connecting, navigate]);
 
   const handleDisconnect = async () => {
-    await logout();
+    await disconnect();
   };
 
-  if (authLoading || !user) {
+  if (connecting || !connected) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
         <div className="absolute inset-0 -z-10">
@@ -211,10 +211,10 @@ export default function AppPage() {
                 <div className="p-3 rounded-xl bg-muted/30 mb-3 hidden lg:block">
                   <div className="flex items-center gap-3 mb-3">
                     <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white text-xs font-bold">
-                      7x
+                      <Wallet className="w-4 h-4" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{walletAddress}</p>
+                      <p className="text-sm font-medium truncate" data-testid="text-wallet-address">{shortenedAddress}</p>
                       <p className="text-xs text-muted-foreground">Connected</p>
                     </div>
                     <button className="p-1.5 hover:bg-muted rounded-lg transition-colors" data-testid="button-copy-address">
@@ -224,21 +224,23 @@ export default function AppPage() {
                   <div className="grid grid-cols-2 gap-2 text-center">
                     <div className="p-2 rounded-lg bg-background/50">
                       <p className="text-xs text-muted-foreground">SOL</p>
-                      <p className="text-sm font-semibold font-mono">12.45</p>
+                      <p className="text-sm font-semibold font-mono" data-testid="text-sol-balance">
+                        {balanceLoading ? '...' : balance !== null ? balance.toFixed(2) : '0.00'}
+                      </p>
                     </div>
                     <div className="p-2 rounded-lg bg-background/50">
                       <p className="text-xs text-muted-foreground">USDC</p>
-                      <p className="text-sm font-semibold font-mono">8,450</p>
+                      <p className="text-sm font-semibold font-mono">--</p>
                     </div>
                   </div>
                 </div>
                 <div className="p-3 rounded-xl bg-muted/30 mb-3 lg:hidden">
                   <div className="flex items-center gap-3 mb-3">
                     <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white text-xs font-bold">
-                      7x
+                      <Wallet className="w-4 h-4" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{walletAddress}</p>
+                      <p className="text-sm font-medium truncate" data-testid="text-wallet-address-mobile">{shortenedAddress}</p>
                       <p className="text-xs text-muted-foreground">Connected</p>
                     </div>
                     <button className="p-1.5 hover:bg-muted rounded-lg transition-colors">
@@ -248,11 +250,13 @@ export default function AppPage() {
                   <div className="grid grid-cols-2 gap-2 text-center">
                     <div className="p-2 rounded-lg bg-background/50">
                       <p className="text-xs text-muted-foreground">SOL</p>
-                      <p className="text-sm font-semibold font-mono">12.45</p>
+                      <p className="text-sm font-semibold font-mono" data-testid="text-sol-balance-mobile">
+                        {balanceLoading ? '...' : balance !== null ? balance.toFixed(2) : '0.00'}
+                      </p>
                     </div>
                     <div className="p-2 rounded-lg bg-background/50">
                       <p className="text-xs text-muted-foreground">USDC</p>
-                      <p className="text-sm font-semibold font-mono">8,450</p>
+                      <p className="text-sm font-semibold font-mono">--</p>
                     </div>
                   </div>
                 </div>
@@ -271,7 +275,7 @@ export default function AppPage() {
             ) : (
               <div className="hidden lg:flex flex-col items-center gap-2">
                 <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white text-xs font-bold">
-                  7x
+                  <Wallet className="w-5 h-5" />
                 </div>
                 <button 
                   onClick={handleDisconnect}

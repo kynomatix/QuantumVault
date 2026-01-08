@@ -1,10 +1,8 @@
-import { useState } from 'react';
+import { useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { 
   Wallet, 
-  TrendingUp, 
-  Bot, 
   Shield, 
   Zap, 
   ArrowRight,
@@ -15,8 +13,8 @@ import {
   Globe
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { AuthDialog } from '@/components/AuthDialog';
-import { useAuth } from '@/hooks/useAuth';
+import { useWallet } from '@/hooks/useWallet';
+import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import heroImage from '@assets/generated_images/abstract_purple_quantum_blockchain_visualization.png';
 
 const fadeInUp = {
@@ -55,15 +53,17 @@ function FeatureCard({ icon, title, description }: FeatureCardProps) {
 
 export default function Landing() {
   const [, navigate] = useLocation();
-  const [authDialogOpen, setAuthDialogOpen] = useState(false);
-  const { user } = useAuth();
+  const { connected, connecting } = useWallet();
+  const { setVisible } = useWalletModal();
 
-  const handleLaunchApp = () => {
-    if (user) {
+  useEffect(() => {
+    if (connected) {
       navigate('/app');
-    } else {
-      setAuthDialogOpen(true);
     }
+  }, [connected, navigate]);
+
+  const handleConnectWallet = () => {
+    setVisible(true);
   };
 
   return (
@@ -96,11 +96,12 @@ export default function Landing() {
 
           <Button 
             className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity"
-            onClick={handleLaunchApp}
-            data-testid="button-launch-app"
+            onClick={handleConnectWallet}
+            disabled={connecting}
+            data-testid="button-connect-wallet"
           >
-            Launch App
-            <ArrowRight className="w-4 h-4 ml-2" />
+            {connecting ? 'Connecting...' : 'Connect Wallet'}
+            <Wallet className="w-4 h-4 ml-2" />
           </Button>
         </div>
       </nav>
@@ -143,11 +144,12 @@ export default function Landing() {
               <Button 
                 size="lg" 
                 className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity text-lg px-8 py-6 glow"
-                onClick={handleLaunchApp}
-                data-testid="button-hero-launch"
+                onClick={handleConnectWallet}
+                disabled={connecting}
+                data-testid="button-hero-connect"
               >
                 <Wallet className="w-5 h-5 mr-2" />
-                Launch App
+                {connecting ? 'Connecting...' : 'Connect Wallet'}
               </Button>
               <Button 
                 size="lg" 
@@ -287,11 +289,12 @@ export default function Landing() {
                 <Button 
                   size="lg"
                   className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity text-lg px-8 py-6 glow"
-                  onClick={handleLaunchApp}
-                  data-testid="button-cta-launch"
+                  onClick={handleConnectWallet}
+                  disabled={connecting}
+                  data-testid="button-cta-connect"
                 >
                   <Wallet className="w-5 h-5 mr-2" />
-                  Launch App
+                  {connecting ? 'Connecting...' : 'Connect Wallet'}
                 </Button>
               </motion.div>
             </motion.div>
@@ -320,8 +323,6 @@ export default function Landing() {
           </div>
         </div>
       </footer>
-      
-      <AuthDialog open={authDialogOpen} onOpenChange={setAuthDialogOpen} />
     </div>
   );
 }
