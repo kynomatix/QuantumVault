@@ -41,6 +41,12 @@ async function fetchLeaderboard(limit?: number) {
   return res.json();
 }
 
+async function fetchPrices(): Promise<Record<string, number>> {
+  const res = await fetch("/api/prices");
+  if (!res.ok) throw new Error("Failed to fetch prices");
+  return res.json();
+}
+
 async function subscribeToBot(botId: string, walletAddress: string) {
   const res = await fetch("/api/subscriptions", {
     method: "POST",
@@ -137,5 +143,14 @@ export function useUpdateSubscription() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
     },
+  });
+}
+
+export function usePrices() {
+  return useQuery({
+    queryKey: ["prices"],
+    queryFn: fetchPrices,
+    refetchInterval: 10000,
+    staleTime: 5000,
   });
 }

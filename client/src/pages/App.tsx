@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
@@ -36,13 +36,12 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { DepositWithdraw } from '@/components/DepositWithdraw';
 
-const markets = [
-  { symbol: 'SOL-PERP', price: 98.45, change: 5.23, volume: '124.5M' },
-  { symbol: 'BTC-PERP', price: 43250.00, change: 2.14, volume: '892.3M' },
-  { symbol: 'ETH-PERP', price: 2340.50, change: -1.82, volume: '456.7M' },
-  { symbol: 'JUP-PERP', price: 0.8234, change: 12.45, volume: '45.2M' },
-  { symbol: 'BONK-PERP', price: 0.00001234, change: -3.21, volume: '23.1M' },
+const defaultMarkets = [
+  { symbol: 'SOL-PERP', price: 0, change: 0, volume: '-' },
+  { symbol: 'BTC-PERP', price: 0, change: 0, volume: '-' },
+  { symbol: 'ETH-PERP', price: 0, change: 0, volume: '-' },
 ];
 
 const positions = [
@@ -100,7 +99,6 @@ export default function AppPage() {
   const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading } = useWallet();
   const { toast } = useToast();
   const [activeNav, setActiveNav] = useState<NavItem>('dashboard');
-  const [selectedMarket, setSelectedMarket] = useState(markets[0]);
   const [orderType, setOrderType] = useState<'market' | 'limit'>('market');
   const [orderSide, setOrderSide] = useState<'long' | 'short'>('long');
   const [orderSize, setOrderSize] = useState('');
@@ -115,8 +113,17 @@ export default function AppPage() {
   const { data: tradesData } = useTrades(10);
   const { data: botsData } = useBots();
   const { data: leaderboardData } = useLeaderboard(100);
+  const { data: pricesData } = usePrices();
   const subscribeBot = useSubscribeToBot();
   const updateSub = useUpdateSubscription();
+
+  const [selectedMarketSymbol, setSelectedMarketSymbol] = useState('SOL-PERP');
+
+  const markets = defaultMarkets.map(m => ({
+    ...m,
+    price: pricesData?.[m.symbol] ?? 0,
+  }));
+  const selectedMarket = markets.find(m => m.symbol === selectedMarketSymbol) || markets[0];
 
   // Redirect to landing if wallet not connected
   useEffect(() => {
@@ -448,6 +455,8 @@ export default function AppPage() {
                       ))}
                     </div>
                   </div>
+
+                  <DepositWithdraw />
                 </div>
 
                 <div className="gradient-border p-4 noise">
@@ -502,7 +511,7 @@ export default function AppPage() {
                   {markets.map((m) => (
                     <button
                       key={m.symbol}
-                      onClick={() => setSelectedMarket(m)}
+                      onClick={() => setSelectedMarketSymbol(m.symbol)}
                       className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
                         selectedMarket.symbol === m.symbol
                           ? 'bg-primary/20 text-primary border border-primary/50'

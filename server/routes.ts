@@ -6,6 +6,7 @@ import crypto from "crypto";
 import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
+import { getMarketPrice, getAllPrices } from "./drift-price";
 
 declare module "express-session" {
   interface SessionData {
@@ -569,6 +570,30 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get leaderboard error:", error);
       res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/prices", async (req, res) => {
+    try {
+      const prices = await getAllPrices();
+      res.json(prices);
+    } catch (error) {
+      console.error("Get prices error:", error);
+      res.status(500).json({ error: "Failed to fetch prices" });
+    }
+  });
+
+  app.get("/api/prices/:market", async (req, res) => {
+    try {
+      const { market } = req.params;
+      const price = await getMarketPrice(market);
+      if (price === null) {
+        return res.status(404).json({ error: "Market not found or price unavailable" });
+      }
+      res.json({ market, price });
+    } catch (error) {
+      console.error("Get price error:", error);
+      res.status(500).json({ error: "Failed to fetch price" });
     }
   });
 
