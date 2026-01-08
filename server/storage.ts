@@ -2,7 +2,11 @@ import { eq, desc, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
   users,
+  wallets,
   bots,
+  tradingBots,
+  botTrades,
+  webhookLogs,
   subscriptions,
   portfolios,
   positions,
@@ -10,8 +14,16 @@ import {
   leaderboardStats,
   type User,
   type InsertUser,
+  type Wallet,
+  type InsertWallet,
   type Bot,
   type InsertBot,
+  type TradingBot,
+  type InsertTradingBot,
+  type BotTrade,
+  type InsertBotTrade,
+  type WebhookLog,
+  type InsertWebhookLog,
   type Subscription,
   type InsertSubscription,
   type Portfolio,
@@ -25,43 +37,56 @@ import {
 } from "@shared/schema";
 
 export interface IStorage {
-  // Users
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
 
-  // Bots
+  getWallet(address: string): Promise<Wallet | undefined>;
+  createWallet(wallet: InsertWallet): Promise<Wallet>;
+  updateWalletLastSeen(address: string): Promise<void>;
+  getOrCreateWallet(address: string): Promise<Wallet>;
+
   getAllBots(): Promise<Bot[]>;
   getFeaturedBots(): Promise<Bot[]>;
   getBotById(id: string): Promise<Bot | undefined>;
   createBot(bot: InsertBot): Promise<Bot>;
   incrementBotSubscribers(botId: string, delta: number): Promise<void>;
 
-  // Subscriptions
+  getTradingBots(walletAddress: string): Promise<TradingBot[]>;
+  getTradingBotById(id: string): Promise<TradingBot | undefined>;
+  getTradingBotBySecret(webhookSecret: string): Promise<TradingBot | undefined>;
+  createTradingBot(bot: InsertTradingBot): Promise<TradingBot>;
+  updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined>;
+  deleteTradingBot(id: string): Promise<void>;
+  updateTradingBotStats(id: string, stats: TradingBot['stats']): Promise<void>;
+
+  getBotTrades(tradingBotId: string, limit?: number): Promise<BotTrade[]>;
+  getWalletBotTrades(walletAddress: string, limit?: number): Promise<BotTrade[]>;
+  createBotTrade(trade: InsertBotTrade): Promise<BotTrade>;
+  updateBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<void>;
+
+  createWebhookLog(log: InsertWebhookLog): Promise<WebhookLog>;
+  updateWebhookLog(id: string, updates: Partial<InsertWebhookLog>): Promise<void>;
+
   createSubscription(subscription: InsertSubscription): Promise<Subscription>;
   getUserSubscriptions(userId: string): Promise<(Subscription & { bot: Bot })[]>;
   updateSubscriptionStatus(id: string, status: string): Promise<void>;
 
-  // Portfolio
   getPortfolio(userId: string): Promise<Portfolio | undefined>;
   upsertPortfolio(portfolio: InsertPortfolio): Promise<Portfolio>;
 
-  // Positions
   getUserPositions(userId: string): Promise<Position[]>;
   createPosition(position: InsertPosition): Promise<Position>;
   updatePosition(id: string, updates: Partial<InsertPosition>): Promise<void>;
 
-  // Trades
   getUserTrades(userId: string, limit?: number): Promise<Trade[]>;
   createTrade(trade: InsertTrade): Promise<Trade>;
 
-  // Leaderboard
   getLeaderboard(limit?: number): Promise<(LeaderboardStats & { user: User })[]>;
   upsertLeaderboardStats(stats: InsertLeaderboardStats): Promise<LeaderboardStats>;
 }
 
 export class DatabaseStorage implements IStorage {
-  // Users
   async getUser(id: string): Promise<User | undefined> {
     const result = await db.select().from(users).where(eq(users.id, id)).limit(1);
     return result[0];
@@ -77,7 +102,29 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  // Bots
+  async getWallet(address: string): Promise<Wallet | undefined> {
+    const result = await db.select().from(wallets).where(eq(wallets.address, address)).limit(1);
+    return result[0];
+  }
+
+  async createWallet(wallet: InsertWallet): Promise<Wallet> {
+    const result = await db.insert(wallets).values(wallet).returning();
+    return result[0];
+  }
+
+  async updateWalletLastSeen(address: string): Promise<void> {
+    await db.update(wallets).set({ lastSeen: sql`NOW()` }).where(eq(wallets.address, address));
+  }
+
+  async getOrCreateWallet(address: string): Promise<Wallet> {
+    const existing = await this.getWallet(address);
+    if (existing) {
+      await this.updateWalletLastSeen(address);
+      return existing;
+    }
+    return this.createWallet({ address });
+  }
+
   async getAllBots(): Promise<Bot[]> {
     return db.select().from(bots).orderBy(desc(bots.subscribers));
   }
@@ -103,7 +150,64 @@ export class DatabaseStorage implements IStorage {
       .where(eq(bots.id, botId));
   }
 
-  // Subscriptions
+  async getTradingBots(walletAddress: string): Promise<TradingBot[]> {
+    return db.select().from(tradingBots).where(eq(tradingBots.walletAddress, walletAddress)).orderBy(desc(tradingBots.createdAt));
+  }
+
+  async getTradingBotById(id: string): Promise<TradingBot | undefined> {
+    const result = await db.select().from(tradingBots).where(eq(tradingBots.id, id)).limit(1);
+    return result[0];
+  }
+
+  async getTradingBotBySecret(webhookSecret: string): Promise<TradingBot | undefined> {
+    const result = await db.select().from(tradingBots).where(eq(tradingBots.webhookSecret, webhookSecret)).limit(1);
+    return result[0];
+  }
+
+  async createTradingBot(bot: InsertTradingBot): Promise<TradingBot> {
+    const result = await db.insert(tradingBots).values(bot as any).returning();
+    return result[0];
+  }
+
+  async updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined> {
+    const result = await db.update(tradingBots).set({ ...updates, updatedAt: sql`NOW()` } as any).where(eq(tradingBots.id, id)).returning();
+    return result[0];
+  }
+
+  async deleteTradingBot(id: string): Promise<void> {
+    await db.delete(tradingBots).where(eq(tradingBots.id, id));
+  }
+
+  async updateTradingBotStats(id: string, stats: TradingBot['stats']): Promise<void> {
+    await db.update(tradingBots).set({ stats, updatedAt: sql`NOW()` }).where(eq(tradingBots.id, id));
+  }
+
+  async getBotTrades(tradingBotId: string, limit: number = 50): Promise<BotTrade[]> {
+    return db.select().from(botTrades).where(eq(botTrades.tradingBotId, tradingBotId)).orderBy(desc(botTrades.executedAt)).limit(limit);
+  }
+
+  async getWalletBotTrades(walletAddress: string, limit: number = 50): Promise<BotTrade[]> {
+    return db.select().from(botTrades).where(eq(botTrades.walletAddress, walletAddress)).orderBy(desc(botTrades.executedAt)).limit(limit);
+  }
+
+  async createBotTrade(trade: InsertBotTrade): Promise<BotTrade> {
+    const result = await db.insert(botTrades).values(trade).returning();
+    return result[0];
+  }
+
+  async updateBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<void> {
+    await db.update(botTrades).set(updates).where(eq(botTrades.id, id));
+  }
+
+  async createWebhookLog(log: InsertWebhookLog): Promise<WebhookLog> {
+    const result = await db.insert(webhookLogs).values(log).returning();
+    return result[0];
+  }
+
+  async updateWebhookLog(id: string, updates: Partial<InsertWebhookLog>): Promise<void> {
+    await db.update(webhookLogs).set(updates).where(eq(webhookLogs.id, id));
+  }
+
   async createSubscription(subscription: InsertSubscription): Promise<Subscription> {
     const result = await db.insert(subscriptions).values(subscription).returning();
     return result[0];
@@ -127,7 +231,6 @@ export class DatabaseStorage implements IStorage {
     await db.update(subscriptions).set({ status }).where(eq(subscriptions.id, id));
   }
 
-  // Portfolio
   async getPortfolio(userId: string): Promise<Portfolio | undefined> {
     const result = await db.select().from(portfolios).where(eq(portfolios.userId, userId)).limit(1);
     return result[0];
@@ -152,7 +255,6 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  // Positions
   async getUserPositions(userId: string): Promise<Position[]> {
     return db.select().from(positions).where(eq(positions.userId, userId)).orderBy(desc(positions.createdAt));
   }
@@ -166,7 +268,6 @@ export class DatabaseStorage implements IStorage {
     await db.update(positions).set(updates).where(eq(positions.id, id));
   }
 
-  // Trades
   async getUserTrades(userId: string, limit: number = 50): Promise<Trade[]> {
     return db.select().from(trades).where(eq(trades.userId, userId)).orderBy(desc(trades.timestamp)).limit(limit);
   }
@@ -176,7 +277,6 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  // Leaderboard
   async getLeaderboard(limit: number = 100): Promise<(LeaderboardStats & { user: User })[]> {
     const result = await db
       .select()

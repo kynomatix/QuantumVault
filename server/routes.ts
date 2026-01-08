@@ -2,21 +2,43 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import session from "express-session";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import { storage } from "./storage";
-import { insertUserSchema, insertSubscriptionSchema } from "@shared/schema";
+import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 
 declare module "express-session" {
   interface SessionData {
     userId: string;
+    walletAddress: string;
   }
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      walletAddress?: string;
+    }
+  }
+}
+
+function generateWebhookSecret(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function generateWebhookUrl(botId: string, secret: string): string {
+  const baseUrl = process.env.REPLIT_DEV_DOMAIN 
+    ? `https://${process.env.REPLIT_DEV_DOMAIN}`
+    : process.env.REPLIT_DEPLOYMENT_DOMAIN 
+    ? `https://${process.env.REPLIT_DEPLOYMENT_DOMAIN}`
+    : 'http://localhost:5000';
+  return `${baseUrl}/api/webhook/${botId}?secret=${secret}`;
 }
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  // Session middleware
   app.use(
     session({
       secret: process.env.SESSION_SECRET || "quantum-vault-secret-change-in-production",
@@ -25,12 +47,11 @@ export async function registerRoutes(
       cookie: {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
-        maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
+        maxAge: 1000 * 60 * 60 * 24 * 7,
       },
     })
   );
 
-  // Auth middleware
   const requireAuth = (req: any, res: any, next: any) => {
     if (!req.session.userId) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -38,27 +59,299 @@ export async function registerRoutes(
     next();
   };
 
-  // Auth routes
+  const requireWallet = (req: any, res: any, next: any) => {
+    const walletAddress = req.query.wallet || req.body.walletAddress || req.headers['x-wallet-address'];
+    if (!walletAddress) {
+      return res.status(401).json({ error: "Wallet address required" });
+    }
+    req.walletAddress = walletAddress;
+    next();
+  };
+
+  // Wallet auth routes
+  app.post("/api/wallet/connect", async (req, res) => {
+    try {
+      const { walletAddress } = req.body;
+      if (!walletAddress) {
+        return res.status(400).json({ error: "Wallet address required" });
+      }
+
+      const wallet = await storage.getOrCreateWallet(walletAddress);
+      req.session.walletAddress = walletAddress;
+
+      res.json({
+        address: wallet.address,
+        displayName: wallet.displayName,
+        driftSubaccount: wallet.driftSubaccount,
+      });
+    } catch (error) {
+      console.error("Wallet connect error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/wallet/me", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      res.json(wallet);
+    } catch (error) {
+      console.error("Get wallet error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Trading bot CRUD routes
+  app.get("/api/trading-bots", requireWallet, async (req, res) => {
+    try {
+      const bots = await storage.getTradingBots(req.walletAddress);
+      res.json(bots);
+    } catch (error) {
+      console.error("Get trading bots error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/trading-bots/:id", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      res.json(bot);
+    } catch (error) {
+      console.error("Get trading bot error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/trading-bots", requireWallet, async (req, res) => {
+    try {
+      const { name, market, side, leverage, maxPositionSize, signalConfig, riskConfig } = req.body;
+      
+      if (!name || !market) {
+        return res.status(400).json({ error: "Name and market are required" });
+      }
+
+      const webhookSecret = generateWebhookSecret();
+
+      const bot = await storage.createTradingBot({
+        walletAddress: req.walletAddress,
+        name,
+        market,
+        webhookSecret,
+        isActive: true,
+        side: side || 'both',
+        leverage: leverage || 1,
+        maxPositionSize: maxPositionSize || null,
+        signalConfig: signalConfig || { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
+        riskConfig: riskConfig || {},
+      });
+
+      const webhookUrl = generateWebhookUrl(bot.id, webhookSecret);
+      await storage.updateTradingBot(bot.id, { webhookUrl } as any);
+
+      res.json({
+        ...bot,
+        webhookUrl,
+      });
+    } catch (error) {
+      console.error("Create trading bot error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.patch("/api/trading-bots/:id", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const { name, market, side, leverage, maxPositionSize, signalConfig, riskConfig, isActive } = req.body;
+      
+      const updated = await storage.updateTradingBot(req.params.id, {
+        ...(name && { name }),
+        ...(market && { market }),
+        ...(side && { side }),
+        ...(leverage !== undefined && { leverage }),
+        ...(maxPositionSize !== undefined && { maxPositionSize }),
+        ...(signalConfig && { signalConfig }),
+        ...(riskConfig && { riskConfig }),
+        ...(isActive !== undefined && { isActive }),
+      });
+
+      res.json(updated);
+    } catch (error) {
+      console.error("Update trading bot error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.delete("/api/trading-bots/:id", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      await storage.deleteTradingBot(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete trading bot error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Bot trades routes
+  app.get("/api/trading-bots/:id/trades", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+      const trades = await storage.getBotTrades(req.params.id, limit);
+      res.json(trades);
+    } catch (error) {
+      console.error("Get bot trades error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/bot-trades", requireWallet, async (req, res) => {
+    try {
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+      const trades = await storage.getWalletBotTrades(req.walletAddress, limit);
+      res.json(trades);
+    } catch (error) {
+      console.error("Get wallet bot trades error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // TradingView Webhook endpoint
+  app.post("/api/webhook/:botId", async (req, res) => {
+    const { botId } = req.params;
+    const { secret } = req.query;
+
+    // Log webhook
+    const log = await storage.createWebhookLog({
+      tradingBotId: botId,
+      payload: req.body,
+      headers: req.headers as any,
+      ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
+      processed: false,
+    });
+
+    try {
+      // Get bot
+      const bot = await storage.getTradingBotById(botId);
+      if (!bot) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Bot not found" });
+        return res.status(404).json({ error: "Bot not found" });
+      }
+
+      // Validate secret
+      if (secret !== bot.webhookSecret) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Invalid secret" });
+        return res.status(401).json({ error: "Invalid secret" });
+      }
+
+      // Check if bot is active
+      if (!bot.isActive) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused" });
+        return res.status(400).json({ error: "Bot is paused" });
+      }
+
+      // Parse signal from TradingView alert
+      const payload = req.body;
+      const message = typeof payload === 'string' ? payload : payload.message || payload.text || JSON.stringify(payload);
+      
+      const signalConfig = bot.signalConfig as TradingBot['signalConfig'];
+      let side: 'long' | 'short' | 'close' | null = null;
+
+      if (signalConfig?.longKeyword && message.toUpperCase().includes(signalConfig.longKeyword.toUpperCase())) {
+        side = 'long';
+      } else if (signalConfig?.shortKeyword && message.toUpperCase().includes(signalConfig.shortKeyword.toUpperCase())) {
+        side = 'short';
+      } else if (signalConfig?.exitKeyword && message.toUpperCase().includes(signalConfig.exitKeyword.toUpperCase())) {
+        side = 'close';
+      }
+
+      if (!side) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "No valid signal found in message", processed: true });
+        return res.status(400).json({ error: "No valid signal found", message });
+      }
+
+      // Create trade record (pending execution)
+      const trade = await storage.createBotTrade({
+        tradingBotId: botId,
+        walletAddress: bot.walletAddress,
+        market: bot.market,
+        side: side === 'close' ? 'CLOSE' : side.toUpperCase(),
+        size: bot.maxPositionSize || "1",
+        price: "0",
+        status: "pending",
+        webhookPayload: payload,
+      });
+
+      // TODO: Execute trade on Drift Protocol
+      // For now, simulate execution
+      await storage.updateBotTrade(trade.id, {
+        status: "executed",
+        price: "100.00",
+        txSignature: `sim_${Date.now()}`,
+      });
+
+      // Update bot stats
+      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+      await storage.updateTradingBotStats(botId, {
+        ...stats,
+        totalTrades: (stats.totalTrades || 0) + 1,
+        lastTradeAt: new Date().toISOString(),
+      });
+
+      await storage.updateWebhookLog(log.id, { processed: true });
+
+      res.json({
+        success: true,
+        signal: side,
+        tradeId: trade.id,
+        market: bot.market,
+      });
+    } catch (error) {
+      console.error("Webhook processing error:", error);
+      await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
+      res.status(500).json({ error: "Failed to process webhook" });
+    }
+  });
+
+  // Legacy auth routes (kept for compatibility)
   app.post("/api/auth/register", async (req, res) => {
     try {
       const { username, password } = insertUserSchema.parse(req.body);
-
-      // Check if user exists
       const existingUser = await storage.getUserByUsername(username);
       if (existingUser) {
         return res.status(400).json({ error: "Username already taken" });
       }
-
-      // Hash password
       const passwordHash = await bcrypt.hash(password, 10);
-
-      // Create user
-      const user = await storage.createUser({
-        username,
-        password: passwordHash,
-      });
-
-      // Create initial portfolio
+      const user = await storage.createUser({ username, password: passwordHash });
       await storage.upsertPortfolio({
         userId: user.id,
         totalValue: "10000",
@@ -67,8 +360,6 @@ export async function registerRoutes(
         solBalance: "0",
         usdcBalance: "10000",
       });
-
-      // Initialize leaderboard stats
       await storage.upsertLeaderboardStats({
         userId: user.id,
         totalVolume: "0",
@@ -76,15 +367,8 @@ export async function registerRoutes(
         winRate: "0",
         totalTrades: 0,
       });
-
-      // Set session
       req.session.userId = user.id;
-
-      res.json({
-        id: user.id,
-        username: user.username,
-        displayName: user.displayName,
-      });
+      res.json({ id: user.id, username: user.username, displayName: user.displayName });
     } catch (error) {
       if (error instanceof ZodError) {
         return res.status(400).json({ error: "Invalid input", details: error.errors });
@@ -97,24 +381,16 @@ export async function registerRoutes(
   app.post("/api/auth/login", async (req, res) => {
     try {
       const { username, password } = req.body;
-
       const user = await storage.getUserByUsername(username);
       if (!user) {
         return res.status(401).json({ error: "Invalid credentials" });
       }
-
       const validPassword = await bcrypt.compare(password, user.password);
       if (!validPassword) {
         return res.status(401).json({ error: "Invalid credentials" });
       }
-
       req.session.userId = user.id;
-
-      res.json({
-        id: user.id,
-        username: user.username,
-        displayName: user.displayName,
-      });
+      res.json({ id: user.id, username: user.username, displayName: user.displayName });
     } catch (error) {
       console.error("Login error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -136,19 +412,14 @@ export async function registerRoutes(
       if (!user) {
         return res.status(404).json({ error: "User not found" });
       }
-
-      res.json({
-        id: user.id,
-        username: user.username,
-        displayName: user.displayName,
-      });
+      res.json({ id: user.id, username: user.username, displayName: user.displayName });
     } catch (error) {
       console.error("Get user error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  // Bot routes
+  // Bot marketplace routes
   app.get("/api/bots", async (req, res) => {
     try {
       const featured = req.query.featured === "true";
@@ -173,28 +444,16 @@ export async function registerRoutes(
     }
   });
 
-  // Subscription routes
   app.post("/api/subscriptions", requireAuth, async (req, res) => {
     try {
       const { botId } = req.body;
       const userId = req.session.userId!;
-
-      // Check if already subscribed
       const existingSubs = await storage.getUserSubscriptions(userId);
       if (existingSubs.some((sub) => sub.botId === botId && sub.status === "active")) {
         return res.status(400).json({ error: "Already subscribed to this bot" });
       }
-
-      // Create subscription
-      const subscription = await storage.createSubscription({
-        userId,
-        botId,
-        status: "active",
-      });
-
-      // Increment bot subscribers
+      const subscription = await storage.createSubscription({ userId, botId, status: "active" });
       await storage.incrementBotSubscribers(botId, 1);
-
       res.json(subscription);
     } catch (error) {
       console.error("Subscribe error:", error);
@@ -223,7 +482,6 @@ export async function registerRoutes(
     }
   });
 
-  // Portfolio routes
   app.get("/api/portfolio", requireAuth, async (req, res) => {
     try {
       const portfolio = await storage.getPortfolio(req.session.userId!);
@@ -234,7 +492,6 @@ export async function registerRoutes(
     }
   });
 
-  // Position routes
   app.get("/api/positions", requireAuth, async (req, res) => {
     try {
       const positions = await storage.getUserPositions(req.session.userId!);
@@ -245,7 +502,6 @@ export async function registerRoutes(
     }
   });
 
-  // Trade routes
   app.get("/api/trades", requireAuth, async (req, res) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
@@ -257,7 +513,6 @@ export async function registerRoutes(
     }
   });
 
-  // Leaderboard routes
   app.get("/api/leaderboard", async (req, res) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
