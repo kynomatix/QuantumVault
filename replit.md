@@ -60,6 +60,11 @@ Preferred communication style: Simple, everyday language.
 - `SESSION_SECRET`: Session encryption key (optional, has default for development)
 - `SOLANA_RPC_URL`: Solana RPC endpoint (optional, defaults to mainnet)
 
+### Drift Protocol Testnet Configuration
+- **Network**: Solana Devnet
+- **USDC Token Mint**: `8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2`
+- **Usage**: For deposits/withdrawals on Drift testnet
+
 ### Frontend Libraries
 - **UI Components**: Full shadcn/ui component set with Radix UI primitives
 - **Forms**: React Hook Form with Zod validation (`@hookform/resolvers`)
