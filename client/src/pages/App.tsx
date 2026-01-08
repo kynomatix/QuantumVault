@@ -1,6 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
+import { useAuth } from '@/hooks/useAuth';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription } from '@/hooks/useApi';
+import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
   TrendingUp, 
@@ -94,8 +97,8 @@ type NavItem = 'dashboard' | 'trade' | 'marketplace' | 'bots' | 'leaderboard' | 
 
 export default function AppPage() {
   const [, navigate] = useLocation();
-  const [isConnected, setIsConnected] = useState(false);
-  const [walletAddress] = useState('7xKXp...m4Qp');
+  const { user, logout, loading: authLoading } = useAuth();
+  const { toast } = useToast();
   const [activeNav, setActiveNav] = useState<NavItem>('dashboard');
   const [selectedMarket, setSelectedMarket] = useState(markets[0]);
   const [orderType, setOrderType] = useState<'market' | 'limit'>('market');
@@ -105,13 +108,28 @@ export default function AppPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-  const handleConnect = () => setIsConnected(true);
-  const handleDisconnect = () => {
-    setIsConnected(false);
-    navigate('/');
+  // Fetch data using React Query hooks
+  const { data: portfolioData } = usePortfolio();
+  const { data: positionsData } = usePositions();
+  const { data: subscriptionsData } = useSubscriptions();
+  const { data: tradesData } = useTrades(10);
+  const { data: botsData } = useBots();
+  const { data: leaderboardData } = useLeaderboard(100);
+  const subscribeBot = useSubscribeToBot();
+  const updateSub = useUpdateSubscription();
+
+  // Redirect to landing if not authenticated
+  useEffect(() => {
+    if (!authLoading && !user) {
+      navigate('/');
+    }
+  }, [user, authLoading, navigate]);
+
+  const handleDisconnect = async () => {
+    await logout();
   };
 
-  if (!isConnected) {
+  if (authLoading || !user) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
         <div className="absolute inset-0 -z-10">
@@ -125,29 +143,13 @@ export default function AppPage() {
           className="max-w-md w-full"
         >
           <div className="gradient-border p-8 noise text-center">
-            <div className="w-16 h-16 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+            <div className="w-16 h-16 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center animate-pulse">
               <Sparkles className="w-8 h-8 text-white" />
             </div>
-            <h1 className="text-3xl font-display font-bold mb-2">QuantumVault</h1>
-            <p className="text-muted-foreground mb-8">
-              Connect your Phantom wallet to access the trading dashboard
+            <h1 className="text-3xl font-display font-bold mb-2">Loading...</h1>
+            <p className="text-muted-foreground">
+              Please wait while we load your dashboard
             </p>
-            <Button 
-              size="lg"
-              className="w-full bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity"
-              onClick={handleConnect}
-              data-testid="button-connect-wallet"
-            >
-              <Wallet className="w-5 h-5 mr-2" />
-              Connect Phantom
-            </Button>
-            <button 
-              onClick={() => navigate('/')}
-              className="mt-4 text-sm text-muted-foreground hover:text-foreground transition-colors"
-              data-testid="link-back-home"
-            >
-              ← Back to Home
-            </button>
           </div>
         </motion.div>
       </div>

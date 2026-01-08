@@ -15,6 +15,8 @@ import {
   Globe
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { AuthDialog } from '@/components/AuthDialog';
+import { useAuth } from '@/hooks/useAuth';
 import heroImage from '@assets/generated_images/abstract_purple_quantum_blockchain_visualization.png';
 
 const fadeInUp = {
@@ -53,9 +55,15 @@ function FeatureCard({ icon, title, description }: FeatureCardProps) {
 
 export default function Landing() {
   const [, navigate] = useLocation();
+  const [authDialogOpen, setAuthDialogOpen] = useState(false);
+  const { user } = useAuth();
 
   const handleLaunchApp = () => {
-    navigate('/app');
+    if (user) {
+      navigate('/app');
+    } else {
+      setAuthDialogOpen(true);
+    }
   };
 
   return (
@@ -312,6 +320,8 @@ export default function Landing() {
           </div>
         </div>
       </footer>
+      
+      <AuthDialog open={authDialogOpen} onOpenChange={setAuthDialogOpen} />
     </div>
   );
 }
