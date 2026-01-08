@@ -26,7 +26,10 @@ import {
   Star,
   Zap,
   Shield,
-  ChevronRight
+  ChevronRight,
+  ChevronLeft,
+  PanelLeftClose,
+  PanelLeft
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -100,6 +103,7 @@ export default function AppPage() {
   const [orderSize, setOrderSize] = useState('');
   const [limitPrice, setLimitPrice] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const handleConnect = () => setIsConnected(true);
   const handleDisconnect = () => {
@@ -152,14 +156,20 @@ export default function AppPage() {
 
   return (
     <div className="min-h-screen flex">
-      <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-card/95 backdrop-blur-xl border-r border-border/50 transform transition-transform duration-300 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+      <aside className={`fixed inset-y-0 left-0 z-50 bg-card/95 backdrop-blur-xl border-r border-border/50 transform transition-all duration-300 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} ${sidebarCollapsed ? 'lg:w-20' : 'lg:w-64'} w-64`}>
         <div className="flex flex-col h-full">
           <div className="p-4 border-b border-border/50">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center flex-shrink-0">
                 <Sparkles className="w-5 h-5 text-white" />
               </div>
-              <div>
+              {!sidebarCollapsed && (
+                <div className="hidden lg:block">
+                  <span className="font-display font-bold text-lg">QuantumVault</span>
+                  <p className="text-xs text-muted-foreground">Solana • Mainnet</p>
+                </div>
+              )}
+              <div className="lg:hidden">
                 <span className="font-display font-bold text-lg">QuantumVault</span>
                 <p className="text-xs text-muted-foreground">Solana • Mainnet</p>
               </div>
@@ -178,54 +188,114 @@ export default function AppPage() {
               <button
                 key={item.id}
                 onClick={() => { setActiveNav(item.id); setSidebarOpen(false); }}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${sidebarCollapsed ? 'lg:justify-center lg:px-3' : ''} ${
                   activeNav === item.id 
                     ? 'bg-primary/20 text-primary' 
                     : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
                 }`}
                 data-testid={`nav-${item.id}`}
+                title={sidebarCollapsed ? item.label : undefined}
               >
-                <item.icon className="w-5 h-5" />
-                {item.label}
+                <item.icon className="w-5 h-5 flex-shrink-0" />
+                {!sidebarCollapsed && <span className="hidden lg:inline">{item.label}</span>}
+                <span className="lg:hidden">{item.label}</span>
               </button>
             ))}
           </nav>
 
           <div className="p-3 border-t border-border/50">
-            <div className="p-3 rounded-xl bg-muted/30 mb-3">
-              <div className="flex items-center gap-3 mb-3">
-                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white text-xs font-bold">
+            {!sidebarCollapsed ? (
+              <>
+                <div className="p-3 rounded-xl bg-muted/30 mb-3 hidden lg:block">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white text-xs font-bold">
+                      7x
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate">{walletAddress}</p>
+                      <p className="text-xs text-muted-foreground">Connected</p>
+                    </div>
+                    <button className="p-1.5 hover:bg-muted rounded-lg transition-colors" data-testid="button-copy-address">
+                      <Copy className="w-4 h-4 text-muted-foreground" />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-center">
+                    <div className="p-2 rounded-lg bg-background/50">
+                      <p className="text-xs text-muted-foreground">SOL</p>
+                      <p className="text-sm font-semibold font-mono">12.45</p>
+                    </div>
+                    <div className="p-2 rounded-lg bg-background/50">
+                      <p className="text-xs text-muted-foreground">USDC</p>
+                      <p className="text-sm font-semibold font-mono">8,450</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-muted/30 mb-3 lg:hidden">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white text-xs font-bold">
+                      7x
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate">{walletAddress}</p>
+                      <p className="text-xs text-muted-foreground">Connected</p>
+                    </div>
+                    <button className="p-1.5 hover:bg-muted rounded-lg transition-colors">
+                      <Copy className="w-4 h-4 text-muted-foreground" />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-center">
+                    <div className="p-2 rounded-lg bg-background/50">
+                      <p className="text-xs text-muted-foreground">SOL</p>
+                      <p className="text-sm font-semibold font-mono">12.45</p>
+                    </div>
+                    <div className="p-2 rounded-lg bg-background/50">
+                      <p className="text-xs text-muted-foreground">USDC</p>
+                      <p className="text-sm font-semibold font-mono">8,450</p>
+                    </div>
+                  </div>
+                </div>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="w-full"
+                  onClick={handleDisconnect}
+                  data-testid="button-disconnect"
+                >
+                  <LogOut className="w-4 h-4 mr-2" />
+                  <span className="hidden lg:inline">Disconnect</span>
+                  <span className="lg:hidden">Disconnect</span>
+                </Button>
+              </>
+            ) : (
+              <div className="hidden lg:flex flex-col items-center gap-2">
+                <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white text-xs font-bold">
                   7x
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{walletAddress}</p>
-                  <p className="text-xs text-muted-foreground">Connected</p>
-                </div>
-                <button className="p-1.5 hover:bg-muted rounded-lg transition-colors" data-testid="button-copy-address">
-                  <Copy className="w-4 h-4 text-muted-foreground" />
+                <button 
+                  onClick={handleDisconnect}
+                  className="p-2 hover:bg-muted rounded-lg transition-colors"
+                  title="Disconnect"
+                  data-testid="button-disconnect-collapsed"
+                >
+                  <LogOut className="w-5 h-5 text-muted-foreground" />
                 </button>
               </div>
-              <div className="grid grid-cols-2 gap-2 text-center">
-                <div className="p-2 rounded-lg bg-background/50">
-                  <p className="text-xs text-muted-foreground">SOL</p>
-                  <p className="text-sm font-semibold font-mono">12.45</p>
-                </div>
-                <div className="p-2 rounded-lg bg-background/50">
-                  <p className="text-xs text-muted-foreground">USDC</p>
-                  <p className="text-sm font-semibold font-mono">8,450</p>
-                </div>
-              </div>
-            </div>
-            <Button 
-              variant="outline" 
-              size="sm" 
-              className="w-full"
-              onClick={handleDisconnect}
-              data-testid="button-disconnect"
+            )}
+            
+            <button
+              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              className="hidden lg:flex w-full mt-3 items-center justify-center gap-2 py-2 text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded-lg transition-all"
+              data-testid="button-collapse-sidebar"
             >
-              <LogOut className="w-4 h-4 mr-2" />
-              Disconnect
-            </Button>
+              {sidebarCollapsed ? (
+                <PanelLeft className="w-5 h-5" />
+              ) : (
+                <>
+                  <PanelLeftClose className="w-5 h-5" />
+                  <span className="text-sm">Collapse</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
       </aside>
@@ -237,7 +307,7 @@ export default function AppPage() {
         />
       )}
 
-      <div className="flex-1 lg:ml-64">
+      <div className={`flex-1 transition-all duration-300 ${sidebarCollapsed ? 'lg:ml-20' : 'lg:ml-64'}`}>
         <header className="sticky top-0 z-30 h-14 bg-background/80 backdrop-blur-xl border-b border-border/50 flex items-center justify-between px-4 lg:px-6">
           <div className="flex items-center gap-4">
             <button 
