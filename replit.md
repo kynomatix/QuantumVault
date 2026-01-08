@@ -43,6 +43,18 @@ Preferred communication style: Simple, everyday language.
 - **API Layer**: Custom hooks in `useApi.ts` wrap React Query for data fetching
 - **Storage Interface**: `IStorage` interface in `storage.ts` abstracts database operations
 
+### Funds Management System
+- **Drift Subaccounts**: Each trading bot operates on its own isolated Drift subaccount (1, 2, 3, etc.)
+- **Main Account**: Subaccount 0 is the user's main Drift account for deposits/withdrawals
+- **Capital Flow**:
+  1. Deposit: Wallet → Main Account (subaccount 0)
+  2. Allocate: Main Account → Bot Subaccount
+  3. Deallocate: Bot Subaccount → Main Account
+  4. Withdraw: Main Account → Wallet
+- **Delete Safety**: Bots with funds require sweep transaction before deletion
+- **Legacy Bots**: Old bots with agent wallets show "Migration needed" warning
+- **Capital Pool UI**: Shows total equity, main account balance, and per-bot allocations
+
 ## External Dependencies
 
 ### Blockchain Services
