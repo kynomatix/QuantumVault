@@ -21,7 +21,12 @@ import {
   Users,
   Sparkles,
   LogOut,
-  Menu
+  Menu,
+  Store,
+  Star,
+  Zap,
+  Shield,
+  ChevronRight
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -44,6 +49,17 @@ const activeBots = [
   { id: 1, name: 'SOL Momentum Pro', market: 'SOL-PERP', status: 'running', trades: 47, pnl: 1245.80, pnlPercent: 12.4 },
   { id: 2, name: 'ETH Grid Master', market: 'ETH-PERP', status: 'running', trades: 124, pnl: 892.30, pnlPercent: 8.9 },
   { id: 3, name: 'Multi Trend Alpha', market: 'Multi', status: 'paused', trades: 23, pnl: -124.50, pnlPercent: -2.1 },
+];
+
+const marketplaceBots = [
+  { id: 'sol-momentum', name: 'SOL Momentum Pro', type: 'Signal Bot', market: 'SOL-PERP', apr: 42.8, subscribers: 1247, creator: 'quantum_whale', rating: 4.8, minDeposit: 500, featured: true },
+  { id: 'btc-grid', name: 'BTC Range Master', type: 'Grid Bot', market: 'BTC-PERP', apr: 28.4, subscribers: 892, creator: 'grid_wizard', rating: 4.6, minDeposit: 1000, featured: true },
+  { id: 'eth-scalper', name: 'ETH Scalper Elite', type: 'Signal Bot', market: 'ETH-PERP', apr: 35.2, subscribers: 634, creator: 'alpha_hunter', rating: 4.5, minDeposit: 750, featured: false },
+  { id: 'multi-perp', name: 'Multi-Asset Trend', type: 'Signal Bot', market: 'Multi', apr: 52.1, subscribers: 2103, creator: 'drift_master', rating: 4.9, minDeposit: 2000, featured: true },
+  { id: 'sol-grid', name: 'SOL Grid Runner', type: 'Grid Bot', market: 'SOL-PERP', apr: 31.7, subscribers: 445, creator: 'perp_lord', rating: 4.3, minDeposit: 300, featured: false },
+  { id: 'jup-signal', name: 'JUP Signal Alpha', type: 'Signal Bot', market: 'JUP-PERP', apr: 67.3, subscribers: 328, creator: 'moon_trader', rating: 4.7, minDeposit: 250, featured: true },
+  { id: 'bonk-degen', name: 'BONK Degen Play', type: 'Signal Bot', market: 'BONK-PERP', apr: 89.2, subscribers: 156, creator: 'degen_king', rating: 4.1, minDeposit: 100, featured: false },
+  { id: 'eth-grid-pro', name: 'ETH Grid Pro', type: 'Grid Bot', market: 'ETH-PERP', apr: 24.5, subscribers: 567, creator: 'grid_wizard', rating: 4.4, minDeposit: 800, featured: false },
 ];
 
 const recentTrades = [
@@ -71,7 +87,7 @@ const orderbook = {
   ],
 };
 
-type NavItem = 'dashboard' | 'trade' | 'bots' | 'leaderboard' | 'settings';
+type NavItem = 'dashboard' | 'trade' | 'marketplace' | 'bots' | 'leaderboard' | 'settings';
 
 export default function AppPage() {
   const [, navigate] = useLocation();
@@ -154,6 +170,7 @@ export default function AppPage() {
             {[
               { id: 'dashboard' as NavItem, icon: LayoutDashboard, label: 'Dashboard' },
               { id: 'trade' as NavItem, icon: Activity, label: 'Trade' },
+              { id: 'marketplace' as NavItem, icon: Store, label: 'Marketplace' },
               { id: 'bots' as NavItem, icon: Bot, label: 'My Bots' },
               { id: 'leaderboard' as NavItem, icon: Users, label: 'Leaderboard' },
               { id: 'settings' as NavItem, icon: Settings, label: 'Settings' },
@@ -622,6 +639,145 @@ export default function AppPage() {
                         {orderSide === 'long' ? 'Long' : 'Short'} {selectedMarket.symbol}
                       </Button>
                     </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeNav === 'marketplace' && (
+              <motion.div
+                key="marketplace"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-6"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h1 className="text-2xl font-display font-bold">Bot Marketplace</h1>
+                    <p className="text-muted-foreground">Discover and subscribe to proven trading strategies</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" data-testid="button-filter-all">All</Button>
+                    <Button variant="outline" size="sm" data-testid="button-filter-signal">Signal Bots</Button>
+                    <Button variant="outline" size="sm" data-testid="button-filter-grid">Grid Bots</Button>
+                  </div>
+                </div>
+
+                <div className="gradient-border p-6 noise">
+                  <div className="flex items-center gap-3 mb-4">
+                    <Zap className="w-5 h-5 text-primary" />
+                    <h2 className="font-display font-semibold">Featured Bots</h2>
+                  </div>
+                  <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {marketplaceBots.filter(b => b.featured).map((bot) => (
+                      <div 
+                        key={bot.id} 
+                        className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/5 border border-primary/20 hover:border-primary/40 transition-all cursor-pointer group"
+                        data-testid={`featured-bot-${bot.id}`}
+                      >
+                        <div className="flex items-center gap-3 mb-3">
+                          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+                            <Bot className="w-5 h-5 text-white" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <h3 className="font-semibold text-sm truncate">{bot.name}</h3>
+                            <p className="text-xs text-muted-foreground">{bot.type}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-emerald-400 font-bold">+{bot.apr}% APR</span>
+                          <span className="text-muted-foreground text-xs">{bot.subscribers.toLocaleString()} users</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="relative">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
+                  <Input 
+                    placeholder="Search bots by name, market, or creator..." 
+                    className="pl-12 py-6 bg-card border-border/50 text-lg"
+                    data-testid="input-search-bots"
+                  />
+                </div>
+
+                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {marketplaceBots.map((bot) => (
+                    <div 
+                      key={bot.id} 
+                      className="gradient-border p-5 noise hover:scale-[1.02] transition-transform cursor-pointer group"
+                      data-testid={`marketplace-bot-${bot.id}`}
+                    >
+                      <div className="flex items-start justify-between mb-4">
+                        <div className="flex items-center gap-3">
+                          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center">
+                            <Bot className="w-6 h-6 text-primary" />
+                          </div>
+                          <div>
+                            <h3 className="font-display font-semibold">{bot.name}</h3>
+                            <p className="text-sm text-muted-foreground">{bot.type} • {bot.market}</p>
+                          </div>
+                        </div>
+                        {bot.featured && (
+                          <span className="px-2 py-1 rounded-full text-xs font-medium bg-primary/20 text-primary flex items-center gap-1">
+                            <Star className="w-3 h-3" /> Featured
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-3 mb-4">
+                        <div className="text-center p-2 rounded-lg bg-muted/30">
+                          <p className="text-lg font-bold text-emerald-400">+{bot.apr}%</p>
+                          <p className="text-xs text-muted-foreground">Est. APR</p>
+                        </div>
+                        <div className="text-center p-2 rounded-lg bg-muted/30">
+                          <p className="text-lg font-bold">{bot.subscribers.toLocaleString()}</p>
+                          <p className="text-xs text-muted-foreground">Subscribers</p>
+                        </div>
+                        <div className="text-center p-2 rounded-lg bg-muted/30">
+                          <div className="flex items-center justify-center gap-1">
+                            <Star className="w-4 h-4 text-yellow-400 fill-yellow-400" />
+                            <span className="text-lg font-bold">{bot.rating}</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground">Rating</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-sm text-muted-foreground mb-4">
+                        <span>By @{bot.creator}</span>
+                        <span>Min: ${bot.minDeposit} USDC</span>
+                      </div>
+
+                      <div className="flex gap-2">
+                        <Button 
+                          className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                          data-testid={`button-subscribe-${bot.id}`}
+                        >
+                          Subscribe
+                        </Button>
+                        <Button variant="outline" size="icon" data-testid={`button-details-${bot.id}`}>
+                          <ChevronRight className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="gradient-border p-6 noise">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center">
+                      <Shield className="w-6 h-6 text-primary" />
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="font-display font-semibold">Create Your Own Bot</h3>
+                      <p className="text-sm text-muted-foreground">Build custom strategies and earn from subscribers</p>
+                    </div>
+                    <Button className="bg-gradient-to-r from-primary to-accent" data-testid="button-create-strategy">
+                      <Plus className="w-4 h-4 mr-2" />
+                      Create Strategy
+                    </Button>
                   </div>
                 </div>
               </motion.div>
