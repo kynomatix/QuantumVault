@@ -33,7 +33,9 @@ import {
   PanelLeftClose,
   PanelLeft,
   Loader2,
-  ArrowUpFromLine
+  ArrowUpFromLine,
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -80,6 +82,9 @@ export default function AppPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [withdrawingBotId, setWithdrawingBotId] = useState<string | null>(null);
   const [botBalances, setBotBalances] = useState<Record<string, { balance: number; exists: boolean }>>({});
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [botToDelete, setBotToDelete] = useState<{ id: string; name: string; balance: number; isLegacy?: boolean; agentPublicKey?: string } | null>(null);
+  const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -229,6 +234,173 @@ export default function AppPage() {
       });
     } finally {
       setWithdrawingBotId(null);
+    }
+  };
+
+  const handleDeleteBot = async (botId: string, botName: string) => {
+    const botBalance = botBalances[botId]?.balance ?? 0;
+    
+    if (!solanaWallet.publicKey) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    // First try normal delete
+    setDeletingBotId(botId);
+    try {
+      const response = await fetch(`/api/trading-bots/${botId}`, {
+        method: 'DELETE',
+        headers: { 'x-wallet-address': solanaWallet.publicKey.toString() },
+        credentials: 'include',
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.success) {
+        toast({ title: 'Bot deleted successfully' });
+        setBotBalances(prev => {
+          const updated = { ...prev };
+          delete updated[botId];
+          return updated;
+        });
+        setDeletingBotId(null);
+        return;
+      }
+
+      // Handle legacy bot warning
+      if (data.isLegacy) {
+        setBotToDelete({ id: botId, name: botName, balance: 0, isLegacy: true, agentPublicKey: data.agentPublicKey });
+        setDeleteModalOpen(true);
+        setDeletingBotId(null);
+        return;
+      }
+
+      // Handle bot with funds
+      if (data.requiresSweep) {
+        setBotToDelete({ id: botId, name: botName, balance: data.balance });
+        setDeleteModalOpen(true);
+        setDeletingBotId(null);
+        return;
+      }
+
+      throw new Error(data.error || 'Failed to delete bot');
+    } catch (error: any) {
+      console.error('Delete bot error:', error);
+      toast({ 
+        title: 'Delete Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+      setDeletingBotId(null);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!botToDelete || !solanaWallet.publicKey || !solanaWallet.signTransaction) {
+      return;
+    }
+
+    setDeletingBotId(botToDelete.id);
+    setDeleteModalOpen(false);
+
+    try {
+      // For legacy bots, just confirm deletion without sweep
+      if (botToDelete.isLegacy) {
+        const response = await fetch(`/api/trading-bots/${botToDelete.id}/confirm-delete`, {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'x-wallet-address': solanaWallet.publicKey.toString(),
+          },
+          body: JSON.stringify({}),
+          credentials: 'include',
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || 'Failed to delete bot');
+        }
+
+        toast({ title: 'Bot deleted successfully' });
+        setBotBalances(prev => {
+          const updated = { ...prev };
+          delete updated[botToDelete.id];
+          return updated;
+        });
+        setBotToDelete(null);
+        setDeletingBotId(null);
+        return;
+      }
+
+      // For bots with funds, use force delete endpoint
+      const forceResponse = await fetch(`/api/trading-bots/${botToDelete.id}/force`, {
+        method: 'DELETE',
+        headers: { 'x-wallet-address': solanaWallet.publicKey.toString() },
+        credentials: 'include',
+      });
+
+      const forceData = await forceResponse.json();
+
+      if (forceResponse.ok && forceData.success) {
+        toast({ title: 'Bot deleted successfully' });
+        setBotBalances(prev => {
+          const updated = { ...prev };
+          delete updated[botToDelete.id];
+          return updated;
+        });
+        setBotToDelete(null);
+        setDeletingBotId(null);
+        return;
+      }
+
+      // Need to sign and send transaction
+      if (forceData.requiresTransaction) {
+        const transaction = Transaction.from(Buffer.from(forceData.transaction, 'base64'));
+        const signedTx = await solanaWallet.signTransaction(transaction);
+        const signature = await connection.sendRawTransaction(signedTx.serialize());
+        
+        await connection.confirmTransaction({
+          signature,
+          blockhash: forceData.blockhash,
+          lastValidBlockHeight: forceData.lastValidBlockHeight,
+        });
+
+        // Now confirm the deletion
+        const confirmResponse = await fetch(`/api/trading-bots/${botToDelete.id}/confirm-delete`, {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'x-wallet-address': solanaWallet.publicKey.toString(),
+          },
+          body: JSON.stringify({ txSignature: signature }),
+          credentials: 'include',
+        });
+
+        if (!confirmResponse.ok) {
+          const error = await confirmResponse.json();
+          throw new Error(error.error || 'Failed to confirm deletion');
+        }
+
+        toast({ 
+          title: 'Bot deleted successfully!', 
+          description: `$${forceData.balance.toFixed(2)} USDC has been returned to your main account.`
+        });
+        setBotBalances(prev => {
+          const updated = { ...prev };
+          delete updated[botToDelete.id];
+          return updated;
+        });
+      }
+    } catch (error: any) {
+      console.error('Confirm delete error:', error);
+      toast({ 
+        title: 'Delete Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setBotToDelete(null);
+      setDeletingBotId(null);
     }
   };
 
@@ -1097,6 +1269,26 @@ export default function AppPage() {
                                 )}
                               </Button>
                             </div>
+                            <Button 
+                              variant="outline" 
+                              size="sm" 
+                              className="w-full mt-2 border-red-500/30 text-red-400 hover:bg-red-500/10"
+                              onClick={() => handleDeleteBot(bot.id, bot.name)}
+                              disabled={deletingBotId === bot.id}
+                              data-testid={`button-delete-bot-${bot.id}`}
+                            >
+                              {deletingBotId === bot.id ? (
+                                <>
+                                  <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                                  Deleting...
+                                </>
+                              ) : (
+                                <>
+                                  <Trash2 className="w-4 h-4 mr-1" />
+                                  Delete Bot
+                                </>
+                              )}
+                            </Button>
                           </>
                         ) : (
                           <>
@@ -1111,6 +1303,26 @@ export default function AppPage() {
                               <Button variant="outline" size="sm" className="flex-1" onClick={() => navigate('/bots')} data-testid={`button-edit-bot-${bot.id}`}>
                                 <Settings className="w-4 h-4 mr-1" />
                                 Settings
+                              </Button>
+                              <Button 
+                                variant="outline" 
+                                size="sm" 
+                                className="flex-1 border-red-500/30 text-red-400 hover:bg-red-500/10"
+                                onClick={() => handleDeleteBot(bot.id, bot.name)}
+                                disabled={deletingBotId === bot.id}
+                                data-testid={`button-delete-legacy-bot-${bot.id}`}
+                              >
+                                {deletingBotId === bot.id ? (
+                                  <>
+                                    <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                                    Deleting...
+                                  </>
+                                ) : (
+                                  <>
+                                    <Trash2 className="w-4 h-4 mr-1" />
+                                    Delete
+                                  </>
+                                )}
                               </Button>
                             </div>
                           </>
@@ -1264,6 +1476,85 @@ export default function AppPage() {
           </AnimatePresence>
         </main>
       </div>
+
+      {deleteModalOpen && botToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="gradient-border p-6 noise max-w-md w-full mx-4"
+            data-testid="modal-delete-bot"
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center">
+                <AlertTriangle className="w-6 h-6 text-red-400" />
+              </div>
+              <div>
+                <h3 className="font-display font-semibold text-lg">Delete Bot</h3>
+                <p className="text-sm text-muted-foreground">{botToDelete.name}</p>
+              </div>
+            </div>
+
+            {botToDelete.isLegacy ? (
+              <div className="mb-6">
+                <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4 mb-4">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-medium text-yellow-500">Legacy Bot Warning</p>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        This bot uses an older wallet system. Please manually check the agent wallet for any remaining funds before deletion.
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-2 font-mono break-all">
+                        Agent: {botToDelete.agentPublicKey}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Are you sure you want to delete this bot? This action cannot be undone.
+                </p>
+              </div>
+            ) : (
+              <div className="mb-6">
+                <div className="bg-primary/10 border border-primary/30 rounded-lg p-4 mb-4">
+                  <div className="flex items-start gap-3">
+                    <ArrowUpFromLine className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-medium">Automatic Fund Withdrawal</p>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        This bot has <span className="font-semibold text-primary">${botToDelete.balance.toFixed(2)} USDC</span>. 
+                        Funds will be automatically withdrawn to your main Drift account before deletion.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  You'll be asked to sign a transaction to transfer the funds. After confirming, the bot will be deleted.
+                </p>
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <Button 
+                variant="outline" 
+                className="flex-1" 
+                onClick={() => { setDeleteModalOpen(false); setBotToDelete(null); }}
+                data-testid="button-cancel-delete"
+              >
+                Cancel
+              </Button>
+              <Button 
+                className="flex-1 bg-red-500 hover:bg-red-600 text-white"
+                onClick={handleConfirmDelete}
+                data-testid="button-confirm-delete"
+              >
+                {botToDelete.isLegacy ? 'Delete Anyway' : 'Withdraw & Delete'}
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }

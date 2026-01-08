@@ -221,10 +221,115 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Forbidden" });
       }
 
+      // Check if bot has a drift subaccount with potential funds
+      if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
+        // Check if subaccount exists and has balance
+        const exists = await subaccountExists(req.walletAddress!, bot.driftSubaccountId);
+        if (exists) {
+          const balance = await getDriftBalance(req.walletAddress!, bot.driftSubaccountId);
+          if (balance > 0) {
+            return res.status(409).json({ 
+              error: "Bot has funds that need to be withdrawn first",
+              requiresSweep: true,
+              balance,
+              driftSubaccountId: bot.driftSubaccountId,
+              message: `This bot has $${balance.toFixed(2)} USDC. Use the force delete endpoint to sweep funds before deletion.`
+            });
+          }
+        }
+        // No balance or subaccount doesn't exist, safe to delete
+        await storage.deleteTradingBot(req.params.id);
+        return res.json({ success: true });
+      }
+
+      // Legacy bot with agentPublicKey but no driftSubaccountId
+      if (bot.agentPublicKey && !bot.driftSubaccountId) {
+        return res.status(409).json({
+          error: "Legacy bot may have funds in agent wallet",
+          isLegacy: true,
+          agentPublicKey: bot.agentPublicKey,
+          message: "This bot uses an older wallet system. Please manually check the agent wallet for any remaining funds before deletion."
+        });
+      }
+
       await storage.deleteTradingBot(req.params.id);
       res.json({ success: true });
     } catch (error) {
       console.error("Delete trading bot error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Force delete with sweep - builds transaction to transfer funds before deletion
+  app.delete("/api/trading-bots/:id/force", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      // Must have a subaccount to sweep
+      if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
+        // No subaccount, just delete directly
+        await storage.deleteTradingBot(req.params.id);
+        return res.json({ success: true, swept: false });
+      }
+
+      // Check balance
+      const balance = await getDriftBalance(req.walletAddress!, bot.driftSubaccountId);
+      
+      if (balance <= 0) {
+        // No balance, just delete
+        await storage.deleteTradingBot(req.params.id);
+        return res.json({ success: true, swept: false });
+      }
+
+      // Build sweep transaction (transfer from subaccount to main account)
+      const txData = await buildTransferFromSubaccountTransaction(
+        req.walletAddress!,
+        bot.driftSubaccountId,
+        balance
+      );
+
+      res.json({
+        success: false,
+        requiresTransaction: true,
+        isSweepAndDelete: true,
+        balance,
+        botId: bot.id,
+        driftSubaccountId: bot.driftSubaccountId,
+        ...txData,
+        message: `Sweep ${balance.toFixed(2)} USDC from subaccount ${bot.driftSubaccountId} to main account`
+      });
+    } catch (error) {
+      console.error("Force delete trading bot error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Confirm deletion after sweep transaction is confirmed
+  app.post("/api/trading-bots/:id/confirm-delete", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const { txSignature } = req.body;
+      
+      // Optionally validate that the transaction was confirmed
+      // For now, we trust the client that the sweep was successful
+
+      await storage.deleteTradingBot(req.params.id);
+      res.json({ success: true, txSignature });
+    } catch (error) {
+      console.error("Confirm delete trading bot error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
