@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 
@@ -9,12 +9,41 @@ export function useWallet() {
   const { connection } = useConnection();
   const [balance, setBalance] = useState<number | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
+  const [sessionConnected, setSessionConnected] = useState(false);
+  const lastConnectedWallet = useRef<string | null>(null);
 
   const publicKeyString = wallet.publicKey?.toBase58() || null;
 
   const shortenedAddress = publicKeyString
     ? `${publicKeyString.slice(0, 4)}...${publicKeyString.slice(-4)}`
     : null;
+
+  // Register wallet with backend session when connected
+  useEffect(() => {
+    const registerWallet = async () => {
+      if (publicKeyString && publicKeyString !== lastConnectedWallet.current) {
+        try {
+          const res = await fetch('/api/wallet/connect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ walletAddress: publicKeyString }),
+          });
+          if (res.ok) {
+            lastConnectedWallet.current = publicKeyString;
+            setSessionConnected(true);
+          }
+        } catch (error) {
+          console.error('Failed to register wallet with session:', error);
+        }
+      } else if (!publicKeyString) {
+        lastConnectedWallet.current = null;
+        setSessionConnected(false);
+      }
+    };
+    
+    registerWallet();
+  }, [publicKeyString]);
 
   const fetchBalance = useCallback(async () => {
     if (!wallet.publicKey) {
@@ -54,5 +83,6 @@ export function useWallet() {
     balance,
     balanceLoading,
     fetchBalance,
+    sessionConnected,
   };
 }
