@@ -328,24 +328,32 @@ export default function AppPage() {
               >
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className="gradient-border p-4 noise">
-                    <p className="text-xs text-muted-foreground mb-1">Portfolio Value</p>
-                    <p className="text-2xl font-bold font-mono" data-testid="text-portfolio-value">$24,891.45</p>
-                    <p className="text-xs text-emerald-400 mt-1">+$2,456.80 (10.9%)</p>
+                    <p className="text-xs text-muted-foreground mb-1">SOL Balance</p>
+                    <p className="text-2xl font-bold font-mono" data-testid="text-portfolio-value">
+                      {balance !== null ? `${balance.toFixed(4)} SOL` : '--'}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">Wallet balance</p>
                   </div>
                   <div className="gradient-border p-4 noise">
-                    <p className="text-xs text-muted-foreground mb-1">Unrealized PnL</p>
-                    <p className="text-2xl font-bold font-mono text-emerald-400" data-testid="text-unrealized-pnl">+$516.50</p>
-                    <p className="text-xs text-muted-foreground mt-1">3 open positions</p>
+                    <p className="text-xs text-muted-foreground mb-1">SOL Price</p>
+                    <p className="text-2xl font-bold font-mono text-emerald-400" data-testid="text-unrealized-pnl">
+                      ${pricesData?.['SOL-PERP']?.toFixed(2) ?? '--'}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">Live from market</p>
                   </div>
                   <div className="gradient-border p-4 noise">
-                    <p className="text-xs text-muted-foreground mb-1">Today's PnL</p>
-                    <p className="text-2xl font-bold font-mono text-emerald-400" data-testid="text-today-pnl">+$342.18</p>
-                    <p className="text-xs text-muted-foreground mt-1">12 trades</p>
+                    <p className="text-xs text-muted-foreground mb-1">Total Trades</p>
+                    <p className="text-2xl font-bold font-mono" data-testid="text-today-pnl">
+                      {tradesData?.length ?? 0}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">Bot executions</p>
                   </div>
                   <div className="gradient-border p-4 noise">
                     <p className="text-xs text-muted-foreground mb-1">Active Bots</p>
-                    <p className="text-2xl font-bold font-mono" data-testid="text-active-bots">2</p>
-                    <p className="text-xs text-muted-foreground mt-1">1 paused</p>
+                    <p className="text-2xl font-bold font-mono" data-testid="text-active-bots">
+                      {botsData?.length ?? 0}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">TradingView bots</p>
                   </div>
                 </div>
 
@@ -356,69 +364,83 @@ export default function AppPage() {
                       <Button variant="outline" size="sm" data-testid="button-view-all-positions">View All</Button>
                     </div>
                     <div className="overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="text-muted-foreground text-xs border-b border-border/50">
-                            <th className="text-left py-3 font-medium">Market</th>
-                            <th className="text-left py-3 font-medium">Side</th>
-                            <th className="text-right py-3 font-medium">Size</th>
-                            <th className="text-right py-3 font-medium">Entry</th>
-                            <th className="text-right py-3 font-medium">Current</th>
-                            <th className="text-right py-3 font-medium">PnL</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {positions.map((pos, i) => (
-                            <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-position-${i}`}>
-                              <td className="py-3 font-medium">{pos.market}</td>
-                              <td className="py-3">
-                                <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                  pos.side === 'LONG' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
-                                }`}>
-                                  {pos.side}
-                                </span>
-                              </td>
-                              <td className="py-3 text-right font-mono">{pos.size}</td>
-                              <td className="py-3 text-right font-mono text-muted-foreground">${pos.entry.toLocaleString()}</td>
-                              <td className="py-3 text-right font-mono">${pos.current.toLocaleString()}</td>
-                              <td className={`py-3 text-right font-mono ${pos.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                {pos.pnl >= 0 ? '+' : ''}${pos.pnl.toFixed(2)} ({pos.pnlPercent}%)
-                              </td>
+                      {positionsData && positionsData.length > 0 ? (
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-muted-foreground text-xs border-b border-border/50">
+                              <th className="text-left py-3 font-medium">Market</th>
+                              <th className="text-left py-3 font-medium">Side</th>
+                              <th className="text-right py-3 font-medium">Size</th>
+                              <th className="text-right py-3 font-medium">Entry</th>
+                              <th className="text-right py-3 font-medium">PnL</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody>
+                            {positionsData.map((pos, i) => (
+                              <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-position-${i}`}>
+                                <td className="py-3 font-medium">{pos.market}</td>
+                                <td className="py-3">
+                                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                    pos.side === 'long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                                  }`}>
+                                    {pos.side?.toUpperCase()}
+                                  </span>
+                                </td>
+                                <td className="py-3 text-right font-mono">{pos.size}</td>
+                                <td className="py-3 text-right font-mono text-muted-foreground">${Number(pos.entryPrice).toLocaleString()}</td>
+                                <td className={`py-3 text-right font-mono ${Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                  {Number(pos.unrealizedPnl) >= 0 ? '+' : ''}${Number(pos.unrealizedPnl).toFixed(2)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <div className="text-center py-8 text-muted-foreground">
+                          <TrendingUp className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                          <p>No open positions</p>
+                          <p className="text-xs mt-1">Positions will appear when your bots execute trades</p>
+                        </div>
+                      )}
                     </div>
                   </div>
 
                   <div className="gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
                       <h2 className="font-display font-semibold">Active Bots</h2>
-                      <Button variant="outline" size="sm" data-testid="button-manage-bots">Manage</Button>
+                      <Button variant="outline" size="sm" onClick={() => setActiveNav('bots')} data-testid="button-manage-bots">Manage</Button>
                     </div>
                     <div className="space-y-3">
-                      {activeBots.map((bot) => (
-                        <div key={bot.id} className="p-3 rounded-xl bg-muted/30 hover:bg-muted/40 transition-colors" data-testid={`bot-item-${bot.id}`}>
-                          <div className="flex items-center justify-between mb-2">
-                            <div className="flex items-center gap-2">
-                              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center">
-                                <Bot className="w-4 h-4 text-primary" />
+                      {botsData && botsData.length > 0 ? (
+                        botsData.map((bot) => (
+                          <div key={bot.id} className="p-3 rounded-xl bg-muted/30 hover:bg-muted/40 transition-colors" data-testid={`bot-item-${bot.id}`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center gap-2">
+                                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center">
+                                  <Bot className="w-4 h-4 text-primary" />
+                                </div>
+                                <div>
+                                  <p className="text-sm font-medium">{bot.name}</p>
+                                  <p className="text-xs text-muted-foreground">{bot.market}</p>
+                                </div>
                               </div>
-                              <div>
-                                <p className="text-sm font-medium">{bot.name}</p>
-                                <p className="text-xs text-muted-foreground">{bot.market}</p>
-                              </div>
+                              <span className={`w-2 h-2 rounded-full ${bot.isActive ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
                             </div>
-                            <span className={`w-2 h-2 rounded-full ${bot.status === 'running' ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="text-muted-foreground">{(bot.stats as any)?.totalTrades ?? 0} trades</span>
+                              <span className={(bot.stats as any)?.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                                {(bot.stats as any)?.totalPnl >= 0 ? '+' : ''}${((bot.stats as any)?.totalPnl ?? 0).toFixed(2)}
+                              </span>
+                            </div>
                           </div>
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="text-muted-foreground">{bot.trades} trades</span>
-                            <span className={bot.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                              {bot.pnl >= 0 ? '+' : ''}${bot.pnl.toFixed(2)} ({bot.pnlPercent}%)
-                            </span>
-                          </div>
+                        ))
+                      ) : (
+                        <div className="text-center py-6 text-muted-foreground">
+                          <Bot className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                          <p>No bots yet</p>
+                          <p className="text-xs mt-1">Create a TradingView bot to start</p>
                         </div>
-                      ))}
+                      )}
                     </div>
                   </div>
 
@@ -431,35 +453,51 @@ export default function AppPage() {
                     <Button variant="outline" size="sm" data-testid="button-trade-history">Full History</Button>
                   </div>
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-muted-foreground text-xs border-b border-border/50">
-                          <th className="text-left py-3 font-medium">Time</th>
-                          <th className="text-left py-3 font-medium">Market</th>
-                          <th className="text-left py-3 font-medium">Side</th>
-                          <th className="text-right py-3 font-medium">Size</th>
-                          <th className="text-right py-3 font-medium">Price</th>
-                          <th className="text-right py-3 font-medium">Total</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {recentTrades.map((trade, i) => (
-                          <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-trade-${i}`}>
-                            <td className="py-3 font-mono text-muted-foreground">{trade.time}</td>
-                            <td className="py-3 font-medium">{trade.market}</td>
-                            <td className="py-3">
-                              <span className={`flex items-center gap-1 ${trade.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>
-                                {trade.side === 'BUY' ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
-                                {trade.side}
-                              </span>
-                            </td>
-                            <td className="py-3 text-right font-mono">{trade.size}</td>
-                            <td className="py-3 text-right font-mono">${trade.price.toLocaleString()}</td>
-                            <td className="py-3 text-right font-mono">${trade.total.toLocaleString()}</td>
+                    {tradesData && tradesData.length > 0 ? (
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-muted-foreground text-xs border-b border-border/50">
+                            <th className="text-left py-3 font-medium">Time</th>
+                            <th className="text-left py-3 font-medium">Market</th>
+                            <th className="text-left py-3 font-medium">Side</th>
+                            <th className="text-right py-3 font-medium">Size</th>
+                            <th className="text-right py-3 font-medium">Price</th>
+                            <th className="text-right py-3 font-medium">Status</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {tradesData.slice(0, 10).map((trade, i) => (
+                            <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-trade-${i}`}>
+                              <td className="py-3 font-mono text-muted-foreground text-xs">
+                                {trade.createdAt ? new Date(trade.createdAt).toLocaleTimeString() : '--'}
+                              </td>
+                              <td className="py-3 font-medium">{trade.market}</td>
+                              <td className="py-3">
+                                <span className={`flex items-center gap-1 ${trade.side === 'long' ? 'text-emerald-400' : 'text-red-400'}`}>
+                                  {trade.side === 'long' ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                                  {trade.side?.toUpperCase()}
+                                </span>
+                              </td>
+                              <td className="py-3 text-right font-mono">{trade.size}</td>
+                              <td className="py-3 text-right font-mono">${Number(trade.price).toLocaleString()}</td>
+                              <td className="py-3 text-right">
+                                <span className={`px-2 py-0.5 rounded text-xs ${
+                                  trade.status === 'filled' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-yellow-500/20 text-yellow-400'
+                                }`}>
+                                  {trade.status}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <div className="text-center py-8 text-muted-foreground">
+                        <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                        <p>No trades yet</p>
+                        <p className="text-xs mt-1">Trades will appear when your bots execute orders</p>
+                      </div>
+                    )}
                   </div>
                 </div>
               </motion.div>
@@ -524,48 +562,37 @@ export default function AppPage() {
                     <div className="grid md:grid-cols-2 gap-6">
                       <div className="gradient-border p-4 noise">
                         <h3 className="font-display font-semibold mb-3">Order Book</h3>
-                        <div className="space-y-1 mb-3">
-                          {orderbook.asks.slice().reverse().map((ask, i) => (
-                            <div key={i} className="relative flex items-center justify-between text-xs py-1 px-2 rounded" data-testid={`ask-${i}`}>
-                              <div 
-                                className="absolute inset-0 bg-red-500/10 rounded" 
-                                style={{ width: `${(ask.size / 500) * 100}%` }} 
-                              />
-                              <span className="relative text-red-400 font-mono">${ask.price.toFixed(2)}</span>
-                              <span className="relative font-mono text-muted-foreground">{ask.size.toFixed(1)}</span>
-                            </div>
-                          ))}
-                        </div>
                         <div className="py-2 px-2 bg-muted/30 rounded-lg text-center mb-3">
                           <span className="text-lg font-mono font-bold">${selectedMarket.price.toFixed(2)}</span>
+                          <p className="text-xs text-muted-foreground mt-1">Current market price</p>
                         </div>
-                        <div className="space-y-1">
-                          {orderbook.bids.map((bid, i) => (
-                            <div key={i} className="relative flex items-center justify-between text-xs py-1 px-2 rounded" data-testid={`bid-${i}`}>
-                              <div 
-                                className="absolute inset-0 bg-emerald-500/10 rounded" 
-                                style={{ width: `${(bid.size / 500) * 100}%` }} 
-                              />
-                              <span className="relative text-emerald-400 font-mono">${bid.price.toFixed(2)}</span>
-                              <span className="relative font-mono text-muted-foreground">{bid.size.toFixed(1)}</span>
-                            </div>
-                          ))}
+                        <div className="text-center py-4 text-muted-foreground text-xs">
+                          <p>Order book coming soon</p>
+                          <p className="mt-1">Real-time data will be available with Drift integration</p>
                         </div>
                       </div>
 
                       <div className="gradient-border p-4 noise">
                         <h3 className="font-display font-semibold mb-3">Recent Trades</h3>
-                        <div className="space-y-2">
-                          {recentTrades.slice(0, 8).map((trade, i) => (
-                            <div key={i} className="flex items-center justify-between text-xs py-1">
-                              <span className="text-muted-foreground font-mono">{trade.time}</span>
-                              <span className={trade.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}>
-                                ${trade.price.toLocaleString()}
-                              </span>
-                              <span className="font-mono text-muted-foreground">{trade.size}</span>
-                            </div>
-                          ))}
-                        </div>
+                        {tradesData && tradesData.length > 0 ? (
+                          <div className="space-y-2">
+                            {tradesData.slice(0, 8).map((trade, i) => (
+                              <div key={i} className="flex items-center justify-between text-xs py-1">
+                                <span className="text-muted-foreground font-mono">
+                                  {trade.createdAt ? new Date(trade.createdAt).toLocaleTimeString() : '--'}
+                                </span>
+                                <span className={trade.side === 'long' ? 'text-emerald-400' : 'text-red-400'}>
+                                  ${Number(trade.price).toLocaleString()}
+                                </span>
+                                <span className="font-mono text-muted-foreground">{trade.size}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-center py-4 text-muted-foreground text-xs">
+                            <p>No trades yet</p>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
