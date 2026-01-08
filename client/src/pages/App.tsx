@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useLocation } from 'wouter';
 import { 
   Wallet, 
   TrendingUp, 
@@ -12,18 +13,15 @@ import {
   Settings,
   Bell,
   Search,
-  ChevronDown,
   Plus,
   Minus,
   RefreshCw,
   Copy,
-  ExternalLink,
   BarChart3,
   Users,
   Sparkles,
   LogOut,
-  Menu,
-  X
+  Menu
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -75,7 +73,8 @@ const orderbook = {
 
 type NavItem = 'dashboard' | 'trade' | 'bots' | 'leaderboard' | 'settings';
 
-export default function Home() {
+export default function AppPage() {
+  const [, navigate] = useLocation();
   const [isConnected, setIsConnected] = useState(false);
   const [walletAddress] = useState('7xKXp...m4Qp');
   const [activeNav, setActiveNav] = useState<NavItem>('dashboard');
@@ -87,7 +86,10 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const handleConnect = () => setIsConnected(true);
-  const handleDisconnect = () => setIsConnected(false);
+  const handleDisconnect = () => {
+    setIsConnected(false);
+    navigate('/');
+  };
 
   if (!isConnected) {
     return (
@@ -119,9 +121,13 @@ export default function Home() {
               <Wallet className="w-5 h-5 mr-2" />
               Connect Phantom
             </Button>
-            <p className="text-xs text-muted-foreground mt-4">
-              Non-custodial • Powered by Drift Protocol
-            </p>
+            <button 
+              onClick={() => navigate('/')}
+              className="mt-4 text-sm text-muted-foreground hover:text-foreground transition-colors"
+              data-testid="link-back-home"
+            >
+              ← Back to Home
+            </button>
           </div>
         </motion.div>
       </div>
