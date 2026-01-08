@@ -82,9 +82,7 @@ export default function Landing() {
       <nav className="fixed top-0 left-0 right-0 z-50 glass border-b border-border/30">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-              <Sparkles className="w-5 h-5 text-white" />
-            </div>
+            <img src="/images/qv_logo.png" alt="QuantumVault" className="w-10 h-10 rounded-xl" />
             <span className="font-display font-bold text-xl">QuantumVault</span>
           </div>
           
@@ -306,9 +304,7 @@ export default function Landing() {
         <div className="max-w-7xl mx-auto">
           <div className="flex flex-col md:flex-row items-center justify-between gap-6">
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-                <Sparkles className="w-4 h-4 text-white" />
-              </div>
+              <img src="/images/qv_logo.png" alt="QuantumVault" className="w-8 h-8 rounded-lg" />
               <span className="font-display font-bold">QuantumVault</span>
             </div>
             <div className="flex items-center gap-6 text-sm text-muted-foreground">
