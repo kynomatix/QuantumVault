@@ -267,14 +267,32 @@ export function DepositWithdraw() {
                   <label className="text-sm text-muted-foreground mb-1 block">
                     Amount (USDC)
                   </label>
-                  <Input
-                    type="number"
-                    placeholder="0.00"
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
-                    className="font-mono"
-                    data-testid="input-amount"
-                  />
+                  <div className="flex gap-2">
+                    <Input
+                      type="number"
+                      placeholder="0.00"
+                      value={amount}
+                      onChange={(e) => setAmount(e.target.value)}
+                      className="font-mono flex-1"
+                      data-testid="input-amount"
+                    />
+                    {mode === 'withdraw' && botBalance > 0 && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setAmount(botBalance.toString())}
+                        className="px-3"
+                        data-testid="button-max-withdraw"
+                      >
+                        Max
+                      </Button>
+                    )}
+                  </div>
+                  {mode === 'withdraw' && botBalance > 0 && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Available: ${botBalance.toFixed(2)} USDC
+                    </p>
+                  )}
                 </div>
 
                 <Button

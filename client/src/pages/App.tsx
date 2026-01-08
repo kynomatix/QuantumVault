@@ -31,11 +31,16 @@ import {
   Shield,
   ChevronRight,
   PanelLeftClose,
-  PanelLeft
+  PanelLeft,
+  Loader2,
+  ArrowUpFromLine
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { DepositWithdraw } from '@/components/DepositWithdraw';
+import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
+import { Transaction } from '@solana/web3.js';
+import { Buffer } from 'buffer';
 
 const defaultMarkets = [
   { symbol: 'SOL-PERP', price: 0, change: 0, volume: '-' },
@@ -62,7 +67,9 @@ type NavItem = 'dashboard' | 'trade' | 'marketplace' | 'bots' | 'leaderboard' | 
 
 export default function AppPage() {
   const [, navigate] = useLocation();
-  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading } = useWallet();
+  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString } = useWallet();
+  const solanaWallet = useSolanaWallet();
+  const { connection } = useConnection();
   const { toast } = useToast();
   const [activeNav, setActiveNav] = useState<NavItem>('dashboard');
   const [orderType, setOrderType] = useState<'market' | 'limit'>('market');
@@ -71,6 +78,8 @@ export default function AppPage() {
   const [limitPrice, setLimitPrice] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [withdrawingBotId, setWithdrawingBotId] = useState<string | null>(null);
+  const [botBalances, setBotBalances] = useState<Record<string, { balance: number; exists: boolean }>>({});
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -133,6 +142,94 @@ export default function AppPage() {
 
   const handleDisconnect = async () => {
     await disconnect();
+  };
+
+  // Fetch bot balances when on bots page
+  useEffect(() => {
+    if (activeNav !== 'bots' || !connected || !botsData) return;
+    
+    const fetchBalances = async () => {
+      const balances: Record<string, { balance: number; exists: boolean }> = {};
+      for (const bot of botsData) {
+        if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
+          try {
+            const res = await fetch(`/api/bot/${bot.id}/balance`, { credentials: 'include' });
+            if (res.ok) {
+              const data = await res.json();
+              balances[bot.id] = { balance: data.usdcBalance ?? 0, exists: data.subaccountExists ?? false };
+            }
+          } catch (error) {
+            console.error(`Error fetching balance for bot ${bot.id}:`, error);
+          }
+        }
+      }
+      setBotBalances(balances);
+    };
+    
+    fetchBalances();
+  }, [activeNav, connected, botsData]);
+
+  const handleWithdrawAll = async (botId: string, subaccountId: number) => {
+    const botBalance = botBalances[botId];
+    if (!botBalance || botBalance.balance <= 0) {
+      toast({ title: 'No funds to withdraw', variant: 'destructive' });
+      return;
+    }
+
+    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    setWithdrawingBotId(botId);
+    try {
+      const response = await fetch(`/api/bot/${botId}/withdraw`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-wallet-address': solanaWallet.publicKey.toString(),
+        },
+        body: JSON.stringify({ amount: botBalance.balance }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Withdrawal failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      const signedTx = await solanaWallet.signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ 
+        title: 'Withdrawal Successful!', 
+        description: message 
+      });
+      
+      // Refresh balances
+      setBotBalances(prev => ({
+        ...prev,
+        [botId]: { ...prev[botId], balance: 0 }
+      }));
+    } catch (error: any) {
+      console.error('Withdraw error:', error);
+      toast({ 
+        title: 'Withdrawal Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setWithdrawingBotId(null);
+    }
   };
 
   if (connecting || !connected) {
@@ -961,12 +1058,63 @@ export default function AppPage() {
                           </div>
                         </div>
 
-                        <div className="flex gap-2">
-                          <Button variant="outline" size="sm" className="flex-1" onClick={() => navigate('/bots')} data-testid={`button-edit-bot-${bot.id}`}>
-                            <Settings className="w-4 h-4 mr-1" />
-                            Settings
-                          </Button>
-                        </div>
+                        {bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined ? (
+                          <>
+                            <div className="bg-muted/30 rounded-lg p-3 mb-4">
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <p className="text-xs text-muted-foreground">Subaccount #{bot.driftSubaccountId} Balance</p>
+                                  <p className="text-lg font-bold font-mono text-primary" data-testid={`text-bot-balance-${bot.id}`}>
+                                    ${(botBalances[bot.id]?.balance ?? 0).toFixed(2)} USDC
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex gap-2">
+                              <Button variant="outline" size="sm" className="flex-1" onClick={() => navigate('/bots')} data-testid={`button-edit-bot-${bot.id}`}>
+                                <Settings className="w-4 h-4 mr-1" />
+                                Settings
+                              </Button>
+                              <Button 
+                                variant="outline" 
+                                size="sm" 
+                                className="flex-1"
+                                onClick={() => handleWithdrawAll(bot.id, bot.driftSubaccountId!)}
+                                disabled={withdrawingBotId === bot.id || !(botBalances[bot.id]?.balance > 0)}
+                                data-testid={`button-withdraw-all-${bot.id}`}
+                              >
+                                {withdrawingBotId === bot.id ? (
+                                  <>
+                                    <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                                    Withdrawing...
+                                  </>
+                                ) : (
+                                  <>
+                                    <ArrowUpFromLine className="w-4 h-4 mr-1" />
+                                    Withdraw All
+                                  </>
+                                )}
+                              </Button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mb-4">
+                              <p className="text-xs text-yellow-500 font-medium">Migration Needed</p>
+                              <p className="text-xs text-muted-foreground mt-1">
+                                This bot uses an older wallet system. Create a new bot to use isolated subaccounts.
+                              </p>
+                            </div>
+
+                            <div className="flex gap-2">
+                              <Button variant="outline" size="sm" className="flex-1" onClick={() => navigate('/bots')} data-testid={`button-edit-bot-${bot.id}`}>
+                                <Settings className="w-4 h-4 mr-1" />
+                                Settings
+                              </Button>
+                            </div>
+                          </>
+                        )}
                       </div>
                     ))
                   ) : (
