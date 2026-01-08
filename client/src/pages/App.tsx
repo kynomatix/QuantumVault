@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
@@ -77,7 +77,7 @@ export default function AppPage() {
   const { data: positionsData } = usePositions();
   const { data: subscriptionsData } = useSubscriptions();
   const { data: tradesData } = useTrades(10);
-  const { data: botsData } = useBots();
+  const { data: botsData } = useTradingBots();
   const { data: leaderboardData } = useLeaderboard(100);
   const { data: pricesData } = usePrices();
   const subscribeBot = useSubscribeToBot();

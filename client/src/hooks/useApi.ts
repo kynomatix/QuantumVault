@@ -47,6 +47,12 @@ async function fetchPrices(): Promise<Record<string, number>> {
   return res.json();
 }
 
+async function fetchTradingBots(walletAddress: string) {
+  const res = await fetch(`/api/trading-bots?wallet=${walletAddress}`, { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch trading bots");
+  return res.json();
+}
+
 async function subscribeToBot(botId: string, walletAddress: string) {
   const res = await fetch("/api/subscriptions", {
     method: "POST",
@@ -152,5 +158,14 @@ export function usePrices() {
     queryFn: fetchPrices,
     refetchInterval: 10000,
     staleTime: 5000,
+  });
+}
+
+export function useTradingBots() {
+  const { publicKeyString } = useWallet();
+  return useQuery({
+    queryKey: ["tradingBots", publicKeyString],
+    queryFn: () => fetchTradingBots(publicKeyString!),
+    enabled: !!publicKeyString,
   });
 }
