@@ -8,6 +8,7 @@ import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shar
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance } from "./drift-service";
+import { generateAgentWallet, getAgentUsdcBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
   interface SessionData {
@@ -144,19 +145,22 @@ export async function registerRoutes(
       await storage.getOrCreateWallet(req.walletAddress!);
 
       const webhookSecret = generateWebhookSecret();
+      const agentWallet = generateAgentWallet();
 
       const bot = await storage.createTradingBot({
         walletAddress: req.walletAddress!,
         name,
         market,
         webhookSecret,
+        agentPublicKey: agentWallet.publicKey,
+        agentPrivateKeyEncrypted: agentWallet.encryptedPrivateKey,
         isActive: true,
         side: side || 'both',
         leverage: leverage || 1,
         maxPositionSize: maxPositionSize || null,
         signalConfig: signalConfig || { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
         riskConfig: riskConfig || {},
-      });
+      } as any);
 
       const webhookUrl = generateWebhookUrl(bot.id, webhookSecret);
       await storage.updateTradingBot(bot.id, { webhookUrl } as any);
@@ -216,6 +220,35 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Delete trading bot error:", error);
       res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/trading-bots/:id/init-wallet", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (bot.agentPublicKey) {
+        return res.status(400).json({ error: "Bot already has an agent wallet", agentPublicKey: bot.agentPublicKey });
+      }
+
+      const agentWallet = generateAgentWallet();
+      await storage.updateTradingBot(req.params.id, {
+        agentPublicKey: agentWallet.publicKey,
+        agentPrivateKeyEncrypted: agentWallet.encryptedPrivateKey,
+      } as any);
+
+      res.json({ 
+        success: true, 
+        agentPublicKey: agentWallet.publicKey 
+      });
+    } catch (error) {
+      console.error("Init agent wallet error:", error);
+      res.status(500).json({ error: "Failed to initialize agent wallet" });
     }
   });
 
@@ -646,6 +679,95 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Drift balance error:", error);
       res.status(500).json({ error: "Failed to fetch balances" });
+    }
+  });
+
+  app.post("/api/bot/:botId/deposit", requireWallet, async (req, res) => {
+    try {
+      const { botId } = req.params;
+      const { amount } = req.body;
+      
+      const bot = await storage.getTradingBotById(botId);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (!bot.agentPublicKey) {
+        return res.status(400).json({ error: "Bot has no agent wallet" });
+      }
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+
+      const result = await buildTransferToAgentTransaction(
+        req.walletAddress!,
+        bot.agentPublicKey,
+        amount
+      );
+      res.json(result);
+    } catch (error) {
+      console.error("Bot deposit error:", error);
+      res.status(500).json({ error: "Failed to build deposit transaction" });
+    }
+  });
+
+  app.post("/api/bot/:botId/withdraw", requireWallet, async (req, res) => {
+    try {
+      const { botId } = req.params;
+      const { amount } = req.body;
+      
+      const bot = await storage.getTradingBotById(botId);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (!bot.agentPublicKey || !bot.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Bot has no agent wallet" });
+      }
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+
+      const result = await buildWithdrawFromAgentTransaction(
+        req.walletAddress!,
+        bot.agentPublicKey,
+        bot.agentPrivateKeyEncrypted,
+        amount
+      );
+      res.json(result);
+    } catch (error) {
+      console.error("Bot withdraw error:", error);
+      res.status(500).json({ error: "Failed to build withdraw transaction" });
+    }
+  });
+
+  app.get("/api/bot/:botId/balance", requireWallet, async (req, res) => {
+    try {
+      const { botId } = req.params;
+      
+      const bot = await storage.getTradingBotById(botId);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (!bot.agentPublicKey) {
+        return res.status(400).json({ error: "Bot has no agent wallet" });
+      }
+
+      const balance = await getAgentUsdcBalance(bot.agentPublicKey);
+      res.json({ 
+        agentPublicKey: bot.agentPublicKey,
+        usdcBalance: balance 
+      });
+    } catch (error) {
+      console.error("Bot balance error:", error);
+      res.status(500).json({ error: "Failed to fetch balance" });
     }
   });
 

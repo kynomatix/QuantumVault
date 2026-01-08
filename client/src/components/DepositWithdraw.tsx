@@ -1,77 +1,108 @@
-import { useState } from 'react';
-import { ArrowDownToLine, ArrowUpFromLine, Loader2, AlertCircle, Plus, ExternalLink } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { ArrowDownToLine, ArrowUpFromLine, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useWallet } from '@/hooks/useWallet';
-import { useTokenBalance } from '@/hooks/useTokenBalance';
 import { useToast } from '@/hooks/use-toast';
+import { useTradingBots } from '@/hooks/useApi';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+
+interface TradingBot {
+  id: string;
+  name: string;
+  market: string;
+  agentPublicKey: string | null;
+}
 
 export function DepositWithdraw() {
-  const { balance, connected } = useWallet();
+  const { balance, connected, publicKeyString } = useWallet();
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
-  const { 
-    usdcBalance, 
-    usdcLoading, 
-    tokenAccountExists, 
-    creatingAccount, 
-    createTokenAccount,
-    fetchUsdcBalance 
-  } = useTokenBalance();
   const { toast } = useToast();
+  const { data: bots, isLoading: botsLoading, refetch: refetchBots } = useTradingBots();
+  
+  const [selectedBotId, setSelectedBotId] = useState<string>('');
+  const [botBalance, setBotBalance] = useState<number | null>(null);
+  const [botBalanceLoading, setBotBalanceLoading] = useState(false);
   const [mode, setMode] = useState<'deposit' | 'withdraw'>('deposit');
   const [amount, setAmount] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [initializingWallet, setInitializingWallet] = useState(false);
 
-  const handleCreateTokenAccount = async () => {
+  const tradingBots = (bots as TradingBot[]) || [];
+  const selectedBot = tradingBots.find(b => b.id === selectedBotId);
+
+  useEffect(() => {
+    if (tradingBots.length > 0 && !selectedBotId) {
+      setSelectedBotId(tradingBots[0].id);
+    }
+  }, [tradingBots, selectedBotId]);
+
+  const fetchBotBalance = async () => {
+    if (!selectedBotId || !publicKeyString) return;
+    
+    setBotBalanceLoading(true);
     try {
-      await createTokenAccount();
-      toast({ 
-        title: 'Token Account Created!', 
-        description: 'Your USDC token account is ready for deposits.' 
+      const res = await fetch(`/api/bot/${selectedBotId}/balance`, {
+        headers: { 'x-wallet-address': publicKeyString },
+        credentials: 'include',
       });
-    } catch (error: any) {
-      toast({ 
-        title: 'Failed to create token account', 
-        description: error.message || 'Please try again',
-        variant: 'destructive' 
-      });
+      if (!res.ok) throw new Error('Failed to fetch balance');
+      const data = await res.json();
+      setBotBalance(data.usdcBalance);
+    } catch (error) {
+      console.error('Error fetching bot balance:', error);
+      setBotBalance(null);
+    } finally {
+      setBotBalanceLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (selectedBotId && publicKeyString) {
+      fetchBotBalance();
+    }
+  }, [selectedBotId, publicKeyString]);
 
   const handleAction = async () => {
     if (!amount || parseFloat(amount) <= 0) {
       toast({ title: 'Enter a valid amount', variant: 'destructive' });
       return;
     }
-    
-    if (!tokenAccountExists) {
-      toast({ 
-        title: 'Create Token Account First', 
-        description: 'You need a USDC token account before depositing',
-        variant: 'destructive' 
-      });
+
+    if (!selectedBotId) {
+      toast({ title: 'Select a bot first', variant: 'destructive' });
       return;
     }
 
-    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+    if (!solanaWallet.publicKey) {
       toast({ title: 'Wallet not connected', variant: 'destructive' });
       return;
     }
 
     setIsProcessing(true);
     try {
-      const endpoint = mode === 'deposit' ? '/api/drift/deposit' : '/api/drift/withdraw';
+      const endpoint = mode === 'deposit' 
+        ? `/api/bot/${selectedBotId}/deposit` 
+        : `/api/bot/${selectedBotId}/withdraw`;
+      
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          walletAddress: solanaWallet.publicKey.toString(),
-          amount: parseFloat(amount),
-        }),
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-wallet-address': solanaWallet.publicKey.toString(),
+        },
+        body: JSON.stringify({ amount: parseFloat(amount) }),
+        credentials: 'include',
       });
 
       if (!response.ok) {
@@ -83,9 +114,17 @@ export function DepositWithdraw() {
       
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
       
-      const signedTx = await solanaWallet.signTransaction(transaction);
+      let signature: string;
       
-      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      if (mode === 'deposit') {
+        if (!solanaWallet.signTransaction) {
+          throw new Error('Wallet does not support signing');
+        }
+        const signedTx = await solanaWallet.signTransaction(transaction);
+        signature = await connection.sendRawTransaction(signedTx.serialize());
+      } else {
+        signature = await connection.sendRawTransaction(transaction.serialize());
+      }
       
       await connection.confirmTransaction({
         signature,
@@ -99,7 +138,7 @@ export function DepositWithdraw() {
       });
       
       setAmount('');
-      await fetchUsdcBalance();
+      await fetchBotBalance();
     } catch (error: any) {
       console.error(`${mode} error:`, error);
       toast({ 
@@ -112,12 +151,49 @@ export function DepositWithdraw() {
     }
   };
 
+  const hasNoBots = !botsLoading && tradingBots.length === 0;
+  const selectedBotNeedsWallet = selectedBot && !selectedBot.agentPublicKey;
+
+  const initializeAgentWallet = async () => {
+    if (!selectedBotId || !publicKeyString) return;
+    
+    setInitializingWallet(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${selectedBotId}/init-wallet`, {
+        method: 'POST',
+        headers: { 'x-wallet-address': publicKeyString },
+        credentials: 'include',
+      });
+      
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || 'Failed to initialize wallet');
+      }
+      
+      toast({ 
+        title: 'Agent Wallet Created!', 
+        description: 'Your bot now has its own wallet for trading.' 
+      });
+      await refetchBots();
+      await fetchBotBalance();
+    } catch (error: any) {
+      console.error('Init wallet error:', error);
+      toast({ 
+        title: 'Failed to initialize wallet', 
+        description: error.message,
+        variant: 'destructive' 
+      });
+    } finally {
+      setInitializingWallet(false);
+    }
+  };
+
   return (
     <div className="gradient-border p-6 noise space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-display font-semibold">Wallet & Deposits</h3>
+        <h3 className="text-lg font-display font-semibold">Bot Wallet</h3>
         <button 
-          onClick={fetchUsdcBalance}
+          onClick={() => { refetchBots(); fetchBotBalance(); }}
           className="text-xs text-muted-foreground hover:text-foreground transition-colors"
           data-testid="button-refresh-balance"
         >
@@ -125,150 +201,169 @@ export function DepositWithdraw() {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-muted/30 rounded-xl p-4 border border-border/30">
-          <p className="text-sm text-muted-foreground">SOL Balance</p>
-          <p className="text-2xl font-mono font-bold" data-testid="text-sol-balance">
-            {balance?.toFixed(4) ?? '0'} SOL
-          </p>
-        </div>
-        <div className="bg-muted/30 rounded-xl p-4 border border-border/30">
-          <p className="text-sm text-muted-foreground">USDC Balance</p>
-          {usdcLoading ? (
-            <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
-          ) : (
-            <p className="text-2xl font-mono font-bold" data-testid="text-usdc-balance">
-              {usdcBalance?.toFixed(2) ?? '0.00'} USDC
-            </p>
-          )}
-        </div>
-      </div>
-
-      {connected && tokenAccountExists === false && (
+      {connected && hasNoBots && (
         <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4">
           <div className="flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" />
             <div className="flex-1">
-              <p className="text-sm font-medium text-yellow-500">No USDC Token Account</p>
+              <p className="text-sm font-medium text-yellow-500">No Trading Bots</p>
               <p className="text-xs text-muted-foreground mt-1">
-                You need to create a USDC token account to receive testnet USDC. This is a one-time setup.
+                Create a trading bot first to deposit funds for automated trading.
               </p>
-              <Button
-                size="sm"
-                className="mt-3"
-                onClick={handleCreateTokenAccount}
-                disabled={creatingAccount}
-                data-testid="button-create-token-account"
-              >
-                {creatingAccount ? (
-                  <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    Creating...
-                  </>
-                ) : (
-                  <>
-                    <Plus className="w-4 h-4 mr-2" />
-                    Create Token Account
-                  </>
-                )}
-              </Button>
             </div>
           </div>
         </div>
       )}
 
-      {connected && tokenAccountExists && usdcBalance === 0 && (
-        <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <p className="text-sm font-medium text-blue-400">Get Testnet USDC</p>
-              <p className="text-xs text-muted-foreground mt-1">
-                Your token account is ready! Get testnet USDC from the Drift faucet to start trading.
-              </p>
-              <a
-                href="https://app.drift.trade/devnet"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 mt-2"
-              >
-                Open Drift Testnet <ExternalLink className="w-3 h-3" />
-              </a>
-            </div>
+      {connected && tradingBots.length > 0 && (
+        <>
+          <div className="space-y-2">
+            <label className="text-sm text-muted-foreground">Select Bot</label>
+            <Select value={selectedBotId} onValueChange={setSelectedBotId}>
+              <SelectTrigger className="w-full" data-testid="select-bot">
+                <SelectValue placeholder="Select a bot" />
+              </SelectTrigger>
+              <SelectContent>
+                {tradingBots.map((bot) => (
+                  <SelectItem key={bot.id} value={bot.id}>
+                    {bot.name} ({bot.market})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-        </div>
-      )}
 
-      <div className="flex rounded-xl bg-muted/30 p-1">
-        <button
-          onClick={() => setMode('deposit')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all ${
-            mode === 'deposit'
-              ? 'bg-primary/20 text-primary'
-              : 'text-muted-foreground hover:text-foreground'
-          }`}
-          data-testid="button-mode-deposit"
-        >
-          <ArrowDownToLine className="w-4 h-4" />
-          Deposit
-        </button>
-        <button
-          onClick={() => setMode('withdraw')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all ${
-            mode === 'withdraw'
-              ? 'bg-primary/20 text-primary'
-              : 'text-muted-foreground hover:text-foreground'
-          }`}
-          data-testid="button-mode-withdraw"
-        >
-          <ArrowUpFromLine className="w-4 h-4" />
-          Withdraw
-        </button>
-      </div>
-
-      <div className="space-y-3">
-        <div>
-          <label className="text-sm text-muted-foreground mb-1 block">
-            Amount (USDC)
-          </label>
-          <Input
-            type="number"
-            placeholder="0.00"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            className="font-mono"
-            data-testid="input-amount"
-          />
-        </div>
-
-        <Button
-          className="w-full"
-          onClick={handleAction}
-          disabled={!amount || !tokenAccountExists || isProcessing}
-          data-testid={`button-${mode}`}
-        >
-          {isProcessing ? (
-            <>
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Processing...
-            </>
-          ) : mode === 'deposit' ? (
-            <>
-              <ArrowDownToLine className="w-4 h-4 mr-2" />
-              Deposit to Drift
-            </>
+          {selectedBotNeedsWallet ? (
+            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-yellow-500">Bot Wallet Not Initialized</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    This bot needs a wallet to hold trading funds. Initialize it to start depositing.
+                  </p>
+                  <Button
+                    size="sm"
+                    className="mt-3"
+                    onClick={initializeAgentWallet}
+                    disabled={initializingWallet}
+                    data-testid="button-init-wallet"
+                  >
+                    {initializingWallet ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Initializing...
+                      </>
+                    ) : (
+                      'Initialize Bot Wallet'
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </div>
           ) : (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-muted/30 rounded-xl p-4 border border-border/30">
+                <p className="text-sm text-muted-foreground">Wallet SOL</p>
+                <p className="text-2xl font-mono font-bold" data-testid="text-sol-balance">
+                  {balance?.toFixed(4) ?? '0'} SOL
+                </p>
+              </div>
+              <div className="bg-primary/5 rounded-xl p-4 border border-primary/30">
+                <p className="text-sm text-muted-foreground">Trading Capital</p>
+                {botBalanceLoading ? (
+                  <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                ) : (
+                  <p className="text-2xl font-mono font-bold text-primary" data-testid="text-bot-balance">
+                    {botBalance?.toFixed(2) ?? '0.00'} USDC
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {!selectedBotNeedsWallet && (
             <>
-              <ArrowUpFromLine className="w-4 h-4 mr-2" />
-              Withdraw from Drift
+              <div className="flex rounded-xl bg-muted/30 p-1">
+                <button
+                  onClick={() => setMode('deposit')}
+                  className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all ${
+                    mode === 'deposit'
+                      ? 'bg-primary/20 text-primary'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                  data-testid="button-mode-deposit"
+                >
+                  <ArrowDownToLine className="w-4 h-4" />
+                  Deposit
+                </button>
+                <button
+                  onClick={() => setMode('withdraw')}
+                  className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all ${
+                    mode === 'withdraw'
+                      ? 'bg-primary/20 text-primary'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                  data-testid="button-mode-withdraw"
+                >
+                  <ArrowUpFromLine className="w-4 h-4" />
+                  Withdraw
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="text-sm text-muted-foreground mb-1 block">
+                    Amount (USDC)
+                  </label>
+                  <Input
+                    type="number"
+                    placeholder="0.00"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    className="font-mono"
+                    data-testid="input-amount"
+                  />
+                </div>
+
+                <Button
+                  className="w-full"
+                  onClick={handleAction}
+                  disabled={!amount || !selectedBotId || isProcessing}
+                  data-testid={`button-${mode}`}
+                >
+                  {isProcessing ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Processing...
+                    </>
+                  ) : mode === 'deposit' ? (
+                    <>
+                      <ArrowDownToLine className="w-4 h-4 mr-2" />
+                      Deposit to Bot
+                    </>
+                  ) : (
+                    <>
+                      <ArrowUpFromLine className="w-4 h-4 mr-2" />
+                      Withdraw from Bot
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              <div className="text-xs text-muted-foreground text-center">
+                {selectedBot?.name ? `Managing: ${selectedBot.name}` : 'Select a bot to manage funds'}
+              </div>
             </>
           )}
-        </Button>
-      </div>
+        </>
+      )}
 
-      <div className="text-xs text-muted-foreground text-center">
-        Connected to Drift Protocol Testnet (Devnet)
-      </div>
+      {!connected && (
+        <div className="text-center py-8 text-muted-foreground">
+          Connect your wallet to manage bot funds
+        </div>
+      )}
     </div>
   );
 }

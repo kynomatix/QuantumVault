@@ -66,6 +66,8 @@ export const tradingBots = pgTable("trading_bots", {
   market: text("market").notNull(),
   webhookSecret: text("webhook_secret").notNull(),
   webhookUrl: text("webhook_url"),
+  agentPublicKey: text("agent_public_key"),
+  agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),
   isActive: boolean("is_active").default(true).notNull(),
   side: text("side").default("both").notNull(),
   maxPositionSize: decimal("max_position_size", { precision: 20, scale: 2 }),
@@ -99,6 +101,8 @@ export const insertTradingBotSchema = createInsertSchema(tradingBots).omit({
   updatedAt: true,
   stats: true,
   webhookUrl: true,
+  agentPublicKey: true,
+  agentPrivateKeyEncrypted: true,
 });
 export type InsertTradingBot = z.infer<typeof insertTradingBotSchema>;
 export type TradingBot = typeof tradingBots.$inferSelect;
