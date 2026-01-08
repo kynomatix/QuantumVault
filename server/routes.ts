@@ -152,15 +152,14 @@ export async function registerRoutes(
       await storage.getOrCreateWallet(req.walletAddress!);
 
       const webhookSecret = generateWebhookSecret();
-      const agentWallet = generateAgentWallet();
+      const nextSubaccountId = await storage.getNextSubaccountId(req.walletAddress!);
 
       const bot = await storage.createTradingBot({
         walletAddress: req.walletAddress!,
         name,
         market,
         webhookSecret,
-        agentPublicKey: agentWallet.publicKey,
-        agentPrivateKeyEncrypted: agentWallet.encryptedPrivateKey,
+        driftSubaccountId: nextSubaccountId,
         isActive: true,
         side: side || 'both',
         leverage: leverage || 1,

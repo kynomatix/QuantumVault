@@ -66,6 +66,7 @@ export const tradingBots = pgTable("trading_bots", {
   market: text("market").notNull(),
   webhookSecret: text("webhook_secret").notNull(),
   webhookUrl: text("webhook_url"),
+  driftSubaccountId: integer("drift_subaccount_id"),
   agentPublicKey: text("agent_public_key"),
   agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),
   isActive: boolean("is_active").default(true).notNull(),
@@ -101,6 +102,7 @@ export const insertTradingBotSchema = createInsertSchema(tradingBots).omit({
   updatedAt: true,
   stats: true,
   webhookUrl: true,
+  driftSubaccountId: true,
   agentPublicKey: true,
   agentPrivateKeyEncrypted: true,
 });
