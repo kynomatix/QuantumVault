@@ -872,10 +872,34 @@ export default function AppPage() {
                     <h1 className="text-2xl font-display font-bold">My Bots</h1>
                     <p className="text-muted-foreground">Manage your trading bots and subscriptions</p>
                   </div>
-                  <Button className="bg-gradient-to-r from-primary to-accent" data-testid="button-create-bot">
+                  <Button 
+                    className="bg-gradient-to-r from-primary to-accent" 
+                    onClick={() => navigate('/bots')}
+                    data-testid="button-create-bot"
+                  >
                     <Plus className="w-4 h-4 mr-2" />
-                    Create Bot
+                    TradingView Bot Setup
                   </Button>
+                </div>
+
+                <div className="gradient-border p-6 noise bg-gradient-to-br from-primary/5 to-accent/5">
+                  <div className="flex items-center gap-4">
+                    <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+                      <Zap className="w-7 h-7 text-white" />
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="font-display font-semibold text-lg">TradingView Integration</h3>
+                      <p className="text-sm text-muted-foreground">Connect your TradingView alerts to execute automated trades on Drift Protocol</p>
+                    </div>
+                    <Button 
+                      className="bg-gradient-to-r from-primary to-accent" 
+                      onClick={() => navigate('/bots')}
+                      data-testid="button-tradingview-setup"
+                    >
+                      Configure Bots
+                      <ChevronRight className="w-4 h-4 ml-2" />
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
