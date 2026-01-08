@@ -30,7 +30,6 @@ import {
   Zap,
   Shield,
   ChevronRight,
-  ChevronLeft,
   PanelLeftClose,
   PanelLeft
 } from 'lucide-react';
@@ -44,19 +43,20 @@ const defaultMarkets = [
   { symbol: 'ETH-PERP', price: 0, change: 0, volume: '-' },
 ];
 
-type Position = { market: string; side: string; size: number; entry: number; current: number; pnl: number; pnlPercent: number };
-type ActiveBot = { id: string | number; name: string; market: string; status: string; trades: number; pnl: number; pnlPercent: number };
-type Trade = { time: string; market: string; side: string; size: number; price: number; total: number };
-type OrderEntry = { price: number; size: number; total: number };
-
-const positions: Position[] = [];
-const activeBots: ActiveBot[] = [];
-const recentTrades: Trade[] = [];
-const marketplaceBots: { id: string; name: string; type: string; market: string; apr: number; subscribers: number; creator: string; rating: number; minDeposit: number; featured: boolean }[] = [];
-const orderbook = {
-  asks: [] as OrderEntry[],
-  bids: [] as OrderEntry[],
+type MarketplaceBot = { 
+  id: string; 
+  name: string; 
+  type: string; 
+  market: string; 
+  apr: number; 
+  subscribers: number; 
+  creator: string; 
+  rating: number; 
+  minDeposit: number; 
+  featured: boolean;
 };
+
+const marketplaceBots: MarketplaceBot[] = [];
 
 type NavItem = 'dashboard' | 'trade' | 'marketplace' | 'bots' | 'leaderboard' | 'settings';
 

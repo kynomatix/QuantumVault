@@ -63,11 +63,18 @@ export async function registerRoutes(
   };
 
   const requireWallet = (req: any, res: any, next: any) => {
-    const walletAddress = req.query.wallet || req.body.walletAddress || req.headers['x-wallet-address'];
-    if (!walletAddress) {
-      return res.status(401).json({ error: "Wallet address required" });
+    const headerWallet = req.query.wallet || req.body.walletAddress || req.headers['x-wallet-address'];
+    const sessionWallet = req.session?.walletAddress;
+    
+    if (!sessionWallet) {
+      return res.status(401).json({ error: "Wallet not connected - please connect your wallet first" });
     }
-    req.walletAddress = walletAddress;
+    
+    if (headerWallet && sessionWallet !== headerWallet) {
+      return res.status(403).json({ error: "Wallet mismatch - please reconnect wallet" });
+    }
+    
+    req.walletAddress = sessionWallet;
     next();
   };
 

@@ -31,7 +31,8 @@ export function DepositWithdraw() {
   const { data: bots, isLoading: botsLoading, refetch: refetchBots } = useTradingBots();
   
   const [selectedBotId, setSelectedBotId] = useState<string>('');
-  const [botBalance, setBotBalance] = useState<number | null>(null);
+  const [botBalance, setBotBalance] = useState<number>(0);
+  const [hasFetchedBalance, setHasFetchedBalance] = useState(false);
   const [botBalanceLoading, setBotBalanceLoading] = useState(false);
   const [mode, setMode] = useState<'deposit' | 'withdraw'>('deposit');
   const [amount, setAmount] = useState('');
@@ -58,10 +59,10 @@ export function DepositWithdraw() {
       });
       if (!res.ok) throw new Error('Failed to fetch balance');
       const data = await res.json();
-      setBotBalance(data.usdcBalance);
+      setBotBalance(data.usdcBalance ?? 0);
+      setHasFetchedBalance(true);
     } catch (error) {
       console.error('Error fetching bot balance:', error);
-      setBotBalance(null);
     } finally {
       setBotBalanceLoading(false);
     }
@@ -69,6 +70,8 @@ export function DepositWithdraw() {
 
   useEffect(() => {
     if (selectedBotId && publicKeyString) {
+      setHasFetchedBalance(false);
+      setBotBalance(0);
       fetchBotBalance();
     }
   }, [selectedBotId, publicKeyString]);
@@ -271,14 +274,21 @@ export function DepositWithdraw() {
               </div>
               <div className="bg-primary/5 rounded-xl p-4 border border-primary/30">
                 <p className="text-sm text-muted-foreground">Trading Capital</p>
-                <div className="flex items-center gap-2">
-                  <p className="text-2xl font-mono font-bold text-primary" data-testid="text-bot-balance">
-                    {botBalance?.toFixed(2) ?? '0.00'} USDC
-                  </p>
-                  {botBalanceLoading && (
-                    <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-                  )}
-                </div>
+                {!hasFetchedBalance && botBalanceLoading ? (
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                    <span className="text-muted-foreground">Loading...</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <p className="text-2xl font-mono font-bold text-primary" data-testid="text-bot-balance">
+                      {botBalance.toFixed(2)} USDC
+                    </p>
+                    {botBalanceLoading && (
+                      <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}
