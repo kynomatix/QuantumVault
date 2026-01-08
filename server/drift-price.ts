@@ -1,121 +1,50 @@
-import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-
-const DRIFT_PROGRAM_ID = 'dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH';
-
-const MARKET_INDICES: Record<string, number> = {
-  'SOL-PERP': 0,
-  'BTC-PERP': 1,
-  'ETH-PERP': 2,
-  'APT-PERP': 3,
-  'MATIC-PERP': 4,
-  'ARB-PERP': 5,
+const COINGECKO_IDS: Record<string, string> = {
+  'SOL-PERP': 'solana',
+  'BTC-PERP': 'bitcoin',
+  'ETH-PERP': 'ethereum',
 };
 
-let driftClient: any = null;
-let isInitializing = false;
-let initPromise: Promise<void> | null = null;
-
-async function initializeDriftClient() {
-  if (driftClient) return;
-  if (isInitializing && initPromise) {
-    await initPromise;
-    return;
-  }
-  
-  isInitializing = true;
-  
-  initPromise = (async () => {
-    try {
-      const { DriftClient, initialize, BulkAccountLoader, Wallet } = await import('@drift-labs/sdk');
-      
-      const env = 'mainnet-beta';
-      initialize({ env });
-      
-      const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
-      const connection = new Connection(rpcUrl, 'confirmed');
-      
-      const dummyKeypair = Keypair.generate();
-      const wallet = new Wallet(dummyKeypair);
-      
-      const bulkAccountLoader = new BulkAccountLoader(connection, 'confirmed', 5000);
-      
-      driftClient = new DriftClient({
-        connection,
-        wallet: wallet as any,
-        programID: new PublicKey(DRIFT_PROGRAM_ID),
-        accountSubscription: {
-          type: 'polling',
-          accountLoader: bulkAccountLoader,
-        },
-      });
-      
-      await driftClient.subscribe();
-      console.log('Drift client initialized for price feeds');
-    } catch (error) {
-      console.error('Failed to initialize Drift client:', error);
-      driftClient = null;
-    } finally {
-      isInitializing = false;
-    }
-  })();
-  
-  await initPromise;
-}
+let priceCache: Record<string, number> = {};
+let lastFetch = 0;
+const CACHE_TTL = 30000;
 
 export async function getMarketPrice(market: string): Promise<number | null> {
-  const marketIndex = MARKET_INDICES[market];
-  if (marketIndex === undefined) {
-    console.log(`Unknown market: ${market}`);
-    return null;
-  }
-  
-  try {
-    await initializeDriftClient();
-    
-    if (!driftClient) {
-      return null;
-    }
-    
-    const { convertToNumber, PRICE_PRECISION } = await import('@drift-labs/sdk');
-    const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
-    
-    if (!oracleData || !oracleData.price) {
-      return null;
-    }
-    
-    const price = convertToNumber(oracleData.price, PRICE_PRECISION);
-    return price;
-  } catch (error) {
-    console.error(`Failed to get price for ${market}:`, error);
-    return null;
-  }
+  const prices = await getAllPrices();
+  return prices[market] ?? null;
 }
 
 export async function getAllPrices(): Promise<Record<string, number>> {
-  const prices: Record<string, number> = {};
+  const now = Date.now();
   
-  try {
-    await initializeDriftClient();
-    
-    if (!driftClient) {
-      return prices;
-    }
-    
-    const { convertToNumber, PRICE_PRECISION } = await import('@drift-labs/sdk');
-    
-    for (const [market, index] of Object.entries(MARKET_INDICES)) {
-      try {
-        const oracleData = driftClient.getOracleDataForPerpMarket(index);
-        if (oracleData && oracleData.price) {
-          prices[market] = convertToNumber(oracleData.price, PRICE_PRECISION);
-        }
-      } catch (e) {
-        console.error(`Failed to get price for ${market}:`, e);
-      }
-    }
-  } catch (error) {
-    console.error('Failed to get all prices:', error);
+  if (now - lastFetch < CACHE_TTL && Object.keys(priceCache).length > 0) {
+    return priceCache;
   }
   
-  return prices;
+  try {
+    const ids = Object.values(COINGECKO_IDS).join(',');
+    const response = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`
+    );
+    
+    if (!response.ok) {
+      console.log('CoinGecko API error:', response.status);
+      return priceCache;
+    }
+    
+    const data = await response.json();
+    
+    const prices: Record<string, number> = {};
+    for (const [market, geckoId] of Object.entries(COINGECKO_IDS)) {
+      if (data[geckoId]?.usd) {
+        prices[market] = data[geckoId].usd;
+      }
+    }
+    
+    priceCache = prices;
+    lastFetch = now;
+    return prices;
+  } catch (error) {
+    console.error('Failed to fetch prices:', error);
+    return priceCache;
+  }
 }

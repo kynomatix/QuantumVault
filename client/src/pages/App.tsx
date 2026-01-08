@@ -44,52 +44,18 @@ const defaultMarkets = [
   { symbol: 'ETH-PERP', price: 0, change: 0, volume: '-' },
 ];
 
-const positions = [
-  { market: 'SOL-PERP', side: 'LONG', size: 50, entry: 94.20, current: 98.45, pnl: 212.50, pnlPercent: 4.51 },
-  { market: 'ETH-PERP', side: 'SHORT', size: 2, entry: 2380.00, current: 2340.50, pnl: 79.00, pnlPercent: 1.66 },
-  { market: 'BTC-PERP', side: 'LONG', size: 0.5, entry: 42800.00, current: 43250.00, pnl: 225.00, pnlPercent: 1.05 },
-];
+type Position = { market: string; side: string; size: number; entry: number; current: number; pnl: number; pnlPercent: number };
+type ActiveBot = { id: string | number; name: string; market: string; status: string; trades: number; pnl: number; pnlPercent: number };
+type Trade = { time: string; market: string; side: string; size: number; price: number; total: number };
+type OrderEntry = { price: number; size: number; total: number };
 
-const activeBots = [
-  { id: 1, name: 'SOL Momentum Pro', market: 'SOL-PERP', status: 'running', trades: 47, pnl: 1245.80, pnlPercent: 12.4 },
-  { id: 2, name: 'ETH Grid Master', market: 'ETH-PERP', status: 'running', trades: 124, pnl: 892.30, pnlPercent: 8.9 },
-  { id: 3, name: 'Multi Trend Alpha', market: 'Multi', status: 'paused', trades: 23, pnl: -124.50, pnlPercent: -2.1 },
-];
-
-const marketplaceBots = [
-  { id: 'sol-momentum', name: 'SOL Momentum Pro', type: 'Signal Bot', market: 'SOL-PERP', apr: 42.8, subscribers: 1247, creator: 'quantum_whale', rating: 4.8, minDeposit: 500, featured: true },
-  { id: 'btc-grid', name: 'BTC Range Master', type: 'Grid Bot', market: 'BTC-PERP', apr: 28.4, subscribers: 892, creator: 'grid_wizard', rating: 4.6, minDeposit: 1000, featured: true },
-  { id: 'eth-scalper', name: 'ETH Scalper Elite', type: 'Signal Bot', market: 'ETH-PERP', apr: 35.2, subscribers: 634, creator: 'alpha_hunter', rating: 4.5, minDeposit: 750, featured: false },
-  { id: 'multi-perp', name: 'Multi-Asset Trend', type: 'Signal Bot', market: 'Multi', apr: 52.1, subscribers: 2103, creator: 'drift_master', rating: 4.9, minDeposit: 2000, featured: true },
-  { id: 'sol-grid', name: 'SOL Grid Runner', type: 'Grid Bot', market: 'SOL-PERP', apr: 31.7, subscribers: 445, creator: 'perp_lord', rating: 4.3, minDeposit: 300, featured: false },
-  { id: 'jup-signal', name: 'JUP Signal Alpha', type: 'Signal Bot', market: 'JUP-PERP', apr: 67.3, subscribers: 328, creator: 'moon_trader', rating: 4.7, minDeposit: 250, featured: true },
-  { id: 'bonk-degen', name: 'BONK Degen Play', type: 'Signal Bot', market: 'BONK-PERP', apr: 89.2, subscribers: 156, creator: 'degen_king', rating: 4.1, minDeposit: 100, featured: false },
-  { id: 'eth-grid-pro', name: 'ETH Grid Pro', type: 'Grid Bot', market: 'ETH-PERP', apr: 24.5, subscribers: 567, creator: 'grid_wizard', rating: 4.4, minDeposit: 800, featured: false },
-];
-
-const recentTrades = [
-  { time: '14:32:05', market: 'SOL-PERP', side: 'BUY', size: 10, price: 98.42, total: 984.20 },
-  { time: '14:28:12', market: 'ETH-PERP', side: 'SELL', size: 0.5, price: 2342.10, total: 1171.05 },
-  { time: '14:15:44', market: 'SOL-PERP', side: 'BUY', size: 15, price: 97.85, total: 1467.75 },
-  { time: '13:58:21', market: 'BTC-PERP', side: 'BUY', size: 0.1, price: 43180.00, total: 4318.00 },
-  { time: '13:42:08', market: 'JUP-PERP', side: 'SELL', size: 1000, price: 0.8180, total: 818.00 },
-];
-
+const positions: Position[] = [];
+const activeBots: ActiveBot[] = [];
+const recentTrades: Trade[] = [];
+const marketplaceBots: { id: string; name: string; type: string; market: string; apr: number; subscribers: number; creator: string; rating: number; minDeposit: number; featured: boolean }[] = [];
 const orderbook = {
-  asks: [
-    { price: 98.72, size: 245.5, total: 24230.36 },
-    { price: 98.68, size: 189.2, total: 18662.46 },
-    { price: 98.62, size: 312.8, total: 30848.34 },
-    { price: 98.55, size: 156.4, total: 15413.22 },
-    { price: 98.50, size: 423.1, total: 41675.35 },
-  ],
-  bids: [
-    { price: 98.45, size: 387.2, total: 38119.64 },
-    { price: 98.40, size: 234.6, total: 23084.64 },
-    { price: 98.35, size: 445.8, total: 43844.43 },
-    { price: 98.28, size: 178.3, total: 17523.32 },
-    { price: 98.22, size: 289.4, total: 28426.87 },
-  ],
+  asks: [] as OrderEntry[],
+  bids: [] as OrderEntry[],
 };
 
 type NavItem = 'dashboard' | 'trade' | 'marketplace' | 'bots' | 'leaderboard' | 'settings';
