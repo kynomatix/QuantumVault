@@ -89,7 +89,10 @@ export default function AppPage() {
 
   // Fetch total equity across all bot subaccounts
   useEffect(() => {
-    if (!connected) return;
+    if (!connected) {
+      setTotalEquity(null);
+      return;
+    }
     
     const fetchTotalEquity = async () => {
       setEquityLoading(true);
@@ -98,9 +101,12 @@ export default function AppPage() {
         if (res.ok) {
           const data = await res.json();
           setTotalEquity(data.totalEquity ?? 0);
+        } else if (res.status === 401) {
+          // Not authenticated yet, silently skip
+          setTotalEquity(null);
         }
       } catch (error) {
-        console.error('Error fetching total equity:', error);
+        // Network error, silently skip
       } finally {
         setEquityLoading(false);
       }
