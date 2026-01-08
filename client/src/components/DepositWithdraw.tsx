@@ -24,7 +24,7 @@ interface TradingBot {
 }
 
 export function DepositWithdraw() {
-  const { balance, connected, publicKeyString } = useWallet();
+  const { connected, publicKeyString } = useWallet();
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
   const { toast } = useToast();
@@ -210,34 +210,29 @@ export function DepositWithdraw() {
             </div>
           ) : (
             <>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="bg-muted/30 rounded-xl p-4 border border-border/30">
-                  <p className="text-sm text-muted-foreground">Wallet SOL</p>
-                  <p className="text-2xl font-mono font-bold" data-testid="text-sol-balance">
-                    {balance?.toFixed(4) ?? '0'} SOL
-                  </p>
-                </div>
-                <div className="bg-primary/5 rounded-xl p-4 border border-primary/30">
+              <div className="bg-primary/5 rounded-xl p-4 border border-primary/30">
+                <div className="flex items-center justify-between mb-1">
                   <p className="text-sm text-muted-foreground">Subaccount #{selectedBot?.driftSubaccountId}</p>
-                  {!hasFetchedBalance && botBalanceLoading ? (
-                    <div className="flex items-center gap-2">
-                      <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
-                      <span className="text-muted-foreground">Loading...</span>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <p className="text-2xl font-mono font-bold text-primary" data-testid="text-bot-balance">
-                        {botBalance.toFixed(2)} USDC
-                      </p>
-                      {botBalanceLoading && (
-                        <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-                      )}
-                    </div>
-                  )}
                   {!subaccountExists && hasFetchedBalance && (
-                    <p className="text-xs text-muted-foreground mt-1">Not initialized yet</p>
+                    <span className="text-xs text-yellow-500">Not initialized</span>
                   )}
                 </div>
+                {!hasFetchedBalance && botBalanceLoading ? (
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                    <span className="text-muted-foreground">Loading...</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <p className="text-2xl font-mono font-bold text-primary" data-testid="text-bot-balance">
+                      ${botBalance.toFixed(2)}
+                    </p>
+                    <span className="text-sm text-muted-foreground">USDC</span>
+                    {botBalanceLoading && (
+                      <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="flex rounded-xl bg-muted/30 p-1">

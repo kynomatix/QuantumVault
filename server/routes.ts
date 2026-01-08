@@ -688,6 +688,40 @@ export async function registerRoutes(
     }
   });
 
+  // Get total equity across all bot subaccounts
+  app.get("/api/total-equity", requireWallet, async (req, res) => {
+    try {
+      const bots = await storage.getTradingBots(req.walletAddress!);
+      
+      // Sum up balances from all subaccounts
+      let totalEquity = 0;
+      const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
+      
+      for (const bot of bots) {
+        if (bot.driftSubaccountId !== null) {
+          const exists = await subaccountExists(req.walletAddress!, bot.driftSubaccountId);
+          const balance = exists ? await getDriftBalance(req.walletAddress!, bot.driftSubaccountId) : 0;
+          totalEquity += balance;
+          subaccountBalances.push({
+            botId: bot.id,
+            botName: bot.name,
+            subaccountId: bot.driftSubaccountId,
+            balance,
+          });
+        }
+      }
+      
+      res.json({ 
+        totalEquity,
+        botCount: bots.length,
+        subaccountBalances,
+      });
+    } catch (error) {
+      console.error("Total equity error:", error);
+      res.status(500).json({ error: "Failed to fetch total equity" });
+    }
+  });
+
   // Bot deposit - transfer from main Drift account to bot's subaccount
   app.post("/api/bot/:botId/deposit", requireWallet, async (req, res) => {
     try {

@@ -84,6 +84,33 @@ export default function AppPage() {
   const updateSub = useUpdateSubscription();
 
   const [selectedMarketSymbol, setSelectedMarketSymbol] = useState('SOL-PERP');
+  const [totalEquity, setTotalEquity] = useState<number | null>(null);
+  const [equityLoading, setEquityLoading] = useState(false);
+
+  // Fetch total equity across all bot subaccounts
+  useEffect(() => {
+    if (!connected) return;
+    
+    const fetchTotalEquity = async () => {
+      setEquityLoading(true);
+      try {
+        const res = await fetch('/api/total-equity', { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          setTotalEquity(data.totalEquity ?? 0);
+        }
+      } catch (error) {
+        console.error('Error fetching total equity:', error);
+      } finally {
+        setEquityLoading(false);
+      }
+    };
+    
+    fetchTotalEquity();
+    // Refresh every 30 seconds
+    const interval = setInterval(fetchTotalEquity, 30000);
+    return () => clearInterval(interval);
+  }, [connected]);
 
   const markets = defaultMarkets.map(m => ({
     ...m,
@@ -192,17 +219,12 @@ export default function AppPage() {
                       <Copy className="w-4 h-4 text-muted-foreground" />
                     </button>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-center">
-                    <div className="p-2 rounded-lg bg-background/50">
-                      <p className="text-xs text-muted-foreground">SOL</p>
-                      <p className="text-sm font-semibold font-mono" data-testid="text-sol-balance">
-                        {balanceLoading ? '...' : balance !== null ? balance.toFixed(2) : '0.00'}
-                      </p>
-                    </div>
-                    <div className="p-2 rounded-lg bg-background/50">
-                      <p className="text-xs text-muted-foreground">USDC</p>
-                      <p className="text-sm font-semibold font-mono">--</p>
-                    </div>
+                  <div className="p-2 rounded-lg bg-background/50 text-center">
+                    <p className="text-xs text-muted-foreground">Total Equity</p>
+                    <p className="text-lg font-semibold font-mono text-primary" data-testid="text-total-equity">
+                      {equityLoading ? '...' : totalEquity !== null ? `$${totalEquity.toFixed(2)}` : '$0.00'}
+                    </p>
+                    <p className="text-xs text-muted-foreground">USDC</p>
                   </div>
                 </div>
                 <div className="p-3 rounded-xl bg-muted/30 mb-3 lg:hidden">
@@ -218,17 +240,12 @@ export default function AppPage() {
                       <Copy className="w-4 h-4 text-muted-foreground" />
                     </button>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-center">
-                    <div className="p-2 rounded-lg bg-background/50">
-                      <p className="text-xs text-muted-foreground">SOL</p>
-                      <p className="text-sm font-semibold font-mono" data-testid="text-sol-balance-mobile">
-                        {balanceLoading ? '...' : balance !== null ? balance.toFixed(2) : '0.00'}
-                      </p>
-                    </div>
-                    <div className="p-2 rounded-lg bg-background/50">
-                      <p className="text-xs text-muted-foreground">USDC</p>
-                      <p className="text-sm font-semibold font-mono">--</p>
-                    </div>
+                  <div className="p-2 rounded-lg bg-background/50 text-center">
+                    <p className="text-xs text-muted-foreground">Total Equity</p>
+                    <p className="text-lg font-semibold font-mono text-primary" data-testid="text-total-equity-mobile">
+                      {equityLoading ? '...' : totalEquity !== null ? `$${totalEquity.toFixed(2)}` : '$0.00'}
+                    </p>
+                    <p className="text-xs text-muted-foreground">USDC</p>
                   </div>
                 </div>
                 <Button 
