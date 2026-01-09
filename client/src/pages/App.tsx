@@ -79,7 +79,7 @@ type MarketplaceBot = {
 
 const marketplaceBots: MarketplaceBot[] = [];
 
-type NavItem = 'dashboard' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet';
+type NavItem = 'dashboard' | 'bots' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet';
 
 export default function AppPage() {
   const [, navigate] = useLocation();
@@ -489,6 +489,7 @@ export default function AppPage() {
           <nav className="flex-1 p-3 space-y-1">
             {[
               { id: 'dashboard' as NavItem, icon: LayoutDashboard, label: 'Dashboard' },
+              { id: 'bots' as NavItem, icon: Bot, label: 'My Bots' },
               { id: 'marketplace' as NavItem, icon: Store, label: 'Marketplace' },
               { id: 'wallet' as NavItem, icon: Wallet, label: 'Wallet' },
               { id: 'leaderboard' as NavItem, icon: Users, label: 'Leaderboard' },
@@ -755,7 +756,7 @@ export default function AppPage() {
                   <div className="gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
                       <h2 className="font-display font-semibold">Active Bots</h2>
-                      <Button variant="outline" size="sm" onClick={() => navigate('/bots')} data-testid="button-add-bot">
+                      <Button variant="outline" size="sm" onClick={() => setActiveNav('bots')} data-testid="button-add-bot">
                         <Plus className="w-4 h-4 mr-1" />
                         Add Bot
                       </Button>
@@ -862,6 +863,107 @@ export default function AppPage() {
                     )}
                   </div>
                 </div>
+              </motion.div>
+            )}
+
+            {activeNav === 'bots' && (
+              <motion.div
+                key="bots"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-6"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h1 className="text-2xl font-display font-bold">My Bots</h1>
+                    <p className="text-muted-foreground">Manage your TradingView trading bots</p>
+                  </div>
+                  <Button 
+                    className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                    onClick={() => navigate('/bots')}
+                    data-testid="button-create-bot"
+                  >
+                    <Plus className="w-4 h-4 mr-2" />
+                    Add Bot
+                  </Button>
+                </div>
+
+                {botsData && botsData.length > 0 ? (
+                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {botsData.map((bot) => (
+                      <div 
+                        key={bot.id} 
+                        className="gradient-border p-4 noise hover:scale-[1.01] transition-transform"
+                        data-testid={`bot-card-${bot.id}`}
+                      >
+                        <div className="flex items-start justify-between mb-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center">
+                              <Bot className="w-5 h-5 text-primary" />
+                            </div>
+                            <div>
+                              <h3 className="font-semibold">{bot.name}</h3>
+                              <p className="text-sm text-muted-foreground">{bot.market}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                              bot.isActive 
+                                ? 'bg-emerald-500/20 text-emerald-400' 
+                                : 'bg-yellow-500/20 text-yellow-400'
+                            }`}>
+                              {bot.isActive ? 'Active' : 'Inactive'}
+                            </span>
+                            <Button 
+                              variant="ghost" 
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => {
+                                setSelectedManagedBot(bot);
+                                setManageBotDrawerOpen(true);
+                              }}
+                              data-testid={`button-manage-bot-${bot.id}`}
+                            >
+                              <Settings className="w-4 h-4 text-muted-foreground" />
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2 text-center">
+                          <div className="p-2 rounded-lg bg-muted/30">
+                            <p className="text-lg font-bold">{(bot.stats as any)?.totalTrades ?? 0}</p>
+                            <p className="text-xs text-muted-foreground">Trades</p>
+                          </div>
+                          <div className="p-2 rounded-lg bg-muted/30">
+                            <p className="text-lg font-bold">{bot.leverage}x</p>
+                            <p className="text-xs text-muted-foreground">Leverage</p>
+                          </div>
+                          <div className="p-2 rounded-lg bg-muted/30">
+                            <p className={`text-lg font-bold ${(bot.stats as any)?.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {(bot.stats as any)?.totalPnl >= 0 ? '+' : ''}${((bot.stats as any)?.totalPnl ?? 0).toFixed(2)}
+                            </p>
+                            <p className="text-xs text-muted-foreground">PnL</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="gradient-border p-12 noise text-center">
+                    <Bot className="w-12 h-12 mx-auto mb-4 text-muted-foreground opacity-50" />
+                    <h3 className="text-lg font-display font-semibold mb-2">No Bots Yet</h3>
+                    <p className="text-muted-foreground mb-6">Create your first TradingView bot to start automated trading</p>
+                    <Button 
+                      className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                      onClick={() => navigate('/bots')}
+                      data-testid="button-create-first-bot"
+                    >
+                      <Plus className="w-4 h-4 mr-2" />
+                      Create Your First Bot
+                    </Button>
+                  </div>
+                )}
               </motion.div>
             )}
 
