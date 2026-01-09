@@ -228,7 +228,8 @@ function getDriftSignerPDA(): PublicKey {
 }
 
 const DRIFT_DEVNET_USDC_ORACLE = new PublicKey('En8hkHLkRe9d9DraYmBTrus518BvmVH448YcvmrFM6Ce');
-const DRIFT_MAINNET_USDC_ORACLE = new PublicKey('Gnt27xtC473ZT2Mw5u8wZ68Z3gULkSTb5DuxJy7eJotD');
+// Updated to correct Pyth Lazer Stable Coin feed from Drift SDK spotMarkets.ts
+const DRIFT_MAINNET_USDC_ORACLE = new PublicKey('9VCioxmni2gDLv11qufWzT3RDERhQE4iY5Gf7NTfYyAV');
 
 async function getSpotMarketOracle(connection: Connection, marketIndex: number = 0): Promise<PublicKey> {
   const oracle = IS_MAINNET ? DRIFT_MAINNET_USDC_ORACLE : DRIFT_DEVNET_USDC_ORACLE;
