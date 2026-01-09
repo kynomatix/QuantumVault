@@ -752,6 +752,80 @@ export function getPrices(): Record<string, number> {
   };
 }
 
+// Helper to initialize Drift accounts in a separate transaction
+async function initializeDriftAccountsIfNeeded(
+  connection: Connection,
+  agentPubkey: PublicKey,
+  agentKeypair: Keypair,
+): Promise<boolean> {
+  const userAccount = getUserAccountPDA(agentPubkey);
+  const userStats = getUserStatsPDA(agentPubkey);
+  
+  const initInstructions: TransactionInstruction[] = [];
+  
+  const userStatsInfo = await connection.getAccountInfo(userStats);
+  if (!userStatsInfo) {
+    console.log('[Drift] Agent user stats not found, adding initialization instruction');
+    initInstructions.push(
+      createInitializeUserStatsInstruction(agentPubkey, userStats)
+    );
+  }
+
+  const userAccountInfo = await connection.getAccountInfo(userAccount);
+  if (!userAccountInfo) {
+    console.log('[Drift] Agent user account not found, adding initialization instruction');
+    initInstructions.push(
+      createInitializeUserInstruction(agentPubkey, userAccount, userStats)
+    );
+  }
+  
+  if (initInstructions.length === 0) {
+    console.log('[Drift] Drift accounts already initialized');
+    return true;
+  }
+  
+  console.log(`[Drift] Initializing Drift accounts in separate transaction (${initInstructions.length} instructions)`);
+  
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  
+  const initTx = new Transaction({
+    feePayer: agentPubkey,
+    blockhash,
+    lastValidBlockHeight,
+  });
+  
+  for (const ix of initInstructions) {
+    initTx.add(ix);
+  }
+  
+  initTx.sign(agentKeypair);
+  
+  const signature = await connection.sendRawTransaction(initTx.serialize(), {
+    skipPreflight: true,
+    preflightCommitment: 'confirmed',
+  });
+  
+  console.log(`[Drift] Account initialization tx sent: ${signature}`);
+  
+  const confirmation = await connection.confirmTransaction({
+    signature,
+    blockhash,
+    lastValidBlockHeight,
+  }, 'confirmed');
+  
+  if (confirmation.value.err) {
+    console.error('[Drift] Account initialization failed:', confirmation.value.err);
+    throw new Error(`Drift account initialization failed: ${JSON.stringify(confirmation.value.err)}`);
+  }
+  
+  console.log('[Drift] Drift accounts initialized successfully');
+  
+  // Wait a bit for the accounts to be queryable
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  
+  return true;
+}
+
 export async function buildAgentDriftDepositTransaction(
   agentPublicKey: string,
   encryptedPrivateKey: string,
@@ -768,6 +842,9 @@ export async function buildAgentDriftDepositTransaction(
   const spotMarketVault = getSpotMarketVaultPDA(0);
   const spotMarket = getSpotMarketPDA(0);
   
+  // First, ensure Drift accounts are initialized (separate transaction)
+  await initializeDriftAccountsIfNeeded(connection, agentPubkey, agentKeypair);
+  
   const instructions: TransactionInstruction[] = [];
   
   const ataInfo = await connection.getAccountInfo(agentAta);
@@ -783,22 +860,6 @@ export async function buildAgentDriftDepositTransaction(
     );
   }
 
-  const userStatsInfo = await connection.getAccountInfo(userStats);
-  if (!userStatsInfo) {
-    console.log('[Drift] Agent user stats not found, adding initialization instruction');
-    instructions.push(
-      createInitializeUserStatsInstruction(agentPubkey, userStats)
-    );
-  }
-
-  const userAccountInfo = await connection.getAccountInfo(userAccount);
-  if (!userAccountInfo) {
-    console.log('[Drift] Agent user account not found, adding initialization instruction');
-    instructions.push(
-      createInitializeUserInstruction(agentPubkey, userAccount, userStats)
-    );
-  }
-
   const depositAmountLamports = Math.round(amountUsdc * 1_000_000);
   if (depositAmountLamports <= 0) {
     throw new Error('Invalid deposit amount');
@@ -807,6 +868,7 @@ export async function buildAgentDriftDepositTransaction(
   const depositAmount = new BN(depositAmountLamports);
   
   const oracle = await getSpotMarketOracle(connection);
+  console.log(`[Drift] Using oracle: ${oracle.toBase58()}`);
   
   instructions.push(
     createDepositInstruction(
