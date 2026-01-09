@@ -255,7 +255,7 @@ export function WalletContent() {
       });
       
       setWithdrawAmount('');
-      await Promise.all([fetchUsdcBalance(), fetchCapitalPool()]);
+      await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool()]);
     } catch (error: any) {
       console.error('Withdraw error:', error);
       toast({ 
@@ -965,7 +965,7 @@ export default function WalletManagement() {
       });
       
       setWithdrawAmount('');
-      await Promise.all([fetchUsdcBalance(), fetchCapitalPool()]);
+      await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool()]);
     } catch (error: any) {
       console.error('Withdraw error:', error);
       toast({ 
