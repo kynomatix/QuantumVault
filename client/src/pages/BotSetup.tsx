@@ -46,6 +46,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
+import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 
 interface TradingBot {
   id: string;
@@ -292,7 +293,7 @@ export default function BotSetup() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,

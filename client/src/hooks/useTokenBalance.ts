@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { PublicKey, Transaction, SYSVAR_RENT_PUBKEY, SystemProgram, TransactionInstruction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
+import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 
 const MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const DEVNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
@@ -119,7 +120,7 @@ export function useTokenBalance() {
       const signedTx = await wallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,

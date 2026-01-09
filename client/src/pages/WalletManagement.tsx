@@ -24,6 +24,7 @@ import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adap
 import { Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { Fuel } from 'lucide-react';
+import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 
 interface CapitalPool {
   mainAccountBalance: number;
@@ -200,7 +201,7 @@ export function WalletContent() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,
@@ -264,7 +265,7 @@ export function WalletContent() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,
@@ -373,24 +374,11 @@ export function WalletContent() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      try {
-        await connection.confirmTransaction({
-          signature,
-          blockhash,
-          lastValidBlockHeight,
-        });
-      } catch (confirmError: any) {
-        if (confirmError.message?.includes('block height exceeded')) {
-          const status = await connection.getSignatureStatus(signature);
-          if (status?.value?.confirmationStatus === 'confirmed' || status?.value?.confirmationStatus === 'finalized') {
-            console.log('Transaction confirmed despite timeout:', signature);
-          } else {
-            throw confirmError;
-          }
-        } else {
-          throw confirmError;
-        }
-      }
+      await confirmTransactionWithFallback(connection, {
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
 
       toast({ 
         title: 'SOL Deposit Successful!', 
@@ -444,7 +432,7 @@ export function WalletContent() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,
@@ -502,7 +490,7 @@ export function WalletContent() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,
@@ -560,7 +548,7 @@ export function WalletContent() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,
@@ -1156,7 +1144,7 @@ export default function WalletManagement() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,
@@ -1220,7 +1208,7 @@ export default function WalletManagement() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,
@@ -1329,24 +1317,11 @@ export default function WalletManagement() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      try {
-        await connection.confirmTransaction({
-          signature,
-          blockhash,
-          lastValidBlockHeight,
-        });
-      } catch (confirmError: any) {
-        if (confirmError.message?.includes('block height exceeded')) {
-          const status = await connection.getSignatureStatus(signature);
-          if (status?.value?.confirmationStatus === 'confirmed' || status?.value?.confirmationStatus === 'finalized') {
-            console.log('Transaction confirmed despite timeout:', signature);
-          } else {
-            throw confirmError;
-          }
-        } else {
-          throw confirmError;
-        }
-      }
+      await confirmTransactionWithFallback(connection, {
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
 
       toast({ 
         title: 'SOL Deposit Successful!', 
@@ -1400,7 +1375,7 @@ export default function WalletManagement() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,
@@ -1458,7 +1433,7 @@ export default function WalletManagement() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,
@@ -1516,7 +1491,7 @@ export default function WalletManagement() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
-      await connection.confirmTransaction({
+      await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
         lastValidBlockHeight,
