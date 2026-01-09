@@ -322,6 +322,14 @@ export async function registerRoutes(
         return res.status(400).json({ error: result.error || "Deposit failed" });
       }
 
+      await storage.createEquityEvent({
+        walletAddress: req.walletAddress!,
+        eventType: 'drift_deposit',
+        amount: String(amount),
+        txSignature: result.signature || null,
+        notes: 'Deposit to Drift Protocol',
+      });
+
       res.json(result);
     } catch (error) {
       console.error("Agent drift deposit error:", error);
@@ -354,6 +362,14 @@ export async function registerRoutes(
         return res.status(400).json({ error: result.error || "Withdraw failed" });
       }
 
+      await storage.createEquityEvent({
+        walletAddress: req.walletAddress!,
+        eventType: 'drift_withdraw',
+        amount: String(-amount),
+        txSignature: result.signature || null,
+        notes: 'Withdraw from Drift Protocol',
+      });
+
       res.json(result);
     } catch (error) {
       console.error("Agent drift withdraw error:", error);
@@ -375,6 +391,61 @@ export async function registerRoutes(
       res.json({ balance });
     } catch (error) {
       console.error("Get agent drift balance error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/agent/confirm-deposit", requireWallet, async (req, res) => {
+    try {
+      const { amount, txSignature } = req.body;
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+
+      await storage.createEquityEvent({
+        walletAddress: req.walletAddress!,
+        eventType: 'agent_deposit',
+        amount: String(amount),
+        txSignature: txSignature || null,
+        notes: 'Deposit to agent wallet',
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Confirm deposit error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/agent/confirm-withdraw", requireWallet, async (req, res) => {
+    try {
+      const { amount, txSignature } = req.body;
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+
+      await storage.createEquityEvent({
+        walletAddress: req.walletAddress!,
+        eventType: 'agent_withdraw',
+        amount: String(-amount),
+        txSignature: txSignature || null,
+        notes: 'Withdraw from agent wallet',
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Confirm withdraw error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/equity-events", requireWallet, async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const events = await storage.getEquityEvents(req.walletAddress!, limit);
+      res.json(events);
+    } catch (error) {
+      console.error("Get equity events error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
