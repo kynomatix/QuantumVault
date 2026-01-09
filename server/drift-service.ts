@@ -1032,7 +1032,24 @@ export async function executeAgentDriftDeposit(
     }
   } catch (error) {
     console.error('[Drift] Deposit error:', error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // Handle different error types properly
+    let errorMessage: string;
+    if (error instanceof Error) {
+      errorMessage = error.message;
+    } else if (typeof error === 'object' && error !== null) {
+      // Handle Solana transaction errors which are objects
+      const errStr = JSON.stringify(error);
+      if (errStr.includes('6036')) {
+        errorMessage = 'Drift Protocol oracle error (6036). The oracle for USDC may be unavailable. Please try again later or contact support.';
+      } else if (errStr.includes('Custom')) {
+        errorMessage = `Drift Protocol error: ${errStr}. Your funds remain safely in your agent wallet.`;
+      } else {
+        errorMessage = errStr;
+      }
+    } else {
+      errorMessage = String(error);
+    }
     
     if (errorMessage.includes('Attempt to debit an account')) {
       return {
