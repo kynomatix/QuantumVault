@@ -799,6 +799,10 @@ export function WalletContent() {
                   <ArrowRight className="w-4 h-4" />
                   <span>To: Agent Wallet</span>
                 </div>
+
+                <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2">
+                  Note: You need SOL in your Phantom wallet for transaction fees (~0.005 SOL)
+                </div>
                 
                 <Button
                   className="w-full bg-gradient-to-r from-primary to-accent"
@@ -1784,6 +1788,10 @@ export default function WalletManagement() {
                         <span>From: Phantom Wallet</span>
                         <ArrowRight className="w-4 h-4" />
                         <span>To: Agent Wallet</span>
+                      </div>
+
+                      <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2">
+                        Note: You need SOL in your Phantom wallet for transaction fees (~0.005 SOL)
                       </div>
                       
                       <Button
