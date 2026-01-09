@@ -14,7 +14,9 @@ import {
   Copy,
   Check,
   Gift,
-  Sparkles
+  Sparkles,
+  Bot,
+  ArrowRight
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -37,6 +39,11 @@ interface CapitalPool {
   warning?: string;
 }
 
+interface AgentWallet {
+  agentPublicKey: string;
+  balance: number;
+}
+
 export default function WalletManagement() {
   const [, navigate] = useLocation();
   const { connected, connecting, shortenedAddress, publicKeyString } = useWallet();
@@ -51,8 +58,20 @@ export default function WalletManagement() {
   const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [copiedAddress, setCopiedAddress] = useState(false);
   
+  const [agentToDriftAmount, setAgentToDriftAmount] = useState('');
+  const [isAgentToDrift, setIsAgentToDrift] = useState(false);
+  
+  const [driftToAgentAmount, setDriftToAgentAmount] = useState('');
+  const [isDriftToAgent, setIsDriftToAgent] = useState(false);
+  
+  const [withdrawToWalletAmount, setWithdrawToWalletAmount] = useState('');
+  const [isWithdrawingToWallet, setIsWithdrawingToWallet] = useState(false);
+  
   const [capitalPool, setCapitalPool] = useState<CapitalPool | null>(null);
   const [capitalLoading, setCapitalLoading] = useState(false);
+
+  const [agentWallet, setAgentWallet] = useState<AgentWallet | null>(null);
+  const [agentLoading, setAgentLoading] = useState(false);
 
   useEffect(() => {
     if (!connecting && !connected) {
@@ -78,14 +97,30 @@ export default function WalletManagement() {
     }
   };
 
+  const fetchAgentBalance = async () => {
+    if (!publicKeyString) return;
+    setAgentLoading(true);
+    try {
+      const res = await fetch('/api/agent/balance', { credentials: 'include' });
+      if (!res.ok) throw new Error('Failed to fetch agent balance');
+      const data = await res.json();
+      setAgentWallet(data);
+    } catch (error) {
+      console.error('Error fetching agent balance:', error);
+    } finally {
+      setAgentLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (connected && publicKeyString) {
       fetchCapitalPool();
+      fetchAgentBalance();
     }
   }, [connected, publicKeyString]);
 
   const handleRefresh = async () => {
-    await Promise.all([fetchUsdcBalance(), fetchCapitalPool()]);
+    await Promise.all([fetchUsdcBalance(), fetchCapitalPool(), fetchAgentBalance()]);
     toast({ title: 'Balances refreshed' });
   };
 
@@ -98,7 +133,12 @@ export default function WalletManagement() {
     }
   };
 
-  const handleDeposit = async () => {
+  const shortenAddress = (address: string) => {
+    if (!address) return '';
+    return `${address.slice(0, 4)}...${address.slice(-4)}`;
+  };
+
+  const handleDepositToAgent = async () => {
     const amount = parseFloat(depositAmount);
     if (!amount || amount <= 0) {
       toast({ title: 'Enter a valid amount', variant: 'destructive' });
@@ -117,15 +157,12 @@ export default function WalletManagement() {
 
     setIsDepositing(true);
     try {
-      const response = await fetch('/api/drift/deposit', {
+      const response = await fetch('/api/agent/deposit', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ 
-          walletAddress: solanaWallet.publicKey.toString(),
-          amount 
-        }),
+        body: JSON.stringify({ amount }),
         credentials: 'include',
       });
 
@@ -148,11 +185,11 @@ export default function WalletManagement() {
 
       toast({ 
         title: 'Deposit Successful!', 
-        description: message || `Deposited ${amount} USDC to your agent account`
+        description: message || `Deposited ${amount} USDC to Agent Wallet`
       });
       
       setDepositAmount('');
-      await Promise.all([fetchUsdcBalance(), fetchCapitalPool()]);
+      await Promise.all([fetchUsdcBalance(), fetchAgentBalance()]);
     } catch (error: any) {
       console.error('Deposit error:', error);
       toast({ 
@@ -244,6 +281,198 @@ export default function WalletManagement() {
     }
   };
 
+  const setMaxAgentToDrift = () => {
+    if (agentWallet?.balance) {
+      setAgentToDriftAmount(agentWallet.balance.toString());
+    }
+  };
+
+  const setMaxDriftToAgent = () => {
+    if (capitalPool?.mainAccountBalance) {
+      setDriftToAgentAmount(capitalPool.mainAccountBalance.toString());
+    }
+  };
+
+  const setMaxWithdrawToWallet = () => {
+    if (agentWallet?.balance) {
+      setWithdrawToWalletAmount(agentWallet.balance.toString());
+    }
+  };
+
+  const handleAgentToDrift = async () => {
+    const amount = parseFloat(agentToDriftAmount);
+    if (!amount || amount <= 0) {
+      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    if (agentWallet && amount > agentWallet.balance) {
+      toast({ title: 'Insufficient Agent Wallet balance', variant: 'destructive' });
+      return;
+    }
+
+    setIsAgentToDrift(true);
+    try {
+      const response = await fetch('/api/agent/drift-deposit', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Drift deposit failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      
+      const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
+      const signature = await connection.sendRawTransaction(txBytes);
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ 
+        title: 'Drift Deposit Successful!', 
+        description: message || `Deposited ${amount} USDC to Drift Protocol`
+      });
+      
+      setAgentToDriftAmount('');
+      await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool()]);
+    } catch (error: any) {
+      console.error('Agent to Drift error:', error);
+      toast({ 
+        title: 'Drift Deposit Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsAgentToDrift(false);
+    }
+  };
+
+  const handleDriftToAgent = async () => {
+    const amount = parseFloat(driftToAgentAmount);
+    if (!amount || amount <= 0) {
+      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    if (capitalPool && amount > capitalPool.mainAccountBalance) {
+      toast({ title: 'Insufficient Drift balance', variant: 'destructive' });
+      return;
+    }
+
+    setIsDriftToAgent(true);
+    try {
+      const response = await fetch('/api/agent/drift-withdraw', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Drift withdrawal failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      
+      const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
+      const signature = await connection.sendRawTransaction(txBytes);
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ 
+        title: 'Drift Withdrawal Successful!', 
+        description: message || `Withdrew ${amount} USDC from Drift to Agent Wallet`
+      });
+      
+      setDriftToAgentAmount('');
+      await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool()]);
+    } catch (error: any) {
+      console.error('Drift to Agent error:', error);
+      toast({ 
+        title: 'Drift Withdrawal Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsDriftToAgent(false);
+    }
+  };
+
+  const handleWithdrawToWallet = async () => {
+    const amount = parseFloat(withdrawToWalletAmount);
+    if (!amount || amount <= 0) {
+      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    if (agentWallet && amount > agentWallet.balance) {
+      toast({ title: 'Insufficient Agent Wallet balance', variant: 'destructive' });
+      return;
+    }
+
+    setIsWithdrawingToWallet(true);
+    try {
+      const response = await fetch('/api/agent/withdraw', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Withdrawal failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      
+      const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
+      const signature = await connection.sendRawTransaction(txBytes);
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ 
+        title: 'Withdrawal Successful!', 
+        description: message || `Withdrew ${amount} USDC to your wallet`
+      });
+      
+      setWithdrawToWalletAmount('');
+      await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool()]);
+    } catch (error: any) {
+      console.error('Withdraw to wallet error:', error);
+      toast({ 
+        title: 'Withdrawal Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsWithdrawingToWallet(false);
+    }
+  };
+
   if (!connected) {
     return null;
   }
@@ -281,16 +510,16 @@ export default function WalletManagement() {
             variant="outline" 
             size="sm" 
             onClick={handleRefresh}
-            disabled={usdcLoading || capitalLoading}
+            disabled={usdcLoading || capitalLoading || agentLoading}
             data-testid="button-refresh"
           >
-            <RefreshCw className={`w-4 h-4 mr-2 ${(usdcLoading || capitalLoading) ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-4 h-4 mr-2 ${(usdcLoading || capitalLoading || agentLoading) ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-8 max-w-4xl">
+      <main className="container mx-auto px-4 py-8 max-w-5xl">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -322,7 +551,7 @@ export default function WalletManagement() {
             </CardContent>
           </Card>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <motion.div
               initial={{ opacity: 0, x: -20 }}
               animate={{ opacity: 1, x: 0 }}
@@ -330,7 +559,10 @@ export default function WalletManagement() {
             >
               <Card className="border-border/50 bg-card/50 backdrop-blur-sm h-full">
                 <CardHeader className="pb-2">
-                  <CardDescription>Wallet USDC Balance</CardDescription>
+                  <CardDescription className="flex items-center gap-2">
+                    <Wallet className="w-4 h-4" />
+                    Phantom Wallet
+                  </CardDescription>
                   <CardTitle className="text-2xl font-mono" data-testid="text-wallet-usdc">
                     {usdcLoading ? (
                       <Loader2 className="w-5 h-5 animate-spin" />
@@ -340,7 +572,39 @@ export default function WalletManagement() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-xs text-muted-foreground">Available in your Phantom wallet</p>
+                  <p className="text-xs text-muted-foreground">Your personal USDC balance</p>
+                </CardContent>
+              </Card>
+            </motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5, delay: 0.15 }}
+            >
+              <Card className="border-primary/30 bg-card/50 backdrop-blur-sm h-full border-2">
+                <CardHeader className="pb-2">
+                  <CardDescription className="flex items-center gap-2">
+                    <Bot className="w-4 h-4 text-primary" />
+                    Agent Wallet
+                  </CardDescription>
+                  <CardTitle className="text-2xl font-mono" data-testid="text-agent-balance">
+                    {agentLoading ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      `$${(agentWallet?.balance ?? 0).toFixed(2)}`
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-xs text-muted-foreground">
+                    Server-managed trading wallet
+                    {agentWallet?.agentPublicKey && (
+                      <span className="block font-mono text-primary/70 mt-1">
+                        {shortenAddress(agentWallet.agentPublicKey)}
+                      </span>
+                    )}
+                  </p>
                 </CardContent>
               </Card>
             </motion.div>
@@ -352,7 +616,10 @@ export default function WalletManagement() {
             >
               <Card className="border-border/50 bg-card/50 backdrop-blur-sm h-full">
                 <CardHeader className="pb-2">
-                  <CardDescription>Agent Account Balance</CardDescription>
+                  <CardDescription className="flex items-center gap-2">
+                    <ArrowRight className="w-4 h-4" />
+                    Drift Protocol
+                  </CardDescription>
                   <CardTitle className="text-2xl font-mono" data-testid="text-drift-balance">
                     {capitalLoading ? (
                       <Loader2 className="w-5 h-5 animate-spin" />
@@ -362,7 +629,7 @@ export default function WalletManagement() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-xs text-muted-foreground">Your agent deposits to Drift Protocol for trading</p>
+                  <p className="text-xs text-muted-foreground">Active trading capital on Drift</p>
                 </CardContent>
               </Card>
             </motion.div>
@@ -375,19 +642,27 @@ export default function WalletManagement() {
           >
             <Card className="border-border/50 bg-card/50 backdrop-blur-sm">
               <CardContent className="pt-6">
-                <Tabs defaultValue="deposit" className="w-full">
-                  <TabsList className="grid w-full grid-cols-2 mb-6">
-                    <TabsTrigger value="deposit" className="flex items-center gap-2" data-testid="tab-deposit">
-                      <ArrowDownToLine className="w-4 h-4" />
-                      Deposit
+                <Tabs defaultValue="deposit-agent" className="w-full">
+                  <TabsList className="grid w-full grid-cols-4 mb-6">
+                    <TabsTrigger value="deposit-agent" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-deposit-agent">
+                      <ArrowDownToLine className="w-3 h-3 sm:w-4 sm:h-4" />
+                      <span className="hidden sm:inline">Deposit to</span> Agent
                     </TabsTrigger>
-                    <TabsTrigger value="withdraw" className="flex items-center gap-2" data-testid="tab-withdraw">
-                      <ArrowUpFromLine className="w-4 h-4" />
-                      Withdraw
+                    <TabsTrigger value="agent-drift" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-agent-drift">
+                      <ArrowRight className="w-3 h-3 sm:w-4 sm:h-4" />
+                      <span className="hidden sm:inline">Agent to</span> Drift
+                    </TabsTrigger>
+                    <TabsTrigger value="drift-agent" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-drift-agent">
+                      <ArrowLeft className="w-3 h-3 sm:w-4 sm:h-4" />
+                      <span className="hidden sm:inline">Drift to</span> Agent
+                    </TabsTrigger>
+                    <TabsTrigger value="withdraw-wallet" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-withdraw-wallet">
+                      <ArrowUpFromLine className="w-3 h-3 sm:w-4 sm:h-4" />
+                      <span className="hidden sm:inline">Withdraw to</span> Wallet
                     </TabsTrigger>
                   </TabsList>
                   
-                  <TabsContent value="deposit" className="space-y-4">
+                  <TabsContent value="deposit-agent" className="space-y-4">
                     <div className="p-4 bg-muted/30 rounded-xl space-y-4">
                       <div>
                         <div className="flex items-center justify-between mb-2">
@@ -416,13 +691,14 @@ export default function WalletManagement() {
                       </div>
                       
                       <div className="flex items-center justify-between text-sm text-muted-foreground">
-                        <span>From: Wallet</span>
-                        <span>To: Agent Account</span>
+                        <span>From: Phantom Wallet</span>
+                        <ArrowRight className="w-4 h-4" />
+                        <span>To: Agent Wallet</span>
                       </div>
                       
                       <Button
                         className="w-full bg-gradient-to-r from-primary to-accent"
-                        onClick={handleDeposit}
+                        onClick={handleDepositToAgent}
                         disabled={isDepositing || !depositAmount || parseFloat(depositAmount) <= 0}
                         data-testid="button-deposit"
                       >
@@ -441,7 +717,62 @@ export default function WalletManagement() {
                     </div>
                   </TabsContent>
                   
-                  <TabsContent value="withdraw" className="space-y-4">
+                  <TabsContent value="agent-drift" className="space-y-4">
+                    <div className="p-4 bg-muted/30 rounded-xl space-y-4">
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="text-sm font-medium">Amount (USDC)</label>
+                          <span className="text-xs text-muted-foreground">
+                            Available: ${(agentWallet?.balance ?? 0).toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="flex gap-2">
+                          <Input
+                            type="number"
+                            placeholder="0.00"
+                            value={agentToDriftAmount}
+                            onChange={(e) => setAgentToDriftAmount(e.target.value)}
+                            className="flex-1"
+                            data-testid="input-agent-drift-amount"
+                          />
+                          <Button 
+                            variant="outline" 
+                            onClick={setMaxAgentToDrift}
+                            data-testid="button-agent-drift-max"
+                          >
+                            Max
+                          </Button>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-center justify-between text-sm text-muted-foreground">
+                        <span>From: Agent Wallet</span>
+                        <ArrowRight className="w-4 h-4" />
+                        <span>To: Drift Protocol</span>
+                      </div>
+                      
+                      <Button
+                        className="w-full bg-gradient-to-r from-primary to-accent"
+                        onClick={handleAgentToDrift}
+                        disabled={isAgentToDrift || !agentToDriftAmount || parseFloat(agentToDriftAmount) <= 0}
+                        data-testid="button-agent-drift"
+                      >
+                        {isAgentToDrift ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Processing...
+                          </>
+                        ) : (
+                          <>
+                            <ArrowRight className="w-4 h-4 mr-2" />
+                            Deposit to Drift
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </TabsContent>
+                  
+                  <TabsContent value="drift-agent" className="space-y-4">
                     <div className="p-4 bg-muted/30 rounded-xl space-y-4">
                       <div>
                         <div className="flex items-center justify-between mb-2">
@@ -454,15 +785,15 @@ export default function WalletManagement() {
                           <Input
                             type="number"
                             placeholder="0.00"
-                            value={withdrawAmount}
-                            onChange={(e) => setWithdrawAmount(e.target.value)}
+                            value={driftToAgentAmount}
+                            onChange={(e) => setDriftToAgentAmount(e.target.value)}
                             className="flex-1"
-                            data-testid="input-withdraw-amount"
+                            data-testid="input-drift-agent-amount"
                           />
                           <Button 
                             variant="outline" 
-                            onClick={setMaxWithdraw}
-                            data-testid="button-withdraw-max"
+                            onClick={setMaxDriftToAgent}
+                            data-testid="button-drift-agent-max"
                           >
                             Max
                           </Button>
@@ -470,17 +801,73 @@ export default function WalletManagement() {
                       </div>
                       
                       <div className="flex items-center justify-between text-sm text-muted-foreground">
-                        <span>From: Agent Account</span>
-                        <span>To: Wallet</span>
+                        <span>From: Drift Protocol</span>
+                        <ArrowRight className="w-4 h-4" />
+                        <span>To: Agent Wallet</span>
                       </div>
                       
                       <Button
                         className="w-full bg-gradient-to-r from-primary to-accent"
-                        onClick={handleWithdraw}
-                        disabled={isWithdrawing || !withdrawAmount || parseFloat(withdrawAmount) <= 0}
-                        data-testid="button-withdraw"
+                        onClick={handleDriftToAgent}
+                        disabled={isDriftToAgent || !driftToAgentAmount || parseFloat(driftToAgentAmount) <= 0}
+                        data-testid="button-drift-agent"
                       >
-                        {isWithdrawing ? (
+                        {isDriftToAgent ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Processing...
+                          </>
+                        ) : (
+                          <>
+                            <ArrowLeft className="w-4 h-4 mr-2" />
+                            Withdraw to Agent
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </TabsContent>
+                  
+                  <TabsContent value="withdraw-wallet" className="space-y-4">
+                    <div className="p-4 bg-muted/30 rounded-xl space-y-4">
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="text-sm font-medium">Amount (USDC)</label>
+                          <span className="text-xs text-muted-foreground">
+                            Available: ${(agentWallet?.balance ?? 0).toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="flex gap-2">
+                          <Input
+                            type="number"
+                            placeholder="0.00"
+                            value={withdrawToWalletAmount}
+                            onChange={(e) => setWithdrawToWalletAmount(e.target.value)}
+                            className="flex-1"
+                            data-testid="input-withdraw-wallet-amount"
+                          />
+                          <Button 
+                            variant="outline" 
+                            onClick={setMaxWithdrawToWallet}
+                            data-testid="button-withdraw-wallet-max"
+                          >
+                            Max
+                          </Button>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-center justify-between text-sm text-muted-foreground">
+                        <span>From: Agent Wallet</span>
+                        <ArrowRight className="w-4 h-4" />
+                        <span>To: Phantom Wallet</span>
+                      </div>
+                      
+                      <Button
+                        className="w-full bg-gradient-to-r from-primary to-accent"
+                        onClick={handleWithdrawToWallet}
+                        disabled={isWithdrawingToWallet || !withdrawToWalletAmount || parseFloat(withdrawToWalletAmount) <= 0}
+                        data-testid="button-withdraw-wallet"
+                      >
+                        {isWithdrawingToWallet ? (
                           <>
                             <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                             Processing...

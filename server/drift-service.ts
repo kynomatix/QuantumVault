@@ -1,6 +1,7 @@
 import { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
 import { createHash } from 'crypto';
 import BN from 'bn.js';
+import { getAgentKeypair } from './agent-wallet';
 
 const DRIFT_TESTNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
@@ -627,5 +628,173 @@ export function getPrices(): Record<string, number> {
     'SOL-PERP': 138.37,
     'BTC-PERP': 91006,
     'ETH-PERP': 3106.29,
+  };
+}
+
+export async function buildAgentDriftDepositTransaction(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  amountUsdc: number,
+): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  const connection = getConnection();
+  const agentPubkey = new PublicKey(agentPublicKey);
+  const agentKeypair = getAgentKeypair(encryptedPrivateKey);
+  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  
+  const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
+  const userAccount = getUserAccountPDA(agentPubkey);
+  const userStats = getUserStatsPDA(agentPubkey);
+  const spotMarketVault = getSpotMarketVaultPDA(0);
+  const spotMarket = getSpotMarketPDA(0);
+  
+  const instructions: TransactionInstruction[] = [];
+  
+  const ataInfo = await connection.getAccountInfo(agentAta);
+  if (!ataInfo) {
+    console.log('[Drift] Agent ATA not found, adding creation instruction');
+    instructions.push(
+      createAssociatedTokenAccountInstruction(
+        agentPubkey,
+        agentAta,
+        agentPubkey,
+        usdcMint
+      )
+    );
+  }
+
+  const userStatsInfo = await connection.getAccountInfo(userStats);
+  if (!userStatsInfo) {
+    console.log('[Drift] Agent user stats not found, adding initialization instruction');
+    instructions.push(
+      createInitializeUserStatsInstruction(agentPubkey, userStats)
+    );
+  }
+
+  const userAccountInfo = await connection.getAccountInfo(userAccount);
+  if (!userAccountInfo) {
+    console.log('[Drift] Agent user account not found, adding initialization instruction');
+    instructions.push(
+      createInitializeUserInstruction(agentPubkey, userAccount, userStats)
+    );
+  }
+
+  const depositAmountLamports = Math.round(amountUsdc * 1_000_000);
+  if (depositAmountLamports <= 0) {
+    throw new Error('Invalid deposit amount');
+  }
+
+  const depositAmount = new BN(depositAmountLamports);
+  
+  instructions.push(
+    createDepositInstruction(
+      agentPubkey,
+      userAccount,
+      userStats,
+      agentAta,
+      spotMarketVault,
+      spotMarket,
+      DEVNET_USDC_ORACLE,
+      depositAmount
+    )
+  );
+  
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  
+  const transaction = new Transaction({
+    feePayer: agentPubkey,
+    blockhash,
+    lastValidBlockHeight,
+  });
+  
+  for (const ix of instructions) {
+    transaction.add(ix);
+  }
+  
+  transaction.sign(agentKeypair);
+  
+  const serializedTx = transaction.serialize().toString('base64');
+  
+  return {
+    transaction: serializedTx,
+    blockhash,
+    lastValidBlockHeight,
+    message: `Deposit ${amountUsdc} USDC from agent wallet to Drift`,
+  };
+}
+
+export async function buildAgentDriftWithdrawTransaction(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  amountUsdc: number,
+): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  const connection = getConnection();
+  const agentPubkey = new PublicKey(agentPublicKey);
+  const agentKeypair = getAgentKeypair(encryptedPrivateKey);
+  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  
+  const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
+  const userAccount = getUserAccountPDA(agentPubkey);
+  const userStats = getUserStatsPDA(agentPubkey);
+  const spotMarketVault = getSpotMarketVaultPDA(0);
+  const driftSigner = getDriftSignerPDA();
+  const spotMarket = getSpotMarketPDA(0);
+  
+  const instructions: TransactionInstruction[] = [];
+  
+  const ataInfo = await connection.getAccountInfo(agentAta);
+  if (!ataInfo) {
+    console.log('[Drift] Agent ATA not found, adding creation instruction');
+    instructions.push(
+      createAssociatedTokenAccountInstruction(
+        agentPubkey,
+        agentAta,
+        agentPubkey,
+        usdcMint
+      )
+    );
+  }
+
+  const withdrawAmountLamports = Math.round(amountUsdc * 1_000_000);
+  if (withdrawAmountLamports <= 0) {
+    throw new Error('Invalid withdraw amount');
+  }
+
+  const withdrawAmount = new BN(withdrawAmountLamports);
+  
+  instructions.push(
+    createWithdrawInstruction(
+      agentPubkey,
+      userAccount,
+      userStats,
+      agentAta,
+      spotMarketVault,
+      driftSigner,
+      spotMarket,
+      DEVNET_USDC_ORACLE,
+      withdrawAmount
+    )
+  );
+  
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  
+  const transaction = new Transaction({
+    feePayer: agentPubkey,
+    blockhash,
+    lastValidBlockHeight,
+  });
+  
+  for (const ix of instructions) {
+    transaction.add(ix);
+  }
+  
+  transaction.sign(agentKeypair);
+  
+  const serializedTx = transaction.serialize().toString('base64');
+  
+  return {
+    transaction: serializedTx,
+    blockhash,
+    lastValidBlockHeight,
+    message: `Withdraw ${amountUsdc} USDC from Drift to agent wallet`,
   };
 }
