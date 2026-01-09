@@ -3,17 +3,24 @@ import { encrypt, decrypt } from './crypto';
 import bs58 from 'bs58';
 import BN from 'bn.js';
 
-const DRIFT_TESTNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
+const DRIFT_ENV = (process.env.DRIFT_ENV || 'mainnet-beta') as 'devnet' | 'mainnet-beta';
+const IS_MAINNET = DRIFT_ENV === 'mainnet-beta';
+
+const MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const DEVNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
+const USDC_MINT = IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
+
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
-const DEVNET_RPC = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+const DEFAULT_RPC = IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
+const SOLANA_RPC = process.env.SOLANA_RPC_URL || DEFAULT_RPC;
 
 let connectionInstance: Connection | null = null;
 
 function getConnection(): Connection {
   if (!connectionInstance) {
-    connectionInstance = new Connection(DEVNET_RPC, 'confirmed');
+    connectionInstance = new Connection(SOLANA_RPC, 'confirmed');
   }
   return connectionInstance;
 }
@@ -54,7 +61,7 @@ export function getAgentKeypair(encryptedPrivateKey: string): Keypair {
 export async function getAgentUsdcBalance(agentPublicKey: string): Promise<number> {
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
-  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  const usdcMint = new PublicKey(USDC_MINT);
   
   const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
   
@@ -128,7 +135,7 @@ export async function buildTransferToAgentTransaction(
   const connection = getConnection();
   const userPubkey = new PublicKey(userWalletAddress);
   const agentPubkey = new PublicKey(agentPublicKey);
-  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  const usdcMint = new PublicKey(USDC_MINT);
   
   const userAta = getAssociatedTokenAddressSync(usdcMint, userPubkey);
   const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
@@ -196,7 +203,7 @@ export async function buildWithdrawFromAgentTransaction(
   const userPubkey = new PublicKey(userWalletAddress);
   const agentPubkey = new PublicKey(agentPublicKey);
   const agentKeypair = getAgentKeypair(encryptedPrivateKey);
-  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  const usdcMint = new PublicKey(USDC_MINT);
   
   const userAta = getAssociatedTokenAddressSync(usdcMint, userPubkey);
   const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
