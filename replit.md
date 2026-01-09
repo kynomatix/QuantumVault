@@ -43,17 +43,30 @@ Preferred communication style: Simple, everyday language.
 - **API Layer**: Custom hooks in `useApi.ts` wrap React Query for data fetching
 - **Storage Interface**: `IStorage` interface in `storage.ts` abstracts database operations
 
-### Funds Management System
-- **Drift Subaccounts**: Each trading bot operates on its own isolated Drift subaccount (1, 2, 3, etc.)
-- **Main Account**: Subaccount 0 is the user's main Drift account for deposits/withdrawals
-- **Capital Flow**:
-  1. Deposit: Wallet → Main Account (subaccount 0)
-  2. Allocate: Main Account → Bot Subaccount
-  3. Deallocate: Bot Subaccount → Main Account
-  4. Withdraw: Main Account → Wallet
+### Agent Wallet Architecture
+- **3-Tier Fund Flow**: User Phantom Wallet → Agent Wallet → Drift Protocol
+- **Agent Wallet**: Server-managed Solana wallet per user for autonomous trading
+  - Generated on first wallet connect
+  - Private key stored encrypted in database (wallets.agentPrivateKeyEncrypted)
+  - Public key visible to user (wallets.agentPublicKey)
+  - Signs all Drift interactions server-side for automated trade execution
+- **Capital Flow Operations**:
+  1. Deposit to Agent: User signs USDC transfer from Phantom to Agent Wallet
+  2. Agent to Drift: Agent signs deposit from Agent Wallet to Drift Protocol
+  3. Drift to Agent: Agent signs withdrawal from Drift to Agent Wallet
+  4. Withdraw to Wallet: Agent signs USDC transfer from Agent Wallet to Phantom
+- **Agent Wallet API Endpoints**:
+  - `GET /api/agent/balance` - Get agent wallet USDC balance
+  - `POST /api/agent/deposit` - Build tx for user to deposit to agent (user signs)
+  - `POST /api/agent/withdraw` - Agent sends USDC to user wallet (agent signs)
+  - `POST /api/agent/drift-deposit` - Agent deposits to Drift (agent signs)
+  - `POST /api/agent/drift-withdraw` - Agent withdraws from Drift (agent signs)
+
+### Drift Subaccounts
+- **Subaccount 0**: Main trading account (agent wallet's Drift account)
+- **Subaccounts 1+**: Individual trading bot subaccounts (future implementation)
 - **Delete Safety**: Bots with funds require sweep transaction before deletion
-- **Legacy Bots**: Old bots with agent wallets show "Migration needed" warning
-- **Capital Pool UI**: Shows total equity, main account balance, and per-bot allocations
+- **Capital Pool UI**: Shows Phantom balance, Agent Wallet balance, and Drift Protocol balance
 
 ## External Dependencies
 
