@@ -227,14 +227,62 @@ function getDriftSignerPDA(): PublicKey {
   return signer;
 }
 
+// Fallback oracle addresses (used if on-chain fetch fails)
 const DRIFT_DEVNET_USDC_ORACLE = new PublicKey('En8hkHLkRe9d9DraYmBTrus518BvmVH448YcvmrFM6Ce');
-// Updated to correct Pyth Lazer Stable Coin feed from Drift SDK spotMarkets.ts
 const DRIFT_MAINNET_USDC_ORACLE = new PublicKey('9VCioxmni2gDLv11qufWzT3RDERhQE4iY5Gf7NTfYyAV');
 
+// Cache for fetched oracles to avoid repeated RPC calls
+const oracleCache: Map<string, { oracle: PublicKey; timestamp: number }> = new Map();
+const ORACLE_CACHE_TTL = 60000; // 1 minute cache
+
 async function getSpotMarketOracle(connection: Connection, marketIndex: number = 0): Promise<PublicKey> {
-  const oracle = IS_MAINNET ? DRIFT_MAINNET_USDC_ORACLE : DRIFT_DEVNET_USDC_ORACLE;
-  console.log(`[Drift] Using ${IS_MAINNET ? 'mainnet' : 'devnet'} USDC oracle:`, oracle.toBase58());
-  return oracle;
+  const spotMarketPda = getSpotMarketPDA(marketIndex);
+  const cacheKey = `${spotMarketPda.toBase58()}-${marketIndex}`;
+  
+  // Check cache first
+  const cached = oracleCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < ORACLE_CACHE_TTL) {
+    console.log(`[Drift] Using cached oracle for market ${marketIndex}: ${cached.oracle.toBase58()}`);
+    return cached.oracle;
+  }
+  
+  try {
+    // Fetch the SpotMarket account from chain
+    const spotMarketAccount = await connection.getAccountInfo(spotMarketPda);
+    
+    if (!spotMarketAccount || !spotMarketAccount.data) {
+      console.warn(`[Drift] Could not fetch SpotMarket account, using fallback oracle`);
+      return IS_MAINNET ? DRIFT_MAINNET_USDC_ORACLE : DRIFT_DEVNET_USDC_ORACLE;
+    }
+    
+    // SpotMarket struct layout (from Drift V2):
+    // - 8 bytes: Anchor discriminator
+    // - 32 bytes: pubkey (some field)
+    // - 32 bytes: oracle (at offset 40)
+    // The oracle is at offset 40 from the start of the account data
+    const ORACLE_OFFSET = 40;
+    
+    if (spotMarketAccount.data.length < ORACLE_OFFSET + 32) {
+      console.warn(`[Drift] SpotMarket account data too short, using fallback oracle`);
+      return IS_MAINNET ? DRIFT_MAINNET_USDC_ORACLE : DRIFT_DEVNET_USDC_ORACLE;
+    }
+    
+    const oracleBytes = spotMarketAccount.data.slice(ORACLE_OFFSET, ORACLE_OFFSET + 32);
+    const oracle = new PublicKey(oracleBytes);
+    
+    console.log(`[Drift] Fetched oracle from on-chain SpotMarket ${marketIndex}: ${oracle.toBase58()}`);
+    console.log(`[Drift] SpotMarket PDA: ${spotMarketPda.toBase58()}`);
+    
+    // Cache the result
+    oracleCache.set(cacheKey, { oracle, timestamp: Date.now() });
+    
+    return oracle;
+  } catch (error) {
+    console.error(`[Drift] Error fetching SpotMarket oracle:`, error);
+    const fallback = IS_MAINNET ? DRIFT_MAINNET_USDC_ORACLE : DRIFT_DEVNET_USDC_ORACLE;
+    console.log(`[Drift] Using fallback oracle: ${fallback.toBase58()}`);
+    return fallback;
+  }
 }
 
 function createInitializeUserStatsInstruction(

@@ -1,0 +1,60 @@
+Based on your error codes and the codebase analysis, here is the diagnosis and fix.
+
+### 1. Error 3002: Account Discriminator Mismatch
+The error `{"Custom":3002}` means "Account Discriminator Mismatch". This confirms that your **"New (Fixed) Order" is actually incorrect** for the V2/V3 program.
+
+The `Deposit` instruction structure (verified in `programs/drift/src/instructions/user.rs`) expects exactly **7 main accounts**. You are sending 9 accounts, but crucially, you are likely putting the `spotMarket` account in the wrong slot.
+
+**Correct Account Order (Indices 0-6):**
+0. `state`
+1. `user` (User Account PDA)
+2. `userStats` (User Stats PDA)
+3. `authority` (Wallet Signer)
+4. `spotMarketVault` (Token Account)
+5. `userTokenAccount` (Token Account)
+6. `tokenProgram`
+
+**The Missing Accounts (`spotMarket` & `oracle`):**
+These must be passed as **remaining accounts**. The program iterates through `remaining_accounts` to find the spot market and its oracle.
+
+### 2. Error 6036: Oracle Not Found
+This error (`OracleNotFound`) persists because even when you had the account order correct (in your "Old" attempt), the program logic failed to validate the oracle.
+
+The function `handle_deposit` calls `load_maps` which iterates through `remaining_accounts` to build the market map.
+It then calls `spot_market_map.get_ref_mut(&market_index)` and attempts to load the price data for `spot_market.oracle`.
+
+If you receive `6036`, it means one of two things:
+1.  You didn't pass the Oracle account at all in `remaining_accounts`.
+2.  You passed the Oracle account, but you **didn't pass the Spot Market account** in `remaining_accounts`.
+
+**Crucial Logic:**
+The program needs to read the Spot Market account to *know* which Oracle address to look for. If the Spot Market account is missing from `remaining_accounts`, it can't load the market definition, and thus can't validate the oracle.
+
+### The Fix: Correct Transaction Construction
+
+You must use the following structure. Note that `spotMarket` and `oracle` are appended to the end of the transaction as `remainingAccounts`.
+
+```typescript
+// Correct Manual Deposit Instruction Construction
+const keys = [
+    { pubkey: statePublicKey, isSigner: false, isWritable: false },
+    { pubkey: userAccountPublicKey, isSigner: false, isWritable: true },
+    { pubkey: userStatsPublicKey, isSigner: false, isWritable: true },
+    { pubkey: authorityPublicKey, isSigner: true, isWritable: false }, // Signer
+    { pubkey: spotMarketVaultPublicKey, isSigner: false, isWritable: true },
+    { pubkey: userTokenAccountPublicKey, isSigner: false, isWritable: true },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    // REMAINING ACCOUNTS START HERE
+    { pubkey: spotMarketPublicKey, isSigner: false, isWritable: true }, // Must be Writable
+    { pubkey: oraclePublicKey, isSigner: false, isWritable: false } // The CORRECT oracle (9VC...)
+];
+
+const data = ... // Encode the 'deposit' instruction data (8 bytes discriminator + params)
+```
+
+**Key Requirements:**
+*   **Indices 0-6:** Must match the `Deposit` struct exactly.
+*   **Remaining Account 1:** The `SpotMarket` account. It **must be writable** (`isWritable: true`) because the deposit updates the market's cumulative interest and balances.
+*   **Remaining Account 2:** The `Oracle` account (`9VC...`).
+
+If you leave out the `SpotMarket` from remaining accounts, or make it read-only when it needs to be writable (for interest updates), the program will fail to load the market map correctly, leading to the "Oracle Not Found" or "Market Not Found" errors.
