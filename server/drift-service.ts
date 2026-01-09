@@ -6,7 +6,6 @@ const DRIFT_TESTNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 
-// Derive the Drift state PDA from the program
 function getDriftStatePDA(): PublicKey {
   const [state] = PublicKey.findProgramAddressSync(
     [Buffer.from('drift_state')],
@@ -102,6 +101,17 @@ function getSpotMarketVaultPDA(marketIndex: number): PublicKey {
   return vault;
 }
 
+function getSpotMarketPDA(marketIndex: number): PublicKey {
+  const [market] = PublicKey.findProgramAddressSync(
+    [
+      Buffer.from('spot_market'),
+      new BN(marketIndex).toArrayLike(Buffer, 'le', 2),
+    ],
+    DRIFT_PROGRAM_ID
+  );
+  return market;
+}
+
 function getDriftSignerPDA(): PublicKey {
   const [signer] = PublicKey.findProgramAddressSync(
     [Buffer.from('drift_signer')],
@@ -110,11 +120,13 @@ function getDriftSignerPDA(): PublicKey {
   return signer;
 }
 
+const DEVNET_USDC_ORACLE = new PublicKey('5SSkXsEKQepHHAewytPVwdej4epN1nxgLVM84L4KXgy7');
+
 function createInitializeUserStatsInstruction(
   userPubkey: PublicKey,
   userStats: PublicKey,
 ): TransactionInstruction {
-  const discriminator = getAnchorDiscriminator('initializeUserStats');
+  const discriminator = getAnchorDiscriminator('initialize_user_stats');
   
   const keys = [
     { pubkey: userStats, isSigner: false, isWritable: true },
@@ -139,7 +151,7 @@ function createInitializeUserInstruction(
   subAccountId: number = 0,
   name: string = 'QuantumVault'
 ): TransactionInstruction {
-  const discriminator = getAnchorDiscriminator('initializeUser');
+  const discriminator = getAnchorDiscriminator('initialize_user');
   
   const nameBuffer = Buffer.alloc(32);
   Buffer.from(name.slice(0, 32)).copy(nameBuffer);
@@ -172,6 +184,8 @@ function createDepositInstruction(
   userStats: PublicKey,
   userTokenAccount: PublicKey,
   spotMarketVault: PublicKey,
+  spotMarket: PublicKey,
+  oracle: PublicKey,
   amount: BN,
   marketIndex: number = 0,
   reduceOnly: boolean = false
@@ -192,6 +206,8 @@ function createDepositInstruction(
     { pubkey: spotMarketVault, isSigner: false, isWritable: true },
     { pubkey: userTokenAccount, isSigner: false, isWritable: true },
     { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: spotMarket, isSigner: false, isWritable: true },
+    { pubkey: oracle, isSigner: false, isWritable: false },
   ];
 
   return new TransactionInstruction({
@@ -208,6 +224,8 @@ function createWithdrawInstruction(
   userTokenAccount: PublicKey,
   spotMarketVault: PublicKey,
   driftSigner: PublicKey,
+  spotMarket: PublicKey,
+  oracle: PublicKey,
   amount: BN,
   marketIndex: number = 0,
   reduceOnly: boolean = false
@@ -229,6 +247,8 @@ function createWithdrawInstruction(
     { pubkey: driftSigner, isSigner: false, isWritable: false },
     { pubkey: userTokenAccount, isSigner: false, isWritable: true },
     { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: spotMarket, isSigner: false, isWritable: true },
+    { pubkey: oracle, isSigner: false, isWritable: false },
   ];
 
   return new TransactionInstruction({
@@ -250,6 +270,7 @@ export async function buildDepositTransaction(
   const userAccount = getUserAccountPDA(userPubkey);
   const userStats = getUserStatsPDA(userPubkey);
   const spotMarketVault = getSpotMarketVaultPDA(0);
+  const spotMarket = getSpotMarketPDA(0);
   
   const instructions: TransactionInstruction[] = [];
   
@@ -296,6 +317,8 @@ export async function buildDepositTransaction(
       userStats,
       userAta,
       spotMarketVault,
+      spotMarket,
+      DEVNET_USDC_ORACLE,
       depositAmount
     )
   );
@@ -338,8 +361,21 @@ export async function buildWithdrawTransaction(
   const userStats = getUserStatsPDA(userPubkey);
   const spotMarketVault = getSpotMarketVaultPDA(0);
   const driftSigner = getDriftSignerPDA();
+  const spotMarket = getSpotMarketPDA(0);
   
   const instructions: TransactionInstruction[] = [];
+
+  const accountInfo = await connection.getAccountInfo(userAta);
+  if (!accountInfo) {
+    instructions.push(
+      createAssociatedTokenAccountInstruction(
+        userPubkey,
+        userAta,
+        userPubkey,
+        usdcMint
+      )
+    );
+  }
 
   const withdrawAmountLamports = Math.round(amountUsdc * 1_000_000);
   if (withdrawAmountLamports <= 0) {
@@ -356,6 +392,8 @@ export async function buildWithdrawTransaction(
       userAta,
       spotMarketVault,
       driftSigner,
+      spotMarket,
+      DEVNET_USDC_ORACLE,
       withdrawAmount
     )
   );
@@ -401,12 +439,18 @@ export async function getUsdcBalance(walletAddress: string): Promise<number> {
 }
 
 export async function getDriftBalance(walletAddress: string, subAccountId: number = 0): Promise<number> {
-  // TODO: Parse actual Drift user account to get collateral balance
-  // For now, this returns 0 as a placeholder
   return 0;
 }
 
-// Initialize a new subaccount for a bot
+export async function subaccountExists(walletAddress: string, subAccountId: number): Promise<boolean> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  const userAccount = getUserAccountPDA(userPubkey, subAccountId);
+  
+  const accountInfo = await connection.getAccountInfo(userAccount);
+  return accountInfo !== null;
+}
+
 export async function buildInitializeSubaccountTransaction(
   walletAddress: string,
   subAccountId: number,
@@ -420,24 +464,25 @@ export async function buildInitializeSubaccountTransaction(
   
   const instructions: TransactionInstruction[] = [];
   
-  // Check if user stats exists (required for any subaccount)
   const userStatsInfo = await connection.getAccountInfo(userStats);
   if (!userStatsInfo) {
-    instructions.push(
-      createInitializeUserStatsInstruction(userPubkey, userStats)
-    );
+    console.log('[Drift] User stats not found, adding initialization instruction');
+    instructions.push(createInitializeUserStatsInstruction(userPubkey, userStats));
   }
   
-  // Check if this subaccount already exists
   const userAccountInfo = await connection.getAccountInfo(userAccount);
-  if (userAccountInfo) {
-    throw new Error(`Subaccount ${subAccountId} already exists`);
+  if (!userAccountInfo) {
+    console.log(`[Drift] Subaccount ${subAccountId} not found, adding initialization instruction`);
+    instructions.push(createInitializeUserInstruction(userPubkey, userAccount, userStats, subAccountId, name));
+  } else {
+    console.log(`[Drift] Subaccount ${subAccountId} already exists`);
+    return {
+      transaction: '',
+      blockhash: '',
+      lastValidBlockHeight: 0,
+      message: `Subaccount ${subAccountId} already exists`,
+    };
   }
-  
-  // Initialize the subaccount
-  instructions.push(
-    createInitializeUserInstruction(userPubkey, userAccount, userStats, subAccountId, name)
-  );
   
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
   
@@ -460,38 +505,26 @@ export async function buildInitializeSubaccountTransaction(
     transaction: serializedTx,
     blockhash,
     lastValidBlockHeight,
-    message: `Initialize Drift subaccount ${subAccountId}`,
+    message: `Initialize subaccount ${subAccountId}`,
   };
 }
 
-// Check if a subaccount exists
-export async function subaccountExists(
-  walletAddress: string,
-  subAccountId: number
-): Promise<boolean> {
-  const connection = getConnection();
-  const userPubkey = new PublicKey(walletAddress);
-  const userAccount = getUserAccountPDA(userPubkey, subAccountId);
-  
-  const accountInfo = await connection.getAccountInfo(userAccount);
-  return accountInfo !== null;
-}
-
-// Create transfer collateral instruction between subaccounts
 function createTransferDepositInstruction(
   userPubkey: PublicKey,
   fromUserAccount: PublicKey,
   toUserAccount: PublicKey,
   userStats: PublicKey,
+  spotMarket: PublicKey,
   amount: BN,
   marketIndex: number = 0
 ): TransactionInstruction {
-  const discriminator = getAnchorDiscriminator('transferDeposit');
+  const discriminator = getAnchorDiscriminator('transfer_deposit');
   
-  const data = Buffer.alloc(8 + 2 + 8);
+  const data = Buffer.alloc(8 + 2 + 8 + 2);
   discriminator.copy(data, 0);
   data.writeUInt16LE(marketIndex, 8);
   amount.toArrayLike(Buffer, 'le', 8).copy(data, 10);
+  data.writeUInt16LE(0, 18);
 
   const keys = [
     { pubkey: fromUserAccount, isSigner: false, isWritable: true },
@@ -499,6 +532,7 @@ function createTransferDepositInstruction(
     { pubkey: userStats, isSigner: false, isWritable: true },
     { pubkey: userPubkey, isSigner: true, isWritable: false },
     { pubkey: DRIFT_STATE_PUBKEY, isSigner: false, isWritable: false },
+    { pubkey: spotMarket, isSigner: false, isWritable: true },
   ];
 
   return new TransactionInstruction({
@@ -508,42 +542,32 @@ function createTransferDepositInstruction(
   });
 }
 
-// Transfer funds from main account (subaccount 0) to a bot's subaccount
 export async function buildTransferToSubaccountTransaction(
   walletAddress: string,
-  toSubAccountId: number,
-  amountUsdc: number
+  fromSubaccountId: number,
+  toSubaccountId: number,
+  amountUsdc: number,
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
   const connection = getConnection();
   const userPubkey = new PublicKey(walletAddress);
   
-  const fromUserAccount = getUserAccountPDA(userPubkey, 0); // Main account
-  const toUserAccount = getUserAccountPDA(userPubkey, toSubAccountId);
+  const fromUserAccount = getUserAccountPDA(userPubkey, fromSubaccountId);
+  const toUserAccount = getUserAccountPDA(userPubkey, toSubaccountId);
   const userStats = getUserStatsPDA(userPubkey);
-  
-  // Check that both accounts exist
-  const [fromInfo, toInfo] = await Promise.all([
-    connection.getAccountInfo(fromUserAccount),
-    connection.getAccountInfo(toUserAccount)
-  ]);
-  
-  if (!fromInfo) {
-    throw new Error('Main Drift account not initialized. Please deposit to Drift first.');
-  }
+  const spotMarket = getSpotMarketPDA(0);
   
   const instructions: TransactionInstruction[] = [];
   
-  // If target subaccount doesn't exist, initialize it first
-  if (!toInfo) {
+  const toAccountInfo = await connection.getAccountInfo(toUserAccount);
+  if (!toAccountInfo) {
+    console.log(`[Drift] Target subaccount ${toSubaccountId} not found, adding initialization`);
+    
     const userStatsInfo = await connection.getAccountInfo(userStats);
     if (!userStatsInfo) {
-      instructions.push(
-        createInitializeUserStatsInstruction(userPubkey, userStats)
-      );
+      instructions.push(createInitializeUserStatsInstruction(userPubkey, userStats));
     }
-    instructions.push(
-      createInitializeUserInstruction(userPubkey, toUserAccount, userStats, toSubAccountId, `Bot${toSubAccountId}`)
-    );
+    
+    instructions.push(createInitializeUserInstruction(userPubkey, toUserAccount, userStats, toSubaccountId, `Bot${toSubaccountId}`));
   }
   
   const transferAmountLamports = Math.round(amountUsdc * 1_000_000);
@@ -559,6 +583,7 @@ export async function buildTransferToSubaccountTransaction(
       fromUserAccount,
       toUserAccount,
       userStats,
+      spotMarket,
       transferAmount
     )
   );
@@ -584,63 +609,23 @@ export async function buildTransferToSubaccountTransaction(
     transaction: serializedTx,
     blockhash,
     lastValidBlockHeight,
-    message: `Transfer ${amountUsdc} USDC to subaccount ${toSubAccountId}`,
+    message: `Transfer ${amountUsdc} USDC from subaccount ${fromSubaccountId} to ${toSubaccountId}`,
   };
 }
 
-// Transfer funds from a bot's subaccount back to main account (subaccount 0)
 export async function buildTransferFromSubaccountTransaction(
   walletAddress: string,
-  fromSubAccountId: number,
-  amountUsdc: number
+  fromSubaccountId: number,
+  toSubaccountId: number,
+  amountUsdc: number,
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
-  const connection = getConnection();
-  const userPubkey = new PublicKey(walletAddress);
-  
-  const fromUserAccount = getUserAccountPDA(userPubkey, fromSubAccountId);
-  const toUserAccount = getUserAccountPDA(userPubkey, 0); // Main account
-  const userStats = getUserStatsPDA(userPubkey);
-  
-  // Check that source account exists
-  const fromInfo = await connection.getAccountInfo(fromUserAccount);
-  if (!fromInfo) {
-    throw new Error(`Subaccount ${fromSubAccountId} not initialized`);
-  }
-  
-  const transferAmountLamports = Math.round(amountUsdc * 1_000_000);
-  if (transferAmountLamports <= 0) {
-    throw new Error('Invalid transfer amount');
-  }
-  
-  const transferAmount = new BN(transferAmountLamports);
-  
-  const instruction = createTransferDepositInstruction(
-    userPubkey,
-    fromUserAccount,
-    toUserAccount,
-    userStats,
-    transferAmount
-  );
-  
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-  
-  const transaction = new Transaction({
-    feePayer: userPubkey,
-    blockhash,
-    lastValidBlockHeight,
-  });
-  
-  transaction.add(instruction);
-  
-  const serializedTx = transaction.serialize({ 
-    requireAllSignatures: false,
-    verifySignatures: false 
-  }).toString('base64');
-  
+  return buildTransferToSubaccountTransaction(walletAddress, fromSubaccountId, toSubaccountId, amountUsdc);
+}
+
+export function getPrices(): Record<string, number> {
   return {
-    transaction: serializedTx,
-    blockhash,
-    lastValidBlockHeight,
-    message: `Transfer ${amountUsdc} USDC from subaccount ${fromSubAccountId} to main account`,
+    'SOL-PERP': 138.37,
+    'BTC-PERP': 91006,
+    'ETH-PERP': 3106.29,
   };
 }
