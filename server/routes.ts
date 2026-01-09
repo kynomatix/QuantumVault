@@ -794,25 +794,27 @@ export async function registerRoutes(
     // Generate signal hash for deduplication
     const signalHash = generateSignalHash(botId, req.body);
     
-    // Log webhook with signal hash
-    const log = await storage.createWebhookLog({
-      tradingBotId: botId,
-      payload: req.body,
-      headers: req.headers as any,
-      ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
-      processed: false,
-      signalHash,
-    });
-
+    // Log webhook with signal hash - unique index prevents concurrent duplicates
+    let log;
     try {
-      // Check for duplicate signal (prevents glitchy double executions)
-      const isDuplicate = await storage.checkDuplicateSignal(signalHash, botId);
-      if (isDuplicate) {
-        console.log(`[Webhook] Duplicate signal detected, skipping: hash=${signalHash}`);
-        await storage.updateWebhookLog(log.id, { errorMessage: "Duplicate signal - already executed", processed: true });
+      log = await storage.createWebhookLog({
+        tradingBotId: botId,
+        payload: req.body,
+        headers: req.headers as any,
+        ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
+        processed: false,
+        signalHash,
+      });
+    } catch (dbError: any) {
+      // Unique constraint violation means this signal was already received
+      if (dbError?.code === '23505') {
+        console.log(`[Webhook] Duplicate signal blocked at creation: hash=${signalHash}`);
         return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
       }
+      throw dbError;
+    }
 
+    try {
       // Get bot
       const bot = await storage.getTradingBotById(botId);
       if (!bot) {
@@ -1021,7 +1023,17 @@ export async function registerRoutes(
         lastTradeAt: new Date().toISOString(),
       });
 
-      await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
+      // Mark signal as executed (unique index prevents concurrent duplicates)
+      try {
+        await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
+      } catch (dbError: any) {
+        // Unique constraint violation means another request already executed this signal
+        if (dbError?.code === '23505') {
+          console.log(`[Webhook] Concurrent duplicate detected at DB level, signal already executed: hash=${signalHash}`);
+          return res.status(200).json({ status: "skipped", reason: "concurrent duplicate" });
+        }
+        throw dbError;
+      }
 
       res.json({
         success: true,
@@ -1043,15 +1055,33 @@ export async function registerRoutes(
   app.post("/api/webhook/user/:walletAddress", async (req, res) => {
     const { walletAddress } = req.params;
     const { secret } = req.query;
+    const payload = req.body;
 
-    // Log webhook
-    const log = await storage.createWebhookLog({
-      tradingBotId: null,
-      payload: req.body,
-      headers: req.headers as any,
-      ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
-      processed: false,
-    });
+    // Extract botId early for signal hash generation
+    const botId = payload?.botId;
+    
+    // Generate signal hash for deduplication (only if botId exists)
+    const signalHash = botId ? generateSignalHash(botId, payload) : null;
+
+    // Log webhook with signal hash - unique index prevents concurrent duplicates
+    let log;
+    try {
+      log = await storage.createWebhookLog({
+        tradingBotId: botId || null,
+        payload: payload,
+        headers: req.headers as any,
+        ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
+        processed: false,
+        signalHash,
+      });
+    } catch (dbError: any) {
+      // Unique constraint violation means this signal was already received
+      if (dbError?.code === '23505') {
+        console.log(`[User Webhook] Duplicate signal blocked at creation: hash=${signalHash}`);
+        return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
+      }
+      throw dbError;
+    }
 
     try {
       // Get wallet
@@ -1067,9 +1097,7 @@ export async function registerRoutes(
         return res.status(401).json({ error: "Invalid secret" });
       }
 
-      // Extract botId from payload
-      const payload = req.body;
-      const botId = payload.botId;
+      // Verify botId exists
       if (!botId) {
         await storage.updateWebhookLog(log.id, { errorMessage: "Missing botId in payload" });
         return res.status(400).json({ error: "Missing botId in payload" });
@@ -1078,27 +1106,13 @@ export async function registerRoutes(
       // Get bot and verify ownership
       const bot = await storage.getTradingBotById(botId);
       if (!bot) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Bot not found", tradingBotId: botId });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Bot not found" });
         return res.status(404).json({ error: "Bot not found" });
       }
 
       if (bot.walletAddress !== walletAddress) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Bot does not belong to this wallet", tradingBotId: botId });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Bot does not belong to this wallet" });
         return res.status(403).json({ error: "Bot does not belong to this wallet" });
-      }
-
-      // Generate signal hash and check for duplicates
-      const signalHash = generateSignalHash(botId, payload);
-      
-      // Update webhook log with botId and signal hash
-      await storage.updateWebhookLog(log.id, { tradingBotId: botId, signalHash });
-
-      // Check for duplicate signal (prevents glitchy double executions)
-      const isDuplicate = await storage.checkDuplicateSignal(signalHash, botId);
-      if (isDuplicate) {
-        console.log(`[User Webhook] Duplicate signal detected, skipping: hash=${signalHash}`);
-        await storage.updateWebhookLog(log.id, { errorMessage: "Duplicate signal - already executed", processed: true });
-        return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
       }
 
       // Check if bot is active
@@ -1276,7 +1290,17 @@ export async function registerRoutes(
         lastTradeAt: new Date().toISOString(),
       });
 
-      await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
+      // Mark signal as executed (unique index prevents concurrent duplicates)
+      try {
+        await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
+      } catch (dbError: any) {
+        // Unique constraint violation means another request already executed this signal
+        if (dbError?.code === '23505') {
+          console.log(`[User Webhook] Concurrent duplicate detected at DB level, signal already executed: hash=${signalHash}`);
+          return res.status(200).json({ status: "skipped", reason: "concurrent duplicate" });
+        }
+        throw dbError;
+      }
 
       res.json({
         success: true,
