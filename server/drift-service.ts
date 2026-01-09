@@ -711,6 +711,94 @@ export async function subaccountExists(walletAddress: string, subAccountId: numb
   return accountInfo !== null;
 }
 
+export interface DriftAccountInfo {
+  usdcBalance: number;
+  freeCollateral: number;
+  hasOpenPositions: boolean;
+  marginUsed: number;
+}
+
+export async function getDriftAccountInfo(walletAddress: string, subAccountId: number = 0): Promise<DriftAccountInfo> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  const userAccount = getUserAccountPDA(userPubkey, subAccountId);
+  
+  const defaultResult: DriftAccountInfo = {
+    usdcBalance: 0,
+    freeCollateral: 0,
+    hasOpenPositions: false,
+    marginUsed: 0,
+  };
+  
+  try {
+    const accountInfo = await connection.getAccountInfo(userAccount);
+    
+    if (!accountInfo || !accountInfo.data) {
+      return defaultResult;
+    }
+    
+    const data = accountInfo.data;
+    
+    // Get USDC balance using existing logic
+    const usdcBalance = await getDriftBalance(walletAddress, subAccountId);
+    
+    // Check for open perp positions
+    // PerpPositions array starts after SpotPositions in the User account
+    // SpotPositions: 8 positions * 48 bytes = 384 bytes, starting at offset 80
+    // PerpPositions start at offset 80 + 384 = 464
+    const PERP_POSITIONS_OFFSET = 464;
+    const PERP_POSITION_SIZE = 128; // Larger than spot positions
+    const MAX_PERP_POSITIONS = 8;
+    
+    let hasOpenPositions = false;
+    let totalBaseAsset = 0;
+    
+    for (let i = 0; i < MAX_PERP_POSITIONS; i++) {
+      const posOffset = PERP_POSITIONS_OFFSET + (i * PERP_POSITION_SIZE);
+      
+      if (posOffset + 16 > data.length) break;
+      
+      try {
+        // Base asset amount is at offset 0 of each perp position (i128)
+        const baseAssetLow = data.readBigInt64LE(posOffset);
+        const baseAsset = Number(baseAssetLow);
+        
+        if (baseAsset !== 0) {
+          hasOpenPositions = true;
+          totalBaseAsset += Math.abs(baseAsset);
+        }
+      } catch (e) {
+        // Skip invalid reads
+      }
+    }
+    
+    // Calculate free collateral
+    // If there are open positions, estimate margin requirement as ~50% of position value
+    // This is a conservative estimate - actual margin depends on leverage settings
+    let marginUsed = 0;
+    if (hasOpenPositions) {
+      // Conservative estimate: assume ~50% of USDC balance is margin if positions exist
+      // The actual margin is calculated by Drift based on position size and oracle prices
+      marginUsed = Math.min(usdcBalance * 0.5, usdcBalance - 0.01);
+    }
+    
+    // Free collateral = balance - margin used (with small buffer for safety)
+    const freeCollateral = Math.max(0, usdcBalance - marginUsed - 0.01);
+    
+    console.log(`[Drift] Account info: balance=${usdcBalance.toFixed(4)}, marginUsed=${marginUsed.toFixed(4)}, free=${freeCollateral.toFixed(4)}, hasPositions=${hasOpenPositions}`);
+    
+    return {
+      usdcBalance,
+      freeCollateral,
+      hasOpenPositions,
+      marginUsed,
+    };
+  } catch (error) {
+    console.error(`[Drift] Error reading account info:`, error);
+    return defaultResult;
+  }
+}
+
 export async function buildInitializeSubaccountTransaction(
   walletAddress: string,
   subAccountId: number,

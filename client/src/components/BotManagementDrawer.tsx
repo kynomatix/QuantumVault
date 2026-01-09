@@ -126,6 +126,8 @@ export function BotManagementDrawer({
   const [botBalance, setBotBalance] = useState<number>(0);
   const [mainAccountBalance, setMainAccountBalance] = useState<number>(0);
   const [driftBalance, setDriftBalance] = useState<number>(0);
+  const [driftFreeCollateral, setDriftFreeCollateral] = useState<number>(0);
+  const [hasOpenPositions, setHasOpenPositions] = useState<boolean>(false);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [trades, setTrades] = useState<BotTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(false);
@@ -209,6 +211,8 @@ export function BotManagementDrawer({
       if (driftRes.ok) {
         const data = await driftRes.json();
         setDriftBalance(data.balance ?? 0);
+        setDriftFreeCollateral(data.freeCollateral ?? data.balance ?? 0);
+        setHasOpenPositions(data.hasOpenPositions ?? false);
       }
     } catch (error) {
       console.error('Failed to fetch balances:', error);
@@ -811,7 +815,7 @@ export function BotManagementDrawer({
                     variant="ghost"
                     size="sm"
                     className="absolute right-1 top-1/2 -translate-y-1/2 h-7 px-2 text-xs"
-                    onClick={() => setRemoveEquityAmount(driftBalance.toString())}
+                    onClick={() => setRemoveEquityAmount(driftFreeCollateral.toFixed(2))}
                     data-testid="button-remove-max"
                   >
                     Max
@@ -829,6 +833,11 @@ export function BotManagementDrawer({
               <p className="text-xs text-muted-foreground">
                 Withdraw USDC from Drift back to your agent wallet
               </p>
+              {hasOpenPositions && driftBalance > driftFreeCollateral && (
+                <p className="text-xs text-amber-500">
+                  Note: ${(driftBalance - driftFreeCollateral).toFixed(2)} is locked as margin for open positions
+                </p>
+              )}
             </div>
 
             <div className="p-4 rounded-xl border border-blue-500/30 bg-blue-500/5">
