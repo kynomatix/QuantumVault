@@ -1484,3 +1484,166 @@ export async function getAgentDriftBalance(
 ): Promise<number> {
   return getDriftBalance(agentPublicKey, 0);
 }
+
+// Market indices for perpetual markets
+const PERP_MARKET_INDICES: Record<string, number> = {
+  'SOL-PERP': 0,
+  'BTC-PERP': 1,
+  'ETH-PERP': 2,
+  'SOL': 0,
+  'BTC': 1,
+  'ETH': 2,
+  'SOLUSD': 0,
+  'BTCUSD': 1,
+  'ETHUSD': 2,
+};
+
+export async function executePerpOrder(
+  encryptedPrivateKey: string,
+  market: string,
+  side: 'long' | 'short',
+  sizeInBase: number,
+  subAccountId: number = 0,
+): Promise<{ success: boolean; signature?: string; error?: string; fillPrice?: number }> {
+  try {
+    // Import SDK types
+    const { PositionDirection, OrderType, MarketType, BASE_PRECISION } = await import('@drift-labs/sdk');
+    
+    // Get market index
+    const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
+    const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
+    
+    console.log(`[Drift] Executing ${side} order for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}`);
+    
+    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey);
+    
+    try {
+      // NOTE: Currently all trades execute on subaccount 0
+      // Multi-subaccount support requires additional setup (addUser + proper PDA derivation)
+      // This is marked as future implementation in the architecture
+      if (subAccountId !== 0) {
+        console.log(`[Drift] Bot configured for subaccount ${subAccountId}, but executing on subaccount 0 (multi-subaccount not yet implemented)`);
+      }
+      
+      // Convert size to base precision (1e9)
+      const basePrecision = new BN(BASE_PRECISION.toString());
+      const baseAssetAmount = new BN(Math.round(sizeInBase * 1e9));
+      
+      // Determine direction
+      const direction = side === 'long' ? PositionDirection.LONG : PositionDirection.SHORT;
+      
+      console.log(`[Drift] Placing ${side} market order: ${sizeInBase} contracts`);
+      
+      // Use placeAndTakePerpOrder for immediate market execution
+      const txSig = await driftClient.placeAndTakePerpOrder({
+        direction,
+        baseAssetAmount,
+        marketIndex,
+        marketType: MarketType.PERP,
+        orderType: OrderType.MARKET,
+      });
+      
+      console.log(`[Drift] Order executed: ${txSig}`);
+      
+      // Try to get fill price from user account
+      let fillPrice: number | undefined;
+      try {
+        const user = driftClient.getUser();
+        const perpPosition = user.getPerpPosition(marketIndex);
+        if (perpPosition && !perpPosition.baseAssetAmount.isZero()) {
+          // Entry price = quoteAssetAmount / baseAssetAmount (both in precision)
+          const quoteAbs = Math.abs(perpPosition.quoteAssetAmount.toNumber());
+          const baseAbs = Math.abs(perpPosition.baseAssetAmount.toNumber());
+          if (baseAbs > 0) {
+            // quoteAssetAmount is in QUOTE_PRECISION (1e6), baseAssetAmount in BASE_PRECISION (1e9)
+            fillPrice = (quoteAbs / baseAbs) * 1e3; // Normalize to actual price
+          }
+        }
+      } catch (e) {
+        console.warn('[Drift] Could not get fill price:', e);
+      }
+      
+      await cleanup();
+      return { success: true, signature: txSig, fillPrice };
+    } catch (orderError) {
+      await cleanup();
+      throw orderError;
+    }
+  } catch (error) {
+    console.error('[Drift] Order execution error:', error);
+    
+    let errorMessage: string;
+    if (error instanceof Error) {
+      errorMessage = error.message;
+      
+      // Check for common Drift errors
+      if (errorMessage.includes('6010')) {
+        errorMessage = 'Insufficient collateral to open position. Please deposit more funds to Drift.';
+      } else if (errorMessage.includes('6001')) {
+        errorMessage = 'User account not initialized. Please deposit funds first.';
+      } else if (errorMessage.includes('6040')) {
+        errorMessage = 'Max position size exceeded. Reduce order size or check bot settings.';
+      }
+    } else {
+      errorMessage = String(error);
+    }
+    
+    return { success: false, error: errorMessage };
+  }
+}
+
+export async function closePerpPosition(
+  encryptedPrivateKey: string,
+  market: string,
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    const { PositionDirection, OrderType, MarketType } = await import('@drift-labs/sdk');
+    
+    const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
+    const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
+    
+    console.log(`[Drift] Closing position for ${market} (index ${marketIndex})`);
+    
+    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey);
+    
+    try {
+      // Get current position
+      const user = driftClient.getUser();
+      const perpPosition = user.getPerpPosition(marketIndex);
+      
+      if (!perpPosition || perpPosition.baseAssetAmount.isZero()) {
+        await cleanup();
+        return { success: true, signature: undefined }; // No position to close
+      }
+      
+      // Determine direction to close (opposite of current position)
+      const isLong = perpPosition.baseAssetAmount.gt(new BN(0));
+      const closeDirection = isLong ? PositionDirection.SHORT : PositionDirection.LONG;
+      const closeAmount = perpPosition.baseAssetAmount.abs();
+      
+      console.log(`[Drift] Closing ${isLong ? 'long' : 'short'} position of ${closeAmount.toNumber() / 1e9} contracts`);
+      
+      const txSig = await driftClient.placeAndTakePerpOrder({
+        direction: closeDirection,
+        baseAssetAmount: closeAmount,
+        marketIndex,
+        marketType: MarketType.PERP,
+        orderType: OrderType.MARKET,
+        reduceOnly: true,
+      });
+      
+      console.log(`[Drift] Position closed: ${txSig}`);
+      await cleanup();
+      return { success: true, signature: txSig };
+    } catch (closeError) {
+      await cleanup();
+      throw closeError;
+    }
+  } catch (error) {
+    console.error('[Drift] Close position error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}

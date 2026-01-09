@@ -980,61 +980,130 @@ export function BotManagementDrawer({
             </div>
           </TabsContent>
 
-          <TabsContent value="history" className="mt-4">
-            {equityEventsLoading ? (
-              <div className="flex items-center justify-center py-12">
-                <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-              </div>
-            ) : equityEvents.length === 0 ? (
-              <div className="text-center py-12">
-                <History className="w-12 h-12 mx-auto mb-3 text-muted-foreground/50" />
-                <p className="text-muted-foreground">No transactions yet</p>
-                <p className="text-sm text-muted-foreground/70 mt-1">
-                  Deposits and withdrawals will appear here
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2 max-h-96 overflow-y-auto">
-                {equityEvents.map((event) => {
-                  const isPositive = parseFloat(event.amount) > 0;
-                  const formatEventType = (type: string) => {
-                    switch (type) {
-                      case 'agent_deposit': return 'Deposit to Bot Wallet';
-                      case 'agent_withdraw': return 'Withdraw from Bot Wallet';
-                      case 'drift_deposit': return 'Deposit to Trading';
-                      case 'drift_withdraw': return 'Withdraw from Trading';
-                      default: return type.replace(/_/g, ' ');
-                    }
-                  };
-                  return (
-                    <div 
-                      key={event.id} 
-                      className="flex items-center justify-between py-3 px-3 border rounded-lg bg-muted/30"
-                      data-testid={`equity-event-${event.id}`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className={`p-2 rounded-full ${isPositive ? 'bg-emerald-500/10' : 'bg-orange-500/10'}`}>
-                          {isPositive ? (
-                            <ArrowDown className="h-4 w-4 text-emerald-500" />
-                          ) : (
-                            <ArrowUp className="h-4 w-4 text-orange-500" />
-                          )}
+          <TabsContent value="history" className="mt-4 space-y-6">
+            {/* Trades Section */}
+            <div>
+              <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                <TrendingUp className="w-4 h-4" />
+                Trade Executions
+              </h3>
+              {tradesLoading ? (
+                <div className="flex items-center justify-center py-6">
+                  <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : trades.length === 0 ? (
+                <div className="text-center py-6 bg-muted/20 rounded-lg">
+                  <p className="text-sm text-muted-foreground">No trades yet</p>
+                  <p className="text-xs text-muted-foreground/70 mt-1">
+                    Trades from TradingView signals will appear here
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-48 overflow-y-auto">
+                  {trades.map((trade) => {
+                    const isLong = trade.side === 'LONG';
+                    const isSimulated = trade.status === 'executed' && (trade.price === '0' || trade.price === '0.000000');
+                    return (
+                      <div 
+                        key={trade.id} 
+                        className="flex items-center justify-between py-3 px-3 border rounded-lg bg-muted/30"
+                        data-testid={`trade-${trade.id}`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`p-2 rounded-full ${isLong ? 'bg-emerald-500/10' : 'bg-red-500/10'}`}>
+                            {isLong ? (
+                              <TrendingUp className="h-4 w-4 text-emerald-500" />
+                            ) : (
+                              <TrendingDown className="h-4 w-4 text-red-500" />
+                            )}
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium flex items-center gap-2">
+                              {trade.side} {trade.market}
+                              {isSimulated && (
+                                <span className="text-xs px-1.5 py-0.5 bg-amber-500/20 text-amber-600 rounded">
+                                  Simulated
+                                </span>
+                              )}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {formatDate(trade.executedAt)}
+                            </p>
+                          </div>
                         </div>
-                        <div>
-                          <p className="text-sm font-medium">{formatEventType(event.eventType)}</p>
-                          <p className="text-xs text-muted-foreground">
-                            {formatDate(event.createdAt)}
-                          </p>
+                        <div className="text-right">
+                          <span className="font-mono text-sm font-medium">
+                            {parseFloat(trade.size).toFixed(4)}
+                          </span>
+                          <p className="text-xs text-muted-foreground">contracts</p>
                         </div>
                       </div>
-                      <span className={`font-mono text-sm font-medium ${isPositive ? 'text-emerald-500' : 'text-orange-500'}`}>
-                        {isPositive ? '+' : ''}{parseFloat(event.amount).toFixed(2)} USDC
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Equity Events Section */}
+            <div>
+              <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                <Wallet className="w-4 h-4" />
+                Deposits & Withdrawals
+              </h3>
+              {equityEventsLoading ? (
+                <div className="flex items-center justify-center py-6">
+                  <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : equityEvents.length === 0 ? (
+                <div className="text-center py-6 bg-muted/20 rounded-lg">
+                  <p className="text-sm text-muted-foreground">No transactions yet</p>
+                  <p className="text-xs text-muted-foreground/70 mt-1">
+                    Deposits and withdrawals will appear here
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-48 overflow-y-auto">
+                  {equityEvents.map((event) => {
+                    const isPositive = parseFloat(event.amount) > 0;
+                    const formatEventType = (type: string) => {
+                      switch (type) {
+                        case 'agent_deposit': return 'Deposit to Bot Wallet';
+                        case 'agent_withdraw': return 'Withdraw from Bot Wallet';
+                        case 'drift_deposit': return 'Deposit to Trading';
+                        case 'drift_withdraw': return 'Withdraw from Trading';
+                        default: return type.replace(/_/g, ' ');
+                      }
+                    };
+                    return (
+                      <div 
+                        key={event.id} 
+                        className="flex items-center justify-between py-3 px-3 border rounded-lg bg-muted/30"
+                        data-testid={`equity-event-${event.id}`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`p-2 rounded-full ${isPositive ? 'bg-emerald-500/10' : 'bg-orange-500/10'}`}>
+                            {isPositive ? (
+                              <ArrowDown className="h-4 w-4 text-emerald-500" />
+                            ) : (
+                              <ArrowUp className="h-4 w-4 text-orange-500" />
+                            )}
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">{formatEventType(event.eventType)}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {formatDate(event.createdAt)}
+                            </p>
+                          </div>
+                        </div>
+                        <span className={`font-mono text-sm font-medium ${isPositive ? 'text-emerald-500' : 'text-orange-500'}`}>
+                          {isPositive ? '+' : ''}{parseFloat(event.amount).toFixed(2)} USDC
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </TabsContent>
         </Tabs>
 

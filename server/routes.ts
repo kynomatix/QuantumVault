@@ -7,7 +7,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder } from "./drift-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
@@ -905,46 +905,57 @@ export async function registerRoutes(
         console.log(`[Webhook] Signal time from TradingView: ${signalTime}`);
       }
 
-      // Auto-deposit from agent wallet to Drift if agent has funds
-      // The agent automatically manages Drift deposits when trading
-      const wallet = await storage.getWallet(bot.walletAddress);
-      if (wallet?.agentPublicKey && wallet?.agentPrivateKeyEncrypted) {
-        const agentWalletBalance = await getUsdcBalance(wallet.agentPublicKey);
-        console.log(`[Webhook] Agent wallet USDC balance: ${agentWalletBalance}`);
-        
-        // If agent wallet has funds, deposit them to Drift for trading
-        // This ensures the agent's Drift account is funded before trade execution
-        if (agentWalletBalance > 0) {
-          const agentDriftExists = await subaccountExists(wallet.agentPublicKey, 0);
-          console.log(`[Webhook] Agent Drift account exists: ${agentDriftExists}`);
-          
-          // Deposit all available funds (or minimum needed for the trade)
-          const requiredBalance = parseFloat(positionSize) || 100;
-          const depositAmount = Math.min(agentWalletBalance, Math.max(requiredBalance, agentWalletBalance));
-          console.log(`[Webhook] Auto-depositing ${depositAmount} USDC from agent wallet to Drift...`);
-          
-          const depositResult = await executeAgentDriftDeposit(
-            wallet.agentPublicKey,
-            wallet.agentPrivateKeyEncrypted,
-            depositAmount
-          );
-          
-          if (depositResult.success) {
-            console.log(`[Webhook] Auto-deposit successful: ${depositResult.signature}`);
-          } else {
-            console.log(`[Webhook] Auto-deposit failed: ${depositResult.error}`);
-          }
-        } else {
-          console.log(`[Webhook] Agent wallet has no USDC for auto-deposit`);
-        }
-      }
+      // NOTE: Auto-deposit has been disabled per user request
+      // Funds should be manually deposited to Drift before trading
+      // Auto-deposit would only make sense for liquidation protection (future feature)
 
       // Execute trade on Drift Protocol
-      // For now, simulate execution
+      // Get wallet's agent private key for signing
+      const wallet = await storage.getWallet(bot.walletAddress);
+      if (!wallet?.agentPrivateKeyEncrypted) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured", processed: true });
+        return res.status(400).json({ error: "Agent wallet not configured" });
+      }
+
+      // Parse the trade size (contracts from TradingView)
+      const tradeSize = parseFloat(contracts || positionSize || "0");
+      if (tradeSize <= 0) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Invalid trade size", processed: true });
+        return res.status(400).json({ error: "Invalid trade size" });
+      }
+
+      // Execute on Drift
+      // Use bot's subaccount if configured, otherwise use main account (0)
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      const orderResult = await executePerpOrder(
+        wallet.agentPrivateKeyEncrypted,
+        bot.market,
+        side,
+        tradeSize,
+        subAccountId
+      );
+
+      if (!orderResult.success) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
+        return res.status(500).json({ error: orderResult.error || "Order execution failed" });
+      }
+
       await storage.updateBotTrade(trade.id, {
         status: "executed",
-        price: "0",
-        txSignature: `sim_${Date.now()}`,
+        price: orderResult.fillPrice?.toString() || signalPrice || "0",
+        txSignature: orderResult.signature || null,
       });
 
       // Update bot stats
@@ -1113,40 +1124,56 @@ export async function registerRoutes(
         console.log(`[User Webhook] Signal time from TradingView: ${signalTime}`);
       }
 
-      // Auto-deposit from agent wallet to Drift if needed
-      if (wallet.agentPublicKey && wallet.agentPrivateKeyEncrypted) {
-        const agentWalletBalance = await getUsdcBalance(wallet.agentPublicKey);
-        console.log(`[User Webhook] Agent wallet USDC balance: ${agentWalletBalance}`);
-        
-        if (agentWalletBalance > 0) {
-          const agentDriftExists = await subaccountExists(wallet.agentPublicKey, 0);
-          console.log(`[User Webhook] Agent Drift account exists: ${agentDriftExists}`);
-          
-          const requiredBalance = parseFloat(positionSize) || 100;
-          const depositAmount = Math.min(agentWalletBalance, Math.max(requiredBalance, agentWalletBalance));
-          console.log(`[User Webhook] Auto-depositing ${depositAmount} USDC from agent wallet to Drift...`);
-          
-          const depositResult = await executeAgentDriftDeposit(
-            wallet.agentPublicKey,
-            wallet.agentPrivateKeyEncrypted,
-            depositAmount
-          );
-          
-          if (depositResult.success) {
-            console.log(`[User Webhook] Auto-deposit successful: ${depositResult.signature}`);
-          } else {
-            console.log(`[User Webhook] Auto-deposit failed: ${depositResult.error}`);
-          }
-        } else {
-          console.log(`[User Webhook] Agent wallet has no USDC for auto-deposit`);
-        }
+      // NOTE: Auto-deposit has been disabled per user request
+      // Funds should be manually deposited to Drift before trading
+
+      // Execute trade on Drift Protocol
+      // Get wallet's agent private key for signing
+      const userWallet = await storage.getWallet(walletAddress);
+      if (!userWallet?.agentPrivateKeyEncrypted) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured", processed: true });
+        return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Execute trade simulation
+      // Parse the trade size (contracts from TradingView)
+      const tradeSize = parseFloat(contracts || positionSize || "0");
+      if (tradeSize <= 0) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Invalid trade size", processed: true });
+        return res.status(400).json({ error: "Invalid trade size" });
+      }
+
+      // Execute on Drift
+      // Use bot's subaccount if configured, otherwise use main account (0)
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      const orderResult = await executePerpOrder(
+        userWallet.agentPrivateKeyEncrypted,
+        bot.market,
+        side,
+        tradeSize,
+        subAccountId
+      );
+
+      if (!orderResult.success) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
+        return res.status(500).json({ error: orderResult.error || "Order execution failed" });
+      }
+
       await storage.updateBotTrade(trade.id, {
         status: "executed",
-        price: "0",
-        txSignature: `sim_${Date.now()}`,
+        price: orderResult.fillPrice?.toString() || signalPrice || "0",
+        txSignature: orderResult.signature || null,
       });
 
       // Update bot stats
@@ -1167,6 +1194,7 @@ export async function registerRoutes(
         market: bot.market,
         size: positionSize,
         botId: botId,
+        txSignature: orderResult.signature,
       });
     } catch (error) {
       console.error("User webhook processing error:", error);

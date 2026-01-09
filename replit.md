@@ -53,8 +53,8 @@ Preferred communication style: Simple, everyday language.
 - **Simplified Capital Flow** (as of Jan 2026):
   1. Deposit: User signs USDC transfer from Phantom to Agent Wallet
   2. Withdraw: Agent signs USDC transfer from Agent Wallet to Phantom
-  3. Agent handles Drift deposits automatically when trading bots need capital
-- **Auto-Deposit Feature**: When a TradingView webhook signal arrives, the agent automatically deposits any USDC from the agent wallet to Drift Protocol before executing the trade. This eliminates manual Drift management.
+  3. User manually deposits USDC from Agent Wallet to Drift when needed
+- **Trade Execution** (Jan 2026): When a TradingView webhook signal arrives, the agent executes real perpetual orders on Drift Protocol using `placeAndTakePerpOrder`. Orders are placed on the bot's configured subaccount (or subaccount 0 if not configured).
 - **Agent Wallet API Endpoints**:
   - `GET /api/agent/balance` - Get agent wallet USDC balance
   - `POST /api/agent/deposit` - Build tx for user to deposit to agent (user signs)
@@ -70,8 +70,9 @@ Preferred communication style: Simple, everyday language.
 - **Security**: Requires valid transaction signature, wallet session authentication
 
 ### Drift Subaccounts
-- **Subaccount 0**: Main trading account (agent wallet's Drift account)
-- **Subaccounts 1+**: Individual trading bot subaccounts (future implementation)
+- **Subaccount 0**: Main trading account (agent wallet's Drift account) - ALL trades currently execute here
+- **Subaccounts 1+**: Individual trading bot subaccounts (future implementation, not yet supported)
+- **Current Limitation**: Multi-subaccount trading is not yet implemented; all orders execute on subaccount 0 regardless of bot configuration
 - **Delete Safety**: Bots with funds require sweep transaction before deletion
 - **Simplified Wallet UI**: Shows Phantom balance, Agent Wallet balance, and Bot Balance (per-subaccount)
 
