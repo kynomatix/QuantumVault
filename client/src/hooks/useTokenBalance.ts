@@ -51,14 +51,16 @@ export function useTokenBalance() {
 
   const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
 
-  const fetchUsdcBalance = useCallback(async () => {
+  const fetchUsdcBalance = useCallback(async (showLoading = false) => {
     if (!wallet.publicKey) {
       setUsdcBalance(null);
       setTokenAccountExists(null);
       return;
     }
 
-    setUsdcLoading(true);
+    if (showLoading || usdcBalance === null) {
+      setUsdcLoading(true);
+    }
     try {
       const ata = getAssociatedTokenAddressSync(usdcMint, wallet.publicKey);
       
@@ -74,12 +76,14 @@ export function useTokenBalance() {
       }
     } catch (error) {
       console.error('Failed to fetch USDC balance:', error);
-      setUsdcBalance(null);
-      setTokenAccountExists(null);
+      if (usdcBalance === null) {
+        setUsdcBalance(null);
+        setTokenAccountExists(null);
+      }
     } finally {
       setUsdcLoading(false);
     }
-  }, [wallet.publicKey, connection, usdcMint]);
+  }, [wallet.publicKey, connection, usdcMint, usdcBalance]);
 
   const createTokenAccount = useCallback(async () => {
     if (!wallet.publicKey || !wallet.signTransaction) {
