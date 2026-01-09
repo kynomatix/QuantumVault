@@ -7,7 +7,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit } from "./drift-service";
 import { generateAgentWallet, getAgentUsdcBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
@@ -490,6 +490,7 @@ export async function registerRoutes(
       const txData = await buildTransferFromSubaccountTransaction(
         req.walletAddress!,
         bot.driftSubaccountId,
+        0, // to main account
         balance
       );
 
@@ -702,7 +703,41 @@ export async function registerRoutes(
         webhookPayload: payload,
       });
 
-      // TODO: Execute trade on Drift Protocol
+      // Auto-deposit from agent wallet to Drift if agent has funds
+      // The agent automatically manages Drift deposits when trading
+      const wallet = await storage.getWallet(bot.walletAddress);
+      if (wallet?.agentPublicKey && wallet?.agentPrivateKeyEncrypted) {
+        const agentWalletBalance = await getUsdcBalance(wallet.agentPublicKey);
+        console.log(`[Webhook] Agent wallet USDC balance: ${agentWalletBalance}`);
+        
+        // If agent wallet has funds, deposit them to Drift for trading
+        // This ensures the agent's Drift account is funded before trade execution
+        if (agentWalletBalance > 0) {
+          const agentDriftExists = await subaccountExists(wallet.agentPublicKey, 0);
+          console.log(`[Webhook] Agent Drift account exists: ${agentDriftExists}`);
+          
+          // Deposit all available funds (or minimum needed for the trade)
+          const requiredBalance = parseFloat(positionSize) || 100;
+          const depositAmount = Math.min(agentWalletBalance, Math.max(requiredBalance, agentWalletBalance));
+          console.log(`[Webhook] Auto-depositing ${depositAmount} USDC from agent wallet to Drift...`);
+          
+          const depositResult = await executeAgentDriftDeposit(
+            wallet.agentPublicKey,
+            wallet.agentPrivateKeyEncrypted,
+            depositAmount
+          );
+          
+          if (depositResult.success) {
+            console.log(`[Webhook] Auto-deposit successful: ${depositResult.signature}`);
+          } else {
+            console.log(`[Webhook] Auto-deposit failed: ${depositResult.error}`);
+          }
+        } else {
+          console.log(`[Webhook] Agent wallet has no USDC for auto-deposit`);
+        }
+      }
+
+      // Execute trade on Drift Protocol
       // For now, simulate execution
       await storage.updateBotTrade(trade.id, {
         status: "executed",
@@ -1048,6 +1083,7 @@ export async function registerRoutes(
 
       const result = await buildTransferToSubaccountTransaction(
         req.walletAddress!,
+        0, // from main account
         bot.driftSubaccountId,
         amount
       );
@@ -1081,6 +1117,7 @@ export async function registerRoutes(
       const result = await buildTransferFromSubaccountTransaction(
         req.walletAddress!,
         bot.driftSubaccountId,
+        0, // to main account
         amount
       );
       res.json(result);

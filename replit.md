@@ -50,23 +50,21 @@ Preferred communication style: Simple, everyday language.
   - Private key stored encrypted in database (wallets.agentPrivateKeyEncrypted)
   - Public key visible to user (wallets.agentPublicKey)
   - Signs all Drift interactions server-side for automated trade execution
-- **Capital Flow Operations**:
-  1. Deposit to Agent: User signs USDC transfer from Phantom to Agent Wallet
-  2. Agent to Drift: Agent signs deposit from Agent Wallet to Drift Protocol
-  3. Drift to Agent: Agent signs withdrawal from Drift to Agent Wallet
-  4. Withdraw to Wallet: Agent signs USDC transfer from Agent Wallet to Phantom
+- **Simplified Capital Flow** (as of Jan 2026):
+  1. Deposit: User signs USDC transfer from Phantom to Agent Wallet
+  2. Withdraw: Agent signs USDC transfer from Agent Wallet to Phantom
+  3. Agent handles Drift deposits automatically when trading bots need capital
+- **Auto-Deposit Feature**: When a TradingView webhook signal arrives, the agent automatically deposits any USDC from the agent wallet to Drift Protocol before executing the trade. This eliminates manual Drift management.
 - **Agent Wallet API Endpoints**:
   - `GET /api/agent/balance` - Get agent wallet USDC balance
   - `POST /api/agent/deposit` - Build tx for user to deposit to agent (user signs)
   - `POST /api/agent/withdraw` - Agent sends USDC to user wallet (agent signs)
-  - `POST /api/agent/drift-deposit` - Agent deposits to Drift (agent signs)
-  - `POST /api/agent/drift-withdraw` - Agent withdraws from Drift (agent signs)
 
 ### Drift Subaccounts
 - **Subaccount 0**: Main trading account (agent wallet's Drift account)
 - **Subaccounts 1+**: Individual trading bot subaccounts (future implementation)
 - **Delete Safety**: Bots with funds require sweep transaction before deletion
-- **Capital Pool UI**: Shows Phantom balance, Agent Wallet balance, and Drift Protocol balance
+- **Simplified Wallet UI**: Shows only Phantom balance and Agent Wallet balance (Drift managed automatically)
 
 ## External Dependencies
 

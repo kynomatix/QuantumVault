@@ -798,3 +798,54 @@ export async function buildAgentDriftWithdrawTransaction(
     message: `Withdraw ${amountUsdc} USDC from Drift to agent wallet`,
   };
 }
+
+export async function executeAgentDriftDeposit(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  amountUsdc: number,
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    const connection = getConnection();
+    
+    const txData = await buildAgentDriftDepositTransaction(
+      agentPublicKey,
+      encryptedPrivateKey,
+      amountUsdc
+    );
+    
+    const txBuffer = Buffer.from(txData.transaction, 'base64');
+    
+    const signature = await connection.sendRawTransaction(txBuffer, {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+    
+    console.log(`[Drift] Agent deposit transaction sent: ${signature}`);
+    
+    const confirmation = await connection.confirmTransaction({
+      signature,
+      blockhash: txData.blockhash,
+      lastValidBlockHeight: txData.lastValidBlockHeight,
+    }, 'confirmed');
+    
+    if (confirmation.value.err) {
+      return {
+        success: false,
+        error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}`,
+      };
+    }
+    
+    console.log(`[Drift] Agent deposit confirmed: ${signature}`);
+    
+    return {
+      success: true,
+      signature,
+    };
+  } catch (error) {
+    console.error('[Drift] Agent deposit execution error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
