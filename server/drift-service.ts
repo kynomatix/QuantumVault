@@ -202,29 +202,11 @@ function getDriftSignerPDA(): PublicKey {
   return signer;
 }
 
-let cachedSpotMarketOracle: PublicKey | null = null;
+const DRIFT_DEVNET_USDC_ORACLE = new PublicKey('En8hkHLkRe9d9DraYmBTrus518BvmVH448YcvmrFM6Ce');
 
 async function getSpotMarketOracle(connection: Connection, marketIndex: number = 0): Promise<PublicKey> {
-  if (cachedSpotMarketOracle) {
-    return cachedSpotMarketOracle;
-  }
-  
-  const spotMarketPDA = getSpotMarketPDA(marketIndex);
-  const accountInfo = await connection.getAccountInfo(spotMarketPDA);
-  
-  if (!accountInfo || !accountInfo.data) {
-    console.log('[Drift] Could not fetch spot market account, using fallback oracle');
-    return new PublicKey('GVXRSBjFk6e6J3NbVPXohDJetcTjaeeuykUpbQF8UoMU');
-  }
-  
-  const oracleOffset = 8 + 32;
-  const oracleBytes = accountInfo.data.slice(oracleOffset, oracleOffset + 32);
-  const oracle = new PublicKey(oracleBytes);
-  
-  console.log('[Drift] Fetched spot market oracle from chain:', oracle.toBase58());
-  cachedSpotMarketOracle = oracle;
-  
-  return oracle;
+  console.log('[Drift] Using official Drift SDK devnet USDC oracle:', DRIFT_DEVNET_USDC_ORACLE.toBase58());
+  return DRIFT_DEVNET_USDC_ORACLE;
 }
 
 function createInitializeUserStatsInstruction(
