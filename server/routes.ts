@@ -509,7 +509,7 @@ export async function registerRoutes(
 
   app.post("/api/trading-bots", requireWallet, async (req, res) => {
     try {
-      const { name, market, side, leverage, maxPositionSize, signalConfig, riskConfig } = req.body;
+      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig } = req.body;
       
       if (!name || !market) {
         return res.status(400).json({ error: "Name and market are required" });
@@ -530,6 +530,7 @@ export async function registerRoutes(
         isActive: true,
         side: side || 'both',
         leverage: leverage || 1,
+        totalInvestment: totalInvestment ? String(totalInvestment) : '100',
         maxPositionSize: maxPositionSize || null,
         signalConfig: signalConfig || { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
         riskConfig: riskConfig || {},
@@ -558,7 +559,7 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      const { name, market, side, leverage, maxPositionSize, signalConfig, riskConfig, isActive } = req.body;
+      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive } = req.body;
       
       if (leverage !== undefined) {
         const leverageNum = Number(leverage);
@@ -572,6 +573,7 @@ export async function registerRoutes(
         ...(market && { market }),
         ...(side && { side }),
         ...(leverage !== undefined && { leverage: Number(leverage) }),
+        ...(totalInvestment !== undefined && { totalInvestment: String(totalInvestment) }),
         ...(maxPositionSize !== undefined && { maxPositionSize }),
         ...(signalConfig && { signalConfig }),
         ...(riskConfig && { riskConfig }),
@@ -921,16 +923,42 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Parse the trade size (contracts from TradingView)
-      const tradeSize = parseFloat(contracts || positionSize || "0");
-      if (tradeSize <= 0) {
+      // Calculate actual trade size using percentage-based sizing
+      // Signal value (contracts) is treated as a percentage of totalInvestment
+      // e.g., if totalInvestment = $500 and signal = 50, trade size = $250 worth of contracts
+      // Note: Values >100 are allowed for scale-out strategies (e.g., 150% = 1.5x position)
+      const signalPercentage = parseFloat(contracts || positionSize || "0");
+      if (signalPercentage <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
         });
-        await storage.updateWebhookLog(log.id, { errorMessage: "Invalid trade size", processed: true });
-        return res.status(400).json({ error: "Invalid trade size" });
+        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid signal percentage: ${signalPercentage}`, processed: true });
+        return res.status(400).json({ error: `Invalid signal percentage: ${signalPercentage}. Must be > 0.` });
       }
+
+      // Get bot's total investment and calculate USD amount for this trade
+      const totalInvestmentUsd = parseFloat(bot.totalInvestment || "100");
+      const tradeAmountUsd = (totalInvestmentUsd * signalPercentage) / 100;
+      
+      console.log(`[Webhook] Signal ${signalPercentage}% of $${totalInvestmentUsd} = $${tradeAmountUsd.toFixed(2)}`);
+
+      // Get current market price to convert USD to contracts
+      const currentPrice = await getMarketPrice(bot.market);
+      if (!currentPrice || currentPrice <= 0) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
+        return res.status(500).json({ error: "Could not get market price" });
+      }
+
+      // Calculate contract size (with leverage)
+      const leverage = bot.leverage || 1;
+      const contractSize = (tradeAmountUsd * leverage) / currentPrice;
+      
+      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} * ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Execute on Drift
       // Use bot's subaccount if configured, otherwise use main account (0)
@@ -939,7 +967,7 @@ export async function registerRoutes(
         wallet.agentPrivateKeyEncrypted,
         bot.market,
         side,
-        tradeSize,
+        contractSize,
         subAccountId
       );
 
@@ -1139,16 +1167,41 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Parse the trade size (contracts from TradingView)
-      const tradeSize = parseFloat(contracts || positionSize || "0");
-      if (tradeSize <= 0) {
+      // Calculate actual trade size using percentage-based sizing
+      // Signal value (contracts) is treated as a percentage of totalInvestment
+      // Note: Values >100 are allowed for scale-out strategies (e.g., 150% = 1.5x position)
+      const signalPercentage = parseFloat(contracts || positionSize || "0");
+      if (signalPercentage <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
         });
-        await storage.updateWebhookLog(log.id, { errorMessage: "Invalid trade size", processed: true });
-        return res.status(400).json({ error: "Invalid trade size" });
+        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid signal percentage: ${signalPercentage}`, processed: true });
+        return res.status(400).json({ error: `Invalid signal percentage: ${signalPercentage}. Must be > 0.` });
       }
+
+      // Get bot's total investment and calculate USD amount for this trade
+      const totalInvestmentUsd = parseFloat(bot.totalInvestment || "100");
+      const tradeAmountUsd = (totalInvestmentUsd * signalPercentage) / 100;
+      
+      console.log(`[User Webhook] Signal ${signalPercentage}% of $${totalInvestmentUsd} = $${tradeAmountUsd.toFixed(2)}`);
+
+      // Get current market price to convert USD to contracts
+      const currentPrice = await getMarketPrice(bot.market);
+      if (!currentPrice || currentPrice <= 0) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
+        return res.status(500).json({ error: "Could not get market price" });
+      }
+
+      // Calculate contract size (with leverage)
+      const leverage = bot.leverage || 1;
+      const contractSize = (tradeAmountUsd * leverage) / currentPrice;
+      
+      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} * ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Execute on Drift
       // Use bot's subaccount if configured, otherwise use main account (0)
@@ -1157,7 +1210,7 @@ export async function registerRoutes(
         userWallet.agentPrivateKeyEncrypted,
         bot.market,
         side,
-        tradeSize,
+        contractSize,
         subAccountId
       );
 

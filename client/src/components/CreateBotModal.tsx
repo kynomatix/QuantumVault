@@ -65,7 +65,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
     name: '',
     market: 'SOL-PERP',
     leverage: 1,
-    initialCapital: '',
+    totalInvestment: '100',
   });
 
   const resetState = () => {
@@ -79,7 +79,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
       name: '',
       market: 'SOL-PERP',
       leverage: 1,
-      initialCapital: '',
+      totalInvestment: '100',
     });
   };
 
@@ -99,7 +99,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
           name: newBot.name,
           market: newBot.market,
           leverage: newBot.leverage,
-          maxPositionSize: newBot.initialCapital || '100',
+          totalInvestment: newBot.totalInvestment || '100',
         }),
       });
       
@@ -294,21 +294,21 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="initialCapital">Initial Capital (USDC)</Label>
+          <Label htmlFor="totalInvestment">Total Investment (USDC)</Label>
           <div className="relative">
             <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
             <Input
-              id="initialCapital"
+              id="totalInvestment"
               type="number"
               placeholder="100"
-              value={newBot.initialCapital}
-              onChange={(e) => setNewBot({ ...newBot, initialCapital: e.target.value })}
+              value={newBot.totalInvestment}
+              onChange={(e) => setNewBot({ ...newBot, totalInvestment: e.target.value })}
               className="pl-7"
-              data-testid="input-initial-capital"
+              data-testid="input-total-investment"
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            Your total position size for calculating order sizes in TradingView
+            The total capital for this bot. TradingView signals are treated as percentages (e.g., 50 = 50% of this amount).
           </p>
         </div>
       </div>

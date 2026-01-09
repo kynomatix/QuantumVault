@@ -71,6 +71,7 @@ interface TradingBot {
   isActive: boolean;
   side: string;
   leverage: number;
+  totalInvestment: string;
   maxPositionSize: string | null;
   driftSubaccountId?: number | null;
   stats: {
@@ -144,6 +145,7 @@ export function BotManagementDrawer({
   const [localBot, setLocalBot] = useState<TradingBot | null>(null);
   const [editName, setEditName] = useState<string>('');
   const [editLeverage, setEditLeverage] = useState<number>(1);
+  const [editTotalInvestment, setEditTotalInvestment] = useState<string>('100');
   const [editMaxPositionSize, setEditMaxPositionSize] = useState<string>('');
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
@@ -154,6 +156,7 @@ export function BotManagementDrawer({
       setLocalBot(bot);
       setEditName(bot.name);
       setEditLeverage(bot.leverage);
+      setEditTotalInvestment(bot.totalInvestment || '100');
       setEditMaxPositionSize(bot.maxPositionSize || '');
     }
   }, [bot]);
@@ -454,6 +457,7 @@ export function BotManagementDrawer({
         body: JSON.stringify({ 
           name: editName.trim(),
           leverage: editLeverage,
+          totalInvestment: editTotalInvestment ? parseFloat(editTotalInvestment) : 100,
           maxPositionSize: editMaxPositionSize ? parseFloat(editMaxPositionSize) : null,
         }),
       });
@@ -485,6 +489,7 @@ export function BotManagementDrawer({
     if (localBot) {
       setEditName(localBot.name);
       setEditLeverage(localBot.leverage);
+      setEditTotalInvestment(localBot.totalInvestment || '100');
       setEditMaxPositionSize(localBot.maxPositionSize || '');
     }
   };
@@ -492,6 +497,7 @@ export function BotManagementDrawer({
   const hasSettingsChanges = localBot ? (
     editName !== localBot.name || 
     editLeverage !== localBot.leverage || 
+    editTotalInvestment !== (localBot.totalInvestment || '100') ||
     editMaxPositionSize !== (localBot.maxPositionSize || '')
   ) : false;
 
@@ -680,6 +686,26 @@ export function BotManagementDrawer({
                   </p>
                 </div>
                 
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm text-muted-foreground">Total Investment (USDC)</label>
+                    <span className="text-sm font-semibold">${parseFloat(editTotalInvestment || '100').toFixed(0)}</span>
+                  </div>
+                  <Input
+                    type="number"
+                    value={editTotalInvestment}
+                    onChange={(e) => setEditTotalInvestment(e.target.value)}
+                    placeholder="100"
+                    min="1"
+                    step="1"
+                    data-testid="input-total-investment"
+                  />
+                  <p className="text-xs text-muted-foreground flex items-center gap-1">
+                    <Info className="w-3 h-3" />
+                    TradingView signal values are treated as % of this amount (e.g., 50 = 50% = ${(parseFloat(editTotalInvestment || '100') * 0.5).toFixed(0)})
+                  </p>
+                </div>
+
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="text-sm text-muted-foreground">Max Position Size (USDC)</label>

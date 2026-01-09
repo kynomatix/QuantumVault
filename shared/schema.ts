@@ -74,6 +74,7 @@ export const tradingBots = pgTable("trading_bots", {
   agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),
   isActive: boolean("is_active").default(true).notNull(),
   side: text("side").default("both").notNull(),
+  totalInvestment: decimal("total_investment", { precision: 20, scale: 2 }).default("100").notNull(),
   maxPositionSize: decimal("max_position_size", { precision: 20, scale: 2 }),
   leverage: integer("leverage").default(1).notNull(),
   signalConfig: jsonb("signal_config").$type<{
