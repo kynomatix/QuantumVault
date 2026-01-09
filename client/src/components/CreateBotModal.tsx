@@ -19,7 +19,25 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Zap, Loader2 } from 'lucide-react';
+import { 
+  Zap, 
+  Loader2, 
+  Check, 
+  Copy, 
+  Wallet, 
+  ExternalLink, 
+  AlertCircle, 
+  Sparkles,
+  Bot
+} from 'lucide-react';
+
+interface TradingBot {
+  id: string;
+  name: string;
+  market: string;
+  webhookSecret: string;
+  leverage: number;
+}
 
 interface CreateBotModalProps {
   isOpen: boolean;
@@ -33,11 +51,34 @@ const MARKETS = ['SOL-PERP', 'BTC-PERP', 'ETH-PERP'];
 export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }: CreateBotModalProps) {
   const { toast } = useToast();
   const [isCreating, setIsCreating] = useState(false);
+  const [step, setStep] = useState<'create' | 'success' | 'equity'>('create');
+  const [createdBot, setCreatedBot] = useState<TradingBot | null>(null);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [equityAmount, setEquityAmount] = useState('');
+  const [isProcessingEquity, setIsProcessingEquity] = useState(false);
+  const [agentBalance, setAgentBalance] = useState<string | null>(null);
+  const [isLoadingBalance, setIsLoadingBalance] = useState(false);
+  
   const [newBot, setNewBot] = useState({
     name: '',
     market: 'SOL-PERP',
     leverage: 1,
+    initialCapital: '',
   });
+
+  const resetState = () => {
+    setStep('create');
+    setCreatedBot(null);
+    setCopiedField(null);
+    setEquityAmount('');
+    setAgentBalance(null);
+    setNewBot({
+      name: '',
+      market: 'SOL-PERP',
+      leverage: 1,
+      initialCapital: '',
+    });
+  };
 
   const createBot = async () => {
     if (!walletAddress || !newBot.name) {
@@ -55,19 +96,16 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
           name: newBot.name,
           market: newBot.market,
           leverage: newBot.leverage,
-          maxPositionSize: '100',
+          maxPositionSize: newBot.initialCapital || '100',
         }),
       });
       
       if (res.ok) {
-        setNewBot({
-          name: '',
-          market: 'SOL-PERP',
-          leverage: 1,
-        });
-        toast({ title: 'Bot created successfully!' });
+        const bot = await res.json();
+        setCreatedBot(bot);
+        setStep('success');
+        toast({ title: 'Bot created! Copy your webhook details below.' });
         onBotCreated();
-        onClose();
       } else {
         const error = await res.json();
         toast({ title: 'Failed to create bot', description: error.error, variant: 'destructive' });
@@ -81,91 +119,459 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
 
   const handleOpenChange = (open: boolean) => {
     if (!open) {
+      resetState();
       onClose();
     }
   };
 
-  return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-[450px]">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Zap className="w-5 h-5 text-primary" />
-            Create Signal Bot
-          </DialogTitle>
-          <DialogDescription>
-            Set up a new TradingView signal bot for automated trading
-          </DialogDescription>
-        </DialogHeader>
+  const handleClose = () => {
+    resetState();
+    onClose();
+  };
+
+  const copyToClipboard = async (text: string, field: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopiedField(field);
+    toast({ title: `${field} copied to clipboard` });
+    setTimeout(() => setCopiedField(null), 2000);
+  };
+
+  const getWebhookUrl = (bot: TradingBot) => {
+    return `${window.location.origin}/api/webhook/tradingview/${bot.id}?secret=${bot.webhookSecret}`;
+  };
+
+  const getMessageTemplate = () => {
+    return `order {{strategy.order.action}} @ {{strategy.order.contracts}} filled on {{ticker}}. New strategy position is {{strategy.position_size}}`;
+  };
+
+  const fetchAgentBalance = async () => {
+    setIsLoadingBalance(true);
+    try {
+      const res = await fetch(`/api/agent/balance?wallet=${walletAddress}`);
+      if (res.ok) {
+        const data = await res.json();
+        setAgentBalance(data.usdcBalance || '0');
+      }
+    } catch (error) {
+      console.error('Failed to fetch balance:', error);
+    } finally {
+      setIsLoadingBalance(false);
+    }
+  };
+
+  const handleAddEquity = async () => {
+    if (!createdBot || !equityAmount || parseFloat(equityAmount) <= 0) {
+      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    setIsProcessingEquity(true);
+    try {
+      const response = await fetch('/api/agent/drift-deposit', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          walletAddress,
+          botId: createdBot.id,
+          amount: parseFloat(equityAmount) 
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to add equity');
+      }
+
+      toast({ 
+        title: 'Equity Added Successfully!', 
+        description: `Added ${equityAmount} USDC to your bot` 
+      });
+      
+      handleClose();
+    } catch (error: any) {
+      console.error('Equity allocation error:', error);
+      toast({ 
+        title: 'Failed to add equity', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsProcessingEquity(false);
+    }
+  };
+
+  const goToEquityStep = () => {
+    setStep('equity');
+    fetchAgentBalance();
+  };
+
+  const renderCreateStep = () => (
+    <>
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-2">
+          <Zap className="w-5 h-5 text-primary" />
+          Create Signal Bot
+        </DialogTitle>
+        <DialogDescription>
+          Set up a new TradingView signal bot for automated trading
+        </DialogDescription>
+      </DialogHeader>
+      
+      <div className="grid gap-4 py-4">
+        <div className="space-y-2">
+          <Label htmlFor="name">Bot Name</Label>
+          <Input
+            id="name"
+            placeholder="e.g. SOL EMA Crossover"
+            value={newBot.name}
+            onChange={(e) => setNewBot({ ...newBot, name: e.target.value })}
+            data-testid="input-bot-name"
+          />
+        </div>
         
-        <div className="grid gap-4 py-4">
-          <div className="space-y-2">
-            <Label htmlFor="name">Bot Name</Label>
-            <Input
-              id="name"
-              placeholder="e.g. SOL EMA Crossover"
-              value={newBot.name}
-              onChange={(e) => setNewBot({ ...newBot, name: e.target.value })}
-              data-testid="input-bot-name"
-            />
+        <div className="space-y-2">
+          <Label>Market</Label>
+          <Select value={newBot.market} onValueChange={(v) => setNewBot({ ...newBot, market: v })}>
+            <SelectTrigger data-testid="select-market">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {MARKETS.map((market) => (
+                <SelectItem key={market} value={market}>
+                  {market}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        
+        <div className="space-y-3">
+          <div className="flex justify-between">
+            <Label>Leverage</Label>
+            <span className="text-sm font-medium text-primary">{newBot.leverage}x</span>
           </div>
-          
-          <div className="space-y-2">
-            <Label>Market</Label>
-            <Select value={newBot.market} onValueChange={(v) => setNewBot({ ...newBot, market: v })}>
-              <SelectTrigger data-testid="select-market">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {MARKETS.map((market) => (
-                  <SelectItem key={market} value={market}>
-                    {market}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          
-          <div className="space-y-3">
-            <div className="flex justify-between">
-              <Label>Leverage</Label>
-              <span className="text-sm font-medium text-primary">{newBot.leverage}x</span>
-            </div>
-            <Slider
-              value={[newBot.leverage]}
-              onValueChange={(v) => setNewBot({ ...newBot, leverage: v[0] })}
-              min={1}
-              max={20}
-              step={1}
-              data-testid="slider-leverage"
-            />
-            <div className="flex justify-between text-xs text-muted-foreground">
-              <span>1x (Safe)</span>
-              <span>20x (High Risk)</span>
-            </div>
+          <Slider
+            value={[newBot.leverage]}
+            onValueChange={(v) => setNewBot({ ...newBot, leverage: v[0] })}
+            min={1}
+            max={20}
+            step={1}
+            data-testid="slider-leverage"
+          />
+          <div className="flex justify-between text-xs text-muted-foreground">
+            <span>1x (Safe)</span>
+            <span>20x (High Risk)</span>
           </div>
         </div>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={isCreating}>
-            Cancel
-          </Button>
-          <Button 
-            onClick={createBot} 
-            disabled={isCreating || !newBot.name}
-            className="bg-gradient-to-r from-primary to-accent"
-            data-testid="button-confirm-create-bot"
+        <div className="space-y-2">
+          <Label htmlFor="initialCapital">Initial Capital (USDC)</Label>
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
+            <Input
+              id="initialCapital"
+              type="number"
+              placeholder="100"
+              value={newBot.initialCapital}
+              onChange={(e) => setNewBot({ ...newBot, initialCapital: e.target.value })}
+              className="pl-7"
+              data-testid="input-initial-capital"
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Your total position size for calculating order sizes in TradingView
+          </p>
+        </div>
+      </div>
+
+      <DialogFooter>
+        <Button variant="outline" onClick={handleClose} disabled={isCreating}>
+          Cancel
+        </Button>
+        <Button 
+          onClick={createBot} 
+          disabled={isCreating || !newBot.name}
+          className="bg-gradient-to-r from-primary to-accent"
+          data-testid="button-confirm-create-bot"
+        >
+          {isCreating ? (
+            <>
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              Creating...
+            </>
+          ) : (
+            'Create Bot'
+          )}
+        </Button>
+      </DialogFooter>
+    </>
+  );
+
+  const renderSuccessStep = () => {
+    if (!createdBot) return null;
+
+    return (
+      <>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-xl">
+            <Check className="w-6 h-6 text-emerald-500" />
+            Bot Created Successfully!
+          </DialogTitle>
+          <DialogDescription>
+            <span className="font-medium">{createdBot.name}</span> • {createdBot.market}
+          </DialogDescription>
+        </DialogHeader>
+        
+        <div className="space-y-6 py-4 max-h-[60vh] overflow-y-auto">
+          <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-500/10 to-primary/10 border border-emerald-500/20">
+            <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
+              <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">1</span>
+              Webhook URL
+            </h3>
+            <div className="p-3 bg-background/80 rounded-lg font-mono text-sm border" style={{ wordBreak: 'break-word' }}>
+              {getWebhookUrl(createdBot)}
+            </div>
+            <Button
+              className="w-full mt-3"
+              onClick={() => copyToClipboard(getWebhookUrl(createdBot), 'Webhook URL')}
+              data-testid="button-copy-webhook"
+            >
+              {copiedField === 'Webhook URL' ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
+              {copiedField === 'Webhook URL' ? 'Copied!' : 'Copy Webhook URL'}
+            </Button>
+            <p className="text-xs text-muted-foreground mt-2">
+              Paste this in TradingView Alert → Notifications → Webhook URL
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border border-primary/20">
+            <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
+              <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">2</span>
+              Alert Message
+            </h3>
+            <pre className="p-3 bg-background/80 rounded-lg font-mono text-sm border whitespace-pre-wrap" style={{ wordBreak: 'break-word' }}>
+{getMessageTemplate()}
+            </pre>
+            <Button
+              className="w-full mt-3"
+              onClick={() => copyToClipboard(getMessageTemplate(), 'Message')}
+              data-testid="button-copy-message"
+            >
+              {copiedField === 'Message' ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
+              {copiedField === 'Message' ? 'Copied!' : 'Copy Alert Message'}
+            </Button>
+            <p className="text-xs text-muted-foreground mt-2">
+              Paste this in TradingView Alert → Message field (replace all existing content)
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-gradient-to-br from-blue-500/10 to-purple-500/10 border border-blue-500/20">
+            <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
+              <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">3</span>
+              TradingView Strategy Settings
+            </h3>
+            <p className="text-sm text-muted-foreground mb-3">
+              In TradingView, go to your strategy's Settings → Properties and configure:
+            </p>
+            <div className="space-y-3 text-sm">
+              <div className="flex items-center justify-between p-2 bg-background/50 rounded-lg">
+                <span className="font-medium">Initial Capital</span>
+                <span className="text-muted-foreground">Set to your total position size (e.g. 100 USDC)</span>
+              </div>
+              <div className="flex items-center justify-between p-2 bg-background/50 rounded-lg">
+                <span className="font-medium">Default Order Size</span>
+                <span className="text-muted-foreground">Size per entry (e.g. 33.33 for 3 entries)</span>
+              </div>
+              <div className="flex items-center justify-between p-2 bg-background/50 rounded-lg">
+                <span className="font-medium">Pyramiding</span>
+                <span className="text-muted-foreground">Number of orders allowed (e.g. 3 orders)</span>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground mt-3">
+              Example: 100 USDC capital / 33.33 order size / 3 pyramiding = 3 entries of 33.33 each
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-muted/50 border">
+            <h3 className="font-semibold mb-3 flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-primary" />
+              How The Placeholders Work
+            </h3>
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.action}}"}</code> → "buy" or "sell" from your strategy</p>
+              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.contracts}}"}</code> → Order size for this entry (e.g. 33.33)</p>
+              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.position_size}}"}</code> → Total position after this order</p>
+              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{ticker}}"}</code> → The trading symbol</p>
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl border border-yellow-500/30 bg-yellow-500/5">
+            <h3 className="font-semibold mb-2 flex items-center gap-2 text-yellow-600">
+              <AlertCircle className="w-4 h-4" />
+              Important
+            </h3>
+            <ul className="text-sm text-muted-foreground space-y-1">
+              <li>• Your script must use <code className="px-1 py-0.5 bg-background rounded text-xs">strategy()</code> not <code className="px-1 py-0.5 bg-background rounded text-xs">indicator()</code></li>
+              <li>• Webhook alerts require TradingView Essential plan or higher</li>
+              <li>• Make sure your bot is activated before testing</li>
+            </ul>
+          </div>
+
+          <div className="p-4 rounded-xl bg-gradient-to-br from-green-500/10 to-emerald-500/10 border border-green-500/20">
+            <h3 className="font-semibold text-lg mb-3 flex items-center gap-2">
+              <span className="w-6 h-6 rounded-full bg-green-500 text-white text-sm flex items-center justify-center">4</span>
+              Fund Your Bot
+            </h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              Your bot needs equity to execute trades. Add USDC from your main account to start trading.
+            </p>
+            <div className="flex flex-col gap-2">
+              <Button
+                className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600"
+                onClick={goToEquityStep}
+                data-testid="button-add-equity-now"
+              >
+                <Wallet className="w-4 h-4 mr-2" />
+                Add Equity Now
+              </Button>
+              <Button
+                variant="ghost"
+                className="w-full text-muted-foreground"
+                onClick={handleClose}
+                data-testid="button-add-equity-later"
+              >
+                I'll do this later
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <Button
+              variant="outline"
+              className="flex-1"
+              onClick={() => window.open('https://www.tradingview.com/chart/', '_blank')}
+            >
+              <ExternalLink className="w-4 h-4 mr-2" />
+              Open TradingView
+            </Button>
+            <Button
+              variant="secondary"
+              className="flex-1"
+              onClick={handleClose}
+              data-testid="button-done-setup"
+            >
+              Done
+            </Button>
+          </div>
+        </div>
+      </>
+    );
+  };
+
+  const renderEquityStep = () => {
+    if (!createdBot) return null;
+
+    return (
+      <>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Wallet className="w-5 h-5 text-green-500" />
+            Fund Your Bot
+          </DialogTitle>
+          <DialogDescription>
+            Add USDC from your main account to enable your bot to execute trades.
+          </DialogDescription>
+        </DialogHeader>
+        
+        <div className="space-y-4 py-4">
+          <div className="p-3 rounded-lg bg-muted/50 border">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+                <Bot className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <p className="font-semibold">{createdBot.name}</p>
+                <p className="text-sm text-muted-foreground">{createdBot.market}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="equity-amount">Amount (USDC)</Label>
+              {agentBalance && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-auto py-1 px-2 text-xs"
+                  onClick={() => setEquityAmount(agentBalance)}
+                  disabled={isLoadingBalance}
+                >
+                  Max: ${parseFloat(agentBalance).toFixed(2)}
+                </Button>
+              )}
+            </div>
+            <Input
+              id="equity-amount"
+              type="number"
+              placeholder="100"
+              value={equityAmount}
+              onChange={(e) => setEquityAmount(e.target.value)}
+              className="font-mono"
+              data-testid="input-equity-amount"
+            />
+            <p className="text-xs text-muted-foreground">
+              This will be transferred from your main Drift account to this bot's subaccount.
+            </p>
+          </div>
+
+          <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+            <p className="text-xs text-yellow-600">
+              Make sure you have sufficient USDC in your main Drift account before proceeding.
+            </p>
+          </div>
+        </div>
+
+        <DialogFooter className="flex-col gap-2 sm:flex-col">
+          <Button
+            className="w-full bg-gradient-to-r from-green-500 to-emerald-500"
+            onClick={handleAddEquity}
+            disabled={!equityAmount || parseFloat(equityAmount) <= 0 || isProcessingEquity}
+            data-testid="button-confirm-equity"
           >
-            {isCreating ? (
+            {isProcessingEquity ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Creating...
+                Processing...
               </>
             ) : (
-              'Create Bot'
+              <>
+                <Wallet className="w-4 h-4 mr-2" />
+                Add Equity
+              </>
             )}
           </Button>
+          <Button
+            variant="ghost"
+            className="w-full"
+            onClick={() => setStep('success')}
+          >
+            Back
+          </Button>
         </DialogFooter>
+      </>
+    );
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
+      <DialogContent className={step === 'success' ? "sm:max-w-[600px]" : "sm:max-w-[450px]"}>
+        {step === 'create' && renderCreateStep()}
+        {step === 'success' && renderSuccessStep()}
+        {step === 'equity' && renderEquityStep()}
       </DialogContent>
     </Dialog>
   );
