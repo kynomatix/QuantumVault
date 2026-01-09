@@ -849,3 +849,60 @@ export async function executeAgentDriftDeposit(
     };
   }
 }
+
+export async function executeAgentDriftWithdraw(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  amountUsdc: number,
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    const connection = getConnection();
+    
+    const txData = await buildAgentDriftWithdrawTransaction(
+      agentPublicKey,
+      encryptedPrivateKey,
+      amountUsdc
+    );
+    
+    const txBuffer = Buffer.from(txData.transaction, 'base64');
+    
+    const signature = await connection.sendRawTransaction(txBuffer, {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+    
+    console.log(`[Drift] Agent withdraw transaction sent: ${signature}`);
+    
+    const confirmation = await connection.confirmTransaction({
+      signature,
+      blockhash: txData.blockhash,
+      lastValidBlockHeight: txData.lastValidBlockHeight,
+    }, 'confirmed');
+    
+    if (confirmation.value.err) {
+      return {
+        success: false,
+        error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}`,
+      };
+    }
+    
+    console.log(`[Drift] Agent withdraw confirmed: ${signature}`);
+    
+    return {
+      success: true,
+      signature,
+    };
+  } catch (error) {
+    console.error('[Drift] Agent withdraw execution error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function getAgentDriftBalance(
+  agentPublicKey: string,
+): Promise<number> {
+  return getDriftBalance(agentPublicKey, 0);
+}

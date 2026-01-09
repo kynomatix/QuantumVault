@@ -7,7 +7,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance } from "./drift-service";
 import { generateAgentWallet, getAgentUsdcBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
@@ -271,15 +271,19 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const txData = await buildAgentDriftDepositTransaction(
+      const result = await executeAgentDriftDeposit(
         wallet.agentPublicKey,
         wallet.agentPrivateKeyEncrypted,
         amount
       );
 
-      res.json(txData);
+      if (!result.success) {
+        return res.status(400).json({ error: result.error || "Deposit failed" });
+      }
+
+      res.json(result);
     } catch (error) {
-      console.error("Build agent drift deposit error:", error);
+      console.error("Agent drift deposit error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -299,15 +303,37 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const txData = await buildAgentDriftWithdrawTransaction(
+      const result = await executeAgentDriftWithdraw(
         wallet.agentPublicKey,
         wallet.agentPrivateKeyEncrypted,
         amount
       );
 
-      res.json(txData);
+      if (!result.success) {
+        return res.status(400).json({ error: result.error || "Withdraw failed" });
+      }
+
+      res.json(result);
     } catch (error) {
-      console.error("Build agent drift withdraw error:", error);
+      console.error("Agent drift withdraw error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/agent/drift-balance", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const balance = await getAgentDriftBalance(wallet.agentPublicKey);
+      res.json({ balance });
+    } catch (error) {
+      console.error("Get agent drift balance error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

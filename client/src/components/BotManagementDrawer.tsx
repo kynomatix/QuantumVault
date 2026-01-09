@@ -25,6 +25,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { Input } from '@/components/ui/input';
 import {
   Bot,
   Copy,
@@ -41,6 +42,8 @@ import {
   Sparkles,
   Info,
   ExternalLink,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react';
 
 interface TradingBot {
@@ -95,10 +98,15 @@ export function BotManagementDrawer({
   const [activeTab, setActiveTab] = useState('overview');
   const [botBalance, setBotBalance] = useState<number>(0);
   const [mainAccountBalance, setMainAccountBalance] = useState<number>(0);
+  const [driftBalance, setDriftBalance] = useState<number>(0);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [trades, setTrades] = useState<BotTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [addEquityAmount, setAddEquityAmount] = useState<string>('');
+  const [removeEquityAmount, setRemoveEquityAmount] = useState<string>('');
+  const [addEquityLoading, setAddEquityLoading] = useState(false);
+  const [removeEquityLoading, setRemoveEquityLoading] = useState(false);
 
   useEffect(() => {
     if (isOpen && bot) {
@@ -117,9 +125,10 @@ export function BotManagementDrawer({
     if (!bot) return;
     setBalanceLoading(true);
     try {
-      const [balanceRes, agentRes] = await Promise.all([
+      const [balanceRes, agentRes, driftRes] = await Promise.all([
         fetch(`/api/bot/${bot.id}/balance?wallet=${walletAddress}`, { credentials: 'include' }),
         fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' }),
+        fetch(`/api/agent/drift-balance?wallet=${walletAddress}`, { credentials: 'include' }),
       ]);
 
       if (balanceRes.ok) {
@@ -131,10 +140,79 @@ export function BotManagementDrawer({
         const data = await agentRes.json();
         setMainAccountBalance(data.balance ?? 0);
       }
+
+      if (driftRes.ok) {
+        const data = await driftRes.json();
+        setDriftBalance(data.balance ?? 0);
+      }
     } catch (error) {
       console.error('Failed to fetch balances:', error);
     } finally {
       setBalanceLoading(false);
+    }
+  };
+
+  const handleAddEquity = async () => {
+    const amount = parseFloat(addEquityAmount);
+    if (isNaN(amount) || amount <= 0) {
+      toast({ title: 'Please enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    setAddEquityLoading(true);
+    try {
+      const res = await fetch('/api/agent/drift-deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ amount }),
+      });
+
+      const data = await res.json();
+      
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to add to Drift');
+      }
+
+      toast({ title: `Successfully added $${amount} to Drift`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
+      setAddEquityAmount('');
+      fetchBotBalance();
+    } catch (error) {
+      toast({ title: 'Failed to add to Drift', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
+    } finally {
+      setAddEquityLoading(false);
+    }
+  };
+
+  const handleRemoveEquity = async () => {
+    const amount = parseFloat(removeEquityAmount);
+    if (isNaN(amount) || amount <= 0) {
+      toast({ title: 'Please enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    setRemoveEquityLoading(true);
+    try {
+      const res = await fetch('/api/agent/drift-withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ amount }),
+      });
+
+      const data = await res.json();
+      
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to remove from Drift');
+      }
+
+      toast({ title: `Successfully removed $${amount} from Drift`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
+      setRemoveEquityAmount('');
+      fetchBotBalance();
+    } catch (error) {
+      toast({ title: 'Failed to remove from Drift', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
+    } finally {
+      setRemoveEquityLoading(false);
     }
   };
 
@@ -315,48 +393,127 @@ export function BotManagementDrawer({
           </TabsContent>
 
           <TabsContent value="equity" className="space-y-4 mt-4">
-            <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-muted-foreground">Agent Wallet Balance</p>
-                  <p className="text-3xl font-bold mt-1" data-testid="text-current-balance">
-                    {balanceLoading ? (
-                      <Loader2 className="w-6 h-6 animate-spin" />
-                    ) : (
-                      `$${mainAccountBalance.toFixed(2)}`
-                    )}
-                  </p>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-muted-foreground">Agent Wallet</p>
+                    <p className="text-2xl font-bold mt-1" data-testid="text-agent-balance">
+                      {balanceLoading ? (
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                      ) : (
+                        `$${mainAccountBalance.toFixed(2)}`
+                      )}
+                    </p>
+                  </div>
+                  <Wallet className="w-8 h-8 text-primary/50" />
                 </div>
-                <Wallet className="w-10 h-10 text-primary/50" />
               </div>
-              <p className="text-xs text-muted-foreground mt-2">
-                Available for all your trading bots
+              <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-500/10 to-primary/10 border">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-muted-foreground">Drift Balance</p>
+                    <p className="text-2xl font-bold mt-1" data-testid="text-drift-balance">
+                      {balanceLoading ? (
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                      ) : (
+                        `$${driftBalance.toFixed(2)}`
+                      )}
+                    </p>
+                  </div>
+                  <BarChart3 className="w-8 h-8 text-emerald-500/50" />
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
+              <div className="flex items-center gap-2">
+                <ArrowUp className="w-4 h-4 text-emerald-500" />
+                <h3 className="font-semibold text-sm">Add to Drift</h3>
+              </div>
+              <div className="flex gap-2">
+                <div className="flex-1 relative">
+                  <Input
+                    type="number"
+                    placeholder="Amount (USDC)"
+                    value={addEquityAmount}
+                    onChange={(e) => setAddEquityAmount(e.target.value)}
+                    className="pr-16"
+                    data-testid="input-add-equity"
+                  />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 h-7 px-2 text-xs"
+                    onClick={() => setAddEquityAmount(mainAccountBalance.toString())}
+                    data-testid="button-add-max"
+                  >
+                    Max
+                  </Button>
+                </div>
+                <Button
+                  onClick={handleAddEquity}
+                  disabled={addEquityLoading || !addEquityAmount}
+                  data-testid="button-add-equity"
+                >
+                  {addEquityLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Add'}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Transfer USDC from your agent wallet to Drift for trading
+              </p>
+            </div>
+
+            <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
+              <div className="flex items-center gap-2">
+                <ArrowDown className="w-4 h-4 text-orange-500" />
+                <h3 className="font-semibold text-sm">Remove from Drift</h3>
+              </div>
+              <div className="flex gap-2">
+                <div className="flex-1 relative">
+                  <Input
+                    type="number"
+                    placeholder="Amount (USDC)"
+                    value={removeEquityAmount}
+                    onChange={(e) => setRemoveEquityAmount(e.target.value)}
+                    className="pr-16"
+                    data-testid="input-remove-equity"
+                  />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 h-7 px-2 text-xs"
+                    onClick={() => setRemoveEquityAmount(driftBalance.toString())}
+                    data-testid="button-remove-max"
+                  >
+                    Max
+                  </Button>
+                </div>
+                <Button
+                  onClick={handleRemoveEquity}
+                  disabled={removeEquityLoading || !removeEquityAmount}
+                  variant="outline"
+                  data-testid="button-remove-equity"
+                >
+                  {removeEquityLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Remove'}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Withdraw USDC from Drift back to your agent wallet
               </p>
             </div>
 
             <div className="p-4 rounded-xl border border-blue-500/30 bg-blue-500/5">
               <div className="flex items-start gap-3">
                 <Info className="w-5 h-5 text-blue-500 mt-0.5 flex-shrink-0" />
-                <div className="space-y-2">
-                  <h3 className="font-semibold text-sm">How Bot Capital Works</h3>
+                <div className="space-y-1">
+                  <h3 className="font-semibold text-sm">How It Works</h3>
                   <p className="text-sm text-muted-foreground">
-                    Your trading capital is managed through your Agent Wallet. Deposit funds in Wallet Management and your bots will use them automatically.
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    All bots share the same capital pool from your agent wallet, making it easy to manage your funds in one place.
+                    Funds in Drift are used for trading. Transfer from your agent wallet to Drift to enable trading, or withdraw profits back to your agent wallet.
                   </p>
                 </div>
               </div>
             </div>
-
-            <Button
-              onClick={handleNavigateToWalletManagement}
-              className="w-full"
-              data-testid="button-go-to-wallet"
-            >
-              <ExternalLink className="w-4 h-4 mr-2" />
-              Go to Wallet Management
-            </Button>
           </TabsContent>
 
           <TabsContent value="webhook" className="space-y-4 mt-4">
