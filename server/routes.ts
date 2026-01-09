@@ -418,11 +418,18 @@ export async function registerRoutes(
 
       const { name, market, side, leverage, maxPositionSize, signalConfig, riskConfig, isActive } = req.body;
       
+      if (leverage !== undefined) {
+        const leverageNum = Number(leverage);
+        if (isNaN(leverageNum) || leverageNum < 1 || leverageNum > 20 || !Number.isInteger(leverageNum)) {
+          return res.status(400).json({ error: "Leverage must be an integer between 1 and 20" });
+        }
+      }
+      
       const updated = await storage.updateTradingBot(req.params.id, {
         ...(name && { name }),
         ...(market && { market }),
         ...(side && { side }),
-        ...(leverage !== undefined && { leverage }),
+        ...(leverage !== undefined && { leverage: Number(leverage) }),
         ...(maxPositionSize !== undefined && { maxPositionSize }),
         ...(signalConfig && { signalConfig }),
         ...(riskConfig && { riskConfig }),

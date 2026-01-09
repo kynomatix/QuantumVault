@@ -26,6 +26,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { Input } from '@/components/ui/input';
+import { Slider } from '@/components/ui/slider';
 import {
   Bot,
   Copy,
@@ -47,6 +48,7 @@ import {
   Pause,
   Play,
   Trash2,
+  Settings,
 } from 'lucide-react';
 import {
   AlertDialog,
@@ -125,10 +127,15 @@ export function BotManagementDrawer({
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [localBot, setLocalBot] = useState<TradingBot | null>(null);
+  const [editName, setEditName] = useState<string>('');
+  const [editLeverage, setEditLeverage] = useState<number>(1);
+  const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
 
   useEffect(() => {
     if (bot) {
       setLocalBot(bot);
+      setEditName(bot.name);
+      setEditLeverage(bot.leverage);
     }
   }, [bot]);
 
@@ -356,6 +363,63 @@ export function BotManagementDrawer({
     }
   };
 
+  const handleSaveSettings = async () => {
+    if (!localBot) return;
+    
+    if (editLeverage < 1 || editLeverage > 20) {
+      toast({ title: 'Leverage must be between 1 and 20', variant: 'destructive' });
+      return;
+    }
+    
+    if (!editName.trim()) {
+      toast({ title: 'Bot name is required', variant: 'destructive' });
+      return;
+    }
+    
+    setSaveSettingsLoading(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${localBot.id}?wallet=${walletAddress}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ 
+          name: editName.trim(),
+          leverage: editLeverage,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to save settings');
+      }
+
+      const updatedBot = await res.json();
+      setLocalBot(updatedBot);
+      toast({
+        title: 'Settings saved',
+        description: 'Bot settings have been updated successfully',
+      });
+      onBotUpdated();
+    } catch (error) {
+      toast({
+        title: 'Failed to save settings',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setSaveSettingsLoading(false);
+    }
+  };
+
+  const handleCancelEdit = () => {
+    if (localBot) {
+      setEditName(localBot.name);
+      setEditLeverage(localBot.leverage);
+    }
+  };
+
+  const hasSettingsChanges = localBot ? (editName !== localBot.name || editLeverage !== localBot.leverage) : false;
+
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleString();
   };
@@ -495,7 +559,78 @@ export function BotManagementDrawer({
               </div>
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Leverage</p>
-                <p className="text-lg font-semibold mt-1" data-testid="text-leverage">{bot.leverage}x</p>
+                <p className="text-lg font-semibold mt-1" data-testid="text-leverage">{localBot?.leverage ?? bot.leverage}x</p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl border bg-muted/20">
+              <div className="flex items-center gap-2 mb-4">
+                <Settings className="w-4 h-4 text-primary" />
+                <h3 className="font-semibold text-sm">Bot Settings</h3>
+              </div>
+              
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-sm text-muted-foreground">Bot Name</label>
+                  <Input
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    placeholder="Enter bot name"
+                    data-testid="input-edit-name"
+                  />
+                </div>
+                
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm text-muted-foreground">Leverage</label>
+                    <span className="text-sm font-semibold" data-testid="text-edit-leverage">{editLeverage}x</span>
+                  </div>
+                  <Slider
+                    value={[editLeverage]}
+                    onValueChange={(value) => setEditLeverage(value[0])}
+                    min={1}
+                    max={20}
+                    step={1}
+                    className="w-full"
+                    data-testid="slider-leverage"
+                  />
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>1x</span>
+                    <span>10x</span>
+                    <span>20x</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground flex items-center gap-1">
+                    <Info className="w-3 h-3" />
+                    Your capital × leverage = position size per trade
+                  </p>
+                </div>
+                
+                {hasSettingsChanges && (
+                  <div className="flex gap-2 pt-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCancelEdit}
+                      disabled={saveSettingsLoading}
+                      className="flex-1"
+                      data-testid="button-cancel-settings"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={handleSaveSettings}
+                      disabled={saveSettingsLoading}
+                      className="flex-1"
+                      data-testid="button-save-settings"
+                    >
+                      {saveSettingsLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin mr-1" />
+                      ) : null}
+                      Save Changes
+                    </Button>
+                  </div>
+                )}
               </div>
             </div>
 
