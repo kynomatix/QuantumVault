@@ -2,24 +2,19 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots } from '@/hooks/useApi';
+import { usePrices, useTradingBots } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
   TrendingUp, 
   Bot, 
   LayoutDashboard,
-  ArrowUpRight,
-  ArrowDownRight,
-  Activity,
   Settings,
   Bell,
   Search,
   Plus,
-  Minus,
   RefreshCw,
   Copy,
-  Users,
   Sparkles,
   LogOut,
   Menu,
@@ -77,7 +72,7 @@ type MarketplaceBot = {
 
 const marketplaceBots: MarketplaceBot[] = [];
 
-type NavItem = 'dashboard' | 'marketplace' | 'bots' | 'leaderboard' | 'settings' | 'wallet';
+type NavItem = 'dashboard' | 'marketplace' | 'bots' | 'settings' | 'wallet';
 
 export default function AppPage() {
   const [, navigate] = useLocation();
@@ -95,15 +90,8 @@ export default function AppPage() {
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
 
   // Fetch data using React Query hooks
-  const { data: portfolioData } = usePortfolio();
-  const { data: positionsData } = usePositions();
-  const { data: subscriptionsData } = useSubscriptions();
-  const { data: tradesData } = useTrades(10);
   const { data: botsData, refetch: refetchBots } = useTradingBots();
-  const { data: leaderboardData } = useLeaderboard(100);
   const { data: pricesData } = usePrices();
-  const subscribeBot = useSubscribeToBot();
-  const updateSub = useUpdateSubscription();
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [equityLoading, setEquityLoading] = useState(false);
@@ -482,7 +470,6 @@ export default function AppPage() {
               { id: 'marketplace' as NavItem, icon: Store, label: 'Marketplace' },
               { id: 'bots' as NavItem, icon: Bot, label: 'My Bots' },
               { id: 'wallet' as NavItem, icon: Wallet, label: 'Wallet' },
-              { id: 'leaderboard' as NavItem, icon: Users, label: 'Leaderboard' },
               { id: 'settings' as NavItem, icon: Settings, label: 'Settings' },
             ].map((item) => (
               <button
@@ -684,11 +671,11 @@ export default function AppPage() {
                     <p className="text-xs text-muted-foreground mt-1">Live from market</p>
                   </div>
                   <div className="gradient-border p-4 noise">
-                    <p className="text-xs text-muted-foreground mb-1">Total Trades</p>
-                    <p className="text-2xl font-bold font-mono" data-testid="text-today-pnl">
-                      {tradesData?.length ?? 0}
+                    <p className="text-xs text-muted-foreground mb-1">Total Equity</p>
+                    <p className="text-2xl font-bold font-mono text-primary" data-testid="text-total-equity-stat">
+                      ${totalEquity?.toFixed(2) ?? '0.00'}
                     </p>
-                    <p className="text-xs text-muted-foreground mt-1">Bot executions</p>
+                    <p className="text-xs text-muted-foreground mt-1">USDC in bots</p>
                   </div>
                   <div className="gradient-border p-4 noise">
                     <p className="text-xs text-muted-foreground mb-1">Active Bots</p>
@@ -702,37 +689,25 @@ export default function AppPage() {
                 <div className="grid lg:grid-cols-3 gap-6">
                   <div className="lg:col-span-2 gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
-                      <h2 className="font-display font-semibold">Open Positions</h2>
-                      <Button variant="outline" size="sm" data-testid="button-view-all-positions">View All</Button>
+                      <h2 className="font-display font-semibold">Market Prices</h2>
+                      <Button variant="outline" size="sm" data-testid="button-refresh-prices">
+                        <RefreshCw className="w-4 h-4" />
+                      </Button>
                     </div>
                     <div className="overflow-x-auto">
-                      {positionsData && positionsData.length > 0 ? (
+                      {pricesData && Object.keys(pricesData).length > 0 ? (
                         <table className="w-full text-sm">
                           <thead>
                             <tr className="text-muted-foreground text-xs border-b border-border/50">
                               <th className="text-left py-3 font-medium">Market</th>
-                              <th className="text-left py-3 font-medium">Side</th>
-                              <th className="text-right py-3 font-medium">Size</th>
-                              <th className="text-right py-3 font-medium">Entry</th>
-                              <th className="text-right py-3 font-medium">PnL</th>
+                              <th className="text-right py-3 font-medium">Price</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {positionsData.map((pos, i) => (
-                              <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-position-${i}`}>
-                                <td className="py-3 font-medium">{pos.market}</td>
-                                <td className="py-3">
-                                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                    pos.side === 'long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
-                                  }`}>
-                                    {pos.side?.toUpperCase()}
-                                  </span>
-                                </td>
-                                <td className="py-3 text-right font-mono">{pos.size}</td>
-                                <td className="py-3 text-right font-mono text-muted-foreground">${Number(pos.entryPrice).toLocaleString()}</td>
-                                <td className={`py-3 text-right font-mono ${Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                  {Number(pos.unrealizedPnl) >= 0 ? '+' : ''}${Number(pos.unrealizedPnl).toFixed(2)}
-                                </td>
+                            {Object.entries(pricesData).slice(0, 8).map(([market, price], i) => (
+                              <tr key={market} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-price-${i}`}>
+                                <td className="py-3 font-medium">{market}</td>
+                                <td className="py-3 text-right font-mono text-emerald-400">${price.toFixed(2)}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -740,8 +715,7 @@ export default function AppPage() {
                       ) : (
                         <div className="text-center py-8 text-muted-foreground">
                           <TrendingUp className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                          <p>No open positions</p>
-                          <p className="text-xs mt-1">Positions will appear when your bots execute trades</p>
+                          <p>Loading prices...</p>
                         </div>
                       )}
                     </div>
@@ -784,61 +758,6 @@ export default function AppPage() {
                         </div>
                       )}
                     </div>
-                  </div>
-
-                </div>
-
-                <div className="gradient-border p-4 noise">
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="font-display font-semibold">Recent Trades</h2>
-                    <Button variant="outline" size="sm" data-testid="button-trade-history">Full History</Button>
-                  </div>
-                  <div className="overflow-x-auto">
-                    {tradesData && tradesData.length > 0 ? (
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="text-muted-foreground text-xs border-b border-border/50">
-                            <th className="text-left py-3 font-medium">Time</th>
-                            <th className="text-left py-3 font-medium">Market</th>
-                            <th className="text-left py-3 font-medium">Side</th>
-                            <th className="text-right py-3 font-medium">Size</th>
-                            <th className="text-right py-3 font-medium">Price</th>
-                            <th className="text-right py-3 font-medium">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {tradesData.slice(0, 10).map((trade, i) => (
-                            <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-trade-${i}`}>
-                              <td className="py-3 font-mono text-muted-foreground text-xs">
-                                {trade.createdAt ? new Date(trade.createdAt).toLocaleTimeString() : '--'}
-                              </td>
-                              <td className="py-3 font-medium">{trade.market}</td>
-                              <td className="py-3">
-                                <span className={`flex items-center gap-1 ${trade.side === 'long' ? 'text-emerald-400' : 'text-red-400'}`}>
-                                  {trade.side === 'long' ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
-                                  {trade.side?.toUpperCase()}
-                                </span>
-                              </td>
-                              <td className="py-3 text-right font-mono">{trade.size}</td>
-                              <td className="py-3 text-right font-mono">${Number(trade.price).toLocaleString()}</td>
-                              <td className="py-3 text-right">
-                                <span className={`px-2 py-0.5 rounded text-xs ${
-                                  trade.status === 'filled' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-yellow-500/20 text-yellow-400'
-                                }`}>
-                                  {trade.status}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    ) : (
-                      <div className="text-center py-8 text-muted-foreground">
-                        <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                        <p>No trades yet</p>
-                        <p className="text-xs mt-1">Trades will appear when your bots execute orders</p>
-                      </div>
-                    )}
                   </div>
                 </div>
               </motion.div>
@@ -1149,71 +1068,6 @@ export default function AppPage() {
                     <p className="font-medium mb-1">Add New Bot</p>
                     <p className="text-sm text-muted-foreground">Create a TradingView signal bot</p>
                   </div>
-                </div>
-              </motion.div>
-            )}
-
-            {activeNav === 'leaderboard' && (
-              <motion.div
-                key="leaderboard"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="space-y-6"
-              >
-                <div>
-                  <h1 className="text-2xl font-display font-bold">Leaderboard</h1>
-                  <p className="text-muted-foreground">Top traders this epoch</p>
-                </div>
-
-                <div className="gradient-border noise overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-muted/20 text-muted-foreground text-xs">
-                        <th className="text-left py-4 px-4 font-medium">Rank</th>
-                        <th className="text-left py-4 px-4 font-medium">Trader</th>
-                        <th className="text-right py-4 px-4 font-medium">Volume</th>
-                        <th className="text-right py-4 px-4 font-medium">PnL</th>
-                        <th className="text-right py-4 px-4 font-medium">Win Rate</th>
-                        <th className="text-right py-4 px-4 font-medium">Trades</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {[
-                        { rank: 1, name: 'quantum_whale', volume: '2.4M', pnl: '+$124,500', winRate: '72%', trades: 1247 },
-                        { rank: 2, name: 'sol_maxi_2024', volume: '1.8M', pnl: '+$89,230', winRate: '68%', trades: 892 },
-                        { rank: 3, name: 'drift_master', volume: '1.2M', pnl: '+$67,890', winRate: '71%', trades: 634 },
-                        { rank: 4, name: 'perp_lord', volume: '980K', pnl: '+$45,120', winRate: '65%', trades: 521 },
-                        { rank: 5, name: 'alpha_hunter', volume: '750K', pnl: '+$32,450', winRate: '69%', trades: 445 },
-                        { rank: 6, name: 'grid_wizard', volume: '620K', pnl: '+$28,900', winRate: '74%', trades: 328 },
-                        { rank: 7, name: 'moon_trader', volume: '580K', pnl: '+$24,150', winRate: '62%', trades: 412 },
-                        { rank: 8, name: 'signal_king', volume: '520K', pnl: '+$21,800', winRate: '67%', trades: 289 },
-                      ].map((trader) => (
-                        <tr key={trader.rank} className="border-t border-border/30 hover:bg-muted/20" data-testid={`row-leaderboard-${trader.rank}`}>
-                          <td className="py-4 px-4">
-                            <span className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold ${
-                              trader.rank === 1 ? 'bg-yellow-500/20 text-yellow-400' :
-                              trader.rank === 2 ? 'bg-gray-400/20 text-gray-400' :
-                              trader.rank === 3 ? 'bg-orange-500/20 text-orange-400' :
-                              'bg-muted/30 text-muted-foreground'
-                            }`}>
-                              {trader.rank}
-                            </span>
-                          </td>
-                          <td className="py-4 px-4">
-                            <div className="flex items-center gap-3">
-                              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30" />
-                              <span className="font-medium">@{trader.name}</span>
-                            </div>
-                          </td>
-                          <td className="py-4 px-4 text-right font-mono">${trader.volume}</td>
-                          <td className="py-4 px-4 text-right font-mono text-emerald-400">{trader.pnl}</td>
-                          <td className="py-4 px-4 text-right font-mono">{trader.winRate}</td>
-                          <td className="py-4 px-4 text-right font-mono text-muted-foreground">{trader.trades}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
                 </div>
               </motion.div>
             )}
