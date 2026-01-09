@@ -107,41 +107,40 @@ export default function Landing() {
       <main className="pt-16">
         <section className="relative min-h-[90vh] flex items-center justify-center px-6 overflow-hidden">
           <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/20 rounded-full blur-[120px] animate-pulse-slow" />
-          <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-accent/20 rounded-full blur-[120px] animate-pulse-slow delay-1000" />
+          <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-accent/20 rounded-full blur-[120px] animate-pulse-slow" style={{ animationDelay: '2s' }} />
           
           <motion.div 
-            className="relative z-10 max-w-4xl text-center"
             initial="hidden"
             animate="visible"
             variants={staggerContainer}
+            className="max-w-4xl mx-auto text-center relative z-10"
           >
             <motion.div variants={fadeInUp} className="mb-6">
               <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary">
-                <Sparkles className="w-4 h-4" />
-                Powered by Drift Protocol
+                <Zap className="w-4 h-4" />
+                Powered by Drift Protocol on Solana
               </span>
             </motion.div>
             
             <motion.h1 
               variants={fadeInUp}
-              className="text-4xl sm:text-5xl lg:text-6xl font-display font-bold mb-6 leading-tight"
+              className="text-5xl sm:text-6xl lg:text-7xl font-display font-bold mb-6 leading-tight"
             >
-              Trade Smarter with
-              <span className="bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent"> AI-Powered </span>
-              Trading Bots
+              Trade Smarter with{' '}
+              <span className="gradient-text glow-text">Quantum Bots</span>
             </motion.h1>
             
             <motion.p 
               variants={fadeInUp}
-              className="text-lg sm:text-xl text-muted-foreground max-w-2xl mx-auto mb-8"
+              className="text-xl text-muted-foreground max-w-2xl mx-auto mb-10 leading-relaxed"
             >
-              Deploy automated trading strategies on Solana. Connect your wallet, 
-              set up TradingView signals, and let our bots execute trades 24/7.
+              Deploy algorithmic trading bots on Solana's fastest DEX. 
+              Non-custodial, TradingView-powered, and built for serious traders.
             </motion.p>
             
-            <motion.div variants={fadeInUp} className="flex flex-col sm:flex-row gap-4 justify-center">
+            <motion.div variants={fadeInUp} className="flex flex-col sm:flex-row items-center justify-center gap-4">
               <Button 
-                size="lg"
+                size="lg" 
                 className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity text-lg px-8 py-6 glow"
                 onClick={handleConnectWallet}
                 disabled={connecting}
@@ -151,134 +150,122 @@ export default function Landing() {
                 {connecting ? 'Connecting...' : 'Connect Wallet'}
               </Button>
               <Button 
-                size="lg"
+                size="lg" 
                 variant="outline"
-                className="text-lg px-8 py-6 border-border/50 hover:bg-card/50"
+                className="text-lg px-8 py-6"
+                onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
                 data-testid="button-learn-more"
               >
                 Learn More
-                <ArrowRight className="w-5 h-5 ml-2" />
               </Button>
+            </motion.div>
+
+            <motion.div 
+              variants={fadeInUp}
+              className="mt-16 grid grid-cols-3 gap-8 max-w-lg mx-auto"
+            >
+              <div className="text-center">
+                <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-volume">$48M+</p>
+                <p className="text-sm text-muted-foreground mt-1">Trading Volume</p>
+              </div>
+              <div className="text-center">
+                <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-bots">127</p>
+                <p className="text-sm text-muted-foreground mt-1">Active Bots</p>
+              </div>
+              <div className="text-center">
+                <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-users">4.2K</p>
+                <p className="text-sm text-muted-foreground mt-1">Traders</p>
+              </div>
             </motion.div>
           </motion.div>
         </section>
 
-        <section id="features" className="py-24 px-6">
+        <section id="features" className="py-20 px-6">
           <div className="max-w-7xl mx-auto">
             <motion.div 
-              className="text-center mb-16"
               initial="hidden"
               whileInView="visible"
               viewport={{ once: true }}
               variants={staggerContainer}
             >
-              <motion.h2 variants={fadeInUp} className="text-3xl sm:text-4xl font-display font-bold mb-4">
-                Why Choose QuantumVault?
-              </motion.h2>
-              <motion.p variants={fadeInUp} className="text-muted-foreground max-w-2xl mx-auto">
-                Built for serious traders who want automated, secure, and profitable trading on Solana.
-              </motion.p>
-            </motion.div>
-            
-            <motion.div 
-              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
-              initial="hidden"
-              whileInView="visible"
-              viewport={{ once: true }}
-              variants={staggerContainer}
-            >
-              <FeatureCard 
-                icon={<Zap className="w-6 h-6" />}
-                title="Lightning Fast Execution"
-                description="Execute trades in milliseconds on Solana's high-performance blockchain. Never miss a trading opportunity."
-              />
-              <FeatureCard 
-                icon={<Shield className="w-6 h-6" />}
-                title="Non-Custodial Security"
-                description="Your funds stay in your control. We never hold your private keys or assets."
-              />
-              <FeatureCard 
-                icon={<Activity className="w-6 h-6" />}
-                title="TradingView Signals"
-                description="Connect your TradingView alerts directly to our bots. Automate any strategy with webhook integration."
-              />
-              <FeatureCard 
-                icon={<BarChart3 className="w-6 h-6" />}
-                title="Drift Protocol Integration"
-                description="Trade perpetual futures with up to 10x leverage on Drift, the leading Solana DEX."
-              />
-              <FeatureCard 
-                icon={<Lock className="w-6 h-6" />}
-                title="Agent Wallet System"
-                description="Dedicated agent wallets sign trades automatically while you maintain full control of your funds."
-              />
-              <FeatureCard 
-                icon={<Globe className="w-6 h-6" />}
-                title="24/7 Automated Trading"
-                description="Your bots never sleep. Capture opportunities around the clock without manual intervention."
-              />
+              <motion.div variants={fadeInUp} className="text-center mb-12">
+                <h2 className="text-3xl sm:text-4xl font-display font-bold mb-4">Why QuantumVault?</h2>
+                <p className="text-muted-foreground max-w-2xl mx-auto">
+                  Built for traders who demand performance, security, and transparency.
+                </p>
+              </motion.div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <FeatureCard
+                  icon={<Shield className="w-6 h-6" />}
+                  title="Non-Custodial"
+                  description="Your funds stay in your wallet. We never hold your private keys. Trading via delegated authority only."
+                />
+                <FeatureCard
+                  icon={<Zap className="w-6 h-6" />}
+                  title="Lightning Fast"
+                  description="Built on Solana and Drift Protocol for sub-second execution and minimal slippage."
+                />
+                <FeatureCard
+                  icon={<Activity className="w-6 h-6" />}
+                  title="TradingView Signals"
+                  description="Connect your TradingView alerts directly. Webhook ingestion with idempotent execution."
+                />
+                <FeatureCard
+                  icon={<BarChart3 className="w-6 h-6" />}
+                  title="Grid Strategies"
+                  description="Deploy grid bots with automatic rebalancing. Supports all Drift perpetual markets."
+                />
+                <FeatureCard
+                  icon={<Lock className="w-6 h-6" />}
+                  title="Risk Controls"
+                  description="Per-bot sizing limits, slippage guards, and circuit breakers to protect your capital."
+                />
+                <FeatureCard
+                  icon={<Globe className="w-6 h-6" />}
+                  title="All Markets"
+                  description="Auto-discovery of all Drift markets. New listings available immediately without updates."
+                />
+              </div>
             </motion.div>
           </div>
         </section>
 
-        <section id="how-it-works" className="py-24 px-6 bg-card/30">
-          <div className="max-w-7xl mx-auto">
+        <section id="how-it-works" className="py-20 px-6 bg-gradient-to-b from-transparent to-card/30">
+          <div className="max-w-5xl mx-auto">
             <motion.div 
-              className="text-center mb-16"
               initial="hidden"
               whileInView="visible"
               viewport={{ once: true }}
               variants={staggerContainer}
             >
-              <motion.h2 variants={fadeInUp} className="text-3xl sm:text-4xl font-display font-bold mb-4">
-                Get Started in 3 Steps
-              </motion.h2>
-              <motion.p variants={fadeInUp} className="text-muted-foreground max-w-2xl mx-auto">
-                From wallet connection to automated trading in under 5 minutes.
-              </motion.p>
-            </motion.div>
-            
-            <motion.div 
-              className="grid grid-cols-1 md:grid-cols-3 gap-8"
-              initial="hidden"
-              whileInView="visible"
-              viewport={{ once: true }}
-              variants={staggerContainer}
-            >
-              <motion.div variants={fadeInUp} className="text-center">
-                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center mx-auto mb-6 text-2xl font-bold text-white">
-                  1
-                </div>
-                <h3 className="font-display font-semibold text-xl mb-3">Connect Wallet</h3>
-                <p className="text-muted-foreground">
-                  Connect your Phantom wallet to get started. No signup or email required.
+              <motion.div variants={fadeInUp} className="text-center mb-12">
+                <h2 className="text-3xl sm:text-4xl font-display font-bold mb-4">How It Works</h2>
+                <p className="text-muted-foreground max-w-2xl mx-auto">
+                  Get started in three simple steps
                 </p>
               </motion.div>
-              
-              <motion.div variants={fadeInUp} className="text-center">
-                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center mx-auto mb-6 text-2xl font-bold text-white">
-                  2
-                </div>
-                <h3 className="font-display font-semibold text-xl mb-3">Fund Your Agent</h3>
-                <p className="text-muted-foreground">
-                  Deposit USDC to your agent wallet. It will handle all your trading automatically.
-                </p>
-              </motion.div>
-              
-              <motion.div variants={fadeInUp} className="text-center">
-                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center mx-auto mb-6 text-2xl font-bold text-white">
-                  3
-                </div>
-                <h3 className="font-display font-semibold text-xl mb-3">Deploy Bots</h3>
-                <p className="text-muted-foreground">
-                  Create signal bots, connect TradingView, and watch your strategies execute 24/7.
-                </p>
-              </motion.div>
+
+              <div className="grid md:grid-cols-3 gap-8">
+                {[
+                  { step: '01', title: 'Connect Wallet', description: 'Connect your Phantom wallet securely. No signup, no email, just pure crypto.' },
+                  { step: '02', title: 'Deposit Collateral', description: 'Deposit SOL or USDC to your Drift subaccount. Full control remains with you.' },
+                  { step: '03', title: 'Deploy Bots', description: 'Subscribe to signal bots or create grid strategies. Start earning 24/7.' },
+                ].map((item, i) => (
+                  <motion.div key={i} variants={fadeInUp} className="text-center">
+                    <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+                      <span className="text-2xl font-display font-bold text-white">{item.step}</span>
+                    </div>
+                    <h3 className="font-display font-semibold text-xl mb-2">{item.title}</h3>
+                    <p className="text-muted-foreground">{item.description}</p>
+                  </motion.div>
+                ))}
+              </div>
             </motion.div>
           </div>
         </section>
 
-        <section className="py-24 px-6">
+        <section className="py-20 px-6">
           <div className="max-w-4xl mx-auto">
             <motion.div 
               initial="hidden"

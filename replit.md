@@ -22,23 +22,19 @@ Preferred communication style: Simple, everyday language.
 ### Backend Architecture
 - **Runtime**: Node.js with Express.js
 - **Language**: TypeScript with ESM modules
-- **Session Management**: Express-session with wallet address tracking
+- **Session Management**: Express-session with cookie-based authentication
 - **API Design**: RESTful endpoints under `/api/*` prefix
 - **Build**: esbuild for production bundling with selective dependency bundling
-- **Config**: Centralized Solana RPC config in `server/config.ts`
 
 ### Data Storage
 - **Database**: PostgreSQL via Drizzle ORM
 - **Schema Location**: `shared/schema.ts` contains all table definitions
-- **Tables**: 
-  - `wallets` - User wallet connections with agent wallet keypairs
-  - `tradingBots` - TradingView signal bots with webhook configuration
-  - `botTrades` - Trade execution history for bots
-  - `webhookLogs` - Incoming webhook request logs for debugging
+- **Tables**: users, wallets, bots, tradingBots, botTrades, webhookLogs, subscriptions, portfolios, positions, trades, leaderboardStats
 - **Migrations**: Managed via `drizzle-kit push` command
 
 ### Authentication
-- **Wallet-Based**: Authentication via Solana wallet connection (Phantom)
+- **Wallet-Based**: Primary authentication via Solana wallet connection (Phantom)
+- **Username/Password**: Secondary traditional auth with bcrypt password hashing
 - **Session Storage**: Server-side sessions with wallet address tracking
 
 ### Key Design Patterns
@@ -72,44 +68,13 @@ Preferred communication style: Simple, everyday language.
 - **Delete Safety**: Bots with funds require sweep transaction before deletion
 - **Capital Pool UI**: Shows Phantom balance, Agent Wallet balance, and Drift Protocol balance
 
-## API Endpoints
-
-### Wallet Endpoints
-- `POST /api/wallet/connect` - Connect wallet and create/return user
-- `GET /api/wallet/me` - Get current wallet info
-- `GET /api/wallet/capital` - Get wallet USDC balance
-
-### Trading Bot Endpoints
-- `GET /api/trading-bots` - List all bots for current wallet
-- `POST /api/trading-bots` - Create a new trading bot
-- `GET /api/trading-bots/:id` - Get bot details
-- `PATCH /api/trading-bots/:id` - Update bot settings
-- `DELETE /api/trading-bots/:id` - Delete a bot
-- `GET /api/trading-bots/:id/trades` - Get bot's trade history
-- `POST /api/webhook/tradingview/:botId` - Receive TradingView webhook signals
-
-### Capital Management Endpoints
-- `GET /api/total-equity` - Get total equity across all Drift subaccounts
-- `GET /api/prices` - Get current market prices from Drift
-- `GET /api/prices/:market` - Get specific market price
-
-### Bot Capital Endpoints
-- `POST /api/bot/:botId/deposit` - Deposit to bot's subaccount
-- `POST /api/bot/:botId/withdraw` - Withdraw from bot's subaccount
-- `GET /api/bot/:botId/balance` - Get bot's subaccount balance
-
-### Drift Endpoints
-- `POST /api/drift/deposit` - Build deposit transaction to Drift
-- `POST /api/drift/withdraw` - Build withdraw transaction from Drift
-- `GET /api/drift/balance` - Get Drift account balance
-
 ## External Dependencies
 
 ### Blockchain Services
 - **Solana Web3.js**: Core blockchain interaction (`@solana/web3.js`)
 - **Drift Protocol SDK**: Perpetual futures trading (`@drift-labs/sdk`)
 - **SPL Token**: Token program interactions (`@solana/spl-token`)
-- **RPC Endpoint**: Configurable via `SOLANA_RPC_URL` environment variable, defaults to devnet
+- **RPC Endpoint**: Configurable via `SOLANA_RPC_URL` environment variable, defaults to mainnet-beta
 
 ### Database
 - **PostgreSQL**: Required via `DATABASE_URL` environment variable
@@ -118,7 +83,7 @@ Preferred communication style: Simple, everyday language.
 ### Environment Variables Required
 - `DATABASE_URL`: PostgreSQL connection string
 - `SESSION_SECRET`: Session encryption key (optional, has default for development)
-- `SOLANA_RPC_URL`: Solana RPC endpoint (optional, defaults to devnet)
+- `SOLANA_RPC_URL`: Solana RPC endpoint (optional, defaults to mainnet)
 
 ### Drift Protocol Testnet Configuration
 - **Network**: Solana Devnet
@@ -129,16 +94,3 @@ Preferred communication style: Simple, everyday language.
 - **UI Components**: Full shadcn/ui component set with Radix UI primitives
 - **Forms**: React Hook Form with Zod validation (`@hookform/resolvers`)
 - **Charts**: Recharts for data visualization
-
-## Recent Changes (January 2026)
-
-### Code Cleanup Audit
-- Removed legacy authentication system (username/password)
-- Removed unused database tables (users, bots, subscriptions, portfolios, positions, trades, leaderboardStats)
-- Removed unused API endpoints for legacy features
-- Removed unused frontend pages (Landing, BotSetup)
-- Removed unused components (AuthDialog, BotManagementDrawer, DepositWithdraw)
-- Consolidated Solana RPC configuration into `server/config.ts`
-- Fixed webhook foreign key crash when bots are deleted
-- Deleted unused `server/drift-client.ts` file
-- Cleaned up frontend hooks to remove legacy data fetching

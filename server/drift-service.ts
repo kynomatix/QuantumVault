@@ -1,9 +1,9 @@
-import { PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
 import { createHash } from 'crypto';
 import BN from 'bn.js';
 import { getAgentKeypair } from './agent-wallet';
-import { getConnection, DRIFT_TESTNET_USDC_MINT } from './config';
 
+const DRIFT_TESTNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 
@@ -17,6 +17,17 @@ function getDriftStatePDA(): PublicKey {
 
 const DRIFT_STATE_PUBKEY = getDriftStatePDA();
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+
+const DEVNET_RPC = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+
+let connectionInstance: Connection | null = null;
+
+function getConnection(): Connection {
+  if (!connectionInstance) {
+    connectionInstance = new Connection(DEVNET_RPC, 'confirmed');
+  }
+  return connectionInstance;
+}
 
 function getAnchorDiscriminator(instructionName: string): Buffer {
   const hash = createHash('sha256').update(`global:${instructionName}`).digest();
