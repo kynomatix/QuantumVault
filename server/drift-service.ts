@@ -943,10 +943,10 @@ export async function executeAgentDriftDeposit(
     
     const txBuffer = Buffer.from(txData.transaction, 'base64');
     
-    console.log(`[Drift] Sending deposit transaction...`);
+    console.log(`[Drift] Sending deposit transaction (skipping preflight simulation)...`);
     
     const signature = await connection.sendRawTransaction(txBuffer, {
-      skipPreflight: false,
+      skipPreflight: true,
       preflightCommitment: 'confirmed',
     });
     
