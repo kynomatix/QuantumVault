@@ -37,8 +37,8 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { DepositWithdraw } from '@/components/DepositWithdraw';
 import { BotManagementDrawer } from '@/components/BotManagementDrawer';
+import { WalletContent } from '@/pages/WalletManagement';
 
 interface TradingBot {
   id: string;
@@ -498,11 +498,7 @@ export default function AppPage() {
               <button
                 key={item.id}
                 onClick={() => { 
-                  if (item.id === 'wallet') {
-                    navigate('/wallet');
-                  } else {
-                    setActiveNav(item.id);
-                  }
+                  setActiveNav(item.id);
                   setSidebarOpen(false); 
                 }}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${sidebarCollapsed ? 'lg:justify-center lg:px-3' : ''} ${
@@ -795,8 +791,6 @@ export default function AppPage() {
                       )}
                     </div>
                   </div>
-
-                  <DepositWithdraw />
                 </div>
 
                 <div className="gradient-border p-4 noise">
@@ -1310,6 +1304,10 @@ export default function AppPage() {
                   </div>
                 </div>
               </motion.div>
+            )}
+
+            {activeNav === 'wallet' && (
+              <WalletContent />
             )}
           </AnimatePresence>
         </main>
