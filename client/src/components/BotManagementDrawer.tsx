@@ -117,9 +117,9 @@ export function BotManagementDrawer({
     if (!bot) return;
     setBalanceLoading(true);
     try {
-      const [balanceRes, capitalRes] = await Promise.all([
-        fetch(`/api/bot/${bot.id}/balance`, { credentials: 'include' }),
-        fetch('/api/wallet/capital', { credentials: 'include' }),
+      const [balanceRes, agentRes] = await Promise.all([
+        fetch(`/api/bot/${bot.id}/balance?wallet=${walletAddress}`, { credentials: 'include' }),
+        fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' }),
       ]);
 
       if (balanceRes.ok) {
@@ -127,9 +127,9 @@ export function BotManagementDrawer({
         setBotBalance(data.usdcBalance ?? 0);
       }
 
-      if (capitalRes.ok) {
-        const data = await capitalRes.json();
-        setMainAccountBalance(data.mainAccountBalance ?? 0);
+      if (agentRes.ok) {
+        const data = await agentRes.json();
+        setMainAccountBalance(data.balance ?? 0);
       }
     } catch (error) {
       console.error('Failed to fetch balances:', error);
