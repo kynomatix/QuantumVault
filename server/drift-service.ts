@@ -831,8 +831,10 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
       marginUsed = Math.min(usdcBalance * 0.5, usdcBalance - 0.01);
     }
     
-    // Free collateral = balance - margin used (with small buffer for safety)
-    const freeCollateral = Math.max(0, usdcBalance - marginUsed - 0.01);
+    // Free collateral = balance - margin used
+    // Only apply tiny buffer when there are open positions (Drift requires ~0.000002 USDC minimum)
+    const buffer = hasOpenPositions ? 0.0001 : 0;
+    const freeCollateral = Math.max(0, usdcBalance - marginUsed - buffer);
     
     console.log(`[Drift] Account info: balance=${usdcBalance.toFixed(4)}, marginUsed=${marginUsed.toFixed(4)}, free=${freeCollateral.toFixed(4)}, hasPositions=${hasOpenPositions}`);
     
