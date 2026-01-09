@@ -29,6 +29,21 @@ function generateWebhookSecret(): string {
   return crypto.randomBytes(32).toString('hex');
 }
 
+function generateSignalHash(botId: string, payload: any): string {
+  // Create a deterministic hash from botId + key signal data
+  // This prevents duplicate orders from the same TradingView alert
+  const signalData = {
+    botId,
+    action: payload?.data?.action || payload?.action || '',
+    contracts: payload?.data?.contracts || payload?.contracts || '',
+    symbol: payload?.symbol || '',
+    time: payload?.time || '',
+    // Include price to distinguish different signals (rounded to reduce noise)
+    price: payload?.price ? Math.round(parseFloat(payload.price) * 100) / 100 : 0,
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(signalData)).digest('hex').substring(0, 32);
+}
+
 function generateWebhookUrl(botId: string, secret: string): string {
   const baseUrl = process.env.REPLIT_DEV_DOMAIN 
     ? `https://${process.env.REPLIT_DEV_DOMAIN}`
@@ -776,16 +791,28 @@ export async function registerRoutes(
     const { botId } = req.params;
     const { secret } = req.query;
 
-    // Log webhook
+    // Generate signal hash for deduplication
+    const signalHash = generateSignalHash(botId, req.body);
+    
+    // Log webhook with signal hash
     const log = await storage.createWebhookLog({
       tradingBotId: botId,
       payload: req.body,
       headers: req.headers as any,
       ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
       processed: false,
+      signalHash,
     });
 
     try {
+      // Check for duplicate signal (prevents glitchy double executions)
+      const isDuplicate = await storage.checkDuplicateSignal(signalHash, botId);
+      if (isDuplicate) {
+        console.log(`[Webhook] Duplicate signal detected, skipping: hash=${signalHash}`);
+        await storage.updateWebhookLog(log.id, { errorMessage: "Duplicate signal - already executed", processed: true });
+        return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
+      }
+
       // Get bot
       const bot = await storage.getTradingBotById(botId);
       if (!bot) {
@@ -994,7 +1021,7 @@ export async function registerRoutes(
         lastTradeAt: new Date().toISOString(),
       });
 
-      await storage.updateWebhookLog(log.id, { processed: true });
+      await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
 
       res.json({
         success: true,
@@ -1003,6 +1030,7 @@ export async function registerRoutes(
         tradeId: trade.id,
         market: bot.market,
         size: positionSize,
+        signalHash,
       });
     } catch (error) {
       console.error("Webhook processing error:", error);
@@ -1059,8 +1087,19 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Bot does not belong to this wallet" });
       }
 
-      // Update webhook log with botId
-      await storage.updateWebhookLog(log.id, { tradingBotId: botId });
+      // Generate signal hash and check for duplicates
+      const signalHash = generateSignalHash(botId, payload);
+      
+      // Update webhook log with botId and signal hash
+      await storage.updateWebhookLog(log.id, { tradingBotId: botId, signalHash });
+
+      // Check for duplicate signal (prevents glitchy double executions)
+      const isDuplicate = await storage.checkDuplicateSignal(signalHash, botId);
+      if (isDuplicate) {
+        console.log(`[User Webhook] Duplicate signal detected, skipping: hash=${signalHash}`);
+        await storage.updateWebhookLog(log.id, { errorMessage: "Duplicate signal - already executed", processed: true });
+        return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
+      }
 
       // Check if bot is active
       if (!bot.isActive) {
@@ -1237,7 +1276,7 @@ export async function registerRoutes(
         lastTradeAt: new Date().toISOString(),
       });
 
-      await storage.updateWebhookLog(log.id, { processed: true });
+      await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
 
       res.json({
         success: true,
@@ -1248,6 +1287,7 @@ export async function registerRoutes(
         size: positionSize,
         botId: botId,
         txSignature: orderResult.signature,
+        signalHash,
       });
     } catch (error) {
       console.error("User webhook processing error:", error);

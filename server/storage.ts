@@ -1,4 +1,4 @@
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc, sql, and } from "drizzle-orm";
 import { db } from "./db";
 import {
   users,
@@ -74,6 +74,7 @@ export interface IStorage {
 
   createWebhookLog(log: InsertWebhookLog): Promise<WebhookLog>;
   updateWebhookLog(id: string, updates: Partial<InsertWebhookLog>): Promise<void>;
+  checkDuplicateSignal(signalHash: string, botId: string): Promise<boolean>;
 
   createSubscription(subscription: InsertSubscription): Promise<Subscription>;
   getUserSubscriptions(userId: string): Promise<(Subscription & { bot: Bot })[]>;
@@ -249,6 +250,19 @@ export class DatabaseStorage implements IStorage {
 
   async updateWebhookLog(id: string, updates: Partial<InsertWebhookLog>): Promise<void> {
     await db.update(webhookLogs).set(updates).where(eq(webhookLogs.id, id));
+  }
+
+  async checkDuplicateSignal(signalHash: string, botId: string): Promise<boolean> {
+    // Check if a webhook with this hash was already processed for this bot
+    const result = await db.select()
+      .from(webhookLogs)
+      .where(and(
+        eq(webhookLogs.signalHash, signalHash),
+        eq(webhookLogs.tradingBotId, botId),
+        eq(webhookLogs.tradeExecuted, true)
+      ))
+      .limit(1);
+    return result.length > 0;
   }
 
   async createSubscription(subscription: InsertSubscription): Promise<Subscription> {

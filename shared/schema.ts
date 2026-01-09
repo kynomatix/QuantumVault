@@ -162,6 +162,8 @@ export const webhookLogs = pgTable("webhook_logs", {
   headers: jsonb("headers"),
   ipAddress: text("ip_address"),
   processed: boolean("processed").default(false).notNull(),
+  signalHash: text("signal_hash"),
+  tradeExecuted: boolean("trade_executed").default(false).notNull(),
   errorMessage: text("error_message"),
   receivedAt: timestamp("received_at").defaultNow().notNull(),
 });
