@@ -167,5 +167,8 @@ export function useTradingBots() {
     queryKey: ["tradingBots", publicKeyString],
     queryFn: () => fetchTradingBots(publicKeyString!),
     enabled: !!publicKeyString,
+    refetchOnMount: true,
+    staleTime: 1000,
+    refetchOnWindowFocus: true,
   });
 }

@@ -772,7 +772,21 @@ export default function AppPage() {
                                   <p className="text-xs text-muted-foreground">{bot.market}</p>
                                 </div>
                               </div>
-                              <span className={`w-2 h-2 rounded-full ${bot.isActive ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
+                              <div className="flex items-center gap-2">
+                                <Button 
+                                  variant="ghost" 
+                                  size="icon" 
+                                  className="h-6 w-6"
+                                  onClick={() => {
+                                    setSelectedManagedBot(bot);
+                                    setManageBotDrawerOpen(true);
+                                  }}
+                                  data-testid={`button-bot-settings-${bot.id}`}
+                                >
+                                  <Settings className="w-3.5 h-3.5 text-muted-foreground" />
+                                </Button>
+                                <span className={`w-2 h-2 rounded-full ${bot.isActive ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
+                              </div>
                             </div>
                             <div className="flex items-center justify-between text-xs">
                               <span className="text-muted-foreground">{(bot.stats as any)?.totalTrades ?? 0} trades</span>
