@@ -7,7 +7,6 @@ import { WalletProvider } from "@/components/WalletProvider";
 import NotFound from "@/pages/not-found";
 import Landing from "@/pages/Landing";
 import AppPage from "@/pages/App";
-import BotSetup from "@/pages/BotSetup";
 import WalletManagement from "@/pages/WalletManagement";
 
 function Router() {
@@ -15,7 +14,6 @@ function Router() {
     <Switch>
       <Route path="/" component={Landing} />
       <Route path="/app" component={AppPage} />
-      <Route path="/bots" component={BotSetup} />
       <Route path="/wallet" component={WalletManagement} />
       <Route component={NotFound} />
     </Switch>

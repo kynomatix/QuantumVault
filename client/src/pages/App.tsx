@@ -38,6 +38,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { BotManagementDrawer } from '@/components/BotManagementDrawer';
+import { CreateBotModal } from '@/components/CreateBotModal';
 import { WalletContent } from '@/pages/WalletManagement';
 
 interface TradingBot {
@@ -97,6 +98,7 @@ export default function AppPage() {
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
   const [manageBotDrawerOpen, setManageBotDrawerOpen] = useState(false);
   const [selectedManagedBot, setSelectedManagedBot] = useState<TradingBot | null>(null);
+  const [createBotOpen, setCreateBotOpen] = useState(false);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -724,7 +726,7 @@ export default function AppPage() {
                             </tr>
                           </thead>
                           <tbody>
-                            {positionsData.map((pos, i) => (
+                            {positionsData.map((pos: any, i: number) => (
                               <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-position-${i}`}>
                                 <td className="py-3 font-medium">{pos.market}</td>
                                 <td className="py-3">
@@ -763,7 +765,7 @@ export default function AppPage() {
                     </div>
                     <div className="space-y-3">
                       {botsData && botsData.length > 0 ? (
-                        botsData.map((bot) => (
+                        botsData.map((bot: TradingBot) => (
                           <div key={bot.id} className="p-3 rounded-xl bg-muted/30 hover:bg-muted/40 transition-colors" data-testid={`bot-item-${bot.id}`}>
                             <div className="flex items-center justify-between mb-2">
                               <div className="flex items-center gap-2">
@@ -829,7 +831,7 @@ export default function AppPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {tradesData.slice(0, 10).map((trade, i) => (
+                          {tradesData.slice(0, 10).map((trade: any, i: number) => (
                             <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-trade-${i}`}>
                               <td className="py-3 font-mono text-muted-foreground text-xs">
                                 {trade.createdAt ? new Date(trade.createdAt).toLocaleTimeString() : '--'}
@@ -881,7 +883,7 @@ export default function AppPage() {
                   </div>
                   <Button 
                     className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                    onClick={() => navigate('/bots')}
+                    onClick={() => setCreateBotOpen(true)}
                     data-testid="button-create-bot"
                   >
                     <Plus className="w-4 h-4 mr-2" />
@@ -891,7 +893,7 @@ export default function AppPage() {
 
                 {botsData && botsData.length > 0 ? (
                   <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {botsData.map((bot) => (
+                    {botsData.map((bot: TradingBot) => (
                       <div 
                         key={bot.id} 
                         className="gradient-border p-4 noise hover:scale-[1.01] transition-transform"
@@ -956,7 +958,7 @@ export default function AppPage() {
                     <p className="text-muted-foreground mb-6">Create your first TradingView bot to start automated trading</p>
                     <Button 
                       className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                      onClick={() => navigate('/bots')}
+                      onClick={() => setCreateBotOpen(true)}
                       data-testid="button-create-first-bot"
                     >
                       <Plus className="w-4 h-4 mr-2" />
@@ -1323,6 +1325,15 @@ export default function AppPage() {
         }}
         walletAddress={publicKeyString || ''}
         onBotUpdated={() => {
+          refetchBots();
+        }}
+      />
+
+      <CreateBotModal
+        isOpen={createBotOpen}
+        onClose={() => setCreateBotOpen(false)}
+        walletAddress={publicKeyString || ''}
+        onBotCreated={() => {
           refetchBots();
         }}
       />
