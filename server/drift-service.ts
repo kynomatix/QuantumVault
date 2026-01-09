@@ -806,6 +806,27 @@ export async function executeAgentDriftDeposit(
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const connection = getConnection();
+    const agentPubkey = new PublicKey(agentPublicKey);
+    const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+    const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
+    
+    let agentBalance = 0;
+    try {
+      const accountInfo = await connection.getTokenAccountBalance(agentAta);
+      agentBalance = accountInfo.value.uiAmount || 0;
+    } catch {
+      return {
+        success: false,
+        error: 'Agent wallet has no USDC token account. Please deposit USDC to your agent wallet first using Wallet Management.',
+      };
+    }
+    
+    if (agentBalance < amountUsdc) {
+      return {
+        success: false,
+        error: `Insufficient USDC in agent wallet. Available: $${agentBalance.toFixed(2)}, Requested: $${amountUsdc.toFixed(2)}. Please deposit more USDC to your agent wallet first.`,
+      };
+    }
     
     const txData = await buildAgentDriftDepositTransaction(
       agentPublicKey,
@@ -843,9 +864,18 @@ export async function executeAgentDriftDeposit(
     };
   } catch (error) {
     console.error('[Drift] Agent deposit execution error:', error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    if (errorMessage.includes('Attempt to debit an account')) {
+      return {
+        success: false,
+        error: 'Drift Protocol deposit failed. This may be a testnet configuration issue. Your funds remain safely in your agent wallet.',
+      };
+    }
+    
     return {
       success: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage,
     };
   }
 }
