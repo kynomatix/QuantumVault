@@ -25,6 +25,7 @@ import { Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { Fuel } from 'lucide-react';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
+import { EquityHistory } from '@/components/EquityHistory';
 
 interface CapitalPool {
   mainAccountBalance: number;
@@ -207,6 +208,13 @@ export function WalletContent() {
         lastValidBlockHeight,
       });
 
+      await fetch('/api/agent/confirm-deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, txSignature: signature }),
+        credentials: 'include',
+      });
+
       toast({ 
         title: 'Deposit Successful!', 
         description: message || `Deposited ${amount} USDC to Agent Wallet`
@@ -269,6 +277,13 @@ export function WalletContent() {
         signature,
         blockhash,
         lastValidBlockHeight,
+      });
+
+      await fetch('/api/agent/confirm-withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, txSignature: signature }),
+        credentials: 'include',
       });
 
       toast({ 
@@ -552,6 +567,13 @@ export function WalletContent() {
         signature,
         blockhash,
         lastValidBlockHeight,
+      });
+
+      await fetch('/api/agent/confirm-withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, txSignature: signature }),
+        credentials: 'include',
       });
 
       toast({ 
@@ -977,6 +999,8 @@ export function WalletContent() {
           </Tabs>
         </CardContent>
       </Card>
+
+      <EquityHistory walletAddress={publicKeyString ?? undefined} />
     </motion.div>
   );
 }
@@ -1150,6 +1174,13 @@ export default function WalletManagement() {
         lastValidBlockHeight,
       });
 
+      await fetch('/api/agent/confirm-deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, txSignature: signature }),
+        credentials: 'include',
+      });
+
       toast({ 
         title: 'Deposit Successful!', 
         description: message || `Deposited ${amount} USDC to Agent Wallet`
@@ -1212,6 +1243,13 @@ export default function WalletManagement() {
         signature,
         blockhash,
         lastValidBlockHeight,
+      });
+
+      await fetch('/api/agent/confirm-withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, txSignature: signature }),
+        credentials: 'include',
       });
 
       toast({ 
@@ -1495,6 +1533,13 @@ export default function WalletManagement() {
         signature,
         blockhash,
         lastValidBlockHeight,
+      });
+
+      await fetch('/api/agent/confirm-withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, txSignature: signature }),
+        credentials: 'include',
       });
 
       toast({ 

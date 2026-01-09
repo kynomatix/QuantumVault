@@ -401,12 +401,20 @@ export async function registerRoutes(
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
       }
+      if (!txSignature || typeof txSignature !== 'string' || txSignature.length < 20) {
+        return res.status(400).json({ error: "Valid transaction signature required" });
+      }
+
+      const existingEvents = await storage.getEquityEvents(req.walletAddress!, 100);
+      if (existingEvents.some(e => e.txSignature === txSignature)) {
+        return res.json({ success: true, duplicate: true });
+      }
 
       await storage.createEquityEvent({
         walletAddress: req.walletAddress!,
         eventType: 'agent_deposit',
         amount: String(amount),
-        txSignature: txSignature || null,
+        txSignature,
         notes: 'Deposit to agent wallet',
       });
 
@@ -423,12 +431,20 @@ export async function registerRoutes(
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
       }
+      if (!txSignature || typeof txSignature !== 'string' || txSignature.length < 20) {
+        return res.status(400).json({ error: "Valid transaction signature required" });
+      }
+
+      const existingEvents = await storage.getEquityEvents(req.walletAddress!, 100);
+      if (existingEvents.some(e => e.txSignature === txSignature)) {
+        return res.json({ success: true, duplicate: true });
+      }
 
       await storage.createEquityEvent({
         walletAddress: req.walletAddress!,
         eventType: 'agent_withdraw',
         amount: String(-amount),
-        txSignature: txSignature || null,
+        txSignature,
         notes: 'Withdraw from agent wallet',
       });
 
