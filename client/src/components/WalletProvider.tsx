@@ -11,7 +11,13 @@ interface WalletProviderProps {
 }
 
 export function WalletProvider({ children }: WalletProviderProps) {
-  const endpoint = useMemo(() => clusterApiUrl('mainnet-beta'), []);
+  const endpoint = useMemo(() => {
+    const customRpc = import.meta.env.VITE_SOLANA_RPC_URL;
+    if (customRpc) {
+      return customRpc;
+    }
+    return clusterApiUrl('mainnet-beta');
+  }, []);
 
   const wallets = useMemo(
     () => [new PhantomWalletAdapter()],
