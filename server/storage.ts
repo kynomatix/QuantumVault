@@ -6,6 +6,7 @@ import {
   bots,
   tradingBots,
   botTrades,
+  equityEvents,
   webhookLogs,
   subscriptions,
   portfolios,
@@ -22,6 +23,8 @@ import {
   type InsertTradingBot,
   type BotTrade,
   type InsertBotTrade,
+  type EquityEvent,
+  type InsertEquityEvent,
   type WebhookLog,
   type InsertWebhookLog,
   type Subscription,
@@ -88,6 +91,10 @@ export interface IStorage {
 
   getLeaderboard(limit?: number): Promise<(LeaderboardStats & { user: User })[]>;
   upsertLeaderboardStats(stats: InsertLeaderboardStats): Promise<LeaderboardStats>;
+
+  createEquityEvent(event: InsertEquityEvent): Promise<EquityEvent>;
+  getEquityEvents(walletAddress: string, limit?: number): Promise<EquityEvent[]>;
+  getBotEquityEvents(tradingBotId: string, limit?: number): Promise<EquityEvent[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -344,6 +351,19 @@ export class DatabaseStorage implements IStorage {
       })
       .returning();
     return result[0];
+  }
+
+  async createEquityEvent(event: InsertEquityEvent): Promise<EquityEvent> {
+    const result = await db.insert(equityEvents).values(event).returning();
+    return result[0];
+  }
+
+  async getEquityEvents(walletAddress: string, limit: number = 50): Promise<EquityEvent[]> {
+    return db.select().from(equityEvents).where(eq(equityEvents.walletAddress, walletAddress)).orderBy(desc(equityEvents.createdAt)).limit(limit);
+  }
+
+  async getBotEquityEvents(tradingBotId: string, limit: number = 50): Promise<EquityEvent[]> {
+    return db.select().from(equityEvents).where(eq(equityEvents.tradingBotId, tradingBotId)).orderBy(desc(equityEvents.createdAt)).limit(limit);
   }
 }
 

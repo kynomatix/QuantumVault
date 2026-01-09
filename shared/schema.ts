@@ -135,6 +135,25 @@ export const insertBotTradeSchema = createInsertSchema(botTrades).omit({
 export type InsertBotTrade = z.infer<typeof insertBotTradeSchema>;
 export type BotTrade = typeof botTrades.$inferSelect;
 
+export const equityEvents = pgTable("equity_events", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  tradingBotId: varchar("trading_bot_id").references(() => tradingBots.id, { onDelete: "set null" }),
+  eventType: text("event_type").notNull(),
+  amount: decimal("amount", { precision: 20, scale: 6 }).notNull(),
+  txSignature: text("tx_signature"),
+  balanceAfter: decimal("balance_after", { precision: 20, scale: 6 }),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertEquityEventSchema = createInsertSchema(equityEvents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertEquityEvent = z.infer<typeof insertEquityEventSchema>;
+export type EquityEvent = typeof equityEvents.$inferSelect;
+
 export const webhookLogs = pgTable("webhook_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   tradingBotId: varchar("trading_bot_id").references(() => tradingBots.id, { onDelete: "set null" }),
