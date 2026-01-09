@@ -40,6 +40,7 @@ import { Input } from '@/components/ui/input';
 import { BotManagementDrawer } from '@/components/BotManagementDrawer';
 import { CreateBotModal } from '@/components/CreateBotModal';
 import { WalletContent } from '@/pages/WalletManagement';
+import { WelcomePopup } from '@/components/WelcomePopup';
 
 interface TradingBot {
   id: string;
@@ -99,6 +100,9 @@ export default function AppPage() {
   const [manageBotDrawerOpen, setManageBotDrawerOpen] = useState(false);
   const [selectedManagedBot, setSelectedManagedBot] = useState<TradingBot | null>(null);
   const [createBotOpen, setCreateBotOpen] = useState(false);
+  const [welcomePopupOpen, setWelcomePopupOpen] = useState(false);
+  const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
+  const welcomeCheckedRef = useRef(false);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -158,6 +162,31 @@ export default function AppPage() {
       navigate('/');
     }
   }, [connected, connecting, navigate]);
+
+  // Check if agent wallet needs SOL for gas and show welcome popup
+  useEffect(() => {
+    if (!connected || welcomeCheckedRef.current) return;
+    
+    const checkAgentSolBalance = async () => {
+      try {
+        const res = await fetch('/api/agent/balance', { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          setAgentPublicKey(data.agentPublicKey);
+          
+          // Show welcome popup if agent has no SOL (can't pay for gas)
+          if (data.solBalance === 0 || data.solBalance < 0.01) {
+            setWelcomePopupOpen(true);
+          }
+          welcomeCheckedRef.current = true;
+        }
+      } catch (error) {
+        console.error('Error checking agent balance:', error);
+      }
+    };
+    
+    checkAgentSolBalance();
+  }, [connected]);
 
   const handleDisconnect = async () => {
     await disconnect();
@@ -1315,6 +1344,18 @@ export default function AppPage() {
           refetchBots();
         }}
       />
+
+      {agentPublicKey && (
+        <WelcomePopup
+          isOpen={welcomePopupOpen}
+          onClose={() => setWelcomePopupOpen(false)}
+          agentPublicKey={agentPublicKey}
+          onDepositComplete={() => {
+            // Refresh balances after SOL deposit
+            welcomeCheckedRef.current = false;
+          }}
+        />
+      )}
     </div>
   );
 }

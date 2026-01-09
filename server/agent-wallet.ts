@@ -1,4 +1,4 @@
-import { Connection, PublicKey, Keypair, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { Connection, PublicKey, Keypair, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { encrypt, decrypt } from './crypto';
 import bs58 from 'bs58';
 import BN from 'bn.js';
@@ -64,6 +64,60 @@ export async function getAgentUsdcBalance(agentPublicKey: string): Promise<numbe
   } catch (error) {
     return 0;
   }
+}
+
+export async function getAgentSolBalance(agentPublicKey: string): Promise<number> {
+  const connection = getConnection();
+  const agentPubkey = new PublicKey(agentPublicKey);
+  
+  try {
+    const balance = await connection.getBalance(agentPubkey);
+    return balance / LAMPORTS_PER_SOL;
+  } catch (error) {
+    return 0;
+  }
+}
+
+export async function buildSolTransferToAgentTransaction(
+  userWalletAddress: string,
+  agentPublicKey: string,
+  amountSol: number,
+): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(userWalletAddress);
+  const agentPubkey = new PublicKey(agentPublicKey);
+  
+  const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
+  if (lamports <= 0) {
+    throw new Error('Invalid transfer amount');
+  }
+  
+  const transaction = new Transaction();
+  
+  transaction.add(
+    SystemProgram.transfer({
+      fromPubkey: userPubkey,
+      toPubkey: agentPubkey,
+      lamports,
+    })
+  );
+  
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  
+  transaction.feePayer = userPubkey;
+  transaction.recentBlockhash = blockhash;
+  
+  const serializedTx = transaction.serialize({ 
+    requireAllSignatures: false,
+    verifySignatures: false 
+  }).toString('base64');
+  
+  return {
+    transaction: serializedTx,
+    blockhash,
+    lastValidBlockHeight,
+    message: `Deposit ${amountSol} SOL to agent wallet for gas fees`,
+  };
 }
 
 export async function buildTransferToAgentTransaction(

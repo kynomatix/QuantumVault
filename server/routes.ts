@@ -8,7 +8,7 @@ import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shar
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance } from "./drift-service";
-import { generateAgentWallet, getAgentUsdcBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction } from "./agent-wallet";
+import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
   interface SessionData {
@@ -196,13 +196,46 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const balance = await getAgentUsdcBalance(wallet.agentPublicKey);
+      const [balance, solBalance] = await Promise.all([
+        getAgentUsdcBalance(wallet.agentPublicKey),
+        getAgentSolBalance(wallet.agentPublicKey),
+      ]);
+      
       res.json({
         agentPublicKey: wallet.agentPublicKey,
         balance,
+        solBalance,
       });
     } catch (error) {
       console.error("Get agent balance error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/agent/deposit-sol", requireWallet, async (req, res) => {
+    try {
+      const { amount } = req.body;
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const txData = await buildSolTransferToAgentTransaction(
+        req.walletAddress!,
+        wallet.agentPublicKey,
+        amount
+      );
+
+      res.json(txData);
+    } catch (error) {
+      console.error("Build SOL deposit error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

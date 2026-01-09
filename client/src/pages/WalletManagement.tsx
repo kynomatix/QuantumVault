@@ -21,8 +21,9 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
-import { Transaction } from '@solana/web3.js';
+import { Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { Buffer } from 'buffer';
+import { Fuel } from 'lucide-react';
 
 interface CapitalPool {
   mainAccountBalance: number;
@@ -40,6 +41,7 @@ interface CapitalPool {
 interface AgentWallet {
   agentPublicKey: string;
   balance: number;
+  solBalance: number;
 }
 
 export function WalletContent() {
@@ -71,6 +73,24 @@ export function WalletContent() {
   const [agentLoading, setAgentLoading] = useState(false);
 
   const [copiedAgentAddress, setCopiedAgentAddress] = useState(false);
+
+  const [solDepositAmount, setSolDepositAmount] = useState('');
+  const [isDepositingSol, setIsDepositingSol] = useState(false);
+  const [userSolBalance, setUserSolBalance] = useState<number | null>(null);
+  const [solLoading, setSolLoading] = useState(false);
+
+  const fetchUserSolBalance = async () => {
+    if (!solanaWallet.publicKey) return;
+    setSolLoading(true);
+    try {
+      const balance = await connection.getBalance(solanaWallet.publicKey);
+      setUserSolBalance(balance / LAMPORTS_PER_SOL);
+    } catch (error) {
+      console.error('Error fetching SOL balance:', error);
+    } finally {
+      setSolLoading(false);
+    }
+  };
 
   const fetchCapitalPool = async () => {
     if (!publicKeyString) return;
@@ -109,11 +129,12 @@ export function WalletContent() {
     if (connected && publicKeyString) {
       fetchCapitalPool();
       fetchAgentBalance();
+      fetchUserSolBalance();
     }
   }, [connected, publicKeyString]);
 
   const handleRefresh = async () => {
-    await Promise.all([fetchUsdcBalance(), fetchCapitalPool(), fetchAgentBalance()]);
+    await Promise.all([fetchUsdcBalance(), fetchCapitalPool(), fetchAgentBalance(), fetchUserSolBalance()]);
     toast({ title: 'Balances refreshed' });
   };
 
@@ -295,6 +316,76 @@ export function WalletContent() {
   const setMaxWithdrawToWallet = () => {
     if (agentWallet?.balance) {
       setWithdrawToWalletAmount(agentWallet.balance.toString());
+    }
+  };
+
+  const setMaxSolDeposit = () => {
+    if (userSolBalance !== null && userSolBalance > 0.01) {
+      setSolDepositAmount((userSolBalance - 0.01).toFixed(4));
+    }
+  };
+
+  const handleSolDeposit = async () => {
+    const amount = parseFloat(solDepositAmount);
+    if (!amount || amount <= 0) {
+      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    if (userSolBalance !== null && amount > userSolBalance - 0.01) {
+      toast({ title: 'Insufficient SOL balance (keep 0.01 for fees)', variant: 'destructive' });
+      return;
+    }
+
+    setIsDepositingSol(true);
+    try {
+      const response = await fetch('/api/agent/deposit-sol', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'SOL deposit failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      const signedTx = await solanaWallet.signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ 
+        title: 'SOL Deposit Successful!', 
+        description: message || `Deposited ${amount} SOL to Agent Wallet for gas fees`
+      });
+      
+      setSolDepositAmount('');
+      await Promise.all([fetchUserSolBalance(), fetchAgentBalance()]);
+    } catch (error: any) {
+      console.error('SOL deposit error:', error);
+      toast({ 
+        title: 'SOL Deposit Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsDepositingSol(false);
     }
   };
 
@@ -553,21 +644,35 @@ export function WalletContent() {
                 </Button>
               </div>
             </div>
-            <div className="text-right">
-              <p className="text-sm text-muted-foreground">Balance</p>
-              <p className="font-mono text-lg font-semibold text-primary" data-testid="text-agent-wallet-balance">
-                {agentLoading ? (
-                  <Loader2 className="w-4 h-4 animate-spin inline" />
-                ) : (
-                  `$${(agentWallet?.balance ?? 0).toFixed(2)} USDC`
-                )}
-              </p>
+            <div className="text-right space-y-1">
+              <div>
+                <p className="text-sm text-muted-foreground">USDC Balance</p>
+                <p className="font-mono text-lg font-semibold text-primary" data-testid="text-agent-wallet-balance">
+                  {agentLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin inline" />
+                  ) : (
+                    `$${(agentWallet?.balance ?? 0).toFixed(2)} USDC`
+                  )}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground flex items-center gap-1">
+                  <Fuel className="w-3 h-3" /> SOL (Gas)
+                </p>
+                <p className="font-mono text-lg font-semibold text-orange-500" data-testid="text-agent-sol-balance">
+                  {agentLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin inline" />
+                  ) : (
+                    `${(agentWallet?.solBalance ?? 0).toFixed(4)} SOL`
+                  )}
+                </p>
+              </div>
             </div>
           </div>
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card className="border-border/50 bg-card/50 backdrop-blur-sm h-full">
           <CardHeader className="pb-2">
             <CardDescription className="flex items-center gap-2">
@@ -613,12 +718,31 @@ export function WalletContent() {
           </CardContent>
         </Card>
 
+        <Card className="border-orange-500/30 bg-card/50 backdrop-blur-sm h-full border-2">
+          <CardHeader className="pb-2">
+            <CardDescription className="flex items-center gap-2">
+              <Fuel className="w-4 h-4 text-orange-500" />
+              SOL (Gas Fees)
+            </CardDescription>
+            <CardTitle className="text-2xl font-mono text-orange-500" data-testid="text-user-sol-balance">
+              {solLoading ? (
+                <Loader2 className="w-5 h-5 animate-spin" />
+              ) : (
+                `${(userSolBalance ?? 0).toFixed(4)} SOL`
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-xs text-muted-foreground">Your Phantom wallet SOL balance</p>
+          </CardContent>
+        </Card>
+
       </div>
 
       <Card className="border-border/50 bg-card/50 backdrop-blur-sm">
         <CardContent className="pt-6">
           <Tabs defaultValue="deposit" className="w-full">
-            <TabsList className="grid w-full grid-cols-2 mb-6">
+            <TabsList className="grid w-full grid-cols-3 mb-6">
               <TabsTrigger value="deposit" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-deposit">
                 <ArrowDownToLine className="w-3 h-3 sm:w-4 sm:h-4" />
                 Deposit
@@ -626,6 +750,10 @@ export function WalletContent() {
               <TabsTrigger value="withdraw" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-withdraw">
                 <ArrowUpFromLine className="w-3 h-3 sm:w-4 sm:h-4" />
                 Withdraw
+              </TabsTrigger>
+              <TabsTrigger value="gas" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-gas">
+                <Fuel className="w-3 h-3 sm:w-4 sm:h-4" />
+                Gas (SOL)
               </TabsTrigger>
             </TabsList>
             
@@ -738,6 +866,100 @@ export function WalletContent() {
                 </Button>
               </div>
             </TabsContent>
+
+            <TabsContent value="gas" className="space-y-4">
+              <div className="p-4 bg-orange-500/10 border border-orange-500/30 rounded-xl space-y-3 mb-4">
+                <div className="flex items-center gap-2 text-orange-500">
+                  <Fuel className="w-5 h-5" />
+                  <h3 className="font-semibold">Why SOL for Gas?</h3>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  SOL is required to pay transaction fees (gas) on the Solana blockchain. 
+                  The trading agent needs SOL to execute trades, deposits, and withdrawals on Drift Protocol.
+                  We recommend keeping at least 0.1 SOL for smooth operations.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                <div className="p-3 bg-muted/30 rounded-lg">
+                  <p className="text-xs text-muted-foreground mb-1">Your Phantom SOL</p>
+                  <p className="font-mono text-lg" data-testid="text-gas-user-sol">
+                    {solLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin inline" />
+                    ) : (
+                      `${(userSolBalance ?? 0).toFixed(4)} SOL`
+                    )}
+                  </p>
+                </div>
+                <div className="p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg">
+                  <p className="text-xs text-muted-foreground mb-1">Agent SOL (Gas)</p>
+                  <p className="font-mono text-lg text-orange-500" data-testid="text-gas-agent-sol">
+                    {agentLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin inline" />
+                    ) : (
+                      `${(agentWallet?.solBalance ?? 0).toFixed(4)} SOL`
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-4 bg-muted/30 rounded-xl space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium">Amount (SOL)</label>
+                    <span className="text-xs text-muted-foreground">
+                      Available: {(userSolBalance ?? 0).toFixed(4)} SOL
+                    </span>
+                  </div>
+                  <div className="flex gap-2">
+                    <Input
+                      type="number"
+                      placeholder="0.00"
+                      step="0.001"
+                      value={solDepositAmount}
+                      onChange={(e) => setSolDepositAmount(e.target.value)}
+                      className="flex-1"
+                      data-testid="input-sol-deposit-amount"
+                    />
+                    <Button 
+                      variant="outline" 
+                      onClick={setMaxSolDeposit}
+                      data-testid="button-sol-deposit-max"
+                    >
+                      Max
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Keeps 0.01 SOL in your wallet for transaction fees
+                  </p>
+                </div>
+                
+                <div className="flex items-center justify-between text-sm text-muted-foreground">
+                  <span>From: Phantom Wallet</span>
+                  <ArrowRight className="w-4 h-4" />
+                  <span>To: Agent Wallet (Gas)</span>
+                </div>
+                
+                <Button
+                  className="w-full bg-gradient-to-r from-orange-500 to-orange-600"
+                  onClick={handleSolDeposit}
+                  disabled={isDepositingSol || !solDepositAmount || parseFloat(solDepositAmount) <= 0}
+                  data-testid="button-sol-deposit"
+                >
+                  {isDepositingSol ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      <Fuel className="w-4 h-4 mr-2" />
+                      Fund Agent Gas
+                    </>
+                  )}
+                </Button>
+              </div>
+            </TabsContent>
           </Tabs>
         </CardContent>
       </Card>
@@ -775,6 +997,24 @@ export default function WalletManagement() {
   const [agentLoading, setAgentLoading] = useState(false);
 
   const [copiedAgentAddress, setCopiedAgentAddress] = useState(false);
+
+  const [solDepositAmount, setSolDepositAmount] = useState('');
+  const [isDepositingSol, setIsDepositingSol] = useState(false);
+  const [userSolBalance, setUserSolBalance] = useState<number | null>(null);
+  const [solLoading, setSolLoading] = useState(false);
+
+  const fetchUserSolBalance = async () => {
+    if (!solanaWallet.publicKey) return;
+    setSolLoading(true);
+    try {
+      const balance = await connection.getBalance(solanaWallet.publicKey);
+      setUserSolBalance(balance / LAMPORTS_PER_SOL);
+    } catch (error) {
+      console.error('Error fetching SOL balance:', error);
+    } finally {
+      setSolLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!connecting && !connected) {
@@ -819,11 +1059,12 @@ export default function WalletManagement() {
     if (connected && publicKeyString) {
       fetchCapitalPool();
       fetchAgentBalance();
+      fetchUserSolBalance();
     }
   }, [connected, publicKeyString]);
 
   const handleRefresh = async () => {
-    await Promise.all([fetchUsdcBalance(), fetchCapitalPool(), fetchAgentBalance()]);
+    await Promise.all([fetchUsdcBalance(), fetchCapitalPool(), fetchAgentBalance(), fetchUserSolBalance()]);
     toast({ title: 'Balances refreshed' });
   };
 
@@ -1005,6 +1246,76 @@ export default function WalletManagement() {
   const setMaxWithdrawToWallet = () => {
     if (agentWallet?.balance) {
       setWithdrawToWalletAmount(agentWallet.balance.toString());
+    }
+  };
+
+  const setMaxSolDeposit = () => {
+    if (userSolBalance !== null && userSolBalance > 0.01) {
+      setSolDepositAmount((userSolBalance - 0.01).toFixed(4));
+    }
+  };
+
+  const handleSolDeposit = async () => {
+    const amount = parseFloat(solDepositAmount);
+    if (!amount || amount <= 0) {
+      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    if (userSolBalance !== null && amount > userSolBalance - 0.01) {
+      toast({ title: 'Insufficient SOL balance (keep 0.01 for fees)', variant: 'destructive' });
+      return;
+    }
+
+    setIsDepositingSol(true);
+    try {
+      const response = await fetch('/api/agent/deposit-sol', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'SOL deposit failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      const signedTx = await solanaWallet.signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ 
+        title: 'SOL Deposit Successful!', 
+        description: message || `Deposited ${amount} SOL to Agent Wallet for gas fees`
+      });
+      
+      setSolDepositAmount('');
+      await Promise.all([fetchUserSolBalance(), fetchAgentBalance()]);
+    } catch (error: any) {
+      console.error('SOL deposit error:', error);
+      toast({ 
+        title: 'SOL Deposit Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsDepositingSol(false);
     }
   };
 
@@ -1287,21 +1598,35 @@ export default function WalletManagement() {
                     </Button>
                   </div>
                 </div>
-                <div className="text-right">
-                  <p className="text-sm text-muted-foreground">Balance</p>
-                  <p className="font-mono text-lg font-semibold text-primary" data-testid="text-agent-wallet-balance">
-                    {agentLoading ? (
-                      <Loader2 className="w-4 h-4 animate-spin inline" />
-                    ) : (
-                      `$${(agentWallet?.balance ?? 0).toFixed(2)} USDC`
-                    )}
-                  </p>
+                <div className="text-right space-y-1">
+                  <div>
+                    <p className="text-sm text-muted-foreground">USDC Balance</p>
+                    <p className="font-mono text-lg font-semibold text-primary" data-testid="text-agent-wallet-balance">
+                      {agentLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin inline" />
+                      ) : (
+                        `$${(agentWallet?.balance ?? 0).toFixed(2)} USDC`
+                      )}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground flex items-center gap-1">
+                      <Fuel className="w-3 h-3" /> SOL (Gas)
+                    </p>
+                    <p className="font-mono text-lg font-semibold text-orange-500" data-testid="text-agent-sol-balance">
+                      {agentLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin inline" />
+                      ) : (
+                        `${(agentWallet?.solBalance ?? 0).toFixed(4)} SOL`
+                      )}
+                    </p>
+                  </div>
                 </div>
               </div>
             </CardContent>
           </Card>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <motion.div
               initial={{ opacity: 0, x: -20 }}
               animate={{ opacity: 1, x: 0 }}
@@ -1359,6 +1684,31 @@ export default function WalletManagement() {
               </Card>
             </motion.div>
 
+            <motion.div
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.5, delay: 0.2 }}
+            >
+              <Card className="border-orange-500/30 bg-card/50 backdrop-blur-sm h-full border-2">
+                <CardHeader className="pb-2">
+                  <CardDescription className="flex items-center gap-2">
+                    <Fuel className="w-4 h-4 text-orange-500" />
+                    SOL (Gas Fees)
+                  </CardDescription>
+                  <CardTitle className="text-2xl font-mono text-orange-500" data-testid="text-user-sol-balance">
+                    {solLoading ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      `${(userSolBalance ?? 0).toFixed(4)} SOL`
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-xs text-muted-foreground">Your Phantom wallet SOL balance</p>
+                </CardContent>
+              </Card>
+            </motion.div>
+
           </div>
 
           <motion.div
@@ -1369,7 +1719,7 @@ export default function WalletManagement() {
             <Card className="border-border/50 bg-card/50 backdrop-blur-sm">
               <CardContent className="pt-6">
                 <Tabs defaultValue="deposit" className="w-full">
-                  <TabsList className="grid w-full grid-cols-2 mb-6">
+                  <TabsList className="grid w-full grid-cols-3 mb-6">
                     <TabsTrigger value="deposit" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-deposit">
                       <ArrowDownToLine className="w-3 h-3 sm:w-4 sm:h-4" />
                       Deposit
@@ -1377,6 +1727,10 @@ export default function WalletManagement() {
                     <TabsTrigger value="withdraw" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-withdraw">
                       <ArrowUpFromLine className="w-3 h-3 sm:w-4 sm:h-4" />
                       Withdraw
+                    </TabsTrigger>
+                    <TabsTrigger value="gas" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-gas">
+                      <Fuel className="w-3 h-3 sm:w-4 sm:h-4" />
+                      Gas (SOL)
                     </TabsTrigger>
                   </TabsList>
                   
@@ -1484,6 +1838,100 @@ export default function WalletManagement() {
                           <>
                             <ArrowUpFromLine className="w-4 h-4 mr-2" />
                             Withdraw to Wallet
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="gas" className="space-y-4">
+                    <div className="p-4 bg-orange-500/10 border border-orange-500/30 rounded-xl space-y-3 mb-4">
+                      <div className="flex items-center gap-2 text-orange-500">
+                        <Fuel className="w-5 h-5" />
+                        <h3 className="font-semibold">Why SOL for Gas?</h3>
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        SOL is required to pay transaction fees (gas) on the Solana blockchain. 
+                        The trading agent needs SOL to execute trades, deposits, and withdrawals on Drift Protocol.
+                        We recommend keeping at least 0.1 SOL for smooth operations.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 mb-4">
+                      <div className="p-3 bg-muted/30 rounded-lg">
+                        <p className="text-xs text-muted-foreground mb-1">Your Phantom SOL</p>
+                        <p className="font-mono text-lg" data-testid="text-gas-user-sol">
+                          {solLoading ? (
+                            <Loader2 className="w-4 h-4 animate-spin inline" />
+                          ) : (
+                            `${(userSolBalance ?? 0).toFixed(4)} SOL`
+                          )}
+                        </p>
+                      </div>
+                      <div className="p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg">
+                        <p className="text-xs text-muted-foreground mb-1">Agent SOL (Gas)</p>
+                        <p className="font-mono text-lg text-orange-500" data-testid="text-gas-agent-sol">
+                          {agentLoading ? (
+                            <Loader2 className="w-4 h-4 animate-spin inline" />
+                          ) : (
+                            `${(agentWallet?.solBalance ?? 0).toFixed(4)} SOL`
+                          )}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="p-4 bg-muted/30 rounded-xl space-y-4">
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="text-sm font-medium">Amount (SOL)</label>
+                          <span className="text-xs text-muted-foreground">
+                            Available: {(userSolBalance ?? 0).toFixed(4)} SOL
+                          </span>
+                        </div>
+                        <div className="flex gap-2">
+                          <Input
+                            type="number"
+                            placeholder="0.00"
+                            step="0.001"
+                            value={solDepositAmount}
+                            onChange={(e) => setSolDepositAmount(e.target.value)}
+                            className="flex-1"
+                            data-testid="input-sol-deposit-amount"
+                          />
+                          <Button 
+                            variant="outline" 
+                            onClick={setMaxSolDeposit}
+                            data-testid="button-sol-deposit-max"
+                          >
+                            Max
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Keeps 0.01 SOL in your wallet for transaction fees
+                        </p>
+                      </div>
+                      
+                      <div className="flex items-center justify-between text-sm text-muted-foreground">
+                        <span>From: Phantom Wallet</span>
+                        <ArrowRight className="w-4 h-4" />
+                        <span>To: Agent Wallet (Gas)</span>
+                      </div>
+                      
+                      <Button
+                        className="w-full bg-gradient-to-r from-orange-500 to-orange-600"
+                        onClick={handleSolDeposit}
+                        disabled={isDepositingSol || !solDepositAmount || parseFloat(solDepositAmount) <= 0}
+                        data-testid="button-sol-deposit"
+                      >
+                        {isDepositingSol ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Processing...
+                          </>
+                        ) : (
+                          <>
+                            <Fuel className="w-4 h-4 mr-2" />
+                            Fund Agent Gas
                           </>
                         )}
                       </Button>
