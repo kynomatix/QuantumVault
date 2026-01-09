@@ -164,7 +164,11 @@ export async function registerRoutes(
         }
         
         const balance = agentAddress ? await getDriftBalance(agentAddress, bot.driftSubaccountId) : 0;
-        allocatedToBot += balance;
+        
+        // Only add to allocatedToBot if not subaccount 0 (already counted in mainAccountBalance)
+        if (bot.driftSubaccountId !== 0) {
+          allocatedToBot += balance;
+        }
         
         botAllocations.push({
           botId: bot.id,
@@ -174,6 +178,7 @@ export async function registerRoutes(
         });
       }
       
+      // Total equity = main account (subaccount 0) + allocated to other bot subaccounts
       const totalEquity = mainAccountBalance + allocatedToBot;
       
       res.json({
