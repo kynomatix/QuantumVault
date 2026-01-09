@@ -261,6 +261,16 @@ export function BotManagementDrawer({
       return;
     }
 
+    // Validate amount doesn't exceed withdrawable
+    if (amount > driftFreeCollateral + 0.000001) {
+      toast({ 
+        title: 'Amount exceeds withdrawable balance', 
+        description: `Maximum you can withdraw is $${driftFreeCollateral.toFixed(2)}`,
+        variant: 'destructive' 
+      });
+      return;
+    }
+
     setRemoveEquityLoading(true);
     try {
       const res = await fetch('/api/agent/drift-withdraw', {
@@ -273,14 +283,21 @@ export function BotManagementDrawer({
       const data = await res.json();
       
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to remove from Drift');
+        // Map Drift errors to friendly messages
+        let friendlyMessage = data.error || 'Failed to remove from Drift';
+        if (data.error?.includes('InsufficientCollateral') || data.error?.includes('0x1773')) {
+          friendlyMessage = 'Not enough available balance. Try a smaller amount.';
+        } else if (data.error?.includes('Simulation failed')) {
+          friendlyMessage = 'Transaction would fail. Try a smaller amount.';
+        }
+        throw new Error(friendlyMessage);
       }
 
       toast({ title: `Successfully removed $${amount} from Drift`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
       setRemoveEquityAmount('');
       setTimeout(() => fetchBotBalance(), 1500);
     } catch (error) {
-      toast({ title: 'Failed to remove from Drift', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
+      toast({ title: 'Withdrawal failed', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
     } finally {
       setRemoveEquityLoading(false);
     }
@@ -816,7 +833,11 @@ export function BotManagementDrawer({
                     variant="ghost"
                     size="sm"
                     className="absolute right-1 top-1/2 -translate-y-1/2 h-7 px-2 text-xs"
-                    onClick={() => setRemoveEquityAmount(driftFreeCollateral.toFixed(6))}
+                    onClick={() => {
+                      // Floor to 2 decimal places (cents) for clean display values
+                      const maxWithdrawable = Math.floor(driftFreeCollateral * 100) / 100;
+                      setRemoveEquityAmount(maxWithdrawable.toString());
+                    }}
                     data-testid="button-remove-max"
                   >
                     Max
@@ -824,13 +845,18 @@ export function BotManagementDrawer({
                 </div>
                 <Button
                   onClick={handleRemoveEquity}
-                  disabled={removeEquityLoading || !removeEquityAmount}
+                  disabled={removeEquityLoading || !removeEquityAmount || parseFloat(removeEquityAmount) > driftFreeCollateral + 0.000001}
                   variant="outline"
                   data-testid="button-remove-equity"
                 >
                   {removeEquityLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Remove'}
                 </Button>
               </div>
+              {removeEquityAmount && parseFloat(removeEquityAmount) > driftFreeCollateral + 0.000001 && (
+                <p className="text-xs text-red-500">
+                  Amount exceeds max withdrawable (${driftFreeCollateral.toFixed(2)})
+                </p>
+              )}
               <p className="text-xs text-muted-foreground">
                 Withdraw USDC from Drift back to your agent wallet
               </p>
