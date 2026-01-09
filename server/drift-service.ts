@@ -202,7 +202,30 @@ function getDriftSignerPDA(): PublicKey {
   return signer;
 }
 
-const DEVNET_USDC_ORACLE = new PublicKey('9VCioxmni2gDLv11qufWzT3RDERhQE4iY5Gf7NTfYyAV');
+let cachedSpotMarketOracle: PublicKey | null = null;
+
+async function getSpotMarketOracle(connection: Connection, marketIndex: number = 0): Promise<PublicKey> {
+  if (cachedSpotMarketOracle) {
+    return cachedSpotMarketOracle;
+  }
+  
+  const spotMarketPDA = getSpotMarketPDA(marketIndex);
+  const accountInfo = await connection.getAccountInfo(spotMarketPDA);
+  
+  if (!accountInfo || !accountInfo.data) {
+    console.log('[Drift] Could not fetch spot market account, using fallback oracle');
+    return new PublicKey('GVXRSBjFk6e6J3NbVPXohDJetcTjaeeuykUpbQF8UoMU');
+  }
+  
+  const oracleOffset = 8 + 32;
+  const oracleBytes = accountInfo.data.slice(oracleOffset, oracleOffset + 32);
+  const oracle = new PublicKey(oracleBytes);
+  
+  console.log('[Drift] Fetched spot market oracle from chain:', oracle.toBase58());
+  cachedSpotMarketOracle = oracle;
+  
+  return oracle;
+}
 
 function createInitializeUserStatsInstruction(
   userPubkey: PublicKey,
@@ -392,6 +415,8 @@ export async function buildDepositTransaction(
 
   const depositAmount = new BN(depositAmountLamports);
   
+  const oracle = await getSpotMarketOracle(connection);
+  
   instructions.push(
     createDepositInstruction(
       userPubkey,
@@ -400,7 +425,7 @@ export async function buildDepositTransaction(
       userAta,
       spotMarketVault,
       spotMarket,
-      DEVNET_USDC_ORACLE,
+      oracle,
       depositAmount
     )
   );
@@ -466,6 +491,8 @@ export async function buildWithdrawTransaction(
 
   const withdrawAmount = new BN(withdrawAmountLamports);
   
+  const oracle = await getSpotMarketOracle(connection);
+  
   instructions.push(
     createWithdrawInstruction(
       userPubkey,
@@ -475,7 +502,7 @@ export async function buildWithdrawTransaction(
       spotMarketVault,
       driftSigner,
       spotMarket,
-      DEVNET_USDC_ORACLE,
+      oracle,
       withdrawAmount
     )
   );
@@ -766,6 +793,8 @@ export async function buildAgentDriftDepositTransaction(
 
   const depositAmount = new BN(depositAmountLamports);
   
+  const oracle = await getSpotMarketOracle(connection);
+  
   instructions.push(
     createDepositInstruction(
       agentPubkey,
@@ -774,7 +803,7 @@ export async function buildAgentDriftDepositTransaction(
       agentAta,
       spotMarketVault,
       spotMarket,
-      DEVNET_USDC_ORACLE,
+      oracle,
       depositAmount
     )
   );
@@ -842,6 +871,8 @@ export async function buildAgentDriftWithdrawTransaction(
 
   const withdrawAmount = new BN(withdrawAmountLamports);
   
+  const oracle = await getSpotMarketOracle(connection);
+  
   instructions.push(
     createWithdrawInstruction(
       agentPubkey,
@@ -851,7 +882,7 @@ export async function buildAgentDriftWithdrawTransaction(
       spotMarketVault,
       driftSigner,
       spotMarket,
-      DEVNET_USDC_ORACLE,
+      oracle,
       withdrawAmount
     )
   );
