@@ -332,8 +332,17 @@ export function WalletContent() {
       return;
     }
 
-    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+    if (!solanaWallet.publicKey) {
       toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    if (!solanaWallet.signTransaction) {
+      toast({ 
+        title: 'Wallet not supported', 
+        description: 'Please use a wallet that supports signing transactions (e.g., Phantom, Solflare)',
+        variant: 'destructive' 
+      });
       return;
     }
 
@@ -1262,8 +1271,17 @@ export default function WalletManagement() {
       return;
     }
 
-    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+    if (!solanaWallet.publicKey) {
       toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    if (!solanaWallet.signTransaction) {
+      toast({ 
+        title: 'Wallet not supported', 
+        description: 'Please use a wallet that supports signing transactions (e.g., Phantom, Solflare)',
+        variant: 'destructive' 
+      });
       return;
     }
 

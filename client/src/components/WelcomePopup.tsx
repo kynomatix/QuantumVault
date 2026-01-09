@@ -78,8 +78,17 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
       return;
     }
 
-    if (!wallet.publicKey || !wallet.signTransaction) {
+    if (!wallet.publicKey) {
       toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    if (!wallet.signTransaction) {
+      toast({ 
+        title: 'Wallet not supported', 
+        description: 'Please use a wallet that supports signing transactions (e.g., Phantom, Solflare)',
+        variant: 'destructive' 
+      });
       return;
     }
 

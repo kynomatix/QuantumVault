@@ -1350,9 +1350,18 @@ export default function AppPage() {
           isOpen={welcomePopupOpen}
           onClose={() => setWelcomePopupOpen(false)}
           agentPublicKey={agentPublicKey}
-          onDepositComplete={() => {
-            // Refresh balances after SOL deposit
-            welcomeCheckedRef.current = false;
+          onDepositComplete={async () => {
+            try {
+              const res = await fetch('/api/agent/balance', { credentials: 'include' });
+              if (res.ok) {
+                const data = await res.json();
+                if (data.solBalance >= 0.01) {
+                  setWelcomePopupOpen(false);
+                }
+              }
+            } catch (error) {
+              console.error('Error checking agent balance after deposit:', error);
+            }
           }}
         />
       )}
