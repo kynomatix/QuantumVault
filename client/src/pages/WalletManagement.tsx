@@ -373,11 +373,24 @@ export function WalletContent() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      await connection.confirmTransaction({
-        signature,
-        blockhash,
-        lastValidBlockHeight,
-      });
+      try {
+        await connection.confirmTransaction({
+          signature,
+          blockhash,
+          lastValidBlockHeight,
+        });
+      } catch (confirmError: any) {
+        if (confirmError.message?.includes('block height exceeded')) {
+          const status = await connection.getSignatureStatus(signature);
+          if (status?.value?.confirmationStatus === 'confirmed' || status?.value?.confirmationStatus === 'finalized') {
+            console.log('Transaction confirmed despite timeout:', signature);
+          } else {
+            throw confirmError;
+          }
+        } else {
+          throw confirmError;
+        }
+      }
 
       toast({ 
         title: 'SOL Deposit Successful!', 
@@ -1316,11 +1329,24 @@ export default function WalletManagement() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      await connection.confirmTransaction({
-        signature,
-        blockhash,
-        lastValidBlockHeight,
-      });
+      try {
+        await connection.confirmTransaction({
+          signature,
+          blockhash,
+          lastValidBlockHeight,
+        });
+      } catch (confirmError: any) {
+        if (confirmError.message?.includes('block height exceeded')) {
+          const status = await connection.getSignatureStatus(signature);
+          if (status?.value?.confirmationStatus === 'confirmed' || status?.value?.confirmationStatus === 'finalized') {
+            console.log('Transaction confirmed despite timeout:', signature);
+          } else {
+            throw confirmError;
+          }
+        } else {
+          throw confirmError;
+        }
+      }
 
       toast({ 
         title: 'SOL Deposit Successful!', 

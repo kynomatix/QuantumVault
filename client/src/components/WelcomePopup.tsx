@@ -119,11 +119,26 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
       const signedTx = await wallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      await connection.confirmTransaction({
-        signature,
-        blockhash,
-        lastValidBlockHeight,
-      });
+      try {
+        await connection.confirmTransaction({
+          signature,
+          blockhash,
+          lastValidBlockHeight,
+        });
+      } catch (confirmError: any) {
+        // If block height exceeded, check if tx actually succeeded
+        if (confirmError.message?.includes('block height exceeded')) {
+          const status = await connection.getSignatureStatus(signature);
+          if (status?.value?.confirmationStatus === 'confirmed' || status?.value?.confirmationStatus === 'finalized') {
+            // Transaction actually succeeded despite timeout
+            console.log('Transaction confirmed despite timeout:', signature);
+          } else {
+            throw confirmError;
+          }
+        } else {
+          throw confirmError;
+        }
+      }
 
       toast({ 
         title: 'SOL Deposit Successful!', 
