@@ -44,7 +44,21 @@ import {
   ExternalLink,
   ArrowUp,
   ArrowDown,
+  Pause,
+  Play,
+  Trash2,
 } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 
 interface TradingBot {
   id: string;
@@ -107,6 +121,16 @@ export function BotManagementDrawer({
   const [removeEquityAmount, setRemoveEquityAmount] = useState<string>('');
   const [addEquityLoading, setAddEquityLoading] = useState(false);
   const [removeEquityLoading, setRemoveEquityLoading] = useState(false);
+  const [pauseLoading, setPauseLoading] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [localBot, setLocalBot] = useState<TradingBot | null>(null);
+
+  useEffect(() => {
+    if (bot) {
+      setLocalBot(bot);
+    }
+  }, [bot]);
 
   useEffect(() => {
     if (isOpen && bot) {
@@ -256,6 +280,72 @@ export function BotManagementDrawer({
     navigate('/wallet');
   };
 
+  const handlePauseResume = async () => {
+    if (!localBot) return;
+    setPauseLoading(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${localBot.id}?wallet=${walletAddress}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ isActive: !localBot.isActive }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to update bot');
+      }
+
+      const updatedBot = await res.json();
+      setLocalBot(updatedBot);
+      toast({
+        title: updatedBot.isActive ? 'Bot resumed' : 'Bot paused',
+        description: updatedBot.isActive ? 'Your bot is now active and will process signals' : 'Your bot is now paused and will not process signals',
+      });
+      onBotUpdated();
+    } catch (error) {
+      toast({
+        title: 'Failed to update bot',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setPauseLoading(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!localBot) return;
+    setDeleteLoading(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${localBot.id}?wallet=${walletAddress}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || data.message || 'Failed to delete bot');
+      }
+
+      toast({
+        title: 'Bot deleted',
+        description: `${localBot.name} has been permanently deleted`,
+      });
+      setDeleteDialogOpen(false);
+      onClose();
+      onBotUpdated();
+    } catch (error) {
+      toast({
+        title: 'Failed to delete bot',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
+
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleString();
   };
@@ -285,12 +375,33 @@ export function BotManagementDrawer({
             </div>
             <div className="flex items-center gap-2">
               <Badge
-                variant={bot.isActive ? 'default' : 'secondary'}
-                className={bot.isActive ? 'bg-emerald-500' : ''}
+                variant={(localBot?.isActive ?? bot.isActive) ? 'default' : 'secondary'}
+                className={(localBot?.isActive ?? bot.isActive) ? 'bg-emerald-500' : ''}
                 data-testid="badge-bot-status"
               >
-                {bot.isActive ? 'Active' : 'Inactive'}
+                {(localBot?.isActive ?? bot.isActive) ? 'Active' : 'Inactive'}
               </Badge>
+              <Button
+                variant={(localBot?.isActive ?? bot.isActive) ? 'outline' : 'default'}
+                size="sm"
+                onClick={handlePauseResume}
+                disabled={pauseLoading}
+                data-testid="button-pause-resume"
+              >
+                {pauseLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (localBot?.isActive ?? bot.isActive) ? (
+                  <>
+                    <Pause className="w-4 h-4 mr-1.5" />
+                    Pause
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-4 h-4 mr-1.5" />
+                    Resume
+                  </>
+                )}
+              </Button>
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -663,6 +774,47 @@ export function BotManagementDrawer({
             )}
           </TabsContent>
         </Tabs>
+
+        <div className="mt-6 pt-4 border-t">
+          <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+            <AlertDialogTrigger asChild>
+              <Button
+                variant="destructive"
+                className="w-full"
+                data-testid="button-delete-bot"
+              >
+                <Trash2 className="w-4 h-4 mr-2" />
+                Delete Bot
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete {bot.name}?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This action cannot be undone. This will permanently delete the bot
+                  and all associated trade history. Any funds in the bot's account
+                  should be withdrawn first.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={deleteLoading}>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={handleDelete}
+                  disabled={deleteLoading}
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  data-testid="button-confirm-delete"
+                >
+                  {deleteLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                  ) : (
+                    <Trash2 className="w-4 h-4 mr-2" />
+                  )}
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
       </SheetContent>
     </Sheet>
   );
