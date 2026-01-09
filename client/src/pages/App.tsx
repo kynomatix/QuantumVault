@@ -112,22 +112,22 @@ export default function AppPage() {
   const updateSub = useUpdateSubscription();
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
-  const [equityLoading, setEquityLoading] = useState(false);
+  const [driftBalance, setDriftBalance] = useState<number | null>(null);
   const [agentBalance, setAgentBalance] = useState<number | null>(null);
-  const [agentLoading, setAgentLoading] = useState(false);
+  const [equityLoading, setEquityLoading] = useState(false);
   const equityInitialLoadDone = useRef(false);
-  const agentInitialLoadDone = useRef(false);
 
-  // Fetch total equity across all bot subaccounts and agent wallet
+  // Fetch total equity, agent balance, and drift balance together
   useEffect(() => {
     if (!connected) {
       setTotalEquity(null);
+      setAgentBalance(null);
+      setDriftBalance(null);
       equityInitialLoadDone.current = false;
       return;
     }
     
-    const fetchTotalEquity = async () => {
-      // Only show loading on initial load, not refreshes
+    const fetchEquityData = async () => {
       if (!equityInitialLoadDone.current) {
         setEquityLoading(true);
       }
@@ -136,49 +136,19 @@ export default function AppPage() {
         if (res.ok) {
           const data = await res.json();
           setTotalEquity(data.totalEquity ?? 0);
+          setAgentBalance(data.agentBalance ?? 0);
+          setDriftBalance(data.driftBalance ?? 0);
           equityInitialLoadDone.current = true;
         }
       } catch (error) {
-        // Network error, keep previous value
+        // Network error, keep previous values
       } finally {
         setEquityLoading(false);
       }
     };
     
-    fetchTotalEquity();
-    const interval = setInterval(fetchTotalEquity, 30000);
-    return () => clearInterval(interval);
-  }, [connected, publicKeyString]);
-
-  // Fetch agent balance
-  useEffect(() => {
-    if (!connected) {
-      setAgentBalance(null);
-      agentInitialLoadDone.current = false;
-      return;
-    }
-    
-    const fetchAgentBalance = async () => {
-      // Only show loading on initial load
-      if (!agentInitialLoadDone.current) {
-        setAgentLoading(true);
-      }
-      try {
-        const res = await fetch('/api/agent/balance', { credentials: 'include' });
-        if (res.ok) {
-          const data = await res.json();
-          setAgentBalance(data.balance ?? 0);
-          agentInitialLoadDone.current = true;
-        }
-      } catch (error) {
-        // Silently fail, keep previous value
-      } finally {
-        setAgentLoading(false);
-      }
-    };
-    
-    fetchAgentBalance();
-    const interval = setInterval(fetchAgentBalance, 30000);
+    fetchEquityData();
+    const interval = setInterval(fetchEquityData, 30000);
     return () => clearInterval(interval);
   }, [connected, publicKeyString]);
 
@@ -551,12 +521,12 @@ export default function AppPage() {
                   </div>
                   <div className="px-3 py-2 space-y-2 border-t border-border/30 mt-2">
                     <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Main Account</span>
+                      <span className="text-muted-foreground">Available</span>
                       <span className="font-mono text-primary" data-testid="text-main-account">${agentBalance?.toFixed(2) ?? '0.00'}</span>
                     </div>
                     <div className="flex justify-between text-xs">
                       <span className="text-muted-foreground">In Trading</span>
-                      <span className="font-mono text-emerald-400" data-testid="text-in-trading">${totalEquity?.toFixed(2) ?? '0.00'}</span>
+                      <span className="font-mono text-emerald-400" data-testid="text-in-trading">${driftBalance?.toFixed(2) ?? '0.00'}</span>
                     </div>
                   </div>
                 </div>
@@ -582,12 +552,12 @@ export default function AppPage() {
                   </div>
                   <div className="px-3 py-2 space-y-2 border-t border-border/30 mt-2">
                     <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Main Account</span>
+                      <span className="text-muted-foreground">Available</span>
                       <span className="font-mono text-primary" data-testid="text-main-account-mobile">${agentBalance?.toFixed(2) ?? '0.00'}</span>
                     </div>
                     <div className="flex justify-between text-xs">
                       <span className="text-muted-foreground">In Trading</span>
-                      <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">${totalEquity?.toFixed(2) ?? '0.00'}</span>
+                      <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">${driftBalance?.toFixed(2) ?? '0.00'}</span>
                     </div>
                   </div>
                 </div>
@@ -686,11 +656,11 @@ export default function AppPage() {
               >
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className="gradient-border p-4 noise">
-                    <p className="text-xs text-muted-foreground mb-1">SOL Balance</p>
+                    <p className="text-xs text-muted-foreground mb-1">Available Balance</p>
                     <p className="text-2xl font-bold font-mono" data-testid="text-portfolio-value">
-                      {balance !== null ? `${balance.toFixed(4)} SOL` : '--'}
+                      {agentBalance !== null ? `$${agentBalance.toFixed(2)}` : '--'}
                     </p>
-                    <p className="text-xs text-muted-foreground mt-1">Wallet balance</p>
+                    <p className="text-xs text-muted-foreground mt-1">Agent wallet USDC</p>
                   </div>
                   <div className="gradient-border p-4 noise">
                     <p className="text-xs text-muted-foreground mb-1">SOL Price</p>
