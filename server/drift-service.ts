@@ -932,43 +932,77 @@ export async function executeAgentDriftDeposit(
       };
     }
     
-    console.log(`[Drift] Building manual deposit transaction: ${amountUsdc} USDC`);
+    console.log(`[Drift] Using SDK deposit method: ${amountUsdc} USDC`);
     
-    // Build transaction using manual Anchor instruction builder
-    const txData = await buildAgentDriftDepositTransaction(
-      agentPublicKey,
-      encryptedPrivateKey,
-      amountUsdc
-    );
-    
-    const txBuffer = Buffer.from(txData.transaction, 'base64');
-    
-    console.log(`[Drift] Sending deposit transaction (skipping preflight simulation)...`);
-    
-    const signature = await connection.sendRawTransaction(txBuffer, {
-      skipPreflight: true,
-      preflightCommitment: 'confirmed',
-    });
-    
-    console.log(`[Drift] Deposit transaction sent: ${signature}`);
-    
-    const confirmation = await connection.confirmTransaction({
-      signature,
-      blockhash: txData.blockhash,
-      lastValidBlockHeight: txData.lastValidBlockHeight,
-    }, 'confirmed');
-    
-    if (confirmation.value.err) {
-      console.error('[Drift] Transaction confirmed with error:', confirmation.value.err);
-      return {
-        success: false,
-        error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}`,
-      };
+    // Try SDK approach first (handles oracles automatically)
+    try {
+      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey);
+      
+      try {
+        // Convert amount to precision (USDC has 6 decimals)
+        const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
+        
+        // Initialize user if needed
+        const userAccountExists = await driftClient.getUserAccountAndSlot();
+        if (!userAccountExists) {
+          console.log('[Drift] Initializing user account via SDK...');
+          await driftClient.initializeUserAccount();
+        }
+        
+        console.log('[Drift] Calling SDK deposit...');
+        const txSig = await driftClient.deposit(
+          amountBN,
+          0, // USDC market index
+          agentAta
+        );
+        
+        console.log(`[Drift] SDK deposit successful: ${txSig}`);
+        await cleanup();
+        return { success: true, signature: txSig };
+      } catch (sdkError) {
+        await cleanup();
+        throw sdkError;
+      }
+    } catch (sdkError) {
+      console.error('[Drift] SDK deposit failed, trying manual approach:', sdkError);
+      
+      // Fall back to manual approach
+      console.log(`[Drift] Building manual deposit transaction: ${amountUsdc} USDC`);
+      
+      const txData = await buildAgentDriftDepositTransaction(
+        agentPublicKey,
+        encryptedPrivateKey,
+        amountUsdc
+      );
+      
+      const txBuffer = Buffer.from(txData.transaction, 'base64');
+      
+      console.log(`[Drift] Sending deposit transaction (skipping preflight)...`);
+      
+      const signature = await connection.sendRawTransaction(txBuffer, {
+        skipPreflight: true,
+        preflightCommitment: 'confirmed',
+      });
+      
+      console.log(`[Drift] Deposit transaction sent: ${signature}`);
+      
+      const confirmation = await connection.confirmTransaction({
+        signature,
+        blockhash: txData.blockhash,
+        lastValidBlockHeight: txData.lastValidBlockHeight,
+      }, 'confirmed');
+      
+      if (confirmation.value.err) {
+        console.error('[Drift] Transaction confirmed with error:', confirmation.value.err);
+        return {
+          success: false,
+          error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}`,
+        };
+      }
+      
+      console.log(`[Drift] Deposit confirmed: ${signature}`);
+      return { success: true, signature };
     }
-    
-    console.log(`[Drift] Deposit confirmed: ${signature}`);
-    
-    return { success: true, signature };
   } catch (error) {
     console.error('[Drift] Deposit error:', error);
     const errorMessage = error instanceof Error ? error.message : String(error);
