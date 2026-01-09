@@ -1,8 +1,6 @@
 import { useState, useEffect } from 'react';
+import { useLocation } from 'wouter';
 import { useToast } from '@/hooks/use-toast';
-import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
-import { Transaction } from '@solana/web3.js';
-import { Buffer } from 'buffer';
 import {
   Sheet,
   SheetContent,
@@ -13,8 +11,6 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import {
   Table,
   TableBody,
@@ -41,10 +37,10 @@ import {
   Share2,
   Loader2,
   BarChart3,
-  Plus,
-  Minus,
   AlertCircle,
   Sparkles,
+  Info,
+  ExternalLink,
 } from 'lucide-react';
 
 interface TradingBot {
@@ -94,8 +90,7 @@ export function BotManagementDrawer({
   onBotUpdated,
 }: BotManagementDrawerProps) {
   const { toast } = useToast();
-  const solanaWallet = useSolanaWallet();
-  const { connection } = useConnection();
+  const [, navigate] = useLocation();
 
   const [activeTab, setActiveTab] = useState('overview');
   const [botBalance, setBotBalance] = useState<number>(0);
@@ -104,17 +99,11 @@ export function BotManagementDrawer({
   const [trades, setTrades] = useState<BotTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  const [addEquityAmount, setAddEquityAmount] = useState('');
-  const [removeEquityAmount, setRemoveEquityAmount] = useState('');
-  const [isProcessingAdd, setIsProcessingAdd] = useState(false);
-  const [isProcessingRemove, setIsProcessingRemove] = useState(false);
 
   useEffect(() => {
     if (isOpen && bot) {
       fetchBotBalance();
       setActiveTab('overview');
-      setAddEquityAmount('');
-      setRemoveEquityAmount('');
     }
   }, [isOpen, bot?.id]);
 
@@ -184,131 +173,9 @@ export function BotManagementDrawer({
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const handleAddEquity = async () => {
-    if (!bot || !addEquityAmount || parseFloat(addEquityAmount) <= 0) {
-      toast({ title: 'Enter a valid amount', variant: 'destructive' });
-      return;
-    }
-
-    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
-      toast({ title: 'Wallet not connected', variant: 'destructive' });
-      return;
-    }
-
-    setIsProcessingAdd(true);
-    try {
-      const response = await fetch(`/api/bot/${bot.id}/deposit`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-wallet-address': solanaWallet.publicKey.toString(),
-        },
-        body: JSON.stringify({ amount: parseFloat(addEquityAmount) }),
-        credentials: 'include',
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to add equity');
-      }
-
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = data;
-
-      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
-      const signedTx = await solanaWallet.signTransaction(transaction);
-      const signature = await connection.sendRawTransaction(signedTx.serialize());
-
-      await connection.confirmTransaction({
-        signature,
-        blockhash,
-        lastValidBlockHeight,
-      });
-
-      toast({
-        title: 'Equity Added Successfully!',
-        description: message,
-      });
-
-      setAddEquityAmount('');
-      await fetchBotBalance();
-      onBotUpdated();
-    } catch (error: any) {
-      console.error('Add equity error:', error);
-      toast({
-        title: 'Failed to add equity',
-        description: error.message || 'Please try again',
-        variant: 'destructive',
-      });
-    } finally {
-      setIsProcessingAdd(false);
-    }
-  };
-
-  const handleRemoveEquity = async () => {
-    if (!bot || !removeEquityAmount || parseFloat(removeEquityAmount) <= 0) {
-      toast({ title: 'Enter a valid amount', variant: 'destructive' });
-      return;
-    }
-
-    if (parseFloat(removeEquityAmount) > botBalance) {
-      toast({ title: 'Amount exceeds bot balance', variant: 'destructive' });
-      return;
-    }
-
-    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
-      toast({ title: 'Wallet not connected', variant: 'destructive' });
-      return;
-    }
-
-    setIsProcessingRemove(true);
-    try {
-      const response = await fetch(`/api/bot/${bot.id}/withdraw`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-wallet-address': solanaWallet.publicKey.toString(),
-        },
-        body: JSON.stringify({ amount: parseFloat(removeEquityAmount) }),
-        credentials: 'include',
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to remove equity');
-      }
-
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = data;
-
-      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
-      const signedTx = await solanaWallet.signTransaction(transaction);
-      const signature = await connection.sendRawTransaction(signedTx.serialize());
-
-      await connection.confirmTransaction({
-        signature,
-        blockhash,
-        lastValidBlockHeight,
-      });
-
-      toast({
-        title: 'Equity Removed Successfully!',
-        description: message,
-      });
-
-      setRemoveEquityAmount('');
-      await fetchBotBalance();
-      onBotUpdated();
-    } catch (error: any) {
-      console.error('Remove equity error:', error);
-      toast({
-        title: 'Failed to remove equity',
-        description: error.message || 'Please try again',
-        variant: 'destructive',
-      });
-    } finally {
-      setIsProcessingRemove(false);
-    }
+  const handleNavigateToWalletManagement = () => {
+    onClose();
+    navigate('/wallet');
   };
 
   const formatDate = (dateString: string) => {
@@ -451,93 +318,45 @@ export function BotManagementDrawer({
             <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-muted-foreground">Current Bot Balance</p>
+                  <p className="text-sm text-muted-foreground">Agent Wallet Balance</p>
                   <p className="text-3xl font-bold mt-1" data-testid="text-current-balance">
                     {balanceLoading ? (
                       <Loader2 className="w-6 h-6 animate-spin" />
                     ) : (
-                      `$${botBalance.toFixed(2)}`
+                      `$${mainAccountBalance.toFixed(2)}`
                     )}
                   </p>
                 </div>
                 <Wallet className="w-10 h-10 text-primary/50" />
               </div>
               <p className="text-xs text-muted-foreground mt-2">
-                Main account: ${mainAccountBalance.toFixed(2)} available
+                Available for all your trading bots
               </p>
             </div>
 
-            <div className="p-4 rounded-xl border space-y-3">
-              <div className="flex items-center gap-2">
-                <Plus className="w-4 h-4 text-emerald-500" />
-                <Label className="font-medium">Add Equity</Label>
-              </div>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
-                  <Input
-                    type="number"
-                    placeholder="0.00"
-                    value={addEquityAmount}
-                    onChange={(e) => setAddEquityAmount(e.target.value)}
-                    className="pl-7"
-                    data-testid="input-add-equity"
-                  />
+            <div className="p-4 rounded-xl border border-blue-500/30 bg-blue-500/5">
+              <div className="flex items-start gap-3">
+                <Info className="w-5 h-5 text-blue-500 mt-0.5 flex-shrink-0" />
+                <div className="space-y-2">
+                  <h3 className="font-semibold text-sm">How Bot Capital Works</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Your trading capital is managed through your Agent Wallet. Deposit funds in Wallet Management and your bots will use them automatically.
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    All bots share the same capital pool from your agent wallet, making it easy to manage your funds in one place.
+                  </p>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setAddEquityAmount(mainAccountBalance.toString())}
-                  data-testid="button-add-max"
-                >
-                  Max
-                </Button>
-                <Button
-                  onClick={handleAddEquity}
-                  disabled={isProcessingAdd || !addEquityAmount}
-                  className="bg-emerald-500 hover:bg-emerald-600"
-                  data-testid="button-add-equity"
-                >
-                  {isProcessingAdd ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Add'}
-                </Button>
               </div>
             </div>
 
-            <div className="p-4 rounded-xl border space-y-3">
-              <div className="flex items-center gap-2">
-                <Minus className="w-4 h-4 text-red-500" />
-                <Label className="font-medium">Remove Equity</Label>
-              </div>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
-                  <Input
-                    type="number"
-                    placeholder="0.00"
-                    value={removeEquityAmount}
-                    onChange={(e) => setRemoveEquityAmount(e.target.value)}
-                    className="pl-7"
-                    data-testid="input-remove-equity"
-                  />
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setRemoveEquityAmount(botBalance.toString())}
-                  data-testid="button-remove-max"
-                >
-                  Max
-                </Button>
-                <Button
-                  onClick={handleRemoveEquity}
-                  disabled={isProcessingRemove || !removeEquityAmount}
-                  variant="destructive"
-                  data-testid="button-remove-equity"
-                >
-                  {isProcessingRemove ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Remove'}
-                </Button>
-              </div>
-            </div>
+            <Button
+              onClick={handleNavigateToWalletManagement}
+              className="w-full"
+              data-testid="button-go-to-wallet"
+            >
+              <ExternalLink className="w-4 h-4 mr-2" />
+              Go to Wallet Management
+            </Button>
           </TabsContent>
 
           <TabsContent value="webhook" className="space-y-4 mt-4">
