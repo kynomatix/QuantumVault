@@ -73,6 +73,8 @@ export default function WalletManagement() {
   const [agentWallet, setAgentWallet] = useState<AgentWallet | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
 
+  const [copiedAgentAddress, setCopiedAgentAddress] = useState(false);
+
   useEffect(() => {
     if (!connecting && !connected) {
       navigate('/');
@@ -136,6 +138,15 @@ export default function WalletManagement() {
   const shortenAddress = (address: string) => {
     if (!address) return '';
     return `${address.slice(0, 4)}...${address.slice(-4)}`;
+  };
+
+  const copyAgentAddress = async () => {
+    if (agentWallet?.agentPublicKey) {
+      await navigator.clipboard.writeText(agentWallet.agentPublicKey);
+      setCopiedAgentAddress(true);
+      toast({ title: 'Agent wallet address copied' });
+      setTimeout(() => setCopiedAgentAddress(false), 2000);
+    }
   };
 
   const handleDepositToAgent = async () => {
@@ -548,6 +559,48 @@ export default function WalletManagement() {
                   {copiedAddress ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
                 </Button>
               </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border-primary/30 bg-card/50 backdrop-blur-sm border-2">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Bot className="w-5 h-5 text-primary" />
+                Agent Wallet (Trading Account)
+              </CardTitle>
+              <CardDescription>Server-managed wallet for automated trading operations</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 bg-muted/30 rounded-xl">
+                <div className="flex-1">
+                  <p className="text-sm text-muted-foreground">Agent Address</p>
+                  <div className="flex items-center gap-2">
+                    <p className="font-mono text-lg" data-testid="text-agent-wallet-address">
+                      {agentWallet?.agentPublicKey ? shortenAddress(agentWallet.agentPublicKey) : 'Loading...'}
+                    </p>
+                    <Button 
+                      variant="ghost" 
+                      size="icon"
+                      onClick={copyAgentAddress}
+                      disabled={!agentWallet?.agentPublicKey}
+                      data-testid="button-copy-agent-address"
+                    >
+                      {copiedAgentAddress ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                    </Button>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <p className="text-sm text-muted-foreground">Balance</p>
+                  <p className="font-mono text-lg font-semibold text-primary" data-testid="text-agent-wallet-balance">
+                    {agentLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin inline" />
+                    ) : (
+                      `$${(agentWallet?.balance ?? 0).toFixed(2)} USDC`
+                    )}
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground mt-3">Seed phrase backup coming soon</p>
             </CardContent>
           </Card>
 

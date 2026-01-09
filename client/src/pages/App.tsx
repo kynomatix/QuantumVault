@@ -7,7 +7,6 @@ import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
   TrendingUp, 
-  TrendingDown,
   Bot, 
   LayoutDashboard,
   ArrowUpRight,
@@ -20,7 +19,6 @@ import {
   Minus,
   RefreshCw,
   Copy,
-  BarChart3,
   Users,
   Sparkles,
   LogOut,
@@ -66,12 +64,6 @@ import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adap
 import { Transaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 
-const defaultMarkets = [
-  { symbol: 'SOL-PERP', price: 0, change: 0, volume: '-' },
-  { symbol: 'BTC-PERP', price: 0, change: 0, volume: '-' },
-  { symbol: 'ETH-PERP', price: 0, change: 0, volume: '-' },
-];
-
 type MarketplaceBot = { 
   id: string; 
   name: string; 
@@ -87,7 +79,7 @@ type MarketplaceBot = {
 
 const marketplaceBots: MarketplaceBot[] = [];
 
-type NavItem = 'dashboard' | 'trade' | 'marketplace' | 'bots' | 'leaderboard' | 'settings';
+type NavItem = 'dashboard' | 'marketplace' | 'bots' | 'leaderboard' | 'settings' | 'wallet';
 
 export default function AppPage() {
   const [, navigate] = useLocation();
@@ -96,10 +88,6 @@ export default function AppPage() {
   const { connection } = useConnection();
   const { toast } = useToast();
   const [activeNav, setActiveNav] = useState<NavItem>('dashboard');
-  const [orderType, setOrderType] = useState<'market' | 'limit'>('market');
-  const [orderSide, setOrderSide] = useState<'long' | 'short'>('long');
-  const [orderSize, setOrderSize] = useState('');
-  const [limitPrice, setLimitPrice] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [withdrawingBotId, setWithdrawingBotId] = useState<string | null>(null);
@@ -121,9 +109,10 @@ export default function AppPage() {
   const subscribeBot = useSubscribeToBot();
   const updateSub = useUpdateSubscription();
 
-  const [selectedMarketSymbol, setSelectedMarketSymbol] = useState('SOL-PERP');
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [equityLoading, setEquityLoading] = useState(false);
+  const [agentBalance, setAgentBalance] = useState<number | null>(null);
+  const [agentLoading, setAgentLoading] = useState(false);
 
   // Fetch total equity across all bot subaccounts
   useEffect(() => {
@@ -156,11 +145,32 @@ export default function AppPage() {
     return () => clearInterval(interval);
   }, [connected]);
 
-  const markets = defaultMarkets.map(m => ({
-    ...m,
-    price: pricesData?.[m.symbol] ?? 0,
-  }));
-  const selectedMarket = markets.find(m => m.symbol === selectedMarketSymbol) || markets[0];
+  // Fetch agent balance
+  useEffect(() => {
+    if (!connected) {
+      setAgentBalance(null);
+      return;
+    }
+    
+    const fetchAgentBalance = async () => {
+      setAgentLoading(true);
+      try {
+        const res = await fetch('/api/agent/balance', { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          setAgentBalance(data.balance ?? 0);
+        }
+      } catch (error) {
+        // Silently fail
+      } finally {
+        setAgentLoading(false);
+      }
+    };
+    
+    fetchAgentBalance();
+    const interval = setInterval(fetchAgentBalance, 30000);
+    return () => clearInterval(interval);
+  }, [connected]);
 
   // Redirect to landing if wallet not connected
   useEffect(() => {
@@ -479,15 +489,22 @@ export default function AppPage() {
           <nav className="flex-1 p-3 space-y-1">
             {[
               { id: 'dashboard' as NavItem, icon: LayoutDashboard, label: 'Dashboard' },
-              { id: 'trade' as NavItem, icon: Activity, label: 'Trade' },
               { id: 'marketplace' as NavItem, icon: Store, label: 'Marketplace' },
               { id: 'bots' as NavItem, icon: Bot, label: 'My Bots' },
+              { id: 'wallet' as NavItem, icon: Wallet, label: 'Wallet' },
               { id: 'leaderboard' as NavItem, icon: Users, label: 'Leaderboard' },
               { id: 'settings' as NavItem, icon: Settings, label: 'Settings' },
             ].map((item) => (
               <button
                 key={item.id}
-                onClick={() => { setActiveNav(item.id); setSidebarOpen(false); }}
+                onClick={() => { 
+                  if (item.id === 'wallet') {
+                    navigate('/wallet');
+                  } else {
+                    setActiveNav(item.id);
+                  }
+                  setSidebarOpen(false); 
+                }}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${sidebarCollapsed ? 'lg:justify-center lg:px-3' : ''} ${
                   activeNav === item.id 
                     ? 'bg-primary/20 text-primary' 
@@ -526,6 +543,16 @@ export default function AppPage() {
                     </p>
                     <p className="text-xs text-muted-foreground">USDC</p>
                   </div>
+                  <div className="px-3 py-2 space-y-2 border-t border-border/30 mt-2">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">Main Account</span>
+                      <span className="font-mono text-primary" data-testid="text-main-account">${agentBalance?.toFixed(2) ?? '0.00'}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">In Trading</span>
+                      <span className="font-mono text-emerald-400" data-testid="text-in-trading">${totalEquity?.toFixed(2) ?? '0.00'}</span>
+                    </div>
+                  </div>
                 </div>
                 <div className="p-3 rounded-xl bg-muted/30 mb-3 lg:hidden">
                   <div className="flex items-center gap-3 mb-3">
@@ -546,6 +573,16 @@ export default function AppPage() {
                       {equityLoading ? '...' : totalEquity !== null ? `$${totalEquity.toFixed(2)}` : '$0.00'}
                     </p>
                     <p className="text-xs text-muted-foreground">USDC</p>
+                  </div>
+                  <div className="px-3 py-2 space-y-2 border-t border-border/30 mt-2">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">Main Account</span>
+                      <span className="font-mono text-primary" data-testid="text-main-account-mobile">${agentBalance?.toFixed(2) ?? '0.00'}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">In Trading</span>
+                      <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">${totalEquity?.toFixed(2) ?? '0.00'}</span>
+                    </div>
                   </div>
                 </div>
                 <Button 
@@ -813,225 +850,6 @@ export default function AppPage() {
                         <p className="text-xs mt-1">Trades will appear when your bots execute orders</p>
                       </div>
                     )}
-                  </div>
-                </div>
-              </motion.div>
-            )}
-
-            {activeNav === 'trade' && (
-              <motion.div
-                key="trade"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="space-y-6"
-              >
-                <div className="flex flex-wrap gap-2 mb-4">
-                  {markets.map((m) => (
-                    <button
-                      key={m.symbol}
-                      onClick={() => setSelectedMarketSymbol(m.symbol)}
-                      className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-                        selectedMarket.symbol === m.symbol
-                          ? 'bg-primary/20 text-primary border border-primary/50'
-                          : 'bg-muted/30 text-muted-foreground hover:bg-muted/50 border border-transparent'
-                      }`}
-                      data-testid={`market-${m.symbol}`}
-                    >
-                      <span className="font-semibold">{m.symbol}</span>
-                      <span className={`ml-2 ${m.change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {m.change >= 0 ? '+' : ''}{m.change}%
-                      </span>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="grid lg:grid-cols-4 gap-6">
-                  <div className="lg:col-span-3 space-y-6">
-                    <div className="gradient-border p-4 noise">
-                      <div className="flex items-center justify-between mb-4">
-                        <div>
-                          <h2 className="text-2xl font-display font-bold">{selectedMarket.symbol}</h2>
-                          <div className="flex items-center gap-4 mt-1">
-                            <span className="text-3xl font-mono font-bold">${selectedMarket.price.toLocaleString()}</span>
-                            <span className={`flex items-center gap-1 text-lg ${selectedMarket.change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              {selectedMarket.change >= 0 ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
-                              {selectedMarket.change >= 0 ? '+' : ''}{selectedMarket.change}%
-                            </span>
-                          </div>
-                        </div>
-                        <div className="text-right text-sm">
-                          <p className="text-muted-foreground">24h Volume</p>
-                          <p className="font-mono font-semibold">${selectedMarket.volume}</p>
-                        </div>
-                      </div>
-                      <div className="h-64 bg-muted/20 rounded-xl flex items-center justify-center border border-border/30">
-                        <div className="text-center text-muted-foreground">
-                          <BarChart3 className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                          <p>TradingView Chart</p>
-                          <p className="text-xs">Real-time price data</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid md:grid-cols-2 gap-6">
-                      <div className="gradient-border p-4 noise">
-                        <h3 className="font-display font-semibold mb-3">Order Book</h3>
-                        <div className="py-2 px-2 bg-muted/30 rounded-lg text-center mb-3">
-                          <span className="text-lg font-mono font-bold">${selectedMarket.price.toFixed(2)}</span>
-                          <p className="text-xs text-muted-foreground mt-1">Current market price</p>
-                        </div>
-                        <div className="text-center py-4 text-muted-foreground text-xs">
-                          <p>Order book coming soon</p>
-                          <p className="mt-1">Real-time data will be available with Drift integration</p>
-                        </div>
-                      </div>
-
-                      <div className="gradient-border p-4 noise">
-                        <h3 className="font-display font-semibold mb-3">Recent Trades</h3>
-                        {tradesData && tradesData.length > 0 ? (
-                          <div className="space-y-2">
-                            {tradesData.slice(0, 8).map((trade, i) => (
-                              <div key={i} className="flex items-center justify-between text-xs py-1">
-                                <span className="text-muted-foreground font-mono">
-                                  {trade.createdAt ? new Date(trade.createdAt).toLocaleTimeString() : '--'}
-                                </span>
-                                <span className={trade.side === 'long' ? 'text-emerald-400' : 'text-red-400'}>
-                                  ${Number(trade.price).toLocaleString()}
-                                </span>
-                                <span className="font-mono text-muted-foreground">{trade.size}</span>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="text-center py-4 text-muted-foreground text-xs">
-                            <p>No trades yet</p>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="gradient-border p-4 noise h-fit sticky top-20">
-                    <h3 className="font-display font-semibold mb-4">Place Order</h3>
-                    
-                    <div className="grid grid-cols-2 gap-2 mb-4">
-                      <button
-                        onClick={() => setOrderSide('long')}
-                        className={`py-3 rounded-xl font-semibold transition-all ${
-                          orderSide === 'long'
-                            ? 'bg-emerald-500 text-white'
-                            : 'bg-muted/30 text-muted-foreground hover:bg-muted/50'
-                        }`}
-                        data-testid="button-long"
-                      >
-                        Long
-                      </button>
-                      <button
-                        onClick={() => setOrderSide('short')}
-                        className={`py-3 rounded-xl font-semibold transition-all ${
-                          orderSide === 'short'
-                            ? 'bg-red-500 text-white'
-                            : 'bg-muted/30 text-muted-foreground hover:bg-muted/50'
-                        }`}
-                        data-testid="button-short"
-                      >
-                        Short
-                      </button>
-                    </div>
-
-                    <div className="flex gap-2 mb-4">
-                      <button
-                        onClick={() => setOrderType('market')}
-                        className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-                          orderType === 'market'
-                            ? 'bg-primary/20 text-primary'
-                            : 'text-muted-foreground hover:text-foreground'
-                        }`}
-                        data-testid="button-market-order"
-                      >
-                        Market
-                      </button>
-                      <button
-                        onClick={() => setOrderType('limit')}
-                        className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-                          orderType === 'limit'
-                            ? 'bg-primary/20 text-primary'
-                            : 'text-muted-foreground hover:text-foreground'
-                        }`}
-                        data-testid="button-limit-order"
-                      >
-                        Limit
-                      </button>
-                    </div>
-
-                    <div className="space-y-4">
-                      <div>
-                        <label className="text-xs text-muted-foreground mb-1.5 block">Size (USDC)</label>
-                        <div className="relative">
-                          <Input
-                            type="number"
-                            placeholder="0.00"
-                            value={orderSize}
-                            onChange={(e) => setOrderSize(e.target.value)}
-                            className="pr-16 bg-muted/30 border-border/50"
-                            data-testid="input-order-size"
-                          />
-                          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">USDC</span>
-                        </div>
-                        <div className="flex gap-2 mt-2">
-                          {['25%', '50%', '75%', '100%'].map((pct) => (
-                            <button
-                              key={pct}
-                              className="flex-1 py-1.5 text-xs bg-muted/30 hover:bg-muted/50 rounded-lg transition-colors"
-                              data-testid={`button-size-${pct}`}
-                            >
-                              {pct}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {orderType === 'limit' && (
-                        <div>
-                          <label className="text-xs text-muted-foreground mb-1.5 block">Limit Price</label>
-                          <Input
-                            type="number"
-                            placeholder={selectedMarket.price.toString()}
-                            value={limitPrice}
-                            onChange={(e) => setLimitPrice(e.target.value)}
-                            className="bg-muted/30 border-border/50"
-                            data-testid="input-limit-price"
-                          />
-                        </div>
-                      )}
-
-                      <div className="p-3 rounded-xl bg-muted/20 space-y-2 text-xs">
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Est. Entry</span>
-                          <span className="font-mono">${selectedMarket.price.toFixed(2)}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Leverage</span>
-                          <span className="font-mono">5x</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Fee</span>
-                          <span className="font-mono">~$0.50</span>
-                        </div>
-                      </div>
-
-                      <Button
-                        className={`w-full py-6 text-lg font-semibold ${
-                          orderSide === 'long'
-                            ? 'bg-emerald-500 hover:bg-emerald-600'
-                            : 'bg-red-500 hover:bg-red-600'
-                        }`}
-                        data-testid="button-place-order"
-                      >
-                        {orderSide === 'long' ? 'Long' : 'Short'} {selectedMarket.symbol}
-                      </Button>
-                    </div>
                   </div>
                 </div>
               </motion.div>
