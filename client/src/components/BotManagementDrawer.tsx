@@ -93,6 +93,17 @@ interface BotTrade {
   executedAt: string;
 }
 
+interface EquityEvent {
+  id: string;
+  walletAddress: string;
+  tradingBotId: string | null;
+  eventType: string;
+  amount: string;
+  txSignature: string | null;
+  notes: string | null;
+  createdAt: string;
+}
+
 interface BotManagementDrawerProps {
   bot: TradingBot | null;
   isOpen: boolean;
@@ -118,6 +129,8 @@ export function BotManagementDrawer({
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [trades, setTrades] = useState<BotTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(false);
+  const [equityEvents, setEquityEvents] = useState<EquityEvent[]>([]);
+  const [equityEventsLoading, setEquityEventsLoading] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [addEquityAmount, setAddEquityAmount] = useState<string>('');
   const [removeEquityAmount, setRemoveEquityAmount] = useState<string>('');
@@ -169,6 +182,7 @@ export function BotManagementDrawer({
   useEffect(() => {
     if (isOpen && bot && activeTab === 'history') {
       fetchTrades();
+      fetchEquityEvents();
     }
   }, [isOpen, bot?.id, activeTab]);
 
@@ -282,6 +296,23 @@ export function BotManagementDrawer({
       console.error('Failed to fetch trades:', error);
     } finally {
       setTradesLoading(false);
+    }
+  };
+
+  const fetchEquityEvents = async () => {
+    setEquityEventsLoading(true);
+    try {
+      const res = await fetch(`/api/equity-events?limit=50`, {
+        credentials: 'include',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setEquityEvents(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch equity events:', error);
+    } finally {
+      setEquityEventsLoading(false);
     }
   };
 
@@ -914,62 +945,58 @@ export function BotManagementDrawer({
           </TabsContent>
 
           <TabsContent value="history" className="mt-4">
-            {tradesLoading ? (
+            {equityEventsLoading ? (
               <div className="flex items-center justify-center py-12">
                 <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
               </div>
-            ) : trades.length === 0 ? (
+            ) : equityEvents.length === 0 ? (
               <div className="text-center py-12">
                 <History className="w-12 h-12 mx-auto mb-3 text-muted-foreground/50" />
-                <p className="text-muted-foreground">No trades yet</p>
+                <p className="text-muted-foreground">No transactions yet</p>
                 <p className="text-sm text-muted-foreground/70 mt-1">
-                  Trades will appear here when your bot executes them
+                  Deposits and withdrawals will appear here
                 </p>
               </div>
             ) : (
-              <div className="rounded-lg border overflow-hidden">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Time</TableHead>
-                      <TableHead>Action</TableHead>
-                      <TableHead className="text-right">Size</TableHead>
-                      <TableHead className="text-right">Price</TableHead>
-                      <TableHead>Status</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {trades.map((trade) => (
-                      <TableRow key={trade.id} data-testid={`row-trade-${trade.id}`}>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {formatDate(trade.executedAt)}
-                        </TableCell>
-                        <TableCell>
-                          <Badge
-                            variant={trade.side.toLowerCase() === 'buy' ? 'default' : 'destructive'}
-                            className={trade.side.toLowerCase() === 'buy' ? 'bg-emerald-500' : ''}
-                          >
-                            {trade.side.toUpperCase()}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm">
-                          {parseFloat(trade.size).toFixed(4)}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm">
-                          ${parseFloat(trade.price).toFixed(2)}
-                        </TableCell>
-                        <TableCell>
-                          <Badge
-                            variant={trade.status === 'executed' ? 'outline' : 'secondary'}
-                            className={trade.status === 'executed' ? 'border-emerald-500 text-emerald-500' : ''}
-                          >
-                            {trade.status}
-                          </Badge>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+              <div className="space-y-2 max-h-96 overflow-y-auto">
+                {equityEvents.map((event) => {
+                  const isPositive = parseFloat(event.amount) > 0;
+                  const formatEventType = (type: string) => {
+                    switch (type) {
+                      case 'agent_deposit': return 'Deposit to Bot Wallet';
+                      case 'agent_withdraw': return 'Withdraw from Bot Wallet';
+                      case 'drift_deposit': return 'Deposit to Trading';
+                      case 'drift_withdraw': return 'Withdraw from Trading';
+                      default: return type.replace(/_/g, ' ');
+                    }
+                  };
+                  return (
+                    <div 
+                      key={event.id} 
+                      className="flex items-center justify-between py-3 px-3 border rounded-lg bg-muted/30"
+                      data-testid={`equity-event-${event.id}`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`p-2 rounded-full ${isPositive ? 'bg-emerald-500/10' : 'bg-orange-500/10'}`}>
+                          {isPositive ? (
+                            <ArrowDown className="h-4 w-4 text-emerald-500" />
+                          ) : (
+                            <ArrowUp className="h-4 w-4 text-orange-500" />
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium">{formatEventType(event.eventType)}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {formatDate(event.createdAt)}
+                          </p>
+                        </div>
+                      </div>
+                      <span className={`font-mono text-sm font-medium ${isPositive ? 'text-emerald-500' : 'text-orange-500'}`}>
+                        {isPositive ? '+' : ''}{parseFloat(event.amount).toFixed(2)} USDC
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </TabsContent>
