@@ -313,19 +313,19 @@ function createDepositInstruction(
   amount.toArrayLike(Buffer, 'le', 8).copy(data, 10);
   data.writeUInt8(reduceOnly ? 1 : 0, 18);
 
-  // Account order matches SDK: state, spotMarket, spotMarketVault, user, userStats, userTokenAccount, authority, tokenProgram
-  // Then remainingAccounts: oracle, spotMarket (again for writable)
+  // Account order based on Drift V2 IDL: state, user, userStats, authority, spotMarketVault, userTokenAccount, tokenProgram
+  // Then remainingAccounts: spotMarket, oracle
   const keys = [
-    { pubkey: DRIFT_STATE_PUBKEY, isSigner: false, isWritable: false },  // state
-    { pubkey: spotMarket, isSigner: false, isWritable: true },           // spotMarket
-    { pubkey: spotMarketVault, isSigner: false, isWritable: true },      // spotMarketVault
-    { pubkey: userAccount, isSigner: false, isWritable: true },          // user
-    { pubkey: userStats, isSigner: false, isWritable: true },            // userStats
-    { pubkey: userTokenAccount, isSigner: false, isWritable: true },     // userTokenAccount
-    { pubkey: userPubkey, isSigner: true, isWritable: false },           // authority
-    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },    // tokenProgram
-    // remainingAccounts - oracle must be included
-    { pubkey: oracle, isSigner: false, isWritable: false },              // oracle (remaining account)
+    { pubkey: DRIFT_STATE_PUBKEY, isSigner: false, isWritable: false },  // 1. state
+    { pubkey: userAccount, isSigner: false, isWritable: true },          // 2. user
+    { pubkey: userStats, isSigner: false, isWritable: true },            // 3. userStats
+    { pubkey: userPubkey, isSigner: true, isWritable: false },           // 4. authority (signer)
+    { pubkey: spotMarketVault, isSigner: false, isWritable: true },      // 5. spotMarketVault
+    { pubkey: userTokenAccount, isSigner: false, isWritable: true },     // 6. userTokenAccount
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },    // 7. tokenProgram
+    // remainingAccounts
+    { pubkey: spotMarket, isSigner: false, isWritable: true },           // 8. spotMarket (remaining)
+    { pubkey: oracle, isSigner: false, isWritable: false },              // 9. oracle (remaining)
   ];
 
   return new TransactionInstruction({

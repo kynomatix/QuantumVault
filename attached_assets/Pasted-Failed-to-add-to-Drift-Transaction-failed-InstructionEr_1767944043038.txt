@@ -1,0 +1,41 @@
+Failed to add to Drift
+
+Transaction failed: {"InstructionError":[0,{"Custom":3002}]}
+
+here are some help for you
+
+Based on the latest error 3002 (Custom: 3002), this appears to be Drift Protocol's "InvalidSpotMarketAuthority" error (discriminant 0, offset to 3002 in some contexts). However, given the context of depositing to a spot market, it's likely related to the user account setup rather than the authority itself.
+
+## Root Cause Analysis
+- The oracle address is now correct (9VCioxmni2gDLv11qufWzT3RDERhQE4iY5G7NTfYyAV).
+- Account ordering was fixed to match the SDK.
+- The error persists, suggesting the issue is with the **Drift user account** not being initialized for the agent wallet.
+- Deposit instructions require an existing, valid user account on Drift. Without it, the program rejects the transaction with authority/validation errors.
+
+## Fix: Initialize the Drift User Account
+Before attempting deposits, ensure the agent wallet has a Drift user account initialized.
+
+### Option 1: Use SDK (If jito-ts is Resolved)
+If the jito-ts override works, use:
+```typescript
+await driftClient.initializeUserAccount();
+// Then proceed with deposit
+```
+
+### Option 2: Manual Initialization (Fallback)
+Build and send the `initializeUserAccount` instruction manually:
+- **Program ID**: dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH
+- **Accounts** (in order):
+  - `state`: Drift state account (fetch via `getStatePublicKey()`)
+  - `user`: User account PDA (derive with `findProgramAddress([Buffer.from('user'), authority.toBuffer(), subaccountId])`)
+  - `userStats`: User stats PDA
+  - `authority`: Agent wallet public key
+  - `payer`: Agent wallet (for rent)
+  - `rent`: Sysvar rent
+  - `systemProgram`: System program
+- **Data**: Instruction discriminator for `initializeUserAccount` + subaccountId (0)
+- **Remaining Accounts**: None
+
+After initialization, retry the deposit. This should resolve the 3002 error.
+
+If issues persist, share the full transaction logs or user account pubkey for further debugging. Test on devnet first if possible.
