@@ -362,7 +362,7 @@ function createDepositInstruction(
   data.writeUInt8(reduceOnly ? 1 : 0, 18);
 
   // Account order based on Drift V2 IDL: state, user, userStats, authority, spotMarketVault, userTokenAccount, tokenProgram
-  // Then remainingAccounts: spotMarket, oracle
+  // Then remainingAccounts: oracle first, then spotMarket (SDK adds oracles before markets)
   const keys = [
     { pubkey: DRIFT_STATE_PUBKEY, isSigner: false, isWritable: false },  // 1. state
     { pubkey: userAccount, isSigner: false, isWritable: true },          // 2. user
@@ -371,9 +371,9 @@ function createDepositInstruction(
     { pubkey: spotMarketVault, isSigner: false, isWritable: true },      // 5. spotMarketVault
     { pubkey: userTokenAccount, isSigner: false, isWritable: true },     // 6. userTokenAccount
     { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },    // 7. tokenProgram
-    // remainingAccounts
-    { pubkey: spotMarket, isSigner: false, isWritable: true },           // 8. spotMarket (remaining)
-    { pubkey: oracle, isSigner: false, isWritable: false },              // 9. oracle (remaining)
+    // remainingAccounts - oracle FIRST, then spotMarket
+    { pubkey: oracle, isSigner: false, isWritable: false },              // 8. oracle (remaining)
+    { pubkey: spotMarket, isSigner: false, isWritable: true },           // 9. spotMarket (remaining)
   ];
 
   return new TransactionInstruction({
