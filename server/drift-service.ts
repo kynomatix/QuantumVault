@@ -837,14 +837,13 @@ export async function executeAgentDriftDeposit(
   encryptedPrivateKey: string,
   amountUsdc: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
-  let cleanup: (() => Promise<void>) | null = null;
-  
   try {
     const connection = getConnection();
     const agentPubkey = new PublicKey(agentPublicKey);
     const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
     const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
     
+    // Check agent balance first
     let agentBalance = 0;
     try {
       const accountInfo = await connection.getTokenAccountBalance(agentAta);
@@ -863,40 +862,58 @@ export async function executeAgentDriftDeposit(
       };
     }
     
-    const { driftClient, cleanup: cleanupFn } = await getAgentDriftClient(encryptedPrivateKey);
-    cleanup = cleanupFn;
+    console.log(`[Drift] Building manual deposit transaction: ${amountUsdc} USDC`);
     
-    try {
-      const user = driftClient.getUser();
-      if (!user.isSubscribed) {
-        console.log('[Drift] Initializing user account...');
-        await driftClient.initializeUserAccount();
-      }
-    } catch (initError) {
-      console.log('[Drift] User account initialization check - may already exist:', initError);
-    }
-    
-    const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
-    
-    console.log(`[Drift] SDK deposit starting: ${amountUsdc} USDC (${amountBN.toString()} smallest units)`);
-    
-    const signature = await driftClient.deposit(
-      amountBN,
-      0,
-      agentAta,
+    // Build transaction using manual Anchor instruction builder
+    const txData = await buildAgentDriftDepositTransaction(
+      agentPublicKey,
+      encryptedPrivateKey,
+      amountUsdc
     );
     
-    console.log(`[Drift] SDK deposit successful: ${signature}`);
+    const txBuffer = Buffer.from(txData.transaction, 'base64');
+    
+    console.log(`[Drift] Sending deposit transaction...`);
+    
+    const signature = await connection.sendRawTransaction(txBuffer, {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+    
+    console.log(`[Drift] Deposit transaction sent: ${signature}`);
+    
+    const confirmation = await connection.confirmTransaction({
+      signature,
+      blockhash: txData.blockhash,
+      lastValidBlockHeight: txData.lastValidBlockHeight,
+    }, 'confirmed');
+    
+    if (confirmation.value.err) {
+      console.error('[Drift] Transaction confirmed with error:', confirmation.value.err);
+      return {
+        success: false,
+        error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}`,
+      };
+    }
+    
+    console.log(`[Drift] Deposit confirmed: ${signature}`);
     
     return { success: true, signature };
   } catch (error) {
-    console.error('[Drift] SDK deposit error:', error);
+    console.error('[Drift] Deposit error:', error);
     const errorMessage = error instanceof Error ? error.message : String(error);
     
     if (errorMessage.includes('Attempt to debit an account')) {
       return {
         success: false,
-        error: 'Drift Protocol deposit failed. This may be a testnet configuration issue. Your funds remain safely in your agent wallet.',
+        error: 'Drift Protocol deposit failed. The transaction simulation was rejected. Your funds remain safely in your agent wallet.',
+      };
+    }
+    
+    if (errorMessage.includes('custom program error')) {
+      return {
+        success: false,
+        error: `Drift Protocol error: ${errorMessage}. Your funds remain safely in your agent wallet.`,
       };
     }
     
@@ -904,10 +921,6 @@ export async function executeAgentDriftDeposit(
       success: false,
       error: errorMessage,
     };
-  } finally {
-    if (cleanup) {
-      await cleanup();
-    }
   }
 }
 
@@ -916,39 +929,52 @@ export async function executeAgentDriftWithdraw(
   encryptedPrivateKey: string,
   amountUsdc: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
-  let cleanup: (() => Promise<void>) | null = null;
-  
   try {
-    const agentPubkey = new PublicKey(agentPublicKey);
-    const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
-    const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
+    const connection = getConnection();
     
-    const { driftClient, cleanup: cleanupFn } = await getAgentDriftClient(encryptedPrivateKey);
-    cleanup = cleanupFn;
+    console.log(`[Drift] Building manual withdraw transaction: ${amountUsdc} USDC`);
     
-    const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
-    
-    console.log(`[Drift] SDK withdraw starting: ${amountUsdc} USDC (${amountBN.toString()} smallest units)`);
-    
-    const signature = await driftClient.withdraw(
-      amountBN,
-      0,
-      agentAta,
+    // Build transaction using manual Anchor instruction builder
+    const txData = await buildAgentDriftWithdrawTransaction(
+      agentPublicKey,
+      encryptedPrivateKey,
+      amountUsdc
     );
     
-    console.log(`[Drift] SDK withdraw successful: ${signature}`);
+    const txBuffer = Buffer.from(txData.transaction, 'base64');
+    
+    console.log(`[Drift] Sending withdraw transaction...`);
+    
+    const signature = await connection.sendRawTransaction(txBuffer, {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+    
+    console.log(`[Drift] Withdraw transaction sent: ${signature}`);
+    
+    const confirmation = await connection.confirmTransaction({
+      signature,
+      blockhash: txData.blockhash,
+      lastValidBlockHeight: txData.lastValidBlockHeight,
+    }, 'confirmed');
+    
+    if (confirmation.value.err) {
+      console.error('[Drift] Withdraw confirmed with error:', confirmation.value.err);
+      return {
+        success: false,
+        error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}`,
+      };
+    }
+    
+    console.log(`[Drift] Withdraw confirmed: ${signature}`);
     
     return { success: true, signature };
   } catch (error) {
-    console.error('[Drift] SDK withdraw error:', error);
+    console.error('[Drift] Withdraw error:', error);
     return {
       success: false,
       error: error instanceof Error ? error.message : String(error),
     };
-  } finally {
-    if (cleanup) {
-      await cleanup();
-    }
   }
 }
 
