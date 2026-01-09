@@ -28,8 +28,16 @@ function getDriftStatePDA(): PublicKey {
 const DRIFT_STATE_PUBKEY = getDriftStatePDA();
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
-const DEFAULT_RPC = IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
-const SOLANA_RPC = process.env.SOLANA_RPC_URL || DEFAULT_RPC;
+function getSolanaRpcUrl(): string {
+  if (process.env.SOLANA_RPC_URL) {
+    return process.env.SOLANA_RPC_URL;
+  }
+  if (IS_MAINNET && process.env.HELIUS_API_KEY) {
+    return `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
+  }
+  return IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
+}
+const SOLANA_RPC = getSolanaRpcUrl();
 
 let connectionInstance: Connection | null = null;
 

@@ -1485,6 +1485,38 @@ export async function registerRoutes(
     }
   });
 
+  // Solana RPC proxy - forwards requests to Helius securely (no API key exposed to frontend)
+  app.post("/api/solana-rpc", async (req, res) => {
+    try {
+      const IS_MAINNET = process.env.DRIFT_ENV !== 'devnet';
+      let rpcUrl: string;
+      
+      if (process.env.SOLANA_RPC_URL) {
+        rpcUrl = process.env.SOLANA_RPC_URL;
+      } else if (IS_MAINNET && process.env.HELIUS_API_KEY) {
+        rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
+      } else {
+        rpcUrl = IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
+      }
+      
+      const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      
+      const data = await response.json();
+      res.json(data);
+    } catch (error: any) {
+      console.error("RPC proxy error:", error);
+      res.status(500).json({ 
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "RPC request failed" },
+        id: req.body?.id || null 
+      });
+    }
+  });
+
   // Bot balance - get subaccount balance from Drift
   app.get("/api/bot/:botId/balance", requireWallet, async (req, res) => {
     try {

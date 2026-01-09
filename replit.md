@@ -81,7 +81,14 @@ Preferred communication style: Simple, everyday language.
 ### Environment Variables Required
 - `DATABASE_URL`: PostgreSQL connection string
 - `SESSION_SECRET`: Session encryption key (optional, has default for development)
-- `SOLANA_RPC_URL`: Solana RPC endpoint (optional, defaults to mainnet)
+- `HELIUS_API_KEY`: Helius RPC API key for reliable mainnet access (required for production)
+- `SOLANA_RPC_URL`: Solana RPC endpoint (optional, overrides Helius if set)
+
+### RPC Architecture
+- **Server-side RPC Proxy**: Frontend uses `/api/solana-rpc` endpoint that proxies to Helius
+- **API Key Security**: Helius API key never exposed to browser, stays server-side only
+- **Fallback Chain**: SOLANA_RPC_URL → Helius (if key provided) → public mainnet RPC
+- **Rate Limiting**: Helius provides reliable throughput; public RPC has strict limits
 
 ### Drift Protocol Configuration
 - **Network**: Solana Mainnet-Beta (default), configurable via `DRIFT_ENV` env var

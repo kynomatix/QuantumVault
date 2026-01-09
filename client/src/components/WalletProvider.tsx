@@ -1,8 +1,7 @@
-import { useMemo, ReactNode } from 'react';
+import { useMemo, ReactNode, useState, useEffect } from 'react';
 import { ConnectionProvider, WalletProvider as SolanaWalletProvider } from '@solana/wallet-adapter-react';
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui';
 import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom';
-import { clusterApiUrl } from '@solana/web3.js';
 
 import '@solana/wallet-adapter-react-ui/styles.css';
 
@@ -11,18 +10,24 @@ interface WalletProviderProps {
 }
 
 export function WalletProvider({ children }: WalletProviderProps) {
-  const endpoint = useMemo(() => {
-    const customRpc = import.meta.env.VITE_SOLANA_RPC_URL;
-    if (customRpc) {
-      return customRpc;
+  // Use our server's RPC proxy to avoid exposing API keys
+  const [endpoint, setEndpoint] = useState<string | null>(null);
+  
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setEndpoint(`${window.location.origin}/api/solana-rpc`);
     }
-    return clusterApiUrl('mainnet-beta');
   }, []);
 
   const wallets = useMemo(
     () => [new PhantomWalletAdapter()],
     []
   );
+
+  // Wait for endpoint to be available before rendering providers
+  if (!endpoint) {
+    return null;
+  }
 
   return (
     <ConnectionProvider endpoint={endpoint}>

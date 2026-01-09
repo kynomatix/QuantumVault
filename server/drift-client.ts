@@ -11,8 +11,16 @@ const USDC_MINT = IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
-const DEFAULT_RPC = IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
-const SOLANA_RPC = process.env.SOLANA_RPC_URL || DEFAULT_RPC;
+function getSolanaRpcUrl(): string {
+  if (process.env.SOLANA_RPC_URL) {
+    return process.env.SOLANA_RPC_URL;
+  }
+  if (IS_MAINNET && process.env.HELIUS_API_KEY) {
+    return `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
+  }
+  return IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
+}
+const SOLANA_RPC = getSolanaRpcUrl();
 
 function getAssociatedTokenAddressSync(
   mint: PublicKey,
