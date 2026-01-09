@@ -28,6 +28,7 @@ export const wallets = pgTable("wallets", {
   driftSubaccount: integer("drift_subaccount").default(0),
   agentPublicKey: text("agent_public_key"),
   agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),
+  userWebhookSecret: text("user_webhook_secret"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   lastSeen: timestamp("last_seen").defaultNow().notNull(),
 });

@@ -42,10 +42,12 @@ export interface IStorage {
   createUser(user: InsertUser): Promise<User>;
 
   getWallet(address: string): Promise<Wallet | undefined>;
+  getWalletByWebhookSecret(secret: string): Promise<Wallet | undefined>;
   createWallet(wallet: InsertWallet): Promise<Wallet>;
   updateWalletLastSeen(address: string): Promise<void>;
   getOrCreateWallet(address: string): Promise<Wallet>;
   updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void>;
+  updateWalletWebhookSecret(address: string, userWebhookSecret: string): Promise<void>;
 
   getAllBots(): Promise<Bot[]>;
   getFeaturedBots(): Promise<Bot[]>;
@@ -109,6 +111,11 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  async getWalletByWebhookSecret(secret: string): Promise<Wallet | undefined> {
+    const result = await db.select().from(wallets).where(eq(wallets.userWebhookSecret, secret)).limit(1);
+    return result[0];
+  }
+
   async createWallet(wallet: InsertWallet): Promise<Wallet> {
     const result = await db.insert(wallets).values(wallet).returning();
     return result[0];
@@ -132,6 +139,10 @@ export class DatabaseStorage implements IStorage {
       agentPublicKey, 
       agentPrivateKeyEncrypted 
     }).where(eq(wallets.address, address));
+  }
+
+  async updateWalletWebhookSecret(address: string, userWebhookSecret: string): Promise<void> {
+    await db.update(wallets).set({ userWebhookSecret }).where(eq(wallets.address, address));
   }
 
   async getAllBots(): Promise<Bot[]> {

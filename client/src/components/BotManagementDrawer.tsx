@@ -130,6 +130,8 @@ export function BotManagementDrawer({
   const [editName, setEditName] = useState<string>('');
   const [editLeverage, setEditLeverage] = useState<number>(1);
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
+  const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
+  const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
 
   useEffect(() => {
     if (bot) {
@@ -139,9 +141,25 @@ export function BotManagementDrawer({
     }
   }, [bot]);
 
+  const fetchUserWebhookUrl = async () => {
+    setWebhookUrlLoading(true);
+    try {
+      const res = await fetch(`/api/user/webhook-url?wallet=${walletAddress}`, { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setUserWebhookUrl(data.webhookUrl);
+      }
+    } catch (error) {
+      console.error('Failed to fetch user webhook URL:', error);
+    } finally {
+      setWebhookUrlLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (isOpen && bot) {
       fetchBotBalance();
+      fetchUserWebhookUrl();
       setActiveTab('overview');
     }
   }, [isOpen, bot?.id]);
@@ -265,14 +283,10 @@ export function BotManagementDrawer({
     }
   };
 
-  const getWebhookUrl = () => {
-    if (!bot) return '';
-    const baseUrl = window.location.origin;
-    return `${baseUrl}/api/webhook/tradingview/${bot.id}?secret=${bot.webhookSecret}`;
-  };
-
   const getMessageTemplate = () => {
+    if (!bot) return '';
     return `{
+  "botId": "${bot.id}",
   "signalType": "trade",
   "data": {
     "action": "{{strategy.order.action}}",
@@ -779,12 +793,17 @@ export function BotManagementDrawer({
                 Webhook URL
               </h3>
               <div className="p-3 bg-background/80 rounded-lg font-mono text-xs border break-all">
-                {getWebhookUrl()}
+                {webhookUrlLoading ? (
+                  <span className="text-muted-foreground">Loading...</span>
+                ) : (
+                  userWebhookUrl || 'Loading webhook URL...'
+                )}
               </div>
               <Button
                 className="w-full mt-3"
                 variant="secondary"
-                onClick={() => copyToClipboard(getWebhookUrl(), 'Webhook URL')}
+                onClick={() => userWebhookUrl && copyToClipboard(userWebhookUrl, 'Webhook URL')}
+                disabled={!userWebhookUrl}
                 data-testid="button-copy-webhook-url"
               >
                 {copiedField === 'Webhook URL' ? (
@@ -795,7 +814,7 @@ export function BotManagementDrawer({
                 {copiedField === 'Webhook URL' ? 'Copied!' : 'Copy Webhook URL'}
               </Button>
               <p className="text-xs text-muted-foreground mt-2">
-                Paste this in TradingView Alert → Notifications → Webhook URL
+                This is your universal webhook URL - same for all bots! Paste in TradingView Alert → Notifications → Webhook URL
               </p>
             </div>
 
@@ -821,7 +840,7 @@ export function BotManagementDrawer({
                 {copiedField === 'Message' ? 'Copied!' : 'Copy Alert Message'}
               </Button>
               <p className="text-xs text-muted-foreground mt-2">
-                Paste this in TradingView Alert → Message field
+                Paste this in TradingView Alert → Message field. The botId routes signals to this specific bot.
               </p>
             </div>
 
@@ -831,6 +850,9 @@ export function BotManagementDrawer({
                 How The Placeholders Work
               </h3>
               <div className="space-y-2 text-sm text-muted-foreground">
+                <p>
+                  <code className="px-1 py-0.5 bg-background rounded text-xs">"botId"</code> → Your bot's unique ID (routes signals to this bot)
+                </p>
                 <p>
                   <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.order.action}}'}</code> → "buy" or "sell" from strategy
                 </p>

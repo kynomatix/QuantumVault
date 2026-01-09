@@ -58,6 +58,8 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   const [isProcessingEquity, setIsProcessingEquity] = useState(false);
   const [agentBalance, setAgentBalance] = useState<string | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
+  const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
+  const [isLoadingWebhookUrl, setIsLoadingWebhookUrl] = useState(false);
   
   const [newBot, setNewBot] = useState({
     name: '',
@@ -72,6 +74,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
     setCopiedField(null);
     setEquityAmount('');
     setAgentBalance(null);
+    setUserWebhookUrl(null);
     setNewBot({
       name: '',
       market: 'SOL-PERP',
@@ -104,6 +107,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
         const bot = await res.json();
         setCreatedBot(bot);
         setStep('success');
+        fetchUserWebhookUrl();
         toast({ title: 'Bot created! Copy your webhook details below.' });
         onBotCreated();
       } else {
@@ -136,12 +140,24 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const getWebhookUrl = (bot: TradingBot) => {
-    return `${window.location.origin}/api/webhook/tradingview/${bot.id}?secret=${bot.webhookSecret}`;
+  const fetchUserWebhookUrl = async () => {
+    setIsLoadingWebhookUrl(true);
+    try {
+      const res = await fetch(`/api/user/webhook-url?wallet=${walletAddress}`, { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setUserWebhookUrl(data.webhookUrl);
+      }
+    } catch (error) {
+      console.error('Failed to fetch user webhook URL:', error);
+    } finally {
+      setIsLoadingWebhookUrl(false);
+    }
   };
 
-  const getMessageTemplate = () => {
+  const getMessageTemplate = (botId: string) => {
     return `{
+  "botId": "${botId}",
   "signalType": "trade",
   "data": {
     "action": "{{strategy.order.action}}",
@@ -342,18 +358,23 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
               Webhook URL
             </h3>
             <div className="p-3 bg-background/80 rounded-lg font-mono text-sm border" style={{ wordBreak: 'break-word' }}>
-              {getWebhookUrl(createdBot)}
+              {isLoadingWebhookUrl ? (
+                <span className="text-muted-foreground">Loading...</span>
+              ) : (
+                userWebhookUrl || 'Loading webhook URL...'
+              )}
             </div>
             <Button
               className="w-full mt-3"
-              onClick={() => copyToClipboard(getWebhookUrl(createdBot), 'Webhook URL')}
+              onClick={() => userWebhookUrl && copyToClipboard(userWebhookUrl, 'Webhook URL')}
+              disabled={!userWebhookUrl}
               data-testid="button-copy-webhook"
             >
               {copiedField === 'Webhook URL' ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
               {copiedField === 'Webhook URL' ? 'Copied!' : 'Copy Webhook URL'}
             </Button>
             <p className="text-xs text-muted-foreground mt-2">
-              Paste this in TradingView Alert → Notifications → Webhook URL
+              This is your universal webhook URL - same for all bots! Paste in TradingView Alert → Notifications → Webhook URL
             </p>
           </div>
 
@@ -363,18 +384,18 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
               Alert Message
             </h3>
             <pre className="p-3 bg-background/80 rounded-lg font-mono text-sm border whitespace-pre-wrap" style={{ wordBreak: 'break-word' }}>
-{getMessageTemplate()}
+{getMessageTemplate(createdBot.id)}
             </pre>
             <Button
               className="w-full mt-3"
-              onClick={() => copyToClipboard(getMessageTemplate(), 'Message')}
+              onClick={() => copyToClipboard(getMessageTemplate(createdBot.id), 'Message')}
               data-testid="button-copy-message"
             >
               {copiedField === 'Message' ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
               {copiedField === 'Message' ? 'Copied!' : 'Copy Alert Message'}
             </Button>
             <p className="text-xs text-muted-foreground mt-2">
-              Paste this in TradingView Alert → Message field (replace all existing content)
+              Paste this in TradingView Alert → Message field. The botId routes signals to this specific bot.
             </p>
           </div>
 
@@ -411,6 +432,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
               How The Placeholders Work
             </h3>
             <div className="space-y-2 text-sm text-muted-foreground">
+              <p><code className="px-1 py-0.5 bg-background rounded text-xs">"botId"</code> → Your bot's unique ID (routes signals to this bot)</p>
               <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.action}}"}</code> → "buy" or "sell" from your strategy</p>
               <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.contracts}}"}</code> → Order size for this entry (e.g. 33.33)</p>
               <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.position_size}}"}</code> → Total position after this order</p>

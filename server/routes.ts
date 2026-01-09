@@ -99,6 +99,14 @@ export async function registerRoutes(
         wallet = (await storage.getWallet(walletAddress))!;
         console.log(`[Agent] Generated new agent wallet for ${walletAddress}: ${agentWallet.publicKey}`);
       }
+
+      // Generate user webhook secret if not already set
+      if (!wallet.userWebhookSecret) {
+        const userWebhookSecret = generateWebhookSecret();
+        await storage.updateWalletWebhookSecret(walletAddress, userWebhookSecret);
+        wallet = (await storage.getWallet(walletAddress))!;
+        console.log(`[Webhook] Generated user webhook secret for ${walletAddress}`);
+      }
       
       req.session.walletAddress = walletAddress;
 
@@ -827,6 +835,252 @@ export async function registerRoutes(
       console.error("Webhook processing error:", error);
       await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
       res.status(500).json({ error: "Failed to process webhook" });
+    }
+  });
+
+  // User-level webhook endpoint - single URL for all bots, routes based on botId in payload
+  app.post("/api/webhook/user/:walletAddress", async (req, res) => {
+    const { walletAddress } = req.params;
+    const { secret } = req.query;
+
+    // Log webhook
+    const log = await storage.createWebhookLog({
+      tradingBotId: null,
+      payload: req.body,
+      headers: req.headers as any,
+      ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
+      processed: false,
+    });
+
+    try {
+      // Get wallet
+      const wallet = await storage.getWallet(walletAddress);
+      if (!wallet) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Wallet not found" });
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+
+      // Validate secret
+      if (secret !== wallet.userWebhookSecret) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Invalid secret" });
+        return res.status(401).json({ error: "Invalid secret" });
+      }
+
+      // Extract botId from payload
+      const payload = req.body;
+      const botId = payload.botId;
+      if (!botId) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Missing botId in payload" });
+        return res.status(400).json({ error: "Missing botId in payload" });
+      }
+
+      // Get bot and verify ownership
+      const bot = await storage.getTradingBotById(botId);
+      if (!bot) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Bot not found", tradingBotId: botId });
+        return res.status(404).json({ error: "Bot not found" });
+      }
+
+      if (bot.walletAddress !== walletAddress) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Bot does not belong to this wallet", tradingBotId: botId });
+        return res.status(403).json({ error: "Bot does not belong to this wallet" });
+      }
+
+      // Update webhook log with botId
+      await storage.updateWebhookLog(log.id, { tradingBotId: botId });
+
+      // Check if bot is active
+      if (!bot.isActive) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused" });
+        return res.status(400).json({ error: "Bot is paused" });
+      }
+
+      // Parse TradingView strategy signal - reuse existing parsing logic
+      let action: string | null = null;
+      let contracts: string = "0";
+      let positionSize: string = bot.maxPositionSize || "100";
+      let ticker: string = "";
+      let signalPrice: string = "0";
+      let signalTime: string | null = null;
+
+      if (typeof payload === 'object' && payload.signalType === 'trade' && payload.data) {
+        if (payload.data.action) action = payload.data.action.toLowerCase();
+        if (payload.data.contracts) contracts = String(payload.data.contracts);
+        if (payload.data.positionSize) positionSize = String(payload.data.positionSize);
+        if (payload.symbol) ticker = String(payload.symbol);
+        if (payload.price) signalPrice = String(payload.price);
+        if (payload.time) signalTime = String(payload.time);
+        console.log(`[User Webhook] Parsed JSON signal: botId=${botId}, action=${action}, contracts=${contracts}, symbol=${ticker}, price=${signalPrice}`);
+      } else {
+        const message = typeof payload === 'string' ? payload : 
+                        typeof payload === 'object' && payload.message ? payload.message :
+                        typeof payload === 'object' ? JSON.stringify(payload) : String(payload);
+
+        const regex = /order\s+(buy|sell)\s+@\s+([\d.]+)\s+filled\s+on\s+([A-Za-z0-9:\-/]+).*position\s+is\s+([-\d.]+)/i;
+        const match = message.match(regex);
+
+        if (match) {
+          action = match[1].toLowerCase();
+          contracts = match[2];
+          ticker = match[3];
+          positionSize = match[4];
+        } else {
+          try {
+            const parsed = typeof payload === 'object' ? payload : JSON.parse(message);
+            if (parsed.action) action = parsed.action.toLowerCase();
+            if (parsed.contracts) contracts = String(parsed.contracts);
+            if (parsed.position_size) positionSize = String(parsed.position_size);
+          } catch {
+            const text = message.toLowerCase();
+            if (text.includes('buy')) action = 'buy';
+            else if (text.includes('sell')) action = 'sell';
+          }
+        }
+      }
+
+      // Map action to side
+      let side: 'long' | 'short' | null = null;
+      if (action === 'buy') {
+        side = 'long';
+      } else if (action === 'sell') {
+        side = 'short';
+      }
+
+      // Check bot side restrictions
+      if (side && bot.side !== 'both') {
+        if (bot.side === 'long' && side !== 'long') {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts long signals", processed: true });
+          return res.status(400).json({ error: "Bot only accepts long signals" });
+        }
+        if (bot.side === 'short' && side !== 'short') {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts short signals", processed: true });
+          return res.status(400).json({ error: "Bot only accepts short signals" });
+        }
+      }
+
+      if (!side) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "No valid action found (expected buy or sell)", processed: true });
+        return res.status(400).json({ error: "No valid action found", received: payload });
+      }
+
+      // Create trade record
+      const trade = await storage.createBotTrade({
+        tradingBotId: botId,
+        walletAddress: bot.walletAddress,
+        market: bot.market,
+        side: side.toUpperCase(),
+        size: contracts || positionSize,
+        price: signalPrice,
+        status: "pending",
+        webhookPayload: payload,
+      });
+
+      if (signalTime) {
+        console.log(`[User Webhook] Signal time from TradingView: ${signalTime}`);
+      }
+
+      // Auto-deposit from agent wallet to Drift if needed
+      if (wallet.agentPublicKey && wallet.agentPrivateKeyEncrypted) {
+        const agentWalletBalance = await getUsdcBalance(wallet.agentPublicKey);
+        console.log(`[User Webhook] Agent wallet USDC balance: ${agentWalletBalance}`);
+        
+        if (agentWalletBalance > 0) {
+          const agentDriftExists = await subaccountExists(wallet.agentPublicKey, 0);
+          console.log(`[User Webhook] Agent Drift account exists: ${agentDriftExists}`);
+          
+          const requiredBalance = parseFloat(positionSize) || 100;
+          const depositAmount = Math.min(agentWalletBalance, Math.max(requiredBalance, agentWalletBalance));
+          console.log(`[User Webhook] Auto-depositing ${depositAmount} USDC from agent wallet to Drift...`);
+          
+          const depositResult = await executeAgentDriftDeposit(
+            wallet.agentPublicKey,
+            wallet.agentPrivateKeyEncrypted,
+            depositAmount
+          );
+          
+          if (depositResult.success) {
+            console.log(`[User Webhook] Auto-deposit successful: ${depositResult.signature}`);
+          } else {
+            console.log(`[User Webhook] Auto-deposit failed: ${depositResult.error}`);
+          }
+        } else {
+          console.log(`[User Webhook] Agent wallet has no USDC for auto-deposit`);
+        }
+      }
+
+      // Execute trade simulation
+      await storage.updateBotTrade(trade.id, {
+        status: "executed",
+        price: "0",
+        txSignature: `sim_${Date.now()}`,
+      });
+
+      // Update bot stats
+      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+      await storage.updateTradingBotStats(botId, {
+        ...stats,
+        totalTrades: (stats.totalTrades || 0) + 1,
+        lastTradeAt: new Date().toISOString(),
+      });
+
+      await storage.updateWebhookLog(log.id, { processed: true });
+
+      res.json({
+        success: true,
+        action: action,
+        side: side,
+        tradeId: trade.id,
+        market: bot.market,
+        size: positionSize,
+        botId: botId,
+      });
+    } catch (error) {
+      console.error("User webhook processing error:", error);
+      await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
+      res.status(500).json({ error: "Failed to process webhook" });
+    }
+  });
+
+  // Get user webhook URL
+  app.get("/api/user/webhook-url", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+
+      // Generate secret if not exists
+      if (!wallet.userWebhookSecret) {
+        const userWebhookSecret = generateWebhookSecret();
+        await storage.updateWalletWebhookSecret(req.walletAddress!, userWebhookSecret);
+        const updatedWallet = await storage.getWallet(req.walletAddress!);
+        if (!updatedWallet?.userWebhookSecret) {
+          return res.status(500).json({ error: "Failed to generate webhook secret" });
+        }
+        
+        const baseUrl = process.env.REPLIT_DEV_DOMAIN 
+          ? `https://${process.env.REPLIT_DEV_DOMAIN}`
+          : process.env.REPLIT_DEPLOYMENT_DOMAIN 
+          ? `https://${process.env.REPLIT_DEPLOYMENT_DOMAIN}`
+          : 'http://localhost:5000';
+        
+        return res.json({
+          webhookUrl: `${baseUrl}/api/webhook/user/${req.walletAddress}?secret=${updatedWallet.userWebhookSecret}`,
+        });
+      }
+
+      const baseUrl = process.env.REPLIT_DEV_DOMAIN 
+        ? `https://${process.env.REPLIT_DEV_DOMAIN}`
+        : process.env.REPLIT_DEPLOYMENT_DOMAIN 
+        ? `https://${process.env.REPLIT_DEPLOYMENT_DOMAIN}`
+        : 'http://localhost:5000';
+
+      res.json({
+        webhookUrl: `${baseUrl}/api/webhook/user/${req.walletAddress}?secret=${wallet.userWebhookSecret}`,
+      });
+    } catch (error) {
+      console.error("Get user webhook URL error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
