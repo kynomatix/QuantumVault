@@ -29,7 +29,7 @@ Preferred communication style: Simple, everyday language.
 ### Data Storage
 - **Database**: PostgreSQL via Drizzle ORM
 - **Schema Location**: `shared/schema.ts` contains all table definitions
-- **Tables**: users, wallets, bots, tradingBots, botTrades, webhookLogs, subscriptions, portfolios, positions, trades, leaderboardStats
+- **Tables**: users, wallets, bots, tradingBots, botTrades, equityEvents, webhookLogs, subscriptions, portfolios, positions, trades, leaderboardStats
 - **Migrations**: Managed via `drizzle-kit push` command
 
 ### Authentication
@@ -59,6 +59,15 @@ Preferred communication style: Simple, everyday language.
   - `GET /api/agent/balance` - Get agent wallet USDC balance
   - `POST /api/agent/deposit` - Build tx for user to deposit to agent (user signs)
   - `POST /api/agent/withdraw` - Agent sends USDC to user wallet (agent signs)
+  - `POST /api/agent/confirm-deposit` - Log confirmed deposit transaction
+  - `POST /api/agent/confirm-withdraw` - Log confirmed withdrawal transaction
+  - `GET /api/equity-events` - Get transaction history for wallet
+
+### Equity Event Tracking (Jan 2026)
+- **Purpose**: Track all deposits and withdrawals for transaction history display
+- **Event Types**: agent_deposit, agent_withdraw, drift_deposit, drift_withdraw
+- **Idempotency**: Duplicate transactions with same signature are rejected
+- **Security**: Requires valid transaction signature, wallet session authentication
 
 ### Drift Subaccounts
 - **Subaccount 0**: Main trading account (agent wallet's Drift account)
