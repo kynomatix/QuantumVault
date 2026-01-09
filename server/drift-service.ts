@@ -1283,8 +1283,10 @@ export async function executeAgentDriftWithdraw(
   try {
     const connection = getConnection();
     const agentPubkey = new PublicKey(agentPublicKey);
+    const usdcMint = new PublicKey(USDC_MINT);
+    const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
     
-    // Ensure agent has SOL for transaction fees (auto-airdrop on devnet)
+    // Ensure agent has SOL for transaction fees
     const solCheck = await ensureAgentHasSolForFees(agentPubkey);
     if (!solCheck.success) {
       return {
@@ -1293,43 +1295,52 @@ export async function executeAgentDriftWithdraw(
       };
     }
     
-    console.log(`[Drift] Building manual withdraw transaction: ${amountUsdc} USDC`);
+    console.log(`[Drift] Using SDK withdraw method: ${amountUsdc} USDC`);
     
-    // Build transaction using manual Anchor instruction builder
-    const txData = await buildAgentDriftWithdrawTransaction(
-      agentPublicKey,
-      encryptedPrivateKey,
-      amountUsdc
-    );
-    
-    const txBuffer = Buffer.from(txData.transaction, 'base64');
-    
-    console.log(`[Drift] Sending withdraw transaction...`);
-    
-    const signature = await connection.sendRawTransaction(txBuffer, {
-      skipPreflight: false,
-      preflightCommitment: 'confirmed',
-    });
-    
-    console.log(`[Drift] Withdraw transaction sent: ${signature}`);
-    
-    const confirmation = await connection.confirmTransaction({
-      signature,
-      blockhash: txData.blockhash,
-      lastValidBlockHeight: txData.lastValidBlockHeight,
-    }, 'confirmed');
-    
-    if (confirmation.value.err) {
-      console.error('[Drift] Withdraw confirmed with error:', confirmation.value.err);
+    // Use SDK approach (handles oracles and remaining accounts automatically)
+    try {
+      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey);
+      
+      try {
+        // Convert amount to precision (USDC has 6 decimals)
+        const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
+        
+        console.log('[Drift] Calling SDK withdraw...');
+        const txSig = await driftClient.withdraw(
+          amountBN,
+          0, // USDC market index
+          agentAta
+        );
+        
+        console.log(`[Drift] SDK withdraw successful: ${txSig}`);
+        await cleanup();
+        return { success: true, signature: txSig };
+      } catch (sdkError) {
+        await cleanup();
+        throw sdkError;
+      }
+    } catch (sdkError) {
+      console.error('[Drift] SDK withdraw failed:', sdkError);
+      
+      // Extract meaningful error message
+      let errorMessage = 'Withdraw failed';
+      if (sdkError instanceof Error) {
+        const errStr = sdkError.message;
+        if (errStr.includes('Simulation failed')) {
+          const match = errStr.match(/Message: ([^.]+)/);
+          errorMessage = match ? match[1] : errStr;
+        } else {
+          errorMessage = errStr;
+        }
+      } else {
+        errorMessage = String(sdkError);
+      }
+      
       return {
         success: false,
-        error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}`,
+        error: errorMessage,
       };
     }
-    
-    console.log(`[Drift] Withdraw confirmed: ${signature}`);
-    
-    return { success: true, signature };
   } catch (error) {
     console.error('[Drift] Withdraw error:', error);
     return {
