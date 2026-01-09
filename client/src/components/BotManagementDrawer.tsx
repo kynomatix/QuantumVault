@@ -816,7 +816,7 @@ export function BotManagementDrawer({
                     variant="ghost"
                     size="sm"
                     className="absolute right-1 top-1/2 -translate-y-1/2 h-7 px-2 text-xs"
-                    onClick={() => setRemoveEquityAmount(driftFreeCollateral.toFixed(2))}
+                    onClick={() => setRemoveEquityAmount(hasOpenPositions ? driftFreeCollateral.toFixed(6) : botBalance.toFixed(6))}
                     data-testid="button-remove-max"
                   >
                     Max
