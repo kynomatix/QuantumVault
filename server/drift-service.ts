@@ -629,33 +629,60 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
     // - 8 bytes: Anchor discriminator
     // - 32 bytes: authority pubkey
     // - then various fields...
-    // - SpotPositions array at offset 80 (8 positions, 48 bytes each)
+    // - SpotPositions array at offset 80 (8 positions, 40 bytes each)
     // 
-    // SpotPosition struct (48 bytes) - CORRECTED with I80F48 scaled_balance:
-    // - scaled_balance: I80F48 (16 bytes) at offset 0 - 128-bit fixed point
-    // - open_bids: i64 (8 bytes) at offset 16
-    // - open_asks: i64 (8 bytes) at offset 24
-    // - cumulative_deposits: i64 (8 bytes) at offset 32
-    // - market_index: u16 (2 bytes) at offset 40
-    // - balance_type: u8 (1 byte) at offset 42
-    // - open_orders: u8 (1 byte) at offset 43
-    // - padding: 4 bytes at offset 44
+    // SpotPosition struct (40 bytes):
+    // - scaled_balance: u64 (8 bytes) at offset 0 - stored as u64, NOT I80F48
+    // - open_bids: i64 (8 bytes) at offset 8
+    // - open_asks: i64 (8 bytes) at offset 16
+    // - cumulative_deposits: i64 (8 bytes) at offset 24
+    // - market_index: u16 (2 bytes) at offset 32
+    // - balance_type: u8 (1 byte) at offset 34
+    // - open_orders: u8 (1 byte) at offset 35
+    // - padding: 4 bytes at offset 36
     
     const USDC_MARKET_INDEX = 0;
-    const SPOT_BALANCE_PRECISION = 1e9;
-    const QUOTE_PRECISION = 1e6; // USDC has 6 decimals
+    const SPOT_BALANCE_PRECISION = BigInt(1e9);
     
-    // Corrected layout based on Drift V2 (48 byte struct with I80F48):
+    // Layout based on Drift V2 (40 byte struct):
     const SPOT_POSITIONS_OFFSET = 80;
-    const SPOT_POSITION_SIZE = 48;
-    const CUMULATIVE_DEPOSITS_OFFSET = 32; // cumulative_deposits at offset 32
-    const MARKET_INDEX_OFFSET = 40; // market_index at offset 40
-    const BALANCE_TYPE_OFFSET = 42; // balance_type at offset 42
+    const SPOT_POSITION_SIZE = 40;
+    const MARKET_INDEX_OFFSET = 32;
+    const BALANCE_TYPE_OFFSET = 34;
     
-    // scaled_balance is stored as I80F48 (128-bit fixed point with 48 fractional bits)
-    // We need to read all 16 bytes and interpret correctly
-    // I80F48 format: value / 2^48 = actual number
-    // The SPOT_BALANCE_PRECISION (1e9) is additional scaling on top of I80F48
+    // Fetch cumulative_deposit_interest from SpotMarket to compute actual token amount
+    // scaled_balance * cumulative_deposit_interest / SPOT_BALANCE_PRECISION = actual tokens
+    let cumulativeDepositInterest = BigInt(1e10); // Default 1.0 in 1e10 precision
+    try {
+      const spotMarketPDA = getSpotMarketPDA(USDC_MARKET_INDEX);
+      const spotMarketAccount = await connection.getAccountInfo(spotMarketPDA);
+      if (spotMarketAccount && spotMarketAccount.data) {
+        // cumulative_deposit_interest is stored as u128 at a specific offset
+        // We need to find the correct offset by scanning for reasonable values
+        // Interest should be slightly above 1.0 (e.g., 1.001 to 1.1 when divided by 1e10)
+        const marketData = spotMarketAccount.data;
+        console.log(`[Drift] SpotMarket data length: ${marketData.length} bytes`);
+        
+        // Scan common offsets for cumulative_deposit_interest
+        for (const offset of [168, 176, 184, 192, 200, 208, 216, 224, 232, 240]) {
+          if (marketData.length > offset + 16) {
+            const lowBits = marketData.readBigUInt64LE(offset);
+            const highBits = marketData.readBigUInt64LE(offset + 8);
+            // For a u128 value representing ~1.0 in 1e10 precision, expect lowBits around 1e10
+            const asNumber = Number(lowBits) / 1e10;
+            if (asNumber >= 1.0 && asNumber <= 1.5 && highBits === BigInt(0)) {
+              cumulativeDepositInterest = lowBits;
+              console.log(`[Drift] Found cumulative_deposit_interest at offset ${offset}: ${asNumber.toFixed(10)}`);
+              break;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[Drift] Could not fetch cumulative interest, using 1.0`);
+    }
+    
+    // Read spot positions
     for (let i = 0; i < 8; i++) {
       const posOffset = SPOT_POSITIONS_OFFSET + (i * SPOT_POSITION_SIZE);
       
@@ -666,27 +693,29 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
         const balanceType = data.readUInt8(posOffset + BALANCE_TYPE_OFFSET);
         
         if (marketIndex === USDC_MARKET_INDEX && balanceType === 0) {
-          // Read full 128-bit scaled_balance as I80F48
-          // I80F48 has 48 fractional bits, so we divide by 2^48
-          // Then divide by SPOT_BALANCE_PRECISION (1e9)
-          const lowBits = data.readBigUInt64LE(posOffset);
-          const highBits = data.readBigInt64LE(posOffset + 8);
+          // scaled_balance is u64 at offset 0
+          const scaledBalance = data.readBigUInt64LE(posOffset);
           
-          // Combine into 128-bit value: high * 2^64 + low
-          const fullValue = (BigInt(highBits) << BigInt(64)) + lowBits;
+          // Compute actual token amount: scaled_balance * cumulative_deposit_interest / SPOT_BALANCE_PRECISION / 1e10
+          // The interest is in 1e10 precision, scaled_balance is in 1e9 precision
+          // Result: (scaledBalance * interest) / (1e9 * 1e10) = (scaledBalance * interest) / 1e19
+          const INTEREST_PRECISION = BigInt(1e10);
+          const tokenAmountRaw = (scaledBalance * cumulativeDepositInterest) / (SPOT_BALANCE_PRECISION * INTEREST_PRECISION);
+          const usdcBalance = Number(tokenAmountRaw);
           
-          // I80F48: divide by 2^48 to get the fixed-point value
-          const TWO_POW_48 = BigInt(1) << BigInt(48);
-          const scaledBalanceFixed = Number(fullValue) / Number(TWO_POW_48);
-          
-          // Then divide by SPOT_BALANCE_PRECISION (1e9) to get USDC amount
-          const usdcBalance = scaledBalanceFixed / SPOT_BALANCE_PRECISION;
-          
-          console.log(`[Drift] Position ${i}: marketIndex=${marketIndex}, raw128=${fullValue.toString()}, scaledBalance=${usdcBalance.toFixed(6)} USDC`);
+          // Also log raw scaled balance for debugging
+          const rawScaledBalance = Number(scaledBalance) / 1e9;
+          console.log(`[Drift] Position ${i}: marketIndex=${marketIndex}, scaledBalance=${rawScaledBalance.toFixed(6)}, computed=${usdcBalance.toFixed(6)} USDC`);
           
           if (usdcBalance > 0.001) {
             console.log(`[Drift] Using balance: ${usdcBalance.toFixed(6)} USDC`);
             return usdcBalance;
+          }
+          
+          // If computed is 0 but raw scaled balance exists, use raw as fallback
+          if (rawScaledBalance > 0.001) {
+            console.log(`[Drift] Using raw scaled balance as fallback: ${rawScaledBalance.toFixed(6)} USDC`);
+            return rawScaledBalance;
           }
         }
       } catch (e) {
