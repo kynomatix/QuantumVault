@@ -1,9 +1,11 @@
-import { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, Keypair } from '@solana/web3.js';
+import { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { createHash } from 'crypto';
 import BN from 'bn.js';
 import { getAgentKeypair } from './agent-wallet';
 
 const DRIFT_TESTNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
+const MIN_SOL_FOR_FEES = 0.05 * LAMPORTS_PER_SOL;
+const AIRDROP_AMOUNT = 1 * LAMPORTS_PER_SOL;
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 
@@ -27,6 +29,52 @@ function getConnection(): Connection {
     connectionInstance = new Connection(DEVNET_RPC, 'confirmed');
   }
   return connectionInstance;
+}
+
+async function ensureAgentHasSolForFees(agentPubkey: PublicKey): Promise<{ success: boolean; error?: string }> {
+  const connection = getConnection();
+  
+  try {
+    const balance = await connection.getBalance(agentPubkey);
+    console.log(`[Drift] Agent SOL balance: ${balance / LAMPORTS_PER_SOL} SOL`);
+    
+    if (balance >= MIN_SOL_FOR_FEES) {
+      return { success: true };
+    }
+    
+    console.log(`[Drift] Agent needs SOL for fees, requesting devnet airdrop...`);
+    
+    try {
+      const signature = await connection.requestAirdrop(agentPubkey, AIRDROP_AMOUNT);
+      console.log(`[Drift] Airdrop requested: ${signature}`);
+      
+      await connection.confirmTransaction(signature, 'confirmed');
+      console.log(`[Drift] Airdrop confirmed, agent now has SOL for fees`);
+      
+      return { success: true };
+    } catch (airdropError) {
+      console.error('[Drift] Airdrop failed:', airdropError);
+      
+      const errorMsg = airdropError instanceof Error ? airdropError.message : String(airdropError);
+      if (errorMsg.includes('429') || errorMsg.includes('rate limit')) {
+        return {
+          success: false,
+          error: 'Devnet airdrop rate limited. Please try again in a few minutes or manually fund the agent wallet with SOL.',
+        };
+      }
+      
+      return {
+        success: false,
+        error: `Agent wallet needs SOL for transaction fees. Airdrop failed: ${errorMsg}`,
+      };
+    }
+  } catch (error) {
+    console.error('[Drift] Error checking SOL balance:', error);
+    return {
+      success: false,
+      error: 'Failed to check agent wallet SOL balance',
+    };
+  }
 }
 
 async function getAgentDriftClient(
@@ -843,7 +891,16 @@ export async function executeAgentDriftDeposit(
     const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
     const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
     
-    // Check agent balance first
+    // Ensure agent has SOL for transaction fees (auto-airdrop on devnet)
+    const solCheck = await ensureAgentHasSolForFees(agentPubkey);
+    if (!solCheck.success) {
+      return {
+        success: false,
+        error: solCheck.error || 'Agent wallet needs SOL for transaction fees',
+      };
+    }
+    
+    // Check agent USDC balance
     let agentBalance = 0;
     try {
       const accountInfo = await connection.getTokenAccountBalance(agentAta);
@@ -931,6 +988,16 @@ export async function executeAgentDriftWithdraw(
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const connection = getConnection();
+    const agentPubkey = new PublicKey(agentPublicKey);
+    
+    // Ensure agent has SOL for transaction fees (auto-airdrop on devnet)
+    const solCheck = await ensureAgentHasSolForFees(agentPubkey);
+    if (!solCheck.success) {
+      return {
+        success: false,
+        error: solCheck.error || 'Agent wallet needs SOL for transaction fees',
+      };
+    }
     
     console.log(`[Drift] Building manual withdraw transaction: ${amountUsdc} USDC`);
     
