@@ -655,39 +655,60 @@ export async function registerRoutes(
       }
 
       // Parse TradingView strategy signal
-      // Expected format: "order buy @ 33.33 filled on SOLUSDT. New strategy position is 100"
+      // Expected JSON format:
+      // {
+      //   "signalType": "trade",
+      //   "data": { "action": "buy", "contracts": "33.33", "positionSize": "100" },
+      //   "symbol": "SOLUSD",
+      //   "price": "195.50",
+      //   "time": "2025-01-09T12:00:00Z"
+      // }
       const payload = req.body;
       let action: string | null = null;
       let contracts: string = "0";
       let positionSize: string = bot.maxPositionSize || "100";
       let ticker: string = "";
+      let signalPrice: string = "0";
+      let signalTime: string | null = null;
 
-      // Convert payload to string for parsing
-      const message = typeof payload === 'string' ? payload : 
-                      typeof payload === 'object' && payload.message ? payload.message :
-                      typeof payload === 'object' ? JSON.stringify(payload) : String(payload);
-
-      // Try regex parsing for TradingView format: "order buy @ 33.33 filled on TICKER. New strategy position is 100"
-      const regex = /order\s+(buy|sell)\s+@\s+([\d.]+)\s+filled\s+on\s+([A-Za-z0-9:\-/]+).*position\s+is\s+([-\d.]+)/i;
-      const match = message.match(regex);
-
-      if (match) {
-        action = match[1].toLowerCase();
-        contracts = match[2];
-        ticker = match[3];
-        positionSize = match[4];
+      // Try parsing as the new JSON format first
+      if (typeof payload === 'object' && payload.signalType === 'trade' && payload.data) {
+        // New JSON format
+        if (payload.data.action) action = payload.data.action.toLowerCase();
+        if (payload.data.contracts) contracts = String(payload.data.contracts);
+        if (payload.data.positionSize) positionSize = String(payload.data.positionSize);
+        if (payload.symbol) ticker = String(payload.symbol);
+        if (payload.price) signalPrice = String(payload.price);
+        if (payload.time) signalTime = String(payload.time);
+        console.log(`[Webhook] Parsed JSON signal: action=${action}, contracts=${contracts}, symbol=${ticker}, price=${signalPrice}, time=${signalTime}`);
       } else {
-        // Fallback: try JSON parsing
-        try {
-          const parsed = typeof payload === 'object' ? payload : JSON.parse(message);
-          if (parsed.action) action = parsed.action.toLowerCase();
-          if (parsed.contracts) contracts = String(parsed.contracts);
-          if (parsed.position_size) positionSize = String(parsed.position_size);
-        } catch {
-          // Last resort: simple keyword detection
-          const text = message.toLowerCase();
-          if (text.includes('buy')) action = 'buy';
-          else if (text.includes('sell')) action = 'sell';
+        // Fallback: legacy format parsing
+        const message = typeof payload === 'string' ? payload : 
+                        typeof payload === 'object' && payload.message ? payload.message :
+                        typeof payload === 'object' ? JSON.stringify(payload) : String(payload);
+
+        // Try regex parsing for legacy format: "order buy @ 33.33 filled on TICKER. New strategy position is 100"
+        const regex = /order\s+(buy|sell)\s+@\s+([\d.]+)\s+filled\s+on\s+([A-Za-z0-9:\-/]+).*position\s+is\s+([-\d.]+)/i;
+        const match = message.match(regex);
+
+        if (match) {
+          action = match[1].toLowerCase();
+          contracts = match[2];
+          ticker = match[3];
+          positionSize = match[4];
+        } else {
+          // Fallback: try simple JSON parsing
+          try {
+            const parsed = typeof payload === 'object' ? payload : JSON.parse(message);
+            if (parsed.action) action = parsed.action.toLowerCase();
+            if (parsed.contracts) contracts = String(parsed.contracts);
+            if (parsed.position_size) positionSize = String(parsed.position_size);
+          } catch {
+            // Last resort: simple keyword detection
+            const text = message.toLowerCase();
+            if (text.includes('buy')) action = 'buy';
+            else if (text.includes('sell')) action = 'sell';
+          }
         }
       }
 
@@ -718,16 +739,22 @@ export async function registerRoutes(
 
       // Create trade record (pending execution)
       // Use contracts as the trade size (what TradingView sent for this order)
+      // Include the signal price and time from TradingView
       const trade = await storage.createBotTrade({
         tradingBotId: botId,
         walletAddress: bot.walletAddress,
         market: bot.market,
         side: side.toUpperCase(),
         size: contracts || positionSize,
-        price: "0",
+        price: signalPrice,
         status: "pending",
         webhookPayload: payload,
       });
+
+      // Store signal time in webhook log for reference
+      if (signalTime) {
+        console.log(`[Webhook] Signal time from TradingView: ${signalTime}`);
+      }
 
       // Auto-deposit from agent wallet to Drift if agent has funds
       // The agent automatically manages Drift deposits when trading

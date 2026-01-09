@@ -141,7 +141,17 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   };
 
   const getMessageTemplate = () => {
-    return `order {{strategy.order.action}} @ {{strategy.order.contracts}} filled on {{ticker}}. New strategy position is {{strategy.position_size}}`;
+    return `{
+  "signalType": "trade",
+  "data": {
+    "action": "{{strategy.order.action}}",
+    "contracts": "{{strategy.order.contracts}}",
+    "positionSize": "{{strategy.position_size}}"
+  },
+  "symbol": "{{ticker}}",
+  "price": "{{close}}",
+  "time": "{{timenow}}"
+}`;
   };
 
   const fetchAgentBalance = async () => {
@@ -404,7 +414,9 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
               <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.action}}"}</code> → "buy" or "sell" from your strategy</p>
               <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.contracts}}"}</code> → Order size for this entry (e.g. 33.33)</p>
               <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.position_size}}"}</code> → Total position after this order</p>
-              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{ticker}}"}</code> → The trading symbol</p>
+              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{ticker}}"}</code> → Trading symbol (e.g. SOLUSD)</p>
+              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{close}}"}</code> → Current price when signal was sent</p>
+              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{timenow}}"}</code> → Timestamp when TradingView sent the signal</p>
             </div>
           </div>
 
