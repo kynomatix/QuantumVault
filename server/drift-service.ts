@@ -628,31 +628,29 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
     // Drift V2 User Account Layout:
     // - 8 bytes: Anchor discriminator
     // - 32 bytes: authority pubkey
-    // - 2 bytes: delegate
-    // - 8 bytes: name (array)
-    // - 4 bytes: sub_account_id
     // - then various fields...
-    // - SpotPositions array at offset 80 (8 positions, 48 bytes each)
+    // - SpotPositions array at offset 80 (8 positions, 40 bytes each)
     // 
-    // SpotPosition struct (48 bytes):
-    // - scaled_balance: u128 (16 bytes) at offset 0 - but we read low 64 bits
-    // - open_bids/asks: 2x i64 (16 bytes) at offset 16
-    // - cumulative_deposits: i64 (8 bytes) at offset 32
-    // - market_index: u16 (2 bytes) at offset 40
-    // - balance_type: u8 (1 byte) at offset 42
-    // - open_orders: u8 (1 byte) at offset 43
-    // - padding: 4 bytes at offset 44
+    // SpotPosition struct (40 bytes):
+    // - scaled_balance: u64 (8 bytes) at offset 0
+    // - open_bids: i64 (8 bytes) at offset 8
+    // - open_asks: i64 (8 bytes) at offset 16
+    // - cumulative_deposits: i64 (8 bytes) at offset 24
+    // - market_index: u16 (2 bytes) at offset 32
+    // - balance_type: u8 (1 byte) at offset 34
+    // - open_orders: u8 (1 byte) at offset 35
+    // - padding: 4 bytes at offset 36
     
     const USDC_MARKET_INDEX = 0;
     const SPOT_BALANCE_PRECISION = 1e9;
     const QUOTE_PRECISION = 1e6; // USDC has 6 decimals
     
-    // Corrected layout based on Drift V2:
+    // Corrected layout based on Drift V2 (40 byte struct):
     const SPOT_POSITIONS_OFFSET = 80;
-    const SPOT_POSITION_SIZE = 48;
-    const CUMULATIVE_DEPOSITS_OFFSET = 32; // cumulative_deposits is at offset 32 within position
-    const MARKET_INDEX_OFFSET = 40; // market_index is at offset 40
-    const BALANCE_TYPE_OFFSET = 42; // balance_type is at offset 42
+    const SPOT_POSITION_SIZE = 40;
+    const CUMULATIVE_DEPOSITS_OFFSET = 24; // cumulative_deposits at offset 24
+    const MARKET_INDEX_OFFSET = 32; // market_index at offset 32
+    const BALANCE_TYPE_OFFSET = 34; // balance_type at offset 34
     
     // First, try to read cumulative_deposits which is more reliable
     // This tracks actual deposits made by the user
