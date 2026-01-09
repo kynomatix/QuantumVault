@@ -1533,9 +1533,16 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Bot has no Drift subaccount assigned" });
       }
 
-      // Check if subaccount exists on-chain
-      const exists = await subaccountExists(req.walletAddress!, bot.driftSubaccountId);
-      const balance = exists ? await getDriftBalance(req.walletAddress!, bot.driftSubaccountId) : 0;
+      // Get the agent wallet address - this is where Drift funds are held
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet || !wallet.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+      const agentAddress = wallet.agentPublicKey;
+
+      // Check if subaccount exists on-chain using agent wallet (not user wallet)
+      const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
+      const balance = exists ? await getDriftBalance(agentAddress, bot.driftSubaccountId) : 0;
       
       res.json({ 
         driftSubaccountId: bot.driftSubaccountId,

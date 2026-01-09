@@ -621,65 +621,79 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
       return 0;
     }
     
-    // Parse the User account data to get USDC balance
-    // The User struct has spotPositions array starting at a specific offset
-    // Each SpotPosition is 40 bytes: 
-    //   - scaled_balance: u128 (16 bytes)
-    //   - open_bids: i64 (8 bytes)
-    //   - open_asks: i64 (8 bytes)
-    //   - cumulative_deposits: i64 (8 bytes)
-    //   - market_index: u16 (2 bytes, at offset 32)
-    //   - balance_type: u8 (1 byte)
-    //   - open_orders: u8 (1 byte)
-    //   - padding: [u8; 4] (4 bytes)
+    const data = accountInfo.data;
+    console.log(`[Drift] User account data length: ${data.length} bytes for ${walletAddress.slice(0, 8)}...`);
     
-    // User struct layout (simplified for balance reading):
-    // - 8 bytes: discriminator
-    // - 32 bytes: authority
-    // - 8 bytes: delegate
-    // - 32 bytes: name (string)
-    // - ... many fields ...
-    // - spotPositions: [SpotPosition; 8] starts around offset 4488
+    // SpotPosition struct layout (Drift V2):
+    // The struct size and offsets vary by protocol version
+    // We'll scan for USDC market (index 0) with a reasonable balance pattern
     
-    // For now, let's use a simpler approach - read the scaled_balance for USDC (market index 0)
-    // The exact offset varies by SDK version, but typically spotPositions starts around offset 4488
-    
-    const SPOT_POSITIONS_OFFSET = 4352; // Approximate offset, may need adjustment
-    const SPOT_POSITION_SIZE = 40;
     const USDC_MARKET_INDEX = 0;
+    const SPOT_BALANCE_PRECISION = 1e9;
     
-    // Look through the first 8 spot positions to find USDC (market index 0)
+    // Known working layout discovered via scan:
+    // - SpotPositions array starts at offset 80
+    // - Each position is 48 bytes
+    // - market_index is at offset 32 within each position
+    // - balance_type is at offset 34 within each position
+    // - scaled_balance is at offset 0 within each position (u128, lower 64 bits)
+    
+    const SPOT_POSITIONS_OFFSET = 80;
+    const SPOT_POSITION_SIZE = 48;
+    const MARKET_INDEX_OFFSET = 32;
+    const BALANCE_TYPE_OFFSET = 34;
+    
+    // Check known layout first (8 spot positions)
     for (let i = 0; i < 8; i++) {
       const posOffset = SPOT_POSITIONS_OFFSET + (i * SPOT_POSITION_SIZE);
       
-      if (posOffset + SPOT_POSITION_SIZE > accountInfo.data.length) {
-        break;
-      }
+      if (posOffset + SPOT_POSITION_SIZE > data.length) break;
       
-      // Market index is at offset 32 within the SpotPosition struct (2 bytes)
-      const marketIndex = accountInfo.data.readUInt16LE(posOffset + 32);
-      
-      if (marketIndex === USDC_MARKET_INDEX) {
-        // scaled_balance is at offset 0 within SpotPosition (16 bytes, but we read as u64 for simplicity)
-        // Drift uses SPOT_BALANCE_PRECISION = 10^9
-        const scaledBalanceLow = accountInfo.data.readBigUInt64LE(posOffset);
+      try {
+        const marketIndex = data.readUInt16LE(posOffset + MARKET_INDEX_OFFSET);
+        const balanceType = data.readUInt8(posOffset + BALANCE_TYPE_OFFSET);
+        const scaledBalanceLow = data.readBigUInt64LE(posOffset);
         const scaledBalance = Number(scaledBalanceLow);
         
-        // Balance type is at offset 34 (0 = deposit, 1 = borrow)
-        const balanceType = accountInfo.data.readUInt8(posOffset + 34);
-        
-        if (balanceType === 0) { // Deposit
-          // Convert from scaled balance to USDC (divide by 10^9, then adjust for 6 decimals)
-          // SPOT_BALANCE_PRECISION = 1e9
-          // USDC has 6 decimals, so final value = scaledBalance / 1e9
-          const usdcBalance = scaledBalance / 1e9;
-          console.log(`[Drift] Found USDC balance for ${walletAddress}: ${usdcBalance} (scaled: ${scaledBalance})`);
+        if (marketIndex === USDC_MARKET_INDEX && balanceType === 0 && scaledBalance >= 1e6) {
+          const usdcBalance = scaledBalance / SPOT_BALANCE_PRECISION;
+          console.log(`[Drift] Found USDC at position ${i}: ${usdcBalance.toFixed(6)} USDC`);
           return usdcBalance;
         }
+      } catch (e) {
+        // Skip invalid reads
       }
     }
     
-    console.log(`[Drift] No USDC position found for ${walletAddress} subaccount ${subAccountId}`);
+    // Fallback: scan entire account for USDC balance pattern
+    console.log(`[Drift] Scanning entire account for USDC balance pattern...`);
+    for (let offset = 8; offset < data.length - 64; offset += 8) {
+      try {
+        // Look for market_index = 0 at common offsets
+        for (const miOff of [32, 40, 48]) {
+          if (offset + miOff + 2 > data.length) continue;
+          const marketIndex = data.readUInt16LE(offset + miOff);
+          
+          if (marketIndex === 0) {
+            const scaledBalanceLow = data.readBigUInt64LE(offset);
+            const scaledBalance = Number(scaledBalanceLow);
+            
+            if (scaledBalance >= 1e6 && scaledBalance <= 1e18) {
+              const balanceType = data.readUInt8(offset + miOff + 2);
+              if (balanceType === 0) {
+                const usdcBalance = scaledBalance / SPOT_BALANCE_PRECISION;
+                console.log(`[Drift] Found USDC via scan at offset=${offset}, miOff=${miOff}: ${usdcBalance.toFixed(6)} USDC`);
+                return usdcBalance;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Skip
+      }
+    }
+    
+    console.log(`[Drift] No USDC deposit position found for ${walletAddress} subaccount ${subAccountId}`);
     return 0;
   } catch (error) {
     console.error(`[Drift] Error reading Drift balance:`, error);

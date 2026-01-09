@@ -64,7 +64,19 @@ Preferred communication style: Simple, everyday language.
 - **Subaccount 0**: Main trading account (agent wallet's Drift account)
 - **Subaccounts 1+**: Individual trading bot subaccounts (future implementation)
 - **Delete Safety**: Bots with funds require sweep transaction before deletion
-- **Simplified Wallet UI**: Shows only Phantom balance and Agent Wallet balance (Drift managed automatically)
+- **Simplified Wallet UI**: Shows Phantom balance, Agent Wallet balance, and Bot Balance (per-subaccount)
+
+### Drift User Account Parsing (Jan 2026)
+- **Account Data Size**: ~4376 bytes for User account
+- **SpotPositions Array**: Starts at offset 80
+- **SpotPosition Struct Size**: 48 bytes per position
+- **Key Field Offsets within SpotPosition**:
+  - `scaledBalance`: i128 at offset 0 (read lower 64 bits)
+  - `marketIndex`: u16 at offset 32
+  - `balanceType`: u8 at offset 34 (0 = Deposit, 1 = Borrow)
+- **Balance Conversion**: `scaledBalance / SPOT_BALANCE_PRECISION (1e9)` = USDC amount
+- **USDC Market Index**: 0
+- **Deposit Remaining Accounts Order**: Oracle (readable) MUST come before SpotMarket (writable)
 
 ## External Dependencies
 

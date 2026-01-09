@@ -709,12 +709,12 @@ export function BotManagementDrawer({
               <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-500/10 to-primary/10 border">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm text-muted-foreground">Drift Balance</p>
+                    <p className="text-sm text-muted-foreground">Bot Balance</p>
                     <p className="text-2xl font-bold mt-1" data-testid="text-drift-balance">
                       {balanceLoading ? (
                         <Loader2 className="w-5 h-5 animate-spin" />
                       ) : (
-                        `$${driftBalance.toFixed(2)}`
+                        `$${botBalance.toFixed(2)}`
                       )}
                     </p>
                   </div>
