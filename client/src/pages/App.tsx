@@ -546,7 +546,6 @@ export default function AppPage() {
                     <p className="text-lg font-semibold font-mono text-primary" data-testid="text-total-equity">
                       {equityLoading ? '...' : totalEquity !== null ? `$${totalEquity.toFixed(2)}` : '$0.00'}
                     </p>
-                    <p className="text-xs text-muted-foreground">USDC</p>
                   </div>
                   <div className="px-3 py-2 space-y-2 border-t border-border/30 mt-2">
                     <div className="flex justify-between text-xs">
@@ -577,7 +576,6 @@ export default function AppPage() {
                     <p className="text-lg font-semibold font-mono text-primary" data-testid="text-total-equity-mobile">
                       {equityLoading ? '...' : totalEquity !== null ? `$${totalEquity.toFixed(2)}` : '$0.00'}
                     </p>
-                    <p className="text-xs text-muted-foreground">USDC</p>
                   </div>
                   <div className="px-3 py-2 space-y-2 border-t border-border/30 mt-2">
                     <div className="flex justify-between text-xs">
