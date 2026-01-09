@@ -192,10 +192,11 @@ export function BotManagementDrawer({
     if (!bot) return;
     setBalanceLoading(true);
     try {
+      const cacheBust = Date.now();
       const [balanceRes, agentRes, driftRes] = await Promise.all([
-        fetch(`/api/bot/${bot.id}/balance?wallet=${walletAddress}`, { credentials: 'include' }),
-        fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' }),
-        fetch(`/api/agent/drift-balance?wallet=${walletAddress}`, { credentials: 'include' }),
+        fetch(`/api/bot/${bot.id}/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
+        fetch(`/api/agent/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
+        fetch(`/api/agent/drift-balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
       ]);
 
       if (balanceRes.ok) {
@@ -245,7 +246,7 @@ export function BotManagementDrawer({
 
       toast({ title: `Successfully added $${amount} to Drift`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
       setAddEquityAmount('');
-      fetchBotBalance();
+      setTimeout(() => fetchBotBalance(), 1500);
     } catch (error) {
       toast({ title: 'Failed to add to Drift', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
     } finally {
@@ -277,7 +278,7 @@ export function BotManagementDrawer({
 
       toast({ title: `Successfully removed $${amount} from Drift`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
       setRemoveEquityAmount('');
-      fetchBotBalance();
+      setTimeout(() => fetchBotBalance(), 1500);
     } catch (error) {
       toast({ title: 'Failed to remove from Drift', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
     } finally {
