@@ -49,6 +49,7 @@ import {
   Play,
   Trash2,
   Settings,
+  XCircle,
 } from 'lucide-react';
 import {
   AlertDialog,
@@ -92,6 +93,12 @@ interface BotTrade {
   price: string;
   status: string;
   executedAt: string;
+  webhookPayload?: {
+    data?: {
+      action?: string;
+    };
+    action?: string;
+  } | null;
 }
 
 interface EquityEvent {
@@ -145,7 +152,6 @@ export function BotManagementDrawer({
   const [localBot, setLocalBot] = useState<TradingBot | null>(null);
   const [editName, setEditName] = useState<string>('');
   const [editLeverage, setEditLeverage] = useState<number>(1);
-  const [editTotalInvestment, setEditTotalInvestment] = useState<string>('100');
   const [editMaxPositionSize, setEditMaxPositionSize] = useState<string>('');
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
@@ -156,7 +162,6 @@ export function BotManagementDrawer({
       setLocalBot(bot);
       setEditName(bot.name);
       setEditLeverage(bot.leverage);
-      setEditTotalInvestment(bot.totalInvestment || '100');
       setEditMaxPositionSize(bot.maxPositionSize || '');
     }
   }, [bot]);
@@ -457,7 +462,6 @@ export function BotManagementDrawer({
         body: JSON.stringify({ 
           name: editName.trim(),
           leverage: editLeverage,
-          totalInvestment: editTotalInvestment ? parseFloat(editTotalInvestment) : 100,
           maxPositionSize: editMaxPositionSize ? parseFloat(editMaxPositionSize) : null,
         }),
       });
@@ -489,7 +493,6 @@ export function BotManagementDrawer({
     if (localBot) {
       setEditName(localBot.name);
       setEditLeverage(localBot.leverage);
-      setEditTotalInvestment(localBot.totalInvestment || '100');
       setEditMaxPositionSize(localBot.maxPositionSize || '');
     }
   };
@@ -497,7 +500,6 @@ export function BotManagementDrawer({
   const hasSettingsChanges = localBot ? (
     editName !== localBot.name || 
     editLeverage !== localBot.leverage || 
-    editTotalInvestment !== (localBot.totalInvestment || '100') ||
     editMaxPositionSize !== (localBot.maxPositionSize || '')
   ) : false;
 
@@ -686,26 +688,6 @@ export function BotManagementDrawer({
                   </p>
                 </div>
                 
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm text-muted-foreground">Total Investment (USDC)</label>
-                    <span className="text-sm font-semibold">${parseFloat(editTotalInvestment || '100').toFixed(0)}</span>
-                  </div>
-                  <Input
-                    type="number"
-                    value={editTotalInvestment}
-                    onChange={(e) => setEditTotalInvestment(e.target.value)}
-                    placeholder="100"
-                    min="1"
-                    step="1"
-                    data-testid="input-total-investment"
-                  />
-                  <p className="text-xs text-muted-foreground flex items-center gap-1">
-                    <Info className="w-3 h-3" />
-                    TradingView signal values are treated as % of this amount (e.g., 50 = 50% = ${(parseFloat(editTotalInvestment || '100') * 0.5).toFixed(0)})
-                  </p>
-                </div>
-
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="text-sm text-muted-foreground">Max Position Size (USDC)</label>
@@ -1029,6 +1011,31 @@ export function BotManagementDrawer({
                   {trades.map((trade) => {
                     const isLong = trade.side === 'LONG';
                     const isSimulated = trade.status === 'executed' && (trade.price === '0' || trade.price === '0.000000');
+                    const payload = trade.webhookPayload;
+                    const action = payload?.data?.action?.toLowerCase() || payload?.action?.toLowerCase() || '';
+                    const isClose = action === 'close' || trade.side === 'CLOSE';
+                    
+                    const getTradeIcon = () => {
+                      if (isClose) {
+                        return <XCircle className="h-4 w-4 text-purple-500" />;
+                      }
+                      if (isLong) {
+                        return <TrendingUp className="h-4 w-4 text-emerald-500" />;
+                      }
+                      return <TrendingDown className="h-4 w-4 text-red-500" />;
+                    };
+                    
+                    const getTradeLabel = () => {
+                      if (isClose) return 'CLOSE';
+                      return trade.side;
+                    };
+                    
+                    const getIconBgClass = () => {
+                      if (isClose) return 'bg-purple-500/10';
+                      if (isLong) return 'bg-emerald-500/10';
+                      return 'bg-red-500/10';
+                    };
+                    
                     return (
                       <div 
                         key={trade.id} 
@@ -1036,19 +1043,20 @@ export function BotManagementDrawer({
                         data-testid={`trade-${trade.id}`}
                       >
                         <div className="flex items-center gap-3">
-                          <div className={`p-2 rounded-full ${isLong ? 'bg-emerald-500/10' : 'bg-red-500/10'}`}>
-                            {isLong ? (
-                              <TrendingUp className="h-4 w-4 text-emerald-500" />
-                            ) : (
-                              <TrendingDown className="h-4 w-4 text-red-500" />
-                            )}
+                          <div className={`p-2 rounded-full ${getIconBgClass()}`}>
+                            {getTradeIcon()}
                           </div>
                           <div>
                             <p className="text-sm font-medium flex items-center gap-2">
-                              {trade.side} {trade.market}
+                              {getTradeLabel()} {trade.market}
                               {isSimulated && (
                                 <span className="text-xs px-1.5 py-0.5 bg-amber-500/20 text-amber-600 rounded">
                                   Simulated
+                                </span>
+                              )}
+                              {isClose && (
+                                <span className="text-xs px-1.5 py-0.5 bg-purple-500/20 text-purple-600 rounded">
+                                  Exit
                                 </span>
                               )}
                             </p>

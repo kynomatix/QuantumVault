@@ -293,24 +293,6 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
           </div>
         </div>
 
-        <div className="space-y-2">
-          <Label htmlFor="totalInvestment">Total Investment (USDC)</Label>
-          <div className="relative">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
-            <Input
-              id="totalInvestment"
-              type="number"
-              placeholder="100"
-              value={newBot.totalInvestment}
-              onChange={(e) => setNewBot({ ...newBot, totalInvestment: e.target.value })}
-              className="pl-7"
-              data-testid="input-total-investment"
-            />
-          </div>
-          <p className="text-xs text-muted-foreground">
-            The total capital for this bot. TradingView signals are treated as percentages (e.g., 50 = 50% of this amount).
-          </p>
-        </div>
       </div>
 
       <DialogFooter>
