@@ -202,7 +202,7 @@ function getDriftSignerPDA(): PublicKey {
   return signer;
 }
 
-const DEVNET_USDC_ORACLE = new PublicKey('En8hkHLkRe9d9DraYmBTrus518BvmVH448YcvmrFM6Ce');
+const DEVNET_USDC_ORACLE = new PublicKey('9VCioxmni2gDLv11qufWzT3RDERhQE4iY5Gf7NTfYyAV');
 
 function createInitializeUserStatsInstruction(
   userPubkey: PublicKey,
