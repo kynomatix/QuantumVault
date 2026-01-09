@@ -79,7 +79,7 @@ type MarketplaceBot = {
 
 const marketplaceBots: MarketplaceBot[] = [];
 
-type NavItem = 'dashboard' | 'marketplace' | 'bots' | 'leaderboard' | 'settings' | 'wallet';
+type NavItem = 'dashboard' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet';
 
 export default function AppPage() {
   const [, navigate] = useLocation();
@@ -183,9 +183,9 @@ export default function AppPage() {
     await disconnect();
   };
 
-  // Fetch bot balances when on bots page
+  // Fetch bot balances when connected
   useEffect(() => {
-    if (activeNav !== 'bots' || !connected || !botsData) return;
+    if (!connected || !botsData) return;
     
     const fetchBalances = async () => {
       const balances: Record<string, { balance: number; exists: boolean }> = {};
@@ -206,7 +206,7 @@ export default function AppPage() {
     };
     
     fetchBalances();
-  }, [activeNav, connected, botsData]);
+  }, [connected, botsData]);
 
   const handleWithdrawAll = async (botId: string, subaccountId: number) => {
     const botBalance = botBalances[botId];
@@ -490,7 +490,6 @@ export default function AppPage() {
             {[
               { id: 'dashboard' as NavItem, icon: LayoutDashboard, label: 'Dashboard' },
               { id: 'marketplace' as NavItem, icon: Store, label: 'Marketplace' },
-              { id: 'bots' as NavItem, icon: Bot, label: 'My Bots' },
               { id: 'wallet' as NavItem, icon: Wallet, label: 'Wallet' },
               { id: 'leaderboard' as NavItem, icon: Users, label: 'Leaderboard' },
               { id: 'settings' as NavItem, icon: Settings, label: 'Settings' },
@@ -756,7 +755,10 @@ export default function AppPage() {
                   <div className="gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
                       <h2 className="font-display font-semibold">Active Bots</h2>
-                      <Button variant="outline" size="sm" onClick={() => setActiveNav('bots')} data-testid="button-manage-bots">Manage</Button>
+                      <Button variant="outline" size="sm" onClick={() => navigate('/bots')} data-testid="button-add-bot">
+                        <Plus className="w-4 h-4 mr-1" />
+                        Add Bot
+                      </Button>
                     </div>
                     <div className="space-y-3">
                       {botsData && botsData.length > 0 ? (
@@ -997,202 +999,6 @@ export default function AppPage() {
                       <Plus className="w-4 h-4 mr-2" />
                       Create Strategy
                     </Button>
-                  </div>
-                </div>
-              </motion.div>
-            )}
-
-            {activeNav === 'bots' && (
-              <motion.div
-                key="bots"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="space-y-6"
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h1 className="text-2xl font-display font-bold">My Bots</h1>
-                    <p className="text-muted-foreground">Manage your trading bots and subscriptions</p>
-                  </div>
-                  <Button 
-                    className="bg-gradient-to-r from-primary to-accent" 
-                    onClick={() => navigate('/bots')}
-                    data-testid="button-create-bot"
-                  >
-                    <Plus className="w-4 h-4 mr-2" />
-                    TradingView Bot Setup
-                  </Button>
-                </div>
-
-                <div className="gradient-border p-6 noise bg-gradient-to-br from-primary/5 to-accent/5">
-                  <div className="flex items-center gap-4">
-                    <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-                      <Zap className="w-7 h-7 text-white" />
-                    </div>
-                    <div className="flex-1">
-                      <h3 className="font-display font-semibold text-lg">TradingView Integration</h3>
-                      <p className="text-sm text-muted-foreground">Connect your TradingView alerts to execute automated trades on Drift Protocol</p>
-                    </div>
-                    <Button 
-                      className="bg-gradient-to-r from-primary to-accent" 
-                      onClick={() => navigate('/bots')}
-                      data-testid="button-tradingview-setup"
-                    >
-                      Configure Bots
-                      <ChevronRight className="w-4 h-4 ml-2" />
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {botsData && botsData.length > 0 ? (
-                    botsData.map((bot) => (
-                      <div key={bot.id} className="gradient-border p-5 noise" data-testid={`bot-card-${bot.id}`}>
-                        <div className="flex items-start justify-between mb-4">
-                          <div className="flex items-center gap-3">
-                            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-                              <Bot className="w-6 h-6 text-white" />
-                            </div>
-                            <div>
-                              <h3 className="font-display font-semibold">{bot.name}</h3>
-                              <p className="text-sm text-muted-foreground">{bot.market}</p>
-                            </div>
-                          </div>
-                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                            bot.isActive 
-                              ? 'bg-emerald-500/20 text-emerald-400' 
-                              : 'bg-yellow-500/20 text-yellow-400'
-                          }`}>
-                            {bot.isActive ? 'Active' : 'Paused'}
-                          </span>
-                        </div>
-                        
-                        <div className="grid grid-cols-2 gap-4 mb-4">
-                          <div>
-                            <p className="text-xs text-muted-foreground mb-1">Total Trades</p>
-                            <p className="text-xl font-bold font-mono">{(bot.stats as any)?.totalTrades ?? 0}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs text-muted-foreground mb-1">Total PnL</p>
-                            <p className={`text-xl font-bold font-mono ${((bot.stats as any)?.totalPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              {((bot.stats as any)?.totalPnl ?? 0) >= 0 ? '+' : ''}${((bot.stats as any)?.totalPnl ?? 0).toFixed(2)}
-                            </p>
-                          </div>
-                        </div>
-
-                        {bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined ? (
-                          <>
-                            <div className="bg-muted/30 rounded-lg p-3 mb-4">
-                              <div className="flex items-center justify-between">
-                                <div>
-                                  <p className="text-xs text-muted-foreground">Subaccount #{bot.driftSubaccountId} Balance</p>
-                                  <p className="text-lg font-bold font-mono text-primary" data-testid={`text-bot-balance-${bot.id}`}>
-                                    ${(botBalances[bot.id]?.balance ?? 0).toFixed(2)} USDC
-                                  </p>
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="flex gap-2 mb-2">
-                              <Button 
-                                className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                                size="sm"
-                                onClick={() => {
-                                  setSelectedManagedBot(bot as TradingBot);
-                                  setManageBotDrawerOpen(true);
-                                }}
-                                data-testid={`button-manage-bot-${bot.id}`}
-                              >
-                                <Settings className="w-4 h-4 mr-1" />
-                                Manage
-                              </Button>
-                            </div>
-
-                            <div className="flex gap-2">
-                              <Button variant="outline" size="sm" className="flex-1" onClick={() => navigate('/bots')} data-testid={`button-edit-bot-${bot.id}`}>
-                                <Settings className="w-4 h-4 mr-1" />
-                                Settings
-                              </Button>
-                              <Button 
-                                variant="outline" 
-                                size="sm" 
-                                className="flex-1 border-red-500/30 text-red-400 hover:bg-red-500/10"
-                                onClick={() => handleDeleteBot(bot.id, bot.name)}
-                                disabled={deletingBotId === bot.id}
-                                data-testid={`button-delete-bot-${bot.id}`}
-                              >
-                                {deletingBotId === bot.id ? (
-                                  <>
-                                    <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-                                    Deleting...
-                                  </>
-                                ) : (
-                                  <>
-                                    <Trash2 className="w-4 h-4 mr-1" />
-                                    Delete
-                                  </>
-                                )}
-                              </Button>
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mb-4">
-                              <p className="text-xs text-yellow-500 font-medium">Migration Needed</p>
-                              <p className="text-xs text-muted-foreground mt-1">
-                                This bot uses an older wallet system. Create a new bot to use isolated subaccounts.
-                              </p>
-                            </div>
-
-                            <div className="flex gap-2">
-                              <Button variant="outline" size="sm" className="flex-1" onClick={() => navigate('/bots')} data-testid={`button-edit-bot-${bot.id}`}>
-                                <Settings className="w-4 h-4 mr-1" />
-                                Settings
-                              </Button>
-                              <Button 
-                                variant="outline" 
-                                size="sm" 
-                                className="flex-1 border-red-500/30 text-red-400 hover:bg-red-500/10"
-                                onClick={() => handleDeleteBot(bot.id, bot.name)}
-                                disabled={deletingBotId === bot.id}
-                                data-testid={`button-delete-legacy-bot-${bot.id}`}
-                              >
-                                {deletingBotId === bot.id ? (
-                                  <>
-                                    <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-                                    Deleting...
-                                  </>
-                                ) : (
-                                  <>
-                                    <Trash2 className="w-4 h-4 mr-1" />
-                                    Delete
-                                  </>
-                                )}
-                              </Button>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    ))
-                  ) : (
-                    <div className="col-span-full text-center py-12 text-muted-foreground">
-                      <Bot className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                      <p className="font-medium mb-1">No bots created yet</p>
-                      <p className="text-sm">Create a TradingView bot to start automated trading</p>
-                    </div>
-                  )}
-
-                  <div 
-                    className="border-2 border-dashed border-border/50 rounded-2xl p-8 flex flex-col items-center justify-center text-center hover:border-primary/50 transition-colors cursor-pointer" 
-                    onClick={() => navigate('/bots')}
-                    data-testid="button-add-new-bot"
-                  >
-                    <div className="w-12 h-12 rounded-xl bg-muted/30 flex items-center justify-center mb-3">
-                      <Plus className="w-6 h-6 text-muted-foreground" />
-                    </div>
-                    <p className="font-medium mb-1">Add New Bot</p>
-                    <p className="text-sm text-muted-foreground">Create a TradingView signal bot</p>
                   </div>
                 </div>
               </motion.div>
