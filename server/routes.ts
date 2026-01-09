@@ -139,7 +139,11 @@ export async function registerRoutes(
     try {
       const walletAddress = req.walletAddress!;
       
-      const mainAccountBalance = await getDriftBalance(walletAddress, 0);
+      // Get agent wallet - Drift accounts are created from agent wallet, not user wallet
+      const wallet = await storage.getWallet(walletAddress);
+      const agentAddress = wallet?.agentPublicKey;
+      
+      const mainAccountBalance = agentAddress ? await getDriftBalance(agentAddress, 0) : 0;
       
       const bots = await storage.getTradingBots(walletAddress);
       
@@ -159,7 +163,7 @@ export async function registerRoutes(
           continue;
         }
         
-        const balance = await getDriftBalance(walletAddress, bot.driftSubaccountId);
+        const balance = agentAddress ? await getDriftBalance(agentAddress, bot.driftSubaccountId) : 0;
         allocatedToBot += balance;
         
         botAllocations.push({
@@ -1478,14 +1482,15 @@ export async function registerRoutes(
         agentBalance = await getAgentUsdcBalance(wallet.agentPublicKey);
       }
       
-      // Sum up balances from all subaccounts
+      // Sum up balances from all subaccounts (use agent wallet, not user wallet)
       let driftBalance = 0;
       const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
+      const agentAddress = wallet?.agentPublicKey;
       
       for (const bot of bots) {
-        if (bot.driftSubaccountId !== null) {
-          const exists = await subaccountExists(req.walletAddress!, bot.driftSubaccountId);
-          const balance = exists ? await getDriftBalance(req.walletAddress!, bot.driftSubaccountId) : 0;
+        if (bot.driftSubaccountId !== null && agentAddress) {
+          const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
+          const balance = exists ? await getDriftBalance(agentAddress, bot.driftSubaccountId) : 0;
           driftBalance += balance;
           subaccountBalances.push({
             botId: bot.id,
