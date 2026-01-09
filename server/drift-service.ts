@@ -625,26 +625,37 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
     const data = accountInfo.data;
     console.log(`[Drift] User account data length: ${data.length} bytes for ${walletAddress.slice(0, 8)}...`);
     
-    // SpotPosition struct layout (Drift V2):
-    // The struct size and offsets vary by protocol version
-    // We'll scan for USDC market (index 0) with a reasonable balance pattern
+    // Drift V2 User Account Layout:
+    // - 8 bytes: Anchor discriminator
+    // - 32 bytes: authority pubkey
+    // - 2 bytes: delegate
+    // - 8 bytes: name (array)
+    // - 4 bytes: sub_account_id
+    // - then various fields...
+    // - SpotPositions array at offset 80 (8 positions, 48 bytes each)
+    // 
+    // SpotPosition struct (48 bytes):
+    // - scaled_balance: u128 (16 bytes) at offset 0 - but we read low 64 bits
+    // - open_bids/asks: 2x i64 (16 bytes) at offset 16
+    // - cumulative_deposits: i64 (8 bytes) at offset 32
+    // - market_index: u16 (2 bytes) at offset 40
+    // - balance_type: u8 (1 byte) at offset 42
+    // - open_orders: u8 (1 byte) at offset 43
+    // - padding: 4 bytes at offset 44
     
     const USDC_MARKET_INDEX = 0;
     const SPOT_BALANCE_PRECISION = 1e9;
+    const QUOTE_PRECISION = 1e6; // USDC has 6 decimals
     
-    // Known working layout discovered via scan:
-    // - SpotPositions array starts at offset 80
-    // - Each position is 48 bytes
-    // - market_index is at offset 32 within each position
-    // - balance_type is at offset 34 within each position
-    // - scaled_balance is at offset 0 within each position (u128, lower 64 bits)
-    
+    // Corrected layout based on Drift V2:
     const SPOT_POSITIONS_OFFSET = 80;
     const SPOT_POSITION_SIZE = 48;
-    const MARKET_INDEX_OFFSET = 32;
-    const BALANCE_TYPE_OFFSET = 34;
+    const CUMULATIVE_DEPOSITS_OFFSET = 32; // cumulative_deposits is at offset 32 within position
+    const MARKET_INDEX_OFFSET = 40; // market_index is at offset 40
+    const BALANCE_TYPE_OFFSET = 42; // balance_type is at offset 42
     
-    // Check known layout first (8 spot positions)
+    // First, try to read cumulative_deposits which is more reliable
+    // This tracks actual deposits made by the user
     for (let i = 0; i < 8; i++) {
       const posOffset = SPOT_POSITIONS_OFFSET + (i * SPOT_POSITION_SIZE);
       
@@ -653,44 +664,33 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
       try {
         const marketIndex = data.readUInt16LE(posOffset + MARKET_INDEX_OFFSET);
         const balanceType = data.readUInt8(posOffset + BALANCE_TYPE_OFFSET);
-        const scaledBalanceLow = data.readBigUInt64LE(posOffset);
-        const scaledBalance = Number(scaledBalanceLow);
         
-        if (marketIndex === USDC_MARKET_INDEX && balanceType === 0 && scaledBalance >= 1e6) {
-          const usdcBalance = scaledBalance / SPOT_BALANCE_PRECISION;
-          console.log(`[Drift] Found USDC at position ${i}: ${usdcBalance.toFixed(6)} USDC`);
-          return usdcBalance;
-        }
-      } catch (e) {
-        // Skip invalid reads
-      }
-    }
-    
-    // Fallback: scan entire account for USDC balance pattern
-    console.log(`[Drift] Scanning entire account for USDC balance pattern...`);
-    for (let offset = 8; offset < data.length - 64; offset += 8) {
-      try {
-        // Look for market_index = 0 at common offsets
-        for (const miOff of [32, 40, 48]) {
-          if (offset + miOff + 2 > data.length) continue;
-          const marketIndex = data.readUInt16LE(offset + miOff);
+        if (marketIndex === USDC_MARKET_INDEX && balanceType === 0) {
+          // Read cumulative_deposits (i64) - this tracks actual deposits
+          const cumulativeDeposits = data.readBigInt64LE(posOffset + CUMULATIVE_DEPOSITS_OFFSET);
+          const depositsValue = Number(cumulativeDeposits) / QUOTE_PRECISION;
           
-          if (marketIndex === 0) {
-            const scaledBalanceLow = data.readBigUInt64LE(offset);
-            const scaledBalance = Number(scaledBalanceLow);
-            
-            if (scaledBalance >= 1e6 && scaledBalance <= 1e18) {
-              const balanceType = data.readUInt8(offset + miOff + 2);
-              if (balanceType === 0) {
-                const usdcBalance = scaledBalance / SPOT_BALANCE_PRECISION;
-                console.log(`[Drift] Found USDC via scan at offset=${offset}, miOff=${miOff}: ${usdcBalance.toFixed(6)} USDC`);
-                return usdcBalance;
-              }
-            }
+          // Also read scaled_balance for comparison
+          const scaledBalanceLow = data.readBigUInt64LE(posOffset);
+          const scaledBalance = Number(scaledBalanceLow) / SPOT_BALANCE_PRECISION;
+          
+          console.log(`[Drift] Position ${i}: marketIndex=${marketIndex}, cumulativeDeposits=${depositsValue.toFixed(6)}, scaledBalance=${scaledBalance.toFixed(6)}`);
+          
+          // Use cumulative_deposits as the balance - this is more accurate
+          // as it reflects actual user deposits, not stale scaled_balance
+          if (depositsValue > 0) {
+            console.log(`[Drift] Using cumulative deposits: ${depositsValue.toFixed(6)} USDC`);
+            return depositsValue;
+          }
+          
+          // Fallback to scaled_balance if cumulative_deposits is 0 or negative
+          if (scaledBalance > 0.001) {
+            console.log(`[Drift] Using scaled balance: ${scaledBalance.toFixed(6)} USDC`);
+            return scaledBalance;
           }
         }
       } catch (e) {
-        // Skip
+        console.error(`[Drift] Error reading position ${i}:`, e);
       }
     }
     
