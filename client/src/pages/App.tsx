@@ -40,6 +40,28 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { DepositWithdraw } from '@/components/DepositWithdraw';
+import { BotManagementDrawer } from '@/components/BotManagementDrawer';
+
+interface TradingBot {
+  id: string;
+  name: string;
+  market: string;
+  webhookSecret: string;
+  webhookUrl?: string;
+  isActive: boolean;
+  side: string;
+  leverage: number;
+  maxPositionSize: string | null;
+  driftSubaccountId?: number | null;
+  stats: {
+    totalTrades: number;
+    winningTrades: number;
+    losingTrades: number;
+    totalPnl: number;
+    lastTradeAt?: string;
+  } | null;
+  createdAt: string;
+}
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
@@ -85,19 +107,15 @@ export default function AppPage() {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [botToDelete, setBotToDelete] = useState<{ id: string; name: string; balance: number; isLegacy?: boolean; agentPublicKey?: string } | null>(null);
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
-  const [equityModalOpen, setEquityModalOpen] = useState(false);
-  const [equityModalMode, setEquityModalMode] = useState<'add' | 'remove'>('add');
-  const [equityModalBot, setEquityModalBot] = useState<{ id: string; name: string; balance: number; subaccountId: number } | null>(null);
-  const [equityAmount, setEquityAmount] = useState('');
-  const [mainAccountBalance, setMainAccountBalance] = useState<number>(0);
-  const [equityTransferLoading, setEquityTransferLoading] = useState(false);
+  const [manageBotDrawerOpen, setManageBotDrawerOpen] = useState(false);
+  const [selectedManagedBot, setSelectedManagedBot] = useState<TradingBot | null>(null);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
   const { data: positionsData } = usePositions();
   const { data: subscriptionsData } = useSubscriptions();
   const { data: tradesData } = useTrades(10);
-  const { data: botsData } = useTradingBots();
+  const { data: botsData, refetch: refetchBots } = useTradingBots();
   const { data: leaderboardData } = useLeaderboard(100);
   const { data: pricesData } = usePrices();
   const subscribeBot = useSubscribeToBot();
@@ -410,99 +428,6 @@ export default function AppPage() {
     }
   };
 
-  const openEquityModal = async (bot: { id: string; name: string; subaccountId: number }, mode: 'add' | 'remove') => {
-    const botBalance = botBalances[bot.id]?.balance ?? 0;
-    setEquityModalBot({ ...bot, balance: botBalance });
-    setEquityModalMode(mode);
-    setEquityAmount('');
-    setEquityModalOpen(true);
-
-    if (mode === 'add') {
-      try {
-        const res = await fetch('/api/wallet/capital', { credentials: 'include' });
-        if (res.ok) {
-          const data = await res.json();
-          setMainAccountBalance(data.mainAccountBalance ?? 0);
-        }
-      } catch (error) {
-        console.error('Error fetching main account balance:', error);
-      }
-    }
-  };
-
-  const handleEquityTransfer = async () => {
-    if (!equityModalBot || !equityAmount || parseFloat(equityAmount) <= 0) {
-      toast({ title: 'Please enter a valid amount', variant: 'destructive' });
-      return;
-    }
-
-    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
-      toast({ title: 'Wallet not connected', variant: 'destructive' });
-      return;
-    }
-
-    const amount = parseFloat(equityAmount);
-    const endpoint = equityModalMode === 'add' 
-      ? `/api/bot/${equityModalBot.id}/deposit`
-      : `/api/bot/${equityModalBot.id}/withdraw`;
-
-    setEquityTransferLoading(true);
-    try {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-wallet-address': solanaWallet.publicKey.toString(),
-        },
-        body: JSON.stringify({ amount }),
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Transfer failed');
-      }
-
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
-      
-      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
-      const signedTx = await solanaWallet.signTransaction(transaction);
-      const signature = await connection.sendRawTransaction(signedTx.serialize());
-      
-      await connection.confirmTransaction({
-        signature,
-        blockhash,
-        lastValidBlockHeight,
-      });
-
-      const newBalance = equityModalMode === 'add' 
-        ? (equityModalBot.balance + amount)
-        : (equityModalBot.balance - amount);
-
-      setBotBalances(prev => ({
-        ...prev,
-        [equityModalBot.id]: { ...prev[equityModalBot.id], balance: newBalance }
-      }));
-
-      toast({ 
-        title: equityModalMode === 'add' ? 'Equity Added!' : 'Equity Removed!', 
-        description: `$${amount.toFixed(2)} USDC ${equityModalMode === 'add' ? 'added to' : 'removed from'} ${equityModalBot.name}`
-      });
-      
-      setEquityModalOpen(false);
-      setEquityModalBot(null);
-      setEquityAmount('');
-    } catch (error: any) {
-      console.error('Equity transfer error:', error);
-      toast({ 
-        title: 'Transfer Failed', 
-        description: error.message || 'Please try again',
-        variant: 'destructive' 
-      });
-    } finally {
-      setEquityTransferLoading(false);
-    }
-  };
 
   if (connecting || !connected) {
     return (
@@ -1345,25 +1270,16 @@ export default function AppPage() {
 
                             <div className="flex gap-2 mb-2">
                               <Button 
-                                variant="outline" 
-                                size="sm" 
-                                className="flex-1 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
-                                onClick={() => openEquityModal({ id: bot.id, name: bot.name, subaccountId: bot.driftSubaccountId! }, 'add')}
-                                data-testid={`button-add-equity-${bot.id}`}
+                                className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                                size="sm"
+                                onClick={() => {
+                                  setSelectedManagedBot(bot as TradingBot);
+                                  setManageBotDrawerOpen(true);
+                                }}
+                                data-testid={`button-manage-bot-${bot.id}`}
                               >
-                                <Plus className="w-4 h-4 mr-1" />
-                                Add Equity
-                              </Button>
-                              <Button 
-                                variant="outline" 
-                                size="sm" 
-                                className="flex-1"
-                                onClick={() => openEquityModal({ id: bot.id, name: bot.name, subaccountId: bot.driftSubaccountId! }, 'remove')}
-                                disabled={!(botBalances[bot.id]?.balance > 0)}
-                                data-testid={`button-remove-equity-${bot.id}`}
-                              >
-                                <Minus className="w-4 h-4 mr-1" />
-                                Remove Equity
+                                <Settings className="w-4 h-4 mr-1" />
+                                Manage
                               </Button>
                             </div>
 
@@ -1660,115 +1576,18 @@ export default function AppPage() {
         </div>
       )}
 
-      {equityModalOpen && equityModalBot && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="gradient-border p-6 noise max-w-md w-full mx-4"
-            data-testid="modal-equity-transfer"
-          >
-            <div className="flex items-center gap-3 mb-4">
-              <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
-                equityModalMode === 'add' ? 'bg-emerald-500/20' : 'bg-primary/20'
-              }`}>
-                {equityModalMode === 'add' ? (
-                  <Plus className="w-6 h-6 text-emerald-400" />
-                ) : (
-                  <Minus className="w-6 h-6 text-primary" />
-                )}
-              </div>
-              <div>
-                <h3 className="font-display font-semibold text-lg">
-                  {equityModalMode === 'add' ? 'Add Equity' : 'Remove Equity'}
-                </h3>
-                <p className="text-sm text-muted-foreground">{equityModalBot.name}</p>
-              </div>
-            </div>
-
-            <div className="space-y-4 mb-6">
-              <div className="grid grid-cols-2 gap-4">
-                {equityModalMode === 'add' && (
-                  <div className="p-3 rounded-lg bg-muted/30">
-                    <p className="text-xs text-muted-foreground mb-1">Main Account Balance</p>
-                    <p className="text-lg font-bold font-mono text-emerald-400" data-testid="text-main-balance">
-                      ${mainAccountBalance.toFixed(2)}
-                    </p>
-                  </div>
-                )}
-                <div className={`p-3 rounded-lg bg-muted/30 ${equityModalMode === 'remove' ? 'col-span-2' : ''}`}>
-                  <p className="text-xs text-muted-foreground mb-1">Bot Balance</p>
-                  <p className="text-lg font-bold font-mono text-primary" data-testid="text-modal-bot-balance">
-                    ${equityModalBot.balance.toFixed(2)}
-                  </p>
-                </div>
-              </div>
-
-              <div>
-                <label className="text-sm text-muted-foreground mb-1.5 block">
-                  Amount (USDC)
-                </label>
-                <div className="flex gap-2">
-                  <Input 
-                    type="number"
-                    placeholder="0.00"
-                    value={equityAmount}
-                    onChange={(e) => setEquityAmount(e.target.value)}
-                    className="flex-1 bg-muted/30 border-border/50"
-                    data-testid="input-equity-amount"
-                    min="0"
-                    step="0.01"
-                  />
-                  <Button 
-                    variant="outline" 
-                    size="sm"
-                    onClick={() => {
-                      const max = equityModalMode === 'add' ? mainAccountBalance : equityModalBot.balance;
-                      setEquityAmount(max.toFixed(2));
-                    }}
-                    data-testid="button-equity-max"
-                  >
-                    Max
-                  </Button>
-                </div>
-              </div>
-
-              <p className="text-xs text-muted-foreground">
-                {equityModalMode === 'add' 
-                  ? 'Transfer USDC from your main Drift account to this bot\'s subaccount.'
-                  : 'Transfer USDC from this bot\'s subaccount back to your main Drift account.'}
-              </p>
-            </div>
-
-            <div className="flex gap-3">
-              <Button 
-                variant="outline" 
-                className="flex-1" 
-                onClick={() => { setEquityModalOpen(false); setEquityModalBot(null); setEquityAmount(''); }}
-                disabled={equityTransferLoading}
-                data-testid="button-cancel-equity"
-              >
-                Cancel
-              </Button>
-              <Button 
-                className={`flex-1 ${equityModalMode === 'add' ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-primary hover:bg-primary/90'} text-white`}
-                onClick={handleEquityTransfer}
-                disabled={equityTransferLoading || !equityAmount || parseFloat(equityAmount) <= 0}
-                data-testid="button-confirm-equity"
-              >
-                {equityTransferLoading ? (
-                  <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    Processing...
-                  </>
-                ) : (
-                  equityModalMode === 'add' ? 'Add Equity' : 'Remove Equity'
-                )}
-              </Button>
-            </div>
-          </motion.div>
-        </div>
-      )}
+      <BotManagementDrawer
+        bot={selectedManagedBot}
+        isOpen={manageBotDrawerOpen}
+        onClose={() => {
+          setManageBotDrawerOpen(false);
+          setSelectedManagedBot(null);
+        }}
+        walletAddress={publicKeyString || ''}
+        onBotUpdated={() => {
+          refetchBots();
+        }}
+      />
     </div>
   );
 }
