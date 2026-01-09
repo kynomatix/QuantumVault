@@ -313,16 +313,19 @@ function createDepositInstruction(
   amount.toArrayLike(Buffer, 'le', 8).copy(data, 10);
   data.writeUInt8(reduceOnly ? 1 : 0, 18);
 
+  // Account order matches SDK: state, spotMarket, spotMarketVault, user, userStats, userTokenAccount, authority, tokenProgram
+  // Then remainingAccounts: oracle, spotMarket (again for writable)
   const keys = [
-    { pubkey: DRIFT_STATE_PUBKEY, isSigner: false, isWritable: false },
-    { pubkey: userAccount, isSigner: false, isWritable: true },
-    { pubkey: userStats, isSigner: false, isWritable: true },
-    { pubkey: userPubkey, isSigner: true, isWritable: false },
-    { pubkey: spotMarketVault, isSigner: false, isWritable: true },
-    { pubkey: userTokenAccount, isSigner: false, isWritable: true },
-    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-    { pubkey: spotMarket, isSigner: false, isWritable: true },
-    { pubkey: oracle, isSigner: false, isWritable: false },
+    { pubkey: DRIFT_STATE_PUBKEY, isSigner: false, isWritable: false },  // state
+    { pubkey: spotMarket, isSigner: false, isWritable: true },           // spotMarket
+    { pubkey: spotMarketVault, isSigner: false, isWritable: true },      // spotMarketVault
+    { pubkey: userAccount, isSigner: false, isWritable: true },          // user
+    { pubkey: userStats, isSigner: false, isWritable: true },            // userStats
+    { pubkey: userTokenAccount, isSigner: false, isWritable: true },     // userTokenAccount
+    { pubkey: userPubkey, isSigner: true, isWritable: false },           // authority
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },    // tokenProgram
+    // remainingAccounts - oracle must be included
+    { pubkey: oracle, isSigner: false, isWritable: false },              // oracle (remaining account)
   ];
 
   return new TransactionInstruction({
