@@ -4,8 +4,18 @@ import BN from 'bn.js';
 
 const DRIFT_TESTNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
-const DRIFT_STATE_PUBKEY = new PublicKey('6a5jvTpLhej96bLx1tPwJCZRxEW6HotPZwyDj1V1vRc2');
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+
+// Derive the Drift state PDA from the program
+function getDriftStatePDA(): PublicKey {
+  const [state] = PublicKey.findProgramAddressSync(
+    [Buffer.from('drift_state')],
+    DRIFT_PROGRAM_ID
+  );
+  return state;
+}
+
+const DRIFT_STATE_PUBKEY = getDriftStatePDA();
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
 const DEVNET_RPC = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
@@ -311,7 +321,7 @@ export async function buildDepositTransaction(
     transaction: serializedTx,
     blockhash,
     lastValidBlockHeight,
-    message: `Deposit ${amountUsdc} USDC to Drift`,
+    message: `Deposit ${amountUsdc} USDC to your agent account`,
   };
 }
 
@@ -371,7 +381,7 @@ export async function buildWithdrawTransaction(
     transaction: serializedTx,
     blockhash,
     lastValidBlockHeight,
-    message: `Withdraw ${amountUsdc} USDC from Drift`,
+    message: `Withdraw ${amountUsdc} USDC from your agent account`,
   };
 }
 

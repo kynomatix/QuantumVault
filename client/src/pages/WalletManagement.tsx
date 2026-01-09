@@ -148,7 +148,7 @@ export default function WalletManagement() {
 
       toast({ 
         title: 'Deposit Successful!', 
-        description: message || `Deposited ${amount} USDC to your Drift account`
+        description: message || `Deposited ${amount} USDC to your agent account`
       });
       
       setDepositAmount('');
@@ -272,7 +272,7 @@ export default function WalletManagement() {
               </div>
               <div>
                 <h1 className="font-display font-bold text-xl">Wallet Management</h1>
-                <p className="text-sm text-muted-foreground">Manage your funds between wallet and Drift</p>
+                <p className="text-sm text-muted-foreground">Manage your funds for your trading agent</p>
               </div>
             </div>
           </div>
@@ -352,7 +352,7 @@ export default function WalletManagement() {
             >
               <Card className="border-border/50 bg-card/50 backdrop-blur-sm h-full">
                 <CardHeader className="pb-2">
-                  <CardDescription>Drift Main Account</CardDescription>
+                  <CardDescription>Agent Account Balance</CardDescription>
                   <CardTitle className="text-2xl font-mono" data-testid="text-drift-balance">
                     {capitalLoading ? (
                       <Loader2 className="w-5 h-5 animate-spin" />
@@ -362,7 +362,7 @@ export default function WalletManagement() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-xs text-muted-foreground">Available in your Drift account</p>
+                  <p className="text-xs text-muted-foreground">Your agent deposits to Drift Protocol for trading</p>
                 </CardContent>
               </Card>
             </motion.div>
@@ -417,7 +417,7 @@ export default function WalletManagement() {
                       
                       <div className="flex items-center justify-between text-sm text-muted-foreground">
                         <span>From: Wallet</span>
-                        <span>To: Drift Main Account</span>
+                        <span>To: Agent Account</span>
                       </div>
                       
                       <Button
@@ -434,7 +434,7 @@ export default function WalletManagement() {
                         ) : (
                           <>
                             <ArrowDownToLine className="w-4 h-4 mr-2" />
-                            Deposit to Drift
+                            Deposit to Agent
                           </>
                         )}
                       </Button>
@@ -470,7 +470,7 @@ export default function WalletManagement() {
                       </div>
                       
                       <div className="flex items-center justify-between text-sm text-muted-foreground">
-                        <span>From: Drift Main Account</span>
+                        <span>From: Agent Account</span>
                         <span>To: Wallet</span>
                       </div>
                       
