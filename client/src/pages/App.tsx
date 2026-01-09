@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
@@ -115,55 +115,63 @@ export default function AppPage() {
   const [equityLoading, setEquityLoading] = useState(false);
   const [agentBalance, setAgentBalance] = useState<number | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
+  const equityInitialLoadDone = useRef(false);
+  const agentInitialLoadDone = useRef(false);
 
-  // Fetch total equity across all bot subaccounts
+  // Fetch total equity across all bot subaccounts and agent wallet
   useEffect(() => {
     if (!connected) {
       setTotalEquity(null);
+      equityInitialLoadDone.current = false;
       return;
     }
     
     const fetchTotalEquity = async () => {
-      setEquityLoading(true);
+      // Only show loading on initial load, not refreshes
+      if (!equityInitialLoadDone.current) {
+        setEquityLoading(true);
+      }
       try {
         const res = await fetch('/api/total-equity', { credentials: 'include' });
         if (res.ok) {
           const data = await res.json();
           setTotalEquity(data.totalEquity ?? 0);
-        } else if (res.status === 401) {
-          // Not authenticated yet, silently skip
-          setTotalEquity(null);
+          equityInitialLoadDone.current = true;
         }
       } catch (error) {
-        // Network error, silently skip
+        // Network error, keep previous value
       } finally {
         setEquityLoading(false);
       }
     };
     
     fetchTotalEquity();
-    // Refresh every 30 seconds
     const interval = setInterval(fetchTotalEquity, 30000);
     return () => clearInterval(interval);
-  }, [connected]);
+  }, [connected, publicKeyString]);
 
   // Fetch agent balance
   useEffect(() => {
     if (!connected) {
       setAgentBalance(null);
+      agentInitialLoadDone.current = false;
       return;
     }
     
     const fetchAgentBalance = async () => {
-      setAgentLoading(true);
+      // Only show loading on initial load
+      if (!agentInitialLoadDone.current) {
+        setAgentLoading(true);
+      }
       try {
         const res = await fetch('/api/agent/balance', { credentials: 'include' });
         if (res.ok) {
           const data = await res.json();
           setAgentBalance(data.balance ?? 0);
+          agentInitialLoadDone.current = true;
         }
       } catch (error) {
-        // Silently fail
+        // Silently fail, keep previous value
       } finally {
         setAgentLoading(false);
       }
@@ -172,7 +180,7 @@ export default function AppPage() {
     fetchAgentBalance();
     const interval = setInterval(fetchAgentBalance, 30000);
     return () => clearInterval(interval);
-  }, [connected]);
+  }, [connected, publicKeyString]);
 
   // Redirect to landing if wallet not connected
   useEffect(() => {

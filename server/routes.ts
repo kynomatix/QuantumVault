@@ -1341,20 +1341,27 @@ export async function registerRoutes(
     }
   });
 
-  // Get total equity across all bot subaccounts
+  // Get total equity across all bot subaccounts and agent wallet
   app.get("/api/total-equity", requireWallet, async (req, res) => {
     try {
+      const wallet = await storage.getWallet(req.walletAddress!);
       const bots = await storage.getTradingBots(req.walletAddress!);
       
+      // Get agent wallet balance
+      let agentBalance = 0;
+      if (wallet?.agentPublicKey) {
+        agentBalance = await getAgentUsdcBalance(wallet.agentPublicKey);
+      }
+      
       // Sum up balances from all subaccounts
-      let totalEquity = 0;
+      let driftBalance = 0;
       const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
       
       for (const bot of bots) {
         if (bot.driftSubaccountId !== null) {
           const exists = await subaccountExists(req.walletAddress!, bot.driftSubaccountId);
           const balance = exists ? await getDriftBalance(req.walletAddress!, bot.driftSubaccountId) : 0;
-          totalEquity += balance;
+          driftBalance += balance;
           subaccountBalances.push({
             botId: bot.id,
             botName: bot.name,
@@ -1364,7 +1371,11 @@ export async function registerRoutes(
         }
       }
       
+      const totalEquity = agentBalance + driftBalance;
+      
       res.json({ 
+        agentBalance,
+        driftBalance,
         totalEquity,
         botCount: bots.length,
         subaccountBalances,

@@ -87,38 +87,38 @@ export function useBots(featured?: boolean) {
 }
 
 export function useSubscriptions() {
-  const { publicKeyString } = useWallet();
+  const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["subscriptions", publicKeyString],
     queryFn: () => fetchSubscriptions(publicKeyString!),
-    enabled: !!publicKeyString,
+    enabled: !!publicKeyString && sessionConnected,
   });
 }
 
 export function usePortfolio() {
-  const { publicKeyString } = useWallet();
+  const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["portfolio", publicKeyString],
     queryFn: () => fetchPortfolio(publicKeyString!),
-    enabled: !!publicKeyString,
+    enabled: !!publicKeyString && sessionConnected,
   });
 }
 
 export function usePositions() {
-  const { publicKeyString } = useWallet();
+  const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["positions", publicKeyString],
     queryFn: () => fetchPositions(publicKeyString!),
-    enabled: !!publicKeyString,
+    enabled: !!publicKeyString && sessionConnected,
   });
 }
 
 export function useTrades(limit?: number) {
-  const { publicKeyString } = useWallet();
+  const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["trades", publicKeyString, limit],
     queryFn: () => fetchTrades(publicKeyString!, limit),
-    enabled: !!publicKeyString,
+    enabled: !!publicKeyString && sessionConnected,
   });
 }
 
@@ -162,11 +162,11 @@ export function usePrices() {
 }
 
 export function useTradingBots() {
-  const { publicKeyString } = useWallet();
+  const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
-    queryKey: ["tradingBots", publicKeyString],
+    queryKey: ["tradingBots", publicKeyString, sessionConnected],
     queryFn: () => fetchTradingBots(publicKeyString!),
-    enabled: !!publicKeyString,
+    enabled: !!publicKeyString && sessionConnected,
     refetchOnMount: true,
     staleTime: 1000,
     refetchOnWindowFocus: true,
