@@ -37,8 +37,6 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { DepositWithdraw } from '@/components/DepositWithdraw';
-import { BotManagementDrawer } from '@/components/BotManagementDrawer';
 
 interface TradingBot {
   id: string;
@@ -95,8 +93,6 @@ export default function AppPage() {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [botToDelete, setBotToDelete] = useState<{ id: string; name: string; balance: number; isLegacy?: boolean; agentPublicKey?: string } | null>(null);
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
-  const [manageBotDrawerOpen, setManageBotDrawerOpen] = useState(false);
-  const [selectedManagedBot, setSelectedManagedBot] = useState<TradingBot | null>(null);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -172,12 +168,6 @@ export default function AppPage() {
     return () => clearInterval(interval);
   }, [connected]);
 
-  // Redirect to landing if wallet not connected
-  useEffect(() => {
-    if (!connecting && !connected) {
-      navigate('/');
-    }
-  }, [connected, connecting, navigate]);
 
   const handleDisconnect = async () => {
     await disconnect();
@@ -796,7 +786,6 @@ export default function AppPage() {
                     </div>
                   </div>
 
-                  <DepositWithdraw />
                 </div>
 
                 <div className="gradient-border p-4 noise">
@@ -1009,11 +998,10 @@ export default function AppPage() {
                   </div>
                   <Button 
                     className="bg-gradient-to-r from-primary to-accent" 
-                    onClick={() => navigate('/bots')}
                     data-testid="button-create-bot"
                   >
                     <Plus className="w-4 h-4 mr-2" />
-                    TradingView Bot Setup
+                    Create Bot
                   </Button>
                 </div>
 
@@ -1028,7 +1016,6 @@ export default function AppPage() {
                     </div>
                     <Button 
                       className="bg-gradient-to-r from-primary to-accent" 
-                      onClick={() => navigate('/bots')}
                       data-testid="button-tradingview-setup"
                     >
                       Configure Bots
@@ -1086,26 +1073,7 @@ export default function AppPage() {
                               </div>
                             </div>
 
-                            <div className="flex gap-2 mb-2">
-                              <Button 
-                                className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                                size="sm"
-                                onClick={() => {
-                                  setSelectedManagedBot(bot as TradingBot);
-                                  setManageBotDrawerOpen(true);
-                                }}
-                                data-testid={`button-manage-bot-${bot.id}`}
-                              >
-                                <Settings className="w-4 h-4 mr-1" />
-                                Manage
-                              </Button>
-                            </div>
-
                             <div className="flex gap-2">
-                              <Button variant="outline" size="sm" className="flex-1" onClick={() => navigate('/bots')} data-testid={`button-edit-bot-${bot.id}`}>
-                                <Settings className="w-4 h-4 mr-1" />
-                                Settings
-                              </Button>
                               <Button 
                                 variant="outline" 
                                 size="sm" 
@@ -1138,10 +1106,6 @@ export default function AppPage() {
                             </div>
 
                             <div className="flex gap-2">
-                              <Button variant="outline" size="sm" className="flex-1" onClick={() => navigate('/bots')} data-testid={`button-edit-bot-${bot.id}`}>
-                                <Settings className="w-4 h-4 mr-1" />
-                                Settings
-                              </Button>
                               <Button 
                                 variant="outline" 
                                 size="sm" 
@@ -1177,7 +1141,6 @@ export default function AppPage() {
 
                   <div 
                     className="border-2 border-dashed border-border/50 rounded-2xl p-8 flex flex-col items-center justify-center text-center hover:border-primary/50 transition-colors cursor-pointer" 
-                    onClick={() => navigate('/bots')}
                     data-testid="button-add-new-bot"
                   >
                     <div className="w-12 h-12 rounded-xl bg-muted/30 flex items-center justify-center mb-3">
@@ -1393,19 +1356,6 @@ export default function AppPage() {
           </motion.div>
         </div>
       )}
-
-      <BotManagementDrawer
-        bot={selectedManagedBot}
-        isOpen={manageBotDrawerOpen}
-        onClose={() => {
-          setManageBotDrawerOpen(false);
-          setSelectedManagedBot(null);
-        }}
-        walletAddress={publicKeyString || ''}
-        onBotUpdated={() => {
-          refetchBots();
-        }}
-      />
     </div>
   );
 }

@@ -589,21 +589,22 @@ export async function registerRoutes(
     const { botId } = req.params;
     const { secret } = req.query;
 
-    // Log webhook
-    const log = await storage.createWebhookLog({
-      tradingBotId: botId,
-      payload: req.body,
-      headers: req.headers as any,
-      ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
-      processed: false,
-    });
-
     try {
-      // Get bot
+      // Check if bot exists FIRST before logging to avoid FK violation
       const bot = await storage.getTradingBotById(botId);
+      
+      // Log webhook - use null for tradingBotId if bot doesn't exist (FK allows null)
+      const log = await storage.createWebhookLog({
+        tradingBotId: bot ? botId : null,
+        payload: req.body,
+        headers: req.headers as any,
+        ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
+        processed: !bot, // Mark as processed if bot doesn't exist since we won't process it
+      });
+
       if (!bot) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Bot not found" });
-        return res.status(404).json({ error: "Bot not found" });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Bot not found - bot may have been deleted" });
+        return res.status(404).json({ error: "Bot not found - this bot may have been deleted" });
       }
 
       // Validate secret
