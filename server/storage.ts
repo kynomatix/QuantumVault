@@ -45,6 +45,7 @@ export interface IStorage {
   createWallet(wallet: InsertWallet): Promise<Wallet>;
   updateWalletLastSeen(address: string): Promise<void>;
   getOrCreateWallet(address: string): Promise<Wallet>;
+  updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void>;
 
   getAllBots(): Promise<Bot[]>;
   getFeaturedBots(): Promise<Bot[]>;
@@ -124,6 +125,13 @@ export class DatabaseStorage implements IStorage {
       return existing;
     }
     return this.createWallet({ address });
+  }
+
+  async updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void> {
+    await db.update(wallets).set({ 
+      agentPublicKey, 
+      agentPrivateKeyEncrypted 
+    }).where(eq(wallets.address, address));
   }
 
   async getAllBots(): Promise<Bot[]> {

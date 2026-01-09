@@ -86,13 +86,27 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Wallet address required" });
       }
 
-      const wallet = await storage.getOrCreateWallet(walletAddress);
+      let wallet = await storage.getOrCreateWallet(walletAddress);
+      
+      // Generate agent wallet if not already set
+      if (!wallet.agentPublicKey) {
+        const agentWallet = generateAgentWallet();
+        await storage.updateWalletAgentKeys(
+          walletAddress, 
+          agentWallet.publicKey, 
+          agentWallet.encryptedPrivateKey
+        );
+        wallet = (await storage.getWallet(walletAddress))!;
+        console.log(`[Agent] Generated new agent wallet for ${walletAddress}: ${agentWallet.publicKey}`);
+      }
+      
       req.session.walletAddress = walletAddress;
 
       res.json({
         address: wallet.address,
         displayName: wallet.displayName,
         driftSubaccount: wallet.driftSubaccount,
+        agentPublicKey: wallet.agentPublicKey,
       });
     } catch (error) {
       console.error("Wallet connect error:", error);
@@ -159,6 +173,85 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("Get capital pool error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Agent wallet routes
+  app.get("/api/agent/balance", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const balance = await getAgentUsdcBalance(wallet.agentPublicKey);
+      res.json({
+        agentPublicKey: wallet.agentPublicKey,
+        balance,
+      });
+    } catch (error) {
+      console.error("Get agent balance error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/agent/deposit", requireWallet, async (req, res) => {
+    try {
+      const { amount } = req.body;
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const txData = await buildTransferToAgentTransaction(
+        req.walletAddress!,
+        wallet.agentPublicKey,
+        amount
+      );
+
+      res.json(txData);
+    } catch (error) {
+      console.error("Build agent deposit error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/agent/withdraw", requireWallet, async (req, res) => {
+    try {
+      const { amount } = req.body;
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const txData = await buildWithdrawFromAgentTransaction(
+        req.walletAddress!,
+        wallet.agentPublicKey,
+        wallet.agentPrivateKeyEncrypted,
+        amount
+      );
+
+      res.json(txData);
+    } catch (error) {
+      console.error("Build agent withdraw error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

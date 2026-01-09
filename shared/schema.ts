@@ -26,6 +26,8 @@ export const wallets = pgTable("wallets", {
   displayName: text("display_name"),
   referralCode: text("referral_code").unique(),
   driftSubaccount: integer("drift_subaccount").default(0),
+  agentPublicKey: text("agent_public_key"),
+  agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   lastSeen: timestamp("last_seen").defaultNow().notNull(),
 });
