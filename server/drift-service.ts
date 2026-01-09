@@ -3,6 +3,54 @@ import { createHash } from 'crypto';
 import BN from 'bn.js';
 import { getAgentKeypair } from './agent-wallet';
 
+/**
+ * Drift Protocol Account Layouts (derived from official IDL v2.150.0)
+ * Using fixed offsets for deterministic parsing without BorshAccountsCoder
+ * 
+ * User Account (4376 bytes):
+ * - Discriminator: 8 bytes
+ * - authority: 32 bytes (offset 8)
+ * - delegate: 32 bytes (offset 40)
+ * - name: 32 bytes (offset 72)
+ * - spotPositions: 320 bytes (offset 104) - 8 positions × 40 bytes each
+ * 
+ * SpotPosition (40 bytes each):
+ * - scaledBalance: u64 (8 bytes, offset 0)
+ * - openBids: i64 (8 bytes, offset 8)
+ * - openAsks: i64 (8 bytes, offset 16)
+ * - cumulativeDeposits: i64 (8 bytes, offset 24)
+ * - marketIndex: u16 (2 bytes, offset 32)
+ * - balanceType: u8 (1 byte, offset 34) - 0=Deposit, 1=Borrow
+ * - openOrders: u8 (1 byte, offset 35)
+ * - padding: 4 bytes (offset 36)
+ * 
+ * SpotMarket Account (776 bytes):
+ * - Discriminator: 8 bytes
+ * - ... various fields ...
+ * - cumulativeDepositInterest: u128 (16 bytes, offset 464)
+ */
+const DRIFT_LAYOUTS = {
+  USER: {
+    DISCRIMINATOR_SIZE: 8,
+    SPOT_POSITIONS_OFFSET: 104, // 8 + 32 + 32 + 32
+    SPOT_POSITION_COUNT: 8,
+  },
+  SPOT_POSITION: {
+    SIZE: 40,
+    SCALED_BALANCE_OFFSET: 0,
+    MARKET_INDEX_OFFSET: 32,
+    BALANCE_TYPE_OFFSET: 34,
+  },
+  SPOT_MARKET: {
+    CUMULATIVE_DEPOSIT_INTEREST_OFFSET: 464,
+  },
+  PRECISION: {
+    SPOT_BALANCE: new BN('1000000000'), // 1e9
+    SPOT_CUMULATIVE_INTEREST: new BN('10000000000'), // 1e10
+    QUOTE: new BN('1000000'), // 1e6 for USDC
+  },
+};
+
 const DRIFT_ENV = (process.env.DRIFT_ENV || 'mainnet-beta') as 'devnet' | 'mainnet-beta';
 const IS_MAINNET = DRIFT_ENV === 'mainnet-beta';
 
@@ -612,10 +660,16 @@ export async function getUsdcBalance(walletAddress: string): Promise<number> {
 export async function getDriftBalance(walletAddress: string, subAccountId: number = 0): Promise<number> {
   const connection = getConnection();
   const userPubkey = new PublicKey(walletAddress);
-  const userAccount = getUserAccountPDA(userPubkey, subAccountId);
+  const userAccountPDA = getUserAccountPDA(userPubkey, subAccountId);
+  
+  const USDC_MARKET_INDEX = 0;
+  const L = DRIFT_LAYOUTS; // Layout constants
   
   try {
-    const accountInfo = await connection.getAccountInfo(userAccount);
+    // Fetch User account with slot info for freshness verification
+    const result = await connection.getAccountInfoAndContext(userAccountPDA, { commitment: 'confirmed' });
+    const accountInfo = result.value;
+    const slot = result.context.slot;
     
     if (!accountInfo || !accountInfo.data) {
       console.log(`[Drift] User account not found for ${walletAddress} subaccount ${subAccountId}`);
@@ -623,99 +677,65 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
     }
     
     const data = accountInfo.data;
-    console.log(`[Drift] User account data length: ${data.length} bytes for ${walletAddress.slice(0, 8)}...`);
+    console.log(`[Drift] User account: ${userAccountPDA.toString().slice(0, 16)}... length=${data.length} bytes, slot=${slot}`);
     
-    // Drift V2 User Account Layout:
-    // - 8 bytes: Anchor discriminator
-    // - 32 bytes: authority pubkey
-    // - then various fields...
-    // - SpotPositions array at offset 80 (8 positions, 40 bytes each)
-    // 
-    // SpotPosition struct (40 bytes):
-    // - scaled_balance: u64 (8 bytes) at offset 0 - stored as u64, NOT I80F48
-    // - open_bids: i64 (8 bytes) at offset 8
-    // - open_asks: i64 (8 bytes) at offset 16
-    // - cumulative_deposits: i64 (8 bytes) at offset 24
-    // - market_index: u16 (2 bytes) at offset 32
-    // - balance_type: u8 (1 byte) at offset 34
-    // - open_orders: u8 (1 byte) at offset 35
-    // - padding: 4 bytes at offset 36
-    
-    const USDC_MARKET_INDEX = 0;
-    const SPOT_BALANCE_PRECISION = BigInt(1e9);
-    
-    // Layout based on Drift V2 (40 byte struct):
-    const SPOT_POSITIONS_OFFSET = 80;
-    const SPOT_POSITION_SIZE = 40;
-    const MARKET_INDEX_OFFSET = 32;
-    const BALANCE_TYPE_OFFSET = 34;
-    
-    // Fetch cumulative_deposit_interest from SpotMarket to compute actual token amount
-    // scaled_balance * cumulative_deposit_interest / SPOT_BALANCE_PRECISION = actual tokens
-    let cumulativeDepositInterest = BigInt(1e10); // Default 1.0 in 1e10 precision
+    // Fetch SpotMarket to get cumulativeDepositInterest using deterministic offset
+    let cumulativeDepositInterest = L.PRECISION.SPOT_CUMULATIVE_INTEREST; // Default 1.0x
     try {
       const spotMarketPDA = getSpotMarketPDA(USDC_MARKET_INDEX);
-      const spotMarketAccount = await connection.getAccountInfo(spotMarketPDA);
-      if (spotMarketAccount && spotMarketAccount.data) {
-        // cumulative_deposit_interest is stored as u128 at a specific offset
-        // We need to find the correct offset by scanning for reasonable values
-        // Interest should be slightly above 1.0 (e.g., 1.001 to 1.1 when divided by 1e10)
-        const marketData = spotMarketAccount.data;
-        console.log(`[Drift] SpotMarket data length: ${marketData.length} bytes`);
-        
-        // Scan common offsets for cumulative_deposit_interest
-        for (const offset of [168, 176, 184, 192, 200, 208, 216, 224, 232, 240]) {
-          if (marketData.length > offset + 16) {
-            const lowBits = marketData.readBigUInt64LE(offset);
-            const highBits = marketData.readBigUInt64LE(offset + 8);
-            // For a u128 value representing ~1.0 in 1e10 precision, expect lowBits around 1e10
-            const asNumber = Number(lowBits) / 1e10;
-            if (asNumber >= 1.0 && asNumber <= 1.5 && highBits === BigInt(0)) {
-              cumulativeDepositInterest = lowBits;
-              console.log(`[Drift] Found cumulative_deposit_interest at offset ${offset}: ${asNumber.toFixed(10)}`);
-              break;
-            }
-          }
+      const spotMarketInfo = await connection.getAccountInfo(spotMarketPDA, { commitment: 'confirmed' });
+      if (spotMarketInfo && spotMarketInfo.data) {
+        const marketData = spotMarketInfo.data;
+        const offset = L.SPOT_MARKET.CUMULATIVE_DEPOSIT_INTEREST_OFFSET;
+        // Read u128 as two u64s (little-endian), use low 64 bits for BN
+        const lowBits = marketData.readBigUInt64LE(offset);
+        const highBits = marketData.readBigUInt64LE(offset + 8);
+        // For typical interest values (1.0x-2.0x), high bits should be 0
+        if (highBits === BigInt(0)) {
+          cumulativeDepositInterest = new BN(lowBits.toString());
         }
+        const interestFloat = cumulativeDepositInterest.toNumber() / L.PRECISION.SPOT_CUMULATIVE_INTEREST.toNumber();
+        console.log(`[Drift] SpotMarket cumulativeDepositInterest: ${cumulativeDepositInterest.toString()} (${interestFloat.toFixed(10)}x)`);
       }
-    } catch (e) {
-      console.log(`[Drift] Could not fetch cumulative interest, using 1.0`);
+    } catch (marketError) {
+      console.log(`[Drift] Could not read SpotMarket, using default interest`);
     }
     
-    // Read spot positions
-    for (let i = 0; i < 8; i++) {
-      const posOffset = SPOT_POSITIONS_OFFSET + (i * SPOT_POSITION_SIZE);
+    // Read spot positions using deterministic offsets
+    for (let i = 0; i < L.USER.SPOT_POSITION_COUNT; i++) {
+      const posOffset = L.USER.SPOT_POSITIONS_OFFSET + (i * L.SPOT_POSITION.SIZE);
       
-      if (posOffset + SPOT_POSITION_SIZE > data.length) break;
+      if (posOffset + L.SPOT_POSITION.SIZE > data.length) break;
       
       try {
-        const marketIndex = data.readUInt16LE(posOffset + MARKET_INDEX_OFFSET);
-        const balanceType = data.readUInt8(posOffset + BALANCE_TYPE_OFFSET);
+        // Read fields at their exact offsets within the SpotPosition struct
+        const marketIndex = data.readUInt16LE(posOffset + L.SPOT_POSITION.MARKET_INDEX_OFFSET);
+        const balanceType = data.readUInt8(posOffset + L.SPOT_POSITION.BALANCE_TYPE_OFFSET);
         
+        // balanceType: 0 = Deposit, 1 = Borrow
         if (marketIndex === USDC_MARKET_INDEX && balanceType === 0) {
-          // scaled_balance is u64 at offset 0
-          const scaledBalance = data.readBigUInt64LE(posOffset);
+          // Read scaledBalance as u64, keep as BN for precision
+          const scaledBalanceBigInt = data.readBigUInt64LE(posOffset + L.SPOT_POSITION.SCALED_BALANCE_OFFSET);
+          const scaledBalance = new BN(scaledBalanceBigInt.toString());
           
-          // Compute actual token amount: scaled_balance * cumulative_deposit_interest / SPOT_BALANCE_PRECISION / 1e10
-          // The interest is in 1e10 precision, scaled_balance is in 1e9 precision
-          // Result: (scaledBalance * interest) / (1e9 * 1e10) = (scaledBalance * interest) / 1e19
-          const INTEREST_PRECISION = BigInt(1e10);
-          const tokenAmountRaw = (scaledBalance * cumulativeDepositInterest) / (SPOT_BALANCE_PRECISION * INTEREST_PRECISION);
-          const usdcBalance = Number(tokenAmountRaw);
+          // Calculate actual tokens: scaledBalance * cumulativeDepositInterest / (1e9 * 1e10)
+          // Keep all math in BN to avoid 53-bit precision loss for large balances
+          // Step 1: Multiply (result fits in ~128 bits for reasonable balances)
+          const numerator = scaledBalance.mul(cumulativeDepositInterest);
+          // Step 2: Divide by 1e9 (SPOT_BALANCE_PRECISION)
+          const afterBalanceDiv = numerator.div(L.PRECISION.SPOT_BALANCE);
+          // Step 3: Divide by 1e10 (SPOT_CUMULATIVE_INTEREST_PRECISION)
+          // Result is now small enough for Number (max ~1e9 USDC is 1e15 after 1e6 decimals)
+          const wholePart = afterBalanceDiv.div(L.PRECISION.SPOT_CUMULATIVE_INTEREST);
+          const remainder = afterBalanceDiv.mod(L.PRECISION.SPOT_CUMULATIVE_INTEREST);
+          const actualTokens = wholePart.toNumber() + remainder.toNumber() / 1e10;
           
-          // Also log raw scaled balance for debugging
-          const rawScaledBalance = Number(scaledBalance) / 1e9;
-          console.log(`[Drift] Position ${i}: marketIndex=${marketIndex}, scaledBalance=${rawScaledBalance.toFixed(6)}, computed=${usdcBalance.toFixed(6)} USDC`);
+          const interestMult = cumulativeDepositInterest.toNumber() / 1e10;
+          console.log(`[Drift] Position ${i}: marketIndex=${marketIndex}, balanceType=${balanceType}, scaledBalance=${scaledBalanceBigInt}, interest=${interestMult.toFixed(10)}x, actualUSDC=${actualTokens.toFixed(6)}`);
           
-          if (usdcBalance > 0.001) {
-            console.log(`[Drift] Using balance: ${usdcBalance.toFixed(6)} USDC`);
-            return usdcBalance;
-          }
-          
-          // If computed is 0 but raw scaled balance exists, use raw as fallback
-          if (rawScaledBalance > 0.001) {
-            console.log(`[Drift] Using raw scaled balance as fallback: ${rawScaledBalance.toFixed(6)} USDC`);
-            return rawScaledBalance;
+          if (actualTokens > 0.001) {
+            console.log(`[Drift] Deterministic balance: ${actualTokens.toFixed(6)} USDC`);
+            return actualTokens;
           }
         }
       } catch (e) {

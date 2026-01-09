@@ -77,15 +77,22 @@ Preferred communication style: Simple, everyday language.
 
 ### Drift User Account Parsing (Jan 2026)
 - **Account Data Size**: ~4376 bytes for User account
-- **SpotPositions Array**: Starts at offset 80
-- **SpotPosition Struct Size**: 48 bytes per position
-- **Key Field Offsets within SpotPosition**:
-  - `scaledBalance`: i128 at offset 0 (read lower 64 bits)
+- **Struct Layouts** (derived from official Drift IDL v2.150.0):
+  - **User Account**: 8-byte discriminator, then authority (32), delegate (32), name (32), spotPositions (320)
+  - **SpotPositions Array**: Starts at offset 104 (8 + 32 + 32 + 32)
+  - **SpotPosition Struct**: 40 bytes per position (8 positions total)
+- **SpotPosition Field Offsets**:
+  - `scaledBalance`: u64 at offset 0 (8 bytes)
+  - `openBids`: i64 at offset 8
+  - `openAsks`: i64 at offset 16
+  - `cumulativeDeposits`: i64 at offset 24 (lifetime deposits, not current balance)
   - `marketIndex`: u16 at offset 32
   - `balanceType`: u8 at offset 34 (0 = Deposit, 1 = Borrow)
-- **Balance Conversion**: `scaledBalance / SPOT_BALANCE_PRECISION (1e9)` = USDC amount
+- **SpotMarket Account**: cumulativeDepositInterest u128 at offset 464
+- **Balance Formula**: `actualTokens = scaledBalance * cumulativeDepositInterest / 1e9 / 1e10`
 - **USDC Market Index**: 0
 - **Deposit Remaining Accounts Order**: Oracle (readable) MUST come before SpotMarket (writable)
+- **Note**: Drift SDK cannot be used directly due to jito-ts dependency conflict; using deterministic byte parsing instead
 
 ## External Dependencies
 
