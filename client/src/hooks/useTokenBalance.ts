@@ -3,7 +3,9 @@ import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adap
 import { PublicKey, Transaction, SYSVAR_RENT_PUBKEY, SystemProgram, TransactionInstruction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 
-const DRIFT_TESTNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
+const MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const DEVNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
+const USDC_MINT = MAINNET_USDC_MINT;
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
@@ -49,7 +51,7 @@ export function useTokenBalance() {
   const [tokenAccountExists, setTokenAccountExists] = useState<boolean | null>(null);
   const [creatingAccount, setCreatingAccount] = useState(false);
 
-  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  const usdcMint = new PublicKey(USDC_MINT);
 
   const fetchUsdcBalance = useCallback(async (showLoading = false) => {
     if (!wallet.publicKey) {
@@ -146,6 +148,6 @@ export function useTokenBalance() {
     creatingAccount,
     fetchUsdcBalance,
     createTokenAccount,
-    usdcMint: DRIFT_TESTNET_USDC_MINT,
+    usdcMint: USDC_MINT,
   };
 }

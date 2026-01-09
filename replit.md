@@ -83,10 +83,12 @@ Preferred communication style: Simple, everyday language.
 - `SESSION_SECRET`: Session encryption key (optional, has default for development)
 - `SOLANA_RPC_URL`: Solana RPC endpoint (optional, defaults to mainnet)
 
-### Drift Protocol Testnet Configuration
-- **Network**: Solana Devnet
-- **USDC Token Mint**: `8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2`
-- **Usage**: For deposits/withdrawals on Drift testnet
+### Drift Protocol Configuration
+- **Network**: Solana Mainnet-Beta (default), configurable via `DRIFT_ENV` env var
+- **Mainnet USDC Token Mint**: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`
+- **Devnet USDC Token Mint**: `8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2`
+- **Usage**: Real USDC deposits/withdrawals on Drift mainnet for live trading
+- **Note**: Set `DRIFT_ENV=devnet` to switch back to devnet (oracle issues may occur)
 
 ### Frontend Libraries
 - **UI Components**: Full shadcn/ui component set with Radix UI primitives

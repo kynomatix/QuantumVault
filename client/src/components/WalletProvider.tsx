@@ -11,7 +11,7 @@ interface WalletProviderProps {
 }
 
 export function WalletProvider({ children }: WalletProviderProps) {
-  const endpoint = useMemo(() => clusterApiUrl('devnet'), []);
+  const endpoint = useMemo(() => clusterApiUrl('mainnet-beta'), []);
 
   const wallets = useMemo(
     () => [new PhantomWalletAdapter()],

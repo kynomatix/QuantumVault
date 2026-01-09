@@ -3,11 +3,19 @@ import { createHash } from 'crypto';
 import BN from 'bn.js';
 import { getAgentKeypair } from './agent-wallet';
 
-const DRIFT_TESTNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
+const DRIFT_ENV = (process.env.DRIFT_ENV || 'mainnet-beta') as 'devnet' | 'mainnet-beta';
+const IS_MAINNET = DRIFT_ENV === 'mainnet-beta';
+
+const MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const DEVNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
+const USDC_MINT = IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
+
 const MIN_SOL_FOR_FEES = 0.05 * LAMPORTS_PER_SOL;
 const AIRDROP_AMOUNT = 1 * LAMPORTS_PER_SOL;
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+
+console.log(`[Drift] Running in ${DRIFT_ENV} mode, USDC mint: ${USDC_MINT}`);
 
 function getDriftStatePDA(): PublicKey {
   const [state] = PublicKey.findProgramAddressSync(
@@ -20,13 +28,14 @@ function getDriftStatePDA(): PublicKey {
 const DRIFT_STATE_PUBKEY = getDriftStatePDA();
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
-const DEVNET_RPC = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+const DEFAULT_RPC = IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
+const SOLANA_RPC = process.env.SOLANA_RPC_URL || DEFAULT_RPC;
 
 let connectionInstance: Connection | null = null;
 
 function getConnection(): Connection {
   if (!connectionInstance) {
-    connectionInstance = new Connection(DEVNET_RPC, 'confirmed');
+    connectionInstance = new Connection(SOLANA_RPC, 'confirmed');
   }
   return connectionInstance;
 }
@@ -40,6 +49,13 @@ async function ensureAgentHasSolForFees(agentPubkey: PublicKey): Promise<{ succe
     
     if (balance >= MIN_SOL_FOR_FEES) {
       return { success: true };
+    }
+    
+    if (IS_MAINNET) {
+      return {
+        success: false,
+        error: `Agent wallet needs SOL for transaction fees. Current balance: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL. Please deposit SOL to your agent wallet.`,
+      };
     }
     
     console.log(`[Drift] Agent needs SOL for fees, requesting devnet airdrop...`);
@@ -87,13 +103,14 @@ async function getAgentDriftClient(
   
   const wallet = new Wallet(agentKeypair);
   
-  const sdkConfig = initialize({ env: 'devnet' });
+  const sdkEnv = IS_MAINNET ? 'mainnet-beta' : 'devnet';
+  const sdkConfig = initialize({ env: sdkEnv });
   
   const driftClient = new DriftClient({
     connection,
     wallet,
     programID: new PublicKey(sdkConfig.DRIFT_PROGRAM_ID),
-    env: 'devnet',
+    env: sdkEnv,
   });
   
   await driftClient.subscribe();
@@ -203,10 +220,12 @@ function getDriftSignerPDA(): PublicKey {
 }
 
 const DRIFT_DEVNET_USDC_ORACLE = new PublicKey('En8hkHLkRe9d9DraYmBTrus518BvmVH448YcvmrFM6Ce');
+const DRIFT_MAINNET_USDC_ORACLE = new PublicKey('Gnt27xtC473ZT2Mw5u8wZ68Z3gULkSTb5DuxJy7eJotD');
 
 async function getSpotMarketOracle(connection: Connection, marketIndex: number = 0): Promise<PublicKey> {
-  console.log('[Drift] Using official Drift SDK devnet USDC oracle:', DRIFT_DEVNET_USDC_ORACLE.toBase58());
-  return DRIFT_DEVNET_USDC_ORACLE;
+  const oracle = IS_MAINNET ? DRIFT_MAINNET_USDC_ORACLE : DRIFT_DEVNET_USDC_ORACLE;
+  console.log(`[Drift] Using ${IS_MAINNET ? 'mainnet' : 'devnet'} USDC oracle:`, oracle.toBase58());
+  return oracle;
 }
 
 function createInitializeUserStatsInstruction(
@@ -351,7 +370,7 @@ export async function buildDepositTransaction(
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
   const connection = getConnection();
   const userPubkey = new PublicKey(walletAddress);
-  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  const usdcMint = new PublicKey(USDC_MINT);
   
   const userAta = getAssociatedTokenAddressSync(usdcMint, userPubkey);
   const userAccount = getUserAccountPDA(userPubkey);
@@ -443,7 +462,7 @@ export async function buildWithdrawTransaction(
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
   const connection = getConnection();
   const userPubkey = new PublicKey(walletAddress);
-  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  const usdcMint = new PublicKey(USDC_MINT);
   
   const userAta = getAssociatedTokenAddressSync(usdcMint, userPubkey);
   const userAccount = getUserAccountPDA(userPubkey);
@@ -517,7 +536,7 @@ export async function buildWithdrawTransaction(
 export async function getUsdcBalance(walletAddress: string): Promise<number> {
   const connection = getConnection();
   const userPubkey = new PublicKey(walletAddress);
-  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  const usdcMint = new PublicKey(USDC_MINT);
   
   const userAta = getAssociatedTokenAddressSync(usdcMint, userPubkey);
   
@@ -729,7 +748,7 @@ export async function buildAgentDriftDepositTransaction(
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
   const agentKeypair = getAgentKeypair(encryptedPrivateKey);
-  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  const usdcMint = new PublicKey(USDC_MINT);
   
   const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
   const userAccount = getUserAccountPDA(agentPubkey);
@@ -822,7 +841,7 @@ export async function buildAgentDriftWithdrawTransaction(
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
   const agentKeypair = getAgentKeypair(encryptedPrivateKey);
-  const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+  const usdcMint = new PublicKey(USDC_MINT);
   
   const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
   const userAccount = getUserAccountPDA(agentPubkey);
@@ -901,7 +920,7 @@ export async function executeAgentDriftDeposit(
   try {
     const connection = getConnection();
     const agentPubkey = new PublicKey(agentPublicKey);
-    const usdcMint = new PublicKey(DRIFT_TESTNET_USDC_MINT);
+    const usdcMint = new PublicKey(USDC_MINT);
     const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
     
     // Ensure agent has SOL for transaction fees (auto-airdrop on devnet)
