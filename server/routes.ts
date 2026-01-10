@@ -710,14 +710,15 @@ export async function registerRoutes(
               });
               
               // Update bot position (will be zeroed out)
-              await storage.updateBotPositionFromTrade({
-                tradingBotId: bot.id,
-                market: bot.market,
-                side: closeSide,
-                size: closeSize,
-                fillPrice: result.fillPrice || 0,
-                tradeId: closeTrade.id,
-              });
+              await storage.updateBotPositionFromTrade(
+                bot.id,
+                bot.market,
+                bot.walletAddress,
+                closeSide,
+                closeSize,
+                result.fillPrice || 0,
+                closeTrade.id
+              );
               
               positionClosed = true;
             } else {
@@ -1203,22 +1204,22 @@ export async function registerRoutes(
             });
             
             // Update bot position (will be zeroed out)
-            await storage.updateBotPositionFromTrade({
-              tradingBotId: botId,
-              market: bot.market,
-              side: closeSide,
-              size: closeSize,
-              fillPrice: result.fillPrice || 0,
-              tradeId: closeTrade.id,
-            });
+            await storage.updateBotPositionFromTrade(
+              botId,
+              bot.market,
+              bot.walletAddress,
+              closeSide,
+              closeSize,
+              result.fillPrice || 0,
+              closeTrade.id
+            );
             
             // Update bot stats
-            await storage.updateTradingBot(botId, {
-              stats: {
-                ...(bot.stats as any || {}),
-                totalTrades: ((bot.stats as any)?.totalTrades || 0) + 1,
-                lastTradeAt: new Date().toISOString(),
-              },
+            const stats = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+            await storage.updateTradingBotStats(botId, {
+              ...stats,
+              totalTrades: (stats.totalTrades || 0) + 1,
+              lastTradeAt: new Date().toISOString(),
             });
             
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
