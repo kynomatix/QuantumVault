@@ -604,22 +604,26 @@ export function BotManagementDrawer({
         </SheetHeader>
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-4">
-          <TabsList className="w-full grid grid-cols-4" data-testid="tabs-bot-management">
-            <TabsTrigger value="overview" data-testid="tab-overview">
-              <BarChart3 className="w-4 h-4 mr-1.5" />
+          <TabsList className="w-full grid grid-cols-5" data-testid="tabs-bot-management">
+            <TabsTrigger value="overview" data-testid="tab-overview" className="text-xs px-2">
+              <BarChart3 className="w-4 h-4 mr-1" />
               Overview
             </TabsTrigger>
-            <TabsTrigger value="equity" data-testid="tab-equity">
-              <Wallet className="w-4 h-4 mr-1.5" />
+            <TabsTrigger value="equity" data-testid="tab-equity" className="text-xs px-2">
+              <Wallet className="w-4 h-4 mr-1" />
               Equity
             </TabsTrigger>
-            <TabsTrigger value="webhook" data-testid="tab-webhook">
-              <Webhook className="w-4 h-4 mr-1.5" />
+            <TabsTrigger value="webhook" data-testid="tab-webhook" className="text-xs px-2">
+              <Webhook className="w-4 h-4 mr-1" />
               Webhook
             </TabsTrigger>
-            <TabsTrigger value="history" data-testid="tab-history">
-              <History className="w-4 h-4 mr-1.5" />
+            <TabsTrigger value="history" data-testid="tab-history" className="text-xs px-2">
+              <History className="w-4 h-4 mr-1" />
               History
+            </TabsTrigger>
+            <TabsTrigger value="settings" data-testid="tab-settings" className="text-xs px-2">
+              <Settings className="w-4 h-4 mr-1" />
+              Settings
             </TabsTrigger>
           </TabsList>
 
@@ -740,113 +744,6 @@ export function BotManagementDrawer({
                   <p className="text-xs mt-1">Position will appear when bot executes a trade</p>
                 </div>
               )}
-            </div>
-
-            <div className="p-4 rounded-xl border bg-muted/20">
-              <div className="flex items-center gap-2 mb-4">
-                <Settings className="w-4 h-4 text-primary" />
-                <h3 className="font-semibold text-sm">Bot Settings</h3>
-              </div>
-              
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <label className="text-sm text-muted-foreground">Bot Name</label>
-                  <Input
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    placeholder="Enter bot name"
-                    data-testid="input-edit-name"
-                  />
-                </div>
-                
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm text-muted-foreground">Leverage</label>
-                    <span className="text-sm font-semibold" data-testid="text-edit-leverage">{editLeverage}x</span>
-                  </div>
-                  <Slider
-                    value={[editLeverage]}
-                    onValueChange={(value) => setEditLeverage(value[0])}
-                    min={1}
-                    max={20}
-                    step={1}
-                    className="w-full"
-                    data-testid="slider-leverage"
-                  />
-                  <div className="flex justify-between text-xs text-muted-foreground">
-                    <span>1x</span>
-                    <span>10x</span>
-                    <span>20x</span>
-                  </div>
-                  <p className="text-xs text-muted-foreground flex items-center gap-1">
-                    <Info className="w-3 h-3" />
-                    Applied to your trades when bot executes signals
-                  </p>
-                </div>
-                
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm text-muted-foreground">Max Position Size (USDC)</label>
-                  </div>
-                  <div className="flex gap-2">
-                    <Input
-                      type="number"
-                      value={editMaxPositionSize}
-                      onChange={(e) => setEditMaxPositionSize(e.target.value)}
-                      placeholder="Required for trading"
-                      min="1"
-                      step="1"
-                      className="flex-1"
-                      data-testid="input-max-position-size"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setEditMaxPositionSize(botBalance.toFixed(2))}
-                      disabled={botBalance <= 0}
-                      className="px-3"
-                      data-testid="button-max-position-size"
-                    >
-                      Max
-                    </Button>
-                  </div>
-                  <p className="text-xs text-muted-foreground flex items-center gap-1">
-                    <Info className="w-3 h-3" />
-                    Your capital base. TradingView signals trade a % of this amount.
-                    {botBalance > 0 && (
-                      <span className="ml-1">(Bot has ${botBalance.toFixed(2)})</span>
-                    )}
-                  </p>
-                </div>
-                
-                {hasSettingsChanges && (
-                  <div className="flex gap-2 pt-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleCancelEdit}
-                      disabled={saveSettingsLoading}
-                      className="flex-1"
-                      data-testid="button-cancel-settings"
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={handleSaveSettings}
-                      disabled={saveSettingsLoading}
-                      className="flex-1"
-                      data-testid="button-save-settings"
-                    >
-                      {saveSettingsLoading ? (
-                        <Loader2 className="w-4 h-4 animate-spin mr-1" />
-                      ) : null}
-                      Save Changes
-                    </Button>
-                  </div>
-                )}
-              </div>
             </div>
 
             <div className="p-4 rounded-xl border bg-muted/20">
@@ -1253,48 +1150,164 @@ export function BotManagementDrawer({
               )}
             </div>
           </TabsContent>
-        </Tabs>
 
-        <div className="mt-6 pt-4 border-t">
-          <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-            <AlertDialogTrigger asChild>
-              <Button
-                variant="destructive"
-                className="w-full"
-                data-testid="button-delete-bot"
-              >
-                <Trash2 className="w-4 h-4 mr-2" />
-                Delete Bot
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Delete {bot.name}?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  This action cannot be undone. This will permanently delete the bot
-                  and all associated trade history. Any funds in the bot's account
-                  should be withdrawn first.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel disabled={deleteLoading}>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={handleDelete}
-                  disabled={deleteLoading}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                  data-testid="button-confirm-delete"
-                >
-                  {deleteLoading ? (
-                    <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  ) : (
+          <TabsContent value="settings" className="space-y-4 mt-4">
+            <div className="p-4 rounded-xl border bg-muted/20">
+              <div className="flex items-center gap-2 mb-4">
+                <Settings className="w-4 h-4 text-primary" />
+                <h3 className="font-semibold text-sm">Bot Settings</h3>
+              </div>
+              
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-sm text-muted-foreground">Bot Name</label>
+                  <Input
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    placeholder="Enter bot name"
+                    data-testid="input-edit-name"
+                  />
+                </div>
+                
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm text-muted-foreground">Leverage</label>
+                    <span className="text-sm font-semibold" data-testid="text-edit-leverage">{editLeverage}x</span>
+                  </div>
+                  <Slider
+                    value={[editLeverage]}
+                    onValueChange={(value) => setEditLeverage(value[0])}
+                    min={1}
+                    max={20}
+                    step={1}
+                    className="w-full"
+                    data-testid="slider-leverage"
+                  />
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>1x</span>
+                    <span>10x</span>
+                    <span>20x</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground flex items-center gap-1">
+                    <Info className="w-3 h-3" />
+                    Applied to your trades when bot executes signals
+                  </p>
+                </div>
+                
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm text-muted-foreground">Max Position Size (USDC)</label>
+                  </div>
+                  <div className="flex gap-2">
+                    <Input
+                      type="number"
+                      value={editMaxPositionSize}
+                      onChange={(e) => setEditMaxPositionSize(e.target.value)}
+                      placeholder="Required for trading"
+                      min="1"
+                      step="1"
+                      className="flex-1"
+                      data-testid="input-max-position-size"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setEditMaxPositionSize(botBalance.toFixed(2))}
+                      disabled={botBalance <= 0}
+                      className="px-3"
+                      data-testid="button-max-position-size"
+                    >
+                      Max
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground flex items-center gap-1">
+                    <Info className="w-3 h-3" />
+                    Your capital base. TradingView signals trade a % of this amount.
+                    {botBalance > 0 && (
+                      <span className="ml-1">(Bot has ${botBalance.toFixed(2)})</span>
+                    )}
+                  </p>
+                </div>
+                
+                {hasSettingsChanges && (
+                  <div className="flex gap-2 pt-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCancelEdit}
+                      disabled={saveSettingsLoading}
+                      className="flex-1"
+                      data-testid="button-cancel-settings"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={handleSaveSettings}
+                      disabled={saveSettingsLoading}
+                      className="flex-1"
+                      data-testid="button-save-settings"
+                    >
+                      {saveSettingsLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin mr-1" />
+                      ) : null}
+                      Save Changes
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl border border-destructive/30 bg-destructive/5">
+              <div className="flex items-center gap-2 mb-3">
+                <Trash2 className="w-4 h-4 text-destructive" />
+                <h3 className="font-semibold text-sm text-destructive">Danger Zone</h3>
+              </div>
+              <p className="text-xs text-muted-foreground mb-4">
+                Permanently delete this bot and all associated trade history. Any funds should be withdrawn first.
+              </p>
+              <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    variant="destructive"
+                    className="w-full"
+                    data-testid="button-delete-bot"
+                  >
                     <Trash2 className="w-4 h-4 mr-2" />
-                  )}
-                  Delete
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </div>
+                    Delete Bot
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Delete {bot.name}?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This action cannot be undone. This will permanently delete the bot
+                      and all associated trade history. Any funds in the bot's account
+                      should be withdrawn first.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel disabled={deleteLoading}>Cancel</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={handleDelete}
+                      disabled={deleteLoading}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                      data-testid="button-confirm-delete"
+                    >
+                      {deleteLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                      ) : (
+                        <Trash2 className="w-4 h-4 mr-2" />
+                      )}
+                      Delete
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </div>
+          </TabsContent>
+        </Tabs>
       </SheetContent>
     </Sheet>
   );
