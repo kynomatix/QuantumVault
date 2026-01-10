@@ -112,6 +112,17 @@ interface EquityEvent {
   createdAt: string;
 }
 
+interface BotPosition {
+  hasPosition: boolean;
+  side?: 'LONG' | 'SHORT';
+  size?: number;
+  avgEntryPrice?: number;
+  currentPrice?: number;
+  unrealizedPnl?: number;
+  realizedPnl?: number;
+  market?: string;
+}
+
 interface BotManagementDrawerProps {
   bot: TradingBot | null;
   isOpen: boolean;
@@ -156,6 +167,8 @@ export function BotManagementDrawer({
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
+  const [botPosition, setBotPosition] = useState<BotPosition | null>(null);
+  const [positionLoading, setPositionLoading] = useState(false);
 
   useEffect(() => {
     if (bot) {
@@ -181,9 +194,28 @@ export function BotManagementDrawer({
     }
   };
 
+  const fetchBotPosition = async () => {
+    if (!bot) return;
+    setPositionLoading(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${bot.id}/position?wallet=${walletAddress}`, { 
+        credentials: 'include' 
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setBotPosition(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch bot position:', error);
+    } finally {
+      setPositionLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (isOpen && bot) {
       fetchBotBalance();
+      fetchBotPosition();
       fetchUserWebhookUrl();
       setActiveTab('overview');
     }
@@ -640,6 +672,74 @@ export function BotManagementDrawer({
                 <p className="text-xs text-muted-foreground">Leverage</p>
                 <p className="text-lg font-semibold mt-1" data-testid="text-leverage">{localBot?.leverage ?? bot.leverage}x</p>
               </div>
+            </div>
+
+            {/* Current Position Section */}
+            <div className="p-4 rounded-xl border bg-muted/20">
+              <div className="flex items-center gap-2 mb-3">
+                <BarChart3 className="w-4 h-4 text-primary" />
+                <h3 className="font-semibold text-sm">Current Position</h3>
+              </div>
+              
+              {positionLoading ? (
+                <div className="flex items-center justify-center py-4">
+                  <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : botPosition?.hasPosition ? (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Badge 
+                        className={botPosition.side === 'LONG' ? 'bg-emerald-500' : 'bg-red-500'}
+                        data-testid="badge-position-side"
+                      >
+                        {botPosition.side === 'LONG' ? (
+                          <ArrowUp className="w-3 h-3 mr-1" />
+                        ) : (
+                          <ArrowDown className="w-3 h-3 mr-1" />
+                        )}
+                        {botPosition.side}
+                      </Badge>
+                      <span className="text-sm text-muted-foreground">{botPosition.market}</span>
+                    </div>
+                    <span className="font-mono font-semibold" data-testid="text-position-size">
+                      {botPosition.size?.toFixed(4)} contracts
+                    </span>
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="p-2 rounded-lg bg-background/50">
+                      <p className="text-xs text-muted-foreground">Entry Price</p>
+                      <p className="font-mono font-semibold" data-testid="text-entry-price">
+                        ${botPosition.avgEntryPrice?.toFixed(2)}
+                      </p>
+                    </div>
+                    <div className="p-2 rounded-lg bg-background/50">
+                      <p className="text-xs text-muted-foreground">Current Price</p>
+                      <p className="font-mono font-semibold" data-testid="text-current-price">
+                        ${botPosition.currentPrice?.toFixed(2)}
+                      </p>
+                    </div>
+                  </div>
+                  
+                  <div className="p-2 rounded-lg bg-background/50">
+                    <p className="text-xs text-muted-foreground">Unrealized P&L</p>
+                    <p 
+                      className={`font-mono font-bold text-lg ${
+                        (botPosition.unrealizedPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                      }`}
+                      data-testid="text-unrealized-pnl"
+                    >
+                      {(botPosition.unrealizedPnl ?? 0) >= 0 ? '+' : ''}${botPosition.unrealizedPnl?.toFixed(2)}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-4 text-muted-foreground">
+                  <p className="text-sm">No open position</p>
+                  <p className="text-xs mt-1">Position will appear when bot executes a trade</p>
+                </div>
+              )}
             </div>
 
             <div className="p-4 rounded-xl border bg-muted/20">

@@ -944,6 +944,52 @@ export async function registerRoutes(
     }
   });
 
+  // Get bot's current position
+  app.get("/api/trading-bots/:id/position", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const position = await storage.getBotPosition(bot.id, bot.market);
+      
+      if (!position || parseFloat(position.baseSize) === 0) {
+        return res.json({ hasPosition: false });
+      }
+
+      // Get current price for unrealized PnL calculation
+      const prices = await getAllPrices();
+      const currentPrice = prices[bot.market] || 0;
+      const baseSize = parseFloat(position.baseSize);
+      const avgEntryPrice = parseFloat(position.avgEntryPrice || "0");
+      const costBasis = parseFloat(position.costBasis || "0");
+      
+      // Calculate unrealized PnL
+      const currentValue = Math.abs(baseSize) * currentPrice;
+      const unrealizedPnl = baseSize > 0 
+        ? currentValue - costBasis  // Long: current value - cost
+        : costBasis - currentValue; // Short: cost - current value
+
+      res.json({
+        hasPosition: true,
+        side: baseSize > 0 ? 'LONG' : 'SHORT',
+        size: Math.abs(baseSize),
+        avgEntryPrice,
+        currentPrice,
+        unrealizedPnl,
+        realizedPnl: parseFloat(position.realizedPnl || "0"),
+        market: position.market,
+      });
+    } catch (error) {
+      console.error("Get bot position error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // TradingView Webhook endpoint - receives signals from TradingView strategy alerts
   app.post("/api/webhook/tradingview/:botId", async (req, res) => {
     const { botId } = req.params;
