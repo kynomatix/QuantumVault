@@ -153,7 +153,6 @@ export function BotManagementDrawer({
   const [editName, setEditName] = useState<string>('');
   const [editLeverage, setEditLeverage] = useState<number>(1);
   const [editMaxPositionSize, setEditMaxPositionSize] = useState<string>('');
-  const [editTotalInvestment, setEditTotalInvestment] = useState<string>('');
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
@@ -164,7 +163,6 @@ export function BotManagementDrawer({
       setEditName(bot.name);
       setEditLeverage(bot.leverage);
       setEditMaxPositionSize(bot.maxPositionSize || '');
-      setEditTotalInvestment(bot.totalInvestment || '');
     }
   }, [bot]);
 
@@ -461,7 +459,6 @@ export function BotManagementDrawer({
           name: editName.trim(),
           leverage: editLeverage,
           maxPositionSize: editMaxPositionSize ? parseFloat(editMaxPositionSize) : null,
-          totalInvestment: editTotalInvestment || '0',
         }),
       });
 
@@ -493,15 +490,13 @@ export function BotManagementDrawer({
       setEditName(localBot.name);
       setEditLeverage(localBot.leverage);
       setEditMaxPositionSize(localBot.maxPositionSize || '');
-      setEditTotalInvestment(localBot.totalInvestment || '');
     }
   };
 
   const hasSettingsChanges = localBot ? (
     editName !== localBot.name || 
     editLeverage !== localBot.leverage || 
-    editMaxPositionSize !== (localBot.maxPositionSize || '') ||
-    editTotalInvestment !== (localBot.totalInvestment || '')
+    editMaxPositionSize !== (localBot.maxPositionSize || '')
   ) : false;
 
   const formatDate = (dateString: string) => {
@@ -686,25 +681,6 @@ export function BotManagementDrawer({
                   <p className="text-xs text-muted-foreground flex items-center gap-1">
                     <Info className="w-3 h-3" />
                     Applied to your trades when bot executes signals
-                  </p>
-                </div>
-                
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm text-muted-foreground">Total Investment (USDC)</label>
-                  </div>
-                  <Input
-                    type="number"
-                    value={editTotalInvestment}
-                    onChange={(e) => setEditTotalInvestment(e.target.value)}
-                    placeholder="e.g. 6 for $6 capital"
-                    min="0.01"
-                    step="0.01"
-                    data-testid="input-total-investment"
-                  />
-                  <p className="text-xs text-muted-foreground flex items-center gap-1">
-                    <Info className="w-3 h-3" />
-                    Your bot's capital. TradingView signals are % of this amount.
                   </p>
                 </div>
                 

@@ -953,9 +953,9 @@ export async function registerRoutes(
       }
 
       // Pionex-style: TradingView sends PERCENTAGE (100 = 100%, 33.33 = 33.33%)
-      // Platform manages total investment, signal is percentage of that capital
+      // Platform uses maxPositionSize as the capital base for percentage calculations
       const signalPercent = parseFloat(contracts || positionSize || "0");
-      const baseCapital = parseFloat(bot.totalInvestment || "0");
+      const baseCapital = parseFloat(bot.maxPositionSize || "0");
       
       if (baseCapital <= 0) {
         await storage.updateBotTrade(trade.id, {
@@ -963,13 +963,13 @@ export async function registerRoutes(
           txSignature: null,
         });
         await storage.updateWebhookLog(log.id, { errorMessage: `Bot has no capital configured`, processed: true });
-        return res.status(400).json({ error: `Bot has no capital configured. Set totalInvestment on the bot.` });
+        return res.status(400).json({ error: `Bot has no capital configured. Set Max Position Size on the bot.` });
       }
       
       // If signal has percentage, use it; otherwise use 100% of capital
       const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
       
-      console.log(`[Webhook] Signal ${signalPercent}% of $${baseCapital} capital = $${tradeAmountUsd.toFixed(2)} trade`);
+      console.log(`[Webhook] Signal ${signalPercent}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
 
       // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
@@ -1243,9 +1243,9 @@ export async function registerRoutes(
       }
 
       // Pionex-style: TradingView sends PERCENTAGE (100 = 100%, 33.33 = 33.33%)
-      // Platform manages total investment, signal is percentage of that capital
+      // Platform uses maxPositionSize as the capital base for percentage calculations
       const signalPercent = parseFloat(contracts || positionSize || "0");
-      const baseCapital = parseFloat(bot.totalInvestment || "0");
+      const baseCapital = parseFloat(bot.maxPositionSize || "0");
       
       if (baseCapital <= 0) {
         await storage.updateBotTrade(trade.id, {
@@ -1253,13 +1253,13 @@ export async function registerRoutes(
           txSignature: null,
         });
         await storage.updateWebhookLog(log.id, { errorMessage: `Bot has no capital configured`, processed: true });
-        return res.status(400).json({ error: `Bot has no capital configured. Set totalInvestment on the bot.` });
+        return res.status(400).json({ error: `Bot has no capital configured. Set Max Position Size on the bot.` });
       }
       
       // If signal has percentage, use it; otherwise use 100% of capital
       const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
       
-      console.log(`[User Webhook] Signal ${signalPercent}% of $${baseCapital} capital = $${tradeAmountUsd.toFixed(2)} trade`);
+      console.log(`[User Webhook] Signal ${signalPercent}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
 
       // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
