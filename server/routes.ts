@@ -952,14 +952,12 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // CRITICAL FORMULA - DO NOT CHANGE (see replit.md)
-      // TradingView sends a PERCENTAGE in the contracts field
-      // Formula: tradeAmountUsd = (signal / 100) × botCapital
-      //          contractSize = (tradeAmountUsd × leverage) / currentPrice
+      // Pionex-style: TradingView sends PERCENTAGE (100 = 100%, 33.33 = 33.33%)
+      // Platform manages total investment, signal is percentage of that capital
       const signalPercent = parseFloat(contracts || positionSize || "0");
-      const botCapital = parseFloat(bot.totalInvestment || "0");
+      const baseCapital = parseFloat(bot.totalInvestment || "0");
       
-      if (botCapital <= 0) {
+      if (baseCapital <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
@@ -968,10 +966,10 @@ export async function registerRoutes(
         return res.status(400).json({ error: `Bot has no capital configured. Set totalInvestment on the bot.` });
       }
       
-      // Step 1: Calculate USD trade amount from percentage
-      const tradeAmountUsd = (signalPercent / 100) * botCapital;
+      // If signal has percentage, use it; otherwise use 100% of capital
+      const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
       
-      console.log(`[Webhook] Signal: ${signalPercent}% of $${botCapital} = $${tradeAmountUsd.toFixed(2)} trade`);
+      console.log(`[Webhook] Signal ${signalPercent}% of $${baseCapital} capital = $${tradeAmountUsd.toFixed(2)} trade`);
 
       // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
@@ -984,11 +982,11 @@ export async function registerRoutes(
         return res.status(500).json({ error: "Could not get market price" });
       }
 
-      // Step 2: Apply leverage and convert to contracts
+      // Calculate contract size (with leverage)
       const leverage = bot.leverage || 1;
       const contractSize = (tradeAmountUsd * leverage) / currentPrice;
       
-      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x ÷ $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} * ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Execute on Drift
       // Use bot's subaccount if configured, otherwise use main account (0)
@@ -1223,14 +1221,12 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // CRITICAL FORMULA - DO NOT CHANGE (see replit.md)
-      // TradingView sends a PERCENTAGE in the contracts field
-      // Formula: tradeAmountUsd = (signal / 100) × botCapital
-      //          contractSize = (tradeAmountUsd × leverage) / currentPrice
+      // Pionex-style: TradingView sends PERCENTAGE (100 = 100%, 33.33 = 33.33%)
+      // Platform manages total investment, signal is percentage of that capital
       const signalPercent = parseFloat(contracts || positionSize || "0");
-      const botCapital = parseFloat(bot.totalInvestment || "0");
+      const baseCapital = parseFloat(bot.totalInvestment || "0");
       
-      if (botCapital <= 0) {
+      if (baseCapital <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
@@ -1239,10 +1235,10 @@ export async function registerRoutes(
         return res.status(400).json({ error: `Bot has no capital configured. Set totalInvestment on the bot.` });
       }
       
-      // Step 1: Calculate USD trade amount from percentage
-      const tradeAmountUsd = (signalPercent / 100) * botCapital;
+      // If signal has percentage, use it; otherwise use 100% of capital
+      const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
       
-      console.log(`[User Webhook] Signal: ${signalPercent}% of $${botCapital} = $${tradeAmountUsd.toFixed(2)} trade`);
+      console.log(`[User Webhook] Signal ${signalPercent}% of $${baseCapital} capital = $${tradeAmountUsd.toFixed(2)} trade`);
 
       // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
@@ -1255,11 +1251,11 @@ export async function registerRoutes(
         return res.status(500).json({ error: "Could not get market price" });
       }
 
-      // Step 2: Apply leverage and convert to contracts
+      // Calculate contract size (with leverage)
       const leverage = bot.leverage || 1;
       const contractSize = (tradeAmountUsd * leverage) / currentPrice;
       
-      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x ÷ $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} * ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Execute on Drift
       // Use bot's subaccount if configured, otherwise use main account (0)
