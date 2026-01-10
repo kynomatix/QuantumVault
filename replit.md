@@ -102,9 +102,9 @@ Preferred communication style: Simple, everyday language.
 ### Drift User Account Parsing (Jan 2026)
 - **Account Data Size**: ~4376 bytes for User account
 - **Struct Layouts** (derived from official Drift IDL v2.150.0):
-  - **User Account**: 8-byte discriminator, then authority (32), delegate (32), name (32), spotPositions (320)
+  - **User Account**: 8-byte discriminator, then authority (32), delegate (32), name (32), spotPositions (384)
   - **SpotPositions Array**: Starts at offset 104 (8 + 32 + 32 + 32)
-  - **SpotPosition Struct**: 40 bytes per position (8 positions total)
+  - **SpotPosition Struct**: 48 bytes per position (8 positions total)
 - **SpotPosition Field Offsets**:
   - `scaledBalance`: u64 at offset 0 (8 bytes)
   - `openBids`: i64 at offset 8
@@ -117,6 +117,35 @@ Preferred communication style: Simple, everyday language.
 - **USDC Market Index**: 0
 - **Deposit Remaining Accounts Order**: Oracle (readable) MUST come before SpotMarket (writable)
 - **Note**: Drift SDK cannot be used directly due to jito-ts dependency conflict; using deterministic byte parsing instead
+
+### Drift Perp Position Parsing (Jan 2026)
+- **PerpPositions Array**: Starts at offset 488 (104 + 384 spotPositions)
+- **PerpPosition Struct**: 184 bytes per position (8 positions total)
+- **PerpPosition Field Offsets** (within each 184-byte struct):
+  - `lastCumulativeFundingRate`: i128 at offset 0 (16 bytes)
+  - `baseAssetAmount`: i128 at offset 16 (position size, scaled by 1e9)
+  - `quoteAssetAmount`: i128 at offset 32 (scaled by 1e6)
+  - `quoteBreakEvenAmount`: i128 at offset 48
+  - `quoteEntryAmount`: i128 at offset 64 (entry value for PnL calculation)
+  - `openBids`: i128 at offset 80
+  - `openAsks`: i128 at offset 96
+  - `settledPnl`: i128 at offset 112
+  - `lpShares`: u64 at offset 128
+  - `lastBaseAssetAmountPerLp`: i64 at offset 136
+  - `lastQuoteAssetAmountPerLp`: i64 at offset 144
+  - `remainderBaseAssetAmount`: i32 at offset 152
+  - `marketIndex`: u16 at offset 156
+  - `openOrders`: u8 at offset 158
+  - `perLpBase`: i8 at offset 159
+  - `padding`: 24 bytes at offset 160
+- **Position Detection**: baseAssetAmount != 0 indicates open position
+- **Side Calculation**: baseAssetAmount > 0 = LONG, < 0 = SHORT
+- **Entry Price Formula**: abs(quoteEntryAmount) / abs(baseAssetAmount)
+- **Unrealized PnL Formula**: 
+  - LONG: (markPrice - entryPrice) * abs(baseAssetAmount)
+  - SHORT: (entryPrice - markPrice) * abs(baseAssetAmount)
+- **Perp Market Index Mapping**: 0=SOL-PERP, 1=BTC-PERP, 2=ETH-PERP, 3=APT-PERP, etc.
+- **API Endpoint**: `GET /api/positions` - Returns open perp positions with entry price, PnL, and size
 
 ## External Dependencies
 

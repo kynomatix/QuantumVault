@@ -738,15 +738,18 @@ export default function AppPage() {
                                 <td className="py-3 font-medium">{pos.market}</td>
                                 <td className="py-3">
                                   <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                    pos.side === 'long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                                    pos.side === 'LONG' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
                                   }`}>
-                                    {pos.side?.toUpperCase()}
+                                    {pos.side}
                                   </span>
                                 </td>
-                                <td className="py-3 text-right font-mono">{pos.size}</td>
-                                <td className="py-3 text-right font-mono text-muted-foreground">${Number(pos.entryPrice).toLocaleString()}</td>
+                                <td className="py-3 text-right font-mono">
+                                  {Math.abs(pos.baseAssetAmount).toFixed(4)} ({pos.sizeUsd ? `$${pos.sizeUsd.toFixed(2)}` : '--'})
+                                </td>
+                                <td className="py-3 text-right font-mono text-muted-foreground">${Number(pos.entryPrice).toFixed(2)}</td>
                                 <td className={`py-3 text-right font-mono ${Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                   {Number(pos.unrealizedPnl) >= 0 ? '+' : ''}${Number(pos.unrealizedPnl).toFixed(2)}
+                                  <span className="text-xs ml-1">({Number(pos.unrealizedPnlPercent) >= 0 ? '+' : ''}{Number(pos.unrealizedPnlPercent).toFixed(1)}%)</span>
                                 </td>
                               </tr>
                             ))}

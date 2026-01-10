@@ -22,9 +22,10 @@ async function fetchPortfolio(walletAddress: string) {
 }
 
 async function fetchPositions(walletAddress: string) {
-  const res = await fetch(`/api/positions?wallet=${walletAddress}`, { credentials: "include" });
+  const res = await fetch(`/api/positions`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch positions");
-  return res.json();
+  const data = await res.json();
+  return data.positions || [];
 }
 
 async function fetchTrades(walletAddress: string, limit?: number) {

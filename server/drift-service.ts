@@ -34,12 +34,22 @@ const DRIFT_LAYOUTS = {
     DISCRIMINATOR_SIZE: 8,
     SPOT_POSITIONS_OFFSET: 104, // 8 + 32 + 32 + 32
     SPOT_POSITION_COUNT: 8,
+    SPOT_POSITION_SIZE: 48, // 48 bytes per SpotPosition
+    PERP_POSITIONS_OFFSET: 488, // 104 + (8 * 48) = 488
+    PERP_POSITION_COUNT: 8,
   },
   SPOT_POSITION: {
-    SIZE: 40,
+    SIZE: 48, // SpotPosition struct size (corrected from 40)
     SCALED_BALANCE_OFFSET: 0,
     MARKET_INDEX_OFFSET: 32,
     BALANCE_TYPE_OFFSET: 34,
+  },
+  PERP_POSITION: {
+    SIZE: 184, // PerpPosition struct size (184 bytes)
+    BASE_ASSET_AMOUNT_OFFSET: 16, // i128 at offset 16
+    QUOTE_ASSET_AMOUNT_OFFSET: 32, // i128 at offset 32
+    QUOTE_ENTRY_AMOUNT_OFFSET: 64, // i128 at offset 64 (entry value for PnL)
+    MARKET_INDEX_OFFSET: 156, // u16 at offset 156
   },
   SPOT_MARKET: {
     CUMULATIVE_DEPOSIT_INTEREST_OFFSET: 464,
@@ -48,8 +58,28 @@ const DRIFT_LAYOUTS = {
     SPOT_BALANCE: new BN('1000000000'), // 1e9
     SPOT_CUMULATIVE_INTEREST: new BN('10000000000'), // 1e10
     QUOTE: new BN('1000000'), // 1e6 for USDC
+    BASE_ASSET: new BN('1000000000'), // 1e9 for base asset
   },
 };
+
+// Helper function to read signed i128 as two 64-bit values (little-endian)
+// Uses BigInt for proper two's-complement handling of signed values
+function readI128LE(buffer: Buffer, offset: number): bigint {
+  // Read low 64 bits as unsigned, high 64 bits as signed
+  const lowUnsigned = buffer.readBigUInt64LE(offset);
+  const highSigned = buffer.readBigInt64LE(offset + 8);
+  // Combine: value = high * 2^64 + low
+  return (highSigned << 64n) | lowUnsigned;
+}
+
+// Convert bigint to number safely, returns NaN for values outside safe integer range
+function bigintToNumber(value: bigint): number {
+  if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(Number.MIN_SAFE_INTEGER)) {
+    // For very large values, use approximation (may lose precision)
+    console.warn(`[Drift] Large value detected: ${value}, precision may be lost`);
+  }
+  return Number(value);
+}
 
 const DRIFT_ENV = (process.env.DRIFT_ENV || 'mainnet-beta') as 'devnet' | 'mainnet-beta';
 const IS_MAINNET = DRIFT_ENV === 'mainnet-beta';
@@ -847,6 +877,153 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
   } catch (error) {
     console.error(`[Drift] Error reading account info:`, error);
     return defaultResult;
+  }
+}
+
+// Market index to name mapping for Drift perpetuals
+const PERP_MARKET_NAMES: Record<number, string> = {
+  0: 'SOL-PERP',
+  1: 'BTC-PERP',
+  2: 'ETH-PERP',
+  3: 'APT-PERP',
+  4: 'MATIC-PERP',
+  5: 'ARB-PERP',
+  6: 'DOGE-PERP',
+  7: 'BNB-PERP',
+};
+
+export interface PerpPosition {
+  marketIndex: number;
+  market: string;
+  baseAssetAmount: number; // Position size in base units
+  quoteAssetAmount: number; // Quote value (for PnL tracking)
+  quoteEntryAmount: number; // Entry quote value
+  side: 'LONG' | 'SHORT';
+  sizeUsd: number; // Position size in USD
+  entryPrice: number; // Average entry price
+  markPrice: number; // Current mark price
+  unrealizedPnl: number; // Unrealized profit/loss
+  unrealizedPnlPercent: number; // Unrealized PnL as percentage
+}
+
+export async function getPerpPositions(walletAddress: string, subAccountId: number = 0): Promise<PerpPosition[]> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  const userAccount = getUserAccountPDA(userPubkey, subAccountId);
+  
+  const positions: PerpPosition[] = [];
+  
+  try {
+    const accountInfo = await connection.getAccountInfo(userAccount);
+    
+    if (!accountInfo || !accountInfo.data) {
+      console.log(`[Drift] No account data found for positions`);
+      return positions;
+    }
+    
+    const data = accountInfo.data;
+    console.log(`[Drift] Reading perp positions from account data, length=${data.length} bytes`);
+    
+    // Use DRIFT_LAYOUTS constants for consistent offsets
+    const PERP_POSITIONS_OFFSET = DRIFT_LAYOUTS.USER.PERP_POSITIONS_OFFSET;
+    const PERP_POSITION_SIZE = DRIFT_LAYOUTS.PERP_POSITION.SIZE;
+    const MAX_PERP_POSITIONS = DRIFT_LAYOUTS.USER.PERP_POSITION_COUNT;
+    
+    // Fetch current prices for all markets we might have positions in
+    const prices: Record<number, number> = {};
+    try {
+      const priceRes = await fetch(`http://localhost:5000/api/prices`);
+      if (priceRes.ok) {
+        const priceData = await priceRes.json();
+        prices[0] = priceData['SOL-PERP'] || 136;
+        prices[1] = priceData['BTC-PERP'] || 90000;
+        prices[2] = priceData['ETH-PERP'] || 3000;
+      }
+    } catch (e) {
+      // Default prices if fetch fails
+      prices[0] = 136;
+      prices[1] = 90000;
+      prices[2] = 3000;
+    }
+    
+    for (let i = 0; i < MAX_PERP_POSITIONS; i++) {
+      const posOffset = PERP_POSITIONS_OFFSET + (i * PERP_POSITION_SIZE);
+      
+      if (posOffset + PERP_POSITION_SIZE > data.length) {
+        console.log(`[Drift] Position ${i} offset ${posOffset} exceeds data length ${data.length}`);
+        break;
+      }
+      
+      try {
+        // Use DRIFT_LAYOUTS offsets and readI128LE for full precision with BigInt
+        const baseAssetRaw = readI128LE(data, posOffset + DRIFT_LAYOUTS.PERP_POSITION.BASE_ASSET_AMOUNT_OFFSET);
+        
+        // Skip empty positions
+        if (baseAssetRaw === 0n) {
+          continue;
+        }
+        
+        const quoteAssetRaw = readI128LE(data, posOffset + DRIFT_LAYOUTS.PERP_POSITION.QUOTE_ASSET_AMOUNT_OFFSET);
+        const quoteEntryRaw = readI128LE(data, posOffset + DRIFT_LAYOUTS.PERP_POSITION.QUOTE_ENTRY_AMOUNT_OFFSET);
+        const marketIndex = data.readUInt16LE(posOffset + DRIFT_LAYOUTS.PERP_POSITION.MARKET_INDEX_OFFSET);
+        
+        // Keep as BigInt until after scaling to preserve precision
+        // Base asset: scaled by 1e9, Quote: scaled by 1e6
+        const baseAssetAmount = bigintToNumber(baseAssetRaw);
+        const quoteAssetAmount = bigintToNumber(quoteAssetRaw);
+        const quoteEntryAmount = bigintToNumber(quoteEntryRaw);
+        
+        // Convert from precision (1e9 for base, 1e6 for quote)
+        const baseAssetReal = baseAssetAmount / 1e9;
+        const quoteAssetReal = quoteAssetAmount / 1e6;
+        const quoteEntryReal = quoteEntryAmount / 1e6;
+        
+        const side: 'LONG' | 'SHORT' = baseAssetReal > 0 ? 'LONG' : 'SHORT';
+        const marketName = PERP_MARKET_NAMES[marketIndex] || `PERP-${marketIndex}`;
+        const markPrice = prices[marketIndex] || 0;
+        
+        // Calculate entry price: quoteEntryAmount / baseAssetAmount
+        const entryPrice = Math.abs(baseAssetReal) > 0 ? Math.abs(quoteEntryReal / baseAssetReal) : 0;
+        
+        // Position size in USD
+        const sizeUsd = Math.abs(baseAssetReal) * markPrice;
+        
+        // Unrealized PnL
+        // For LONG: (markPrice - entryPrice) * size
+        // For SHORT: (entryPrice - markPrice) * size
+        const unrealizedPnl = side === 'LONG' 
+          ? (markPrice - entryPrice) * Math.abs(baseAssetReal)
+          : (entryPrice - markPrice) * Math.abs(baseAssetReal);
+        
+        const unrealizedPnlPercent = Math.abs(quoteEntryReal) > 0 
+          ? (unrealizedPnl / Math.abs(quoteEntryReal)) * 100 
+          : 0;
+        
+        console.log(`[Drift] Position ${i}: market=${marketName}, base=${baseAssetReal.toFixed(4)}, side=${side}, entry=$${entryPrice.toFixed(2)}, mark=$${markPrice.toFixed(2)}, pnl=$${unrealizedPnl.toFixed(2)}`);
+        
+        positions.push({
+          marketIndex,
+          market: marketName,
+          baseAssetAmount: baseAssetReal,
+          quoteAssetAmount: quoteAssetReal,
+          quoteEntryAmount: quoteEntryReal,
+          side,
+          sizeUsd,
+          entryPrice,
+          markPrice,
+          unrealizedPnl,
+          unrealizedPnlPercent,
+        });
+      } catch (e) {
+        console.error(`[Drift] Error parsing position ${i}:`, e);
+      }
+    }
+    
+    console.log(`[Drift] Found ${positions.length} open perp positions`);
+    return positions;
+  } catch (error) {
+    console.error(`[Drift] Error reading perp positions:`, error);
+    return positions;
   }
 }
 

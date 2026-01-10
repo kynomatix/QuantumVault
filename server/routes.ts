@@ -424,6 +424,25 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/positions", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const { getPerpPositions } = await import('./drift-service');
+      const positions = await getPerpPositions(wallet.agentPublicKey, 0);
+      res.json({ positions });
+    } catch (error) {
+      console.error("Get positions error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   app.post("/api/agent/confirm-deposit", requireWallet, async (req, res) => {
     try {
       const { amount, txSignature } = req.body;
