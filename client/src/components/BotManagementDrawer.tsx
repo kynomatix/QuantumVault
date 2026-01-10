@@ -945,28 +945,25 @@ export function BotManagementDrawer({
             <div className="p-4 rounded-xl bg-muted/50 border">
               <h3 className="font-semibold mb-3 flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-primary" />
-                How It Works
+                How It Works (Pionex-Style)
               </h3>
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
-                  Set your <strong>Default Order Size</strong> in TradingView (e.g., 33.33 USDT for pyramiding).
+                  <strong>1.</strong> Set your <strong>Total Investment</strong> on the bot (e.g., $100)
                 </p>
                 <p>
-                  The platform receives this as USD and calculates contracts automatically.
+                  <strong>2.</strong> In TradingView, set <strong>Initial Capital: 100</strong> and <strong>Order Size: 33.33</strong> for pyramiding
+                </p>
+                <p>
+                  <strong>3.</strong> TradingView sends 33.33 → Platform trades 33.33% of your $100 = <strong>$33.33</strong>
                 </p>
                 <div className="pt-2 border-t mt-2">
                   <p className="font-medium text-foreground mb-1">Placeholders:</p>
                   <p>
+                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.order.contracts}}'}</code> → % of your capital (100 = 100%, 33.33 = 33.33%)
+                  </p>
+                  <p>
                     <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.order.action}}'}</code> → "buy" or "sell"
-                  </p>
-                  <p>
-                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.order.contracts}}'}</code> → USD amount per entry
-                  </p>
-                  <p>
-                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{ticker}}'}</code> → Symbol (e.g. SOLUSD)
-                  </p>
-                  <p>
-                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{close}}'}</code> → Current price
                   </p>
                 </div>
               </div>

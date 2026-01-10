@@ -952,22 +952,24 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Pionex-style: TradingView sends USD amount per entry (e.g., 33.33 for pyramid)
-      // Use TradingView's value as USD, fall back to bot.totalInvestment if not provided
-      const signalUsd = parseFloat(contracts || positionSize || "0");
-      const fallbackUsd = parseFloat(bot.totalInvestment || "100");
-      const tradeAmountUsd = signalUsd > 0 ? signalUsd : fallbackUsd;
+      // Pionex-style: TradingView sends PERCENTAGE (100 = 100%, 33.33 = 33.33%)
+      // Platform manages total investment, signal is percentage of that capital
+      const signalPercent = parseFloat(contracts || positionSize || "0");
+      const baseCapital = parseFloat(bot.totalInvestment || "0");
       
-      if (tradeAmountUsd <= 0) {
+      if (baseCapital <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
         });
-        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid trade amount: ${tradeAmountUsd}`, processed: true });
-        return res.status(400).json({ error: `Invalid trade amount: ${tradeAmountUsd}. Must be > 0.` });
+        await storage.updateWebhookLog(log.id, { errorMessage: `Bot has no capital configured`, processed: true });
+        return res.status(400).json({ error: `Bot has no capital configured. Set totalInvestment on the bot.` });
       }
       
-      console.log(`[Webhook] Trade amount: $${tradeAmountUsd.toFixed(2)} USD (signal: ${signalUsd}, fallback: ${fallbackUsd})`);
+      // If signal has percentage, use it; otherwise use 100% of capital
+      const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+      
+      console.log(`[Webhook] Signal ${signalPercent}% of $${baseCapital} capital = $${tradeAmountUsd.toFixed(2)} trade`);
 
       // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
@@ -1217,22 +1219,24 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Pionex-style: TradingView sends USD amount per entry (e.g., 33.33 for pyramid)
-      // Use TradingView's value as USD, fall back to bot.totalInvestment if not provided
-      const signalUsd = parseFloat(contracts || positionSize || "0");
-      const fallbackUsd = parseFloat(bot.totalInvestment || "100");
-      const tradeAmountUsd = signalUsd > 0 ? signalUsd : fallbackUsd;
+      // Pionex-style: TradingView sends PERCENTAGE (100 = 100%, 33.33 = 33.33%)
+      // Platform manages total investment, signal is percentage of that capital
+      const signalPercent = parseFloat(contracts || positionSize || "0");
+      const baseCapital = parseFloat(bot.totalInvestment || "0");
       
-      if (tradeAmountUsd <= 0) {
+      if (baseCapital <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
         });
-        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid trade amount: ${tradeAmountUsd}`, processed: true });
-        return res.status(400).json({ error: `Invalid trade amount: ${tradeAmountUsd}. Must be > 0.` });
+        await storage.updateWebhookLog(log.id, { errorMessage: `Bot has no capital configured`, processed: true });
+        return res.status(400).json({ error: `Bot has no capital configured. Set totalInvestment on the bot.` });
       }
       
-      console.log(`[User Webhook] Trade amount: $${tradeAmountUsd.toFixed(2)} USD (signal: ${signalUsd}, fallback: ${fallbackUsd})`);
+      // If signal has percentage, use it; otherwise use 100% of capital
+      const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+      
+      console.log(`[User Webhook] Signal ${signalPercent}% of $${baseCapital} capital = $${tradeAmountUsd.toFixed(2)} trade`);
 
       // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
