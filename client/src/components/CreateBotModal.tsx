@@ -28,7 +28,8 @@ import {
   ExternalLink, 
   AlertCircle, 
   Sparkles,
-  Bot
+  Bot,
+  Settings
 } from 'lucide-react';
 
 interface TradingBot {
@@ -60,6 +61,8 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [isLoadingWebhookUrl, setIsLoadingWebhookUrl] = useState(false);
+  const [editLeverage, setEditLeverage] = useState(10);
+  const [editMaxPositionSize, setEditMaxPositionSize] = useState('100');
   
   const [newBot, setNewBot] = useState({
     name: '',
@@ -75,6 +78,8 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
     setEquityAmount('');
     setAgentBalance(null);
     setUserWebhookUrl(null);
+    setEditLeverage(10);
+    setEditMaxPositionSize('100');
     setNewBot({
       name: '',
       market: 'SOL-PERP',
@@ -182,41 +187,45 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   };
 
   const handleAddEquity = async () => {
-    if (!createdBot || !equityAmount || parseFloat(equityAmount) <= 0) {
-      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+    if (!createdBot) {
+      toast({ title: 'No bot found', variant: 'destructive' });
+      return;
+    }
+    
+    if (!editMaxPositionSize || parseFloat(editMaxPositionSize) <= 0) {
+      toast({ title: 'Please set a valid Max Position Size', variant: 'destructive' });
       return;
     }
 
     setIsProcessingEquity(true);
     try {
-      const response = await fetch('/api/agent/drift-deposit', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-        },
+      // First, save the bot settings (leverage and max position size)
+      const settingsRes = await fetch(`/api/trading-bots/${createdBot.id}?wallet=${walletAddress}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ 
-          walletAddress,
-          botId: createdBot.id,
-          amount: parseFloat(equityAmount) 
+          leverage: editLeverage,
+          maxPositionSize: parseFloat(editMaxPositionSize),
         }),
       });
-
-      const data = await response.json();
       
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to add equity');
+      if (!settingsRes.ok) {
+        const err = await settingsRes.json();
+        throw new Error(err.error || 'Failed to save bot settings');
       }
 
       toast({ 
-        title: 'Equity Added Successfully!', 
-        description: `Added ${equityAmount} USDC to your bot` 
+        title: 'Bot Configured Successfully!', 
+        description: `${editLeverage}x leverage, $${editMaxPositionSize} max position` 
       });
       
+      onBotCreated();
       handleClose();
     } catch (error: any) {
-      console.error('Equity allocation error:', error);
+      console.error('Bot configuration error:', error);
       toast({ 
-        title: 'Failed to add equity', 
+        title: 'Failed to configure bot', 
         description: error.message || 'Please try again',
         variant: 'destructive' 
       });
@@ -436,10 +445,10 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
           <div className="p-4 rounded-xl bg-gradient-to-br from-green-500/10 to-emerald-500/10 border border-green-500/20">
             <h3 className="font-semibold text-lg mb-3 flex items-center gap-2">
               <span className="w-6 h-6 rounded-full bg-green-500 text-white text-sm flex items-center justify-center">4</span>
-              Fund Your Bot
+              Configure Trading Settings
             </h3>
             <p className="text-sm text-muted-foreground mb-4">
-              Your bot needs equity to execute trades. Add USDC from your main account to start trading.
+              Set your leverage and max position size to complete the bot setup.
             </p>
             <div className="flex flex-col gap-2">
               <Button
@@ -447,8 +456,8 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
                 onClick={goToEquityStep}
                 data-testid="button-add-equity-now"
               >
-                <Wallet className="w-4 h-4 mr-2" />
-                Add Equity Now
+                <Settings className="w-4 h-4 mr-2" />
+                Configure Now
               </Button>
               <Button
                 variant="ghost"
@@ -491,11 +500,11 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
       <>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Wallet className="w-5 h-5 text-green-500" />
-            Fund Your Bot
+            <Settings className="w-5 h-5 text-primary" />
+            Configure Your Bot
           </DialogTitle>
           <DialogDescription>
-            Add USDC from your main account to enable your bot to execute trades.
+            Set your trading parameters to complete the setup.
           </DialogDescription>
         </DialogHeader>
         
@@ -513,37 +522,43 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
           </div>
 
           <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="equity-amount">Amount (USDC)</Label>
-              {agentBalance && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-auto py-1 px-2 text-xs"
-                  onClick={() => setEquityAmount(agentBalance)}
-                  disabled={isLoadingBalance}
-                >
-                  Max: ${parseFloat(agentBalance).toFixed(2)}
-                </Button>
-              )}
-            </div>
+            <Label htmlFor="max-position-size">Max Position Size (USDC)</Label>
             <Input
-              id="equity-amount"
+              id="max-position-size"
               type="number"
               placeholder="100"
-              value={equityAmount}
-              onChange={(e) => setEquityAmount(e.target.value)}
+              value={editMaxPositionSize}
+              onChange={(e) => setEditMaxPositionSize(e.target.value)}
               className="font-mono"
-              data-testid="input-equity-amount"
+              data-testid="input-max-position-size"
             />
             <p className="text-xs text-muted-foreground">
-              This will be transferred from your main Drift account to this bot's subaccount.
+              Maximum capital for this bot. TradingView sends a % of this amount per trade.
             </p>
           </div>
 
-          <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
-            <p className="text-xs text-yellow-600">
-              Make sure you have sufficient USDC in your main Drift account before proceeding.
+          <div className="space-y-3">
+            <div className="flex justify-between">
+              <Label>Leverage</Label>
+              <span className="text-sm font-medium text-primary">{editLeverage}x</span>
+            </div>
+            <Slider
+              value={[editLeverage]}
+              onValueChange={(v) => setEditLeverage(v[0])}
+              min={1}
+              max={20}
+              step={1}
+              data-testid="slider-leverage-equity"
+            />
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>1x (Safe)</span>
+              <span>20x (High Risk)</span>
+            </div>
+          </div>
+
+          <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
+            <p className="text-xs text-blue-600">
+              <strong>Example:</strong> $100 max position × 33.33% signal × {editLeverage}x leverage = ${(100 * 0.3333 * editLeverage).toFixed(2)} position
             </p>
           </div>
         </div>
@@ -552,19 +567,16 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
           <Button
             className="w-full bg-gradient-to-r from-green-500 to-emerald-500"
             onClick={handleAddEquity}
-            disabled={!equityAmount || parseFloat(equityAmount) <= 0 || isProcessingEquity}
+            disabled={!editMaxPositionSize || parseFloat(editMaxPositionSize) <= 0 || isProcessingEquity}
             data-testid="button-confirm-equity"
           >
             {isProcessingEquity ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Processing...
+                Saving...
               </>
             ) : (
-              <>
-                <Wallet className="w-4 h-4 mr-2" />
-                Add Equity
-              </>
+              'Complete Setup'
             )}
           </Button>
           <Button
