@@ -111,6 +111,8 @@ export function usePositions() {
     queryKey: ["positions", publicKeyString],
     queryFn: () => fetchPositions(publicKeyString!),
     enabled: !!publicKeyString && sessionConnected,
+    refetchInterval: 5000,
+    staleTime: 3000,
   });
 }
 
@@ -157,8 +159,8 @@ export function usePrices() {
   return useQuery({
     queryKey: ["prices"],
     queryFn: fetchPrices,
-    refetchInterval: 10000,
-    staleTime: 5000,
+    refetchInterval: 3000,
+    staleTime: 2000,
   });
 }
 
