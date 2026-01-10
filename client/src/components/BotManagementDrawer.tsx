@@ -692,14 +692,14 @@ export function BotManagementDrawer({
                     type="number"
                     value={editMaxPositionSize}
                     onChange={(e) => setEditMaxPositionSize(e.target.value)}
-                    placeholder="Leave empty for no limit"
+                    placeholder="Required for trading"
                     min="1"
                     step="1"
                     data-testid="input-max-position-size"
                   />
                   <p className="text-xs text-muted-foreground flex items-center gap-1">
                     <Info className="w-3 h-3" />
-                    Maximum USDC per trade (e.g., $10 for small test trades)
+                    Your capital base. TradingView signals trade a % of this amount.
                   </p>
                 </div>
                 
