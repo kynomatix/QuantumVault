@@ -885,9 +885,35 @@ export function BotManagementDrawer({
           </TabsContent>
 
           <TabsContent value="webhook" className="space-y-4 mt-4">
-            <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-500/10 to-primary/10 border border-emerald-500/20">
+            <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border border-primary/20">
               <h3 className="font-semibold mb-3 flex items-center gap-2">
                 <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">1</span>
+                Alert Message
+              </h3>
+              <pre className="p-3 bg-background/80 rounded-lg font-mono text-xs border whitespace-pre-wrap break-all">
+                {getMessageTemplate()}
+              </pre>
+              <Button
+                className="w-full mt-3"
+                variant="secondary"
+                onClick={() => copyToClipboard(getMessageTemplate(), 'Message')}
+                data-testid="button-copy-message"
+              >
+                {copiedField === 'Message' ? (
+                  <Check className="w-4 h-4 mr-2" />
+                ) : (
+                  <Copy className="w-4 h-4 mr-2" />
+                )}
+                {copiedField === 'Message' ? 'Copied!' : 'Copy Alert Message'}
+              </Button>
+              <p className="text-xs text-muted-foreground mt-2">
+                Paste this in TradingView Alert → Message field. The botId routes signals to this specific bot.
+              </p>
+            </div>
+
+            <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-500/10 to-primary/10 border border-emerald-500/20">
+              <h3 className="font-semibold mb-3 flex items-center gap-2">
+                <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">2</span>
                 Webhook URL
               </h3>
               <div className="p-3 bg-background/80 rounded-lg font-mono text-xs border break-all">
@@ -913,32 +939,6 @@ export function BotManagementDrawer({
               </Button>
               <p className="text-xs text-muted-foreground mt-2">
                 This is your universal webhook URL - same for all bots! Paste in TradingView Alert → Notifications → Webhook URL
-              </p>
-            </div>
-
-            <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border border-primary/20">
-              <h3 className="font-semibold mb-3 flex items-center gap-2">
-                <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">2</span>
-                Alert Message
-              </h3>
-              <pre className="p-3 bg-background/80 rounded-lg font-mono text-xs border whitespace-pre-wrap break-all">
-                {getMessageTemplate()}
-              </pre>
-              <Button
-                className="w-full mt-3"
-                variant="secondary"
-                onClick={() => copyToClipboard(getMessageTemplate(), 'Message')}
-                data-testid="button-copy-message"
-              >
-                {copiedField === 'Message' ? (
-                  <Check className="w-4 h-4 mr-2" />
-                ) : (
-                  <Copy className="w-4 h-4 mr-2" />
-                )}
-                {copiedField === 'Message' ? 'Copied!' : 'Copy Alert Message'}
-              </Button>
-              <p className="text-xs text-muted-foreground mt-2">
-                Paste this in TradingView Alert → Message field. The botId routes signals to this specific bot.
               </p>
             </div>
 

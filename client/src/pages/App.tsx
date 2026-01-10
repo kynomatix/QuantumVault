@@ -772,7 +772,15 @@ export default function AppPage() {
                     <div className="space-y-3">
                       {botsData && botsData.length > 0 ? (
                         botsData.map((bot: TradingBot) => (
-                          <div key={bot.id} className="p-3 rounded-xl bg-muted/30 hover:bg-muted/40 transition-colors" data-testid={`bot-item-${bot.id}`}>
+                          <div 
+                            key={bot.id} 
+                            className="p-3 rounded-xl bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer" 
+                            data-testid={`bot-item-${bot.id}`}
+                            onClick={() => {
+                              setSelectedManagedBot(bot);
+                              setManageBotDrawerOpen(true);
+                            }}
+                          >
                             <div className="flex items-center justify-between mb-2">
                               <div className="flex items-center gap-2">
                                 <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center">
@@ -783,21 +791,7 @@ export default function AppPage() {
                                   <p className="text-xs text-muted-foreground">{bot.market}</p>
                                 </div>
                               </div>
-                              <div className="flex items-center gap-2">
-                                <Button 
-                                  variant="ghost" 
-                                  size="icon" 
-                                  className="h-6 w-6"
-                                  onClick={() => {
-                                    setSelectedManagedBot(bot);
-                                    setManageBotDrawerOpen(true);
-                                  }}
-                                  data-testid={`button-bot-settings-${bot.id}`}
-                                >
-                                  <Settings className="w-3.5 h-3.5 text-muted-foreground" />
-                                </Button>
-                                <span className={`w-2 h-2 rounded-full ${bot.isActive ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
-                              </div>
+                              <span className={`w-2 h-2 rounded-full ${bot.isActive ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
                             </div>
                             <div className="flex items-center justify-between text-xs">
                               <span className="text-muted-foreground">{(bot.stats as any)?.totalTrades ?? 0} trades</span>
