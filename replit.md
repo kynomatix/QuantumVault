@@ -103,6 +103,33 @@ Preferred communication style: Simple, everyday language.
   - `POST /api/agent/confirm-withdraw` - Log confirmed withdrawal transaction
   - `GET /api/equity-events` - Get transaction history for wallet
 
+### Close Signal Detection (Jan 2026)
+- **Purpose**: Distinguish between entry signals and close signals (SL/TP) from TradingView
+- **TradingView Field**: `strategy.position_size` - new position size after trade
+  - `position_size = 0` → Closing position (SL/TP signal)
+  - `position_size > 0` → Opening/adding to position
+- **Close Signal Flow**:
+  1. Webhook receives signal with `position_size = 0`
+  2. Platform checks bot_positions for existing position
+  3. If no position exists → Skip signal (stale SL/TP)
+  4. If position exists → Execute reduce-only close order on Drift
+- **Prevents**: Bot incorrectly opening positions from SL/TP signals
+
+### Bot Pause = Close Position (Jan 2026)
+- **Behavior**: When user pauses a bot (isActive → false), platform automatically closes any open position
+- **Flow**:
+  1. User clicks "Pause" on bot
+  2. Platform checks bot_positions for open position
+  3. If position exists → Execute reduce-only close order
+  4. Update bot_trades and bot_positions
+  5. Mark bot as paused
+- **API Response**: Includes `positionClosed: true` or `positionCloseError` if applicable
+
+### Webhook Deduplication (Jan 2026)
+- **Unique Constraint**: `signal_hash` column on webhook_logs table prevents duplicate signals
+- **Hash Contents**: botId + action + contracts + symbol + time + price
+- **Behavior**: Same TradingView alert received multiple times only processes once
+
 ### Equity Event Tracking (Jan 2026)
 - **Purpose**: Track all deposits and withdrawals for transaction history display
 - **Event Types**: agent_deposit, agent_withdraw, drift_deposit, drift_withdraw

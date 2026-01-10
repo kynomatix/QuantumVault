@@ -652,6 +652,85 @@ export async function registerRoutes(
         }
       }
       
+      // PAUSE BOT = CLOSE POSITION: If bot is being paused (isActive changing to false)
+      // close any open position on Drift first
+      let positionClosed = false;
+      let closeError: string | null = null;
+      
+      if (isActive === false && bot.isActive === true) {
+        console.log(`[Bot] Pausing bot ${bot.name} - checking for open positions to close`);
+        
+        // Check if this bot has an open position
+        const botPosition = await storage.getBotPosition(bot.id, bot.market);
+        
+        if (botPosition && parseFloat(botPosition.baseSize) !== 0) {
+          console.log(`[Bot] Found open position: ${botPosition.baseSize} ${bot.market} - closing before pause`);
+          
+          // Get wallet for execution
+          const wallet = await storage.getWallet(bot.walletAddress);
+          if (!wallet?.agentPrivateKeyEncrypted) {
+            return res.status(400).json({ 
+              error: "Cannot pause: Agent wallet not configured to close position",
+              hasPosition: true,
+              positionSize: botPosition.baseSize,
+            });
+          }
+          
+          try {
+            // Determine close side (opposite of current position)
+            const currentPositionSize = parseFloat(botPosition.baseSize);
+            const closeSide: 'long' | 'short' = currentPositionSize > 0 ? 'short' : 'long';
+            const closeSize = Math.abs(currentPositionSize);
+            
+            // Execute close order on Drift (reduce-only)
+            const pauseSubAccountId = bot.driftSubaccountId ?? 0;
+            const result = await executePerpOrder(
+              wallet.agentPrivateKeyEncrypted,
+              bot.market,
+              closeSide,
+              closeSize,
+              pauseSubAccountId,
+              true // reduceOnly
+            );
+            
+            if (result.success && result.txSignature) {
+              console.log(`[Bot] Position closed successfully: ${result.txSignature}`);
+              
+              // Create trade record for the close
+              const closeTrade = await storage.createBotTrade({
+                tradingBotId: bot.id,
+                walletAddress: bot.walletAddress,
+                market: bot.market,
+                side: closeSide.toUpperCase(),
+                size: String(closeSize),
+                price: result.fillPrice ? String(result.fillPrice) : "0",
+                status: "executed",
+                txSignature: result.txSignature,
+                webhookPayload: { action: "pause_close", reason: "Bot paused by user" },
+              });
+              
+              // Update bot position (will be zeroed out)
+              await storage.updateBotPositionFromTrade({
+                tradingBotId: bot.id,
+                market: bot.market,
+                side: closeSide,
+                size: closeSize,
+                fillPrice: result.fillPrice || 0,
+                tradeId: closeTrade.id,
+              });
+              
+              positionClosed = true;
+            } else {
+              throw new Error(result.error || "Close order execution failed");
+            }
+          } catch (err: any) {
+            console.error(`[Bot] Failed to close position on pause:`, err);
+            closeError = err.message || "Failed to close position";
+            // Continue with pause even if close fails - user can manually close
+          }
+        }
+      }
+      
       const updated = await storage.updateTradingBot(req.params.id, {
         ...(name && { name }),
         ...(market && { market }),
@@ -664,7 +743,17 @@ export async function registerRoutes(
         ...(isActive !== undefined && { isActive }),
       });
 
-      res.json(updated);
+      // Include position close info in response
+      const response: any = { ...updated };
+      if (positionClosed) {
+        response.positionClosed = true;
+        response.message = "Bot paused and open position was closed on Drift";
+      } else if (closeError) {
+        response.positionCloseError = closeError;
+        response.message = "Bot paused but position close failed - please close manually";
+      }
+
+      res.json(response);
     } catch (error) {
       console.error("Update trading bot error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -910,12 +999,14 @@ export async function registerRoutes(
       //   "data": { "action": "buy", "contracts": "33.33", "positionSize": "100" },
       //   "symbol": "SOLUSD",
       //   "price": "195.50",
-      //   "time": "2025-01-09T12:00:00Z"
+      //   "time": "2025-01-09T12:00:00Z",
+      //   "position_size": "0"  // NEW: strategy.position_size - 0 means closing position (SL/TP)
       // }
       const payload = req.body;
       let action: string | null = null;
       let contracts: string = "0";
       let positionSize: string = bot.maxPositionSize || "100";
+      let strategyPositionSize: string | null = null; // NEW: Track strategy.position_size for close detection
       let ticker: string = "";
       let signalPrice: string = "0";
       let signalTime: string | null = null;
@@ -929,7 +1020,10 @@ export async function registerRoutes(
         if (payload.symbol) ticker = String(payload.symbol);
         if (payload.price) signalPrice = String(payload.price);
         if (payload.time) signalTime = String(payload.time);
-        console.log(`[Webhook] Parsed JSON signal: action=${action}, contracts=${contracts}, symbol=${ticker}, price=${signalPrice}, time=${signalTime}`);
+        // Parse strategy.position_size for close signal detection
+        if (payload.position_size !== undefined) strategyPositionSize = String(payload.position_size);
+        if (payload.data.position_size !== undefined) strategyPositionSize = String(payload.data.position_size);
+        console.log(`[Webhook] Parsed JSON signal: action=${action}, contracts=${contracts}, symbol=${ticker}, price=${signalPrice}, time=${signalTime}, strategyPositionSize=${strategyPositionSize}`);
       } else {
         // Fallback: legacy format parsing
         const message = typeof payload === 'string' ? payload : 
@@ -945,13 +1039,17 @@ export async function registerRoutes(
           contracts = match[2];
           ticker = match[3];
           positionSize = match[4];
+          strategyPositionSize = match[4]; // Legacy format includes position size
         } else {
           // Fallback: try simple JSON parsing
           try {
             const parsed = typeof payload === 'object' ? payload : JSON.parse(message);
             if (parsed.action) action = parsed.action.toLowerCase();
             if (parsed.contracts) contracts = String(parsed.contracts);
-            if (parsed.position_size) positionSize = String(parsed.position_size);
+            if (parsed.position_size !== undefined) {
+              positionSize = String(parsed.position_size);
+              strategyPositionSize = String(parsed.position_size);
+            }
           } catch {
             // Last resort: simple keyword detection
             const text = message.toLowerCase();
@@ -959,6 +1057,7 @@ export async function registerRoutes(
             else if (text.includes('sell')) action = 'sell';
           }
         }
+        console.log(`[Webhook] Parsed legacy signal: action=${action}, contracts=${contracts}, strategyPositionSize=${strategyPositionSize}`);
       }
 
       // Map TradingView action to trade side
@@ -986,6 +1085,125 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No valid action found", received: payload });
       }
 
+      // CLOSE SIGNAL DETECTION: Check if this is a position close signal (SL/TP)
+      // TradingView sends strategy.position_size = 0 when closing a position
+      const isCloseSignal = strategyPositionSize !== null && 
+        (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
+      
+      if (isCloseSignal) {
+        console.log(`[Webhook] Close signal detected (strategyPositionSize=${strategyPositionSize})`);
+        
+        // Check if this bot has an open position to close
+        const botPosition = await storage.getBotPosition(botId, bot.market);
+        
+        if (!botPosition || parseFloat(botPosition.baseSize) === 0) {
+          // No position to close - this is likely a SL/TP for a position that doesn't exist in this bot
+          console.log(`[Webhook] Close signal ignored - no open position for bot ${bot.name} on ${bot.market}`);
+          await storage.updateWebhookLog(log.id, { 
+            errorMessage: "Close signal ignored - no open position", 
+            processed: true 
+          });
+          return res.status(200).json({ 
+            status: "skipped", 
+            reason: "No open position to close - this may be a stale SL/TP signal" 
+          });
+        }
+        
+        // There IS a position to close - execute close order
+        console.log(`[Webhook] Closing position: ${botPosition.baseSize} contracts on ${bot.market}`);
+        
+        // Get wallet for execution
+        const wallet = await storage.getWallet(bot.walletAddress);
+        if (!wallet?.agentPrivateKeyEncrypted) {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured for close", processed: true });
+          return res.status(400).json({ error: "Agent wallet not configured" });
+        }
+        
+        // Determine close side (opposite of current position)
+        const currentPositionSize = parseFloat(botPosition.baseSize);
+        const closeSide = currentPositionSize > 0 ? 'short' : 'long'; // Close by taking opposite side
+        const closeSize = Math.abs(currentPositionSize);
+        
+        // Create trade record for the close
+        const closeTrade = await storage.createBotTrade({
+          tradingBotId: botId,
+          walletAddress: bot.walletAddress,
+          market: bot.market,
+          side: closeSide.toUpperCase(),
+          size: String(closeSize),
+          price: signalPrice,
+          status: "pending",
+          webhookPayload: payload,
+        });
+        
+        try {
+          // Execute close order on Drift (reduce-only)
+          const subAccountId = bot.driftSubaccountId ?? 0;
+          const result = await executePerpOrder(
+            wallet.agentPrivateKeyEncrypted,
+            bot.market,
+            closeSide,
+            closeSize,
+            subAccountId,
+            true // reduceOnly = true for closing
+          );
+          
+          if (result.success && result.txSignature) {
+            // Update trade record with execution details
+            await storage.updateBotTrade(closeTrade.id, {
+              status: "executed",
+              txSignature: result.txSignature,
+              price: result.fillPrice ? String(result.fillPrice) : signalPrice,
+            });
+            
+            // Update bot position (will be zeroed out)
+            await storage.updateBotPositionFromTrade({
+              tradingBotId: botId,
+              market: bot.market,
+              side: closeSide,
+              size: closeSize,
+              fillPrice: result.fillPrice || 0,
+              tradeId: closeTrade.id,
+            });
+            
+            // Update bot stats
+            await storage.updateTradingBot(botId, {
+              stats: {
+                ...(bot.stats as any || {}),
+                totalTrades: ((bot.stats as any)?.totalTrades || 0) + 1,
+                lastTradeAt: new Date().toISOString(),
+              },
+            });
+            
+            await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
+            
+            console.log(`[Webhook] Position closed successfully: ${closeSize} ${bot.market} ${closeSide.toUpperCase()}`);
+            return res.json({
+              status: "success",
+              type: "close",
+              trade: closeTrade.id,
+              txSignature: result.txSignature,
+              closedSize: closeSize,
+              side: closeSide,
+            });
+          } else {
+            throw new Error(result.error || "Close order execution failed");
+          }
+        } catch (closeError: any) {
+          console.error(`[Webhook] Close order failed:`, closeError);
+          await storage.updateBotTrade(closeTrade.id, {
+            status: "failed",
+            txSignature: null,
+          });
+          await storage.updateWebhookLog(log.id, { 
+            errorMessage: `Close order failed: ${closeError.message}`, 
+            processed: true 
+          });
+          return res.status(500).json({ error: "Close order execution failed", details: closeError.message });
+        }
+      }
+
+      // Regular order execution (not a close signal)
       // Create trade record (pending execution)
       // Use contracts as the trade size (what TradingView sent for this order)
       // Include the signal price and time from TradingView
@@ -1121,7 +1339,7 @@ export async function registerRoutes(
       await storage.updateBotTrade(trade.id, {
         status: "executed",
         price: fillPrice.toString(),
-        txSignature: orderResult.signature || null,
+        txSignature: orderResult.txSignature || orderResult.signature || null,
         size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
 
@@ -1441,7 +1659,7 @@ export async function registerRoutes(
       await storage.updateBotTrade(trade.id, {
         status: "executed",
         price: userFillPrice.toString(),
-        txSignature: orderResult.signature || null,
+        txSignature: orderResult.txSignature || orderResult.signature || null,
         size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
 
@@ -1484,7 +1702,7 @@ export async function registerRoutes(
         market: bot.market,
         size: positionSize,
         botId: botId,
-        txSignature: orderResult.signature,
+        txSignature: orderResult.txSignature || orderResult.signature,
         signalHash,
       });
     } catch (error) {

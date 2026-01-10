@@ -1681,7 +1681,8 @@ export async function executePerpOrder(
   side: 'long' | 'short',
   sizeInBase: number,
   subAccountId: number = 0,
-): Promise<{ success: boolean; signature?: string; error?: string; fillPrice?: number }> {
+  reduceOnly: boolean = false,
+): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number }> {
   try {
     // Import SDK types
     const { PositionDirection, OrderType, MarketType, BASE_PRECISION } = await import('@drift-labs/sdk');
@@ -1690,7 +1691,7 @@ export async function executePerpOrder(
     const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
     const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
     
-    console.log(`[Drift] Executing ${side} order for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}`);
+    console.log(`[Drift] Executing ${side} ${reduceOnly ? 'REDUCE-ONLY ' : ''}order for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}`);
     
     const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey);
     
@@ -1718,6 +1719,7 @@ export async function executePerpOrder(
         marketIndex,
         marketType: MarketType.PERP,
         orderType: OrderType.MARKET,
+        reduceOnly,
       });
       
       console.log(`[Drift] Order executed: ${txSig}`);
@@ -1741,7 +1743,7 @@ export async function executePerpOrder(
       }
       
       await cleanup();
-      return { success: true, signature: txSig, fillPrice };
+      return { success: true, signature: txSig, txSignature: txSig, fillPrice };
     } catch (orderError) {
       await cleanup();
       throw orderError;
