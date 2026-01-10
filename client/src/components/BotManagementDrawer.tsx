@@ -688,18 +688,35 @@ export function BotManagementDrawer({
                   <div className="flex items-center justify-between">
                     <label className="text-sm text-muted-foreground">Max Position Size (USDC)</label>
                   </div>
-                  <Input
-                    type="number"
-                    value={editMaxPositionSize}
-                    onChange={(e) => setEditMaxPositionSize(e.target.value)}
-                    placeholder="Required for trading"
-                    min="1"
-                    step="1"
-                    data-testid="input-max-position-size"
-                  />
+                  <div className="flex gap-2">
+                    <Input
+                      type="number"
+                      value={editMaxPositionSize}
+                      onChange={(e) => setEditMaxPositionSize(e.target.value)}
+                      placeholder="Required for trading"
+                      min="1"
+                      step="1"
+                      className="flex-1"
+                      data-testid="input-max-position-size"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setEditMaxPositionSize(botBalance.toFixed(2))}
+                      disabled={botBalance <= 0}
+                      className="px-3"
+                      data-testid="button-max-position-size"
+                    >
+                      Max
+                    </Button>
+                  </div>
                   <p className="text-xs text-muted-foreground flex items-center gap-1">
                     <Info className="w-3 h-3" />
                     Your capital base. TradingView signals trade a % of this amount.
+                    {botBalance > 0 && (
+                      <span className="ml-1">(Bot has ${botBalance.toFixed(2)})</span>
+                    )}
                   </p>
                 </div>
                 
