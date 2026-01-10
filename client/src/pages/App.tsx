@@ -51,6 +51,7 @@ interface TradingBot {
   isActive: boolean;
   side: string;
   leverage: number;
+  totalInvestment: string;
   maxPositionSize: string | null;
   driftSubaccountId?: number | null;
   stats: {
