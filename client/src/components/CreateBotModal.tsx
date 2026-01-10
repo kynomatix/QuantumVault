@@ -330,9 +330,30 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
         </DialogHeader>
         
         <div className="space-y-6 py-4 max-h-[60vh] overflow-y-auto">
-          <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-500/10 to-primary/10 border border-emerald-500/20">
+          <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border border-primary/20">
             <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
               <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">1</span>
+              Alert Message
+            </h3>
+            <pre className="p-3 bg-background/80 rounded-lg font-mono text-sm border whitespace-pre-wrap" style={{ wordBreak: 'break-word' }}>
+{getMessageTemplate(createdBot.id)}
+            </pre>
+            <Button
+              className="w-full mt-3"
+              onClick={() => copyToClipboard(getMessageTemplate(createdBot.id), 'Message')}
+              data-testid="button-copy-message"
+            >
+              {copiedField === 'Message' ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
+              {copiedField === 'Message' ? 'Copied!' : 'Copy Alert Message'}
+            </Button>
+            <p className="text-xs text-muted-foreground mt-2">
+              Paste this in TradingView Alert → Message field. The botId routes signals to this specific bot.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-500/10 to-primary/10 border border-emerald-500/20">
+            <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
+              <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">2</span>
               Webhook URL
             </h3>
             <div className="p-3 bg-background/80 rounded-lg font-mono text-sm border" style={{ wordBreak: 'break-word' }}>
@@ -356,27 +377,6 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
             </p>
           </div>
 
-          <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border border-primary/20">
-            <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
-              <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">2</span>
-              Alert Message
-            </h3>
-            <pre className="p-3 bg-background/80 rounded-lg font-mono text-sm border whitespace-pre-wrap" style={{ wordBreak: 'break-word' }}>
-{getMessageTemplate(createdBot.id)}
-            </pre>
-            <Button
-              className="w-full mt-3"
-              onClick={() => copyToClipboard(getMessageTemplate(createdBot.id), 'Message')}
-              data-testid="button-copy-message"
-            >
-              {copiedField === 'Message' ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
-              {copiedField === 'Message' ? 'Copied!' : 'Copy Alert Message'}
-            </Button>
-            <p className="text-xs text-muted-foreground mt-2">
-              Paste this in TradingView Alert → Message field. The botId routes signals to this specific bot.
-            </p>
-          </div>
-
           <div className="p-4 rounded-xl bg-gradient-to-br from-blue-500/10 to-purple-500/10 border border-blue-500/20">
             <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
               <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">3</span>
@@ -388,35 +388,36 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
             <div className="space-y-3 text-sm">
               <div className="flex items-center justify-between p-2 bg-background/50 rounded-lg">
                 <span className="font-medium">Initial Capital</span>
-                <span className="text-muted-foreground">Set to your total position size (e.g. 100 USDC)</span>
+                <span className="text-muted-foreground">Set to <strong>100</strong> (represents 100%)</span>
               </div>
               <div className="flex items-center justify-between p-2 bg-background/50 rounded-lg">
                 <span className="font-medium">Default Order Size</span>
-                <span className="text-muted-foreground">Size per entry (e.g. 33.33 for 3 entries)</span>
+                <span className="text-muted-foreground">% per entry (33.33 for 3 entries, 100 for 1 entry)</span>
               </div>
               <div className="flex items-center justify-between p-2 bg-background/50 rounded-lg">
                 <span className="font-medium">Pyramiding</span>
-                <span className="text-muted-foreground">Number of orders allowed (e.g. 3 orders)</span>
+                <span className="text-muted-foreground">Number of entries allowed (e.g. 3)</span>
               </div>
             </div>
             <p className="text-xs text-muted-foreground mt-3">
-              Example: 100 USDC capital / 33.33 order size / 3 pyramiding = 3 entries of 33.33 each
+              TradingView sends a % value → Platform trades that % of your bot's Max Position Size
             </p>
           </div>
 
           <div className="p-4 rounded-xl bg-muted/50 border">
             <h3 className="font-semibold mb-3 flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-primary" />
-              How The Placeholders Work
+              How It Works
             </h3>
             <div className="space-y-2 text-sm text-muted-foreground">
-              <p><code className="px-1 py-0.5 bg-background rounded text-xs">"botId"</code> → Your bot's unique ID (routes signals to this bot)</p>
-              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.action}}"}</code> → "buy" or "sell" from your strategy</p>
-              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.contracts}}"}</code> → Order size for this entry (e.g. 33.33)</p>
-              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.position_size}}"}</code> → Total position after this order</p>
-              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{ticker}}"}</code> → Trading symbol (e.g. SOLUSD)</p>
-              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{close}}"}</code> → Current price when signal was sent</p>
-              <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{timenow}}"}</code> → Timestamp when TradingView sent the signal</p>
+              <p><strong>1.</strong> Set your bot's <strong>Max Position Size</strong> (e.g. $100)</p>
+              <p><strong>2.</strong> In TradingView, set <strong>Initial Capital: 100</strong> and <strong>Order Size: 33.33</strong> (for 3 entries)</p>
+              <p><strong>3.</strong> TradingView sends 33.33 → Platform trades 33.33% of your Max Position Size</p>
+              <div className="pt-2 border-t mt-2">
+                <p className="font-medium text-foreground mb-1">Key placeholders:</p>
+                <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.contracts}}"}</code> → % of your capital (33.33 = 33.33%)</p>
+                <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.action}}"}</code> → "buy" or "sell"</p>
+              </div>
             </div>
           </div>
 
