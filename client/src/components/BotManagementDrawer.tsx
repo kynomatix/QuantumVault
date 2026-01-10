@@ -952,10 +952,14 @@ export function BotManagementDrawer({
                   <strong>1.</strong> Set your <strong>Total Investment</strong> on the bot (e.g., $100)
                 </p>
                 <p>
-                  <strong>2.</strong> In TradingView, set <strong>Initial Capital: 100</strong> and <strong>Order Size: 33.33</strong> (for 3-order pyramiding)
+                  <strong>2.</strong> In TradingView, set <strong>Initial Capital: 100</strong> and <strong>Order Size</strong>:
                 </p>
+                <ul className="ml-4 space-y-1">
+                  <li>• <strong>100</strong> = 100% per trade (no pyramiding)</li>
+                  <li>• <strong>33.33</strong> = 33.33% per trade (3-order pyramiding)</li>
+                </ul>
                 <p>
-                  <strong>3.</strong> TradingView sends 33.33 → Platform trades 33.33% of your $100 = <strong>$33.33</strong>
+                  <strong>3.</strong> TradingView sends the % → Platform trades that % of your capital
                 </p>
                 <div className="pt-2 border-t mt-2">
                   <p className="font-medium text-foreground mb-1">Placeholders:</p>
