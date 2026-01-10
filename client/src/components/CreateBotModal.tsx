@@ -429,7 +429,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
             <ul className="text-sm text-muted-foreground space-y-1">
               <li>• Your script must use <code className="px-1 py-0.5 bg-background rounded text-xs">strategy()</code> not <code className="px-1 py-0.5 bg-background rounded text-xs">indicator()</code></li>
               <li>• Webhook alerts require TradingView Essential plan or higher</li>
-              <li>• Make sure your bot is activated before testing</li>
+              <li>• Make sure your bot is activated before proceeding</li>
             </ul>
           </div>
 
