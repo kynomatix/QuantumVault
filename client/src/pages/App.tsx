@@ -483,7 +483,7 @@ export default function AppPage() {
         <div className="flex flex-col h-full">
           <div className="p-4 border-b border-border/50">
             <div className="flex items-center gap-3">
-              <img src="/images/qv_logo.png" alt="QuantumVault" className="w-10 h-10 rounded-xl flex-shrink-0" />
+              <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-10 h-10 rounded-xl flex-shrink-0" />
               {!sidebarCollapsed && (
                 <div className="hidden lg:block">
                   <span className="font-display font-bold text-lg">QuantumVault</span>
