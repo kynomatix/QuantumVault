@@ -29,8 +29,25 @@ Preferred communication style: Simple, everyday language.
 ### Data Storage
 - **Database**: PostgreSQL via Drizzle ORM
 - **Schema Location**: `shared/schema.ts` contains all table definitions
-- **Tables**: users, wallets, bots, tradingBots, botTrades, equityEvents, webhookLogs, subscriptions, portfolios, positions, trades, leaderboardStats
+- **Tables**: users, wallets, bots, tradingBots, botTrades, botPositions, equityEvents, webhookLogs, subscriptions, portfolios, positions, trades, leaderboardStats
 - **Migrations**: Managed via `drizzle-kit push` command
+
+### Real-Time Position Tracking (Jan 2026)
+- **bot_positions Table**: Persists running position per bot/market with:
+  - tradingBotId, market, baseSize, avgEntryPrice, costBasis, realizedPnl
+  - lastTradeId, lastTradeAt for audit trail
+  - Unique constraint on (tradingBotId, market)
+- **Position Update Flow**: After each successful trade execution:
+  1. Trade logged to botTrades with actual fill price
+  2. storage.updateBotPositionFromTrade() updates bot_positions using Decimal.js for precision
+  3. Same-side trades: Add to cost basis
+  4. Opposite-side trades: Reduce position, calculate realized PnL proportionally
+  5. Side flips: Reset cost basis for new position direction
+- **API Endpoint**: `GET /api/positions` reads from bot_positions + live prices
+- **Real-Time Updates**:
+  - Positions refresh every 5 seconds via React Query
+  - Prices refresh every 3 seconds via React Query
+  - SSE endpoint at `/api/prices/stream` available for streaming (not used by default)
 
 ### Authentication
 - **Wallet-Based**: Primary authentication via Solana wallet connection (Phantom)

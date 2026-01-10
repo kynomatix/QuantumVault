@@ -1,5 +1,6 @@
 import { eq, desc, sql, and } from "drizzle-orm";
 import { db } from "./db";
+import Decimal from "decimal.js";
 import {
   users,
   wallets,
@@ -431,45 +432,56 @@ export class DatabaseStorage implements IStorage {
   ): Promise<BotPosition> {
     const existing = await this.getBotPosition(tradingBotId, market);
     
-    let baseSize = existing ? parseFloat(existing.baseSize) : 0;
-    let costBasis = existing ? parseFloat(existing.costBasis) : 0;
-    let realizedPnl = existing ? parseFloat(existing.realizedPnl) : 0;
+    // Use Decimal.js for precise calculations (avoids floating point errors in trading)
+    Decimal.set({ precision: 20, rounding: Decimal.ROUND_HALF_UP });
+    
+    let baseSize = new Decimal(existing?.baseSize || "0");
+    let costBasis = new Decimal(existing?.costBasis || "0");
+    let realizedPnl = new Decimal(existing?.realizedPnl || "0");
 
+    const tradeSizeNum = new Decimal(size);
+    const priceNum = new Decimal(price);
+    
     const isLong = side.toUpperCase() === 'LONG' || side.toUpperCase() === 'BUY';
-    const tradeSize = isLong ? size : -size;
-    const sameSide = (baseSize >= 0 && tradeSize > 0) || (baseSize <= 0 && tradeSize < 0);
+    const tradeSize = isLong ? tradeSizeNum : tradeSizeNum.negated();
+    const sameSide = (baseSize.gte(0) && tradeSize.gt(0)) || (baseSize.lte(0) && tradeSize.lt(0));
 
-    if (sameSide || baseSize === 0) {
-      costBasis += Math.abs(size) * price;
-      baseSize += tradeSize;
+    if (sameSide || baseSize.isZero()) {
+      // Adding to position - increase cost basis
+      costBasis = costBasis.plus(tradeSizeNum.abs().times(priceNum));
+      baseSize = baseSize.plus(tradeSize);
     } else {
-      const closeSize = Math.min(Math.abs(baseSize), Math.abs(size));
-      const avgEntry = Math.abs(baseSize) > 0 ? costBasis / Math.abs(baseSize) : 0;
+      // Reducing or flipping position
+      const closeSize = Decimal.min(baseSize.abs(), tradeSizeNum.abs());
+      const avgEntry = baseSize.abs().gt(0) ? costBasis.div(baseSize.abs()) : new Decimal(0);
       
-      const closedPnl = baseSize > 0
-        ? (price - avgEntry) * closeSize
-        : (avgEntry - price) * closeSize;
-      realizedPnl += closedPnl;
+      // Calculate realized PnL on closed portion
+      const closedPnl = baseSize.gt(0)
+        ? priceNum.minus(avgEntry).times(closeSize)
+        : avgEntry.minus(priceNum).times(closeSize);
+      realizedPnl = realizedPnl.plus(closedPnl);
       
-      costBasis -= closeSize * avgEntry;
-      baseSize += tradeSize;
+      // Reduce cost basis proportionally
+      costBasis = costBasis.minus(closeSize.times(avgEntry));
+      baseSize = baseSize.plus(tradeSize);
       
-      if (Math.abs(tradeSize) > closeSize) {
-        const newSize = Math.abs(tradeSize) - closeSize;
-        costBasis = newSize * price;
+      // If we flipped sides, the excess starts a new position
+      if (tradeSize.abs().gt(closeSize)) {
+        const newSize = tradeSize.abs().minus(closeSize);
+        costBasis = newSize.times(priceNum);
       }
     }
 
-    const avgEntryPrice = Math.abs(baseSize) > 0 ? costBasis / Math.abs(baseSize) : 0;
+    const avgEntryPrice = baseSize.abs().gt(0) ? costBasis.div(baseSize.abs()) : new Decimal(0);
 
     return this.upsertBotPosition({
       tradingBotId,
       market,
       walletAddress,
-      baseSize: String(baseSize),
-      avgEntryPrice: String(avgEntryPrice),
-      costBasis: String(costBasis),
-      realizedPnl: String(realizedPnl),
+      baseSize: baseSize.toFixed(8),
+      avgEntryPrice: avgEntryPrice.toFixed(6),
+      costBasis: costBasis.toFixed(6),
+      realizedPnl: realizedPnl.toFixed(6),
       lastTradeId: tradeId,
       lastTradeAt: new Date(),
     });

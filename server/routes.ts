@@ -436,13 +436,10 @@ export async function registerRoutes(
       const bots = await storage.getTradingBots(req.walletAddress!);
       const botMap = new Map(bots.map(b => [b.id, b]));
       
-      // Fetch current prices from live API for PnL calculation
+      // Fetch current prices directly (no HTTP roundtrip)
       let prices: Record<string, number> = {};
       try {
-        const priceRes = await fetch('http://localhost:5000/api/prices');
-        if (priceRes.ok) {
-          prices = await priceRes.json();
-        }
+        prices = await getAllPrices();
       } catch (e) {
         console.log('[Positions] Failed to fetch prices');
       }
