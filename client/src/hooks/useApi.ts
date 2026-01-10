@@ -122,6 +122,8 @@ export function useTrades(limit?: number) {
     queryKey: ["trades", publicKeyString, limit],
     queryFn: () => fetchTrades(publicKeyString!, limit),
     enabled: !!publicKeyString && sessionConnected,
+    refetchInterval: 5000,
+    staleTime: 3000,
   });
 }
 
