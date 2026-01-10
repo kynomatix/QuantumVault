@@ -350,12 +350,7 @@ export function BotManagementDrawer({
     if (!bot) return '';
     return `{
   "botId": "${bot.id}",
-  "signalType": "trade",
-  "data": {
-    "action": "{{strategy.order.action}}",
-    "contracts": "{{strategy.order.contracts}}",
-    "positionSize": "{{strategy.position_size}}"
-  },
+  "action": "{{strategy.order.action}}",
   "symbol": "{{ticker}}",
   "price": "{{close}}",
   "time": "{{timenow}}"
@@ -949,30 +944,30 @@ export function BotManagementDrawer({
             <div className="p-4 rounded-xl bg-muted/50 border">
               <h3 className="font-semibold mb-3 flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-primary" />
-                How The Placeholders Work
+                How It Works
               </h3>
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
-                  <code className="px-1 py-0.5 bg-background rounded text-xs">"botId"</code> → Your bot's unique ID (routes signals to this bot)
+                  <strong>TradingView sends:</strong> buy/sell action only
                 </p>
                 <p>
-                  <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.order.action}}'}</code> → "buy" or "sell" from strategy
+                  <strong>Bot manages:</strong> trade size (Investment Per Trade setting)
                 </p>
-                <p>
-                  <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.order.contracts}}'}</code> → Order size for this entry (e.g. 33.33)
-                </p>
-                <p>
-                  <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.position_size}}'}</code> → Total position after this order
-                </p>
-                <p>
-                  <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{ticker}}'}</code> → Trading symbol (e.g. SOLUSD)
-                </p>
-                <p>
-                  <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{close}}'}</code> → Current price when signal was sent
-                </p>
-                <p>
-                  <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{timenow}}'}</code> → Timestamp when TradingView sent the signal
-                </p>
+                <div className="pt-2 border-t mt-2">
+                  <p className="font-medium text-foreground mb-1">Placeholders:</p>
+                  <p>
+                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.order.action}}'}</code> → "buy" or "sell"
+                  </p>
+                  <p>
+                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{ticker}}'}</code> → Symbol (e.g. SOLUSD)
+                  </p>
+                  <p>
+                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{close}}'}</code> → Current price
+                  </p>
+                  <p>
+                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{timenow}}'}</code> → Signal timestamp
+                  </p>
+                </div>
               </div>
             </div>
 

@@ -158,12 +158,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   const getMessageTemplate = (botId: string) => {
     return `{
   "botId": "${botId}",
-  "signalType": "trade",
-  "data": {
-    "action": "{{strategy.order.action}}",
-    "contracts": "{{strategy.order.contracts}}",
-    "positionSize": "{{strategy.position_size}}"
-  },
+  "action": "{{strategy.order.action}}",
   "symbol": "{{ticker}}",
   "price": "{{close}}",
   "time": "{{timenow}}"
