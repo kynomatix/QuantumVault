@@ -33,7 +33,8 @@ import {
   Loader2,
   ArrowUpFromLine,
   Trash2,
-  AlertTriangle
+  AlertTriangle,
+  XCircle
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -837,29 +838,60 @@ export default function AppPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {tradesData.slice(0, 10).map((trade: any, i: number) => (
-                            <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-trade-${i}`}>
-                              <td className="py-3 font-mono text-muted-foreground text-xs">
-                                {trade.executedAt ? new Date(trade.executedAt).toLocaleTimeString() : '--'}
-                              </td>
-                              <td className="py-3 font-medium">{trade.market}</td>
-                              <td className="py-3">
-                                <span className={`flex items-center gap-1 ${trade.side === 'long' ? 'text-emerald-400' : 'text-red-400'}`}>
-                                  {trade.side === 'long' ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
-                                  {trade.side?.toUpperCase()}
-                                </span>
-                              </td>
-                              <td className="py-3 text-right font-mono">{trade.size}</td>
-                              <td className="py-3 text-right font-mono">${Number(trade.price).toLocaleString()}</td>
-                              <td className="py-3 text-right">
-                                <span className={`px-2 py-0.5 rounded text-xs ${
-                                  trade.status === 'filled' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-yellow-500/20 text-yellow-400'
-                                }`}>
-                                  {trade.status}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
+                          {tradesData.slice(0, 10).map((trade: any, i: number) => {
+                            const payload = trade.webhookPayload;
+                            const positionSize = payload?.position_size || payload?.data?.position_size;
+                            const isCloseSignal = positionSize === '0' || positionSize === 0 || trade.side === 'CLOSE';
+                            const isLong = trade.side?.toUpperCase() === 'LONG';
+                            const isShort = trade.side?.toUpperCase() === 'SHORT';
+                            const isFailed = trade.status === 'failed';
+                            const isExecuted = trade.status === 'executed';
+                            
+                            const getSideColor = () => {
+                              if (isCloseSignal) return 'text-amber-400';
+                              if (isLong) return 'text-emerald-400';
+                              return 'text-red-400';
+                            };
+                            
+                            const getSideIcon = () => {
+                              if (isCloseSignal) return <XCircle className="w-3 h-3" />;
+                              if (isLong) return <ArrowUpRight className="w-3 h-3" />;
+                              return <ArrowDownRight className="w-3 h-3" />;
+                            };
+                            
+                            const getSideLabel = () => {
+                              if (isCloseSignal) return 'CLOSE';
+                              return trade.side?.toUpperCase();
+                            };
+                            
+                            const getStatusStyle = () => {
+                              if (isFailed) return 'bg-red-500/20 text-red-400';
+                              if (isExecuted) return 'bg-emerald-500/20 text-emerald-400';
+                              return 'bg-yellow-500/20 text-yellow-400';
+                            };
+                            
+                            return (
+                              <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-trade-${i}`}>
+                                <td className="py-3 font-mono text-muted-foreground text-xs">
+                                  {trade.executedAt ? new Date(trade.executedAt).toLocaleTimeString() : '--'}
+                                </td>
+                                <td className="py-3 font-medium">{trade.market}</td>
+                                <td className="py-3">
+                                  <span className={`flex items-center gap-1 ${getSideColor()}`}>
+                                    {getSideIcon()}
+                                    {getSideLabel()}
+                                  </span>
+                                </td>
+                                <td className="py-3 text-right font-mono">{trade.size}</td>
+                                <td className="py-3 text-right font-mono">${Number(trade.price).toLocaleString()}</td>
+                                <td className="py-3 text-right">
+                                  <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle()}`}>
+                                    {trade.status}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     ) : (

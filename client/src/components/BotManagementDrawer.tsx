@@ -1025,14 +1025,15 @@ export function BotManagementDrawer({
                 <div className="space-y-2 max-h-48 overflow-y-auto">
                   {trades.map((trade) => {
                     const isLong = trade.side === 'LONG';
-                    const isSimulated = trade.status === 'executed' && (trade.price === '0' || trade.price === '0.000000');
-                    const payload = trade.webhookPayload;
+                    const isFailed = trade.status === 'failed';
+                    const payload = trade.webhookPayload as any;
                     const action = payload?.data?.action?.toLowerCase() || payload?.action?.toLowerCase() || '';
-                    const isClose = action === 'close' || trade.side === 'CLOSE';
+                    const positionSize = payload?.position_size || payload?.data?.position_size;
+                    const isClose = action === 'close' || trade.side === 'CLOSE' || positionSize === '0' || positionSize === 0;
                     
                     const getTradeIcon = () => {
                       if (isClose) {
-                        return <XCircle className="h-4 w-4 text-purple-500" />;
+                        return <XCircle className="h-4 w-4 text-amber-500" />;
                       }
                       if (isLong) {
                         return <TrendingUp className="h-4 w-4 text-emerald-500" />;
@@ -1046,9 +1047,15 @@ export function BotManagementDrawer({
                     };
                     
                     const getIconBgClass = () => {
-                      if (isClose) return 'bg-purple-500/10';
+                      if (isClose) return 'bg-amber-500/10';
                       if (isLong) return 'bg-emerald-500/10';
                       return 'bg-red-500/10';
+                    };
+                    
+                    const getLabelColor = () => {
+                      if (isClose) return 'text-amber-500';
+                      if (isLong) return 'text-emerald-500';
+                      return 'text-red-500';
                     };
                     
                     return (
@@ -1063,14 +1070,14 @@ export function BotManagementDrawer({
                           </div>
                           <div>
                             <p className="text-sm font-medium flex items-center gap-2">
-                              {getTradeLabel()} {trade.market}
-                              {isSimulated && (
-                                <span className="text-xs px-1.5 py-0.5 bg-amber-500/20 text-amber-600 rounded">
-                                  Simulated
+                              <span className={getLabelColor()}>{getTradeLabel()}</span> {trade.market}
+                              {isFailed && (
+                                <span className="text-xs px-1.5 py-0.5 bg-red-500/20 text-red-500 rounded">
+                                  Failed
                                 </span>
                               )}
-                              {isClose && (
-                                <span className="text-xs px-1.5 py-0.5 bg-purple-500/20 text-purple-600 rounded">
+                              {isClose && !isFailed && (
+                                <span className="text-xs px-1.5 py-0.5 bg-amber-500/20 text-amber-500 rounded">
                                   Exit
                                 </span>
                               )}
