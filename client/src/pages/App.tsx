@@ -840,7 +840,7 @@ export default function AppPage() {
                           {tradesData.slice(0, 10).map((trade: any, i: number) => (
                             <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-trade-${i}`}>
                               <td className="py-3 font-mono text-muted-foreground text-xs">
-                                {trade.createdAt ? new Date(trade.createdAt).toLocaleTimeString() : '--'}
+                                {trade.executedAt ? new Date(trade.executedAt).toLocaleTimeString() : '--'}
                               </td>
                               <td className="py-3 font-medium">{trade.market}</td>
                               <td className="py-3">

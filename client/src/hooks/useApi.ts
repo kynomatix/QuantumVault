@@ -29,7 +29,7 @@ async function fetchPositions(walletAddress: string) {
 }
 
 async function fetchTrades(walletAddress: string, limit?: number) {
-  const url = limit ? `/api/trades?wallet=${walletAddress}&limit=${limit}` : `/api/trades?wallet=${walletAddress}`;
+  const url = limit ? `/api/bot-trades?limit=${limit}` : `/api/bot-trades`;
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch trades");
   return res.json();
