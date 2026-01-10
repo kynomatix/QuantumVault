@@ -40,6 +40,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { BotManagementDrawer } from '@/components/BotManagementDrawer';
 import { CreateBotModal } from '@/components/CreateBotModal';
+import { TradeHistoryModal } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
 
@@ -103,6 +104,7 @@ export default function AppPage() {
   const [manageBotDrawerOpen, setManageBotDrawerOpen] = useState(false);
   const [selectedManagedBot, setSelectedManagedBot] = useState<TradingBot | null>(null);
   const [createBotOpen, setCreateBotOpen] = useState(false);
+  const [tradeHistoryOpen, setTradeHistoryOpen] = useState(false);
   const [welcomePopupOpen, setWelcomePopupOpen] = useState(false);
   const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
   const welcomeCheckedRef = useRef(false);
@@ -112,6 +114,7 @@ export default function AppPage() {
   const { data: positionsData } = usePositions();
   const { data: subscriptionsData } = useSubscriptions();
   const { data: tradesData } = useTrades(10);
+  const { data: allTradesData } = useTrades();
   const { data: botsData, refetch: refetchBots } = useTradingBots();
   const { data: leaderboardData } = useLeaderboard(100);
   const { data: pricesData } = usePrices();
@@ -822,7 +825,7 @@ export default function AppPage() {
                 <div className="gradient-border p-4 noise">
                   <div className="flex items-center justify-between mb-4">
                     <h2 className="font-display font-semibold">Recent Trades</h2>
-                    <Button variant="outline" size="sm" data-testid="button-trade-history">Full History</Button>
+                    <Button variant="outline" size="sm" data-testid="button-trade-history" onClick={() => setTradeHistoryOpen(true)}>Full History</Button>
                   </div>
                   <div className="overflow-x-auto">
                     {tradesData && tradesData.length > 0 ? (
@@ -1364,6 +1367,12 @@ export default function AppPage() {
         onBotCreated={() => {
           refetchBots();
         }}
+      />
+
+      <TradeHistoryModal
+        open={tradeHistoryOpen}
+        onOpenChange={setTradeHistoryOpen}
+        trades={allTradesData || []}
       />
 
       {agentPublicKey && (
