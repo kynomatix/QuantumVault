@@ -460,6 +460,7 @@ export async function registerRoutes(
         const entryPrice = parseFloat(pos.avgEntryPrice);
         const sizeUsd = Math.abs(baseSize) * markPrice;
         const realizedPnl = parseFloat(pos.realizedPnl);
+        const totalFees = parseFloat(pos.totalFees || "0");
         
         // Calculate unrealized PnL from actual entry price
         const unrealizedPnl = side === 'LONG'
@@ -482,6 +483,7 @@ export async function registerRoutes(
           unrealizedPnl,
           unrealizedPnlPercent,
           realizedPnl,
+          totalFees,
           lastTradeAt: pos.lastTradeAt,
         });
       }
@@ -696,6 +698,10 @@ export async function registerRoutes(
             if (result.success && result.txSignature) {
               console.log(`[Bot] Position closed successfully: ${result.txSignature}`);
               
+              // Calculate fee (0.05% taker fee on notional value)
+              const closeNotional = closeSize * (result.fillPrice || 0);
+              const closeFee = closeNotional * 0.0005;
+              
               // Create trade record for the close
               const closeTrade = await storage.createBotTrade({
                 tradingBotId: bot.id,
@@ -704,6 +710,7 @@ export async function registerRoutes(
                 side: closeSide.toUpperCase(),
                 size: String(closeSize),
                 price: result.fillPrice ? String(result.fillPrice) : "0",
+                fee: String(closeFee),
                 status: "executed",
                 txSignature: result.txSignature,
                 webhookPayload: { action: "pause_close", reason: "Bot paused by user" },
@@ -717,6 +724,7 @@ export async function registerRoutes(
                 closeSide,
                 closeSize,
                 result.fillPrice || 0,
+                closeFee,
                 closeTrade.id
               );
               
@@ -1196,11 +1204,16 @@ export async function registerRoutes(
           );
           
           if (result.success && result.txSignature) {
+            // Calculate fee (0.05% taker fee on notional value)
+            const closeNotional = closeSize * (result.fillPrice || 0);
+            const closeFee = closeNotional * 0.0005;
+            
             // Update trade record with execution details
             await storage.updateBotTrade(closeTrade.id, {
               status: "executed",
               txSignature: result.txSignature,
               price: result.fillPrice ? String(result.fillPrice) : signalPrice,
+              fee: String(closeFee),
             });
             
             // Update bot position (will be zeroed out)
@@ -1211,6 +1224,7 @@ export async function registerRoutes(
               closeSide,
               closeSize,
               result.fillPrice || 0,
+              closeFee,
               closeTrade.id
             );
             
@@ -1383,9 +1397,15 @@ export async function registerRoutes(
       }
 
       const fillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
+      
+      // Calculate fee (0.05% taker fee on notional value)
+      const tradeNotional = contractSize * fillPrice;
+      const tradeFee = tradeNotional * 0.0005;
+      
       await storage.updateBotTrade(trade.id, {
         status: "executed",
         price: fillPrice.toString(),
+        fee: tradeFee.toString(),
         txSignature: orderResult.txSignature || orderResult.signature || null,
         size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
@@ -1398,6 +1418,7 @@ export async function registerRoutes(
         side,
         contractSize,
         fillPrice,
+        tradeFee,
         trade.id
       );
 
@@ -1703,9 +1724,15 @@ export async function registerRoutes(
       }
 
       const userFillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
+      
+      // Calculate fee (0.05% taker fee on notional value)
+      const userTradeNotional = contractSize * userFillPrice;
+      const userTradeFee = userTradeNotional * 0.0005;
+      
       await storage.updateBotTrade(trade.id, {
         status: "executed",
         price: userFillPrice.toString(),
+        fee: userTradeFee.toString(),
         txSignature: orderResult.txSignature || orderResult.signature || null,
         size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
@@ -1718,6 +1745,7 @@ export async function registerRoutes(
         side,
         contractSize,
         userFillPrice,
+        userTradeFee,
         trade.id
       );
 

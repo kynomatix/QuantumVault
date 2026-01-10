@@ -15,6 +15,7 @@ interface Trade {
   side: string;
   size: string;
   price: string;
+  fee?: string | null;
   status: string;
   executedAt: string;
   webhookPayload?: {
@@ -78,6 +79,8 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
       return 'bg-yellow-500/20 text-yellow-400';
     };
 
+    const feeValue = trade.fee ? Number(trade.fee) : 0;
+
     return (
       <tr key={trade.id || index} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-history-trade-${index}`}>
         <td className="py-3 px-2 font-mono text-muted-foreground text-xs">
@@ -92,6 +95,9 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
         </td>
         <td className="py-3 px-2 text-right font-mono">{trade.size}</td>
         <td className="py-3 px-2 text-right font-mono">${Number(trade.price).toLocaleString()}</td>
+        <td className="py-3 px-2 text-right font-mono text-amber-400">
+          {feeValue > 0 ? `-$${feeValue.toFixed(4)}` : '--'}
+        </td>
         <td className="py-3 px-2 text-right">
           <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle()}`}>
             {trade.status}
@@ -118,6 +124,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
                   <th className="text-left py-3 px-2 font-medium">Side</th>
                   <th className="text-right py-3 px-2 font-medium">Size</th>
                   <th className="text-right py-3 px-2 font-medium">Price</th>
+                  <th className="text-right py-3 px-2 font-medium">Fee</th>
                   <th className="text-right py-3 px-2 font-medium">Status</th>
                 </tr>
               </thead>

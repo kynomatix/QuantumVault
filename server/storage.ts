@@ -105,7 +105,7 @@ export interface IStorage {
   getBotPosition(tradingBotId: string, market: string): Promise<BotPosition | undefined>;
   getBotPositions(walletAddress: string): Promise<BotPosition[]>;
   upsertBotPosition(position: InsertBotPosition): Promise<BotPosition>;
-  updateBotPositionFromTrade(tradingBotId: string, market: string, walletAddress: string, side: string, size: number, price: number, tradeId: string): Promise<BotPosition>;
+  updateBotPositionFromTrade(tradingBotId: string, market: string, walletAddress: string, side: string, size: number, price: number, fee: number, tradeId: string): Promise<BotPosition>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -439,6 +439,7 @@ export class DatabaseStorage implements IStorage {
     side: string,
     size: number,
     price: number,
+    fee: number,
     tradeId: string
   ): Promise<BotPosition> {
     const existing = await this.getBotPosition(tradingBotId, market);
@@ -449,37 +450,47 @@ export class DatabaseStorage implements IStorage {
     let baseSize = new Decimal(existing?.baseSize || "0");
     let costBasis = new Decimal(existing?.costBasis || "0");
     let realizedPnl = new Decimal(existing?.realizedPnl || "0");
+    let totalFees = new Decimal(existing?.totalFees || "0");
 
     const tradeSizeNum = new Decimal(size);
     const priceNum = new Decimal(price);
+    const feeNum = new Decimal(fee);
+    
+    // Accumulate fees
+    totalFees = totalFees.plus(feeNum);
     
     const isLong = side.toUpperCase() === 'LONG' || side.toUpperCase() === 'BUY';
     const tradeSize = isLong ? tradeSizeNum : tradeSizeNum.negated();
     const sameSide = (baseSize.gte(0) && tradeSize.gt(0)) || (baseSize.lte(0) && tradeSize.lt(0));
 
     if (sameSide || baseSize.isZero()) {
-      // Adding to position - increase cost basis
-      costBasis = costBasis.plus(tradeSizeNum.abs().times(priceNum));
+      // Adding to position - increase cost basis (includes fee to get accurate breakeven)
+      costBasis = costBasis.plus(tradeSizeNum.abs().times(priceNum)).plus(feeNum);
       baseSize = baseSize.plus(tradeSize);
     } else {
       // Reducing or flipping position
       const closeSize = Decimal.min(baseSize.abs(), tradeSizeNum.abs());
       const avgEntry = baseSize.abs().gt(0) ? costBasis.div(baseSize.abs()) : new Decimal(0);
       
-      // Calculate realized PnL on closed portion
+      // Prorate fee: only the portion for closed size affects realized PnL
+      const closeFeeRatio = closeSize.div(tradeSizeNum.abs());
+      const feeForClose = feeNum.times(closeFeeRatio);
+      const feeForNewPosition = feeNum.minus(feeForClose);
+      
+      // Calculate realized PnL on closed portion (only close fee deducted)
       const closedPnl = baseSize.gt(0)
-        ? priceNum.minus(avgEntry).times(closeSize)
-        : avgEntry.minus(priceNum).times(closeSize);
+        ? priceNum.minus(avgEntry).times(closeSize).minus(feeForClose)
+        : avgEntry.minus(priceNum).times(closeSize).minus(feeForClose);
       realizedPnl = realizedPnl.plus(closedPnl);
       
       // Reduce cost basis proportionally
       costBasis = costBasis.minus(closeSize.times(avgEntry));
       baseSize = baseSize.plus(tradeSize);
       
-      // If we flipped sides, the excess starts a new position
+      // If we flipped sides, the excess starts a new position (with its portion of the fee)
       if (tradeSize.abs().gt(closeSize)) {
         const newSize = tradeSize.abs().minus(closeSize);
-        costBasis = newSize.times(priceNum);
+        costBasis = newSize.times(priceNum).plus(feeForNewPosition);
       }
     }
 
@@ -493,6 +504,7 @@ export class DatabaseStorage implements IStorage {
       avgEntryPrice: avgEntryPrice.toFixed(6),
       costBasis: costBasis.toFixed(6),
       realizedPnl: realizedPnl.toFixed(6),
+      totalFees: totalFees.toFixed(6),
       lastTradeId: tradeId,
       lastTradeAt: new Date(),
     });
