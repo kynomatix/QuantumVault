@@ -136,6 +136,31 @@ export const insertBotTradeSchema = createInsertSchema(botTrades).omit({
 export type InsertBotTrade = z.infer<typeof insertBotTradeSchema>;
 export type BotTrade = typeof botTrades.$inferSelect;
 
+export const botPositions = pgTable("bot_positions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tradingBotId: varchar("trading_bot_id").notNull().references(() => tradingBots.id, { onDelete: "cascade" }),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  market: text("market").notNull(),
+  baseSize: decimal("base_size", { precision: 20, scale: 8 }).notNull().default("0"),
+  avgEntryPrice: decimal("avg_entry_price", { precision: 20, scale: 6 }).notNull().default("0"),
+  costBasis: decimal("cost_basis", { precision: 20, scale: 6 }).notNull().default("0"),
+  realizedPnl: decimal("realized_pnl", { precision: 20, scale: 6 }).notNull().default("0"),
+  lastTradeId: varchar("last_trade_id"),
+  lastTradeAt: timestamp("last_trade_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqueBotMarket: sql`CONSTRAINT bot_positions_bot_market_unique UNIQUE (${table.tradingBotId}, ${table.market})`,
+}));
+
+export const insertBotPositionSchema = createInsertSchema(botPositions).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertBotPosition = z.infer<typeof insertBotPositionSchema>;
+export type BotPosition = typeof botPositions.$inferSelect;
+
 export const equityEvents = pgTable("equity_events", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),

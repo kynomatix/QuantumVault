@@ -6,6 +6,7 @@ import {
   bots,
   tradingBots,
   botTrades,
+  botPositions,
   equityEvents,
   webhookLogs,
   subscriptions,
@@ -23,6 +24,8 @@ import {
   type InsertTradingBot,
   type BotTrade,
   type InsertBotTrade,
+  type BotPosition,
+  type InsertBotPosition,
   type EquityEvent,
   type InsertEquityEvent,
   type WebhookLog,
@@ -96,6 +99,11 @@ export interface IStorage {
   createEquityEvent(event: InsertEquityEvent): Promise<EquityEvent>;
   getEquityEvents(walletAddress: string, limit?: number): Promise<EquityEvent[]>;
   getBotEquityEvents(tradingBotId: string, limit?: number): Promise<EquityEvent[]>;
+
+  getBotPosition(tradingBotId: string, market: string): Promise<BotPosition | undefined>;
+  getBotPositions(walletAddress: string): Promise<BotPosition[]>;
+  upsertBotPosition(position: InsertBotPosition): Promise<BotPosition>;
+  updateBotPositionFromTrade(tradingBotId: string, market: string, walletAddress: string, side: string, size: number, price: number, tradeId: string): Promise<BotPosition>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -378,6 +386,93 @@ export class DatabaseStorage implements IStorage {
 
   async getBotEquityEvents(tradingBotId: string, limit: number = 50): Promise<EquityEvent[]> {
     return db.select().from(equityEvents).where(eq(equityEvents.tradingBotId, tradingBotId)).orderBy(desc(equityEvents.createdAt)).limit(limit);
+  }
+
+  async getBotPosition(tradingBotId: string, market: string): Promise<BotPosition | undefined> {
+    const result = await db.select().from(botPositions)
+      .where(and(eq(botPositions.tradingBotId, tradingBotId), eq(botPositions.market, market)))
+      .limit(1);
+    return result[0];
+  }
+
+  async getBotPositions(walletAddress: string): Promise<BotPosition[]> {
+    return db.select().from(botPositions)
+      .where(eq(botPositions.walletAddress, walletAddress))
+      .orderBy(desc(botPositions.updatedAt));
+  }
+
+  async upsertBotPosition(position: InsertBotPosition): Promise<BotPosition> {
+    const result = await db.insert(botPositions)
+      .values(position)
+      .onConflictDoUpdate({
+        target: [botPositions.tradingBotId, botPositions.market],
+        set: {
+          baseSize: position.baseSize,
+          avgEntryPrice: position.avgEntryPrice,
+          costBasis: position.costBasis,
+          realizedPnl: position.realizedPnl,
+          lastTradeId: position.lastTradeId,
+          lastTradeAt: position.lastTradeAt,
+          updatedAt: sql`NOW()`,
+        },
+      })
+      .returning();
+    return result[0];
+  }
+
+  async updateBotPositionFromTrade(
+    tradingBotId: string,
+    market: string,
+    walletAddress: string,
+    side: string,
+    size: number,
+    price: number,
+    tradeId: string
+  ): Promise<BotPosition> {
+    const existing = await this.getBotPosition(tradingBotId, market);
+    
+    let baseSize = existing ? parseFloat(existing.baseSize) : 0;
+    let costBasis = existing ? parseFloat(existing.costBasis) : 0;
+    let realizedPnl = existing ? parseFloat(existing.realizedPnl) : 0;
+
+    const isLong = side.toUpperCase() === 'LONG' || side.toUpperCase() === 'BUY';
+    const tradeSize = isLong ? size : -size;
+    const sameSide = (baseSize >= 0 && tradeSize > 0) || (baseSize <= 0 && tradeSize < 0);
+
+    if (sameSide || baseSize === 0) {
+      costBasis += Math.abs(size) * price;
+      baseSize += tradeSize;
+    } else {
+      const closeSize = Math.min(Math.abs(baseSize), Math.abs(size));
+      const avgEntry = Math.abs(baseSize) > 0 ? costBasis / Math.abs(baseSize) : 0;
+      
+      const closedPnl = baseSize > 0
+        ? (price - avgEntry) * closeSize
+        : (avgEntry - price) * closeSize;
+      realizedPnl += closedPnl;
+      
+      costBasis -= closeSize * avgEntry;
+      baseSize += tradeSize;
+      
+      if (Math.abs(tradeSize) > closeSize) {
+        const newSize = Math.abs(tradeSize) - closeSize;
+        costBasis = newSize * price;
+      }
+    }
+
+    const avgEntryPrice = Math.abs(baseSize) > 0 ? costBasis / Math.abs(baseSize) : 0;
+
+    return this.upsertBotPosition({
+      tradingBotId,
+      market,
+      walletAddress,
+      baseSize: String(baseSize),
+      avgEntryPrice: String(avgEntryPrice),
+      costBasis: String(costBasis),
+      realizedPnl: String(realizedPnl),
+      lastTradeId: tradeId,
+      lastTradeAt: new Date(),
+    });
   }
 }
 

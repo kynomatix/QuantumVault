@@ -1160,12 +1160,24 @@ export async function registerRoutes(
         return res.status(500).json({ error: orderResult.error || "Order execution failed" });
       }
 
+      const fillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
       await storage.updateBotTrade(trade.id, {
         status: "executed",
-        price: orderResult.fillPrice?.toString() || signalPrice || "0",
+        price: fillPrice.toString(),
         txSignature: orderResult.signature || null,
         size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
+
+      // Update bot position snapshot with actual fill data
+      await storage.updateBotPositionFromTrade(
+        botId,
+        bot.market,
+        bot.walletAddress,
+        side,
+        contractSize,
+        fillPrice,
+        trade.id
+      );
 
       // Update bot stats
       const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
@@ -1468,12 +1480,24 @@ export async function registerRoutes(
         return res.status(500).json({ error: orderResult.error || "Order execution failed" });
       }
 
+      const userFillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
       await storage.updateBotTrade(trade.id, {
         status: "executed",
-        price: orderResult.fillPrice?.toString() || signalPrice || "0",
+        price: userFillPrice.toString(),
         txSignature: orderResult.signature || null,
         size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
+
+      // Update bot position snapshot with actual fill data
+      await storage.updateBotPositionFromTrade(
+        botId,
+        bot.market,
+        bot.walletAddress,
+        side,
+        contractSize,
+        userFillPrice,
+        trade.id
+      );
 
       // Update bot stats
       const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
