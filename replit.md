@@ -55,7 +55,16 @@ Preferred communication style: Simple, everyday language.
   2. Withdraw: Agent signs USDC transfer from Agent Wallet to Phantom
   3. User manually deposits USDC from Agent Wallet to Drift when needed
 - **Trade Execution** (Jan 2026): When a TradingView webhook signal arrives, the agent executes real perpetual orders on Drift Protocol using `placeAndTakePerpOrder`. Orders are placed on the bot's configured subaccount (or subaccount 0 if not configured).
-- **Percentage-Based Position Sizing** (Jan 2026): Signal values from TradingView are treated as percentages of the bot's `totalInvestment`. Example: If totalInvestment = $500 and signal = 50, the trade amount is $250. The platform converts USD to contracts using current market price and applies leverage.
+- **TradingView Signal Format (CRITICAL - Jan 2026)**:
+  - TradingView sends USD amounts in the `contracts` field
+  - The platform treats this USD value AS the percentage of bot's `totalInvestment`
+  - **Formula**: `tradeAmountUsd = (signalValue / 100) * bot.totalInvestment`
+  - **Example 1**: Bot capital = $100, TradingView sends `contracts: 33.33` → 33.33% of $100 = $33.33 trade
+  - **Example 2**: Bot capital = $1, TradingView sends `contracts: 33.33` → 33.33% of $1 = $0.33 trade
+  - **Pyramiding Setup**: For 3 pyramid orders, set TradingView initial capital = 100, order size = 33.33
+    - Each entry = 33.33% of bot capital
+  - The platform then applies leverage and converts to contracts: `contracts = (tradeAmountUsd * leverage) / currentPrice`
+  - **DO NOT CHANGE THIS LOGIC** - it matches Pionex-style trading where TradingView manages percentages
 - **Agent Wallet API Endpoints**:
   - `GET /api/agent/balance` - Get agent wallet USDC balance
   - `POST /api/agent/deposit` - Build tx for user to deposit to agent (user signs)
