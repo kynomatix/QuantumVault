@@ -15,7 +15,6 @@ import {
 import { Button } from '@/components/ui/button';
 import { useWallet } from '@/hooks/useWallet';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
-import heroImage from '@assets/generated_images/abstract_purple_quantum_blockchain_visualization.png';
 
 const fadeInUp = {
   hidden: { opacity: 0, y: 20 },
@@ -68,15 +67,11 @@ export default function Landing() {
 
   return (
     <div className="min-h-screen">
-      <div 
-        className="fixed inset-0 -z-10 opacity-40"
-        style={{
-          backgroundImage: `url(${heroImage})`,
-          backgroundSize: 'cover',
-          backgroundPosition: 'center top',
-          filter: 'blur(60px)',
-        }}
-      />
+      <div className="fixed inset-0 -z-10">
+        <div className="absolute top-0 left-1/4 w-[600px] h-[600px] bg-primary/30 rounded-full blur-[150px]" />
+        <div className="absolute top-1/4 right-1/4 w-[500px] h-[500px] bg-accent/20 rounded-full blur-[120px]" />
+        <div className="absolute bottom-1/4 left-1/3 w-[400px] h-[400px] bg-purple-500/15 rounded-full blur-[100px]" />
+      </div>
       <div className="fixed inset-0 -z-10 bg-gradient-to-b from-transparent via-background/80 to-background" />
       
       <nav className="fixed top-0 left-0 right-0 z-50 glass border-b border-border/30">
@@ -115,6 +110,20 @@ export default function Landing() {
             variants={staggerContainer}
             className="max-w-4xl mx-auto text-center relative z-10"
           >
+            <motion.div 
+              variants={fadeInUp} 
+              className="mb-8 flex justify-center"
+            >
+              <div className="relative">
+                <div className="absolute inset-0 bg-gradient-to-r from-primary/50 to-accent/50 rounded-3xl blur-2xl opacity-60 animate-pulse" />
+                <img 
+                  src="/images/QV_Logo_02.png" 
+                  alt="QuantumVault" 
+                  className="relative w-28 h-28 sm:w-36 sm:h-36 rounded-3xl shadow-2xl ring-2 ring-white/10"
+                />
+              </div>
+            </motion.div>
+
             <motion.div variants={fadeInUp} className="mb-6">
               <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary">
                 <Zap className="w-4 h-4" />
