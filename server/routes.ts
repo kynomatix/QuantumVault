@@ -952,9 +952,28 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Pionex-style: TradingView sends PERCENTAGE (100 = 100%, 33.33 = 33.33%)
-      // Platform uses maxPositionSize as the capital base for percentage calculations
-      const signalPercent = parseFloat(contracts || positionSize || "0");
+      // Get current market price first (needed for USDT conversion)
+      const currentPrice = await getMarketPrice(bot.market);
+      if (!currentPrice || currentPrice <= 0) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
+        return res.status(500).json({ error: "Could not get market price" });
+      }
+
+      // USDT-to-Percentage Translation:
+      // TradingView is configured with USDT order size (e.g., 33.33 USDT)
+      // TradingView sends contracts = USDT / price (e.g., 33.33 / 136 = 0.245)
+      // We reverse this: contracts * price = USDT value (e.g., 0.245 * 136 = 33.33)
+      // Then treat that USDT value AS A PERCENTAGE of maxPositionSize
+      const contractsFromTV = parseFloat(contracts || "0");
+      const usdtValue = contractsFromTV * currentPrice; // Reverse TradingView's calculation
+      const signalPercent = usdtValue; // Treat USDT value as percentage
+      
+      console.log(`[Webhook] TradingView sent ${contractsFromTV} contracts × $${currentPrice.toFixed(2)} = ${usdtValue.toFixed(2)} USDT → treating as ${signalPercent.toFixed(2)}%`);
+
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
       
       if (baseCapital <= 0) {
@@ -966,27 +985,16 @@ export async function registerRoutes(
         return res.status(400).json({ error: `Bot has no capital configured. Set Max Position Size on the bot.` });
       }
       
-      // If signal has percentage, use it; otherwise use 100% of capital
+      // Calculate trade amount: signalPercent% of maxPositionSize
       const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
       
-      console.log(`[Webhook] Signal ${signalPercent}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
-
-      // Get current market price to convert USD to contracts
-      const currentPrice = await getMarketPrice(bot.market);
-      if (!currentPrice || currentPrice <= 0) {
-        await storage.updateBotTrade(trade.id, {
-          status: "failed",
-          txSignature: null,
-        });
-        await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
-        return res.status(500).json({ error: "Could not get market price" });
-      }
+      console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
 
       // Calculate contract size (with leverage)
       const leverage = bot.leverage || 1;
       const contractSize = (tradeAmountUsd * leverage) / currentPrice;
       
-      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} * ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Minimum order sizes per market (from Drift Protocol)
       const MIN_ORDER_SIZES: Record<string, number> = {
@@ -1242,9 +1250,28 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Pionex-style: TradingView sends PERCENTAGE (100 = 100%, 33.33 = 33.33%)
-      // Platform uses maxPositionSize as the capital base for percentage calculations
-      const signalPercent = parseFloat(contracts || positionSize || "0");
+      // Get current market price first (needed for USDT conversion)
+      const currentPrice = await getMarketPrice(bot.market);
+      if (!currentPrice || currentPrice <= 0) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
+        return res.status(500).json({ error: "Could not get market price" });
+      }
+
+      // USDT-to-Percentage Translation:
+      // TradingView is configured with USDT order size (e.g., 33.33 USDT)
+      // TradingView sends contracts = USDT / price (e.g., 33.33 / 136 = 0.245)
+      // We reverse this: contracts * price = USDT value (e.g., 0.245 * 136 = 33.33)
+      // Then treat that USDT value AS A PERCENTAGE of maxPositionSize
+      const contractsFromTV = parseFloat(contracts || "0");
+      const usdtValue = contractsFromTV * currentPrice; // Reverse TradingView's calculation
+      const signalPercent = usdtValue; // Treat USDT value as percentage
+      
+      console.log(`[User Webhook] TradingView sent ${contractsFromTV} contracts × $${currentPrice.toFixed(2)} = ${usdtValue.toFixed(2)} USDT → treating as ${signalPercent.toFixed(2)}%`);
+
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
       
       if (baseCapital <= 0) {
@@ -1256,27 +1283,16 @@ export async function registerRoutes(
         return res.status(400).json({ error: `Bot has no capital configured. Set Max Position Size on the bot.` });
       }
       
-      // If signal has percentage, use it; otherwise use 100% of capital
+      // Calculate trade amount: signalPercent% of maxPositionSize
       const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
       
-      console.log(`[User Webhook] Signal ${signalPercent}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
-
-      // Get current market price to convert USD to contracts
-      const currentPrice = await getMarketPrice(bot.market);
-      if (!currentPrice || currentPrice <= 0) {
-        await storage.updateBotTrade(trade.id, {
-          status: "failed",
-          txSignature: null,
-        });
-        await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
-        return res.status(500).json({ error: "Could not get market price" });
-      }
+      console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
 
       // Calculate contract size (with leverage)
       const leverage = bot.leverage || 1;
       const contractSize = (tradeAmountUsd * leverage) / currentPrice;
       
-      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} * ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Minimum order sizes per market (from Drift Protocol)
       const MIN_ORDER_SIZES: Record<string, number> = {

@@ -56,17 +56,22 @@ Preferred communication style: Simple, everyday language.
   3. User manually deposits USDC from Agent Wallet to Drift when needed
 - **Trade Execution** (Jan 2026): When a TradingView webhook signal arrives, the agent executes real perpetual orders on Drift Protocol using `placeAndTakePerpOrder`. Orders are placed on the bot's configured subaccount (or subaccount 0 if not configured).
 - **TradingView Signal Format (CRITICAL - DO NOT CHANGE - Jan 2026)**:
-  - **THE VALUE FROM TRADINGVIEW IS A PERCENTAGE, NOT A DOLLAR AMOUNT**
-  - TradingView sends a number in the signal (e.g., 33.33)
-  - The platform treats this number AS A PERCENTAGE of the bot's `maxPositionSize`
-  - **Formula**: `tradeAmountUsd = (signalValue / 100) * bot.maxPositionSize`
-  - **Example 1**: Bot maxPositionSize = $6, TradingView sends 33.33 → 33.33% of $6 = $2 trade
-  - **Example 2**: Bot maxPositionSize = $100, TradingView sends 33.33 → 33.33% of $100 = $33.33 trade
-  - **Pyramiding Setup**: For 3 pyramid orders, set TradingView initial capital = 100, order size = 33.33
+  - **⚠️ USDT-TO-PERCENTAGE TRANSLATION - DO NOT CHANGE ⚠️**
+  - User sets order size in TradingView as **USDT** (e.g., 33.33 USDT)
+  - TradingView sends `contracts = USDT / price` (e.g., 33.33 / 136 = 0.245)
+  - **Platform reverses this**: `usdtValue = contracts × price` (0.245 × 136 = 33.33)
+  - **Platform treats usdtValue AS A PERCENTAGE** of `maxPositionSize`
+  - **Formula**: `tradeAmountUsd = (usdtValue / 100) * bot.maxPositionSize`
+  - **Example**: 
+    - TradingView: 33.33 USDT order size, SOL at $136
+    - TradingView sends: contracts = 0.245
+    - Platform calculates: 0.245 × $136 = 33.33 USDT → treat as 33.33%
+    - Bot maxPositionSize = $6 → tradeAmountUsd = 33.33% of $6 = $2
+    - With 10x leverage: finalContracts = ($2 × 10) / $136 = 0.147 SOL ✓
+  - **Pyramiding Setup**: For 3 pyramid orders, set TradingView initial capital = 100, order size = 33.33 USDT
     - Each entry = 33.33% of bot's maxPositionSize
-  - The platform then applies leverage and converts to SOL/BTC/ETH contracts: `contracts = (tradeAmountUsd * leverage) / currentPrice`
-  - **⚠️ DO NOT CHANGE THIS LOGIC ⚠️** - This is Pionex-style percentage-based trading
-  - **⚠️ THE SIGNAL VALUE IS ALWAYS A PERCENTAGE, NEVER A DOLLAR AMOUNT ⚠️**
+  - **⚠️ DO NOT CHANGE THIS LOGIC ⚠️** - This is the core USDT→percentage translation
+  - **⚠️ THE SIGNAL IS USDT, PLATFORM CONVERTS TO PERCENTAGE ⚠️**
 - **Minimum Order Sizes (from Drift Protocol)**:
   - SOL-PERP: 0.01 SOL (~$1.36 at $136/SOL)
   - BTC-PERP: 0.0001 BTC (~$9 at $90k/BTC)
