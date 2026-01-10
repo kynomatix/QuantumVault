@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { storage } from "./storage";
 
 const app = express();
 const httpServer = createServer(app);
@@ -91,8 +92,27 @@ app.use((req, res, next) => {
       host: "0.0.0.0",
       reusePort: true,
     },
-    () => {
+    async () => {
       log(`serving on port ${port}`);
+      
+      // Cleanup orphaned pending trades on startup
+      // Note: These are marked as needs_review since we can't verify Drift execution status
+      // A future improvement would be to check on-chain fills before marking status
+      try {
+        const orphanedTrades = await storage.getOrphanedPendingTrades(2);
+        if (orphanedTrades.length > 0) {
+          log(`Found ${orphanedTrades.length} orphaned pending trades, marking for review`);
+          for (const trade of orphanedTrades) {
+            await storage.updateBotTrade(trade.id, {
+              status: "needs_review",
+              errorMessage: "Trade interrupted by server restart - verify on Drift if executed",
+            });
+            log(`Marked trade ${trade.id} as needs_review (orphaned during restart)`);
+          }
+        }
+      } catch (error) {
+        console.error("Error cleaning up orphaned trades:", error);
+      }
     },
   );
 })();

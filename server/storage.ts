@@ -75,6 +75,7 @@ export interface IStorage {
   getWalletBotTrades(walletAddress: string, limit?: number): Promise<BotTrade[]>;
   createBotTrade(trade: InsertBotTrade): Promise<BotTrade>;
   updateBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<void>;
+  getOrphanedPendingTrades(maxAgeMinutes?: number): Promise<BotTrade[]>;
 
   createWebhookLog(log: InsertWebhookLog): Promise<WebhookLog>;
   updateWebhookLog(id: string, updates: Partial<InsertWebhookLog>): Promise<void>;
@@ -250,6 +251,16 @@ export class DatabaseStorage implements IStorage {
 
   async updateBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<void> {
     await db.update(botTrades).set(updates).where(eq(botTrades.id, id));
+  }
+
+  async getOrphanedPendingTrades(maxAgeMinutes: number = 5): Promise<BotTrade[]> {
+    const threshold = new Date(Date.now() - maxAgeMinutes * 60 * 1000);
+    return db.select().from(botTrades)
+      .where(and(
+        eq(botTrades.status, "pending"),
+        sql`${botTrades.executedAt} < ${threshold}`
+      ))
+      .orderBy(desc(botTrades.executedAt));
   }
 
   async createWebhookLog(log: InsertWebhookLog): Promise<WebhookLog> {
