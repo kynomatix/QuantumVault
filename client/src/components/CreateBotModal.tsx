@@ -169,10 +169,10 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   const fetchAgentBalance = async () => {
     setIsLoadingBalance(true);
     try {
-      const res = await fetch(`/api/agent/balance?wallet=${walletAddress}`);
+      const res = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
-        setAgentBalance(data.usdcBalance || '0');
+        setAgentBalance(data.balance?.toString() || '0');
       }
     } catch (error) {
       console.error('Failed to fetch balance:', error);
