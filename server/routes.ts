@@ -431,9 +431,12 @@ export async function registerRoutes(
         return res.json({ positions: [] });
       }
 
+      // Get bot positions from database (actual fill prices, not calculated)
+      const botPositions = await storage.getBotPositions(req.walletAddress!);
       const bots = await storage.getTradingBots(req.walletAddress!);
+      const botMap = new Map(bots.map(b => [b.id, b]));
       
-      // Fetch current prices from live API
+      // Fetch current prices from live API for PnL calculation
       let prices: Record<string, number> = {};
       try {
         const priceRes = await fetch('http://localhost:5000/api/prices');
@@ -446,87 +449,44 @@ export async function registerRoutes(
 
       const positions: any[] = [];
 
-      // For each bot, calculate its position from trade history
-      // Each bot tracks its own position independently
-      for (const bot of bots) {
-        const trades = await storage.getBotTrades(bot.id, 500);
-        if (!trades || trades.length === 0) continue;
+      for (const pos of botPositions) {
+        const baseSize = parseFloat(pos.baseSize);
+        
+        // Only show positions with non-zero size
+        if (Math.abs(baseSize) < 0.0001) continue;
 
-        // Group trades by market for this bot
-        const marketTrades: Record<string, typeof trades> = {};
-        for (const trade of trades) {
-          if (trade.status !== 'executed') continue;
-          if (!marketTrades[trade.market]) {
-            marketTrades[trade.market] = [];
-          }
-          marketTrades[trade.market].push(trade);
-        }
+        const bot = botMap.get(pos.tradingBotId);
+        if (!bot) continue;
 
-        // Calculate position for each market
-        for (const [market, tradeList] of Object.entries(marketTrades)) {
-          // Sort trades by execution time
-          const sortedTrades = [...tradeList].sort((a, b) => 
-            new Date(a.executedAt).getTime() - new Date(b.executedAt).getTime()
-          );
+        const side = baseSize > 0 ? 'LONG' : 'SHORT';
+        const markPrice = prices[pos.market] || 0;
+        const entryPrice = parseFloat(pos.avgEntryPrice);
+        const sizeUsd = Math.abs(baseSize) * markPrice;
+        const realizedPnl = parseFloat(pos.realizedPnl);
+        
+        // Calculate unrealized PnL from actual entry price
+        const unrealizedPnl = side === 'LONG'
+          ? (markPrice - entryPrice) * Math.abs(baseSize)
+          : (entryPrice - markPrice) * Math.abs(baseSize);
+        
+        const unrealizedPnlPercent = Math.abs(entryPrice * Math.abs(baseSize)) > 0
+          ? (unrealizedPnl / (entryPrice * Math.abs(baseSize))) * 100
+          : 0;
 
-          // Running position with average price
-          let position = 0;
-          let costBasis = 0;
-          
-          for (const trade of sortedTrades) {
-            const size = parseFloat(trade.size);
-            const price = parseFloat(trade.price);
-            const isLong = trade.side.toUpperCase() === 'LONG' || trade.side.toUpperCase() === 'BUY';
-            const tradeSize = isLong ? size : -size;
-            
-            const sameSide = (position >= 0 && tradeSize > 0) || (position <= 0 && tradeSize < 0);
-            
-            if (sameSide || position === 0) {
-              costBasis += Math.abs(size) * price;
-              position += tradeSize;
-            } else {
-              const closeSize = Math.min(Math.abs(position), Math.abs(size));
-              const avgEntry = Math.abs(position) > 0 ? costBasis / Math.abs(position) : 0;
-              costBasis -= closeSize * avgEntry;
-              position += tradeSize;
-              
-              if (Math.abs(tradeSize) > closeSize) {
-                const newSize = Math.abs(tradeSize) - closeSize;
-                costBasis = newSize * price;
-              }
-            }
-          }
-
-          // Only show positions with non-zero size
-          if (Math.abs(position) < 0.0001) continue;
-
-          const side = position > 0 ? 'LONG' : 'SHORT';
-          const markPrice = prices[market] || 0;
-          const entryPrice = Math.abs(position) > 0 ? costBasis / Math.abs(position) : 0;
-          const sizeUsd = Math.abs(position) * markPrice;
-          
-          const unrealizedPnl = side === 'LONG'
-            ? (markPrice - entryPrice) * Math.abs(position)
-            : (entryPrice - markPrice) * Math.abs(position);
-          
-          const unrealizedPnlPercent = Math.abs(entryPrice * Math.abs(position)) > 0
-            ? (unrealizedPnl / (entryPrice * Math.abs(position))) * 100
-            : 0;
-
-          positions.push({
-            botId: bot.id,
-            botName: bot.name,
-            market,
-            side,
-            baseAssetAmount: position,
-            sizeUsd,
-            entryPrice,
-            markPrice,
-            unrealizedPnl,
-            unrealizedPnlPercent,
-            tradeCount: sortedTrades.length,
-          });
-        }
+        positions.push({
+          botId: bot.id,
+          botName: bot.name,
+          market: pos.market,
+          side,
+          baseAssetAmount: baseSize,
+          sizeUsd,
+          entryPrice,
+          markPrice,
+          unrealizedPnl,
+          unrealizedPnlPercent,
+          realizedPnl,
+          lastTradeAt: pos.lastTradeAt,
+        });
       }
 
       res.json({ positions });
@@ -1770,6 +1730,28 @@ export async function registerRoutes(
       console.error("Get prices error:", error);
       res.status(500).json({ error: "Failed to fetch prices" });
     }
+  });
+
+  // SSE endpoint for real-time price streaming (must come BEFORE :market route)
+  app.get("/api/prices/stream", async (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.flushHeaders();
+
+    const sendPrices = async () => {
+      try {
+        const prices = await getAllPrices();
+        res.write(`data: ${JSON.stringify(prices)}\n\n`);
+      } catch (e) {
+        console.error('[SSE] Price fetch error:', e);
+      }
+    };
+
+    await sendPrices();
+    const interval = setInterval(sendPrices, 3000);
+    req.on('close', () => clearInterval(interval));
   });
 
   app.get("/api/prices/:market", async (req, res) => {
