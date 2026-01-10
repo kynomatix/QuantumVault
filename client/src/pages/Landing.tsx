@@ -109,108 +109,75 @@ export default function Landing() {
           <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/20 rounded-full blur-[120px] animate-pulse-slow" />
           <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-accent/20 rounded-full blur-[120px] animate-pulse-slow" style={{ animationDelay: '2s' }} />
           
-          <div className="max-w-7xl mx-auto w-full grid lg:grid-cols-2 gap-12 items-center relative z-10">
-            <motion.div 
-              initial="hidden"
-              animate="visible"
-              variants={staggerContainer}
-              className="text-center lg:text-left"
+          <motion.div 
+            initial="hidden"
+            animate="visible"
+            variants={staggerContainer}
+            className="max-w-4xl mx-auto text-center relative z-10"
+          >
+            <motion.div variants={fadeInUp} className="mb-6">
+              <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary">
+                <Zap className="w-4 h-4" />
+                Powered by Drift Protocol on Solana
+              </span>
+            </motion.div>
+            
+            <motion.h1 
+              variants={fadeInUp}
+              className="text-5xl sm:text-6xl lg:text-7xl font-display font-bold mb-6 leading-tight"
             >
-              <motion.div variants={fadeInUp} className="mb-6">
-                <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary">
-                  <Zap className="w-4 h-4" />
-                  Powered by Drift Protocol on Solana
-                </span>
-              </motion.div>
-              
-              <motion.h1 
-                variants={fadeInUp}
-                className="text-5xl sm:text-6xl lg:text-7xl font-display font-bold mb-6 leading-tight"
+              Trade Smarter with{' '}
+              <span className="gradient-text glow-text">Quantum Bots</span>
+            </motion.h1>
+            
+            <motion.p 
+              variants={fadeInUp}
+              className="text-xl text-muted-foreground max-w-2xl mx-auto mb-10 leading-relaxed"
+            >
+              Deploy algorithmic trading bots on Solana's fastest DEX. 
+              Non-custodial, TradingView-powered, and built for serious traders.
+            </motion.p>
+            
+            <motion.div variants={fadeInUp} className="flex flex-col sm:flex-row items-center justify-center gap-4">
+              <Button 
+                size="lg" 
+                className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity text-lg px-8 py-6 glow"
+                onClick={handleConnectWallet}
+                disabled={connecting}
+                data-testid="button-hero-connect"
               >
-                Trade Smarter with{' '}
-                <span className="gradient-text glow-text">Quantum Bots</span>
-              </motion.h1>
-              
-              <motion.p 
-                variants={fadeInUp}
-                className="text-xl text-muted-foreground max-w-2xl mx-auto lg:mx-0 mb-10 leading-relaxed"
+                <Wallet className="w-5 h-5 mr-2" />
+                {connecting ? 'Connecting...' : 'Connect Wallet'}
+              </Button>
+              <Button 
+                size="lg" 
+                variant="outline"
+                className="text-lg px-8 py-6"
+                onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
+                data-testid="button-learn-more"
               >
-                Deploy algorithmic trading bots on Solana's fastest DEX. 
-                Non-custodial, TradingView-powered, and built for serious traders.
-              </motion.p>
-              
-              <motion.div variants={fadeInUp} className="flex flex-col sm:flex-row items-center lg:items-start justify-center lg:justify-start gap-4">
-                <Button 
-                  size="lg" 
-                  className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity text-lg px-8 py-6 glow"
-                  onClick={handleConnectWallet}
-                  disabled={connecting}
-                  data-testid="button-hero-connect"
-                >
-                  <Wallet className="w-5 h-5 mr-2" />
-                  {connecting ? 'Connecting...' : 'Connect Wallet'}
-                </Button>
-                <Button 
-                  size="lg" 
-                  variant="outline"
-                  className="text-lg px-8 py-6"
-                  onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
-                  data-testid="button-learn-more"
-                >
-                  Learn More
-                </Button>
-              </motion.div>
-
-              <motion.div 
-                variants={fadeInUp}
-                className="mt-12 grid grid-cols-3 gap-8 max-w-lg mx-auto lg:mx-0"
-              >
-                <div className="text-center lg:text-left">
-                  <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-volume">$48M+</p>
-                  <p className="text-sm text-muted-foreground mt-1">Trading Volume</p>
-                </div>
-                <div className="text-center lg:text-left">
-                  <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-bots">127</p>
-                  <p className="text-sm text-muted-foreground mt-1">Active Bots</p>
-                </div>
-                <div className="text-center lg:text-left">
-                  <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-users">4.2K</p>
-                  <p className="text-sm text-muted-foreground mt-1">Traders</p>
-                </div>
-              </motion.div>
+                Learn More
+              </Button>
             </motion.div>
 
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              transition={{ duration: 0.8, delay: 0.3 }}
-              className="hidden lg:block relative"
+            <motion.div 
+              variants={fadeInUp}
+              className="mt-16 grid grid-cols-3 gap-8 max-w-lg mx-auto"
             >
-              <div className="absolute inset-0 bg-gradient-to-br from-primary/30 via-transparent to-accent/30 rounded-3xl blur-2xl" />
-              <div className="relative">
-                <div className="absolute -inset-1 bg-gradient-to-r from-primary via-accent to-primary rounded-3xl opacity-50 blur-sm animate-pulse" />
-                <img 
-                  src={heroImage} 
-                  alt="Quantum Trading Visualization" 
-                  className="relative rounded-3xl border border-primary/20 shadow-2xl shadow-primary/20 w-full h-auto object-cover"
-                  style={{ maxHeight: '500px' }}
-                />
-                <div className="absolute inset-0 rounded-3xl bg-gradient-to-t from-background/60 via-transparent to-transparent" />
-                <div className="absolute bottom-6 left-6 right-6 glass rounded-xl p-4 border border-primary/20">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-3 h-3 rounded-full bg-emerald-400 animate-pulse" />
-                      <span className="text-sm font-medium">Live Trading Active</span>
-                    </div>
-                    <div className="flex items-center gap-2 text-emerald-400">
-                      <Activity className="w-4 h-4" />
-                      <span className="text-sm font-mono">24/7</span>
-                    </div>
-                  </div>
-                </div>
+              <div className="text-center">
+                <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-volume">$48M+</p>
+                <p className="text-sm text-muted-foreground mt-1">Trading Volume</p>
+              </div>
+              <div className="text-center">
+                <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-bots">127</p>
+                <p className="text-sm text-muted-foreground mt-1">Active Bots</p>
+              </div>
+              <div className="text-center">
+                <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-users">4.2K</p>
+                <p className="text-sm text-muted-foreground mt-1">Traders</p>
               </div>
             </motion.div>
-          </div>
+          </motion.div>
         </section>
 
         <section id="features" className="py-20 px-6">
