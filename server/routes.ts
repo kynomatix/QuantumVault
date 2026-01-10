@@ -1003,6 +1003,7 @@ export async function registerRoutes(
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
+          size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
         });
         await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
         return res.status(500).json({ error: orderResult.error || "Order execution failed" });
@@ -1012,6 +1013,7 @@ export async function registerRoutes(
         status: "executed",
         price: orderResult.fillPrice?.toString() || signalPrice || "0",
         txSignature: orderResult.signature || null,
+        size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
 
       // Update bot stats
@@ -1270,6 +1272,7 @@ export async function registerRoutes(
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
+          size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
         });
         await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
         return res.status(500).json({ error: orderResult.error || "Order execution failed" });
@@ -1279,6 +1282,7 @@ export async function registerRoutes(
         status: "executed",
         price: orderResult.fillPrice?.toString() || signalPrice || "0",
         txSignature: orderResult.signature || null,
+        size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
 
       // Update bot stats
