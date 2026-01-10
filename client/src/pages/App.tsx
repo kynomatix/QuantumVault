@@ -897,8 +897,12 @@ export default function AppPage() {
                     {botsData.map((bot: TradingBot) => (
                       <div 
                         key={bot.id} 
-                        className="gradient-border p-4 noise hover:scale-[1.01] transition-transform"
+                        className="gradient-border p-4 noise hover:scale-[1.01] transition-transform cursor-pointer"
                         data-testid={`bot-card-${bot.id}`}
+                        onClick={() => {
+                          setSelectedManagedBot(bot);
+                          setManageBotDrawerOpen(true);
+                        }}
                       >
                         <div className="flex items-start justify-between mb-4">
                           <div className="flex items-center gap-3">
@@ -910,27 +914,13 @@ export default function AppPage() {
                               <p className="text-sm text-muted-foreground">{bot.market}</p>
                             </div>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                              bot.isActive 
-                                ? 'bg-emerald-500/20 text-emerald-400' 
-                                : 'bg-yellow-500/20 text-yellow-400'
-                            }`}>
-                              {bot.isActive ? 'Active' : 'Inactive'}
-                            </span>
-                            <Button 
-                              variant="ghost" 
-                              size="icon"
-                              className="h-8 w-8"
-                              onClick={() => {
-                                setSelectedManagedBot(bot);
-                                setManageBotDrawerOpen(true);
-                              }}
-                              data-testid={`button-manage-bot-${bot.id}`}
-                            >
-                              <Settings className="w-4 h-4 text-muted-foreground" />
-                            </Button>
-                          </div>
+                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                            bot.isActive 
+                              ? 'bg-emerald-500/20 text-emerald-400' 
+                              : 'bg-yellow-500/20 text-yellow-400'
+                          }`}>
+                            {bot.isActive ? 'Active' : 'Inactive'}
+                          </span>
                         </div>
 
                         <div className="grid grid-cols-3 gap-2 text-center">
