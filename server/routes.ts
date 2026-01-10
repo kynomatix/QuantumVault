@@ -952,25 +952,19 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Calculate actual trade size using percentage-based sizing
-      // Signal value (contracts) is treated as a percentage of totalInvestment
-      // e.g., if totalInvestment = $500 and signal = 50, trade size = $250 worth of contracts
-      // Note: Values >100 are allowed for scale-out strategies (e.g., 150% = 1.5x position)
-      const signalPercentage = parseFloat(contracts || positionSize || "0");
-      if (signalPercentage <= 0) {
+      // Pionex-style: Use bot's configured investment amount, not TradingView's
+      // TradingView just sends buy/sell signals, the trade size is set on the bot
+      const tradeAmountUsd = parseFloat(bot.totalInvestment || "100");
+      if (tradeAmountUsd <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
         });
-        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid signal percentage: ${signalPercentage}`, processed: true });
-        return res.status(400).json({ error: `Invalid signal percentage: ${signalPercentage}. Must be > 0.` });
+        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid bot investment: ${tradeAmountUsd}`, processed: true });
+        return res.status(400).json({ error: `Invalid bot investment: ${tradeAmountUsd}. Must be > 0.` });
       }
-
-      // Get bot's total investment and calculate USD amount for this trade
-      const totalInvestmentUsd = parseFloat(bot.totalInvestment || "100");
-      const tradeAmountUsd = (totalInvestmentUsd * signalPercentage) / 100;
       
-      console.log(`[Webhook] Signal ${signalPercentage}% of $${totalInvestmentUsd} = $${tradeAmountUsd.toFixed(2)}`);
+      console.log(`[Webhook] Bot investment per trade: $${tradeAmountUsd.toFixed(2)}`);
 
       // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
@@ -1220,24 +1214,19 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Calculate actual trade size using percentage-based sizing
-      // Signal value (contracts) is treated as a percentage of totalInvestment
-      // Note: Values >100 are allowed for scale-out strategies (e.g., 150% = 1.5x position)
-      const signalPercentage = parseFloat(contracts || positionSize || "0");
-      if (signalPercentage <= 0) {
+      // Pionex-style: Use bot's configured investment amount, not TradingView's
+      // TradingView just sends buy/sell signals, the trade size is set on the bot
+      const tradeAmountUsd = parseFloat(bot.totalInvestment || "100");
+      if (tradeAmountUsd <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
         });
-        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid signal percentage: ${signalPercentage}`, processed: true });
-        return res.status(400).json({ error: `Invalid signal percentage: ${signalPercentage}. Must be > 0.` });
+        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid bot investment: ${tradeAmountUsd}`, processed: true });
+        return res.status(400).json({ error: `Invalid bot investment: ${tradeAmountUsd}. Must be > 0.` });
       }
-
-      // Get bot's total investment and calculate USD amount for this trade
-      const totalInvestmentUsd = parseFloat(bot.totalInvestment || "100");
-      const tradeAmountUsd = (totalInvestmentUsd * signalPercentage) / 100;
       
-      console.log(`[User Webhook] Signal ${signalPercentage}% of $${totalInvestmentUsd} = $${tradeAmountUsd.toFixed(2)}`);
+      console.log(`[User Webhook] Bot investment per trade: $${tradeAmountUsd.toFixed(2)}`);
 
       // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
