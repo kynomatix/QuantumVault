@@ -952,41 +952,26 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // TradingView signal interpretation:
-      // - If "percent" field exists (e.g., 33.33) → treat as percentage of bot capital
-      // - If contracts > 10 → treat as percentage (Pionex-style: 33.33 = 33.33%)
-      // - If contracts < 10 → treat as actual contract size from TradingView
-      const signalValue = parseFloat(contracts || positionSize || "0");
+      // Pionex-style: TradingView sends PERCENTAGE (100 = 100%, 33.33 = 33.33%)
+      // Platform manages total investment, signal is percentage of that capital
+      const signalPercent = parseFloat(contracts || positionSize || "0");
       const baseCapital = parseFloat(bot.totalInvestment || "0");
-      const leverage = bot.leverage || 1;
       
-      // Check for explicit percent field in payload (override)
-      const explicitPercent = payload?.percent || payload?.percentage || payload?.data?.percent;
-      
-      let contractSize: number;
-      let logMessage: string;
-      
-      if (explicitPercent) {
-        // Explicit percentage in payload
-        const percent = parseFloat(explicitPercent);
-        const tradeAmountUsd = (percent / 100) * baseCapital;
-        contractSize = (tradeAmountUsd * leverage) / (await getMarketPrice(bot.market) || 1);
-        logMessage = `[Webhook] Explicit ${percent}% of $${baseCapital} capital * ${leverage}x = ${contractSize.toFixed(6)} contracts`;
-      } else if (signalValue >= 10) {
-        // Large value = percentage (Pionex-style: 33.33 means 33.33%)
-        const tradeAmountUsd = (signalValue / 100) * baseCapital;
-        const currentPrice = await getMarketPrice(bot.market) || 1;
-        contractSize = (tradeAmountUsd * leverage) / currentPrice;
-        logMessage = `[Webhook] ${signalValue}% of $${baseCapital} * ${leverage}x / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`;
-      } else {
-        // Small value = actual contract amount from TradingView, multiply by leverage
-        contractSize = signalValue * leverage;
-        logMessage = `[Webhook] ${signalValue} contracts * ${leverage}x leverage = ${contractSize.toFixed(6)} contracts`;
+      if (baseCapital <= 0) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: `Bot has no capital configured`, processed: true });
+        return res.status(400).json({ error: `Bot has no capital configured. Set totalInvestment on the bot.` });
       }
       
-      console.log(logMessage);
+      // If signal has percentage, use it; otherwise use 100% of capital
+      const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+      
+      console.log(`[Webhook] Signal ${signalPercent}% of $${baseCapital} capital = $${tradeAmountUsd.toFixed(2)} trade`);
 
-      // Get current market price for min order size calculation
+      // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
       if (!currentPrice || currentPrice <= 0) {
         await storage.updateBotTrade(trade.id, {
@@ -996,6 +981,12 @@ export async function registerRoutes(
         await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
         return res.status(500).json({ error: "Could not get market price" });
       }
+
+      // Calculate contract size (with leverage)
+      const leverage = bot.leverage || 1;
+      const contractSize = (tradeAmountUsd * leverage) / currentPrice;
+      
+      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} * ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Minimum order sizes per market (from Drift Protocol)
       const MIN_ORDER_SIZES: Record<string, number> = {
