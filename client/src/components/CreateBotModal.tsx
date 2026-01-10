@@ -167,7 +167,8 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   "contracts": "{{strategy.order.contracts}}",
   "symbol": "{{ticker}}",
   "price": "{{close}}",
-  "time": "{{timenow}}"
+  "time": "{{timenow}}",
+  "position_size": "{{strategy.position_size}}"
 }`;
   };
 
@@ -426,6 +427,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
                 <p className="font-medium text-foreground mb-1">Key placeholders:</p>
                 <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.contracts}}"}</code> → % of your capital (33.33 = 33.33%)</p>
                 <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.order.action}}"}</code> → "buy" or "sell"</p>
+                <p><code className="px-1 py-0.5 bg-background rounded text-xs">{"{{strategy.position_size}}"}</code> → Detects SL/TP closes (0 = close)</p>
               </div>
             </div>
           </div>

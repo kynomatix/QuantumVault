@@ -386,7 +386,8 @@ export function BotManagementDrawer({
   "contracts": "{{strategy.order.contracts}}",
   "symbol": "{{ticker}}",
   "price": "{{close}}",
-  "time": "{{timenow}}"
+  "time": "{{timenow}}",
+  "position_size": "{{strategy.position_size}}"
 }`;
   };
 
@@ -982,6 +983,9 @@ export function BotManagementDrawer({
                   </p>
                   <p>
                     <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.order.action}}'}</code> → "buy" or "sell"
+                  </p>
+                  <p>
+                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.position_size}}'}</code> → Detects SL/TP closes (0 = close position)
                   </p>
                 </div>
               </div>
