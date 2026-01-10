@@ -988,6 +988,27 @@ export async function registerRoutes(
       
       console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} * ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
+      // Minimum order sizes per market (from Drift Protocol)
+      const MIN_ORDER_SIZES: Record<string, number> = {
+        "SOL-PERP": 0.01,
+        "BTC-PERP": 0.0001,
+        "ETH-PERP": 0.001,
+      };
+      const minOrderSize = MIN_ORDER_SIZES[bot.market] || 0.01;
+      
+      if (contractSize < minOrderSize) {
+        const minCapitalNeeded = (minOrderSize * currentPrice) / leverage;
+        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. With ${leverage}x leverage at $${currentPrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} per entry. Increase your Total Investment or reduce pyramid entries.`;
+        console.log(`[Webhook] ${errorMsg}`);
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+          size: contractSize.toFixed(8),
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
+        return res.status(400).json({ error: errorMsg });
+      }
+
       // Execute on Drift
       // Use bot's subaccount if configured, otherwise use main account (0)
       const subAccountId = bot.driftSubaccountId ?? 0;
@@ -1256,6 +1277,27 @@ export async function registerRoutes(
       const contractSize = (tradeAmountUsd * leverage) / currentPrice;
       
       console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} * ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+
+      // Minimum order sizes per market (from Drift Protocol)
+      const MIN_ORDER_SIZES: Record<string, number> = {
+        "SOL-PERP": 0.01,
+        "BTC-PERP": 0.0001,
+        "ETH-PERP": 0.001,
+      };
+      const minOrderSize = MIN_ORDER_SIZES[bot.market] || 0.01;
+      
+      if (contractSize < minOrderSize) {
+        const minCapitalNeeded = (minOrderSize * currentPrice) / leverage;
+        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. With ${leverage}x leverage at $${currentPrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} per entry. Increase your Total Investment or reduce pyramid entries.`;
+        console.log(`[User Webhook] ${errorMsg}`);
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+          size: contractSize.toFixed(8),
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
+        return res.status(400).json({ error: errorMsg });
+      }
 
       // Execute on Drift
       // Use bot's subaccount if configured, otherwise use main account (0)

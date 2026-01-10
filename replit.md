@@ -65,6 +65,12 @@ Preferred communication style: Simple, everyday language.
     - Each entry = 33.33% of bot capital
   - The platform then applies leverage and converts to contracts: `contracts = (tradeAmountUsd * leverage) / currentPrice`
   - **DO NOT CHANGE THIS LOGIC** - it matches Pionex-style trading where TradingView manages percentages
+- **Minimum Order Sizes (from Drift Protocol)**:
+  - SOL-PERP: 0.01 SOL (~$1.36 at $136/SOL)
+  - BTC-PERP: 0.0001 BTC (~$9 at $90k/BTC)
+  - ETH-PERP: 0.001 ETH (~$3 at $3k/ETH)
+  - With leverage, minimum capital per entry = (minOrderSize × price) / leverage
+  - Example: SOL with 10x leverage needs ~$0.14 per pyramid entry
 - **Agent Wallet API Endpoints**:
   - `GET /api/agent/balance` - Get agent wallet USDC balance
   - `POST /api/agent/deposit` - Build tx for user to deposit to agent (user signs)
