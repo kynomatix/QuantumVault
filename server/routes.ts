@@ -952,9 +952,9 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Get current market price first (needed for USDT conversion)
-      const currentPrice = await getMarketPrice(bot.market);
-      if (!currentPrice || currentPrice <= 0) {
+      // Get current market price from oracle (used for order execution)
+      const oraclePrice = await getMarketPrice(bot.market);
+      if (!oraclePrice || oraclePrice <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
@@ -966,13 +966,23 @@ export async function registerRoutes(
       // USDT-to-Percentage Translation:
       // TradingView is configured with USDT order size (e.g., 33.33 USDT)
       // TradingView sends contracts = USDT / price (e.g., 33.33 / 136 = 0.245)
-      // We reverse this: contracts * price = USDT value (e.g., 0.245 * 136 = 33.33)
-      // Then treat that USDT value AS A PERCENTAGE of maxPositionSize
+      // We reverse this using TradingView's price to recover exact USDT value
       const contractsFromTV = parseFloat(contracts || "0");
-      const usdtValue = contractsFromTV * currentPrice; // Reverse TradingView's calculation
+      
+      // Use TradingView's signal price for reverse calculation (more accurate)
+      // Fall back to oracle price if signal price is invalid
+      const tvPrice = parseFloat(signalPrice) || 0;
+      const priceForReversal = (tvPrice > 0 && Math.abs(tvPrice - oraclePrice) / oraclePrice < 0.10) 
+        ? tvPrice 
+        : oraclePrice;
+      
+      const usdtValue = contractsFromTV * priceForReversal; // Reverse TradingView's calculation
       const signalPercent = usdtValue; // Treat USDT value as percentage
       
-      console.log(`[Webhook] TradingView sent ${contractsFromTV} contracts × $${currentPrice.toFixed(2)} = ${usdtValue.toFixed(2)} USDT → treating as ${signalPercent.toFixed(2)}%`);
+      console.log(`[Webhook] TradingView sent ${contractsFromTV} contracts × $${priceForReversal.toFixed(2)} (TV price) = ${usdtValue.toFixed(2)} USDT → treating as ${signalPercent.toFixed(2)}%`);
+      if (Math.abs(tvPrice - oraclePrice) > 0.01) {
+        console.log(`[Webhook] Price comparison: TradingView=$${tvPrice.toFixed(2)}, Oracle=$${oraclePrice.toFixed(2)}, using ${tvPrice === priceForReversal ? 'TradingView' : 'Oracle'}`);
+      }
 
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
       
@@ -990,11 +1000,11 @@ export async function registerRoutes(
       
       console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
 
-      // Calculate contract size (with leverage)
+      // Calculate contract size (with leverage) using oracle price for execution
       const leverage = bot.leverage || 1;
-      const contractSize = (tradeAmountUsd * leverage) / currentPrice;
+      const contractSize = (tradeAmountUsd * leverage) / oraclePrice;
       
-      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x leverage / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Minimum order sizes per market (from Drift Protocol)
       const MIN_ORDER_SIZES: Record<string, number> = {
@@ -1005,8 +1015,8 @@ export async function registerRoutes(
       const minOrderSize = MIN_ORDER_SIZES[bot.market] || 0.01;
       
       if (contractSize < minOrderSize) {
-        const minCapitalNeeded = (minOrderSize * currentPrice) / leverage;
-        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. With ${leverage}x leverage at $${currentPrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} per entry. Increase your Total Investment or reduce pyramid entries.`;
+        const minCapitalNeeded = (minOrderSize * oraclePrice) / leverage;
+        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. With ${leverage}x leverage at $${oraclePrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} per entry. Increase your Total Investment or reduce pyramid entries.`;
         console.log(`[Webhook] ${errorMsg}`);
         await storage.updateBotTrade(trade.id, {
           status: "failed",
@@ -1250,9 +1260,9 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Get current market price first (needed for USDT conversion)
-      const currentPrice = await getMarketPrice(bot.market);
-      if (!currentPrice || currentPrice <= 0) {
+      // Get current market price from oracle (used for order execution)
+      const oraclePrice = await getMarketPrice(bot.market);
+      if (!oraclePrice || oraclePrice <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
@@ -1264,13 +1274,23 @@ export async function registerRoutes(
       // USDT-to-Percentage Translation:
       // TradingView is configured with USDT order size (e.g., 33.33 USDT)
       // TradingView sends contracts = USDT / price (e.g., 33.33 / 136 = 0.245)
-      // We reverse this: contracts * price = USDT value (e.g., 0.245 * 136 = 33.33)
-      // Then treat that USDT value AS A PERCENTAGE of maxPositionSize
+      // We reverse this using TradingView's price to recover exact USDT value
       const contractsFromTV = parseFloat(contracts || "0");
-      const usdtValue = contractsFromTV * currentPrice; // Reverse TradingView's calculation
+      
+      // Use TradingView's signal price for reverse calculation (more accurate)
+      // Fall back to oracle price if signal price is invalid
+      const tvPrice = parseFloat(signalPrice) || 0;
+      const priceForReversal = (tvPrice > 0 && Math.abs(tvPrice - oraclePrice) / oraclePrice < 0.10) 
+        ? tvPrice 
+        : oraclePrice;
+      
+      const usdtValue = contractsFromTV * priceForReversal; // Reverse TradingView's calculation
       const signalPercent = usdtValue; // Treat USDT value as percentage
       
-      console.log(`[User Webhook] TradingView sent ${contractsFromTV} contracts × $${currentPrice.toFixed(2)} = ${usdtValue.toFixed(2)} USDT → treating as ${signalPercent.toFixed(2)}%`);
+      console.log(`[User Webhook] TradingView sent ${contractsFromTV} contracts × $${priceForReversal.toFixed(2)} (TV price) = ${usdtValue.toFixed(2)} USDT → treating as ${signalPercent.toFixed(2)}%`);
+      if (Math.abs(tvPrice - oraclePrice) > 0.01) {
+        console.log(`[User Webhook] Price comparison: TradingView=$${tvPrice.toFixed(2)}, Oracle=$${oraclePrice.toFixed(2)}, using ${tvPrice === priceForReversal ? 'TradingView' : 'Oracle'}`);
+      }
 
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
       
@@ -1288,11 +1308,11 @@ export async function registerRoutes(
       
       console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
 
-      // Calculate contract size (with leverage)
+      // Calculate contract size (with leverage) using oracle price for execution
       const leverage = bot.leverage || 1;
-      const contractSize = (tradeAmountUsd * leverage) / currentPrice;
+      const contractSize = (tradeAmountUsd * leverage) / oraclePrice;
       
-      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x leverage / $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x leverage / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Minimum order sizes per market (from Drift Protocol)
       const MIN_ORDER_SIZES: Record<string, number> = {
@@ -1303,8 +1323,8 @@ export async function registerRoutes(
       const minOrderSize = MIN_ORDER_SIZES[bot.market] || 0.01;
       
       if (contractSize < minOrderSize) {
-        const minCapitalNeeded = (minOrderSize * currentPrice) / leverage;
-        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. With ${leverage}x leverage at $${currentPrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} per entry. Increase your Total Investment or reduce pyramid entries.`;
+        const minCapitalNeeded = (minOrderSize * oraclePrice) / leverage;
+        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. With ${leverage}x leverage at $${oraclePrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} per entry. Increase your Total Investment or reduce pyramid entries.`;
         console.log(`[User Webhook] ${errorMsg}`);
         await storage.updateBotTrade(trade.id, {
           status: "failed",
