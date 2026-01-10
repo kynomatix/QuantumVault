@@ -945,7 +945,7 @@ export function BotManagementDrawer({
             <div className="p-4 rounded-xl bg-muted/50 border">
               <h3 className="font-semibold mb-3 flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-primary" />
-                How It Works (Pionex-Style)
+                How It Works
               </h3>
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
