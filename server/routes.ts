@@ -952,11 +952,12 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // TradingView sends contract amounts calculated for its $100 default capital
-      // We scale proportionally to our bot's actual capital
-      const tvContracts = parseFloat(contracts || positionSize || "0");
+      // CRITICAL FORMULA - DO NOT CHANGE (see replit.md)
+      // TradingView sends a PERCENTAGE in the contracts field
+      // Formula: tradeAmountUsd = (signal / 100) × botCapital
+      //          contractSize = (tradeAmountUsd × leverage) / currentPrice
+      const signalPercent = parseFloat(contracts || positionSize || "0");
       const botCapital = parseFloat(bot.totalInvestment || "0");
-      const tvCapital = 100; // TradingView's default initial capital
       
       if (botCapital <= 0) {
         await storage.updateBotTrade(trade.id, {
@@ -967,21 +968,27 @@ export async function registerRoutes(
         return res.status(400).json({ error: `Bot has no capital configured. Set totalInvestment on the bot.` });
       }
       
-      // Scale TradingView's contracts to match our actual capital
-      // Example: TV sends 0.245 contracts for $100, our capital is $6
-      // Scaled: 0.245 * (6/100) = 0.0147 contracts
-      const scalingFactor = botCapital / tvCapital;
-      let contractSize = tvContracts * scalingFactor;
+      // Step 1: Calculate USD trade amount from percentage
+      const tradeAmountUsd = (signalPercent / 100) * botCapital;
       
-      // Ensure minimum order size for Drift (0.01 SOL for SOL-PERP)
-      const minOrderSize = 0.01;
-      if (contractSize > 0 && contractSize < minOrderSize) {
-        console.log(`[Webhook] Contract size ${contractSize.toFixed(6)} below minimum ${minOrderSize}, using minimum`);
-        contractSize = minOrderSize;
+      console.log(`[Webhook] Signal: ${signalPercent}% of $${botCapital} = $${tradeAmountUsd.toFixed(2)} trade`);
+
+      // Get current market price to convert USD to contracts
+      const currentPrice = await getMarketPrice(bot.market);
+      if (!currentPrice || currentPrice <= 0) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
+        return res.status(500).json({ error: "Could not get market price" });
       }
+
+      // Step 2: Apply leverage and convert to contracts
+      const leverage = bot.leverage || 1;
+      const contractSize = (tradeAmountUsd * leverage) / currentPrice;
       
-      console.log(`[Webhook] TV contracts: ${tvContracts}, Bot capital: $${botCapital}, TV capital: $${tvCapital}`);
-      console.log(`[Webhook] Scaling: ${tvContracts} * (${botCapital}/${tvCapital}) = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x ÷ $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Execute on Drift
       // Use bot's subaccount if configured, otherwise use main account (0)
@@ -1216,11 +1223,12 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // TradingView sends contract amounts calculated for its $100 default capital
-      // We scale proportionally to our bot's actual capital
-      const tvContracts = parseFloat(contracts || positionSize || "0");
+      // CRITICAL FORMULA - DO NOT CHANGE (see replit.md)
+      // TradingView sends a PERCENTAGE in the contracts field
+      // Formula: tradeAmountUsd = (signal / 100) × botCapital
+      //          contractSize = (tradeAmountUsd × leverage) / currentPrice
+      const signalPercent = parseFloat(contracts || positionSize || "0");
       const botCapital = parseFloat(bot.totalInvestment || "0");
-      const tvCapital = 100; // TradingView's default initial capital
       
       if (botCapital <= 0) {
         await storage.updateBotTrade(trade.id, {
@@ -1231,21 +1239,27 @@ export async function registerRoutes(
         return res.status(400).json({ error: `Bot has no capital configured. Set totalInvestment on the bot.` });
       }
       
-      // Scale TradingView's contracts to match our actual capital
-      // Example: TV sends 0.245 contracts for $100, our capital is $6
-      // Scaled: 0.245 * (6/100) = 0.0147 contracts
-      const scalingFactor = botCapital / tvCapital;
-      let contractSize = tvContracts * scalingFactor;
+      // Step 1: Calculate USD trade amount from percentage
+      const tradeAmountUsd = (signalPercent / 100) * botCapital;
       
-      // Ensure minimum order size for Drift (0.01 SOL for SOL-PERP)
-      const minOrderSize = 0.01;
-      if (contractSize > 0 && contractSize < minOrderSize) {
-        console.log(`[User Webhook] Contract size ${contractSize.toFixed(6)} below minimum ${minOrderSize}, using minimum`);
-        contractSize = minOrderSize;
+      console.log(`[User Webhook] Signal: ${signalPercent}% of $${botCapital} = $${tradeAmountUsd.toFixed(2)} trade`);
+
+      // Get current market price to convert USD to contracts
+      const currentPrice = await getMarketPrice(bot.market);
+      if (!currentPrice || currentPrice <= 0) {
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
+        return res.status(500).json({ error: "Could not get market price" });
       }
+
+      // Step 2: Apply leverage and convert to contracts
+      const leverage = bot.leverage || 1;
+      const contractSize = (tradeAmountUsd * leverage) / currentPrice;
       
-      console.log(`[User Webhook] TV contracts: ${tvContracts}, Bot capital: $${botCapital}, TV capital: $${tvCapital}`);
-      console.log(`[User Webhook] Scaling: ${tvContracts} * (${botCapital}/${tvCapital}) = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x ÷ $${currentPrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Execute on Drift
       // Use bot's subaccount if configured, otherwise use main account (0)
