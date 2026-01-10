@@ -34,15 +34,23 @@ Preferred communication style: Simple, everyday language.
 
 ### Real-Time Position Tracking (Jan 2026)
 - **bot_positions Table**: Persists running position per bot/market with:
-  - tradingBotId, market, baseSize, avgEntryPrice, costBasis, realizedPnl
+  - tradingBotId, market, baseSize, avgEntryPrice, costBasis, realizedPnl, totalFees
   - lastTradeId, lastTradeAt for audit trail
   - Unique constraint on (tradingBotId, market)
 - **Position Update Flow**: After each successful trade execution:
-  1. Trade logged to botTrades with actual fill price
+  1. Trade logged to botTrades with actual fill price and fee
   2. storage.updateBotPositionFromTrade() updates bot_positions using Decimal.js for precision
-  3. Same-side trades: Add to cost basis
-  4. Opposite-side trades: Reduce position, calculate realized PnL proportionally
-  5. Side flips: Reset cost basis for new position direction
+  3. Same-side trades: Add to cost basis (includes fee for accurate breakeven)
+  4. Opposite-side trades: Reduce position, calculate realized PnL proportionally, deduct prorated fee
+  5. Side flips: Reset cost basis for new position direction with prorated fee
+
+### Fee Tracking (Jan 2026)
+- **Drift Taker Fee**: 0.05% (5 basis points) on notional value
+- **Per-Trade Fee Storage**: `bot_trades.fee` column stores fee for each trade
+- **Position Fee Accumulation**: `bot_positions.totalFees` accumulates all fees for audit
+- **Fee in Cost Basis**: Fees added to cost basis when opening/adding to get accurate breakeven
+- **Fee Proration on Close/Flip**: When closing or flipping position, only the fee portion for the closed size affects realized PnL; the remainder goes to the new position's cost basis
+- **UI Display**: Trade history modal shows fees in amber color per trade
 - **API Endpoint**: `GET /api/positions` reads from bot_positions + live prices
 - **Real-Time Updates**:
   - Positions refresh every 5 seconds via React Query
