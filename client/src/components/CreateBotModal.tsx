@@ -159,6 +159,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
     return `{
   "botId": "${botId}",
   "action": "{{strategy.order.action}}",
+  "contracts": "{{strategy.order.contracts}}",
   "symbol": "{{ticker}}",
   "price": "{{close}}",
   "time": "{{timenow}}"

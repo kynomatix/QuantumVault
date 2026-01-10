@@ -351,6 +351,7 @@ export function BotManagementDrawer({
     return `{
   "botId": "${bot.id}",
   "action": "{{strategy.order.action}}",
+  "contracts": "{{strategy.order.contracts}}",
   "symbol": "{{ticker}}",
   "price": "{{close}}",
   "time": "{{timenow}}"
@@ -948,10 +949,10 @@ export function BotManagementDrawer({
               </h3>
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
-                  <strong>TradingView sends:</strong> buy/sell action only
+                  Set your <strong>Default Order Size</strong> in TradingView (e.g., 33.33 USDT for pyramiding).
                 </p>
                 <p>
-                  <strong>Bot manages:</strong> trade size (Investment Per Trade setting)
+                  The platform receives this as USD and calculates contracts automatically.
                 </p>
                 <div className="pt-2 border-t mt-2">
                   <p className="font-medium text-foreground mb-1">Placeholders:</p>
@@ -959,13 +960,13 @@ export function BotManagementDrawer({
                     <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.order.action}}'}</code> → "buy" or "sell"
                   </p>
                   <p>
+                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{strategy.order.contracts}}'}</code> → USD amount per entry
+                  </p>
+                  <p>
                     <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{ticker}}'}</code> → Symbol (e.g. SOLUSD)
                   </p>
                   <p>
                     <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{close}}'}</code> → Current price
-                  </p>
-                  <p>
-                    <code className="px-1 py-0.5 bg-background rounded text-xs">{'{{timenow}}'}</code> → Signal timestamp
                   </p>
                 </div>
               </div>

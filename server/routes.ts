@@ -952,19 +952,22 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Pionex-style: Use bot's configured investment amount, not TradingView's
-      // TradingView just sends buy/sell signals, the trade size is set on the bot
-      const tradeAmountUsd = parseFloat(bot.totalInvestment || "100");
+      // Pionex-style: TradingView sends USD amount per entry (e.g., 33.33 for pyramid)
+      // Use TradingView's value as USD, fall back to bot.totalInvestment if not provided
+      const signalUsd = parseFloat(contracts || positionSize || "0");
+      const fallbackUsd = parseFloat(bot.totalInvestment || "100");
+      const tradeAmountUsd = signalUsd > 0 ? signalUsd : fallbackUsd;
+      
       if (tradeAmountUsd <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
         });
-        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid bot investment: ${tradeAmountUsd}`, processed: true });
-        return res.status(400).json({ error: `Invalid bot investment: ${tradeAmountUsd}. Must be > 0.` });
+        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid trade amount: ${tradeAmountUsd}`, processed: true });
+        return res.status(400).json({ error: `Invalid trade amount: ${tradeAmountUsd}. Must be > 0.` });
       }
       
-      console.log(`[Webhook] Bot investment per trade: $${tradeAmountUsd.toFixed(2)}`);
+      console.log(`[Webhook] Trade amount: $${tradeAmountUsd.toFixed(2)} USD (signal: ${signalUsd}, fallback: ${fallbackUsd})`);
 
       // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
@@ -1214,19 +1217,22 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      // Pionex-style: Use bot's configured investment amount, not TradingView's
-      // TradingView just sends buy/sell signals, the trade size is set on the bot
-      const tradeAmountUsd = parseFloat(bot.totalInvestment || "100");
+      // Pionex-style: TradingView sends USD amount per entry (e.g., 33.33 for pyramid)
+      // Use TradingView's value as USD, fall back to bot.totalInvestment if not provided
+      const signalUsd = parseFloat(contracts || positionSize || "0");
+      const fallbackUsd = parseFloat(bot.totalInvestment || "100");
+      const tradeAmountUsd = signalUsd > 0 ? signalUsd : fallbackUsd;
+      
       if (tradeAmountUsd <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
         });
-        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid bot investment: ${tradeAmountUsd}`, processed: true });
-        return res.status(400).json({ error: `Invalid bot investment: ${tradeAmountUsd}. Must be > 0.` });
+        await storage.updateWebhookLog(log.id, { errorMessage: `Invalid trade amount: ${tradeAmountUsd}`, processed: true });
+        return res.status(400).json({ error: `Invalid trade amount: ${tradeAmountUsd}. Must be > 0.` });
       }
       
-      console.log(`[User Webhook] Bot investment per trade: $${tradeAmountUsd.toFixed(2)}`);
+      console.log(`[User Webhook] Trade amount: $${tradeAmountUsd.toFixed(2)} USD (signal: ${signalUsd}, fallback: ${fallbackUsd})`);
 
       // Get current market price to convert USD to contracts
       const currentPrice = await getMarketPrice(bot.market);
