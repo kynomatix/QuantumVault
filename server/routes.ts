@@ -427,15 +427,108 @@ export async function registerRoutes(
   app.get("/api/positions", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet) {
-        return res.status(404).json({ error: "Wallet not found" });
-      }
-      if (!wallet.agentPublicKey) {
-        return res.status(400).json({ error: "Agent wallet not initialized" });
+      if (!wallet || !wallet.agentPublicKey) {
+        return res.json({ positions: [] });
       }
 
-      const { getPerpPositions } = await import('./drift-service');
-      const positions = await getPerpPositions(wallet.agentPublicKey, 0);
+      const bots = await storage.getTradingBots(req.walletAddress!);
+      
+      // Fetch current prices from live API
+      let prices: Record<string, number> = {};
+      try {
+        const priceRes = await fetch('http://localhost:5000/api/prices');
+        if (priceRes.ok) {
+          prices = await priceRes.json();
+        }
+      } catch (e) {
+        console.log('[Positions] Failed to fetch prices');
+      }
+
+      const positions: any[] = [];
+
+      // For each bot, calculate its position from trade history
+      // Each bot tracks its own position independently
+      for (const bot of bots) {
+        const trades = await storage.getBotTrades(bot.id, 500);
+        if (!trades || trades.length === 0) continue;
+
+        // Group trades by market for this bot
+        const marketTrades: Record<string, typeof trades> = {};
+        for (const trade of trades) {
+          if (trade.status !== 'executed') continue;
+          if (!marketTrades[trade.market]) {
+            marketTrades[trade.market] = [];
+          }
+          marketTrades[trade.market].push(trade);
+        }
+
+        // Calculate position for each market
+        for (const [market, tradeList] of Object.entries(marketTrades)) {
+          // Sort trades by execution time
+          const sortedTrades = [...tradeList].sort((a, b) => 
+            new Date(a.executedAt).getTime() - new Date(b.executedAt).getTime()
+          );
+
+          // Running position with average price
+          let position = 0;
+          let costBasis = 0;
+          
+          for (const trade of sortedTrades) {
+            const size = parseFloat(trade.size);
+            const price = parseFloat(trade.price);
+            const isLong = trade.side.toUpperCase() === 'LONG' || trade.side.toUpperCase() === 'BUY';
+            const tradeSize = isLong ? size : -size;
+            
+            const sameSide = (position >= 0 && tradeSize > 0) || (position <= 0 && tradeSize < 0);
+            
+            if (sameSide || position === 0) {
+              costBasis += Math.abs(size) * price;
+              position += tradeSize;
+            } else {
+              const closeSize = Math.min(Math.abs(position), Math.abs(size));
+              const avgEntry = Math.abs(position) > 0 ? costBasis / Math.abs(position) : 0;
+              costBasis -= closeSize * avgEntry;
+              position += tradeSize;
+              
+              if (Math.abs(tradeSize) > closeSize) {
+                const newSize = Math.abs(tradeSize) - closeSize;
+                costBasis = newSize * price;
+              }
+            }
+          }
+
+          // Only show positions with non-zero size
+          if (Math.abs(position) < 0.0001) continue;
+
+          const side = position > 0 ? 'LONG' : 'SHORT';
+          const markPrice = prices[market] || 0;
+          const entryPrice = Math.abs(position) > 0 ? costBasis / Math.abs(position) : 0;
+          const sizeUsd = Math.abs(position) * markPrice;
+          
+          const unrealizedPnl = side === 'LONG'
+            ? (markPrice - entryPrice) * Math.abs(position)
+            : (entryPrice - markPrice) * Math.abs(position);
+          
+          const unrealizedPnlPercent = Math.abs(entryPrice * Math.abs(position)) > 0
+            ? (unrealizedPnl / (entryPrice * Math.abs(position))) * 100
+            : 0;
+
+          positions.push({
+            botId: bot.id,
+            botName: bot.name,
+            market,
+            side,
+            baseAssetAmount: position,
+            sizeUsd,
+            entryPrice,
+            markPrice,
+            unrealizedPnl,
+            unrealizedPnlPercent,
+            tradeCount: sortedTrades.length,
+          });
+        }
+      }
+
       res.json({ positions });
     } catch (error) {
       console.error("Get positions error:", error);

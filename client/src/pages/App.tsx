@@ -725,6 +725,7 @@ export default function AppPage() {
                         <table className="w-full text-sm">
                           <thead>
                             <tr className="text-muted-foreground text-xs border-b border-border/50">
+                              <th className="text-left py-3 font-medium">Bot</th>
                               <th className="text-left py-3 font-medium">Market</th>
                               <th className="text-left py-3 font-medium">Side</th>
                               <th className="text-right py-3 font-medium">Size</th>
@@ -735,6 +736,7 @@ export default function AppPage() {
                           <tbody>
                             {positionsData.map((pos: any, i: number) => (
                               <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-position-${i}`}>
+                                <td className="py-3 font-medium text-primary">{pos.botName || 'Unknown'}</td>
                                 <td className="py-3 font-medium">{pos.market}</td>
                                 <td className="py-3">
                                   <span className={`px-2 py-0.5 rounded text-xs font-medium ${
