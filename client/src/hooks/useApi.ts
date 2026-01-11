@@ -235,3 +235,40 @@ export function useHealthMetrics() {
     staleTime: 8000,
   });
 }
+
+export interface BotHealthMetrics {
+  healthFactor: number;
+  marginRatio: number;
+  totalCollateral: number;
+  freeCollateral: number;
+  unrealizedPnl: number;
+  positions: Array<{
+    marketIndex: number;
+    market: string;
+    baseSize: number;
+    notionalValue: number;
+    liquidationPrice: number | null;
+    entryPrice: number;
+    unrealizedPnl: number;
+  }>;
+}
+
+async function fetchBotHealth(botId: string): Promise<BotHealthMetrics | null> {
+  try {
+    const res = await fetch(`/api/trading-bots/${botId}/position`, { credentials: "include" });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.health || null;
+  } catch {
+    return null;
+  }
+}
+
+export function useBotHealth(botId: string | null, enabled: boolean = false) {
+  return useQuery({
+    queryKey: ["botHealth", botId],
+    queryFn: () => fetchBotHealth(botId!),
+    enabled: !!botId && enabled,
+    staleTime: 5000,
+  });
+}

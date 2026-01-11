@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, type HealthMetrics } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, type HealthMetrics } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
@@ -28,6 +28,7 @@ import {
   Zap,
   Shield,
   ChevronRight,
+  ChevronDown,
   PanelLeftClose,
   PanelLeft,
   Loader2,
@@ -103,6 +104,7 @@ export default function AppPage() {
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
   const [manageBotDrawerOpen, setManageBotDrawerOpen] = useState(false);
   const [selectedManagedBot, setSelectedManagedBot] = useState<TradingBot | null>(null);
+  const [expandedPositionBotId, setExpandedPositionBotId] = useState<string | null>(null);
   const [createBotOpen, setCreateBotOpen] = useState(false);
   const [tradeHistoryOpen, setTradeHistoryOpen] = useState(false);
   const [welcomePopupOpen, setWelcomePopupOpen] = useState(false);
@@ -119,6 +121,7 @@ export default function AppPage() {
   const { data: leaderboardData } = useLeaderboard(100);
   const { data: pricesData } = usePrices();
   const { data: healthMetrics } = useHealthMetrics();
+  const { data: expandedBotHealth, isLoading: healthLoading } = useBotHealth(expandedPositionBotId, !!expandedPositionBotId);
   const subscribeBot = useSubscribeToBot();
   const updateSub = useUpdateSubscription();
 
@@ -719,107 +722,112 @@ export default function AppPage() {
                   </div>
                 </div>
 
-                {healthMetrics && positionsData && positionsData.length > 0 && (
-                  <div className="gradient-border p-4 noise">
-                    <div className="flex items-center justify-between mb-2">
-                      <h3 className="font-display font-semibold text-sm">Account Health</h3>
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                        healthMetrics.healthFactor >= 50 ? 'bg-emerald-500/20 text-emerald-400' :
-                        healthMetrics.healthFactor >= 20 ? 'bg-amber-500/20 text-amber-400' :
-                        'bg-red-500/20 text-red-400'
-                      }`}>
-                        {healthMetrics.healthFactor >= 50 ? 'Healthy' :
-                         healthMetrics.healthFactor >= 20 ? 'Warning' : 'At Risk'}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                      <div>
-                        <p className="text-xs text-muted-foreground">Health Factor</p>
-                        <p className={`text-lg font-mono font-semibold ${
-                          healthMetrics.healthFactor >= 50 ? 'text-emerald-400' :
-                          healthMetrics.healthFactor >= 20 ? 'text-amber-400' : 'text-red-400'
-                        }`} data-testid="text-health-factor">
-                          {healthMetrics.healthFactor.toFixed(0)}%
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-muted-foreground">Total Collateral</p>
-                        <p className="text-lg font-mono font-semibold" data-testid="text-total-collateral">
-                          ${healthMetrics.totalCollateral.toFixed(2)}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-muted-foreground">Free Collateral</p>
-                        <p className="text-lg font-mono font-semibold text-muted-foreground" data-testid="text-free-collateral">
-                          ${healthMetrics.freeCollateral.toFixed(2)}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-muted-foreground">Unrealized PnL</p>
-                        <p className={`text-lg font-mono font-semibold ${
-                          healthMetrics.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
-                        }`} data-testid="text-account-pnl">
-                          {healthMetrics.unrealizedPnl >= 0 ? '+' : ''}${healthMetrics.unrealizedPnl.toFixed(2)}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
                 <div className="grid lg:grid-cols-3 gap-6">
                   <div className="lg:col-span-2 gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
                       <h2 className="font-display font-semibold">Open Positions</h2>
                       <Button variant="outline" size="sm" data-testid="button-view-all-positions">View All</Button>
                     </div>
-                    <div className="overflow-x-auto">
+                    <div className="space-y-3">
                       {positionsData && positionsData.length > 0 ? (
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="text-muted-foreground text-xs border-b border-border/50">
-                              <th className="text-left py-3 font-medium">Bot</th>
-                              <th className="text-left py-3 font-medium">Market</th>
-                              <th className="text-left py-3 font-medium">Side</th>
-                              <th className="text-right py-3 font-medium">Size</th>
-                              <th className="text-right py-3 font-medium">Entry</th>
-                              <th className="text-right py-3 font-medium">Liq. Price</th>
-                              <th className="text-right py-3 font-medium">PnL</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {positionsData.map((pos: any, i: number) => {
-                              const normalizeMarket = (m: string) => m.toUpperCase().replace('-PERP', '').replace('USD', '').replace('PERP-', '');
-                              const liqPriceData = healthMetrics?.positions?.find(
-                                (hp: any) => normalizeMarket(hp.market) === normalizeMarket(pos.market)
-                              );
-                              const liquidationPrice = liqPriceData?.liquidationPrice;
-                              return (
-                                <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-position-${i}`}>
-                                  <td className="py-3 font-medium text-primary">{pos.botName || 'Unknown'}</td>
-                                  <td className="py-3 font-medium">{pos.market}</td>
-                                  <td className="py-3">
-                                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                      pos.side === 'LONG' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
-                                    }`}>
-                                      {pos.side}
-                                    </span>
-                                  </td>
-                                  <td className="py-3 text-right font-mono">
-                                    {Math.abs(pos.baseAssetAmount).toFixed(4)} ({pos.sizeUsd ? `$${pos.sizeUsd.toFixed(2)}` : '--'})
-                                  </td>
-                                  <td className="py-3 text-right font-mono text-muted-foreground">${Number(pos.entryPrice).toFixed(2)}</td>
-                                  <td className="py-3 text-right font-mono text-amber-400">
-                                    {liquidationPrice ? `$${liquidationPrice.toFixed(2)}` : '--'}
-                                  </td>
-                                  <td className={`py-3 text-right font-mono ${Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                    {Number(pos.unrealizedPnl) >= 0 ? '+' : ''}${Number(pos.unrealizedPnl).toFixed(2)}
-                                    <span className="text-xs ml-1">({Number(pos.unrealizedPnlPercent) >= 0 ? '+' : ''}{Number(pos.unrealizedPnlPercent).toFixed(1)}%)</span>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
+                        positionsData.map((pos: any, i: number) => {
+                          const isExpanded = expandedPositionBotId === pos.botId;
+                          const health = isExpanded ? expandedBotHealth : null;
+                          
+                          return (
+                            <div 
+                              key={i} 
+                              className="rounded-xl bg-muted/30 overflow-hidden transition-all"
+                              data-testid={`position-card-${i}`}
+                            >
+                              <div 
+                                className="p-4 cursor-pointer hover:bg-muted/50 transition-colors"
+                                onClick={() => setExpandedPositionBotId(isExpanded ? null : pos.botId)}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center">
+                                      <TrendingUp className="w-5 h-5 text-primary" />
+                                    </div>
+                                    <div>
+                                      <div className="flex items-center gap-2">
+                                        <p className="font-medium">{pos.botName || 'Unknown'}</p>
+                                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                          pos.side === 'LONG' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                                        }`}>
+                                          {pos.side}
+                                        </span>
+                                      </div>
+                                      <p className="text-xs text-muted-foreground">{pos.market}</p>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-4">
+                                    <div className="text-right">
+                                      <p className={`font-mono font-semibold ${Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                        {Number(pos.unrealizedPnl) >= 0 ? '+' : ''}${Number(pos.unrealizedPnl).toFixed(2)}
+                                      </p>
+                                      <p className="text-xs text-muted-foreground">
+                                        {Math.abs(pos.baseAssetAmount).toFixed(4)} @ ${Number(pos.entryPrice).toFixed(2)}
+                                      </p>
+                                    </div>
+                                    <ChevronDown className={`w-5 h-5 text-muted-foreground transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                                  </div>
+                                </div>
+                              </div>
+                              
+                              <AnimatePresence>
+                                {isExpanded && (
+                                  <motion.div
+                                    initial={{ height: 0, opacity: 0 }}
+                                    animate={{ height: 'auto', opacity: 1 }}
+                                    exit={{ height: 0, opacity: 0 }}
+                                    transition={{ duration: 0.2 }}
+                                    className="overflow-hidden"
+                                  >
+                                    <div className="px-4 pb-4 pt-2 border-t border-border/30">
+                                      {healthLoading ? (
+                                        <div className="flex items-center justify-center py-4">
+                                          <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+                                          <span className="ml-2 text-sm text-muted-foreground">Loading health data...</span>
+                                        </div>
+                                      ) : health ? (
+                                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                                          <div>
+                                            <p className="text-xs text-muted-foreground">Health Factor</p>
+                                            <p className={`text-lg font-mono font-semibold ${
+                                              health.healthFactor >= 50 ? 'text-emerald-400' :
+                                              health.healthFactor >= 20 ? 'text-amber-400' : 'text-red-400'
+                                            }`}>
+                                              {health.healthFactor.toFixed(0)}%
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs text-muted-foreground">Total Collateral</p>
+                                            <p className="text-lg font-mono font-semibold">${health.totalCollateral.toFixed(2)}</p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs text-muted-foreground">Free Collateral</p>
+                                            <p className="text-lg font-mono font-semibold text-muted-foreground">${health.freeCollateral.toFixed(2)}</p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs text-muted-foreground">Liquidation Price</p>
+                                            <p className="text-lg font-mono font-semibold text-amber-400">
+                                              {health.positions?.[0]?.liquidationPrice 
+                                                ? `$${health.positions[0].liquidationPrice.toFixed(2)}` 
+                                                : '--'}
+                                            </p>
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <p className="text-sm text-muted-foreground text-center py-2">Unable to load health data</p>
+                                      )}
+                                    </div>
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
+                            </div>
+                          );
+                        })
                       ) : (
                         <div className="text-center py-8 text-muted-foreground">
                           <TrendingUp className="w-8 h-8 mx-auto mb-2 opacity-50" />
