@@ -25,7 +25,16 @@ async function fetchPositions(walletAddress: string) {
   const res = await fetch(`/api/positions`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch positions");
   const data = await res.json();
-  return data.positions || [];
+  return { positions: data.positions || [], source: data.source || 'unknown' };
+}
+
+async function reconcilePositions() {
+  const res = await fetch(`/api/positions/reconcile`, { 
+    method: 'POST',
+    credentials: "include" 
+  });
+  if (!res.ok) throw new Error("Failed to reconcile positions");
+  return res.json();
 }
 
 async function fetchTrades(walletAddress: string, limit?: number) {
@@ -113,6 +122,16 @@ export function usePositions() {
     enabled: !!publicKeyString && sessionConnected,
     refetchInterval: 2000,
     staleTime: 1500,
+  });
+}
+
+export function useReconcilePositions() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: reconcilePositions,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["positions"] });
+    },
   });
 }
 

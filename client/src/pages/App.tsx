@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useReconcilePositions } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
@@ -721,11 +721,22 @@ export default function AppPage() {
                 <div className="grid lg:grid-cols-3 gap-6">
                   <div className="lg:col-span-2 gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
-                      <h2 className="font-display font-semibold">Open Positions</h2>
+                      <div className="flex items-center gap-2">
+                        <h2 className="font-display font-semibold">Open Positions</h2>
+                        {positionsData?.source && (
+                          <span className={`text-xs px-2 py-0.5 rounded ${
+                            positionsData.source === 'on-chain' 
+                              ? 'bg-emerald-500/20 text-emerald-400' 
+                              : 'bg-amber-500/20 text-amber-400'
+                          }`}>
+                            {positionsData.source === 'on-chain' ? '🔗 On-Chain' : '💾 Database'}
+                          </span>
+                        )}
+                      </div>
                       <Button variant="outline" size="sm" data-testid="button-view-all-positions">View All</Button>
                     </div>
                     <div className="overflow-x-auto">
-                      {positionsData && positionsData.length > 0 ? (
+                      {positionsData?.positions && positionsData.positions.length > 0 ? (
                         <table className="w-full text-sm">
                           <thead>
                             <tr className="text-muted-foreground text-xs border-b border-border/50">
@@ -738,7 +749,7 @@ export default function AppPage() {
                             </tr>
                           </thead>
                           <tbody>
-                            {positionsData.map((pos: any, i: number) => (
+                            {positionsData.positions.map((pos: any, i: number) => (
                               <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-position-${i}`}>
                                 <td className="py-3 font-medium text-primary">{pos.botName || 'Unknown'}</td>
                                 <td className="py-3 font-medium">{pos.market}</td>
