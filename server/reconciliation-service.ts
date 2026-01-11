@@ -123,11 +123,21 @@ export function startPeriodicReconciliation(): void {
         if (!wallet?.agentPublicKey) continue;
         
         const bots = await storage.getTradingBots(walletAddress);
-        const activeBots = bots.filter(b => b.isActive);
         
-        if (activeBots.length === 0) continue;
+        // Reconcile active bots AND any bots that have non-zero positions (even if paused)
+        const botsWithPositions = await Promise.all(
+          bots.map(async (bot) => {
+            if (bot.isActive) return bot;
+            const pos = await storage.getBotPosition(bot.id, bot.market);
+            if (pos && Math.abs(parseFloat(pos.baseSize)) > 0.0001) return bot;
+            return null;
+          })
+        );
+        const botsToReconcile = botsWithPositions.filter((b): b is typeof bots[0] => b !== null);
         
-        for (const bot of activeBots) {
+        if (botsToReconcile.length === 0) continue;
+        
+        for (const bot of botsToReconcile) {
           const subAccountId = bot.driftSubaccountId ?? 0;
           await reconcileBotPosition(
             bot.id,

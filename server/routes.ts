@@ -910,30 +910,49 @@ export async function registerRoutes(
       if (isActive === false && bot.isActive === true) {
         console.log(`[Bot] Pausing bot ${bot.name} - checking for open positions to close`);
         
-        // Check if this bot has an open position
-        const botPosition = await storage.getBotPosition(bot.id, bot.market);
-        
-        if (botPosition && parseFloat(botPosition.baseSize) !== 0) {
-          console.log(`[Bot] Found open position: ${botPosition.baseSize} ${bot.market} - closing before pause`);
-          
-          // Get wallet for execution
-          const wallet = await storage.getWallet(bot.walletAddress);
-          if (!wallet?.agentPrivateKeyEncrypted) {
+        // Get wallet for execution
+        const wallet = await storage.getWallet(bot.walletAddress);
+        if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+          // No agent wallet - check if there's a DB position we can't close
+          const dbPosition = await storage.getBotPosition(bot.id, bot.market);
+          if (dbPosition && parseFloat(dbPosition.baseSize) !== 0) {
             return res.status(400).json({ 
               error: "Cannot pause: Agent wallet not configured to close position",
               hasPosition: true,
-              positionSize: botPosition.baseSize,
+              positionSize: dbPosition.baseSize,
             });
           }
+        }
+        
+        // Query ACTUAL on-chain Drift position instead of relying on database
+        // This ensures we close the EXACT amount that exists on-chain
+        const pauseSubAccountId = bot.driftSubaccountId ?? 0;
+        let actualPositionSize = 0;
+        
+        try {
+          const onChainPositions = await getPerpPositions(wallet!.agentPublicKey!, pauseSubAccountId);
+          const marketName = bot.market.toUpperCase();
+          const onChainPosition = onChainPositions.find(p => 
+            p.market.toUpperCase() === marketName || 
+            p.market.toUpperCase().replace('-', '-') === marketName
+          );
+          actualPositionSize = onChainPosition?.baseAssetAmount || 0;
+          console.log(`[Bot] On-chain position for ${bot.market}: ${actualPositionSize}`);
+        } catch (err) {
+          console.error(`[Bot] Failed to query on-chain position, falling back to DB:`, err);
+          const dbPosition = await storage.getBotPosition(bot.id, bot.market);
+          actualPositionSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
+        }
+        
+        if (Math.abs(actualPositionSize) > 0.0001 && wallet?.agentPrivateKeyEncrypted) {
+          console.log(`[Bot] Found open position: ${actualPositionSize} ${bot.market} - closing before pause`);
           
           try {
             // Determine close side (opposite of current position)
-            const currentPositionSize = parseFloat(botPosition.baseSize);
-            const closeSide: 'long' | 'short' = currentPositionSize > 0 ? 'short' : 'long';
-            const closeSize = Math.abs(currentPositionSize);
+            const closeSide: 'long' | 'short' = actualPositionSize > 0 ? 'short' : 'long';
+            const closeSize = Math.abs(actualPositionSize);
             
             // Execute close order on Drift (reduce-only)
-            const pauseSubAccountId = bot.driftSubaccountId ?? 0;
             const result = await executePerpOrder(
               wallet.agentPrivateKeyEncrypted,
               bot.market,
@@ -975,6 +994,15 @@ export async function registerRoutes(
                 closeFee,
                 closeTrade.id
               );
+              
+              // Fire-and-forget reconciliation to ensure database matches on-chain
+              setImmediate(async () => {
+                try {
+                  await reconcileBotPosition(bot.id, bot.walletAddress, wallet.agentPublicKey!, pauseSubAccountId, bot.market);
+                } catch (err) {
+                  console.error(`[Bot] Post-pause reconciliation failed:`, err);
+                }
+              });
               
               positionClosed = true;
             } else {
