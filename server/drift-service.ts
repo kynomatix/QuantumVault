@@ -1832,9 +1832,10 @@ export async function executePerpOrder(
             const calculatedPrice = (quoteAbs / baseAbs) * 1e3;
             console.log(`[Drift] Calculated fill price: $${calculatedPrice.toFixed(2)}`);
             
-            // Validate: if calculated price is more than 20% off oracle, use oracle instead
-            if (oraclePrice && Math.abs(calculatedPrice - oraclePrice) / oraclePrice > 0.2) {
-              console.warn(`[Drift] Calculated price $${calculatedPrice.toFixed(2)} deviates >20% from oracle $${oraclePrice.toFixed(2)}, using oracle`);
+            // Validate: if calculated price is more than 3% off oracle, use oracle instead
+            // This catches position flip scenarios where quoteEntryAmount includes realized PnL
+            if (oraclePrice && Math.abs(calculatedPrice - oraclePrice) / oraclePrice > 0.03) {
+              console.warn(`[Drift] Calculated price $${calculatedPrice.toFixed(2)} deviates >3% from oracle $${oraclePrice.toFixed(2)}, using oracle as fill price`);
               fillPrice = oraclePrice;
             } else {
               fillPrice = calculatedPrice;
