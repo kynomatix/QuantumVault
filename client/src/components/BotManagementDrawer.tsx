@@ -506,8 +506,13 @@ export function BotManagementDrawer({
   };
 
   const handleClosePosition = async () => {
-    if (!localBot) return;
+    console.log('[ClosePosition] Button clicked, localBot:', localBot?.id, 'walletAddress:', walletAddress);
+    if (!localBot) {
+      console.log('[ClosePosition] No localBot, returning early');
+      return;
+    }
     setClosePositionLoading(true);
+    console.log('[ClosePosition] Making fetch request to:', `/api/trading-bots/${localBot.id}/close-position?wallet=${walletAddress}`);
     try {
       const res = await fetch(`/api/trading-bots/${localBot.id}/close-position?wallet=${walletAddress}`, {
         method: 'POST',
