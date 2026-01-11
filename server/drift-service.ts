@@ -1782,8 +1782,26 @@ export async function executePerpOrder(
   reduceOnly: boolean = false,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number }> {
   try {
-    // Import SDK types
-    const { PositionDirection, OrderType, MarketType, BASE_PRECISION } = await import('@drift-labs/sdk');
+    // Import SDK types with retry to handle intermittent "Class extends value is not a constructor" errors
+    let sdk: any;
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        sdk = await import('@drift-labs/sdk');
+        break;
+      } catch (importErr: any) {
+        const errMsg = importErr.message || String(importErr);
+        console.error(`[Drift] SDK import failed in executePerpOrder (attempt ${attempt}/${maxRetries}):`, errMsg);
+        if (attempt === maxRetries) {
+          return {
+            success: false,
+            error: `Failed to load Drift SDK after ${maxRetries} attempts: ${errMsg}`,
+          };
+        }
+        await new Promise(r => setTimeout(r, 100 * attempt));
+      }
+    }
+    const { PositionDirection, OrderType, MarketType, BASE_PRECISION } = sdk;
     
     // Get market index
     const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
@@ -1899,7 +1917,23 @@ export async function closePerpPosition(
   subAccountId: number = 0,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
-    const { PositionDirection, OrderType, MarketType } = await import('@drift-labs/sdk');
+    // Import SDK types with retry
+    let sdk: any;
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        sdk = await import('@drift-labs/sdk');
+        break;
+      } catch (importErr: any) {
+        const errMsg = importErr.message || String(importErr);
+        console.error(`[Drift] SDK import failed in closePerpPosition (attempt ${attempt}/${maxRetries}):`, errMsg);
+        if (attempt === maxRetries) {
+          return { success: false, error: `Failed to load Drift SDK: ${errMsg}` };
+        }
+        await new Promise(r => setTimeout(r, 100 * attempt));
+      }
+    }
+    const { PositionDirection, OrderType, MarketType } = sdk;
     
     const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
     const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
