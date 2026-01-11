@@ -258,7 +258,24 @@ async function fetchBotHealth(botId: string): Promise<BotHealthMetrics | null> {
     const res = await fetch(`/api/trading-bots/${botId}/position`, { credentials: "include" });
     if (!res.ok) return null;
     const data = await res.json();
-    return data.health || null;
+    if (!data.hasPosition) return null;
+    
+    return {
+      healthFactor: data.healthFactor ?? 0,
+      marginRatio: 0,
+      totalCollateral: data.totalCollateral ?? 0,
+      freeCollateral: data.freeCollateral ?? 0,
+      unrealizedPnl: data.unrealizedPnl ?? 0,
+      positions: [{
+        marketIndex: 0,
+        market: data.market ?? '',
+        baseSize: data.size ?? 0,
+        notionalValue: 0,
+        liquidationPrice: data.liquidationPrice ?? null,
+        entryPrice: data.avgEntryPrice ?? 0,
+        unrealizedPnl: data.unrealizedPnl ?? 0,
+      }]
+    };
   } catch {
     return null;
   }
