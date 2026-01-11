@@ -1,41 +1,82 @@
-import { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, Keypair, LAMPORTS_PER_SOL, VersionedTransaction, TransactionMessage } from '@solana/web3.js';
 import { createHash } from 'crypto';
+import { createRequire } from 'module';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import BN from 'bn.js';
+import * as anchor from '@coral-xyz/anchor';
 import { getAgentKeypair } from './agent-wallet';
 import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 
-// Drift SDK loaded via require() to avoid ESM interop issues
-// The dynamic import() approach fails with "Class extends value is not a constructor"
-let cachedDriftSDK: any = null;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-// Attempt to load SDK synchronously at module init time using require()
+// Drift SDK components loaded individually via require() from CJS files
+// DriftClient fails due to ESM/CJS interop issues, so we build transactions manually with Anchor
+const requireSync = createRequire(import.meta.url);
+
+// Load SDK components - try browser build for DriftClient (different bundling)
+let sdkTypes: any = null;
+let sdkConfig: any = null;
+let WalletClass: any = null;
+let DriftClientClass: any = null;
+let driftIdl: any = null;
+let sdkLoadSuccess = false;
+
 try {
-  // Use createRequire to get require() in ESM context
-  const { createRequire } = require('module');
-  const requireSync = createRequire(import.meta.url);
-  cachedDriftSDK = requireSync('@drift-labs/sdk');
-  console.log('[Drift] SDK loaded successfully via require()');
-} catch (requireErr: any) {
-  console.error('[Drift] SDK require() failed, will try dynamic import:', requireErr.message);
+  sdkTypes = requireSync('@drift-labs/sdk/lib/node/types.js');
+  console.log('[Drift] Types loaded successfully');
+  
+  sdkConfig = requireSync('@drift-labs/sdk/lib/node/config.js');
+  console.log('[Drift] Config loaded successfully');
+  
+  WalletClass = requireSync('@drift-labs/sdk/lib/node/wallet.js').Wallet;
+  console.log('[Drift] Wallet loaded successfully');
+  
+  // Try loading DriftClient from browser build (different bundling may work)
+  try {
+    DriftClientClass = requireSync('@drift-labs/sdk/lib/browser/driftClient.js').DriftClient;
+    console.log('[Drift] DriftClient loaded from browser build');
+    sdkLoadSuccess = true;
+  } catch (browserErr: any) {
+    console.error('[Drift] Browser DriftClient failed:', browserErr.message);
+    // Try node build as fallback
+    try {
+      DriftClientClass = requireSync('@drift-labs/sdk/lib/node/driftClient.js').DriftClient;
+      console.log('[Drift] DriftClient loaded from node build');
+      sdkLoadSuccess = true;
+    } catch (nodeErr: any) {
+      console.error('[Drift] Node DriftClient also failed:', nodeErr.message);
+    }
+  }
+  
+  // Load Drift IDL for reference
+  driftIdl = requireSync('@drift-labs/sdk/lib/node/idl/drift.json');
+  console.log('[Drift] IDL loaded successfully');
+  
+} catch (loadErr: any) {
+  console.error('[Drift] SDK component loading failed:', loadErr.message);
 }
+
+// Build SDK object with available components
+const cachedDriftSDK = sdkTypes && sdkConfig && WalletClass ? {
+  DriftClient: DriftClientClass, // May be null if loading failed
+  Wallet: WalletClass,
+  PositionDirection: sdkTypes.PositionDirection,
+  OrderType: sdkTypes.OrderType,
+  MarketType: sdkTypes.MarketType,
+  ...sdkTypes,
+  ...sdkConfig,
+  idl: driftIdl,
+  isDriftClientAvailable: sdkLoadSuccess,
+} : null;
 
 async function getDriftSDK(): Promise<any> {
   if (cachedDriftSDK) {
     return cachedDriftSDK;
   }
-  
-  // Fallback to dynamic import if require() failed
-  try {
-    console.log('[Drift] Attempting dynamic import as fallback...');
-    const sdk = await import('@drift-labs/sdk');
-    cachedDriftSDK = sdk;
-    console.log('[Drift] SDK loaded successfully via dynamic import');
-    return sdk;
-  } catch (importErr: any) {
-    const errMsg = importErr.message || String(importErr);
-    console.error('[Drift] SDK dynamic import failed:', errMsg);
-    throw new Error(`Failed to load Drift SDK: ${errMsg}`);
-  }
+  throw new Error('Drift SDK components not loaded');
 }
 
 /**
@@ -1793,6 +1834,76 @@ const PERP_MARKET_INDICES: Record<string, number> = {
   'ETHUSD': 2,
 };
 
+// Execute trade/close via subprocess to avoid ESM/CJS issues with Drift SDK
+async function executeDriftCommandViaSubprocess(command: Record<string, any>): Promise<any> {
+  return new Promise((resolve) => {
+    const executorPath = join(__dirname, 'drift-executor.mjs');
+    
+    console.log(`[Drift] Spawning subprocess executor for ${command.action || 'trade'}`);
+    
+    const child = spawn('node', [executorPath], {
+      env: {
+        ...process.env,
+        NODE_OPTIONS: '--no-warnings',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    
+    let stdout = '';
+    let stderr = '';
+    
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+    
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+      console.log(`[Executor] ${data.toString().trim()}`);
+    });
+    
+    child.on('close', (code) => {
+      console.log(`[Drift] Subprocess exited with code ${code}`);
+      
+      try {
+        if (stdout.trim()) {
+          const result = JSON.parse(stdout.trim());
+          resolve(result);
+        } else {
+          resolve({
+            success: false,
+            error: stderr || `Subprocess exited with code ${code}`,
+          });
+        }
+      } catch (parseErr) {
+        resolve({
+          success: false,
+          error: `Failed to parse executor output: ${stdout || stderr}`,
+        });
+      }
+    });
+    
+    child.on('error', (err) => {
+      console.error('[Drift] Subprocess error:', err);
+      resolve({
+        success: false,
+        error: `Subprocess error: ${err.message}`,
+      });
+    });
+    
+    child.stdin.write(JSON.stringify(command));
+    child.stdin.end();
+    
+    // Timeout after 60 seconds
+    setTimeout(() => {
+      child.kill();
+      resolve({
+        success: false,
+        error: 'Operation timed out after 60 seconds',
+      });
+    }, 60000);
+  });
+}
+
 export async function executePerpOrder(
   encryptedPrivateKey: string,
   market: string,
@@ -1801,103 +1912,88 @@ export async function executePerpOrder(
   subAccountId: number = 0,
   reduceOnly: boolean = false,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number }> {
+  const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
+  const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
+  
+  console.log(`[Drift] *** Executing ${side.toUpperCase()} ${reduceOnly ? 'REDUCE-ONLY ' : ''}order *** for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}`);
+  if (reduceOnly) {
+    console.log(`[Drift] REDUCE-ONLY flag is SET - this order should only close existing positions, never open new ones`);
+  }
+  
+  // Try to use in-process SDK first, fall back to subprocess if SDK not available
+  let sdk: any = null;
+  let useDriftClient = false;
+  
   try {
-    // Use cached SDK to avoid repeated dynamic import issues
-    const sdk = await getDriftSDK();
-    const { PositionDirection, OrderType, MarketType, BASE_PRECISION } = sdk;
-    
-    // Get market index
-    const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
-    const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
-    
-    console.log(`[Drift] *** Executing ${side.toUpperCase()} ${reduceOnly ? 'REDUCE-ONLY ' : ''}order *** for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}`);
-    if (reduceOnly) {
-      console.log(`[Drift] REDUCE-ONLY flag is SET - this order should only close existing positions, never open new ones`);
-    }
-    
-    // Create DriftClient configured for the specific subaccount
-    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
-    
+    sdk = await getDriftSDK();
+    useDriftClient = !!(sdk?.isDriftClientAvailable && sdk?.DriftClient);
+  } catch (sdkError) {
+    console.log(`[Drift] SDK not available (${sdkError}), will use subprocess executor`);
+  }
+  
+  if (useDriftClient && sdk) {
+    // Use in-process DriftClient (faster)
+    console.log('[Drift] Using in-process DriftClient');
     try {
+      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
       
-      // Convert size to base precision (1e9)
-      const baseAssetAmount = new BN(Math.round(sizeInBase * 1e9));
-      
-      // Determine direction
-      const direction = side === 'long' ? PositionDirection.LONG : PositionDirection.SHORT;
-      
-      console.log(`[Drift] Placing ${side} market order: ${sizeInBase} contracts`);
-      
-      // Use placeAndTakePerpOrder for immediate market execution
-      const txSig = await driftClient.placeAndTakePerpOrder({
-        direction,
-        baseAssetAmount,
-        marketIndex,
-        marketType: MarketType.PERP,
-        orderType: OrderType.MARKET,
-        reduceOnly,
-      });
-      
-      console.log(`[Drift] Order executed: ${txSig}`);
-      
-      // Get fill price - prefer oracle price as it's more reliable after position flips
-      let fillPrice: number | undefined;
       try {
-        // First get oracle price as reference
-        const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
-        const oraclePrice = oracleData?.price?.toNumber() / 1e6; // PRICE_PRECISION is 1e6
-        console.log(`[Drift] Oracle price for market ${marketIndex}: $${oraclePrice?.toFixed(2) ?? 'unknown'}`);
+        const baseAssetAmount = new BN(Math.round(sizeInBase * 1e9));
+        const direction = side === 'long' ? sdk.PositionDirection.LONG : sdk.PositionDirection.SHORT;
         
-        // Force refresh user account to get latest position data
-        const user = driftClient.getUser();
+        const txSig = await driftClient.placeAndTakePerpOrder({
+          direction,
+          baseAssetAmount,
+          marketIndex,
+          marketType: sdk.MarketType.PERP,
+          orderType: sdk.OrderType.MARKET,
+          reduceOnly,
+        });
+        
+        console.log(`[Drift] Order executed: ${txSig}`);
+        
+        let fillPrice: number | undefined;
         try {
-          await user.fetchAccounts();
+          const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
+          fillPrice = oracleData?.price?.toNumber() / 1e6;
         } catch (e) {
-          console.warn('[Drift] Could not refresh user accounts for fill price');
+          console.warn('[Drift] Could not get fill price');
         }
         
-        const perpPosition = user.getPerpPosition(marketIndex);
-        if (perpPosition && !perpPosition.baseAssetAmount.isZero()) {
-          // Calculate entry from position data
-          const quoteAbs = Math.abs(perpPosition.quoteAssetAmount.toNumber());
-          const baseAbs = Math.abs(perpPosition.baseAssetAmount.toNumber());
-          if (baseAbs > 0) {
-            const calculatedPrice = (quoteAbs / baseAbs) * 1e3;
-            console.log(`[Drift] Calculated fill price: $${calculatedPrice.toFixed(2)}`);
-            
-            // Validate: if calculated price is more than 3% off oracle, use oracle instead
-            // This catches position flip scenarios where quoteEntryAmount includes realized PnL
-            if (oraclePrice && Math.abs(calculatedPrice - oraclePrice) / oraclePrice > 0.03) {
-              console.warn(`[Drift] Calculated price $${calculatedPrice.toFixed(2)} deviates >3% from oracle $${oraclePrice.toFixed(2)}, using oracle as fill price`);
-              fillPrice = oraclePrice;
-            } else {
-              fillPrice = calculatedPrice;
-            }
-          }
-        }
-        
-        // Fallback to oracle if no position-based price
-        if (!fillPrice && oraclePrice) {
-          fillPrice = oraclePrice;
-        }
-      } catch (e) {
-        console.warn('[Drift] Could not get fill price:', e);
+        await cleanup();
+        return { success: true, signature: txSig, txSignature: txSig, fillPrice };
+      } catch (orderError) {
+        await cleanup();
+        throw orderError;
       }
-      
-      await cleanup();
-      return { success: true, signature: txSig, txSignature: txSig, fillPrice };
-    } catch (orderError) {
-      await cleanup();
-      throw orderError;
+    } catch (driftClientError) {
+      console.error('[Drift] In-process DriftClient failed, falling back to subprocess:', driftClientError);
+      // Fall through to subprocess
     }
+  }
+  
+  // Use subprocess executor (fallback or when DriftClient not available)
+  console.log('[Drift] Using subprocess executor for trade');
+  
+  try {
+    const result = await executeDriftCommandViaSubprocess({
+      action: 'trade',
+      encryptedPrivateKey,
+      market,
+      side,
+      sizeInBase,
+      subAccountId,
+      reduceOnly,
+    });
+    
+    return result;
   } catch (error) {
-    console.error('[Drift] Order execution error:', error);
+    console.error('[Drift] Subprocess execution error:', error);
     
     let errorMessage: string;
     if (error instanceof Error) {
       errorMessage = error.message;
       
-      // Check for common Drift errors
       if (errorMessage.includes('6010')) {
         errorMessage = 'Insufficient collateral to open position. Please deposit more funds to Drift.';
       } else if (errorMessage.includes('6001')) {
@@ -1917,52 +2013,79 @@ export async function closePerpPosition(
   encryptedPrivateKey: string,
   market: string,
   subAccountId: number = 0,
+  positionSizeBase?: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
+  const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
+  const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
+  
+  console.log(`[Drift] Closing position for ${market} (index ${marketIndex}) on subaccount ${subAccountId}`);
+  
+  // Try to use in-process SDK first, fall back to subprocess if SDK not available
+  let sdk: any = null;
+  let useDriftClient = false;
+  
   try {
-    // Use cached SDK to avoid repeated dynamic import issues
-    const sdk = await getDriftSDK();
-    const { PositionDirection, OrderType, MarketType } = sdk;
-    
-    const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
-    const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
-    
-    console.log(`[Drift] Closing position for ${market} (index ${marketIndex}) on subaccount ${subAccountId}`);
-    
-    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
-    
+    sdk = await getDriftSDK();
+    useDriftClient = !!(sdk?.isDriftClientAvailable && sdk?.DriftClient);
+  } catch (sdkError) {
+    console.log(`[Drift] SDK not available for close (${sdkError}), will use subprocess executor`);
+  }
+  
+  if (useDriftClient && sdk) {
+    console.log('[Drift] Using in-process DriftClient for close');
     try {
-      // Get current position
-      const user = driftClient.getUser();
-      const perpPosition = user.getPerpPosition(marketIndex);
+      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
       
-      if (!perpPosition || perpPosition.baseAssetAmount.isZero()) {
+      try {
+        const user = driftClient.getUser();
+        const perpPosition = user.getPerpPosition(marketIndex);
+        
+        if (!perpPosition || perpPosition.baseAssetAmount.isZero()) {
+          await cleanup();
+          return { success: true, signature: undefined };
+        }
+        
+        const isLong = perpPosition.baseAssetAmount.gt(new BN(0));
+        const closeDirection = isLong ? sdk.PositionDirection.SHORT : sdk.PositionDirection.LONG;
+        const closeAmount = perpPosition.baseAssetAmount.abs();
+        
+        console.log(`[Drift] Closing ${isLong ? 'long' : 'short'} position of ${closeAmount.toNumber() / 1e9} contracts`);
+        
+        const txSig = await driftClient.placeAndTakePerpOrder({
+          direction: closeDirection,
+          baseAssetAmount: closeAmount,
+          marketIndex,
+          marketType: sdk.MarketType.PERP,
+          orderType: sdk.OrderType.MARKET,
+          reduceOnly: true,
+        });
+        
+        console.log(`[Drift] Position closed: ${txSig}`);
         await cleanup();
-        return { success: true, signature: undefined }; // No position to close
+        return { success: true, signature: txSig };
+      } catch (closeError) {
+        await cleanup();
+        throw closeError;
       }
-      
-      // Determine direction to close (opposite of current position)
-      const isLong = perpPosition.baseAssetAmount.gt(new BN(0));
-      const closeDirection = isLong ? PositionDirection.SHORT : PositionDirection.LONG;
-      const closeAmount = perpPosition.baseAssetAmount.abs();
-      
-      console.log(`[Drift] Closing ${isLong ? 'long' : 'short'} position of ${closeAmount.toNumber() / 1e9} contracts`);
-      
-      const txSig = await driftClient.placeAndTakePerpOrder({
-        direction: closeDirection,
-        baseAssetAmount: closeAmount,
-        marketIndex,
-        marketType: MarketType.PERP,
-        orderType: OrderType.MARKET,
-        reduceOnly: true,
-      });
-      
-      console.log(`[Drift] Position closed: ${txSig}`);
-      await cleanup();
-      return { success: true, signature: txSig };
-    } catch (closeError) {
-      await cleanup();
-      throw closeError;
+    } catch (driftClientError) {
+      console.error('[Drift] In-process DriftClient close failed, falling back to subprocess:', driftClientError);
+      // Fall through to subprocess
     }
+  }
+  
+  // Use subprocess executor (fallback or when DriftClient not available)
+  console.log('[Drift] Using subprocess executor for close');
+  
+  try {
+    const result = await executeDriftCommandViaSubprocess({
+      action: 'close',
+      encryptedPrivateKey,
+      market,
+      subAccountId,
+      positionSizeBase: positionSizeBase ?? null,
+    });
+    
+    return result;
   } catch (error) {
     console.error('[Drift] Close position error:', error);
     return {

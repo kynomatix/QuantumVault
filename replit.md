@@ -74,6 +74,12 @@ Preferred communication style: Simple, everyday language.
 
 ## Known Issues
 
+- **Drift SDK Nested Dependency Conflict (CRITICAL)**: The Drift SDK has nested dependencies (`@pythnetwork/solana-utils` → `jito-ts` → old `@solana/web3.js`) that cause "Class extends value is not a constructor" errors. Fix: After any `npm install`, run:
+    ```bash
+    rm -rf node_modules/@pythnetwork/solana-utils/node_modules/jito-ts/node_modules/@solana/web3.js
+    rm -rf node_modules/jito-ts/node_modules/@solana
+    ```
+- **Subprocess Trade Executor Fallback**: If DriftClient fails to load, the system uses `drift-executor.mjs` subprocess for trade execution (~1-2s latency per trade).
 - **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK's DriftClient creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Mitigation: Use RPC + SDK's `decodeUser()` (stateless, no WebSocket) instead of DriftClient subscriptions for all read-only queries. DriftClient is reserved ONLY for trade execution where we must submit transactions.
 - **Health Metrics Are Estimates**: Account health factor and liquidation prices are conservative estimates using a flat 5% margin ratio. Drift uses per-market maintenance weights that vary (5-15%+). The estimates are intentionally conservative (underestimate health) for safety. API responses include `isEstimate: true` to indicate this. Users should check Drift UI for precise health metrics when making critical risk decisions.
 - **Equity Discrepancy (~1-2%)**: Displayed Bot Equity may differ slightly from Drift UI due to:
