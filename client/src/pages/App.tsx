@@ -807,6 +807,11 @@ export default function AppPage() {
                               <span className="text-muted-foreground">{(bot as any).actualTradeCount ?? (bot.stats as any)?.totalTrades ?? 0} trades</span>
                               <span className={parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
                                 {parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? '+' : ''}${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
+                                {parseFloat(bot.maxPositionSize || '0') > 0 && (
+                                  <span className="ml-1">
+                                    ({((parseFloat((bot as any).realizedPnl ?? 0) / parseFloat(bot.maxPositionSize || '1')) * 100).toFixed(1)}%)
+                                  </span>
+                                )}
                               </span>
                             </div>
                           </div>
@@ -975,6 +980,11 @@ export default function AppPage() {
                           <div className="p-2 rounded-lg bg-muted/30">
                             <p className={`text-lg font-bold ${parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                               {parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? '+' : ''}${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
+                              {parseFloat(bot.maxPositionSize || '0') > 0 && (
+                                <span className="text-xs ml-1">
+                                  ({((parseFloat((bot as any).realizedPnl ?? 0) / parseFloat(bot.maxPositionSize || '1')) * 100).toFixed(1)}%)
+                                </span>
+                              )}
                             </p>
                             <p className="text-xs text-muted-foreground">PnL</p>
                           </div>

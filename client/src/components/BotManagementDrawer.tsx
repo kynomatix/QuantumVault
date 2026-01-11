@@ -631,7 +631,7 @@ export function BotManagementDrawer({
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4 mt-4">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border">
                 <p className="text-sm text-muted-foreground">Bot Equity</p>
                 <p className="text-2xl font-bold mt-1" data-testid="text-bot-equity">
@@ -657,12 +657,27 @@ export function BotManagementDrawer({
                     data-testid="text-total-pnl"
                   >
                     ${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
+                    {parseFloat(bot.maxPositionSize || '0') > 0 && (
+                      <span className="text-sm ml-1">
+                        ({((parseFloat((bot as any).realizedPnl ?? 0) / parseFloat(bot.maxPositionSize || '1')) * 100).toFixed(1)}%)
+                      </span>
+                    )}
                   </p>
                 </div>
               </div>
+              <div className="p-4 rounded-xl bg-blue-500/10 border border-blue-500/30">
+                <p className="text-sm text-muted-foreground">Interest Earned</p>
+                <p className="text-2xl font-bold mt-1 text-blue-400" data-testid="text-interest-card">
+                  {balanceLoading ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    `+$${interestEarned.toFixed(4)}`
+                  )}
+                </p>
+              </div>
             </div>
 
-            <div className="grid grid-cols-4 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Total Trades</p>
                 <p className="text-lg font-semibold mt-1" data-testid="text-total-trades">
@@ -678,12 +693,6 @@ export function BotManagementDrawer({
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Leverage</p>
                 <p className="text-lg font-semibold mt-1" data-testid="text-leverage">{localBot?.leverage ?? bot.leverage}x</p>
-              </div>
-              <div className="p-3 rounded-lg bg-muted/30 border text-center">
-                <p className="text-xs text-muted-foreground">Interest</p>
-                <p className="text-lg font-semibold mt-1 text-blue-400" data-testid="text-interest-earned">
-                  {balanceLoading ? '-' : `+$${interestEarned.toFixed(4)}`}
-                </p>
               </div>
             </div>
 
