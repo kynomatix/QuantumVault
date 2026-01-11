@@ -1892,22 +1892,46 @@ export async function getAccountHealthMetrics(
       }
       
       // Get health metrics from SDK
-      // Health is 0-100 where 100 means fully healthy (no margin usage)
-      // When health approaches 0, liquidation is imminent
+      // Drift UI Health = 1 - (Maintenance Margin / Total Collateral)
+      // Health ranges 0-100% where 100% = fully healthy, 0% = liquidation
       let healthFactor = 100;
       let marginRatio = 0;
       let totalCollateral = 0;
       let freeCollateral = 0;
       let unrealizedPnl = 0;
+      let maintenanceMargin = 0;
       
       try {
-        // Get health as percentage (0-100, 100 = healthy)
-        const health = user.getHealth();
-        // getHealth() returns a number directly in newer SDK versions
-        healthFactor = typeof health === 'number' ? health : (health as any).toNumber?.() ?? 100;
-        console.log(`[Drift] Raw health: ${healthFactor}`);
+        // Total collateral value in USDC (weighted margin collateral)
+        const totalCollateralBN = user.getTotalCollateral();
+        totalCollateral = totalCollateralBN.toNumber() / QUOTE_PRECISION.toNumber();
+        console.log(`[Drift] Total collateral: $${totalCollateral.toFixed(2)}`);
       } catch (e) {
-        console.warn('[Drift] Could not get health:', e);
+        console.warn('[Drift] Could not get total collateral:', e);
+      }
+      
+      try {
+        // Get maintenance margin requirement - this is what Drift UI uses for health calculation
+        const maintenanceMarginBN = user.getMaintenanceMarginRequirement();
+        maintenanceMargin = maintenanceMarginBN.toNumber() / QUOTE_PRECISION.toNumber();
+        console.log(`[Drift] Maintenance margin: $${maintenanceMargin.toFixed(2)}`);
+        
+        // Calculate health factor using Drift UI formula: Health = 1 - (Maintenance Margin / Collateral)
+        if (totalCollateral > 0) {
+          healthFactor = Math.max(0, Math.min(100, 100 * (1 - maintenanceMargin / totalCollateral)));
+        } else {
+          healthFactor = maintenanceMargin > 0 ? 0 : 100;
+        }
+        console.log(`[Drift] Calculated health (Drift formula): ${healthFactor.toFixed(1)}%`);
+      } catch (e) {
+        console.warn('[Drift] Could not get maintenance margin, falling back to SDK getHealth:', e);
+        try {
+          const health = user.getHealth();
+          healthFactor = typeof health === 'number' ? health : (health as any).toNumber?.() ?? 100;
+          console.log(`[Drift] Fallback SDK health: ${healthFactor}`);
+        } catch (e2) {
+          console.warn('[Drift] Could not get health:', e2);
+        }
       }
       
       try {
@@ -1918,15 +1942,6 @@ export async function getAccountHealthMetrics(
         console.log(`[Drift] Margin ratio: ${marginRatio}%`);
       } catch (e) {
         console.warn('[Drift] Could not get margin ratio:', e);
-      }
-      
-      try {
-        // Total collateral value in USDC
-        const totalCollateralBN = user.getTotalCollateral();
-        totalCollateral = totalCollateralBN.toNumber() / QUOTE_PRECISION.toNumber();
-        console.log(`[Drift] Total collateral: $${totalCollateral.toFixed(2)}`);
-      } catch (e) {
-        console.warn('[Drift] Could not get total collateral:', e);
       }
       
       try {
