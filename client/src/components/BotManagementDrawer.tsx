@@ -669,18 +669,22 @@ export function BotManagementDrawer({
               </div>
             </div>
             
-            <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/30">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-muted-foreground">Lending Interest (Est.)</p>
-                  <p className="text-sm font-semibold text-blue-400" data-testid="text-interest-card">
-                    {balanceLoading ? '-' : `+$${interestEarned.toFixed(4)}/day`}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="text-xs text-muted-foreground">Current APY</p>
-                  <p className="text-sm font-semibold text-blue-400">~5.3%</p>
-                </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
+                <p className="text-xs text-muted-foreground">Daily Interest</p>
+                <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-interest-card">
+                  {balanceLoading ? '-' : `+$${interestEarned.toFixed(4)}`}
+                </p>
+              </div>
+              <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
+                <p className="text-xs text-muted-foreground">Current APY</p>
+                <p className="text-lg font-semibold text-blue-400 mt-1">~5.3%</p>
+              </div>
+              <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
+                <p className="text-xs text-muted-foreground">Total Earned</p>
+                <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-total-interest">
+                  {balanceLoading ? '-' : `$${(interestEarned * 30).toFixed(2)}`}
+                </p>
               </div>
             </div>
 
