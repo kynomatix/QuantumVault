@@ -1724,19 +1724,44 @@ export async function executePerpOrder(
       
       console.log(`[Drift] Order executed: ${txSig}`);
       
-      // Try to get fill price from user account
+      // Get fill price - prefer oracle price as it's more reliable after position flips
       let fillPrice: number | undefined;
       try {
+        // First get oracle price as reference
+        const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
+        const oraclePrice = oracleData?.price?.toNumber() / 1e6; // PRICE_PRECISION is 1e6
+        console.log(`[Drift] Oracle price for market ${marketIndex}: $${oraclePrice?.toFixed(2) ?? 'unknown'}`);
+        
+        // Force refresh user account to get latest position data
         const user = driftClient.getUser();
+        try {
+          await user.fetchAccounts();
+        } catch (e) {
+          console.warn('[Drift] Could not refresh user accounts for fill price');
+        }
+        
         const perpPosition = user.getPerpPosition(marketIndex);
         if (perpPosition && !perpPosition.baseAssetAmount.isZero()) {
-          // Entry price = quoteAssetAmount / baseAssetAmount (both in precision)
+          // Calculate entry from position data
           const quoteAbs = Math.abs(perpPosition.quoteAssetAmount.toNumber());
           const baseAbs = Math.abs(perpPosition.baseAssetAmount.toNumber());
           if (baseAbs > 0) {
-            // quoteAssetAmount is in QUOTE_PRECISION (1e6), baseAssetAmount in BASE_PRECISION (1e9)
-            fillPrice = (quoteAbs / baseAbs) * 1e3; // Normalize to actual price
+            const calculatedPrice = (quoteAbs / baseAbs) * 1e3;
+            console.log(`[Drift] Calculated fill price: $${calculatedPrice.toFixed(2)}`);
+            
+            // Validate: if calculated price is more than 20% off oracle, use oracle instead
+            if (oraclePrice && Math.abs(calculatedPrice - oraclePrice) / oraclePrice > 0.2) {
+              console.warn(`[Drift] Calculated price $${calculatedPrice.toFixed(2)} deviates >20% from oracle $${oraclePrice.toFixed(2)}, using oracle`);
+              fillPrice = oraclePrice;
+            } else {
+              fillPrice = calculatedPrice;
+            }
           }
+        }
+        
+        // Fallback to oracle if no position-based price
+        if (!fillPrice && oraclePrice) {
+          fillPrice = oraclePrice;
         }
       } catch (e) {
         console.warn('[Drift] Could not get fill price:', e);
@@ -1857,6 +1882,14 @@ export async function getAccountHealthMetrics(
     
     try {
       const user = driftClient.getUser();
+      
+      // Force refresh user account data from on-chain to avoid stale cache
+      try {
+        await user.fetchAccounts();
+        console.log('[Drift] User account data refreshed from on-chain');
+      } catch (refreshError) {
+        console.warn('[Drift] Could not refresh user accounts, using cached data:', refreshError);
+      }
       
       // Get health metrics from SDK
       // Health is 0-100 where 100 means fully healthy (no margin usage)
