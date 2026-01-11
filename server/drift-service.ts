@@ -1902,16 +1902,13 @@ export async function getAccountHealthMetrics(
       let maintenanceMargin = 0;
       
       try {
-        // Total collateral value in USDC (weighted margin collateral)
-        const totalCollateralBN = user.getTotalCollateral();
-        totalCollateral = totalCollateralBN.toNumber() / QUOTE_PRECISION.toNumber();
-        console.log(`[Drift] Total collateral: $${totalCollateral.toFixed(2)}`);
-      } catch (e) {
-        console.warn('[Drift] Could not get total collateral:', e);
-      }
-      
-      try {
-        // Get maintenance margin requirement - this is what Drift UI uses for health calculation
+        // Get maintenance total collateral (with maintenance asset weights) - this matches Drift UI
+        // MarginCategory is 'Initial' | 'Maintenance' string type
+        const maintenanceCollateralBN = user.getTotalCollateral('Maintenance' as any);
+        totalCollateral = maintenanceCollateralBN.toNumber() / QUOTE_PRECISION.toNumber();
+        console.log(`[Drift] Total collateral (maintenance): $${totalCollateral.toFixed(2)}`);
+        
+        // Get maintenance margin requirement
         const maintenanceMarginBN = user.getMaintenanceMarginRequirement();
         maintenanceMargin = maintenanceMarginBN.toNumber() / QUOTE_PRECISION.toNumber();
         console.log(`[Drift] Maintenance margin: $${maintenanceMargin.toFixed(2)}`);
@@ -1926,6 +1923,10 @@ export async function getAccountHealthMetrics(
       } catch (e) {
         console.warn('[Drift] Could not get maintenance margin, falling back to SDK getHealth:', e);
         try {
+          // Fallback: try without MarginCategory
+          const totalCollateralBN = user.getTotalCollateral();
+          totalCollateral = totalCollateralBN.toNumber() / QUOTE_PRECISION.toNumber();
+          
           const health = user.getHealth();
           healthFactor = typeof health === 'number' ? health : (health as any).toNumber?.() ?? 100;
           console.log(`[Drift] Fallback SDK health: ${healthFactor}`);
