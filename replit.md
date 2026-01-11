@@ -48,6 +48,7 @@ Preferred communication style: Simple, everyday language.
 - **Equity Event Tracking**: Tracks deposits and withdrawals for transaction history, ensuring idempotency.
 - **Drift Subaccounts**: Currently, all trades execute on `subaccount 0`. Multi-subaccount support is planned.
 - **Drift Account Parsing**: Custom byte parsing is used for Solana Drift User and PerpPosition accounts to extract balances and positions, as direct Drift SDK usage has dependency conflicts.
+- **Account Health Metrics**: Uses official Drift SDK methods (`getHealth()`, `getMarginRatio()`, `getTotalCollateral()`, `getFreeCollateral()`, `getUnrealizedPNL()`) to display account health factor, collateral values, and per-position liquidation prices on the dashboard.
 
 ## External Dependencies
 
