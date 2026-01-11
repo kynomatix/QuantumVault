@@ -127,10 +127,11 @@ export function usePositions() {
 
 export function useReconcilePositions() {
   const queryClient = useQueryClient();
+  const { publicKeyString } = useWallet();
   return useMutation({
     mutationFn: reconcilePositions,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["positions"] });
+      queryClient.invalidateQueries({ queryKey: ["positions", publicKeyString] });
     },
   });
 }
