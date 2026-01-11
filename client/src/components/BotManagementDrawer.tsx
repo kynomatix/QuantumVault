@@ -50,6 +50,7 @@ import {
   Trash2,
   Settings,
   XCircle,
+  RefreshCw,
 } from 'lucide-react';
 import {
   AlertDialog,
@@ -176,6 +177,15 @@ export function BotManagementDrawer({
   const [positionLoading, setPositionLoading] = useState(false);
   const [netDeposited, setNetDeposited] = useState<number>(0);
   const [closePositionLoading, setClosePositionLoading] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    await Promise.all([fetchBotBalance(), fetchBotPosition()]);
+    setLastUpdated(new Date());
+    setIsRefreshing(false);
+  };
 
   useEffect(() => {
     if (bot) {
@@ -225,6 +235,16 @@ export function BotManagementDrawer({
       fetchBotPosition();
       fetchUserWebhookUrl();
       setActiveTab('overview');
+      
+      // Auto-refresh every 15 seconds when drawer is open
+      setLastUpdated(new Date());
+      const refreshInterval = setInterval(() => {
+        fetchBotBalance();
+        fetchBotPosition();
+        setLastUpdated(new Date());
+      }, 15000);
+      
+      return () => clearInterval(refreshInterval);
     }
   }, [isOpen, bot?.id]);
 
@@ -684,6 +704,22 @@ export function BotManagementDrawer({
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4 mt-4">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs text-muted-foreground">
+                {lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : 'Auto-updates every 15s'}
+              </p>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleManualRefresh}
+                disabled={isRefreshing || balanceLoading}
+                className="h-6 px-2"
+                data-testid="button-refresh-balance"
+              >
+                <RefreshCw className={`w-3 h-3 mr-1 ${isRefreshing ? 'animate-spin' : ''}`} />
+                Refresh
+              </Button>
+            </div>
             <div className="grid grid-cols-3 gap-3">
               <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border">
                 <div className="flex items-center gap-1">
