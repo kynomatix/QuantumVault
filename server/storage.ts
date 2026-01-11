@@ -108,6 +108,7 @@ export interface IStorage {
   getBotPositions(walletAddress: string): Promise<BotPosition[]>;
   upsertBotPosition(position: InsertBotPosition): Promise<BotPosition>;
   updateBotPositionFromTrade(tradingBotId: string, market: string, walletAddress: string, side: string, size: number, price: number, fee: number, tradeId: string): Promise<BotPosition>;
+  getWalletsWithActiveBots(): Promise<string[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -541,6 +542,13 @@ export class DatabaseStorage implements IStorage {
       lastTradeId: tradeId,
       lastTradeAt: new Date(),
     });
+  }
+
+  async getWalletsWithActiveBots(): Promise<string[]> {
+    const result = await db.selectDistinct({ walletAddress: tradingBots.walletAddress })
+      .from(tradingBots)
+      .where(eq(tradingBots.isActive, true));
+    return result.map(r => r.walletAddress);
   }
 }
 

@@ -8,6 +8,7 @@ import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shar
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, getAccountHealthMetrics } from "./drift-service";
+import { reconcileBotPosition } from "./reconciliation-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
@@ -1793,6 +1794,15 @@ export async function registerRoutes(
         tradeFee,
         trade.id
       );
+
+      // Fire-and-forget reconciliation to sync with on-chain position
+      setImmediate(async () => {
+        try {
+          await reconcileBotPosition(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market);
+        } catch (err) {
+          console.error(`[Webhook] Post-trade reconciliation failed for bot ${botId}:`, err);
+        }
+      });
 
       // Update bot stats
       const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
