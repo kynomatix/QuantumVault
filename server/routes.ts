@@ -529,6 +529,126 @@ export async function registerRoutes(
     }
   });
 
+  // Reconcile endpoint - sync database with on-chain Drift positions
+  app.post("/api/positions/reconcile", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet || !wallet.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not found" });
+      }
+
+      // Fetch real on-chain positions from Drift
+      const onChainPositions = await getPerpPositions(wallet.agentPublicKey, 0);
+      console.log(`[Reconcile] Found ${onChainPositions.length} on-chain positions`);
+
+      // Get all bots for this wallet
+      const bots = await storage.getTradingBots(req.walletAddress!);
+      const reconciled: any[] = [];
+      const discrepancies: any[] = [];
+
+      for (const pos of onChainPositions) {
+        // Find matching bot by market
+        const matchingBot = bots.find(b => b.market === pos.market);
+        
+        if (matchingBot) {
+          // Get current database position
+          const dbPosition = await storage.getBotPosition(matchingBot.id, pos.market);
+          const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
+          const onChainBaseSize = pos.baseAssetAmount;
+          
+          // Check for discrepancy
+          if (Math.abs(dbBaseSize - onChainBaseSize) > 0.0001) {
+            discrepancies.push({
+              botId: matchingBot.id,
+              botName: matchingBot.name,
+              market: pos.market,
+              database: { baseSize: dbBaseSize },
+              onChain: { 
+                baseSize: onChainBaseSize, 
+                side: pos.side,
+                entryPrice: pos.entryPrice 
+              }
+            });
+
+            // Update database with on-chain data
+            await storage.upsertBotPosition({
+              tradingBotId: matchingBot.id,
+              market: pos.market,
+              baseSize: String(onChainBaseSize),
+              avgEntryPrice: String(pos.entryPrice),
+              costBasis: String(Math.abs(onChainBaseSize) * pos.entryPrice),
+              realizedPnl: dbPosition?.realizedPnl || "0",
+              totalFees: dbPosition?.totalFees || "0",
+              lastTradeId: dbPosition?.lastTradeId || null,
+              lastTradeAt: new Date(),
+            });
+
+            reconciled.push({
+              botId: matchingBot.id,
+              botName: matchingBot.name,
+              market: pos.market,
+              newPosition: {
+                baseSize: onChainBaseSize,
+                side: pos.side,
+                entryPrice: pos.entryPrice
+              }
+            });
+          }
+        }
+      }
+
+      // Also check for positions in DB that don't exist on-chain (closed positions)
+      for (const bot of bots) {
+        const dbPosition = await storage.getBotPosition(bot.id, bot.market);
+        if (!dbPosition) continue;
+        
+        const dbBaseSize = parseFloat(dbPosition.baseSize);
+        if (Math.abs(dbBaseSize) < 0.0001) continue;
+
+        const hasOnChainPosition = onChainPositions.some(p => p.market === bot.market);
+        if (!hasOnChainPosition) {
+          discrepancies.push({
+            botId: bot.id,
+            botName: bot.name,
+            market: bot.market,
+            database: { baseSize: dbBaseSize },
+            onChain: { baseSize: 0, side: 'FLAT' }
+          });
+
+          // Zero out the database position
+          await storage.upsertBotPosition({
+            tradingBotId: bot.id,
+            market: bot.market,
+            baseSize: "0",
+            avgEntryPrice: "0",
+            costBasis: "0",
+            realizedPnl: dbPosition.realizedPnl,
+            totalFees: dbPosition.totalFees,
+            lastTradeId: dbPosition.lastTradeId,
+            lastTradeAt: new Date(),
+          });
+
+          reconciled.push({
+            botId: bot.id,
+            botName: bot.name,
+            market: bot.market,
+            newPosition: { baseSize: 0, side: 'FLAT' }
+          });
+        }
+      }
+
+      res.json({ 
+        success: true,
+        onChainPositions: onChainPositions.length,
+        discrepancies,
+        reconciled,
+      });
+    } catch (error) {
+      console.error("Reconcile positions error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   app.post("/api/agent/confirm-deposit", requireWallet, async (req, res) => {
     try {
       const { amount, txSignature } = req.body;
