@@ -684,13 +684,13 @@ export async function registerRoutes(
         };
       });
       
-      // Health factor: 100% if no positions, otherwise estimate based on margin
+      // Health factor: Use freeCollateral/totalCollateral ratio (closer to Drift's approach)
+      // Drift shows health as remaining margin capacity - when freeCollateral drops, health drops
       let healthFactor = 100;
       if (formattedPositions.length > 0 && totalCollateral > 0) {
-        const totalNotional = formattedPositions.reduce((sum, p) => sum + Math.abs(p.notionalValue), 0);
-        const marginRatio = totalNotional / totalCollateral;
-        // Drift maintenance margin is typically 5%, health drops as margin usage increases
-        healthFactor = Math.max(0, Math.min(100, 100 * (1 - marginRatio * 0.05)));
+        // Health = (freeCollateral / totalCollateral) * 100
+        // This matches Drift's approach: 100% when fully free, 0% when all margin is used
+        healthFactor = Math.max(0, Math.min(100, (freeCollateral / totalCollateral) * 100));
       }
       
       res.json({
@@ -1803,7 +1803,7 @@ export async function registerRoutes(
             });
             
             // Sync position from on-chain (replaces client-side math with actual Drift state)
-            await syncPositionFromOnChain(
+            const syncResult = await syncPositionFromOnChain(
               botId,
               bot.walletAddress,
               wallet.agentPublicKey!,
@@ -1817,10 +1817,13 @@ export async function registerRoutes(
             );
             
             // Update bot stats
-            const stats = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+            const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
             await storage.updateTradingBotStats(botId, {
               ...stats,
               totalTrades: (stats.totalTrades || 0) + 1,
+              winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
+              losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
+              totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
               lastTradeAt: new Date().toISOString(),
             });
             
@@ -2129,7 +2132,7 @@ export async function registerRoutes(
       });
 
       // Sync position from on-chain (replaces client-side math with actual Drift state)
-      await syncPositionFromOnChain(
+      const syncResult = await syncPositionFromOnChain(
         botId,
         bot.walletAddress,
         wallet.agentPublicKey!,
@@ -2147,6 +2150,9 @@ export async function registerRoutes(
       await storage.updateTradingBotStats(botId, {
         ...stats,
         totalTrades: (stats.totalTrades || 0) + 1,
+        winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
+        losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
+        totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
         lastTradeAt: new Date().toISOString(),
       });
 
@@ -2458,7 +2464,7 @@ export async function registerRoutes(
       });
 
       // Sync position from on-chain (replaces client-side math with actual Drift state)
-      await syncPositionFromOnChain(
+      const syncResult = await syncPositionFromOnChain(
         botId,
         bot.walletAddress,
         userWallet.agentPublicKey!,
@@ -2476,6 +2482,9 @@ export async function registerRoutes(
       await storage.updateTradingBotStats(botId, {
         ...stats,
         totalTrades: (stats.totalTrades || 0) + 1,
+        winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
+        losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
+        totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
         lastTradeAt: new Date().toISOString(),
       });
 

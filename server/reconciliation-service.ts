@@ -35,7 +35,7 @@ export async function syncPositionFromOnChain(
   tradeFillPrice: number = 0,
   tradeSide: string = '',
   tradeSize: number = 0
-): Promise<{ success: boolean; position?: any; error?: string }> {
+): Promise<{ success: boolean; position?: any; error?: string; tradePnl?: number; isClosingTrade?: boolean }> {
   try {
     console.log(`[Sync] Force syncing bot ${botId} from on-chain (market=${market}, subaccount=${subAccountId})`);
     
@@ -105,7 +105,7 @@ export async function syncPositionFromOnChain(
       });
       
       console.log(`[Sync] On-chain position: ${onChainBaseSize.toFixed(4)} ${market} @ $${onChainPos.entryPrice.toFixed(2)}, cumulative PnL: $${newRealizedPnl.toFixed(4)}`);
-      return { success: true, position };
+      return { success: true, position, tradePnl, isClosingTrade: tradePnl !== 0 };
     } else {
       // No position on-chain (position fully closed)
       const position = await storage.upsertBotPosition({
@@ -122,7 +122,7 @@ export async function syncPositionFromOnChain(
       });
       
       console.log(`[Sync] Position cleared, cumulative realized PnL: $${newRealizedPnl.toFixed(4)}`);
-      return { success: true, position };
+      return { success: true, position, tradePnl, isClosingTrade: tradePnl !== 0 };
     }
   } catch (error) {
     console.error(`[Sync] Failed to sync position from on-chain:`, error);

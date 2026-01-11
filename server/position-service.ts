@@ -122,27 +122,33 @@ export class PositionService {
         try {
           const accountInfo = await getDriftAccountInfo(agentPublicKey, subAccountId);
           
-          // Health Factor = 100 * (1 - maintenanceMargin / totalCollateral)
-          // When totalCollateral equals maintenanceMargin, health = 0 (liquidation)
-          // When no margin used, health = 100 (fully healthy)
+          // Health Factor = (freeCollateral / totalCollateral) * 100
+          // This matches Drift's approach: 100% when fully free, lower as margin is used
           let healthFactor = 100;
-          if (accountInfo.totalCollateral > 0 && accountInfo.marginUsed > 0) {
-            healthFactor = Math.max(0, Math.min(100, 100 * (1 - accountInfo.marginUsed / accountInfo.totalCollateral)));
+          if (accountInfo.totalCollateral > 0) {
+            healthFactor = Math.max(0, Math.min(100, (accountInfo.freeCollateral / accountInfo.totalCollateral) * 100));
           } else if (accountInfo.totalCollateral <= 0 && hasPosition) {
             healthFactor = 0; // Negative collateral = critical
           }
           
-          // Estimate liquidation price for SOL-PERP (most common)
-          // Liquidation occurs when: collateral = maintenanceMargin
-          // For a LONG: liqPrice = entryPrice - (freeCollateral / positionSize)
-          // For a SHORT: liqPrice = entryPrice + (freeCollateral / positionSize)
+          // Estimate liquidation price
+          // Liquidation occurs when freeCollateral = 0 (margin fully consumed)
+          // freeCollateral already accounts for maintenance margin requirements
+          // Price buffer = how much price can move before freeCollateral is consumed
+          // For a LONG: liqPrice = markPrice - (freeCollateral / |size|)
+          // For a SHORT: liqPrice = markPrice + (freeCollateral / |size|)
           let liquidationPrice: number | null = null;
-          if (onChainPos && Math.abs(onChainSize) > 0.0001 && accountInfo.freeCollateral > 0) {
-            const priceBuffer = accountInfo.freeCollateral / Math.abs(onChainSize);
-            if (onChainPos.side === 'LONG') {
-              liquidationPrice = Math.max(0, onChainPos.entryPrice - priceBuffer);
+          if (onChainPos && Math.abs(onChainSize) > 0.0001) {
+            if (accountInfo.freeCollateral <= 0) {
+              // Already at or past liquidation threshold
+              liquidationPrice = onChainPos.markPrice;
             } else {
-              liquidationPrice = onChainPos.entryPrice + priceBuffer;
+              const priceBuffer = accountInfo.freeCollateral / Math.abs(onChainSize);
+              if (onChainPos.side === 'LONG') {
+                liquidationPrice = Math.max(0, onChainPos.markPrice - priceBuffer);
+              } else {
+                liquidationPrice = onChainPos.markPrice + priceBuffer;
+              }
             }
           }
           

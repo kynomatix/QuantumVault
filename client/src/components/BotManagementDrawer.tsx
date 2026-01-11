@@ -877,23 +877,24 @@ export function BotManagementDrawer({
                     </div>
                   </div>
                   
-                  <div className="p-2 rounded-lg bg-primary/10 border border-primary/20">
-                    <p className="text-xs text-muted-foreground">Position Value</p>
-                    <p className="font-mono font-bold text-lg" data-testid="text-position-value">
-                      ${((botPosition.size ?? 0) * (botPosition.currentPrice ?? 0)).toFixed(2)}
-                    </p>
-                  </div>
-                  
-                  <div className="p-2 rounded-lg bg-background/50">
-                    <p className="text-xs text-muted-foreground">Unrealized P&L</p>
-                    <p 
-                      className={`font-mono font-bold text-lg ${
-                        (botPosition.unrealizedPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
-                      }`}
-                      data-testid="text-unrealized-pnl"
-                    >
-                      {(botPosition.unrealizedPnl ?? 0) >= 0 ? '+' : ''}${botPosition.unrealizedPnl?.toFixed(2)}
-                    </p>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="p-2 rounded-lg bg-primary/10 border border-primary/20">
+                      <p className="text-xs text-muted-foreground">Position Value</p>
+                      <p className="font-mono font-bold text-lg" data-testid="text-position-value">
+                        ${((botPosition.size ?? 0) * (botPosition.currentPrice ?? 0)).toFixed(2)}
+                      </p>
+                    </div>
+                    <div className="p-2 rounded-lg bg-background/50">
+                      <p className="text-xs text-muted-foreground">Unrealized P&L</p>
+                      <p 
+                        className={`font-mono font-bold text-lg ${
+                          (botPosition.unrealizedPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                        }`}
+                        data-testid="text-unrealized-pnl"
+                      >
+                        {(botPosition.unrealizedPnl ?? 0) >= 0 ? '+' : ''}${botPosition.unrealizedPnl?.toFixed(2)}
+                      </p>
+                    </div>
                   </div>
                   
                   {/* Health Metrics */}
@@ -978,7 +979,7 @@ export function BotManagementDrawer({
                   <p className="text-lg font-semibold text-blue-400 mt-1">~5.3%</p>
                 </div>
                 <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
-                  <p className="text-xs text-muted-foreground">Total Earned</p>
+                  <p className="text-xs text-muted-foreground">Est. Monthly</p>
                   <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-total-interest">
                     {balanceLoading ? '-' : `$${(interestEarned * 30).toFixed(2)}`}
                   </p>
