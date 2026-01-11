@@ -412,9 +412,22 @@ export class DatabaseStorage implements IStorage {
     let netDeposited = 0;
     for (const event of events) {
       const amount = parseFloat(event.amount);
-      // Amounts are stored with correct sign: deposits positive, withdrawals negative
-      // Simply sum all amounts to get net deposited
       netDeposited += amount;
+    }
+    return netDeposited;
+  }
+
+  async getWalletNetDeposited(walletAddress: string): Promise<number> {
+    // Get all drift_deposit and drift_withdraw events for this wallet
+    const events = await db.select().from(equityEvents)
+      .where(eq(equityEvents.walletAddress, walletAddress));
+    let netDeposited = 0;
+    for (const event of events) {
+      // Only count drift deposits/withdrawals (not agent wallet transfers)
+      if (event.eventType === 'drift_deposit' || event.eventType === 'drift_withdraw') {
+        const amount = parseFloat(event.amount);
+        netDeposited += amount;
+      }
     }
     return netDeposited;
   }

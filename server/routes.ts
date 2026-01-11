@@ -715,10 +715,58 @@ export async function registerRoutes(
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      // Get net deposited for this specific bot's subaccount
       const netDeposited = await storage.getBotNetDeposited(botId);
       res.json({ netDeposited });
     } catch (error) {
       console.error("Get bot net deposited error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Get bot-specific Drift account info from its subaccount
+  app.get("/api/bots/:botId/drift-balance", requireWallet, async (req, res) => {
+    try {
+      const { botId } = req.params;
+      const bot = await storage.getTradingBotById(botId);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet?.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      
+      // Use health metrics endpoint which returns totalCollateral from Drift SDK
+      const healthResult = await getAccountHealthMetrics(wallet.agentPrivateKeyEncrypted, subAccountId);
+      
+      if (!healthResult.success || !healthResult.data) {
+        // Fallback to basic account info
+        const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
+        return res.json({ 
+          balance: accountInfo.usdcBalance,
+          totalCollateral: accountInfo.usdcBalance, // Use USDC balance as fallback
+          freeCollateral: accountInfo.freeCollateral,
+          hasOpenPositions: accountInfo.hasOpenPositions,
+          subAccountId,
+        });
+      }
+      
+      res.json({ 
+        balance: healthResult.data.freeCollateral,
+        totalCollateral: healthResult.data.totalCollateral,
+        freeCollateral: healthResult.data.freeCollateral,
+        hasOpenPositions: healthResult.data.positions.length > 0,
+        subAccountId,
+      });
+    } catch (error) {
+      console.error("Get bot drift balance error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

@@ -239,10 +239,10 @@ export function BotManagementDrawer({
     setBalanceLoading(true);
     try {
       const cacheBust = Date.now();
-      const [balanceRes, agentRes, driftRes, netDepositedRes] = await Promise.all([
+      const [balanceRes, agentRes, botDriftRes, netDepositedRes] = await Promise.all([
         fetch(`/api/bot/${bot.id}/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
         fetch(`/api/agent/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
-        fetch(`/api/agent/drift-balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
+        fetch(`/api/bots/${bot.id}/drift-balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
         fetch(`/api/bots/${bot.id}/net-deposited?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
       ]);
 
@@ -257,10 +257,12 @@ export function BotManagementDrawer({
         setMainAccountBalance(data.balance ?? 0);
       }
 
-      if (driftRes.ok) {
-        const data = await driftRes.json();
-        setDriftBalance(data.balance ?? 0);
-        setDriftFreeCollateral(data.freeCollateral ?? data.balance ?? 0);
+      // Use bot-specific drift balance from its subaccount
+      if (botDriftRes.ok) {
+        const data = await botDriftRes.json();
+        // Bot Equity = Total Collateral from Drift (what the bot is worth now)
+        setDriftBalance(data.totalCollateral ?? data.balance ?? 0);
+        setDriftFreeCollateral(data.freeCollateral ?? 0);
         setHasOpenPositions(data.hasOpenPositions ?? false);
       }
 
