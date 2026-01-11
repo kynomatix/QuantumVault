@@ -814,9 +814,27 @@ export async function registerRoutes(
 
       console.log(`[ClosePosition] Close order executed: ${txSignature}`);
 
+      // Fetch current ticker price for accurate trade record
+      let fillPrice = 0;
+      try {
+        const priceRes = await fetch(`http://localhost:5000/api/prices`);
+        if (priceRes.ok) {
+          const priceData = await priceRes.json();
+          // Map market name to price key (e.g., "SOL-PERP" -> "SOL-PERP")
+          fillPrice = priceData[bot.market] || 0;
+          console.log(`[ClosePosition] Fetched ticker price for ${bot.market}: $${fillPrice}`);
+        }
+      } catch (priceErr) {
+        console.warn(`[ClosePosition] Could not fetch ticker price:`, priceErr);
+      }
+      
+      // Fallback: use entry price if ticker fetch failed
+      if (!fillPrice && onChainPosition.entryPrice) {
+        fillPrice = onChainPosition.entryPrice;
+        console.log(`[ClosePosition] Using entry price as fallback: $${fillPrice}`);
+      }
+
       // Calculate fee (0.05% taker fee on notional value)
-      // Use onChainPosition.markPrice as fill price estimate since closePerpPosition doesn't return fillPrice
-      const fillPrice = onChainPosition.markPrice || 0;
       const closeNotional = closeSize * fillPrice;
       const closeFee = closeNotional * 0.0005;
 
