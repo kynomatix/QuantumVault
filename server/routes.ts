@@ -681,7 +681,8 @@ export async function registerRoutes(
           bot.id,
           wallet.agentPublicKey,
           subAccountId,
-          bot.market
+          bot.market,
+          wallet.agentPrivateKeyEncrypted
         );
         console.log(`[ClosePosition] On-chain position for ${bot.market}: ${onChainPosition.side} ${onChainPosition.size}`);
       } catch (err) {
@@ -738,7 +739,8 @@ export async function registerRoutes(
           bot.id,
           wallet.agentPublicKey,
           subAccountId,
-          bot.market
+          bot.market,
+          wallet.agentPrivateKeyEncrypted
         );
         
         if (postClosePosition.side !== 'FLAT' && Math.abs(postClosePosition.size) > 0.0001) {
@@ -1633,7 +1635,8 @@ export async function registerRoutes(
             botId,
             wallet.agentPublicKey,
             subAccountId,
-            bot.market
+            bot.market,
+            wallet.agentPrivateKeyEncrypted
           );
           console.log(`[Webhook] On-chain position query result: size=${onChainPosition.size}, side=${onChainPosition.side}, entryPrice=${onChainPosition.entryPrice}`);
         } catch (onChainErr) {
@@ -1702,7 +1705,8 @@ export async function registerRoutes(
                 botId,
                 wallet.agentPublicKey,
                 subAccountId,
-                bot.market
+                bot.market,
+                wallet.agentPrivateKeyEncrypted
               );
               
               if (postClosePosition.side !== 'FLAT' && Math.abs(postClosePosition.size) > 0.0001) {
@@ -1841,7 +1845,8 @@ export async function registerRoutes(
           botId,
           wallet.agentPublicKey,
           subAccountId,
-          bot.market
+          bot.market,
+          wallet.agentPrivateKeyEncrypted
         );
         console.log(`[Webhook] Position flip check: on-chain position is ${onChainPosition.side} ${Math.abs(onChainPosition.size).toFixed(6)} on ${bot.market}`);
       } catch (posErr) {

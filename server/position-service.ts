@@ -1,5 +1,5 @@
 import { storage } from './storage';
-import { getPerpPositions, getAccountHealthMetrics } from './drift-service';
+import { getPerpPositions, getPerpPositionsSDK, getAccountHealthMetrics } from './drift-service';
 
 function normalizeMarket(market: string): string {
   return market.toUpperCase()
@@ -66,7 +66,16 @@ export class PositionService {
     let driftDetails: PositionData['driftDetails'] = undefined;
 
     try {
-      const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
+      // Use SDK-based position fetching when encrypted key is available (more reliable)
+      // Fall back to custom byte parsing if no key available
+      let onChainPositions;
+      if (agentPrivateKeyEncrypted) {
+        console.log(`[PositionService] Using SDK-based position fetching for ${market}`);
+        onChainPositions = await getPerpPositionsSDK(agentPrivateKeyEncrypted, subAccountId);
+      } else {
+        console.log(`[PositionService] Using byte-parsing position fetching for ${market}`);
+        onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
+      }
       const normalizedMarket = normalizeMarket(market);
       onChainPos = onChainPositions.find(p => 
         normalizeMarket(p.market) === normalizedMarket
@@ -189,14 +198,24 @@ export class PositionService {
     botId: string,
     agentPublicKey: string,
     subAccountId: number,
-    market: string
+    market: string,
+    agentPrivateKeyEncrypted?: string
   ): Promise<{ 
     size: number; 
     side: 'LONG' | 'SHORT' | 'FLAT'; 
     source: 'on-chain';
     entryPrice: number;
   }> {
-    const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
+    // Use SDK-based position fetching when encrypted key is available (more reliable)
+    let onChainPositions;
+    if (agentPrivateKeyEncrypted) {
+      console.log(`[PositionService] getPositionForExecution: Using SDK for ${market}`);
+      onChainPositions = await getPerpPositionsSDK(agentPrivateKeyEncrypted, subAccountId);
+    } else {
+      console.log(`[PositionService] getPositionForExecution: Using byte-parsing for ${market}`);
+      onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
+    }
+    
     const normalizedMarket = normalizeMarket(market);
     const onChainPos = onChainPositions.find(p => 
       normalizeMarket(p.market) === normalizedMarket
@@ -207,6 +226,8 @@ export class PositionService {
       Math.abs(size) < 0.0001 ? 'FLAT' : 
       size > 0 ? 'LONG' : 'SHORT';
 
+    console.log(`[PositionService] getPositionForExecution result: ${market} size=${size}, side=${side}`);
+    
     return {
       size,
       side,

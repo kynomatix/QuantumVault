@@ -7,12 +7,14 @@ import { getAgentKeypair } from './agent-wallet';
  * Drift Protocol Account Layouts (derived from official IDL v2.150.0)
  * Using fixed offsets for deterministic parsing without BorshAccountsCoder
  * 
- * User Account (4376 bytes):
- * - Discriminator: 8 bytes
+ * User Account (4376 bytes) - Drift v2.150.0:
+ * - Discriminator: 8 bytes (offset 0)
  * - authority: 32 bytes (offset 8)
  * - delegate: 32 bytes (offset 40)
  * - name: 32 bytes (offset 72)
  * - spotPositions: 320 bytes (offset 104) - 8 positions × 40 bytes each
+ * - padding: 16 bytes (offset 424)
+ * - perpPositions: 1472 bytes (offset 440) - 8 positions × 184 bytes each
  * 
  * SpotPosition (40 bytes each):
  * - scaledBalance: u64 (8 bytes, offset 0)
@@ -34,22 +36,38 @@ const DRIFT_LAYOUTS = {
     DISCRIMINATOR_SIZE: 8,
     SPOT_POSITIONS_OFFSET: 104, // 8 + 32 + 32 + 32
     SPOT_POSITION_COUNT: 8,
-    SPOT_POSITION_SIZE: 48, // 48 bytes per SpotPosition
-    PERP_POSITIONS_OFFSET: 488, // 104 + (8 * 48) = 488
+    SPOT_POSITION_SIZE: 40, // 40 bytes per SpotPosition (corrected from 48)
+    // PerpPositions offset: 8 (discriminator) + 32 (authority) + 32 (delegate) + 32 (name) + 320 (8*40 spot) + 16 (padding) = 440
+    PERP_POSITIONS_OFFSET: 440, // CORRECTED from 488
     PERP_POSITION_COUNT: 8,
   },
   SPOT_POSITION: {
-    SIZE: 48, // SpotPosition struct size (corrected from 40)
+    SIZE: 40, // SpotPosition struct size (corrected from 48)
     SCALED_BALANCE_OFFSET: 0,
     MARKET_INDEX_OFFSET: 32,
     BALANCE_TYPE_OFFSET: 34,
   },
   PERP_POSITION: {
-    SIZE: 184, // PerpPosition struct size (184 bytes)
-    BASE_ASSET_AMOUNT_OFFSET: 16, // i128 at offset 16
-    QUOTE_ASSET_AMOUNT_OFFSET: 32, // i128 at offset 32
-    QUOTE_ENTRY_AMOUNT_OFFSET: 64, // i128 at offset 64 (entry value for PnL)
-    MARKET_INDEX_OFFSET: 156, // u16 at offset 156
+    // PerpPosition struct size (184 bytes) - Drift v2.150.0
+    SIZE: 184,
+    // Correct field offsets based on Drift IDL:
+    // - baseAssetAmount: i128 at offset 0
+    // - quoteAssetAmount: i128 at offset 16  
+    // - quoteBreakEvenAmount: i128 at offset 32
+    // - quoteEntryAmount: i128 at offset 48
+    // - openBids: i64 at offset 64
+    // - openAsks: i64 at offset 72
+    // - settledPnl: i64 at offset 80
+    // - lpShares: u64 at offset 88
+    // - lastBaseAssetAmountPerLp: i64 at offset 96
+    // - lastQuoteAssetAmountPerLp: i64 at offset 104
+    // - remainderBaseAssetAmount: i32 at offset 112
+    // - marketIndex: u16 at offset 116
+    BASE_ASSET_AMOUNT_OFFSET: 0,    // i128 at offset 0
+    QUOTE_ASSET_AMOUNT_OFFSET: 16,  // i128 at offset 16
+    QUOTE_BREAK_EVEN_OFFSET: 32,    // i128 at offset 32
+    QUOTE_ENTRY_AMOUNT_OFFSET: 48,  // i128 at offset 48
+    MARKET_INDEX_OFFSET: 116,       // u16 at offset 116
   },
   SPOT_MARKET: {
     CUMULATIVE_DEPOSIT_INTEREST_OFFSET: 464,
@@ -843,8 +861,9 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
     // PerpPositions array starts after SpotPositions in the User account
     // SpotPositions: 8 positions * 48 bytes = 384 bytes, starting at offset 80
     // PerpPositions start at offset 80 + 384 = 464
-    const PERP_POSITIONS_OFFSET = 464;
-    const PERP_POSITION_SIZE = 128; // Larger than spot positions
+    // Use the same offsets as DRIFT_LAYOUTS for consistency
+    const PERP_POSITIONS_OFFSET = DRIFT_LAYOUTS.USER.PERP_POSITIONS_OFFSET; // 440
+    const PERP_POSITION_SIZE = DRIFT_LAYOUTS.PERP_POSITION.SIZE; // 184 bytes per position
     const MAX_PERP_POSITIONS = 8;
     
     let hasOpenPositions = false;
@@ -1046,6 +1065,104 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
     return positions;
   } catch (error) {
     console.error(`[Drift] Error reading perp positions:`, error);
+    return positions;
+  }
+}
+
+/**
+ * SDK-based position fetching - more reliable than custom byte parsing.
+ * Use this when you have access to the encrypted private key.
+ * This uses the same approach as getAccountHealthMetrics which works correctly.
+ */
+export async function getPerpPositionsSDK(
+  encryptedPrivateKey: string, 
+  subAccountId: number = 0
+): Promise<PerpPosition[]> {
+  const positions: PerpPosition[] = [];
+  
+  try {
+    const { QUOTE_PRECISION, BASE_PRECISION } = await import('@drift-labs/sdk');
+    console.log(`[Drift SDK] Fetching perp positions for subaccount ${subAccountId}`);
+    
+    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
+    
+    try {
+      const user = driftClient.getUser();
+      
+      // Force refresh from on-chain
+      try {
+        await user.fetchAccounts();
+      } catch (refreshError) {
+        console.warn('[Drift SDK] Could not refresh accounts:', refreshError);
+      }
+      
+      // Fetch current prices
+      const prices: Record<number, number> = {};
+      try {
+        const priceRes = await fetch(`http://localhost:5000/api/prices`);
+        if (priceRes.ok) {
+          const priceData = await priceRes.json();
+          prices[0] = priceData['SOL-PERP'] || 136;
+          prices[1] = priceData['BTC-PERP'] || 90000;
+          prices[2] = priceData['ETH-PERP'] || 3000;
+        }
+      } catch (e) {
+        prices[0] = 136; prices[1] = 90000; prices[2] = 3000;
+      }
+      
+      // Get positions using SDK's reliable method
+      const perpPositions = user.getActivePerpPositions();
+      
+      for (const pos of perpPositions) {
+        const marketIndex = pos.marketIndex;
+        const marketName = PERP_MARKET_NAMES[marketIndex] || `PERP-${marketIndex}`;
+        
+        const baseAssetAmount = pos.baseAssetAmount.toNumber() / BASE_PRECISION.toNumber();
+        const quoteAssetAmount = Math.abs(pos.quoteAssetAmount.toNumber()) / QUOTE_PRECISION.toNumber();
+        const quoteEntryAmount = Math.abs(pos.quoteEntryAmount?.toNumber() || 0) / QUOTE_PRECISION.toNumber();
+        
+        const side: 'LONG' | 'SHORT' = baseAssetAmount > 0 ? 'LONG' : 'SHORT';
+        const markPrice = prices[marketIndex] || 0;
+        
+        // Calculate entry price
+        const entryPrice = Math.abs(baseAssetAmount) > 0 
+          ? Math.abs(quoteAssetAmount / baseAssetAmount) 
+          : 0;
+        
+        const sizeUsd = Math.abs(baseAssetAmount) * markPrice;
+        const unrealizedPnl = side === 'LONG' 
+          ? (markPrice - entryPrice) * Math.abs(baseAssetAmount)
+          : (entryPrice - markPrice) * Math.abs(baseAssetAmount);
+        const unrealizedPnlPercent = Math.abs(quoteEntryAmount) > 0 
+          ? (unrealizedPnl / Math.abs(quoteEntryAmount)) * 100 
+          : 0;
+        
+        console.log(`[Drift SDK] Position: market=${marketName}, base=${baseAssetAmount.toFixed(4)}, side=${side}, entry=$${entryPrice.toFixed(2)}, mark=$${markPrice.toFixed(2)}`);
+        
+        positions.push({
+          marketIndex,
+          market: marketName,
+          baseAssetAmount,
+          quoteAssetAmount,
+          quoteEntryAmount,
+          side,
+          sizeUsd,
+          entryPrice,
+          markPrice,
+          unrealizedPnl,
+          unrealizedPnlPercent,
+        });
+      }
+      
+      await cleanup();
+      console.log(`[Drift SDK] Found ${positions.length} open perp positions`);
+      return positions;
+    } catch (innerError) {
+      await cleanup();
+      throw innerError;
+    }
+  } catch (error) {
+    console.error(`[Drift SDK] Error fetching positions:`, error);
     return positions;
   }
 }

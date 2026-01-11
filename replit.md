@@ -50,11 +50,13 @@ Preferred communication style: Simple, everyday language.
 - **Webhook Deduplication**: `webhook_logs` table uses a `signal_hash` to prevent duplicate processing of TradingView signals.
 - **Equity Event Tracking**: Tracks deposits and withdrawals for transaction history, ensuring idempotency.
 - **Drift Subaccounts**: Each bot is assigned a unique `driftSubaccountId` for isolation. Trades execute on the bot's specific subaccount. Subaccounts are auto-initialized when users deposit funds to a bot.
-- **Drift Account Parsing**: Custom byte parsing is used for Solana Drift User and PerpPosition accounts to extract balances and positions, as direct Drift SDK usage has dependency conflicts.
+- **Drift Account Parsing**: Two methods available for reading on-chain positions:
+    1. **SDK-Based (`getPerpPositionsSDK`)**: Uses official Drift SDK's `user.getActivePerpPositions()` - most reliable for critical operations.
+    2. **Byte-Parsing (`getPerpPositions`)**: Raw RPC calls with custom byte parsing - fallback when encrypted key unavailable.
 - **Account Health Metrics**: Uses official Drift SDK methods (`getHealth()`, `getMarginRatio()`, `getTotalCollateral()`, `getFreeCollateral()`, `getUnrealizedPNL()`) to display account health factor, collateral values, and per-position liquidation prices on the dashboard.
 - **On-Chain-First Architecture**: On-chain Drift positions are ALWAYS the source of truth. Database is treated as a cache that can be wrong.
-    - **PositionService** (`server/position-service.ts`): Central service for all position queries. Always queries on-chain first via `getPerpPositions()`, falls back to database only if RPC fails. Auto-detects and corrects database drift.
-    - **Critical Operations**: Close signals, position flips, and manual close all query on-chain directly using `PositionService.getPositionForExecution()` - NEVER trust database for these operations.
+    - **PositionService** (`server/position-service.ts`): Central service for all position queries. Uses SDK-based fetching when encrypted key is available (most reliable), falls back to byte-parsing otherwise.
+    - **Critical Operations**: Close signals, position flips, and manual close all query on-chain directly using `PositionService.getPositionForExecution()` with SDK method - NEVER trust database for these operations.
     - **Drift Detection & Auto-Correction**: When on-chain differs from database, logs a warning and automatically updates database to match on-chain.
     - **UI Data Freshness**: API responses include `source` ('on-chain' | 'database') and `driftDetected` flags so UI can show data reliability.
     - **Market Normalization**: Uses regex to normalize market names (strips PERP, USD, separators) ensuring `SOL-PERP`, `SOLPERP`, `SOL/USD` all match correctly.
