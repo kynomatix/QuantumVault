@@ -633,6 +633,10 @@ export async function registerRoutes(
     }
   });
 
+  // Health metrics cache to prevent SDK memory leaks
+  const healthMetricsCache = new Map<string, { data: any; timestamp: number }>();
+  const HEALTH_METRICS_CACHE_TTL = 60000; // 60 seconds cache to reduce SDK calls
+
   // Health metrics endpoint - get account health, liquidation prices, etc.
   app.get("/api/health-metrics", requireWallet, async (req, res) => {
     try {
@@ -642,6 +646,14 @@ export async function registerRoutes(
       }
 
       const subAccountId = req.query.subaccount ? parseInt(req.query.subaccount as string) : 0;
+      const cacheKey = `${req.walletAddress}-${subAccountId}`;
+      
+      // Check cache first to avoid SDK memory leaks from frequent calls
+      const cached = healthMetricsCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < HEALTH_METRICS_CACHE_TTL) {
+        console.log(`[Health] Returning cached metrics (age: ${Math.round((Date.now() - cached.timestamp) / 1000)}s)`);
+        return res.json(cached.data);
+      }
       
       const result = await getAccountHealthMetrics(wallet.agentPrivateKeyEncrypted, subAccountId);
       
@@ -649,6 +661,9 @@ export async function registerRoutes(
         return res.status(500).json({ error: result.error || "Failed to get health metrics" });
       }
 
+      // Cache the result
+      healthMetricsCache.set(cacheKey, { data: result.data, timestamp: Date.now() });
+      
       res.json(result.data);
     } catch (error) {
       console.error("Health metrics error:", error);
