@@ -1,6 +1,8 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
+import pg from "pg";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { storage } from "./storage";
@@ -59,8 +61,18 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  const PgStore = connectPgSimple(session);
+  const pgPool = new pg.Pool({
+    connectionString: process.env.DATABASE_URL,
+  });
+  
   app.use(
     session({
+      store: new PgStore({
+        pool: pgPool,
+        tableName: 'user_sessions',
+        createTableIfMissing: true,
+      }),
       secret: process.env.SESSION_SECRET || "quantum-vault-secret-change-in-production",
       resave: false,
       saveUninitialized: false,
