@@ -705,6 +705,7 @@ export async function registerRoutes(
 
   // Manual close position endpoint - query on-chain and close with reduce-only order
   app.post("/api/trading-bots/:id/close-position", requireWallet, async (req, res) => {
+    console.log(`[ClosePosition] *** CLOSE POSITION REQUEST RECEIVED *** botId=${req.params.id}`);
     try {
       const bot = await storage.getTradingBotById(req.params.id);
       if (!bot) {
