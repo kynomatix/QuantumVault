@@ -787,14 +787,28 @@ export async function registerRoutes(
       // This can happen if position was closed by another process (e.g., liquidation, webhook)
       if (result.success && !txSignature) {
         console.log(`[ClosePosition] closePerpPosition returned success but no signature - position was already closed`);
+        
+        // Still run a reconciliation to ensure database matches on-chain state
+        // This handles the case where liquidation or another process closed the position
+        // but the database wasn't updated
+        try {
+          const { reconcileBot } = await import("./reconciliation-service.js");
+          await reconcileBot(bot.id);
+          console.log(`[ClosePosition] Ran reconciliation after "already closed" scenario`);
+        } catch (reconcileErr) {
+          console.warn(`[ClosePosition] Reconciliation failed (non-critical):`, reconcileErr);
+        }
+        
         return res.json({ 
           success: true,
           message: "Position was already closed (no trade executed)",
+          warning: null,
           closedSize: 0,
           closeSide,
           fillPrice: 0,
           fee: 0,
           txSignature: null,
+          tradeId: null,
         });
       }
 

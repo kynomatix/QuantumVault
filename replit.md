@@ -46,6 +46,8 @@ Preferred communication style: Simple, everyday language.
     - **Reduce-Only Enforcement**: Close orders are executed with `reduceOnly: true` to prevent accidental position openings.
     - **Enhanced Logging**: Close signal flow logs every step for debugging: detection, on-chain query result, execution.
 - **Position Flip Detection**: Signals in the opposite direction of an open position trigger a two-step process: first, close the existing position using the **actual on-chain Drift position size** (queried via `getPerpPositions`), then open a new one in the signal direction. This ensures complete position closes without "dust" remaining.
+- **Close Order Precision (CRITICAL)**: All close paths (webhook close, position flip, manual close) use `closePerpPosition()` which does NOT pass position size. Instead, the subprocess queries the exact BN value directly from DriftClient. This prevents JavaScript float precision loss (e.g., 0.4374 → 437399999 vs 437400000) that causes dust positions remaining after close.
+    - **Graceful "Already Closed" Handling**: If closePerpPosition returns success=true but no signature (position was closed by another process), all paths return a graceful 200 response and run reconciliation to sync database with on-chain state.
 - **Bot Pause Behavior**: Pausing a bot (`isActive: false`) automatically triggers a close of any open positions associated with it.
 - **Webhook Deduplication**: `webhook_logs` table uses a `signal_hash` to prevent duplicate processing of TradingView signals.
 - **Equity Event Tracking**: Tracks deposits and withdrawals for transaction history, ensuring idempotency.
@@ -57,8 +59,10 @@ Preferred communication style: Simple, everyday language.
     4. **Session Persistence**: Uses `connect-pg-simple` with PostgreSQL to persist sessions across server restarts.
 - **Account Health Metrics**: Uses SDK decodeUser for accurate account health, collateral values, and positions.
     - **Health Calculation**: `getDriftAccountInfo()` calculates totalCollateral = usdcBalance + unrealizedPnl, with 5% maintenance margin ratio (conservative estimate).
-    - **Liquidation Price**: Estimated based on free collateral and position size. These are approximations - Drift uses per-market weights.
-    - **Safety-First**: Uses conservative 5% margin ratio to underestimate health rather than overestimate, ensuring users see lower health than actual for risk awareness.
+    - **Liquidation Price**: Uses per-market maintenance margin weights for more accurate estimates:
+    - SOL: 6.25%, BTC: 5%, ETH: 5%, memecoins (BONK, WIF, DOGE, etc.): 15%, smaller caps: 10%
+    - Formula: `priceBuffer = freeCollateral / (|size| * (1 + maintenanceWeight))`
+    - **Safety-First**: Estimates are intentionally conservative (underestimate health) for safety. Users should check Drift UI for precise health metrics when making critical risk decisions.
 - **On-Chain-First Architecture**: On-chain Drift positions are ALWAYS the source of truth. Database is treated as a cache that can be wrong.
     - **PositionService** (`server/position-service.ts`): Central service for all position queries. Uses SDK's decodeUser (stateless) to avoid memory leaks from Drift SDK WebSocket connections.
     - **Critical Operations**: Close signals, position flips, and manual close all query on-chain directly using `PositionService.getPositionForExecution()` with byte-parsing - NEVER trust database for these operations.
