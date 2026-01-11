@@ -644,37 +644,43 @@ export function BotManagementDrawer({
               </div>
               <div className="p-4 rounded-xl bg-muted/50 border">
                 <p className="text-sm text-muted-foreground">Realized P&L</p>
-                <div className="flex items-center gap-1 mt-1">
-                  {parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? (
-                    <TrendingUp className="w-4 h-4 text-emerald-500" />
-                  ) : (
-                    <TrendingDown className="w-4 h-4 text-red-500" />
-                  )}
-                  <p
-                    className={`text-2xl font-bold ${
-                      parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
-                    }`}
-                    data-testid="text-total-pnl"
-                  >
-                    ${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
-                    {parseFloat(bot.maxPositionSize || '0') > 0 && (
-                      <span className="text-sm ml-1">
-                        ({((parseFloat((bot as any).realizedPnl ?? 0) / parseFloat(bot.maxPositionSize || '1')) * 100).toFixed(1)}%)
-                      </span>
-                    )}
+                <p
+                  className={`text-2xl font-bold mt-1 ${
+                    parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                  }`}
+                  data-testid="text-total-pnl"
+                >
+                  {parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? '+' : ''}${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
+                </p>
+              </div>
+              <div className="p-4 rounded-xl bg-muted/50 border">
+                <p className="text-sm text-muted-foreground">Return</p>
+                <p
+                  className={`text-2xl font-bold mt-1 ${
+                    parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                  }`}
+                  data-testid="text-return-pct"
+                >
+                  {parseFloat(bot.maxPositionSize || '0') > 0 
+                    ? `${((parseFloat((bot as any).realizedPnl ?? 0) / parseFloat(bot.maxPositionSize || '1')) * 100).toFixed(2)}%`
+                    : '0%'
+                  }
+                </p>
+              </div>
+            </div>
+            
+            <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/30">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-muted-foreground">Lending Interest (Est.)</p>
+                  <p className="text-sm font-semibold text-blue-400" data-testid="text-interest-card">
+                    {balanceLoading ? '-' : `+$${interestEarned.toFixed(4)}/day`}
                   </p>
                 </div>
-              </div>
-              <div className="p-4 rounded-xl bg-blue-500/10 border border-blue-500/30">
-                <p className="text-sm text-muted-foreground">Est. Daily Interest</p>
-                <p className="text-2xl font-bold mt-1 text-blue-400" data-testid="text-interest-card">
-                  {balanceLoading ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    `+$${interestEarned.toFixed(4)}/day`
-                  )}
-                </p>
-                <p className="text-xs text-muted-foreground mt-1">~5.3% APY</p>
+                <div className="text-right">
+                  <p className="text-xs text-muted-foreground">Current APY</p>
+                  <p className="text-sm font-semibold text-blue-400">~5.3%</p>
+                </div>
               </div>
             </div>
 
