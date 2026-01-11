@@ -1545,29 +1545,42 @@ export async function registerRoutes(
       // If we're LONG and receive a SHORT signal (or vice versa), we need to:
       // 1. First close the existing position completely
       // 2. Then execute the new order in the opposite direction
-      const botPosition = await storage.getBotPosition(botId, bot.market);
-      const currentPositionSize = botPosition ? parseFloat(botPosition.baseSize) : 0;
-      const isCurrentlyLong = currentPositionSize > 0;
-      const isCurrentlyShort = currentPositionSize < 0;
+      
+      // Get wallet for execution (needed for on-chain position check)
+      const wallet = await storage.getWallet(bot.walletAddress);
+      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured", processed: true });
+        return res.status(400).json({ error: "Agent wallet not configured" });
+      }
+      
+      // Query ACTUAL on-chain Drift position instead of relying on tracked position
+      // This ensures we close the exact amount that exists on-chain
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      const onChainPositions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
+      const marketName = bot.market.toUpperCase().replace('-', '-'); // Normalize market name
+      const onChainPosition = onChainPositions.find(p => 
+        p.market.toUpperCase() === marketName || 
+        p.market.toUpperCase() === bot.market.toUpperCase()
+      );
+      
+      // Use on-chain position size for accurate flip detection
+      const actualOnChainSize = onChainPosition?.baseAssetAmount || 0;
+      const isCurrentlyLong = actualOnChainSize > 0;
+      const isCurrentlyShort = actualOnChainSize < 0;
       const signalIsLong = side === 'long';
       const signalIsShort = side === 'short';
+      
+      console.log(`[Webhook] On-chain position check: ${bot.market} size=${actualOnChainSize.toFixed(6)} (${isCurrentlyLong ? 'LONG' : isCurrentlyShort ? 'SHORT' : 'FLAT'})`);
       
       // Detect position flip: signal direction opposite to current position
       const isPositionFlip = (isCurrentlyLong && signalIsShort) || (isCurrentlyShort && signalIsLong);
       
-      if (isPositionFlip && Math.abs(currentPositionSize) > 0) {
-        console.log(`[Webhook] POSITION FLIP detected: Currently ${isCurrentlyLong ? 'LONG' : 'SHORT'} ${Math.abs(currentPositionSize)} contracts, signal wants to go ${side.toUpperCase()}`);
+      if (isPositionFlip && Math.abs(actualOnChainSize) > 0) {
+        console.log(`[Webhook] POSITION FLIP detected: On-chain ${isCurrentlyLong ? 'LONG' : 'SHORT'} ${Math.abs(actualOnChainSize).toFixed(6)} contracts, signal wants to go ${side.toUpperCase()}`);
         
-        // Get wallet for execution
-        const wallet = await storage.getWallet(bot.walletAddress);
-        if (!wallet?.agentPrivateKeyEncrypted) {
-          await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured for position flip", processed: true });
-          return res.status(400).json({ error: "Agent wallet not configured" });
-        }
-        
-        // Step 1: Close existing position first
+        // Step 1: Close existing position first using ACTUAL on-chain size
         const closeSide = isCurrentlyLong ? 'short' : 'long';
-        const closeSize = Math.abs(currentPositionSize);
+        const closeSize = Math.abs(actualOnChainSize); // Use actual on-chain size, not tracked
         
         console.log(`[Webhook] Step 1: Closing existing ${isCurrentlyLong ? 'LONG' : 'SHORT'} position of ${closeSize} contracts`);
         
@@ -1584,7 +1597,6 @@ export async function registerRoutes(
         });
         
         try {
-          const subAccountId = bot.driftSubaccountId ?? 0;
           const closeResult = await executePerpOrder(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
@@ -1664,16 +1676,7 @@ export async function registerRoutes(
       // Auto-deposit would only make sense for liquidation protection (future feature)
 
       // Execute trade on Drift Protocol
-      // Get wallet's agent private key for signing
-      const wallet = await storage.getWallet(bot.walletAddress);
-      if (!wallet?.agentPrivateKeyEncrypted) {
-        await storage.updateBotTrade(trade.id, {
-          status: "failed",
-          txSignature: null,
-        });
-        await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured", processed: true });
-        return res.status(400).json({ error: "Agent wallet not configured" });
-      }
+      // Wallet was already fetched earlier for position check
 
       // Get current market price from oracle (used for order execution)
       const oraclePrice = await getMarketPrice(bot.market);
@@ -1750,9 +1753,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: errorMsg });
       }
 
-      // Execute on Drift
-      // Use bot's subaccount if configured, otherwise use main account (0)
-      const subAccountId = bot.driftSubaccountId ?? 0;
+      // Execute on Drift using the subAccountId already declared for position check
       const orderResult = await executePerpOrder(
         wallet.agentPrivateKeyEncrypted,
         bot.market,
