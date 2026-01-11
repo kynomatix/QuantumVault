@@ -2835,7 +2835,7 @@ export async function registerRoutes(
         agentBalance = await getAgentUsdcBalance(wallet.agentPublicKey);
       }
       
-      // Sum up balances from all subaccounts (use agent wallet, not user wallet)
+      // Sum up totalCollateral from all subaccounts (includes USDC + unrealized PnL)
       let driftBalance = 0;
       const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
       const agentAddress = wallet?.agentPublicKey;
@@ -2843,14 +2843,24 @@ export async function registerRoutes(
       for (const bot of bots) {
         if (bot.driftSubaccountId !== null && agentAddress) {
           const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
-          const balance = exists ? await getDriftBalance(agentAddress, bot.driftSubaccountId) : 0;
-          driftBalance += balance;
-          subaccountBalances.push({
-            botId: bot.id,
-            botName: bot.name,
-            subaccountId: bot.driftSubaccountId,
-            balance,
-          });
+          if (exists) {
+            // Use getDriftAccountInfo for totalCollateral (USDC + unrealized PnL)
+            const accountInfo = await getDriftAccountInfo(agentAddress, bot.driftSubaccountId);
+            driftBalance += accountInfo.totalCollateral;
+            subaccountBalances.push({
+              botId: bot.id,
+              botName: bot.name,
+              subaccountId: bot.driftSubaccountId,
+              balance: accountInfo.totalCollateral,
+            });
+          } else {
+            subaccountBalances.push({
+              botId: bot.id,
+              botName: bot.name,
+              subaccountId: bot.driftSubaccountId,
+              balance: 0,
+            });
+          }
         }
       }
       

@@ -76,6 +76,11 @@ Preferred communication style: Simple, everyday language.
 
 - **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK's DriftClient creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Mitigation: Use RPC + SDK's `decodeUser()` (stateless, no WebSocket) instead of DriftClient subscriptions for all read-only queries. DriftClient is reserved ONLY for trade execution where we must submit transactions.
 - **Health Metrics Are Estimates**: Account health factor and liquidation prices are conservative estimates using a flat 5% margin ratio. Drift uses per-market maintenance weights that vary (5-15%+). The estimates are intentionally conservative (underestimate health) for safety. API responses include `isEstimate: true` to indicate this. Users should check Drift UI for precise health metrics when making critical risk decisions.
+- **Equity Discrepancy (~1-2%)**: Displayed Bot Equity may differ slightly from Drift UI due to:
+    1. **Funding Rate Payments**: Our unrealized PnL calculation uses `(markPrice - entryPrice) * size` which doesn't include cumulative funding payments that Drift adds/subtracts.
+    2. **Price Latency**: 15-second polling vs Drift's real-time WebSocket updates means our mark price may be slightly stale.
+    3. **Precision Differences**: Drift uses on-chain BN math with settlement amounts; we use JavaScript floats.
+    - **Workaround**: For precise values, check Drift UI directly. Our estimates are sufficient for monitoring but not for exact accounting.
 
 ## External Dependencies
 
