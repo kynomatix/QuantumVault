@@ -53,7 +53,10 @@ Preferred communication style: Simple, everyday language.
 - **Drift Account Parsing**: **ALWAYS use byte-parsing** for position reading to avoid memory leaks:
     1. **Byte-Parsing (`getPerpPositions`)**: Raw RPC calls with custom byte parsing - used for ALL position reading including close position detection. This is lightweight and doesn't create WebSocket connections.
     2. **SDK-Based (`getPerpPositionsSDK`)**: Uses official Drift SDK - **AVOID for position reading** due to memory leaks. Only use for trade execution where we need to submit transactions.
-- **Account Health Metrics**: Uses byte-parsing to display account health factor, collateral values, and positions. SDK methods are AVOIDED to prevent memory leaks.
+- **Account Health Metrics**: Uses byte-parsing exclusively to display account health factor, collateral values, and positions. SDK methods are AVOIDED to prevent memory leaks.
+    - **Health Calculation**: `getDriftAccountInfo()` calculates totalCollateral = usdcBalance + unrealizedPnl, with 10% maintenance margin ratio (conservative estimate).
+    - **Liquidation Price**: Estimated based on free collateral and position size. These are approximations - Drift uses per-market weights.
+    - **Safety-First**: Uses conservative 10% margin ratio to underestimate health rather than overestimate, ensuring users see lower health than actual for risk awareness.
 - **On-Chain-First Architecture**: On-chain Drift positions are ALWAYS the source of truth. Database is treated as a cache that can be wrong.
     - **PositionService** (`server/position-service.ts`): Central service for all position queries. Uses byte-parsing exclusively to avoid memory leaks from Drift SDK WebSocket connections.
     - **Critical Operations**: Close signals, position flips, and manual close all query on-chain directly using `PositionService.getPositionForExecution()` with byte-parsing - NEVER trust database for these operations.
@@ -70,6 +73,7 @@ Preferred communication style: Simple, everyday language.
 ## Known Issues
 
 - **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Under heavy load, this can lead to JavaScript heap out of memory crashes. Mitigation: Use byte-parsing (`getPerpPositions`) instead of SDK-based methods for position reading. The SDK is reserved ONLY for trade execution where we must submit transactions.
+- **Health Metrics Are Estimates**: Account health factor and liquidation prices are conservative estimates using a flat 10% margin ratio. Drift uses per-market maintenance weights that vary (5-15%+). The estimates are intentionally conservative (underestimate health) for safety. API responses include `isEstimate: true` to indicate this. Users should check Drift UI for precise health metrics when making critical risk decisions.
 
 ## External Dependencies
 

@@ -681,6 +681,8 @@ export async function registerRoutes(
         freeCollateral,
         unrealizedPnl,
         positions: formattedPositions,
+        isEstimate: true, // Health metrics are conservative estimates - check Drift UI for precise values
+        estimateNote: "Conservative 10% margin ratio - actual health may be higher",
       });
     } catch (error) {
       console.error("Health metrics error:", error);

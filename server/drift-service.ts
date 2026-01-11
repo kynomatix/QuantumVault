@@ -830,6 +830,8 @@ export interface DriftAccountInfo {
   freeCollateral: number;
   hasOpenPositions: boolean;
   marginUsed: number;
+  unrealizedPnl: number;
+  totalPositionNotional: number;
 }
 
 export async function getDriftAccountInfo(walletAddress: string, subAccountId: number = 0): Promise<DriftAccountInfo> {
@@ -843,6 +845,8 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
     freeCollateral: 0,
     hasOpenPositions: false,
     marginUsed: 0,
+    unrealizedPnl: 0,
+    totalPositionNotional: 0,
   };
   
   try {
@@ -852,62 +856,40 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
       return defaultResult;
     }
     
-    const data = accountInfo.data;
-    
     // Get USDC balance using existing logic
     const usdcBalance = await getDriftBalance(walletAddress, subAccountId);
     
-    // Check for open perp positions
-    // PerpPositions array starts after SpotPositions in the User account
-    // SpotPositions: 8 positions * 48 bytes = 384 bytes, starting at offset 80
-    // PerpPositions start at offset 80 + 384 = 464
-    // Use the same offsets as DRIFT_LAYOUTS for consistency
-    const PERP_POSITIONS_OFFSET = DRIFT_LAYOUTS.USER.PERP_POSITIONS_OFFSET; // 440
-    const PERP_POSITION_SIZE = DRIFT_LAYOUTS.PERP_POSITION.SIZE; // 184 bytes per position
-    const MAX_PERP_POSITIONS = 8;
+    // Get positions with unrealized PnL for accurate health calculation
+    const positions = await getPerpPositions(walletAddress, subAccountId);
     
     let hasOpenPositions = false;
-    let totalBaseAsset = 0;
+    let totalUnrealizedPnl = 0;
+    let totalPositionNotional = 0;
     
-    for (let i = 0; i < MAX_PERP_POSITIONS; i++) {
-      const posOffset = PERP_POSITIONS_OFFSET + (i * PERP_POSITION_SIZE);
-      
-      if (posOffset + 16 > data.length) break;
-      
-      try {
-        // Base asset amount is at offset 0 of each perp position (i128)
-        const baseAssetLow = data.readBigInt64LE(posOffset);
-        const baseAsset = Number(baseAssetLow);
-        
-        if (baseAsset !== 0) {
-          hasOpenPositions = true;
-          totalBaseAsset += Math.abs(baseAsset);
-        }
-      } catch (e) {
-        // Skip invalid reads
+    for (const pos of positions) {
+      if (Math.abs(pos.baseAssetAmount) > 0.0001) {
+        hasOpenPositions = true;
+        totalUnrealizedPnl += pos.unrealizedPnl;
+        totalPositionNotional += pos.sizeUsd;
       }
     }
     
-    // Calculate free collateral
-    // If there are open positions, estimate margin requirement as ~50% of position value
-    // This is a conservative estimate - actual margin depends on leverage settings
-    let marginUsed = 0;
-    if (hasOpenPositions) {
-      // Conservative estimate: assume ~50% of USDC balance is margin if positions exist
-      // The actual margin is calculated by Drift based on position size and oracle prices
-      marginUsed = Math.min(usdcBalance * 0.5, usdcBalance - 0.01);
-    }
+    // Total collateral = USDC balance + unrealized PnL (can be negative)
+    const totalCollateral = usdcBalance + totalUnrealizedPnl;
     
-    // Free collateral = balance - margin used
-    // Only apply tiny buffer when there are open positions (Drift requires ~0.000002 USDC minimum)
+    // Calculate margin requirement based on position notional value
+    // Drift uses varying maintenance margins (5-10%+ depending on market)
+    // We use 10% (conservative) to underestimate health rather than overestimate
+    // This means UI will show lower health than actual, which is safer for risk awareness
+    const MAINTENANCE_MARGIN_RATIO = 0.10;
+    const marginRequired = totalPositionNotional * MAINTENANCE_MARGIN_RATIO;
+    const marginUsed = hasOpenPositions ? marginRequired : 0;
+    
+    // Free collateral = total collateral - margin requirement
     const buffer = hasOpenPositions ? 0.0001 : 0;
-    const freeCollateral = Math.max(0, usdcBalance - marginUsed - buffer);
+    const freeCollateral = Math.max(0, totalCollateral - marginUsed - buffer);
     
-    // For basic account info, totalCollateral is approximately usdcBalance + unrealized PnL
-    // For accurate totalCollateral, use getAccountHealthMetrics which uses SDK
-    const totalCollateral = usdcBalance;
-    
-    console.log(`[Drift] Account info: balance=${usdcBalance.toFixed(4)}, totalCollateral=${totalCollateral.toFixed(4)}, marginUsed=${marginUsed.toFixed(4)}, free=${freeCollateral.toFixed(4)}, hasPositions=${hasOpenPositions}`);
+    console.log(`[Drift] Account info: balance=${usdcBalance.toFixed(4)}, unrealizedPnl=${totalUnrealizedPnl.toFixed(4)}, totalCollateral=${totalCollateral.toFixed(4)}, positionNotional=${totalPositionNotional.toFixed(2)}, marginUsed=${marginUsed.toFixed(4)}, free=${freeCollateral.toFixed(4)}, hasPositions=${hasOpenPositions}`);
     
     return {
       usdcBalance,
@@ -915,6 +897,8 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
       freeCollateral,
       hasOpenPositions,
       marginUsed,
+      unrealizedPnl: totalUnrealizedPnl,
+      totalPositionNotional,
     };
   } catch (error) {
     console.error(`[Drift] Error reading account info:`, error);
@@ -1070,9 +1054,13 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
 }
 
 /**
- * SDK-based position fetching - more reliable than custom byte parsing.
- * Use this when you have access to the encrypted private key.
- * This uses the same approach as getAccountHealthMetrics which works correctly.
+ * @deprecated DO NOT USE - Causes memory leaks due to SDK WebSocket connections that don't cleanup.
+ * Use getPerpPositions() (byte-parsing) instead for all position reading.
+ * This function is kept for reference/debugging only.
+ * 
+ * SDK-based position fetching - was more reliable than custom byte parsing,
+ * but the WebSocket connections cause "accountUnsubscribe timeout" errors
+ * and JavaScript heap out of memory crashes under load.
  */
 export async function getPerpPositionsSDK(
   encryptedPrivateKey: string, 
@@ -2008,6 +1996,11 @@ export interface HealthMetrics {
   }>;
 }
 
+/**
+ * @deprecated DO NOT USE - Causes memory leaks due to SDK WebSocket connections that don't cleanup.
+ * Use getDriftAccountInfo() (byte-parsing) instead for health metrics.
+ * This function is kept for reference/debugging only.
+ */
 export async function getAccountHealthMetrics(
   encryptedPrivateKey: string,
   subAccountId: number = 0
@@ -2015,7 +2008,7 @@ export async function getAccountHealthMetrics(
   try {
     const { QUOTE_PRECISION, BASE_PRECISION } = await import('@drift-labs/sdk');
     
-    console.log(`[Drift] Fetching health metrics for subaccount ${subAccountId}`);
+    console.log(`[Drift] [DEPRECATED] Fetching health metrics for subaccount ${subAccountId}`);
     
     const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
     

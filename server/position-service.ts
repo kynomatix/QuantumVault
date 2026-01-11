@@ -1,5 +1,5 @@
 import { storage } from './storage';
-import { getPerpPositions, getPerpPositionsSDK, getAccountHealthMetrics } from './drift-service';
+import { getPerpPositions, getDriftAccountInfo } from './drift-service';
 
 function normalizeMarket(market: string): string {
   return market.toUpperCase()
@@ -66,16 +66,10 @@ export class PositionService {
     let driftDetails: PositionData['driftDetails'] = undefined;
 
     try {
-      // Use SDK-based position fetching when encrypted key is available (more reliable)
-      // Fall back to custom byte parsing if no key available
-      let onChainPositions;
-      if (agentPrivateKeyEncrypted) {
-        console.log(`[PositionService] Using SDK-based position fetching for ${market}`);
-        onChainPositions = await getPerpPositionsSDK(agentPrivateKeyEncrypted, subAccountId);
-      } else {
-        console.log(`[PositionService] Using byte-parsing position fetching for ${market}`);
-        onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
-      }
+      // ALWAYS use byte-parsing for position reading to avoid SDK WebSocket memory leaks
+      // The SDK creates WebSocket connections that don't properly cleanup
+      console.log(`[PositionService] Using byte-parsing position fetching for ${market}`);
+      const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
       const normalizedMarket = normalizeMarket(market);
       onChainPos = onChainPositions.find(p => 
         normalizeMarket(p.market) === normalizedMarket
@@ -94,40 +88,70 @@ export class PositionService {
         };
         console.warn(`[PositionService] DRIFT DETECTED for bot ${botId} ${market}: DB=${dbSize}, OnChain=${onChainSize}, diff=${driftDetails.difference}`);
 
-        await storage.upsertBotPosition({
-          tradingBotId: botId,
-          walletAddress,
-          market,
-          baseSize: String(onChainSize),
-          avgEntryPrice: onChainPos ? String(onChainPos.entryPrice) : "0",
-          costBasis: onChainPos ? String(Math.abs(onChainSize) * onChainPos.entryPrice) : "0",
-          realizedPnl: dbPosition?.realizedPnl || "0",
-          totalFees: dbPosition?.totalFees || "0",
-          lastTradeId: dbPosition?.lastTradeId || null,
-          lastTradeAt: new Date(),
-        });
-        console.log(`[PositionService] Auto-corrected database from on-chain data`);
+        // SAFETY: Only auto-correct if we have a valid on-chain position OR the DB shows a position
+        // that doesn't exist on-chain. Never auto-correct to 0 if DB has no position (could be wrong wallet).
+        const shouldAutoCorrect = onChainPos !== null || (dbSize !== 0 && onChainSize === 0);
+        
+        if (shouldAutoCorrect) {
+          await storage.upsertBotPosition({
+            tradingBotId: botId,
+            walletAddress,
+            market,
+            baseSize: String(onChainSize),
+            avgEntryPrice: onChainPos ? String(onChainPos.entryPrice) : "0",
+            costBasis: onChainPos ? String(Math.abs(onChainSize) * onChainPos.entryPrice) : "0",
+            realizedPnl: dbPosition?.realizedPnl || "0",
+            totalFees: dbPosition?.totalFees || "0",
+            lastTradeId: dbPosition?.lastTradeId || null,
+            lastTradeAt: new Date(),
+          });
+          console.log(`[PositionService] Auto-corrected database from on-chain data`);
+        } else {
+          console.warn(`[PositionService] Skipping auto-correction: on-chain empty and DB empty - possible wallet mismatch`);
+        }
       }
 
       const hasPosition = Math.abs(onChainSize) > 0.0001;
       const realizedPnl = dbPosition ? parseFloat(dbPosition.realizedPnl) : 0;
       const totalFees = dbPosition ? parseFloat(dbPosition.totalFees || "0") : 0;
 
+      // Use byte-parsing for health metrics - NO SDK to avoid memory leaks
+      // getDriftAccountInfo now includes unrealized PnL and margin calculations
       let healthMetrics: PositionData['healthMetrics'] = undefined;
-      if (hasPosition && agentPrivateKeyEncrypted) {
+      if (hasPosition) {
         try {
-          const healthResult = await getAccountHealthMetrics(agentPrivateKeyEncrypted, subAccountId);
-          if (healthResult.success && healthResult.data) {
-            const posHealth = healthResult.data.positions?.find(
-              (p: any) => normalizeMarket(p.market || '') === normalizedMarket
-            );
-            healthMetrics = {
-              healthFactor: healthResult.data.healthFactor || 100,
-              liquidationPrice: posHealth?.liquidationPrice || null,
-              totalCollateral: healthResult.data.totalCollateral || 0,
-              freeCollateral: healthResult.data.freeCollateral || 0,
-            };
+          const accountInfo = await getDriftAccountInfo(agentPublicKey, subAccountId);
+          
+          // Health Factor = 100 * (1 - maintenanceMargin / totalCollateral)
+          // When totalCollateral equals maintenanceMargin, health = 0 (liquidation)
+          // When no margin used, health = 100 (fully healthy)
+          let healthFactor = 100;
+          if (accountInfo.totalCollateral > 0 && accountInfo.marginUsed > 0) {
+            healthFactor = Math.max(0, Math.min(100, 100 * (1 - accountInfo.marginUsed / accountInfo.totalCollateral)));
+          } else if (accountInfo.totalCollateral <= 0 && hasPosition) {
+            healthFactor = 0; // Negative collateral = critical
           }
+          
+          // Estimate liquidation price for SOL-PERP (most common)
+          // Liquidation occurs when: collateral = maintenanceMargin
+          // For a LONG: liqPrice = entryPrice - (freeCollateral / positionSize)
+          // For a SHORT: liqPrice = entryPrice + (freeCollateral / positionSize)
+          let liquidationPrice: number | null = null;
+          if (onChainPos && Math.abs(onChainSize) > 0.0001 && accountInfo.freeCollateral > 0) {
+            const priceBuffer = accountInfo.freeCollateral / Math.abs(onChainSize);
+            if (onChainPos.side === 'LONG') {
+              liquidationPrice = Math.max(0, onChainPos.entryPrice - priceBuffer);
+            } else {
+              liquidationPrice = onChainPos.entryPrice + priceBuffer;
+            }
+          }
+          
+          healthMetrics = {
+            healthFactor,
+            liquidationPrice,
+            totalCollateral: accountInfo.totalCollateral,
+            freeCollateral: accountInfo.freeCollateral,
+          };
         } catch (healthErr) {
           console.error(`[PositionService] Failed to get health metrics:`, healthErr);
         }
