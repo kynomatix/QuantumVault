@@ -2101,7 +2101,10 @@ export async function registerRoutes(
             const closeFee = closeNotional * 0.0005;
             
             // Calculate trade PnL based on entry and exit prices
+            // IMPORTANT: onChainPosition was queried BEFORE close - it should have the entry price
             const closeEntryPrice = onChainPosition.entryPrice || 0;
+            console.log(`[Webhook] PnL calculation inputs: entryPrice=${closeEntryPrice}, fillPrice=${closeFillPrice}, closeSide=${closeSide}, closeSize=${closeSize}`);
+            
             let closeTradePnl = 0;
             if (closeEntryPrice > 0 && closeFillPrice > 0) {
               if (closeSide === 'short') {
@@ -2111,7 +2114,9 @@ export async function registerRoutes(
                 // Closing SHORT: profit if entryPrice > exitPrice
                 closeTradePnl = (closeEntryPrice - closeFillPrice) * closeSize - closeFee;
               }
-              console.log(`[Webhook] Close PnL: entry=$${closeEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${closeTradePnl.toFixed(4)}`);
+              console.log(`[Webhook] Close PnL CALCULATED: entry=$${closeEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${closeTradePnl.toFixed(4)}`);
+            } else {
+              console.warn(`[Webhook] PnL NOT calculated: entryPrice=${closeEntryPrice}, fillPrice=${closeFillPrice} - one or both are zero`);
             }
             
             // CRITICAL: Verify on-chain that position is actually closed and retry if dust remains
