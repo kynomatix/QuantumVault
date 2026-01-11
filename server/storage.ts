@@ -55,6 +55,7 @@ export interface IStorage {
   getOrCreateWallet(address: string): Promise<Wallet>;
   updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void>;
   updateWalletWebhookSecret(address: string, userWebhookSecret: string): Promise<void>;
+  updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined>;
 
   getAllBots(): Promise<Bot[]>;
   getFeaturedBots(): Promise<Bot[]>;
@@ -98,6 +99,15 @@ export interface IStorage {
 
   getLeaderboard(limit?: number): Promise<(LeaderboardStats & { user: User })[]>;
   upsertLeaderboardStats(stats: InsertLeaderboardStats): Promise<LeaderboardStats>;
+  getWalletLeaderboard(limit?: number): Promise<Array<{
+    walletAddress: string;
+    displayName: string | null;
+    xUsername: string | null;
+    totalVolume: number;
+    totalPnl: number;
+    winRate: number;
+    tradeCount: number;
+  }>>;
 
   createEquityEvent(event: InsertEquityEvent): Promise<EquityEvent>;
   getEquityEvents(walletAddress: string, limit?: number): Promise<EquityEvent[]>;
@@ -164,6 +174,11 @@ export class DatabaseStorage implements IStorage {
 
   async updateWalletWebhookSecret(address: string, userWebhookSecret: string): Promise<void> {
     await db.update(wallets).set({ userWebhookSecret }).where(eq(wallets.address, address));
+  }
+
+  async updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined> {
+    const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
+    return result[0];
   }
 
   async getAllBots(): Promise<Bot[]> {
@@ -406,6 +421,75 @@ export class DatabaseStorage implements IStorage {
       })
       .returning();
     return result[0];
+  }
+
+  async getWalletLeaderboard(limit: number = 20): Promise<Array<{
+    walletAddress: string;
+    displayName: string | null;
+    xUsername: string | null;
+    totalVolume: number;
+    totalPnl: number;
+    winRate: number;
+    tradeCount: number;
+  }>> {
+    const allWallets = await db.select().from(wallets);
+    const results: Array<{
+      walletAddress: string;
+      displayName: string | null;
+      xUsername: string | null;
+      totalVolume: number;
+      totalPnl: number;
+      winRate: number;
+      tradeCount: number;
+    }> = [];
+
+    for (const wallet of allWallets) {
+      const bots = await db.select().from(tradingBots).where(eq(tradingBots.walletAddress, wallet.address));
+      if (bots.length === 0) continue;
+
+      let totalWinningTrades = 0;
+      let totalTrades = 0;
+      for (const bot of bots) {
+        const stats = bot.stats as { totalTrades?: number; winningTrades?: number } | null;
+        if (stats) {
+          totalTrades += stats.totalTrades || 0;
+          totalWinningTrades += stats.winningTrades || 0;
+        }
+      }
+
+      const botIds = bots.map(b => b.id);
+      let totalVolume = 0;
+      let totalPnl = 0;
+
+      for (const botId of botIds) {
+        const trades = await db.select().from(botTrades).where(eq(botTrades.tradingBotId, botId));
+        for (const trade of trades) {
+          const size = parseFloat(trade.size);
+          const price = parseFloat(trade.price);
+          totalVolume += Math.abs(size * price);
+        }
+
+        const positions = await db.select().from(botPositions).where(eq(botPositions.tradingBotId, botId));
+        for (const pos of positions) {
+          totalPnl += parseFloat(pos.realizedPnl);
+        }
+      }
+
+      const winRate = totalTrades > 0 ? (totalWinningTrades / totalTrades) * 100 : 0;
+
+      results.push({
+        walletAddress: wallet.address,
+        displayName: wallet.displayName,
+        xUsername: wallet.xUsername,
+        totalVolume,
+        totalPnl,
+        winRate,
+        tradeCount: totalTrades,
+      });
+    }
+
+    results.sort((a, b) => b.totalPnl - a.totalPnl);
+    return results.slice(0, limit);
   }
 
   async createEquityEvent(event: InsertEquityEvent): Promise<EquityEvent> {

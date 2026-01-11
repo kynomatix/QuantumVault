@@ -24,8 +24,11 @@ export type User = typeof users.$inferSelect;
 export const wallets = pgTable("wallets", {
   address: text("address").primaryKey(),
   displayName: text("display_name"),
+  xUsername: text("x_username"),
   referralCode: text("referral_code").unique(),
   driftSubaccount: integer("drift_subaccount").default(0),
+  defaultLeverage: integer("default_leverage").default(5),
+  slippageBps: integer("slippage_bps").default(30),
   agentPublicKey: text("agent_public_key"),
   agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),
   userWebhookSecret: text("user_webhook_secret"),

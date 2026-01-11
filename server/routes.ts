@@ -171,6 +171,145 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/wallet/settings", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      res.json({
+        displayName: wallet.displayName,
+        xUsername: wallet.xUsername,
+        defaultLeverage: wallet.defaultLeverage,
+        slippageBps: wallet.slippageBps,
+      });
+    } catch (error) {
+      console.error("Get wallet settings error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.put("/api/wallet/settings", requireWallet, async (req, res) => {
+    try {
+      const { displayName, xUsername, defaultLeverage, slippageBps } = req.body;
+      
+      const updates: any = {};
+      if (displayName !== undefined) updates.displayName = displayName;
+      if (xUsername !== undefined) updates.xUsername = xUsername;
+      if (defaultLeverage !== undefined) {
+        const leverage = parseInt(defaultLeverage);
+        if (isNaN(leverage) || leverage < 1 || leverage > 20) {
+          return res.status(400).json({ error: "Invalid leverage (must be 1-20)" });
+        }
+        updates.defaultLeverage = leverage;
+      }
+      if (slippageBps !== undefined) {
+        const slippage = parseInt(slippageBps);
+        if (isNaN(slippage) || slippage < 1 || slippage > 500) {
+          return res.status(400).json({ error: "Invalid slippage (must be 1-500 bps)" });
+        }
+        updates.slippageBps = slippage;
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No valid updates provided" });
+      }
+
+      const wallet = await storage.updateWallet(req.walletAddress!, updates);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      res.json({
+        displayName: wallet.displayName,
+        xUsername: wallet.xUsername,
+        defaultLeverage: wallet.defaultLeverage,
+        slippageBps: wallet.slippageBps,
+      });
+    } catch (error) {
+      console.error("Update wallet settings error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/close-all-positions", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const bots = await storage.getTradingBots(req.walletAddress!);
+      const activeBots = bots.filter(b => b.isActive);
+
+      const results: Array<{
+        botId: string;
+        botName: string;
+        market: string;
+        success: boolean;
+        closed?: { side: string; size: number };
+        error?: string;
+      }> = [];
+
+      for (const bot of activeBots) {
+        const subAccountId = bot.driftSubaccountId ?? 0;
+        
+        try {
+          const onChainPositions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
+          const position = onChainPositions.find(p => p.market === bot.market);
+          
+          if (!position || Math.abs(position.baseAssetAmount) < 0.0001) {
+            continue;
+          }
+
+          const result = await closePerpPosition(
+            wallet.agentPrivateKeyEncrypted,
+            bot.market,
+            subAccountId
+          );
+
+          if (result.success) {
+            results.push({
+              botId: bot.id,
+              botName: bot.name,
+              market: bot.market,
+              success: true,
+              closed: { side: position.side, size: Math.abs(position.baseAssetAmount) },
+            });
+          } else {
+            results.push({
+              botId: bot.id,
+              botName: bot.name,
+              market: bot.market,
+              success: false,
+              error: result.error || "Unknown error",
+            });
+          }
+        } catch (error: any) {
+          results.push({
+            botId: bot.id,
+            botName: bot.name,
+            market: bot.market,
+            success: false,
+            error: error.message || "Unknown error",
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        totalBotsChecked: activeBots.length,
+        positionsClosed: results.filter(r => r.success).length,
+        results,
+      });
+    } catch (error) {
+      console.error("Close all positions error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   app.get("/api/wallet/capital", requireWallet, async (req, res) => {
     try {
       const walletAddress = req.walletAddress!;
@@ -792,8 +931,8 @@ export async function registerRoutes(
         // This handles the case where liquidation or another process closed the position
         // but the database wasn't updated
         try {
-          const { reconcileBot } = await import("./reconciliation-service.js");
-          await reconcileBot(bot.id);
+          const { reconcileBotPosition } = await import("./reconciliation-service.js");
+          await reconcileBotPosition(bot.id, wallet.address, wallet.agentPublicKey, subAccountId, bot.market);
           console.log(`[ClosePosition] Ran reconciliation after "already closed" scenario`);
         } catch (reconcileErr) {
           console.warn(`[ClosePosition] Reconciliation failed (non-critical):`, reconcileErr);
@@ -2954,8 +3093,8 @@ export async function registerRoutes(
 
   app.get("/api/leaderboard", async (req, res) => {
     try {
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
-      const leaderboard = await storage.getLeaderboard(limit);
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 20;
+      const leaderboard = await storage.getWalletLeaderboard(limit);
       res.json(leaderboard);
     } catch (error) {
       console.error("Get leaderboard error:", error);

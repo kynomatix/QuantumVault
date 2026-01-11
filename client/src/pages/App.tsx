@@ -35,7 +35,8 @@ import {
   ArrowUpFromLine,
   Trash2,
   AlertTriangle,
-  XCircle
+  XCircle,
+  ExternalLink
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -110,6 +111,16 @@ export default function AppPage() {
   const [welcomePopupOpen, setWelcomePopupOpen] = useState(false);
   const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
   const welcomeCheckedRef = useRef(false);
+  
+  // Settings state
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [displayName, setDisplayName] = useState('');
+  const [xUsername, setXUsername] = useState('');
+  const [defaultLeverage, setDefaultLeverage] = useState('5');
+  const [slippageBps, setSlippageBps] = useState('30');
+  const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
+  const [closingAllPositions, setClosingAllPositions] = useState(false);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -173,6 +184,117 @@ export default function AppPage() {
       navigate('/');
     }
   }, [connected, connecting, navigate]);
+
+  // Load wallet settings on mount
+  useEffect(() => {
+    if (!connected) return;
+    
+    const loadSettings = async () => {
+      setSettingsLoading(true);
+      try {
+        const res = await fetch('/api/wallet/settings', { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          setDisplayName(data.displayName || '');
+          setXUsername(data.xUsername || '');
+          setDefaultLeverage(String(data.defaultLeverage || 5));
+          setSlippageBps(String(data.slippageBps || 30));
+        }
+      } catch (error) {
+        console.error('Error loading settings:', error);
+      } finally {
+        setSettingsLoading(false);
+      }
+    };
+    
+    loadSettings();
+  }, [connected]);
+
+  const handleSaveSettings = async () => {
+    setSettingsSaving(true);
+    try {
+      const res = await fetch('/api/wallet/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          displayName,
+          xUsername,
+          defaultLeverage: parseInt(defaultLeverage),
+          slippageBps: parseInt(slippageBps),
+        }),
+      });
+      
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to save settings');
+      }
+      
+      toast({ title: 'Settings saved', description: 'Your preferences have been updated' });
+    } catch (error: any) {
+      toast({ 
+        title: 'Failed to save settings', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const handleCloseAllPositions = async () => {
+    setClosingAllPositions(true);
+    try {
+      const res = await fetch('/api/close-all-positions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+      });
+      
+      const data = await res.json();
+      
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to close positions');
+      }
+      
+      const successCount = data.positionsClosed || 0;
+      const failCount = data.results?.filter((r: any) => !r.success).length || 0;
+      
+      if (successCount > 0 && failCount === 0) {
+        toast({ 
+          title: 'Positions closed', 
+          description: `Successfully closed ${successCount} position${successCount > 1 ? 's' : ''}` 
+        });
+      } else if (successCount > 0 && failCount > 0) {
+        toast({ 
+          title: 'Partial success', 
+          description: `Closed ${successCount} position(s), ${failCount} failed`,
+          variant: 'destructive'
+        });
+      } else if (successCount === 0 && failCount > 0) {
+        toast({ 
+          title: 'Failed to close positions', 
+          description: 'Could not close any positions',
+          variant: 'destructive'
+        });
+      } else {
+        toast({ 
+          title: 'No positions to close', 
+          description: 'No open positions were found' 
+        });
+      }
+      
+      setCloseAllDialogOpen(false);
+    } catch (error: any) {
+      toast({ 
+        title: 'Error', 
+        description: error.message || 'Failed to close positions',
+        variant: 'destructive' 
+      });
+    } finally {
+      setClosingAllPositions(false);
+    }
+  };
 
   // Check if agent wallet needs SOL for gas and show welcome popup
   useEffect(() => {
@@ -1259,53 +1381,88 @@ export default function AppPage() {
                 </div>
 
                 <div className="gradient-border noise overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-muted/20 text-muted-foreground text-xs">
-                        <th className="text-left py-4 px-4 font-medium">Rank</th>
-                        <th className="text-left py-4 px-4 font-medium">Trader</th>
-                        <th className="text-right py-4 px-4 font-medium">Volume</th>
-                        <th className="text-right py-4 px-4 font-medium">PnL</th>
-                        <th className="text-right py-4 px-4 font-medium">Win Rate</th>
-                        <th className="text-right py-4 px-4 font-medium">Trades</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {[
-                        { rank: 1, name: 'quantum_whale', volume: '2.4M', pnl: '+$124,500', winRate: '72%', trades: 1247 },
-                        { rank: 2, name: 'sol_maxi_2024', volume: '1.8M', pnl: '+$89,230', winRate: '68%', trades: 892 },
-                        { rank: 3, name: 'drift_master', volume: '1.2M', pnl: '+$67,890', winRate: '71%', trades: 634 },
-                        { rank: 4, name: 'perp_lord', volume: '980K', pnl: '+$45,120', winRate: '65%', trades: 521 },
-                        { rank: 5, name: 'alpha_hunter', volume: '750K', pnl: '+$32,450', winRate: '69%', trades: 445 },
-                        { rank: 6, name: 'grid_wizard', volume: '620K', pnl: '+$28,900', winRate: '74%', trades: 328 },
-                        { rank: 7, name: 'moon_trader', volume: '580K', pnl: '+$24,150', winRate: '62%', trades: 412 },
-                        { rank: 8, name: 'signal_king', volume: '520K', pnl: '+$21,800', winRate: '67%', trades: 289 },
-                      ].map((trader) => (
-                        <tr key={trader.rank} className="border-t border-border/30 hover:bg-muted/20" data-testid={`row-leaderboard-${trader.rank}`}>
-                          <td className="py-4 px-4">
-                            <span className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold ${
-                              trader.rank === 1 ? 'bg-yellow-500/20 text-yellow-400' :
-                              trader.rank === 2 ? 'bg-gray-400/20 text-gray-400' :
-                              trader.rank === 3 ? 'bg-orange-500/20 text-orange-400' :
-                              'bg-muted/30 text-muted-foreground'
-                            }`}>
-                              {trader.rank}
-                            </span>
-                          </td>
-                          <td className="py-4 px-4">
-                            <div className="flex items-center gap-3">
-                              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30" />
-                              <span className="font-medium">@{trader.name}</span>
-                            </div>
-                          </td>
-                          <td className="py-4 px-4 text-right font-mono">${trader.volume}</td>
-                          <td className="py-4 px-4 text-right font-mono text-emerald-400">{trader.pnl}</td>
-                          <td className="py-4 px-4 text-right font-mono">{trader.winRate}</td>
-                          <td className="py-4 px-4 text-right font-mono text-muted-foreground">{trader.trades}</td>
+                  {!leaderboardData ? (
+                    <div className="flex items-center justify-center py-12">
+                      <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                      <span className="ml-2 text-muted-foreground">Loading leaderboard...</span>
+                    </div>
+                  ) : leaderboardData.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                      <Users className="w-12 h-12 mb-4 opacity-50" />
+                      <p>No traders on the leaderboard yet</p>
+                    </div>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-muted/20 text-muted-foreground text-xs">
+                          <th className="text-left py-4 px-4 font-medium">Rank</th>
+                          <th className="text-left py-4 px-4 font-medium">Trader</th>
+                          <th className="text-right py-4 px-4 font-medium">Volume</th>
+                          <th className="text-right py-4 px-4 font-medium">PnL</th>
+                          <th className="text-right py-4 px-4 font-medium">Win Rate</th>
+                          <th className="text-right py-4 px-4 font-medium">Trades</th>
+                          <th className="text-center py-4 px-4 font-medium">Profile</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {leaderboardData.map((trader: { walletAddress: string; displayName: string | null; xUsername: string | null; totalVolume: number; totalPnl: number; winRate: number; tradeCount: number }, index: number) => {
+                          const rank = index + 1;
+                          const shortenedWallet = `${trader.walletAddress.slice(0, 4)}...${trader.walletAddress.slice(-4)}`;
+                          const displayName = trader.displayName || shortenedWallet;
+                          const formatVolume = (v: number) => {
+                            if (v >= 1000000) return `${(v / 1000000).toFixed(1)}M`;
+                            if (v >= 1000) return `${(v / 1000).toFixed(1)}K`;
+                            return v.toFixed(0);
+                          };
+                          const pnlFormatted = trader.totalPnl >= 0 ? `+$${trader.totalPnl.toFixed(2)}` : `-$${Math.abs(trader.totalPnl).toFixed(2)}`;
+                          return (
+                            <tr key={trader.walletAddress} className="border-t border-border/30 hover:bg-muted/20" data-testid={`row-leaderboard-${rank}`}>
+                              <td className="py-4 px-4">
+                                <span className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold ${
+                                  rank === 1 ? 'bg-yellow-500/20 text-yellow-400' :
+                                  rank === 2 ? 'bg-gray-400/20 text-gray-400' :
+                                  rank === 3 ? 'bg-orange-500/20 text-orange-400' :
+                                  'bg-muted/30 text-muted-foreground'
+                                }`}>
+                                  {rank}
+                                </span>
+                              </td>
+                              <td className="py-4 px-4">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center text-xs font-bold">
+                                    {displayName.charAt(0).toUpperCase()}
+                                  </div>
+                                  <span className="font-medium">{displayName}</span>
+                                </div>
+                              </td>
+                              <td className="py-4 px-4 text-right font-mono">${formatVolume(trader.totalVolume)}</td>
+                              <td className={`py-4 px-4 text-right font-mono ${trader.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{pnlFormatted}</td>
+                              <td className="py-4 px-4 text-right font-mono">{trader.winRate.toFixed(1)}%</td>
+                              <td className="py-4 px-4 text-right font-mono text-muted-foreground">{trader.tradeCount}</td>
+                              <td className="py-4 px-4 text-center">
+                                {trader.xUsername ? (
+                                  <a
+                                    href={`https://x.com/${trader.xUsername}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-muted/30 hover:bg-primary/20 transition-colors"
+                                    data-testid={`link-x-profile-${rank}`}
+                                    title={`@${trader.xUsername}`}
+                                  >
+                                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                                      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                                    </svg>
+                                  </a>
+                                ) : (
+                                  <span className="text-muted-foreground/30">—</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
               </motion.div>
             )}
@@ -1323,47 +1480,108 @@ export default function AppPage() {
                   <p className="text-muted-foreground">Manage your account and preferences</p>
                 </div>
 
-                <div className="gradient-border p-6 noise space-y-6">
-                  <div>
-                    <h3 className="font-display font-semibold mb-4">Profile</h3>
-                    <div className="space-y-4">
-                      <div>
-                        <label className="text-sm text-muted-foreground mb-1.5 block">Username</label>
-                        <Input defaultValue="quantum_trader" className="bg-muted/30 border-border/50" data-testid="input-username" />
-                      </div>
-                      <div>
-                        <label className="text-sm text-muted-foreground mb-1.5 block">Referral Code</label>
-                        <div className="flex gap-2">
-                          <Input defaultValue="QUANTUM2024" readOnly className="bg-muted/30 border-border/50 font-mono" data-testid="input-referral" />
-                          <Button variant="outline" data-testid="button-copy-referral">
-                            <Copy className="w-4 h-4" />
-                          </Button>
+                {settingsLoading ? (
+                  <div className="gradient-border p-6 noise flex items-center justify-center py-12">
+                    <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                    <span className="ml-2 text-muted-foreground">Loading settings...</span>
+                  </div>
+                ) : (
+                  <div className="gradient-border p-6 noise space-y-6">
+                    <div>
+                      <h3 className="font-display font-semibold mb-4">Profile</h3>
+                      <div className="space-y-4">
+                        <div>
+                          <label className="text-sm text-muted-foreground mb-1.5 block">Username</label>
+                          <Input 
+                            value={displayName} 
+                            onChange={(e) => setDisplayName(e.target.value)}
+                            placeholder="Enter your display name"
+                            className="bg-muted/30 border-border/50" 
+                            data-testid="input-username" 
+                          />
+                        </div>
+                        <div>
+                          <label className="text-sm text-muted-foreground mb-1.5 block">X (Twitter) Username</label>
+                          <div className="relative">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">@</span>
+                            <Input 
+                              value={xUsername} 
+                              onChange={(e) => setXUsername(e.target.value.replace(/^@/, ''))}
+                              placeholder="username"
+                              className="bg-muted/30 border-border/50 pl-8" 
+                              data-testid="input-x-username" 
+                            />
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="border-t border-border/50 pt-6">
-                    <h3 className="font-display font-semibold mb-4">Trading Defaults</h3>
-                    <div className="space-y-4">
-                      <div>
-                        <label className="text-sm text-muted-foreground mb-1.5 block">Default Leverage</label>
-                        <Input type="number" defaultValue="5" className="bg-muted/30 border-border/50" data-testid="input-leverage" />
-                      </div>
-                      <div>
-                        <label className="text-sm text-muted-foreground mb-1.5 block">Slippage Tolerance (bps)</label>
-                        <Input type="number" defaultValue="30" className="bg-muted/30 border-border/50" data-testid="input-slippage" />
+                    <div className="border-t border-border/50 pt-6">
+                      <h3 className="font-display font-semibold mb-4">Trading Defaults</h3>
+                      <div className="space-y-4">
+                        <div>
+                          <label className="text-sm text-muted-foreground mb-1.5 block">Default Leverage (1-20x)</label>
+                          <Input 
+                            type="number" 
+                            min="1"
+                            max="20"
+                            value={defaultLeverage} 
+                            onChange={(e) => setDefaultLeverage(e.target.value)}
+                            className="bg-muted/30 border-border/50" 
+                            data-testid="input-leverage" 
+                          />
+                        </div>
+                        <div>
+                          <label className="text-sm text-muted-foreground mb-1.5 block">Slippage Tolerance (1-500 bps)</label>
+                          <Input 
+                            type="number" 
+                            min="1"
+                            max="500"
+                            value={slippageBps} 
+                            onChange={(e) => setSlippageBps(e.target.value)}
+                            className="bg-muted/30 border-border/50" 
+                            data-testid="input-slippage" 
+                          />
+                          <p className="text-xs text-muted-foreground mt-1">1 bps = 0.01%. Default: 30 bps (0.3%)</p>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="border-t border-border/50 pt-6">
-                    <h3 className="font-display font-semibold mb-4">Danger Zone</h3>
-                    <Button variant="outline" className="border-red-500/50 text-red-400 hover:bg-red-500/10" data-testid="button-close-positions">
-                      Close All Positions
-                    </Button>
+                    <div className="border-t border-border/50 pt-6">
+                      <Button 
+                        onClick={handleSaveSettings} 
+                        disabled={settingsSaving}
+                        className="w-full sm:w-auto"
+                        data-testid="button-save-settings"
+                      >
+                        {settingsSaving ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Saving...
+                          </>
+                        ) : (
+                          'Save Changes'
+                        )}
+                      </Button>
+                    </div>
+
+                    <div className="border-t border-border/50 pt-6">
+                      <h3 className="font-display font-semibold mb-4 text-red-400">Danger Zone</h3>
+                      <p className="text-sm text-muted-foreground mb-4">
+                        Close all open positions across all your trading bots. This action cannot be undone.
+                      </p>
+                      <Button 
+                        variant="outline" 
+                        className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
+                        onClick={() => setCloseAllDialogOpen(true)}
+                        data-testid="button-close-positions"
+                      >
+                        <XCircle className="w-4 h-4 mr-2" />
+                        Close All Positions
+                      </Button>
+                    </div>
                   </div>
-                </div>
+                )}
               </motion.div>
             )}
 
@@ -1373,6 +1591,72 @@ export default function AppPage() {
           </AnimatePresence>
         </main>
       </div>
+
+      {closeAllDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="gradient-border p-6 noise max-w-md w-full mx-4"
+            data-testid="modal-close-all-positions"
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center">
+                <AlertTriangle className="w-6 h-6 text-red-400" />
+              </div>
+              <div>
+                <h3 className="font-display font-semibold text-lg">Close All Positions</h3>
+                <p className="text-sm text-muted-foreground">This action cannot be undone</p>
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-4">
+                <div className="flex items-start gap-3">
+                  <XCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-red-400">Warning</p>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      This will close all open positions across all your active trading bots at current market prices. 
+                      You may experience slippage on large positions.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Are you sure you want to proceed?
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <Button 
+                variant="outline" 
+                className="flex-1" 
+                onClick={() => setCloseAllDialogOpen(false)}
+                disabled={closingAllPositions}
+                data-testid="button-cancel-close-all"
+              >
+                Cancel
+              </Button>
+              <Button 
+                className="flex-1 bg-red-500 hover:bg-red-600 text-white"
+                onClick={handleCloseAllPositions}
+                disabled={closingAllPositions}
+                data-testid="button-confirm-close-all"
+              >
+                {closingAllPositions ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Closing...
+                  </>
+                ) : (
+                  'Close All Positions'
+                )}
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      )}
 
       {deleteModalOpen && botToDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">

@@ -3,7 +3,7 @@ import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
-import { Loader2, Copy, Check, Fuel, Wallet, CheckCircle2 } from 'lucide-react';
+import { Loader2, Copy, Check, Fuel, Wallet, CheckCircle2, User } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -29,6 +29,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
   const { connection } = useConnection();
   const { toast } = useToast();
 
+  const [displayName, setDisplayName] = useState('');
   const [solDepositAmount, setSolDepositAmount] = useState('0.1');
   const [isDepositing, setIsDepositing] = useState(false);
   const [depositSuccess, setDepositSuccess] = useState(false);
@@ -130,6 +131,19 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
         title: 'SOL Deposit Successful!', 
         description: message || `Deposited ${amount} SOL to Agent Wallet for gas fees`
       });
+
+      if (displayName.trim()) {
+        try {
+          await fetch('/api/wallet/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ displayName: displayName.trim() }),
+            credentials: 'include',
+          });
+        } catch (err) {
+          console.error('Failed to save display name:', err);
+        }
+      }
       
       setDepositSuccess(true);
       onDepositComplete();
@@ -202,6 +216,25 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
         </DialogHeader>
 
         <div className="space-y-4">
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <User className="w-4 h-4 text-primary" />
+              <label className="text-sm font-medium">Display Name</label>
+              <span className="text-xs text-muted-foreground">(optional)</span>
+            </div>
+            <Input
+              type="text"
+              placeholder="Enter your display name"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              maxLength={32}
+              data-testid="input-display-name"
+            />
+            <p className="text-xs text-muted-foreground">
+              Your display name will appear on the leaderboard. You can change it later in settings.
+            </p>
+          </div>
+
           <Card className="border-orange-500/30 bg-orange-500/10">
             <CardContent className="pt-4">
               <div className="flex items-start gap-3">
