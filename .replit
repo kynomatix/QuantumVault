@@ -45,3 +45,4 @@ mockupState = "FULLSTACK"
 [userenv]
 
 [userenv.shared]
+NODE_OPTIONS = "--max-old-space-size=4096"
