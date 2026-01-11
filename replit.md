@@ -49,10 +49,16 @@ Preferred communication style: Simple, everyday language.
 - **Drift Subaccounts**: Each bot is assigned a unique `driftSubaccountId` for isolation. Trades execute on the bot's specific subaccount. Subaccounts are auto-initialized when users deposit funds to a bot.
 - **Drift Account Parsing**: Custom byte parsing is used for Solana Drift User and PerpPosition accounts to extract balances and positions, as direct Drift SDK usage has dependency conflicts.
 - **Account Health Metrics**: Uses official Drift SDK methods (`getHealth()`, `getMarginRatio()`, `getTotalCollateral()`, `getFreeCollateral()`, `getUnrealizedPNL()`) to display account health factor, collateral values, and per-position liquidation prices on the dashboard.
-- **Automated Position Reconciliation**: On-chain is the source of truth. Database syncs from Drift after every trade.
-    1. **Immediate Post-Trade Sync**: `syncPositionFromOnChain()` called after every successful trade execution. Queries actual on-chain position via `getPerpPositions()` (raw RPC, no WebSocket) and updates database with real values.
+- **On-Chain-First Architecture**: On-chain Drift positions are ALWAYS the source of truth. Database is treated as a cache that can be wrong.
+    - **PositionService** (`server/position-service.ts`): Central service for all position queries. Always queries on-chain first via `getPerpPositions()`, falls back to database only if RPC fails. Auto-detects and corrects database drift.
+    - **Critical Operations**: Close signals, position flips, and manual close all query on-chain directly using `PositionService.getPositionForExecution()` - NEVER trust database for these operations.
+    - **Drift Detection & Auto-Correction**: When on-chain differs from database, logs a warning and automatically updates database to match on-chain.
+    - **UI Data Freshness**: API responses include `source` ('on-chain' | 'database') and `driftDetected` flags so UI can show data reliability.
+    - **Market Normalization**: Uses regex to normalize market names (strips PERP, USD, separators) ensuring `SOL-PERP`, `SOLPERP`, `SOL/USD` all match correctly.
+- **Automated Position Reconciliation**: Multi-layer sync ensures database stays updated:
+    1. **Immediate Post-Trade Sync**: `syncPositionFromOnChain()` called after every successful trade. Queries actual on-chain position and updates database.
     2. **Periodic Background Sync (60s)**: `startPeriodicReconciliation()` runs every 60 seconds, checking all active bots.
-    3. **Manual Sync Button**: UI button in Open Positions section for user-triggered reconciliation.
+    3. **Manual Sync Button**: UI button for user-triggered reconciliation.
     - **Realized PnL Tracking**: Calculated when positions close/reduce. Formula: `(fillPrice - avgEntry) * closedSize - proratedFee`. Fees are prorated for flip/overclose trades.
     - **On-Chain Position Reading**: Uses `getPerpPositions()` with raw RPC calls (`connection.getAccountInfo()`) and custom byte parsing, NOT Drift SDK WebSocket subscriptions which are unreliable.
 

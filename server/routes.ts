@@ -9,6 +9,7 @@ import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, getAccountHealthMetrics } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
+import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
@@ -1392,60 +1393,48 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      const position = await storage.getBotPosition(bot.id, bot.market);
-      
-      if (!position || parseFloat(position.baseSize) === 0) {
-        return res.json({ hasPosition: false });
+      const wallet = await storage.getWallet(bot.walletAddress);
+      if (!wallet?.agentPublicKey) {
+        return res.json({ hasPosition: false, source: 'none' });
       }
 
-      // Get current price for unrealized PnL calculation
-      const prices = await getAllPrices();
-      const currentPrice = prices[bot.market] || 0;
-      const baseSize = parseFloat(position.baseSize);
-      const avgEntryPrice = parseFloat(position.avgEntryPrice || "0");
-      const costBasis = parseFloat(position.costBasis || "0");
+      const subAccountId = bot.driftSubaccountId ?? 0;
       
-      // Calculate unrealized PnL
-      const currentValue = Math.abs(baseSize) * currentPrice;
-      const unrealizedPnl = baseSize > 0 
-        ? currentValue - costBasis  // Long: current value - cost
-        : costBasis - currentValue; // Short: cost - current value
+      // Use PositionService - always queries on-chain first, auto-corrects database drift
+      const posData = await PositionService.getPosition(
+        bot.id,
+        bot.walletAddress,
+        wallet.agentPublicKey,
+        subAccountId,
+        bot.market,
+        wallet.agentPrivateKeyEncrypted
+      );
 
-      // Fetch health metrics for the bot's subaccount
-      let healthMetrics: { healthFactor?: number; liquidationPrice?: number; totalCollateral?: number; freeCollateral?: number } = {};
-      try {
-        const wallet = await storage.getWallet(bot.walletAddress);
-        if (wallet?.agentPrivateKeyEncrypted) {
-          const subAccountId = bot.driftSubaccountId ?? 0;
-          const healthResult = await getAccountHealthMetrics(wallet.agentPrivateKeyEncrypted, subAccountId);
-          if (healthResult.success && healthResult.data) {
-            healthMetrics.healthFactor = healthResult.data.healthFactor;
-            healthMetrics.totalCollateral = healthResult.data.totalCollateral;
-            healthMetrics.freeCollateral = healthResult.data.freeCollateral;
-            // Find liquidation price for this market
-            const normalizeMarket = (m: string) => m.toUpperCase().replace('-PERP', '').replace('USD', '').replace('PERP-', '');
-            const posHealth = healthResult.data.positions.find(
-              p => normalizeMarket(p.market) === normalizeMarket(bot.market)
-            );
-            if (posHealth?.liquidationPrice) {
-              healthMetrics.liquidationPrice = posHealth.liquidationPrice;
-            }
-          }
-        }
-      } catch (e) {
-        console.warn("Could not fetch health metrics for bot position:", e);
+      if (!posData.position?.hasPosition) {
+        return res.json({ 
+          hasPosition: false, 
+          source: posData.source,
+          driftDetected: posData.driftDetected,
+        });
       }
 
       res.json({
         hasPosition: true,
-        side: baseSize > 0 ? 'LONG' : 'SHORT',
-        size: Math.abs(baseSize),
-        avgEntryPrice,
-        currentPrice,
-        unrealizedPnl,
-        realizedPnl: parseFloat(position.realizedPnl || "0"),
-        market: position.market,
-        ...healthMetrics,
+        side: posData.position.side,
+        size: posData.position.size,
+        avgEntryPrice: posData.position.avgEntryPrice,
+        currentPrice: posData.position.currentPrice,
+        unrealizedPnl: posData.position.unrealizedPnl,
+        realizedPnl: posData.position.realizedPnl,
+        market: posData.position.market,
+        source: posData.source,
+        staleWarning: posData.staleWarning,
+        driftDetected: posData.driftDetected,
+        driftDetails: posData.driftDetails,
+        healthFactor: posData.healthMetrics?.healthFactor,
+        liquidationPrice: posData.healthMetrics?.liquidationPrice,
+        totalCollateral: posData.healthMetrics?.totalCollateral,
+        freeCollateral: posData.healthMetrics?.freeCollateral,
       });
     } catch (error) {
       console.error("Get bot position error:", error);
@@ -1602,35 +1591,53 @@ export async function registerRoutes(
       if (isCloseSignal) {
         console.log(`[Webhook] Close signal detected (strategyPositionSize=${strategyPositionSize})`);
         
-        // Check if this bot has an open position to close
-        const botPosition = await storage.getBotPosition(botId, bot.market);
-        
-        if (!botPosition || parseFloat(botPosition.baseSize) === 0) {
-          // No position to close - this is likely a SL/TP for a position that doesn't exist in this bot
-          console.log(`[Webhook] Close signal ignored - no open position for bot ${bot.name} on ${bot.market}`);
-          await storage.updateWebhookLog(log.id, { 
-            errorMessage: "Close signal ignored - no open position", 
-            processed: true 
-          });
-          return res.status(200).json({ 
-            status: "skipped", 
-            reason: "No open position to close - this may be a stale SL/TP signal" 
-          });
-        }
-        
-        // There IS a position to close - execute close order
-        console.log(`[Webhook] Closing position: ${botPosition.baseSize} contracts on ${bot.market}`);
-        
         // Get wallet for execution
         const wallet = await storage.getWallet(bot.walletAddress);
-        if (!wallet?.agentPrivateKeyEncrypted) {
+        if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
           await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured for close", processed: true });
           return res.status(400).json({ error: "Agent wallet not configured" });
         }
         
+        const subAccountId = bot.driftSubaccountId ?? 0;
+        
+        // CRITICAL: Query on-chain position directly - NEVER trust database for close signals
+        let onChainPosition;
+        try {
+          onChainPosition = await PositionService.getPositionForExecution(
+            botId,
+            wallet.agentPublicKey,
+            subAccountId,
+            bot.market
+          );
+          console.log(`[Webhook] On-chain position for close: size=${onChainPosition.size}, side=${onChainPosition.side}`);
+        } catch (onChainErr) {
+          console.error(`[Webhook] CRITICAL: Failed to query on-chain position for close:`, onChainErr);
+          await storage.updateWebhookLog(log.id, { 
+            errorMessage: "Failed to query on-chain position - cannot safely close", 
+            processed: true 
+          });
+          return res.status(500).json({ error: "Failed to query on-chain position" });
+        }
+        
+        if (onChainPosition.side === 'FLAT' || Math.abs(onChainPosition.size) < 0.0001) {
+          // No position to close - this is likely a SL/TP for a position that doesn't exist in this bot
+          console.log(`[Webhook] Close signal ignored - no on-chain position for bot ${bot.name} on ${bot.market}`);
+          await storage.updateWebhookLog(log.id, { 
+            errorMessage: "Close signal ignored - no on-chain position", 
+            processed: true 
+          });
+          return res.status(200).json({ 
+            status: "skipped", 
+            reason: "No on-chain position to close - this may be a stale SL/TP signal" 
+          });
+        }
+        
+        // There IS an on-chain position to close - use ACTUAL on-chain size
+        const currentPositionSize = onChainPosition.size;
+        console.log(`[Webhook] Closing ON-CHAIN position: ${currentPositionSize} contracts on ${bot.market}`);
+        
         // Determine close side (opposite of current position)
-        const currentPositionSize = parseFloat(botPosition.baseSize);
-        const closeSide = currentPositionSize > 0 ? 'short' : 'long'; // Close by taking opposite side
+        const closeSide = onChainPosition.side === 'LONG' ? 'short' : 'long';
         const closeSize = Math.abs(currentPositionSize);
         
         // Create trade record for the close
