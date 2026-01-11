@@ -206,15 +206,10 @@ export class PositionService {
     source: 'on-chain';
     entryPrice: number;
   }> {
-    // Use SDK-based position fetching when encrypted key is available (more reliable)
-    let onChainPositions;
-    if (agentPrivateKeyEncrypted) {
-      console.log(`[PositionService] getPositionForExecution: Using SDK for ${market}`);
-      onChainPositions = await getPerpPositionsSDK(agentPrivateKeyEncrypted, subAccountId);
-    } else {
-      console.log(`[PositionService] getPositionForExecution: Using byte-parsing for ${market}`);
-      onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
-    }
+    // ALWAYS use byte-parsing for position reading - it's lightweight and doesn't create WebSocket connections
+    // The SDK approach causes memory leaks due to WebSocket connections that don't cleanup
+    console.log(`[PositionService] getPositionForExecution: Using byte-parsing for ${market} (subaccount ${subAccountId})`);
+    const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
     
     const normalizedMarket = normalizeMarket(market);
     const onChainPos = onChainPositions.find(p => 

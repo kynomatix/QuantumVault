@@ -50,13 +50,13 @@ Preferred communication style: Simple, everyday language.
 - **Webhook Deduplication**: `webhook_logs` table uses a `signal_hash` to prevent duplicate processing of TradingView signals.
 - **Equity Event Tracking**: Tracks deposits and withdrawals for transaction history, ensuring idempotency.
 - **Drift Subaccounts**: Each bot is assigned a unique `driftSubaccountId` for isolation. Trades execute on the bot's specific subaccount. Subaccounts are auto-initialized when users deposit funds to a bot.
-- **Drift Account Parsing**: Two methods available for reading on-chain positions:
-    1. **SDK-Based (`getPerpPositionsSDK`)**: Uses official Drift SDK's `user.getActivePerpPositions()` - most reliable for critical operations.
-    2. **Byte-Parsing (`getPerpPositions`)**: Raw RPC calls with custom byte parsing - fallback when encrypted key unavailable.
+- **Drift Account Parsing**: **ALWAYS use byte-parsing** for position reading to avoid memory leaks:
+    1. **Byte-Parsing (`getPerpPositions`)**: Raw RPC calls with custom byte parsing - used for ALL position reading including close position detection. This is lightweight and doesn't create WebSocket connections.
+    2. **SDK-Based (`getPerpPositionsSDK`)**: Uses official Drift SDK - **AVOID for position reading** due to memory leaks. Only use for trade execution where we need to submit transactions.
 - **Account Health Metrics**: Uses official Drift SDK methods (`getHealth()`, `getMarginRatio()`, `getTotalCollateral()`, `getFreeCollateral()`, `getUnrealizedPNL()`) to display account health factor, collateral values, and per-position liquidation prices on the dashboard.
 - **On-Chain-First Architecture**: On-chain Drift positions are ALWAYS the source of truth. Database is treated as a cache that can be wrong.
-    - **PositionService** (`server/position-service.ts`): Central service for all position queries. Uses SDK-based fetching when encrypted key is available (most reliable), falls back to byte-parsing otherwise.
-    - **Critical Operations**: Close signals, position flips, and manual close all query on-chain directly using `PositionService.getPositionForExecution()` with SDK method - NEVER trust database for these operations.
+    - **PositionService** (`server/position-service.ts`): Central service for all position queries. Uses byte-parsing exclusively to avoid memory leaks from Drift SDK WebSocket connections.
+    - **Critical Operations**: Close signals, position flips, and manual close all query on-chain directly using `PositionService.getPositionForExecution()` with byte-parsing - NEVER trust database for these operations.
     - **Drift Detection & Auto-Correction**: When on-chain differs from database, logs a warning and automatically updates database to match on-chain.
     - **UI Data Freshness**: API responses include `source` ('on-chain' | 'database') and `driftDetected` flags so UI can show data reliability.
     - **Market Normalization**: Uses regex to normalize market names (strips PERP, USD, separators) ensuring `SOL-PERP`, `SOLPERP`, `SOL/USD` all match correctly.
@@ -69,7 +69,7 @@ Preferred communication style: Simple, everyday language.
 
 ## Known Issues
 
-- **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Under heavy load, this can lead to JavaScript heap out of memory crashes. Mitigation: Consider implementing a singleton DriftClient connection pool or increasing Node.js memory limit (`--max-old-space-size=4096`).
+- **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Under heavy load, this can lead to JavaScript heap out of memory crashes. Mitigation: Use byte-parsing (`getPerpPositions`) instead of SDK-based methods for position reading. The SDK is reserved ONLY for trade execution where we must submit transactions.
 
 ## External Dependencies
 

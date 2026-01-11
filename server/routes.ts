@@ -1432,7 +1432,7 @@ export async function registerRoutes(
         wallet.agentPublicKey,
         subAccountId,
         bot.market,
-        wallet.agentPrivateKeyEncrypted
+        wallet.agentPrivateKeyEncrypted ?? undefined
       );
 
       if (!posData.position?.hasPosition) {

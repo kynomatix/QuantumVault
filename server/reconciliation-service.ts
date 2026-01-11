@@ -2,6 +2,14 @@ import { storage } from "./storage";
 import { getPerpPositions } from "./drift-service";
 
 const STALE_THRESHOLD_MS = 60 * 1000; // 60 seconds
+
+function normalizeMarket(market: string): string {
+  return market.toUpperCase()
+    .replace(/-PERP$/i, '')
+    .replace(/PERP$/i, '')
+    .replace(/USD[CT]?$/i, '')
+    .replace(/[-_/]/g, '');
+}
 const RECONCILE_INTERVAL_MS = 60 * 1000; // 60 seconds
 
 let reconcileInterval: NodeJS.Timeout | null = null;
@@ -33,7 +41,8 @@ export async function syncPositionFromOnChain(
     
     // Query actual on-chain position using raw RPC (no WebSocket)
     const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
-    const onChainPos = onChainPositions.find(p => p.market === market);
+    const normalizedMarket = normalizeMarket(market);
+    const onChainPos = onChainPositions.find(p => normalizeMarket(p.market) === normalizedMarket);
     
     // Get existing DB position to calculate realized PnL delta
     const dbPosition = await storage.getBotPosition(botId, market);
@@ -130,7 +139,8 @@ export async function reconcileBotPosition(
 ): Promise<{ synced: boolean; discrepancy: boolean }> {
   try {
     const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
-    const onChainPos = onChainPositions.find(p => p.market === market);
+    const normalizedMarket = normalizeMarket(market);
+    const onChainPos = onChainPositions.find(p => normalizeMarket(p.market) === normalizedMarket);
     const dbPosition = await storage.getBotPosition(botId, market);
     
     const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
