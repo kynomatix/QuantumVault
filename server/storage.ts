@@ -72,6 +72,7 @@ export interface IStorage {
   updateTradingBotStats(id: string, stats: TradingBot['stats']): Promise<void>;
 
   getBotTrades(tradingBotId: string, limit?: number): Promise<BotTrade[]>;
+  getBotTradeCount(tradingBotId: string): Promise<number>;
   getWalletBotTrades(walletAddress: string, limit?: number): Promise<BotTrade[]>;
   createBotTrade(trade: InsertBotTrade): Promise<BotTrade>;
   updateBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<void>;
@@ -238,6 +239,11 @@ export class DatabaseStorage implements IStorage {
 
   async getBotTrades(tradingBotId: string, limit: number = 50): Promise<BotTrade[]> {
     return db.select().from(botTrades).where(eq(botTrades.tradingBotId, tradingBotId)).orderBy(desc(botTrades.executedAt)).limit(limit);
+  }
+
+  async getBotTradeCount(tradingBotId: string): Promise<number> {
+    const result = await db.select({ count: sql<number>`count(*)::int` }).from(botTrades).where(eq(botTrades.tradingBotId, tradingBotId));
+    return result[0]?.count || 0;
   }
 
   async getWalletBotTrades(walletAddress: string, limit: number = 50): Promise<BotTrade[]> {

@@ -957,7 +957,7 @@ export default function BotSetup() {
                     <TabsContent value="stats" className="mt-4">
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                         <div className="p-4 rounded-xl border bg-card/50 text-center">
-                          <p className="text-2xl font-bold font-mono">{selectedBot.stats?.totalTrades || 0}</p>
+                          <p className="text-2xl font-bold font-mono">{(selectedBot as any).actualTradeCount ?? selectedBot.stats?.totalTrades ?? 0}</p>
                           <p className="text-sm text-muted-foreground">Total Trades</p>
                         </div>
                         <div className="p-4 rounded-xl border bg-card/50 text-center">
@@ -970,11 +970,11 @@ export default function BotSetup() {
                         </div>
                         <div className="p-4 rounded-xl border bg-card/50 text-center">
                           <p className={`text-2xl font-bold font-mono ${
-                            (selectedBot.stats?.totalPnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                            parseFloat((selectedBot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
                           }`}>
-                            ${(selectedBot.stats?.totalPnl || 0).toFixed(2)}
+                            ${parseFloat((selectedBot as any).realizedPnl ?? 0).toFixed(2)}
                           </p>
-                          <p className="text-sm text-muted-foreground">Total PnL</p>
+                          <p className="text-sm text-muted-foreground">Realized PnL</p>
                         </div>
                       </div>
                     </TabsContent>

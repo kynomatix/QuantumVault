@@ -641,20 +641,20 @@ export function BotManagementDrawer({
                 </p>
               </div>
               <div className="p-4 rounded-xl bg-muted/50 border">
-                <p className="text-sm text-muted-foreground">Total P&L</p>
+                <p className="text-sm text-muted-foreground">Realized P&L</p>
                 <div className="flex items-center gap-1 mt-1">
-                  {(bot.stats?.totalPnl ?? 0) >= 0 ? (
+                  {parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? (
                     <TrendingUp className="w-4 h-4 text-emerald-500" />
                   ) : (
                     <TrendingDown className="w-4 h-4 text-red-500" />
                   )}
                   <p
                     className={`text-2xl font-bold ${
-                      (bot.stats?.totalPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                      parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
                     }`}
                     data-testid="text-total-pnl"
                   >
-                    ${(bot.stats?.totalPnl ?? 0).toFixed(2)}
+                    ${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
                   </p>
                 </div>
               </div>
@@ -664,7 +664,7 @@ export function BotManagementDrawer({
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Total Trades</p>
                 <p className="text-lg font-semibold mt-1" data-testid="text-total-trades">
-                  {bot.stats?.totalTrades ?? 0}
+                  {(bot as any).actualTradeCount ?? bot.stats?.totalTrades ?? 0}
                 </p>
               </div>
               <div className="p-3 rounded-lg bg-muted/30 border text-center">

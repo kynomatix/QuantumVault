@@ -804,9 +804,9 @@ export default function AppPage() {
                               <span className={`w-2 h-2 rounded-full ${bot.isActive ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
                             </div>
                             <div className="flex items-center justify-between text-xs">
-                              <span className="text-muted-foreground">{(bot.stats as any)?.totalTrades ?? 0} trades</span>
-                              <span className={(bot.stats as any)?.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                                {(bot.stats as any)?.totalPnl >= 0 ? '+' : ''}${((bot.stats as any)?.totalPnl ?? 0).toFixed(2)}
+                              <span className="text-muted-foreground">{(bot as any).actualTradeCount ?? (bot.stats as any)?.totalTrades ?? 0} trades</span>
+                              <span className={parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                                {parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? '+' : ''}${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
                               </span>
                             </div>
                           </div>
@@ -965,7 +965,7 @@ export default function AppPage() {
 
                         <div className="grid grid-cols-3 gap-2 text-center">
                           <div className="p-2 rounded-lg bg-muted/30">
-                            <p className="text-lg font-bold">{(bot.stats as any)?.totalTrades ?? 0}</p>
+                            <p className="text-lg font-bold">{(bot as any).actualTradeCount ?? (bot.stats as any)?.totalTrades ?? 0}</p>
                             <p className="text-xs text-muted-foreground">Trades</p>
                           </div>
                           <div className="p-2 rounded-lg bg-muted/30">
@@ -973,8 +973,8 @@ export default function AppPage() {
                             <p className="text-xs text-muted-foreground">Leverage</p>
                           </div>
                           <div className="p-2 rounded-lg bg-muted/30">
-                            <p className={`text-lg font-bold ${(bot.stats as any)?.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              {(bot.stats as any)?.totalPnl >= 0 ? '+' : ''}${((bot.stats as any)?.totalPnl ?? 0).toFixed(2)}
+                            <p className={`text-lg font-bold ${parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? '+' : ''}${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
                             </p>
                             <p className="text-xs text-muted-foreground">PnL</p>
                           </div>

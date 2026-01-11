@@ -570,7 +570,23 @@ export async function registerRoutes(
   app.get("/api/trading-bots", requireWallet, async (req, res) => {
     try {
       const bots = await storage.getTradingBots(req.walletAddress!);
-      res.json(bots);
+      
+      // Enrich with actual trade counts and position data from database
+      const enrichedBots = await Promise.all(bots.map(async (bot) => {
+        const [tradeCount, position] = await Promise.all([
+          storage.getBotTradeCount(bot.id),
+          storage.getBotPosition(bot.id, bot.market),
+        ]);
+        
+        return {
+          ...bot,
+          actualTradeCount: tradeCount,
+          realizedPnl: position?.realizedPnl || "0",
+          totalFees: position?.totalFees || "0",
+        };
+      }));
+      
+      res.json(enrichedBots);
     } catch (error) {
       console.error("Get trading bots error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -2253,7 +2269,7 @@ export async function registerRoutes(
     }
   });
 
-  // Bot balance - get subaccount balance from Drift
+  // Bot balance - get subaccount balance from Drift plus realized PnL from positions
   app.get("/api/bot/:botId/balance", requireWallet, async (req, res) => {
     try {
       const { botId } = req.params;
@@ -2276,14 +2292,27 @@ export async function registerRoutes(
       }
       const agentAddress = wallet.agentPublicKey;
 
+      // Get bot position for realized PnL and trade count
+      const [position, tradeCount] = await Promise.all([
+        storage.getBotPosition(botId, bot.market),
+        storage.getBotTradeCount(botId),
+      ]);
+
       // Check if subaccount exists on-chain using agent wallet (not user wallet)
       const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
       const balance = exists ? await getDriftBalance(agentAddress, bot.driftSubaccountId) : 0;
       
+      // Total equity = Drift balance + realized PnL (already settled into balance, shown for transparency)
+      const realizedPnl = parseFloat(position?.realizedPnl || "0");
+      const totalFees = parseFloat(position?.totalFees || "0");
+      
       res.json({ 
         driftSubaccountId: bot.driftSubaccountId,
         subaccountExists: exists,
-        usdcBalance: balance 
+        usdcBalance: balance,
+        realizedPnl,
+        totalFees,
+        tradeCount,
       });
     } catch (error) {
       console.error("Bot balance error:", error);
