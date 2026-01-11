@@ -1989,8 +1989,13 @@ export async function registerRoutes(
       
       console.log(`[Webhook] Signal analysis: action=${action}, contracts=${contracts}, strategyPositionSize=${strategyPositionSize}, isCloseSignal=${isCloseSignal}`);
       
+      // CRITICAL FIX: Wrap entire close signal handling in outer try/catch to guarantee no fallthrough
+      // to open-order logic. Any exception inside this block MUST return, not continue to open-order flow.
       if (isCloseSignal) {
-        console.log(`[Webhook] *** CLOSE SIGNAL DETECTED *** (strategyPositionSize=${strategyPositionSize}) - Will NOT open new position`);
+        console.log(`[Webhook] *** CLOSE SIGNAL DETECTED *** (strategyPositionSize=${strategyPositionSize}) - Entering close handler (GUARANTEED RETURN)`);
+        
+        try {
+          // === BEGIN CLOSE SIGNAL HANDLING - All paths must return ===
         
         // Get wallet for execution
         const wallet = await storage.getWallet(bot.walletAddress);
@@ -2279,6 +2284,22 @@ export async function registerRoutes(
           });
           return res.status(500).json({ error: "Close order execution failed", details: closeError.message });
         }
+        // === END INNER TRY/CATCH ===
+        
+        } catch (closeHandlerError: any) {
+          // CRITICAL: This outer catch ensures NO exception escapes the close signal handler
+          // Any error here MUST return to prevent fallthrough to open-order logic
+          console.error(`[Webhook] CRITICAL: Unexpected error in close signal handler - returning to prevent fallthrough:`, closeHandlerError);
+          await storage.updateWebhookLog(log.id, { 
+            errorMessage: `Close handler unexpected error: ${closeHandlerError.message}`, 
+            processed: true 
+          });
+          return res.status(500).json({ 
+            error: "Close signal processing failed unexpectedly", 
+            details: closeHandlerError.message 
+          });
+        }
+        // === END OUTER TRY/CATCH FOR CLOSE SIGNAL HANDLING ===
       }
 
       // DEFENSE-IN-DEPTH: Double-check we're not proceeding with a close signal
