@@ -7,7 +7,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, getAccountHealthMetrics } from "./drift-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
@@ -607,6 +607,29 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("Reconcile positions error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Health metrics endpoint - get account health, liquidation prices, etc.
+  app.get("/api/health-metrics", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet?.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Agent wallet not configured" });
+      }
+
+      const subAccountId = req.query.subaccount ? parseInt(req.query.subaccount as string) : 0;
+      
+      const result = await getAccountHealthMetrics(wallet.agentPrivateKeyEncrypted, subAccountId);
+      
+      if (!result.success) {
+        return res.status(500).json({ error: result.error || "Failed to get health metrics" });
+      }
+
+      res.json(result.data);
+    } catch (error) {
+      console.error("Health metrics error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

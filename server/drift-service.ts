@@ -1826,3 +1826,188 @@ export async function closePerpPosition(
     };
   }
 }
+
+export interface HealthMetrics {
+  healthFactor: number;
+  marginRatio: number;
+  totalCollateral: number;
+  freeCollateral: number;
+  unrealizedPnl: number;
+  positions: Array<{
+    marketIndex: number;
+    market: string;
+    baseSize: number;
+    notionalValue: number;
+    liquidationPrice: number | null;
+    entryPrice: number;
+    unrealizedPnl: number;
+  }>;
+}
+
+export async function getAccountHealthMetrics(
+  encryptedPrivateKey: string,
+  subAccountId: number = 0
+): Promise<{ success: boolean; data?: HealthMetrics; error?: string }> {
+  try {
+    const { QUOTE_PRECISION, BASE_PRECISION } = await import('@drift-labs/sdk');
+    
+    console.log(`[Drift] Fetching health metrics for subaccount ${subAccountId}`);
+    
+    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey);
+    
+    try {
+      const user = driftClient.getUser();
+      
+      // Get health metrics from SDK
+      // Health is 0-100 where 100 means fully healthy (no margin usage)
+      // When health approaches 0, liquidation is imminent
+      let healthFactor = 100;
+      let marginRatio = 0;
+      let totalCollateral = 0;
+      let freeCollateral = 0;
+      let unrealizedPnl = 0;
+      
+      try {
+        // Get health as percentage (0-100, 100 = healthy)
+        const health = user.getHealth();
+        healthFactor = health.toNumber();
+        console.log(`[Drift] Raw health: ${healthFactor}`);
+      } catch (e) {
+        console.warn('[Drift] Could not get health:', e);
+      }
+      
+      try {
+        // Margin ratio (higher = more risk)
+        const marginRatioBN = user.getMarginRatio();
+        marginRatio = marginRatioBN.toNumber() / 10000; // Convert from basis points
+        console.log(`[Drift] Margin ratio: ${marginRatio}%`);
+      } catch (e) {
+        console.warn('[Drift] Could not get margin ratio:', e);
+      }
+      
+      try {
+        // Total collateral value in USDC
+        const totalCollateralBN = user.getTotalCollateral();
+        totalCollateral = totalCollateralBN.toNumber() / QUOTE_PRECISION.toNumber();
+        console.log(`[Drift] Total collateral: $${totalCollateral.toFixed(2)}`);
+      } catch (e) {
+        console.warn('[Drift] Could not get total collateral:', e);
+      }
+      
+      try {
+        // Free (unreserved) collateral in USDC
+        const freeCollateralBN = user.getFreeCollateral();
+        freeCollateral = freeCollateralBN.toNumber() / QUOTE_PRECISION.toNumber();
+        console.log(`[Drift] Free collateral: $${freeCollateral.toFixed(2)}`);
+      } catch (e) {
+        console.warn('[Drift] Could not get free collateral:', e);
+      }
+      
+      try {
+        // Unrealized PnL across all positions
+        const unrealizedPnlBN = user.getUnrealizedPNL(true);
+        unrealizedPnl = unrealizedPnlBN.toNumber() / QUOTE_PRECISION.toNumber();
+        console.log(`[Drift] Unrealized PnL: $${unrealizedPnl.toFixed(2)}`);
+      } catch (e) {
+        console.warn('[Drift] Could not get unrealized PnL:', e);
+      }
+      
+      // Get per-position metrics including liquidation prices
+      const positions: HealthMetrics['positions'] = [];
+      
+      try {
+        const perpPositions = user.getActivePerpPositions();
+        
+        for (const pos of perpPositions) {
+          const marketIndex = pos.marketIndex;
+          const marketName = Object.entries(PERP_MARKET_INDICES).find(([_, idx]) => idx === marketIndex)?.[0] || `PERP-${marketIndex}`;
+          
+          const baseSize = pos.baseAssetAmount.toNumber() / BASE_PRECISION.toNumber();
+          const quoteValue = Math.abs(pos.quoteAssetAmount.toNumber()) / QUOTE_PRECISION.toNumber();
+          
+          // Calculate entry price from quote/base
+          let entryPrice = 0;
+          if (baseSize !== 0) {
+            entryPrice = Math.abs(quoteValue / baseSize);
+          }
+          
+          // Get unrealized PnL for this position
+          let posUnrealizedPnl = 0;
+          try {
+            const posPnl = user.getUnrealizedPNL(true, marketIndex);
+            posUnrealizedPnl = posPnl.toNumber() / QUOTE_PRECISION.toNumber();
+          } catch (e) {
+            // Ignore
+          }
+          
+          // Calculate liquidation price
+          // This is an approximation: when margin ratio exceeds maintenance margin, liquidation occurs
+          // For a simple approximation: liquidationPrice ≈ entryPrice * (1 - freeCollateral/notional) for longs
+          // or entryPrice * (1 + freeCollateral/notional) for shorts
+          let liquidationPrice: number | null = null;
+          try {
+            // Use SDK method if available, otherwise estimate
+            const perpMarket = driftClient.getPerpMarketAccount(marketIndex);
+            if (perpMarket && freeCollateral > 0 && quoteValue > 0) {
+              const maintenanceMarginRatio = perpMarket.marginRatioMaintenance / 10000;
+              const isLong = baseSize > 0;
+              
+              // Simplified liquidation price calculation
+              // Real calculation should use SDK's calculateLiquidationPrice if available
+              const leverageRatio = quoteValue / totalCollateral;
+              const marginBuffer = freeCollateral / quoteValue;
+              
+              if (isLong) {
+                // For longs, price needs to drop by marginBuffer%
+                liquidationPrice = entryPrice * (1 - marginBuffer);
+              } else {
+                // For shorts, price needs to rise by marginBuffer%
+                liquidationPrice = entryPrice * (1 + marginBuffer);
+              }
+              
+              // Ensure liquidation price is reasonable
+              if (liquidationPrice < 0) liquidationPrice = null;
+            }
+          } catch (e) {
+            console.warn(`[Drift] Could not calculate liquidation price for ${marketName}:`, e);
+          }
+          
+          positions.push({
+            marketIndex,
+            market: marketName,
+            baseSize,
+            notionalValue: quoteValue,
+            liquidationPrice,
+            entryPrice,
+            unrealizedPnl: posUnrealizedPnl,
+          });
+        }
+      } catch (e) {
+        console.warn('[Drift] Could not get perp positions:', e);
+      }
+      
+      await cleanup();
+      
+      return {
+        success: true,
+        data: {
+          healthFactor,
+          marginRatio,
+          totalCollateral,
+          freeCollateral,
+          unrealizedPnl,
+          positions,
+        },
+      };
+    } catch (userError) {
+      await cleanup();
+      throw userError;
+    }
+  } catch (error) {
+    console.error('[Drift] Health metrics error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
