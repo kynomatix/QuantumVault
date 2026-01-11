@@ -612,17 +612,20 @@ export function BotManagementDrawer({
   };
 
   const getWinRate = () => {
-    if (!bot?.stats) return 0;
-    const total = bot.stats.totalTrades;
+    const stats = localBot?.stats || bot?.stats;
+    if (!stats) return 0;
+    const total = stats.totalTrades;
     if (total === 0) return 0;
-    return ((bot.stats.winningTrades / total) * 100).toFixed(1);
+    return ((stats.winningTrades / total) * 100).toFixed(1);
   };
 
-  if (!bot) return null;
+  const displayBot = localBot || bot;
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <SheetContent className="w-full sm:max-w-[540px] overflow-y-auto" data-testid="drawer-bot-management">
+        {displayBot && (
+        <>
         <SheetHeader className="space-y-3 pb-4 border-b">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -630,20 +633,20 @@ export function BotManagementDrawer({
                 <Bot className="w-5 h-5 text-white" />
               </div>
               <div>
-                <SheetTitle className="text-lg" data-testid="text-bot-name">{bot.name}</SheetTitle>
-                <SheetDescription className="text-sm" data-testid="text-bot-market">{bot.market}</SheetDescription>
+                <SheetTitle className="text-lg" data-testid="text-bot-name">{displayBot.name}</SheetTitle>
+                <SheetDescription className="text-sm" data-testid="text-bot-market">{displayBot.market}</SheetDescription>
               </div>
             </div>
             <div className="flex items-center gap-2">
               <Badge
-                variant={(localBot?.isActive ?? bot.isActive) ? 'default' : 'secondary'}
-                className={(localBot?.isActive ?? bot.isActive) ? 'bg-emerald-500' : ''}
+                variant={(localBot?.isActive ?? displayBot?.isActive) ? 'default' : 'secondary'}
+                className={(localBot?.isActive ?? displayBot?.isActive) ? 'bg-emerald-500' : ''}
                 data-testid="badge-bot-status"
               >
-                {(localBot?.isActive ?? bot.isActive) ? 'Active' : 'Inactive'}
+                {(localBot?.isActive ?? displayBot?.isActive) ? 'Active' : 'Inactive'}
               </Badge>
               <Button
-                variant={(localBot?.isActive ?? bot.isActive) ? 'outline' : 'default'}
+                variant={(localBot?.isActive ?? displayBot?.isActive) ? 'outline' : 'default'}
                 size="sm"
                 onClick={handlePauseResume}
                 disabled={pauseLoading}
@@ -651,7 +654,7 @@ export function BotManagementDrawer({
               >
                 {pauseLoading ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (localBot?.isActive ?? bot.isActive) ? (
+                ) : (localBot?.isActive ?? displayBot?.isActive) ? (
                   <>
                     <Pause className="w-4 h-4 mr-1.5" />
                     Pause
@@ -806,7 +809,7 @@ export function BotManagementDrawer({
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Total Trades</p>
                 <p className="text-lg font-semibold mt-1" data-testid="text-total-trades">
-                  {(bot as any).actualTradeCount ?? bot.stats?.totalTrades ?? 0}
+                  {(displayBot as any)?.actualTradeCount ?? displayBot?.stats?.totalTrades ?? 0}
                 </p>
               </div>
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
@@ -817,7 +820,7 @@ export function BotManagementDrawer({
               </div>
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Leverage</p>
-                <p className="text-lg font-semibold mt-1" data-testid="text-leverage">{localBot?.leverage ?? bot.leverage}x</p>
+                <p className="text-lg font-semibold mt-1" data-testid="text-leverage">{localBot?.leverage ?? displayBot?.leverage}x</p>
               </div>
             </div>
             
@@ -1522,7 +1525,7 @@ export function BotManagementDrawer({
                 </AlertDialogTrigger>
                 <AlertDialogContent>
                   <AlertDialogHeader>
-                    <AlertDialogTitle>Delete {bot.name}?</AlertDialogTitle>
+                    <AlertDialogTitle>Delete {displayBot?.name}?</AlertDialogTitle>
                     <AlertDialogDescription>
                       This action cannot be undone. This will permanently delete the bot
                       and all associated trade history. Any funds in the bot's account
@@ -1550,6 +1553,8 @@ export function BotManagementDrawer({
             </div>
           </TabsContent>
         </Tabs>
+        </>
+        )}
       </SheetContent>
     </Sheet>
   );
