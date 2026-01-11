@@ -692,28 +692,6 @@ export function BotManagementDrawer({
               </div>
             </div>
             
-            <div>
-              <p className="text-xs text-muted-foreground mb-2">Lending Interest</p>
-              <div className="grid grid-cols-3 gap-3">
-                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
-                  <p className="text-xs text-muted-foreground">Daily</p>
-                  <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-interest-card">
-                    {balanceLoading ? '-' : `+$${interestEarned.toFixed(4)}`}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
-                  <p className="text-xs text-muted-foreground">APY</p>
-                  <p className="text-lg font-semibold text-blue-400 mt-1">~5.3%</p>
-                </div>
-                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
-                  <p className="text-xs text-muted-foreground">Total Earned</p>
-                  <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-total-interest">
-                    {balanceLoading ? '-' : `$${(interestEarned * 30).toFixed(2)}`}
-                  </p>
-                </div>
-              </div>
-            </div>
-
             {/* Current Position Section */}
             <div className="p-4 rounded-xl border bg-muted/20">
               <div className="flex items-center gap-2 mb-3">
@@ -819,6 +797,28 @@ export function BotManagementDrawer({
                   <p className="text-xs mt-1">Position will appear when bot executes a trade</p>
                 </div>
               )}
+            </div>
+
+            <div>
+              <p className="text-xs text-muted-foreground mb-2">Lending Interest</p>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
+                  <p className="text-xs text-muted-foreground">Daily</p>
+                  <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-interest-card">
+                    {balanceLoading ? '-' : `+$${interestEarned.toFixed(4)}`}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
+                  <p className="text-xs text-muted-foreground">APY</p>
+                  <p className="text-lg font-semibold text-blue-400 mt-1">~5.3%</p>
+                </div>
+                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
+                  <p className="text-xs text-muted-foreground">Total Earned</p>
+                  <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-total-interest">
+                    {balanceLoading ? '-' : `$${(interestEarned * 30).toFixed(2)}`}
+                  </p>
+                </div>
+              </div>
             </div>
 
             <div className="p-4 rounded-xl border bg-muted/20">
