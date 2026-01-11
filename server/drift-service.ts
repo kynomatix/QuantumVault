@@ -4,43 +4,38 @@ import BN from 'bn.js';
 import { getAgentKeypair } from './agent-wallet';
 import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 
-// Cached SDK reference - loaded once on first use, avoids repeated dynamic imports
-// which can fail with "Class extends value is not a constructor" ESM issues
+// Drift SDK loaded via require() to avoid ESM interop issues
+// The dynamic import() approach fails with "Class extends value is not a constructor"
 let cachedDriftSDK: any = null;
-let sdkLoadPromise: Promise<any> | null = null;
+
+// Attempt to load SDK synchronously at module init time using require()
+try {
+  // Use createRequire to get require() in ESM context
+  const { createRequire } = require('module');
+  const requireSync = createRequire(import.meta.url);
+  cachedDriftSDK = requireSync('@drift-labs/sdk');
+  console.log('[Drift] SDK loaded successfully via require()');
+} catch (requireErr: any) {
+  console.error('[Drift] SDK require() failed, will try dynamic import:', requireErr.message);
+}
 
 async function getDriftSDK(): Promise<any> {
   if (cachedDriftSDK) {
     return cachedDriftSDK;
   }
   
-  // Ensure only one import attempt happens at a time
-  if (sdkLoadPromise) {
-    return sdkLoadPromise;
+  // Fallback to dynamic import if require() failed
+  try {
+    console.log('[Drift] Attempting dynamic import as fallback...');
+    const sdk = await import('@drift-labs/sdk');
+    cachedDriftSDK = sdk;
+    console.log('[Drift] SDK loaded successfully via dynamic import');
+    return sdk;
+  } catch (importErr: any) {
+    const errMsg = importErr.message || String(importErr);
+    console.error('[Drift] SDK dynamic import failed:', errMsg);
+    throw new Error(`Failed to load Drift SDK: ${errMsg}`);
   }
-  
-  sdkLoadPromise = (async () => {
-    const maxRetries = 5;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        const sdk = await import('@drift-labs/sdk');
-        cachedDriftSDK = sdk;
-        console.log('[Drift] SDK loaded successfully and cached');
-        return sdk;
-      } catch (importErr: any) {
-        const errMsg = importErr.message || String(importErr);
-        console.error(`[Drift] SDK import failed (attempt ${attempt}/${maxRetries}):`, errMsg);
-        if (attempt === maxRetries) {
-          sdkLoadPromise = null; // Allow retry on next call
-          throw new Error(`Failed to load Drift SDK after ${maxRetries} attempts: ${errMsg}`);
-        }
-        // Exponential backoff
-        await new Promise(r => setTimeout(r, 200 * attempt));
-      }
-    }
-  })();
-  
-  return sdkLoadPromise;
 }
 
 /**
