@@ -46,7 +46,7 @@ Preferred communication style: Simple, everyday language.
 - **Bot Pause Behavior**: Pausing a bot (`isActive: false`) automatically triggers a close of any open positions associated with it.
 - **Webhook Deduplication**: `webhook_logs` table uses a `signal_hash` to prevent duplicate processing of TradingView signals.
 - **Equity Event Tracking**: Tracks deposits and withdrawals for transaction history, ensuring idempotency.
-- **Drift Subaccounts**: Currently, all trades execute on `subaccount 0`. Multi-subaccount support is planned.
+- **Drift Subaccounts**: Each bot is assigned a unique `driftSubaccountId` for isolation. Trades execute on the bot's specific subaccount. Subaccounts are auto-initialized when users deposit funds to a bot.
 - **Drift Account Parsing**: Custom byte parsing is used for Solana Drift User and PerpPosition accounts to extract balances and positions, as direct Drift SDK usage has dependency conflicts.
 - **Account Health Metrics**: Uses official Drift SDK methods (`getHealth()`, `getMarginRatio()`, `getTotalCollateral()`, `getFreeCollateral()`, `getUnrealizedPNL()`) to display account health factor, collateral values, and per-position liquidation prices on the dashboard.
 
