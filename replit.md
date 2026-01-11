@@ -49,6 +49,11 @@ Preferred communication style: Simple, everyday language.
 - **Drift Subaccounts**: Each bot is assigned a unique `driftSubaccountId` for isolation. Trades execute on the bot's specific subaccount. Subaccounts are auto-initialized when users deposit funds to a bot.
 - **Drift Account Parsing**: Custom byte parsing is used for Solana Drift User and PerpPosition accounts to extract balances and positions, as direct Drift SDK usage has dependency conflicts.
 - **Account Health Metrics**: Uses official Drift SDK methods (`getHealth()`, `getMarginRatio()`, `getTotalCollateral()`, `getFreeCollateral()`, `getUnrealizedPNL()`) to display account health factor, collateral values, and per-position liquidation prices on the dashboard.
+- **Automated Position Reconciliation**: Three-layer system ensures database positions stay synced with on-chain Drift positions:
+    1. **Periodic Background Sync (60s)**: `startPeriodicReconciliation()` runs every 60 seconds on server startup, checking all active bots.
+    2. **Post-Trade Reconciliation**: Fire-and-forget `setImmediate()` call after each successful trade execution.
+    3. **Manual Sync Button**: UI button in Open Positions section for user-triggered reconciliation.
+    - Reconciliation queries on-chain position via `getPerpPositions()` and updates database if discrepancies found.
 
 ## Known Issues
 
