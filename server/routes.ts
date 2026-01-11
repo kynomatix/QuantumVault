@@ -525,11 +525,13 @@ export async function registerRoutes(
       const bots = await storage.getTradingBots(req.walletAddress!);
       const reconciled: any[] = [];
       const discrepancies: any[] = [];
+      let totalOnChainPositions = 0;
 
       // Query each bot's specific subaccount for on-chain positions
       for (const bot of bots) {
         const subAccountId = bot.driftSubaccountId ?? 0;
         const onChainPositions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
+        totalOnChainPositions += onChainPositions.length;
         console.log(`[Reconcile] Bot ${bot.name} (subaccount ${subAccountId}): Found ${onChainPositions.length} on-chain positions`);
 
         // Find position matching this bot's market
@@ -616,7 +618,8 @@ export async function registerRoutes(
 
       res.json({ 
         success: true,
-        onChainPositions: onChainPositions.length,
+        totalOnChainPositions,
+        botsChecked: bots.length,
         discrepancies,
         reconciled,
       });
