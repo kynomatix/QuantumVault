@@ -924,7 +924,7 @@ export async function registerRoutes(
           }
         }
         
-        // Query ACTUAL on-chain Drift position instead of relying on database
+        // Query ACTUAL on-chain Drift position - NEVER fall back to database
         // This ensures we close the EXACT amount that exists on-chain
         const pauseSubAccountId = bot.driftSubaccountId ?? 0;
         let actualPositionSize = 0;
@@ -939,9 +939,13 @@ export async function registerRoutes(
           actualPositionSize = onChainPosition?.baseAssetAmount || 0;
           console.log(`[Bot] On-chain position for ${bot.market}: ${actualPositionSize}`);
         } catch (err) {
-          console.error(`[Bot] Failed to query on-chain position, falling back to DB:`, err);
-          const dbPosition = await storage.getBotPosition(bot.id, bot.market);
-          actualPositionSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
+          console.error(`[Bot] CRITICAL: Failed to query on-chain position:`, err);
+          // DO NOT fall back to database - that's what caused the bug!
+          // Instead, fail the pause so user knows there's a problem
+          return res.status(500).json({ 
+            error: "Cannot pause: Failed to query on-chain position from Drift. Please try again.",
+            details: err instanceof Error ? err.message : "Unknown error"
+          });
         }
         
         if (Math.abs(actualPositionSize) > 0.0001 && wallet?.agentPrivateKeyEncrypted) {
@@ -964,6 +968,34 @@ export async function registerRoutes(
             
             if (result.success && result.txSignature) {
               console.log(`[Bot] Position closed successfully: ${result.txSignature}`);
+              
+              // VERIFY position is actually closed by re-querying on-chain
+              let verifyAttempts = 0;
+              let positionVerified = false;
+              while (verifyAttempts < 3 && !positionVerified) {
+                try {
+                  await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s for blockchain confirmation
+                  const verifyPositions = await getPerpPositions(wallet.agentPublicKey!, pauseSubAccountId);
+                  const verifyPosition = verifyPositions.find(p => 
+                    p.market.toUpperCase() === bot.market.toUpperCase()
+                  );
+                  const remainingSize = Math.abs(verifyPosition?.baseAssetAmount || 0);
+                  if (remainingSize < 0.0001) {
+                    positionVerified = true;
+                    console.log(`[Bot] Position verified closed on-chain`);
+                  } else {
+                    console.log(`[Bot] Position still shows ${remainingSize} on-chain, attempt ${verifyAttempts + 1}/3`);
+                  }
+                } catch (verifyErr) {
+                  console.error(`[Bot] Position verify attempt ${verifyAttempts + 1} failed:`, verifyErr);
+                }
+                verifyAttempts++;
+              }
+              
+              if (!positionVerified) {
+                console.error(`[Bot] WARNING: Position close tx succeeded but verification failed - position may still be open`);
+                closeError = "Close order sent but verification failed - please check Drift manually";
+              }
               
               // Calculate fee (0.05% taker fee on notional value)
               const closeNotional = closeSize * (result.fillPrice || 0);
@@ -1004,14 +1036,20 @@ export async function registerRoutes(
                 }
               });
               
-              positionClosed = true;
+              positionClosed = positionVerified;
             } else {
               throw new Error(result.error || "Close order execution failed");
             }
           } catch (err: any) {
             console.error(`[Bot] Failed to close position on pause:`, err);
             closeError = err.message || "Failed to close position";
-            // Continue with pause even if close fails - user can manually close
+            // DON'T pause the bot if close failed - position is still open!
+            return res.status(500).json({ 
+              error: "Cannot pause: Failed to close open position on Drift",
+              details: closeError,
+              hasPosition: true,
+              positionSize: actualPositionSize
+            });
           }
         }
       }
