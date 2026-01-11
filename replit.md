@@ -58,7 +58,7 @@ Preferred communication style: Simple, everyday language.
     3. **DriftClient (`getAgentDriftClient`)**: ONLY used for trade execution where transactions must be submitted. Avoid for read-only queries due to WebSocket memory leaks.
     4. **Session Persistence**: Uses `connect-pg-simple` with PostgreSQL to persist sessions across server restarts.
 - **Account Health Metrics**: Uses SDK decodeUser for accurate account health, collateral values, and positions.
-    - **Health Calculation**: `getDriftAccountInfo()` calculates totalCollateral = usdcBalance + unrealizedPnl, with 5% maintenance margin ratio (conservative estimate).
+    - **Health Calculation**: `getDriftAccountInfo()` calculates totalCollateral = usdcBalance + unrealizedPnl, with per-market maintenance margins (SOL: 3.3%, BTC/ETH: 2.5%, others: 5%) for closer alignment with Drift.
     - **Liquidation Price**: Uses per-market maintenance margin weights for more accurate estimates:
     - SOL: 6.25%, BTC: 5%, ETH: 5%, memecoins (BONK, WIF, DOGE, etc.): 15%, smaller caps: 10%
     - Formula: `priceBuffer = freeCollateral / (|size| * (1 + maintenanceWeight))`

@@ -702,7 +702,7 @@ export async function registerRoutes(
         positions: formattedPositions,
         subAccountId,
         isEstimate: true, // Health metrics are estimates - check Drift UI for precise values
-        estimateNote: "Using 5% maintenance margin ratio",
+        estimateNote: "Using per-market maintenance margins (SOL: 3.3%, BTC/ETH: 2.5%)",
       });
     } catch (error) {
       console.error("Health metrics error:", error);

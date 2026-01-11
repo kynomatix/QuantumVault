@@ -931,10 +931,23 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
     const totalCollateral = usdcBalance + totalUnrealizedPnl;
     
     // Calculate margin requirement based on position notional value
-    // Drift uses varying maintenance margins (4-5% for SOL-PERP, higher for others)
-    // We use 5% which better matches Drift's actual margin requirements for major markets
-    const MAINTENANCE_MARGIN_RATIO = 0.05;
-    const marginRequired = totalPositionNotional * MAINTENANCE_MARGIN_RATIO;
+    // Use per-market maintenance margin weights to better match Drift's actual requirements
+    // Source: Drift Protocol docs - maintenance margins vary by market volatility
+    const MARKET_MAINTENANCE_MARGINS: Record<string, number> = {
+      'SOL-PERP': 0.033,  // ~3.3% maintenance margin
+      'BTC-PERP': 0.025,  // ~2.5% maintenance margin  
+      'ETH-PERP': 0.025,  // ~2.5% maintenance margin
+      'DEFAULT': 0.05,    // 5% conservative default for other markets
+    };
+    
+    // Calculate weighted margin requirement based on actual positions
+    let marginRequired = 0;
+    for (const pos of positions) {
+      if (Math.abs(pos.baseAssetAmount) > 0.0001) {
+        const marketMargin = MARKET_MAINTENANCE_MARGINS[pos.market] || MARKET_MAINTENANCE_MARGINS['DEFAULT'];
+        marginRequired += pos.sizeUsd * marketMargin;
+      }
+    }
     const marginUsed = hasOpenPositions ? marginRequired : 0;
     
     // Free collateral = total collateral - margin requirement
