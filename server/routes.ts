@@ -7,7 +7,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions } from "./drift-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
@@ -428,15 +428,51 @@ export async function registerRoutes(
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet || !wallet.agentPublicKey) {
-        return res.json({ positions: [] });
+        return res.json({ positions: [], source: 'none' });
       }
 
-      // Get bot positions from database (actual fill prices, not calculated)
+      // PRIORITY: Fetch REAL on-chain positions from Drift User Account PDA
+      let onChainPositions: any[] = [];
+      try {
+        onChainPositions = await getPerpPositions(wallet.agentPublicKey, 0);
+        console.log(`[Positions] Got ${onChainPositions.length} on-chain positions from Drift`);
+      } catch (e) {
+        console.error('[Positions] Failed to fetch on-chain positions:', e);
+      }
+
+      // If we have on-chain positions, use them as source of truth
+      if (onChainPositions.length > 0) {
+        const bots = await storage.getTradingBots(req.walletAddress!);
+        
+        // Try to match on-chain positions to bots by market
+        const positions = onChainPositions.map(pos => {
+          const matchingBot = bots.find(b => b.market === pos.market);
+          return {
+            botId: matchingBot?.id || null,
+            botName: matchingBot?.name || 'Unknown Bot',
+            market: pos.market,
+            side: pos.side,
+            baseAssetAmount: pos.baseAssetAmount,
+            sizeUsd: pos.sizeUsd,
+            entryPrice: pos.entryPrice,
+            markPrice: pos.markPrice,
+            unrealizedPnl: pos.unrealizedPnl,
+            unrealizedPnlPercent: pos.unrealizedPnlPercent,
+            realizedPnl: 0,
+            totalFees: 0,
+            lastTradeAt: null,
+            source: 'on-chain',
+          };
+        });
+
+        return res.json({ positions, source: 'on-chain' });
+      }
+
+      // Fallback: Get bot positions from database if no on-chain positions
       const botPositions = await storage.getBotPositions(req.walletAddress!);
       const bots = await storage.getTradingBots(req.walletAddress!);
       const botMap = new Map(bots.map(b => [b.id, b]));
       
-      // Fetch current prices directly (no HTTP roundtrip)
       let prices: Record<string, number> = {};
       try {
         prices = await getAllPrices();
@@ -448,8 +484,6 @@ export async function registerRoutes(
 
       for (const pos of botPositions) {
         const baseSize = parseFloat(pos.baseSize);
-        
-        // Only show positions with non-zero size
         if (Math.abs(baseSize) < 0.0001) continue;
 
         const bot = botMap.get(pos.tradingBotId);
@@ -462,7 +496,6 @@ export async function registerRoutes(
         const realizedPnl = parseFloat(pos.realizedPnl);
         const totalFees = parseFloat(pos.totalFees || "0");
         
-        // Calculate unrealized PnL from actual entry price
         const unrealizedPnl = side === 'LONG'
           ? (markPrice - entryPrice) * Math.abs(baseSize)
           : (entryPrice - markPrice) * Math.abs(baseSize);
@@ -485,10 +518,11 @@ export async function registerRoutes(
           realizedPnl,
           totalFees,
           lastTradeAt: pos.lastTradeAt,
+          source: 'database',
         });
       }
 
-      res.json({ positions });
+      res.json({ positions, source: 'database' });
     } catch (error) {
       console.error("Get positions error:", error);
       res.status(500).json({ error: "Internal server error" });
