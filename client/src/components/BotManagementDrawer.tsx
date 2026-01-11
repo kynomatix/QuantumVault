@@ -243,7 +243,7 @@ export function BotManagementDrawer({
       if (balanceRes.ok) {
         const data = await balanceRes.json();
         setBotBalance(data.usdcBalance ?? 0);
-        setInterestEarned(data.interestEarned ?? 0);
+        setInterestEarned(data.estimatedDailyInterest ?? 0);
       }
 
       if (agentRes.ok) {
@@ -666,14 +666,15 @@ export function BotManagementDrawer({
                 </div>
               </div>
               <div className="p-4 rounded-xl bg-blue-500/10 border border-blue-500/30">
-                <p className="text-sm text-muted-foreground">Interest Earned</p>
+                <p className="text-sm text-muted-foreground">Est. Daily Interest</p>
                 <p className="text-2xl font-bold mt-1 text-blue-400" data-testid="text-interest-card">
                   {balanceLoading ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    `+$${interestEarned.toFixed(4)}`
+                    `+$${interestEarned.toFixed(4)}/day`
                   )}
                 </p>
+                <p className="text-xs text-muted-foreground mt-1">~5.3% APY</p>
               </div>
             </div>
 

@@ -2292,35 +2292,27 @@ export async function registerRoutes(
       }
       const agentAddress = wallet.agentPublicKey;
 
-      // Get bot position for realized PnL, trade count, and equity events for interest calc
-      const [position, tradeCount, equityEvents] = await Promise.all([
+      // Get bot position for realized PnL and trade count
+      const [position, tradeCount] = await Promise.all([
         storage.getBotPosition(botId, bot.market),
         storage.getBotTradeCount(botId),
-        storage.getBotEquityEvents(botId, 1000),
       ]);
 
       // Check if subaccount exists on-chain using agent wallet (not user wallet)
       const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
       const balance = exists ? await getDriftBalance(agentAddress, bot.driftSubaccountId) : 0;
       
-      // Calculate realized PnL and fees
+      // Calculate realized PnL and fees from position tracking
       const realizedPnl = parseFloat(position?.realizedPnl || "0");
       const totalFees = parseFloat(position?.totalFees || "0");
       
-      // Calculate net deposits/withdrawals to Drift for interest calculation
-      let netDeposits = 0;
-      for (const event of equityEvents) {
-        const amount = parseFloat(event.amount);
-        if (event.eventType === 'drift_deposit') {
-          netDeposits += amount;
-        } else if (event.eventType === 'drift_withdraw') {
-          netDeposits -= Math.abs(amount);
-        }
-      }
-      
-      // Interest Earned = Current Balance - Net Deposits - Realized Trading PnL
-      // (Realized PnL is already settled into the Drift balance)
-      const interestEarned = balance - netDeposits - realizedPnl;
+      // Interest calculation: Use the current Drift balance to estimate daily interest
+      // Note: We don't have per-bot deposit tracking, so we can't calculate exact interest
+      // Drift's current lending APY is ~5.3% for USDC
+      // Daily interest = balance * (APY / 365)
+      const DRIFT_USDC_APY = 0.053; // 5.3% - this varies with market conditions
+      const dailyInterestRate = DRIFT_USDC_APY / 365;
+      const estimatedDailyInterest = balance * dailyInterestRate;
       
       res.json({ 
         driftSubaccountId: bot.driftSubaccountId,
@@ -2329,8 +2321,8 @@ export async function registerRoutes(
         realizedPnl,
         totalFees,
         tradeCount,
-        netDeposits,
-        interestEarned: Math.max(0, interestEarned), // Don't show negative interest
+        estimatedDailyInterest: Math.max(0, estimatedDailyInterest),
+        driftApy: DRIFT_USDC_APY,
       });
     } catch (error) {
       console.error("Bot balance error:", error);
