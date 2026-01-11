@@ -1396,6 +1396,104 @@ export async function registerRoutes(
         }
       }
 
+      // POSITION FLIP DETECTION: Check if signal direction conflicts with existing position
+      // If we're LONG and receive a SHORT signal (or vice versa), we need to:
+      // 1. First close the existing position completely
+      // 2. Then execute the new order in the opposite direction
+      const botPosition = await storage.getBotPosition(botId, bot.market);
+      const currentPositionSize = botPosition ? parseFloat(botPosition.baseSize) : 0;
+      const isCurrentlyLong = currentPositionSize > 0;
+      const isCurrentlyShort = currentPositionSize < 0;
+      const signalIsLong = side === 'long';
+      const signalIsShort = side === 'short';
+      
+      // Detect position flip: signal direction opposite to current position
+      const isPositionFlip = (isCurrentlyLong && signalIsShort) || (isCurrentlyShort && signalIsLong);
+      
+      if (isPositionFlip && Math.abs(currentPositionSize) > 0) {
+        console.log(`[Webhook] POSITION FLIP detected: Currently ${isCurrentlyLong ? 'LONG' : 'SHORT'} ${Math.abs(currentPositionSize)} contracts, signal wants to go ${side.toUpperCase()}`);
+        
+        // Get wallet for execution
+        const wallet = await storage.getWallet(bot.walletAddress);
+        if (!wallet?.agentPrivateKeyEncrypted) {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured for position flip", processed: true });
+          return res.status(400).json({ error: "Agent wallet not configured" });
+        }
+        
+        // Step 1: Close existing position first
+        const closeSide = isCurrentlyLong ? 'short' : 'long';
+        const closeSize = Math.abs(currentPositionSize);
+        
+        console.log(`[Webhook] Step 1: Closing existing ${isCurrentlyLong ? 'LONG' : 'SHORT'} position of ${closeSize} contracts`);
+        
+        // Create close trade record
+        const closeTrade = await storage.createBotTrade({
+          tradingBotId: botId,
+          walletAddress: bot.walletAddress,
+          market: bot.market,
+          side: closeSide.toUpperCase(),
+          size: String(closeSize),
+          price: signalPrice,
+          status: "pending",
+          webhookPayload: { ...payload, _flipClose: true },
+        });
+        
+        try {
+          const subAccountId = bot.driftSubaccountId ?? 0;
+          const closeResult = await executePerpOrder(
+            wallet.agentPrivateKeyEncrypted,
+            bot.market,
+            closeSide,
+            closeSize,
+            subAccountId,
+            true // reduceOnly for closing
+          );
+          
+          if (!closeResult.success) {
+            await storage.updateBotTrade(closeTrade.id, { status: "failed" });
+            await storage.updateWebhookLog(log.id, { errorMessage: `Position flip close failed: ${closeResult.error}`, processed: true });
+            return res.status(500).json({ error: `Position flip close failed: ${closeResult.error}` });
+          }
+          
+          // Update close trade with execution details
+          const closeFillPrice = closeResult.fillPrice || parseFloat(signalPrice || "0");
+          const closeNotional = closeSize * closeFillPrice;
+          const closeFee = closeNotional * 0.0005;
+          
+          await storage.updateBotTrade(closeTrade.id, {
+            status: "executed",
+            txSignature: closeResult.txSignature || null,
+            price: String(closeFillPrice),
+            fee: String(closeFee),
+          });
+          
+          // Update position (should zero it out)
+          await storage.updateBotPositionFromTrade(
+            botId, bot.market, bot.walletAddress,
+            closeSide, closeSize, closeFillPrice, closeFee, closeTrade.id
+          );
+          
+          console.log(`[Webhook] Position closed successfully. Now proceeding to open ${side.toUpperCase()} position.`);
+          
+          // Update stats for close trade
+          const stats1 = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+          await storage.updateTradingBotStats(botId, {
+            ...stats1,
+            totalTrades: (stats1.totalTrades || 0) + 1,
+            lastTradeAt: new Date().toISOString(),
+          });
+          
+        } catch (closeError: any) {
+          console.error(`[Webhook] Position flip close failed:`, closeError);
+          await storage.updateBotTrade(closeTrade.id, { status: "failed" });
+          await storage.updateWebhookLog(log.id, { errorMessage: `Position flip close failed: ${closeError.message}`, processed: true });
+          return res.status(500).json({ error: `Position flip close failed: ${closeError.message}` });
+        }
+        
+        // Step 2: Now fall through to execute the new position in the opposite direction
+        console.log(`[Webhook] Step 2: Opening new ${side.toUpperCase()} position`);
+      }
+
       // Regular order execution (not a close signal)
       // Create trade record (pending execution)
       // Use contracts as the trade size (what TradingView sent for this order)
