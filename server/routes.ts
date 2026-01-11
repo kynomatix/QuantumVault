@@ -521,31 +521,32 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not found" });
       }
 
-      // Fetch real on-chain positions from Drift
-      const onChainPositions = await getPerpPositions(wallet.agentPublicKey, 0);
-      console.log(`[Reconcile] Found ${onChainPositions.length} on-chain positions`);
-
       // Get all bots for this wallet
       const bots = await storage.getTradingBots(req.walletAddress!);
       const reconciled: any[] = [];
       const discrepancies: any[] = [];
 
-      for (const pos of onChainPositions) {
-        // Find matching bot by market
-        const matchingBot = bots.find(b => b.market === pos.market);
-        
-        if (matchingBot) {
-          // Get current database position
-          const dbPosition = await storage.getBotPosition(matchingBot.id, pos.market);
-          const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
+      // Query each bot's specific subaccount for on-chain positions
+      for (const bot of bots) {
+        const subAccountId = bot.driftSubaccountId ?? 0;
+        const onChainPositions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
+        console.log(`[Reconcile] Bot ${bot.name} (subaccount ${subAccountId}): Found ${onChainPositions.length} on-chain positions`);
+
+        // Find position matching this bot's market
+        const pos = onChainPositions.find(p => p.market === bot.market);
+        const dbPosition = await storage.getBotPosition(bot.id, bot.market);
+        const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
+
+        if (pos) {
           const onChainBaseSize = pos.baseAssetAmount;
           
           // Check for discrepancy
           if (Math.abs(dbBaseSize - onChainBaseSize) > 0.0001) {
             discrepancies.push({
-              botId: matchingBot.id,
-              botName: matchingBot.name,
+              botId: bot.id,
+              botName: bot.name,
               market: pos.market,
+              subAccountId,
               database: { baseSize: dbBaseSize },
               onChain: { 
                 baseSize: onChainBaseSize, 
@@ -556,7 +557,7 @@ export async function registerRoutes(
 
             // Update database with on-chain data
             await storage.upsertBotPosition({
-              tradingBotId: matchingBot.id,
+              tradingBotId: bot.id,
               market: pos.market,
               baseSize: String(onChainBaseSize),
               avgEntryPrice: String(pos.entryPrice),
@@ -568,9 +569,10 @@ export async function registerRoutes(
             });
 
             reconciled.push({
-              botId: matchingBot.id,
-              botName: matchingBot.name,
+              botId: bot.id,
+              botName: bot.name,
               market: pos.market,
+              subAccountId,
               newPosition: {
                 baseSize: onChainBaseSize,
                 side: pos.side,
@@ -578,23 +580,13 @@ export async function registerRoutes(
               }
             });
           }
-        }
-      }
-
-      // Also check for positions in DB that don't exist on-chain (closed positions)
-      for (const bot of bots) {
-        const dbPosition = await storage.getBotPosition(bot.id, bot.market);
-        if (!dbPosition) continue;
-        
-        const dbBaseSize = parseFloat(dbPosition.baseSize);
-        if (Math.abs(dbBaseSize) < 0.0001) continue;
-
-        const hasOnChainPosition = onChainPositions.some(p => p.market === bot.market);
-        if (!hasOnChainPosition) {
+        } else if (dbPosition && Math.abs(dbBaseSize) > 0.0001) {
+          // Position in DB but not on-chain (closed position)
           discrepancies.push({
             botId: bot.id,
             botName: bot.name,
             market: bot.market,
+            subAccountId,
             database: { baseSize: dbBaseSize },
             onChain: { baseSize: 0, side: 'FLAT' }
           });
@@ -616,6 +608,7 @@ export async function registerRoutes(
             botId: bot.id,
             botName: bot.name,
             market: bot.market,
+            subAccountId,
             newPosition: { baseSize: 0, side: 'FLAT' }
           });
         }
