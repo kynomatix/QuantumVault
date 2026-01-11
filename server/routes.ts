@@ -7,7 +7,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, getAccountHealthMetrics } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
@@ -633,38 +633,55 @@ export async function registerRoutes(
     }
   });
 
-  // Health metrics cache to prevent SDK memory leaks
-  const healthMetricsCache = new Map<string, { data: any; timestamp: number }>();
-  const HEALTH_METRICS_CACHE_TTL = 60000; // 60 seconds cache to reduce SDK calls
-
-  // Health metrics endpoint - get account health, liquidation prices, etc.
+  // Health metrics endpoint - uses byte-parsing only to avoid SDK memory leaks
   app.get("/api/health-metrics", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet?.agentPrivateKeyEncrypted) {
+      if (!wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
       const subAccountId = req.query.subaccount ? parseInt(req.query.subaccount as string) : 0;
-      const cacheKey = `${req.walletAddress}-${subAccountId}`;
       
-      // Check cache first to avoid SDK memory leaks from frequent calls
-      const cached = healthMetricsCache.get(cacheKey);
-      if (cached && Date.now() - cached.timestamp < HEALTH_METRICS_CACHE_TTL) {
-        console.log(`[Health] Returning cached metrics (age: ${Math.round((Date.now() - cached.timestamp) / 1000)}s)`);
-        return res.json(cached.data);
+      // Use byte-parsing to get positions and account info - NO SDK to avoid memory leaks
+      const positions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
+      const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, subAccountId);
+      
+      // Calculate metrics from byte-parsed data
+      const totalCollateral = accountInfo.totalCollateral;
+      const freeCollateral = accountInfo.freeCollateral;
+      let unrealizedPnl = 0;
+      
+      const formattedPositions = positions.map(pos => {
+        unrealizedPnl += pos.unrealizedPnl;
+        return {
+          marketIndex: pos.marketIndex,
+          market: pos.market,
+          baseSize: pos.baseAssetAmount,
+          notionalValue: pos.sizeUsd,
+          liquidationPrice: null, // Would require more complex calculation
+          entryPrice: pos.entryPrice,
+          unrealizedPnl: pos.unrealizedPnl,
+        };
+      });
+      
+      // Health factor: 100% if no positions, otherwise estimate based on margin
+      let healthFactor = 100;
+      if (formattedPositions.length > 0 && totalCollateral > 0) {
+        const totalNotional = formattedPositions.reduce((sum, p) => sum + Math.abs(p.notionalValue), 0);
+        const marginRatio = totalNotional / totalCollateral;
+        // Drift maintenance margin is typically 5%, health drops as margin usage increases
+        healthFactor = Math.max(0, Math.min(100, 100 * (1 - marginRatio * 0.05)));
       }
       
-      const result = await getAccountHealthMetrics(wallet.agentPrivateKeyEncrypted, subAccountId);
-      
-      if (!result.success) {
-        return res.status(500).json({ error: result.error || "Failed to get health metrics" });
-      }
-
-      // Cache the result
-      healthMetricsCache.set(cacheKey, { data: result.data, timestamp: Date.now() });
-      
-      res.json(result.data);
+      res.json({
+        healthFactor,
+        marginRatio: totalCollateral > 0 ? (totalCollateral - freeCollateral) / totalCollateral : 0,
+        totalCollateral,
+        freeCollateral,
+        unrealizedPnl,
+        positions: formattedPositions,
+      });
     } catch (error) {
       console.error("Health metrics error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -932,26 +949,13 @@ export async function registerRoutes(
 
       const subAccountId = bot.driftSubaccountId ?? 0;
       
-      // Use health metrics endpoint which returns totalCollateral from Drift SDK
-      const healthResult = await getAccountHealthMetrics(wallet.agentPrivateKeyEncrypted, subAccountId);
-      
-      if (!healthResult.success || !healthResult.data) {
-        // Fallback to basic account info
-        const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
-        return res.json({ 
-          balance: accountInfo.usdcBalance,
-          totalCollateral: accountInfo.usdcBalance, // Use USDC balance as fallback
-          freeCollateral: accountInfo.freeCollateral,
-          hasOpenPositions: accountInfo.hasOpenPositions,
-          subAccountId,
-        });
-      }
-      
+      // Use byte-parsing only - no SDK to avoid memory leaks
+      const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
       res.json({ 
-        balance: healthResult.data.freeCollateral,
-        totalCollateral: healthResult.data.totalCollateral,
-        freeCollateral: healthResult.data.freeCollateral,
-        hasOpenPositions: healthResult.data.positions.length > 0,
+        balance: accountInfo.usdcBalance,
+        totalCollateral: accountInfo.totalCollateral,
+        freeCollateral: accountInfo.freeCollateral,
+        hasOpenPositions: accountInfo.hasOpenPositions,
         subAccountId,
       });
     } catch (error) {

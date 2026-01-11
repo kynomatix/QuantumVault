@@ -53,7 +53,7 @@ Preferred communication style: Simple, everyday language.
 - **Drift Account Parsing**: **ALWAYS use byte-parsing** for position reading to avoid memory leaks:
     1. **Byte-Parsing (`getPerpPositions`)**: Raw RPC calls with custom byte parsing - used for ALL position reading including close position detection. This is lightweight and doesn't create WebSocket connections.
     2. **SDK-Based (`getPerpPositionsSDK`)**: Uses official Drift SDK - **AVOID for position reading** due to memory leaks. Only use for trade execution where we need to submit transactions.
-- **Account Health Metrics**: Uses official Drift SDK methods (`getHealth()`, `getMarginRatio()`, `getTotalCollateral()`, `getFreeCollateral()`, `getUnrealizedPNL()`) to display account health factor, collateral values, and per-position liquidation prices on the dashboard.
+- **Account Health Metrics**: Uses byte-parsing to display account health factor, collateral values, and positions. SDK methods are AVOIDED to prevent memory leaks.
 - **On-Chain-First Architecture**: On-chain Drift positions are ALWAYS the source of truth. Database is treated as a cache that can be wrong.
     - **PositionService** (`server/position-service.ts`): Central service for all position queries. Uses byte-parsing exclusively to avoid memory leaks from Drift SDK WebSocket connections.
     - **Critical Operations**: Close signals, position flips, and manual close all query on-chain directly using `PositionService.getPositionForExecution()` with byte-parsing - NEVER trust database for these operations.
