@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -152,7 +152,7 @@ export const botPositions = pgTable("bot_positions", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
-  uniqueBotMarket: sql`CONSTRAINT bot_positions_bot_market_unique UNIQUE (${table.tradingBotId}, ${table.market})`,
+  uniqueBotMarket: unique("bot_positions_bot_market_unique").on(table.tradingBotId, table.market),
 }));
 
 export const insertBotPositionSchema = createInsertSchema(botPositions).omit({

@@ -423,6 +423,7 @@ export class DatabaseStorage implements IStorage {
           avgEntryPrice: position.avgEntryPrice,
           costBasis: position.costBasis,
           realizedPnl: position.realizedPnl,
+          totalFees: position.totalFees,
           lastTradeId: position.lastTradeId,
           lastTradeAt: position.lastTradeAt,
           updatedAt: sql`NOW()`,
