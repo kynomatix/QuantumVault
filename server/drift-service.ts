@@ -727,6 +727,7 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
   const userAccountPDA = getUserAccountPDA(userPubkey, subAccountId);
   
   const USDC_MARKET_INDEX = 0;
+  const L = DRIFT_LAYOUTS;
   
   try {
     const accountInfo = await connection.getAccountInfo(userAccountPDA, { commitment: 'confirmed' });
@@ -736,11 +737,29 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
       return 0;
     }
     
-    console.log(`[Drift] Decoding user account for balance, length=${accountInfo.data.length} bytes`);
+    console.log(`[Drift] Decoding user account for balance (subaccount ${subAccountId}), length=${accountInfo.data.length} bytes`);
     
     // Use Drift SDK's decodeUser helper - uses official IDL for correct offsets
-    const { decodeUser, SPOT_MARKET_BALANCE_PRECISION, SpotBalanceType } = await import('@drift-labs/sdk');
+    const { decodeUser, SPOT_MARKET_BALANCE_PRECISION } = await import('@drift-labs/sdk');
     const userAccount = decodeUser(accountInfo.data);
+    
+    // Fetch SpotMarket to get cumulativeDepositInterest for accurate balance
+    let cumulativeDepositInterest = L.PRECISION.SPOT_CUMULATIVE_INTEREST; // Default 1.0x
+    try {
+      const spotMarketPDA = getSpotMarketPDA(USDC_MARKET_INDEX);
+      const spotMarketInfo = await connection.getAccountInfo(spotMarketPDA, { commitment: 'confirmed' });
+      if (spotMarketInfo && spotMarketInfo.data) {
+        const marketData = spotMarketInfo.data;
+        const offset = L.SPOT_MARKET.CUMULATIVE_DEPOSIT_INTEREST_OFFSET;
+        const lowBits = marketData.readBigUInt64LE(offset);
+        const highBits = marketData.readBigUInt64LE(offset + 8);
+        if (highBits === BigInt(0)) {
+          cumulativeDepositInterest = new BN(lowBits.toString());
+        }
+      }
+    } catch (marketError) {
+      console.log(`[Drift] Could not read SpotMarket, using default interest`);
+    }
     
     // Find USDC spot position (market index 0)
     for (const spotPos of userAccount.spotPositions) {
@@ -748,12 +767,19 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
         // Check if it's a deposit (not a borrow)
         const isDeposit = 'deposit' in spotPos.balanceType || spotPos.balanceType.hasOwnProperty('deposit');
         if (isDeposit) {
-          const scaledBalance = spotPos.scaledBalance.toNumber();
-          // scaledBalance is in 1e9 precision, divide to get actual USDC
-          const actualUsdc = scaledBalance / SPOT_MARKET_BALANCE_PRECISION.toNumber();
+          const scaledBalance = spotPos.scaledBalance;
+          
+          // Apply cumulative interest: scaledBalance * cumulativeDepositInterest / (1e9 * 1e10)
+          const numerator = scaledBalance.mul(cumulativeDepositInterest);
+          const afterBalanceDiv = numerator.div(L.PRECISION.SPOT_BALANCE);
+          const wholePart = afterBalanceDiv.div(L.PRECISION.SPOT_CUMULATIVE_INTEREST);
+          const remainder = afterBalanceDiv.mod(L.PRECISION.SPOT_CUMULATIVE_INTEREST);
+          const actualUsdc = wholePart.toNumber() + remainder.toNumber() / 1e10;
+          
+          const interestMult = cumulativeDepositInterest.toNumber() / 1e10;
+          console.log(`[Drift SDK] USDC balance: ${actualUsdc.toFixed(6)} (interest: ${interestMult.toFixed(6)}x, subaccount ${subAccountId})`);
           
           if (actualUsdc > 0.001) {
-            console.log(`[Drift SDK] USDC balance: ${actualUsdc.toFixed(6)}`);
             return actualUsdc;
           }
         }
@@ -831,10 +857,9 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
     const totalCollateral = usdcBalance + totalUnrealizedPnl;
     
     // Calculate margin requirement based on position notional value
-    // Drift uses varying maintenance margins (5-10%+ depending on market)
-    // We use 10% (conservative) to underestimate health rather than overestimate
-    // This means UI will show lower health than actual, which is safer for risk awareness
-    const MAINTENANCE_MARGIN_RATIO = 0.10;
+    // Drift uses varying maintenance margins (4-5% for SOL-PERP, higher for others)
+    // We use 5% which better matches Drift's actual margin requirements for major markets
+    const MAINTENANCE_MARGIN_RATIO = 0.05;
     const marginRequired = totalPositionNotional * MAINTENANCE_MARGIN_RATIO;
     const marginUsed = hasOpenPositions ? marginRequired : 0;
     
@@ -900,7 +925,7 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
       return positions;
     }
     
-    console.log(`[Drift] Decoding user account using SDK, length=${accountInfo.data.length} bytes`);
+    console.log(`[Drift] Decoding user account for positions (subaccount ${subAccountId}), length=${accountInfo.data.length} bytes`);
     
     // Use Drift SDK's decodeUser helper - uses official IDL for correct offsets
     const { decodeUser, BASE_PRECISION, QUOTE_PRECISION } = await import('@drift-labs/sdk');
