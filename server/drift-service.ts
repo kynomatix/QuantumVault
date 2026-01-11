@@ -1714,7 +1714,10 @@ export async function executePerpOrder(
     const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
     const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
     
-    console.log(`[Drift] Executing ${side} ${reduceOnly ? 'REDUCE-ONLY ' : ''}order for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}`);
+    console.log(`[Drift] *** Executing ${side.toUpperCase()} ${reduceOnly ? 'REDUCE-ONLY ' : ''}order *** for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}`);
+    if (reduceOnly) {
+      console.log(`[Drift] REDUCE-ONLY flag is SET - this order should only close existing positions, never open new ones`);
+    }
     
     // Create DriftClient configured for the specific subaccount
     const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);

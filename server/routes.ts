@@ -674,17 +674,16 @@ export async function registerRoutes(
 
       const subAccountId = bot.driftSubaccountId ?? 0;
 
-      // Query actual on-chain position from Drift
-      let onChainPositionSize = 0;
+      // Query actual on-chain position from Drift using PositionService for normalized market matching
+      let onChainPosition;
       try {
-        const onChainPositions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
-        const marketName = bot.market.toUpperCase();
-        const onChainPos = onChainPositions.find(p => 
-          p.market.toUpperCase() === marketName || 
-          p.market.toUpperCase().replace('-', '-') === marketName
+        onChainPosition = await PositionService.getPositionForExecution(
+          bot.id,
+          wallet.agentPublicKey,
+          subAccountId,
+          bot.market
         );
-        onChainPositionSize = onChainPos?.baseAssetAmount || 0;
-        console.log(`[ClosePosition] On-chain position for ${bot.market}: ${onChainPositionSize}`);
+        console.log(`[ClosePosition] On-chain position for ${bot.market}: ${onChainPosition.side} ${onChainPosition.size}`);
       } catch (err) {
         console.error(`[ClosePosition] Failed to query on-chain position:`, err);
         return res.status(500).json({ 
@@ -694,16 +693,17 @@ export async function registerRoutes(
       }
 
       // Check if there's actually a position to close
-      if (Math.abs(onChainPositionSize) < 0.0001) {
+      if (onChainPosition.side === 'FLAT' || Math.abs(onChainPosition.size) < 0.0001) {
         return res.status(400).json({ 
           error: "No open position to close",
-          onChainPositionSize: 0
+          onChainPositionSize: 0,
+          side: 'FLAT'
         });
       }
 
       // Determine close side (opposite of current position)
-      const closeSide: 'long' | 'short' = onChainPositionSize > 0 ? 'short' : 'long';
-      const closeSize = Math.abs(onChainPositionSize);
+      const closeSide: 'long' | 'short' = onChainPosition.side === 'LONG' ? 'short' : 'long';
+      const closeSize = Math.abs(onChainPosition.size);
 
       console.log(`[ClosePosition] Closing ${closeSize} ${bot.market} (${closeSide}) with reduce-only order`);
 
@@ -724,12 +724,33 @@ export async function registerRoutes(
         });
       }
 
-      console.log(`[ClosePosition] Position closed: ${result.txSignature}`);
+      console.log(`[ClosePosition] Close order executed: ${result.txSignature}`);
 
       // Calculate fee (0.05% taker fee on notional value)
       const fillPrice = result.fillPrice || 0;
       const closeNotional = closeSize * fillPrice;
       const closeFee = closeNotional * 0.0005;
+
+      // CRITICAL: Verify on-chain that position is actually closed
+      let verificationWarning: string | null = null;
+      try {
+        const postClosePosition = await PositionService.getPositionForExecution(
+          bot.id,
+          wallet.agentPublicKey,
+          subAccountId,
+          bot.market
+        );
+        
+        if (postClosePosition.side !== 'FLAT' && Math.abs(postClosePosition.size) > 0.0001) {
+          console.error(`[ClosePosition] CRITICAL: Position NOT fully closed!`);
+          console.error(`[ClosePosition] Expected: FLAT, Actual: ${postClosePosition.side} ${postClosePosition.size}`);
+          verificationWarning = `Position not fully closed. Remaining: ${postClosePosition.side} ${postClosePosition.size}`;
+        } else {
+          console.log(`[ClosePosition] Post-close verification: Position confirmed FLAT`);
+        }
+      } catch (verifyErr) {
+        console.warn(`[ClosePosition] Could not verify post-close position:`, verifyErr);
+      }
 
       // Create trade record for the close
       const closeTrade = await storage.createBotTrade({
@@ -743,6 +764,7 @@ export async function registerRoutes(
         status: "executed",
         txSignature: result.txSignature,
         webhookPayload: { action: "manual_close", reason: "User requested position close" },
+        errorMessage: verificationWarning,
       });
 
       // Sync position from on-chain (updates database with actual Drift state)
@@ -761,7 +783,8 @@ export async function registerRoutes(
 
       res.json({ 
         success: true,
-        message: "Position closed successfully",
+        message: verificationWarning ? "Position closed with warning" : "Position closed successfully",
+        warning: verificationWarning,
         closedSize: closeSize,
         closeSide,
         fillPrice,
@@ -1588,8 +1611,10 @@ export async function registerRoutes(
       const isCloseSignal = strategyPositionSize !== null && 
         (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
       
+      console.log(`[Webhook] Signal analysis: action=${action}, contracts=${contracts}, strategyPositionSize=${strategyPositionSize}, isCloseSignal=${isCloseSignal}`);
+      
       if (isCloseSignal) {
-        console.log(`[Webhook] Close signal detected (strategyPositionSize=${strategyPositionSize})`);
+        console.log(`[Webhook] *** CLOSE SIGNAL DETECTED *** (strategyPositionSize=${strategyPositionSize}) - Will NOT open new position`);
         
         // Get wallet for execution
         const wallet = await storage.getWallet(bot.walletAddress);
@@ -1599,6 +1624,7 @@ export async function registerRoutes(
         }
         
         const subAccountId = bot.driftSubaccountId ?? 0;
+        console.log(`[Webhook] Close signal: querying on-chain position for bot=${bot.name}, market=${bot.market}, subaccount=${subAccountId}`);
         
         // CRITICAL: Query on-chain position directly - NEVER trust database for close signals
         let onChainPosition;
@@ -1609,7 +1635,7 @@ export async function registerRoutes(
             subAccountId,
             bot.market
           );
-          console.log(`[Webhook] On-chain position for close: size=${onChainPosition.size}, side=${onChainPosition.side}`);
+          console.log(`[Webhook] On-chain position query result: size=${onChainPosition.size}, side=${onChainPosition.side}, entryPrice=${onChainPosition.entryPrice}`);
         } catch (onChainErr) {
           console.error(`[Webhook] CRITICAL: Failed to query on-chain position for close:`, onChainErr);
           await storage.updateWebhookLog(log.id, { 
@@ -1621,7 +1647,7 @@ export async function registerRoutes(
         
         if (onChainPosition.side === 'FLAT' || Math.abs(onChainPosition.size) < 0.0001) {
           // No position to close - this is likely a SL/TP for a position that doesn't exist in this bot
-          console.log(`[Webhook] Close signal ignored - no on-chain position for bot ${bot.name} on ${bot.market}`);
+          console.log(`[Webhook] Close signal SKIPPED - no on-chain position found for bot ${bot.name} on ${bot.market} (subaccount ${subAccountId})`);
           await storage.updateWebhookLog(log.id, { 
             errorMessage: "Close signal ignored - no on-chain position", 
             processed: true 
@@ -1634,7 +1660,7 @@ export async function registerRoutes(
         
         // There IS an on-chain position to close - use ACTUAL on-chain size
         const currentPositionSize = onChainPosition.size;
-        console.log(`[Webhook] Closing ON-CHAIN position: ${currentPositionSize} contracts on ${bot.market}`);
+        console.log(`[Webhook] *** EXECUTING CLOSE *** ON-CHAIN position: ${onChainPosition.side} ${Math.abs(currentPositionSize)} contracts on ${bot.market}`);
         
         // Determine close side (opposite of current position)
         const closeSide = onChainPosition.side === 'LONG' ? 'short' : 'long';
@@ -1668,6 +1694,59 @@ export async function registerRoutes(
             // Calculate fee (0.05% taker fee on notional value)
             const closeNotional = closeSize * (result.fillPrice || 0);
             const closeFee = closeNotional * 0.0005;
+            
+            // CRITICAL: Verify on-chain that position is actually closed
+            // This prevents issues where reduceOnly wasn't respected
+            try {
+              const postClosePosition = await PositionService.getPositionForExecution(
+                botId,
+                wallet.agentPublicKey,
+                subAccountId,
+                bot.market
+              );
+              
+              if (postClosePosition.side !== 'FLAT' && Math.abs(postClosePosition.size) > 0.0001) {
+                // Position still exists after "close" - this is a problem!
+                console.error(`[Webhook] CRITICAL: Position NOT fully closed after reduce-only order!`);
+                console.error(`[Webhook] Expected: FLAT, Actual: ${postClosePosition.side} ${postClosePosition.size}`);
+                console.error(`[Webhook] reduceOnly may not have been respected by Drift!`);
+                
+                // Still mark trade as executed (it did execute something)
+                await storage.updateBotTrade(closeTrade.id, {
+                  status: "executed",
+                  txSignature: result.txSignature,
+                  price: result.fillPrice ? String(result.fillPrice) : signalPrice,
+                  fee: String(closeFee),
+                  errorMessage: `WARNING: Position not fully closed. Remaining: ${postClosePosition.side} ${postClosePosition.size}`,
+                });
+                
+                await storage.updateWebhookLog(log.id, { 
+                  processed: true, 
+                  tradeExecuted: true,
+                  errorMessage: `Close executed but position remains: ${postClosePosition.side} ${postClosePosition.size}`
+                });
+                
+                // Return warning response
+                return res.json({
+                  status: "partial",
+                  warning: "Position not fully closed - residual position remains",
+                  type: "close",
+                  trade: closeTrade.id,
+                  txSignature: result.txSignature,
+                  closedSize: closeSize,
+                  side: closeSide,
+                  remainingPosition: {
+                    side: postClosePosition.side,
+                    size: postClosePosition.size,
+                  },
+                });
+              }
+              
+              console.log(`[Webhook] Post-close verification: Position confirmed FLAT`);
+            } catch (verifyErr) {
+              console.warn(`[Webhook] Could not verify post-close position:`, verifyErr);
+              // Continue anyway - the order executed successfully
+            }
             
             // Update trade record with execution details
             await storage.updateBotTrade(closeTrade.id, {
@@ -1727,6 +1806,21 @@ export async function registerRoutes(
         }
       }
 
+      // DEFENSE-IN-DEPTH: Double-check we're not proceeding with a close signal
+      // If isCloseSignal was true, all code paths above should have returned
+      // This is a safety net to prevent any edge case from opening new positions on close signals
+      if (isCloseSignal) {
+        console.error(`[Webhook] CRITICAL: Close signal fell through without returning! This should never happen.`);
+        await storage.updateWebhookLog(log.id, { 
+          errorMessage: "Close signal fell through to regular execution - blocked for safety", 
+          processed: true 
+        });
+        return res.status(500).json({ 
+          error: "Internal error: close signal processing failed",
+          details: "Close signal did not complete properly - blocked to prevent unintended position"
+        });
+      }
+
       // POSITION FLIP DETECTION: Check if signal direction conflicts with existing position
       // If we're LONG and receive a SHORT signal (or vice versa), we need to:
       // 1. First close the existing position completely
@@ -1739,20 +1833,27 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
       
-      // Query ACTUAL on-chain Drift position instead of relying on tracked position
-      // This ensures we close the exact amount that exists on-chain
+      // Query ACTUAL on-chain Drift position using PositionService for consistent market normalization
       const subAccountId = bot.driftSubaccountId ?? 0;
-      const onChainPositions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
-      const marketName = bot.market.toUpperCase().replace('-', '-'); // Normalize market name
-      const onChainPosition = onChainPositions.find(p => 
-        p.market.toUpperCase() === marketName || 
-        p.market.toUpperCase() === bot.market.toUpperCase()
-      );
+      let onChainPosition;
+      try {
+        onChainPosition = await PositionService.getPositionForExecution(
+          botId,
+          wallet.agentPublicKey,
+          subAccountId,
+          bot.market
+        );
+        console.log(`[Webhook] Position flip check: on-chain position is ${onChainPosition.side} ${Math.abs(onChainPosition.size).toFixed(6)} on ${bot.market}`);
+      } catch (posErr) {
+        console.warn(`[Webhook] Could not query on-chain position for flip detection:`, posErr);
+        onChainPosition = { side: 'FLAT', size: 0 };
+      }
       
       // Use on-chain position size for accurate flip detection
-      const actualOnChainSize = onChainPosition?.baseAssetAmount || 0;
-      const isCurrentlyLong = actualOnChainSize > 0;
-      const isCurrentlyShort = actualOnChainSize < 0;
+      const actualOnChainSize = onChainPosition.side === 'LONG' ? onChainPosition.size : 
+                                onChainPosition.side === 'SHORT' ? -onChainPosition.size : 0;
+      const isCurrentlyLong = onChainPosition.side === 'LONG';
+      const isCurrentlyShort = onChainPosition.side === 'SHORT';
       const signalIsLong = side === 'long';
       const signalIsShort = side === 'short';
       
