@@ -4,6 +4,45 @@ import BN from 'bn.js';
 import { getAgentKeypair } from './agent-wallet';
 import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 
+// Cached SDK reference - loaded once on first use, avoids repeated dynamic imports
+// which can fail with "Class extends value is not a constructor" ESM issues
+let cachedDriftSDK: any = null;
+let sdkLoadPromise: Promise<any> | null = null;
+
+async function getDriftSDK(): Promise<any> {
+  if (cachedDriftSDK) {
+    return cachedDriftSDK;
+  }
+  
+  // Ensure only one import attempt happens at a time
+  if (sdkLoadPromise) {
+    return sdkLoadPromise;
+  }
+  
+  sdkLoadPromise = (async () => {
+    const maxRetries = 5;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const sdk = await import('@drift-labs/sdk');
+        cachedDriftSDK = sdk;
+        console.log('[Drift] SDK loaded successfully and cached');
+        return sdk;
+      } catch (importErr: any) {
+        const errMsg = importErr.message || String(importErr);
+        console.error(`[Drift] SDK import failed (attempt ${attempt}/${maxRetries}):`, errMsg);
+        if (attempt === maxRetries) {
+          sdkLoadPromise = null; // Allow retry on next call
+          throw new Error(`Failed to load Drift SDK after ${maxRetries} attempts: ${errMsg}`);
+        }
+        // Exponential backoff
+        await new Promise(r => setTimeout(r, 200 * attempt));
+      }
+    }
+  })();
+  
+  return sdkLoadPromise;
+}
+
 /**
  * Drift Protocol Account Layouts (derived from official IDL v2.150.0)
  * Using fixed offsets for deterministic parsing without BorshAccountsCoder
@@ -197,24 +236,8 @@ async function getAgentDriftClient(
   encryptedPrivateKey: string,
   subAccountId: number = 0
 ): Promise<{ driftClient: any; cleanup: () => Promise<void> }> {
-  // Import with retry to handle intermittent "Class extends value is not a constructor" errors
-  let sdk: any;
-  const maxRetries = 3;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      sdk = await import('@drift-labs/sdk');
-      break;
-    } catch (importErr: any) {
-      const errMsg = importErr.message || String(importErr);
-      console.error(`[Drift] SDK import failed (attempt ${attempt}/${maxRetries}):`, errMsg);
-      if (attempt === maxRetries) {
-        throw new Error(`Failed to load Drift SDK after ${maxRetries} attempts: ${errMsg}`);
-      }
-      // Small delay before retry
-      await new Promise(r => setTimeout(r, 100 * attempt));
-    }
-  }
-  
+  // Use cached SDK to avoid repeated dynamic import issues
+  const sdk = await getDriftSDK();
   const { DriftClient, Wallet, initialize } = sdk;
   
   const connection = getConnection();
@@ -1039,7 +1062,9 @@ export async function getPerpPositionsSDK(
   const positions: PerpPosition[] = [];
   
   try {
-    const { QUOTE_PRECISION, BASE_PRECISION } = await import('@drift-labs/sdk');
+    // Use cached SDK for precision constants
+    const sdk = await getDriftSDK();
+    const { QUOTE_PRECISION, BASE_PRECISION } = sdk;
     console.log(`[Drift SDK] Fetching perp positions for subaccount ${subAccountId}`);
     
     const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
@@ -1782,25 +1807,8 @@ export async function executePerpOrder(
   reduceOnly: boolean = false,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number }> {
   try {
-    // Import SDK types with retry to handle intermittent "Class extends value is not a constructor" errors
-    let sdk: any;
-    const maxRetries = 3;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        sdk = await import('@drift-labs/sdk');
-        break;
-      } catch (importErr: any) {
-        const errMsg = importErr.message || String(importErr);
-        console.error(`[Drift] SDK import failed in executePerpOrder (attempt ${attempt}/${maxRetries}):`, errMsg);
-        if (attempt === maxRetries) {
-          return {
-            success: false,
-            error: `Failed to load Drift SDK after ${maxRetries} attempts: ${errMsg}`,
-          };
-        }
-        await new Promise(r => setTimeout(r, 100 * attempt));
-      }
-    }
+    // Use cached SDK to avoid repeated dynamic import issues
+    const sdk = await getDriftSDK();
     const { PositionDirection, OrderType, MarketType, BASE_PRECISION } = sdk;
     
     // Get market index
@@ -1818,7 +1826,6 @@ export async function executePerpOrder(
     try {
       
       // Convert size to base precision (1e9)
-      const basePrecision = new BN(BASE_PRECISION.toString());
       const baseAssetAmount = new BN(Math.round(sizeInBase * 1e9));
       
       // Determine direction
@@ -1917,22 +1924,8 @@ export async function closePerpPosition(
   subAccountId: number = 0,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
-    // Import SDK types with retry
-    let sdk: any;
-    const maxRetries = 3;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        sdk = await import('@drift-labs/sdk');
-        break;
-      } catch (importErr: any) {
-        const errMsg = importErr.message || String(importErr);
-        console.error(`[Drift] SDK import failed in closePerpPosition (attempt ${attempt}/${maxRetries}):`, errMsg);
-        if (attempt === maxRetries) {
-          return { success: false, error: `Failed to load Drift SDK: ${errMsg}` };
-        }
-        await new Promise(r => setTimeout(r, 100 * attempt));
-      }
-    }
+    // Use cached SDK to avoid repeated dynamic import issues
+    const sdk = await getDriftSDK();
     const { PositionDirection, OrderType, MarketType } = sdk;
     
     const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
@@ -2011,8 +2004,9 @@ export async function getAccountHealthMetrics(
   subAccountId: number = 0
 ): Promise<{ success: boolean; data?: HealthMetrics; error?: string }> {
   try {
-    const { QUOTE_PRECISION, BASE_PRECISION } = await import('@drift-labs/sdk');
-    
+    // Use cached SDK for precision constants
+    const sdk = await getDriftSDK();
+    const { QUOTE_PRECISION, BASE_PRECISION } = sdk;
     console.log(`[Drift] [DEPRECATED] Fetching health metrics for subaccount ${subAccountId}`);
     
     const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
