@@ -50,10 +50,10 @@ Preferred communication style: Simple, everyday language.
 - **Webhook Deduplication**: `webhook_logs` table uses a `signal_hash` to prevent duplicate processing of TradingView signals.
 - **Equity Event Tracking**: Tracks deposits and withdrawals for transaction history, ensuring idempotency.
 - **Drift Subaccounts**: Each bot is assigned a unique `driftSubaccountId` for isolation. Trades execute on the bot's specific subaccount. Subaccounts are auto-initialized when users deposit funds to a bot.
-- **Drift Account Parsing**: **ALWAYS use byte-parsing** for position reading to avoid memory leaks:
-    1. **Byte-Parsing (`getPerpPositions`)**: Raw RPC calls with custom byte parsing - used for ALL position reading including close position detection. This is lightweight and doesn't create WebSocket connections.
-    2. **SDK-Based (`getPerpPositionsSDK`)**: Uses official Drift SDK - **AVOID for position reading** due to memory leaks. Only use for trade execution where we need to submit transactions.
-- **Account Health Metrics**: Uses byte-parsing exclusively to display account health factor, collateral values, and positions. SDK methods are AVOIDED to prevent memory leaks.
+- **Drift Account Parsing**: Uses hybrid approach for accuracy and memory safety:
+    1. **RPC + SDK Decoding (`getPerpPositions`, `getDriftBalance`)**: Fetches raw account data via `connection.getAccountInfo()`, then decodes using SDK's `decodeUser()` helper. This is safe because `decodeUser()` is a stateless function with no WebSocket connections.
+    2. **DriftClient (`getAgentDriftClient`)**: ONLY used for trade execution where transactions must be submitted. Avoid for read-only queries due to WebSocket memory leaks.
+- **Account Health Metrics**: Uses SDK's `decodeUser()` helper for accurate account health, collateral values, and positions. This is safe as it's a stateless decoder function.
     - **Health Calculation**: `getDriftAccountInfo()` calculates totalCollateral = usdcBalance + unrealizedPnl, with 10% maintenance margin ratio (conservative estimate).
     - **Liquidation Price**: Estimated based on free collateral and position size. These are approximations - Drift uses per-market weights.
     - **Safety-First**: Uses conservative 10% margin ratio to underestimate health rather than overestimate, ensuring users see lower health than actual for risk awareness.
@@ -68,11 +68,11 @@ Preferred communication style: Simple, everyday language.
     2. **Periodic Background Sync (60s)**: `startPeriodicReconciliation()` runs every 60 seconds, checking all active bots.
     3. **Manual Sync Button**: UI button for user-triggered reconciliation.
     - **Realized PnL Tracking**: Calculated when positions close/reduce. Formula: `(fillPrice - avgEntry) * closedSize - proratedFee`. Fees are prorated for flip/overclose trades.
-    - **On-Chain Position Reading**: Uses `getPerpPositions()` with raw RPC calls (`connection.getAccountInfo()`) and custom byte parsing, NOT Drift SDK WebSocket subscriptions which are unreliable.
+    - **On-Chain Position Reading**: Uses `getPerpPositions()` with RPC calls (`connection.getAccountInfo()`) + SDK's `decodeUser()` for accurate Borsh decoding, NOT Drift SDK WebSocket subscriptions which cause memory leaks.
 
 ## Known Issues
 
-- **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Under heavy load, this can lead to JavaScript heap out of memory crashes. Mitigation: Use byte-parsing (`getPerpPositions`) instead of SDK-based methods for position reading. The SDK is reserved ONLY for trade execution where we must submit transactions.
+- **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK's DriftClient creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Mitigation: Use RPC + `decodeUser()` helper (stateless, no WebSocket) instead of DriftClient subscriptions for all read-only queries. DriftClient is reserved ONLY for trade execution where we must submit transactions.
 - **Health Metrics Are Estimates**: Account health factor and liquidation prices are conservative estimates using a flat 10% margin ratio. Drift uses per-market maintenance weights that vary (5-15%+). The estimates are intentionally conservative (underestimate health) for safety. API responses include `isEstimate: true` to indicate this. Users should check Drift UI for precise health metrics when making critical risk decisions.
 
 ## External Dependencies
