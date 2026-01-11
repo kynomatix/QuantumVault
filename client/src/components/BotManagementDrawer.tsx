@@ -174,6 +174,7 @@ export function BotManagementDrawer({
   const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
   const [botPosition, setBotPosition] = useState<BotPosition | null>(null);
   const [positionLoading, setPositionLoading] = useState(false);
+  const [netDeposited, setNetDeposited] = useState<number>(0);
 
   useEffect(() => {
     if (bot) {
@@ -238,10 +239,11 @@ export function BotManagementDrawer({
     setBalanceLoading(true);
     try {
       const cacheBust = Date.now();
-      const [balanceRes, agentRes, driftRes] = await Promise.all([
+      const [balanceRes, agentRes, driftRes, netDepositedRes] = await Promise.all([
         fetch(`/api/bot/${bot.id}/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
         fetch(`/api/agent/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
         fetch(`/api/agent/drift-balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
+        fetch(`/api/bots/${bot.id}/net-deposited?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
       ]);
 
       if (balanceRes.ok) {
@@ -260,6 +262,11 @@ export function BotManagementDrawer({
         setDriftBalance(data.balance ?? 0);
         setDriftFreeCollateral(data.freeCollateral ?? data.balance ?? 0);
         setHasOpenPositions(data.hasOpenPositions ?? false);
+      }
+
+      if (netDepositedRes.ok) {
+        const data = await netDepositedRes.json();
+        setNetDeposited(data.netDeposited ?? 0);
       }
     } catch (error) {
       console.error('Failed to fetch balances:', error);
@@ -637,38 +644,82 @@ export function BotManagementDrawer({
           <TabsContent value="overview" className="space-y-4 mt-4">
             <div className="grid grid-cols-3 gap-3">
               <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border">
-                <p className="text-sm text-muted-foreground">Bot Equity</p>
+                <div className="flex items-center gap-1">
+                  <p className="text-sm text-muted-foreground">Bot Equity</p>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <Info className="w-3 h-3 text-muted-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>Current Drift account balance (Total Collateral)</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
                 <p className="text-2xl font-bold mt-1" data-testid="text-bot-equity">
                   {balanceLoading ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    `$${(botBalance + parseFloat((bot as any).realizedPnl ?? 0)).toFixed(2)}`
+                    `$${driftBalance.toFixed(2)}`
                   )}
                 </p>
               </div>
               <div className="p-4 rounded-xl bg-muted/50 border">
-                <p className="text-sm text-muted-foreground">Realized P&L</p>
+                <div className="flex items-center gap-1">
+                  <p className="text-sm text-muted-foreground">Net P&L</p>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <Info className="w-3 h-3 text-muted-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>True performance including all fees & funding</p>
+                        <p className="text-xs text-muted-foreground">Bot Equity - Total Deposited</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
                 <p
                   className={`text-2xl font-bold mt-1 ${
-                    parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                    (driftBalance - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
                   }`}
-                  data-testid="text-total-pnl"
+                  data-testid="text-net-pnl"
                 >
-                  {parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? '+' : ''}${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
+                  {balanceLoading ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    `${(driftBalance - netDeposited) >= 0 ? '+' : ''}$${(driftBalance - netDeposited).toFixed(2)}`
+                  )}
                 </p>
               </div>
               <div className="p-4 rounded-xl bg-muted/50 border">
-                <p className="text-sm text-muted-foreground">Return</p>
+                <div className="flex items-center gap-1">
+                  <p className="text-sm text-muted-foreground">Net Return</p>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <Info className="w-3 h-3 text-muted-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>Net P&L as % of deposited amount</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
                 <p
                   className={`text-2xl font-bold mt-1 ${
-                    parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                    (driftBalance - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
                   }`}
                   data-testid="text-return-pct"
                 >
-                  {parseFloat(bot.maxPositionSize || '0') > 0 
-                    ? `${((parseFloat((bot as any).realizedPnl ?? 0) / parseFloat(bot.maxPositionSize || '1')) * 100).toFixed(2)}%`
-                    : '0%'
-                  }
+                  {balanceLoading ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : netDeposited > 0 ? (
+                    `${(((driftBalance - netDeposited) / netDeposited) * 100).toFixed(2)}%`
+                  ) : (
+                    '0%'
+                  )}
                 </p>
               </div>
             </div>

@@ -705,6 +705,24 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/bots/:botId/net-deposited", requireWallet, async (req, res) => {
+    try {
+      const { botId } = req.params;
+      const bot = await storage.getTradingBotById(botId);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const netDeposited = await storage.getBotNetDeposited(botId);
+      res.json({ netDeposited });
+    } catch (error) {
+      console.error("Get bot net deposited error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Trading bot CRUD routes
   app.get("/api/trading-bots", requireWallet, async (req, res) => {
     try {

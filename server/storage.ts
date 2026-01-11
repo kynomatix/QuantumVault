@@ -102,6 +102,7 @@ export interface IStorage {
   createEquityEvent(event: InsertEquityEvent): Promise<EquityEvent>;
   getEquityEvents(walletAddress: string, limit?: number): Promise<EquityEvent[]>;
   getBotEquityEvents(tradingBotId: string, limit?: number): Promise<EquityEvent[]>;
+  getBotNetDeposited(tradingBotId: string): Promise<number>;
 
   getBotPosition(tradingBotId: string, market: string): Promise<BotPosition | undefined>;
   getBotPositions(walletAddress: string): Promise<BotPosition[]>;
@@ -404,6 +405,18 @@ export class DatabaseStorage implements IStorage {
 
   async getBotEquityEvents(tradingBotId: string, limit: number = 50): Promise<EquityEvent[]> {
     return db.select().from(equityEvents).where(eq(equityEvents.tradingBotId, tradingBotId)).orderBy(desc(equityEvents.createdAt)).limit(limit);
+  }
+
+  async getBotNetDeposited(tradingBotId: string): Promise<number> {
+    const events = await db.select().from(equityEvents).where(eq(equityEvents.tradingBotId, tradingBotId));
+    let netDeposited = 0;
+    for (const event of events) {
+      const amount = parseFloat(event.amount);
+      // Amounts are stored with correct sign: deposits positive, withdrawals negative
+      // Simply sum all amounts to get net deposited
+      netDeposited += amount;
+    }
+    return netDeposited;
   }
 
   async getBotPosition(tradingBotId: string, market: string): Promise<BotPosition | undefined> {
