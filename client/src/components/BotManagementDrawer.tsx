@@ -175,6 +175,7 @@ export function BotManagementDrawer({
   const [botPosition, setBotPosition] = useState<BotPosition | null>(null);
   const [positionLoading, setPositionLoading] = useState(false);
   const [netDeposited, setNetDeposited] = useState<number>(0);
+  const [closePositionLoading, setClosePositionLoading] = useState(false);
 
   useEffect(() => {
     if (bot) {
@@ -481,6 +482,45 @@ export function BotManagementDrawer({
       });
     } finally {
       setDeleteLoading(false);
+    }
+  };
+
+  const handleClosePosition = async () => {
+    if (!localBot) return;
+    setClosePositionLoading(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${localBot.id}/close-position?wallet=${walletAddress}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to close position');
+      }
+
+      toast({
+        title: 'Position closed',
+        description: `Closed ${data.closedSize?.toFixed(4)} ${localBot.market} @ $${data.fillPrice?.toFixed(2)}`,
+      });
+      
+      // Refresh position and balance data
+      setTimeout(() => {
+        fetchBotPosition();
+        fetchBotBalance();
+      }, 1500);
+      
+      onBotUpdated();
+    } catch (error) {
+      toast({
+        title: 'Failed to close position',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setClosePositionLoading(false);
     }
   };
 
@@ -850,6 +890,27 @@ export function BotManagementDrawer({
                       </div>
                     </div>
                   )}
+                  
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={handleClosePosition}
+                    disabled={closePositionLoading}
+                    className="w-full mt-2"
+                    data-testid="button-close-position"
+                  >
+                    {closePositionLoading ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Closing Position...
+                      </>
+                    ) : (
+                      <>
+                        <XCircle className="w-4 h-4 mr-2" />
+                        Close Position
+                      </>
+                    )}
+                  </Button>
                 </div>
               ) : (
                 <div className="text-center py-4 text-muted-foreground">

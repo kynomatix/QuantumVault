@@ -655,6 +655,125 @@ export async function registerRoutes(
     }
   });
 
+  // Manual close position endpoint - query on-chain and close with reduce-only order
+  app.post("/api/trading-bots/:id/close-position", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const wallet = await storage.getWallet(bot.walletAddress);
+      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not configured" });
+      }
+
+      const subAccountId = bot.driftSubaccountId ?? 0;
+
+      // Query actual on-chain position from Drift
+      let onChainPositionSize = 0;
+      try {
+        const onChainPositions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
+        const marketName = bot.market.toUpperCase();
+        const onChainPos = onChainPositions.find(p => 
+          p.market.toUpperCase() === marketName || 
+          p.market.toUpperCase().replace('-', '-') === marketName
+        );
+        onChainPositionSize = onChainPos?.baseAssetAmount || 0;
+        console.log(`[ClosePosition] On-chain position for ${bot.market}: ${onChainPositionSize}`);
+      } catch (err) {
+        console.error(`[ClosePosition] Failed to query on-chain position:`, err);
+        return res.status(500).json({ 
+          error: "Failed to query on-chain position from Drift",
+          details: err instanceof Error ? err.message : "Unknown error"
+        });
+      }
+
+      // Check if there's actually a position to close
+      if (Math.abs(onChainPositionSize) < 0.0001) {
+        return res.status(400).json({ 
+          error: "No open position to close",
+          onChainPositionSize: 0
+        });
+      }
+
+      // Determine close side (opposite of current position)
+      const closeSide: 'long' | 'short' = onChainPositionSize > 0 ? 'short' : 'long';
+      const closeSize = Math.abs(onChainPositionSize);
+
+      console.log(`[ClosePosition] Closing ${closeSize} ${bot.market} (${closeSide}) with reduce-only order`);
+
+      // Execute reduce-only close order on Drift
+      const result = await executePerpOrder(
+        wallet.agentPrivateKeyEncrypted,
+        bot.market,
+        closeSide,
+        closeSize,
+        subAccountId,
+        true // reduceOnly
+      );
+
+      if (!result.success || !result.txSignature) {
+        return res.status(500).json({ 
+          error: "Failed to execute close order",
+          details: result.error || "Unknown error"
+        });
+      }
+
+      console.log(`[ClosePosition] Position closed: ${result.txSignature}`);
+
+      // Calculate fee (0.05% taker fee on notional value)
+      const fillPrice = result.fillPrice || 0;
+      const closeNotional = closeSize * fillPrice;
+      const closeFee = closeNotional * 0.0005;
+
+      // Create trade record for the close
+      const closeTrade = await storage.createBotTrade({
+        tradingBotId: bot.id,
+        walletAddress: bot.walletAddress,
+        market: bot.market,
+        side: closeSide.toUpperCase(),
+        size: String(closeSize),
+        price: String(fillPrice),
+        fee: String(closeFee),
+        status: "executed",
+        txSignature: result.txSignature,
+        webhookPayload: { action: "manual_close", reason: "User requested position close" },
+      });
+
+      // Sync position from on-chain (updates database with actual Drift state)
+      await syncPositionFromOnChain(
+        bot.id,
+        bot.walletAddress,
+        wallet.agentPublicKey,
+        subAccountId,
+        bot.market,
+        closeTrade.id,
+        closeFee,
+        fillPrice,
+        closeSide,
+        closeSize
+      );
+
+      res.json({ 
+        success: true,
+        message: "Position closed successfully",
+        closedSize: closeSize,
+        closeSide,
+        fillPrice,
+        fee: closeFee,
+        txSignature: result.txSignature,
+        tradeId: closeTrade.id
+      });
+    } catch (error) {
+      console.error("Close position error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   app.post("/api/agent/confirm-deposit", requireWallet, async (req, res) => {
     try {
       const { amount, txSignature } = req.body;
