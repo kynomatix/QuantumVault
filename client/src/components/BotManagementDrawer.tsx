@@ -1331,7 +1331,12 @@ export function BotManagementDrawer({
                           <span className="font-mono text-sm font-medium">
                             {parseFloat(trade.size).toFixed(4)}
                           </span>
-                          <p className="text-xs text-muted-foreground">contracts</p>
+                          <p className="text-xs text-muted-foreground">contracts @ ${parseFloat(trade.price || '0').toFixed(2)}</p>
+                          {(trade as any).pnl !== null && (trade as any).pnl !== undefined && (
+                            <p className={`text-xs font-medium ${parseFloat((trade as any).pnl) >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                              {parseFloat((trade as any).pnl) >= 0 ? '+' : ''}${parseFloat((trade as any).pnl).toFixed(2)} PnL
+                            </p>
+                          )}
                         </div>
                       </div>
                     );

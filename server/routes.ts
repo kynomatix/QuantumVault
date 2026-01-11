@@ -838,6 +838,22 @@ export async function registerRoutes(
       const closeNotional = closeSize * fillPrice;
       const closeFee = closeNotional * 0.0005;
 
+      // Calculate trade PnL based on entry and exit prices
+      // closeSide = 'short' means we're closing a LONG (bought low, selling high)
+      // closeSide = 'long' means we're closing a SHORT (sold high, buying low)
+      const entryPrice = onChainPosition.entryPrice || 0;
+      let tradePnl = 0;
+      if (entryPrice > 0 && fillPrice > 0) {
+        if (closeSide === 'short') {
+          // Closing LONG: profit if exitPrice > entryPrice
+          tradePnl = (fillPrice - entryPrice) * closeSize - closeFee;
+        } else {
+          // Closing SHORT: profit if entryPrice > exitPrice
+          tradePnl = (entryPrice - fillPrice) * closeSize - closeFee;
+        }
+        console.log(`[ClosePosition] Trade PnL: entry=$${entryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${tradePnl.toFixed(4)}`);
+      }
+
       // CRITICAL: Verify on-chain that position is actually closed
       let verificationWarning: string | null = null;
       try {
@@ -860,7 +876,7 @@ export async function registerRoutes(
         console.warn(`[ClosePosition] Could not verify post-close position:`, verifyErr);
       }
 
-      // Create trade record for the close
+      // Create trade record for the close with PnL
       const closeTrade = await storage.createBotTrade({
         tradingBotId: bot.id,
         walletAddress: bot.walletAddress,
@@ -869,9 +885,10 @@ export async function registerRoutes(
         size: String(closeSize),
         price: String(fillPrice),
         fee: String(closeFee),
+        pnl: tradePnl !== 0 ? String(tradePnl) : null,
         status: "executed",
         txSignature: txSignature,
-        webhookPayload: { action: "manual_close", reason: "User requested position close" },
+        webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice, exitPrice: fillPrice },
         errorMessage: verificationWarning,
       });
 
@@ -1217,15 +1234,18 @@ export async function registerRoutes(
         const pauseSubAccountId = bot.driftSubaccountId ?? 0;
         let actualPositionSize = 0;
         
+        let pauseEntryPrice = 0;
+        let pauseOnChainPosition: any = null;
         try {
           const onChainPositions = await getPerpPositions(wallet!.agentPublicKey!, pauseSubAccountId);
           const marketName = bot.market.toUpperCase();
-          const onChainPosition = onChainPositions.find(p => 
+          pauseOnChainPosition = onChainPositions.find(p => 
             p.market.toUpperCase() === marketName || 
             p.market.toUpperCase().replace('-', '-') === marketName
           );
-          actualPositionSize = onChainPosition?.baseAssetAmount || 0;
-          console.log(`[Bot] On-chain position for ${bot.market}: ${actualPositionSize}`);
+          actualPositionSize = pauseOnChainPosition?.baseAssetAmount || 0;
+          pauseEntryPrice = pauseOnChainPosition?.entryPrice || 0;
+          console.log(`[Bot] On-chain position for ${bot.market}: ${actualPositionSize} @ entry $${pauseEntryPrice}`);
         } catch (err) {
           console.error(`[Bot] CRITICAL: Failed to query on-chain position:`, err);
           // DO NOT fall back to database - that's what caused the bug!
@@ -1286,21 +1306,36 @@ export async function registerRoutes(
               }
               
               // Calculate fee (0.05% taker fee on notional value)
-              const closeNotional = closeSize * (result.fillPrice || 0);
+              const pauseFillPrice = result.fillPrice || 0;
+              const closeNotional = closeSize * pauseFillPrice;
               const closeFee = closeNotional * 0.0005;
               
-              // Create trade record for the close
+              // Calculate trade PnL for pause close
+              let pauseClosePnl = 0;
+              if (pauseEntryPrice > 0 && pauseFillPrice > 0) {
+                if (closeSide === 'short') {
+                  // Closing LONG: profit if exitPrice > entryPrice
+                  pauseClosePnl = (pauseFillPrice - pauseEntryPrice) * closeSize - closeFee;
+                } else {
+                  // Closing SHORT: profit if entryPrice > exitPrice
+                  pauseClosePnl = (pauseEntryPrice - pauseFillPrice) * closeSize - closeFee;
+                }
+                console.log(`[Bot] Pause close PnL: entry=$${pauseEntryPrice.toFixed(2)}, exit=$${pauseFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${pauseClosePnl.toFixed(4)}`);
+              }
+              
+              // Create trade record for the close with PnL
               const closeTrade = await storage.createBotTrade({
                 tradingBotId: bot.id,
                 walletAddress: bot.walletAddress,
                 market: bot.market,
                 side: closeSide.toUpperCase(),
                 size: String(closeSize),
-                price: result.fillPrice ? String(result.fillPrice) : "0",
+                price: pauseFillPrice ? String(pauseFillPrice) : "0",
                 fee: String(closeFee),
+                pnl: pauseClosePnl !== 0 ? String(pauseClosePnl) : null,
                 status: "executed",
                 txSignature: result.txSignature,
-                webhookPayload: { action: "pause_close", reason: "Bot paused by user" },
+                webhookPayload: { action: "pause_close", reason: "Bot paused by user", entryPrice: pauseEntryPrice, exitPrice: pauseFillPrice },
               });
               
               // Sync position from on-chain (replaces client-side math with actual Drift state)
@@ -1867,6 +1902,20 @@ export async function registerRoutes(
             const closeNotional = closeSize * closeFillPrice;
             const closeFee = closeNotional * 0.0005;
             
+            // Calculate trade PnL based on entry and exit prices
+            const closeEntryPrice = onChainPosition.entryPrice || 0;
+            let closeTradePnl = 0;
+            if (closeEntryPrice > 0 && closeFillPrice > 0) {
+              if (closeSide === 'short') {
+                // Closing LONG: profit if exitPrice > entryPrice
+                closeTradePnl = (closeFillPrice - closeEntryPrice) * closeSize - closeFee;
+              } else {
+                // Closing SHORT: profit if entryPrice > exitPrice
+                closeTradePnl = (closeEntryPrice - closeFillPrice) * closeSize - closeFee;
+              }
+              console.log(`[Webhook] Close PnL: entry=$${closeEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${closeTradePnl.toFixed(4)}`);
+            }
+            
             // CRITICAL: Verify on-chain that position is actually closed
             // This prevents issues where reduceOnly wasn't respected
             try {
@@ -1890,6 +1939,7 @@ export async function registerRoutes(
                   txSignature: txSignature,
                   price: signalPrice,
                   fee: String(closeFee),
+                  pnl: closeTradePnl !== 0 ? String(closeTradePnl) : null,
                   errorMessage: `WARNING: Position not fully closed. Remaining: ${postClosePosition.side} ${postClosePosition.size}`,
                 });
                 
@@ -1921,12 +1971,13 @@ export async function registerRoutes(
               // Continue anyway - the order executed successfully
             }
             
-            // Update trade record with execution details
+            // Update trade record with execution details and PnL
             await storage.updateBotTrade(closeTrade.id, {
               status: "executed",
               txSignature: txSignature,
               price: signalPrice,
               fee: String(closeFee),
+              pnl: closeTradePnl !== 0 ? String(closeTradePnl) : null,
             });
             
             // Sync position from on-chain (replaces client-side math with actual Drift state)
@@ -2096,11 +2147,26 @@ export async function registerRoutes(
             const closeNotional = closeSize * closeFillPrice;
             const closeFee = closeNotional * 0.0005;
             
+            // Calculate trade PnL for position flip close
+            const flipEntryPrice = onChainPosition.entryPrice || 0;
+            let flipClosePnl = 0;
+            if (flipEntryPrice > 0 && closeFillPrice > 0) {
+              if (closeSide === 'short') {
+                // Closing LONG: profit if exitPrice > entryPrice
+                flipClosePnl = (closeFillPrice - flipEntryPrice) * closeSize - closeFee;
+              } else {
+                // Closing SHORT: profit if entryPrice > exitPrice
+                flipClosePnl = (flipEntryPrice - closeFillPrice) * closeSize - closeFee;
+              }
+              console.log(`[Webhook] Flip close PnL: entry=$${flipEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${flipClosePnl.toFixed(4)}`);
+            }
+            
             await storage.updateBotTrade(closeTrade.id, {
               status: "executed",
               txSignature: flipTxSignature,
               price: String(closeFillPrice),
               fee: String(closeFee),
+              pnl: flipClosePnl !== 0 ? String(flipClosePnl) : null,
             });
           
             // Sync position from on-chain (replaces client-side math with actual Drift state)
