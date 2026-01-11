@@ -1024,19 +1024,52 @@ export async function registerRoutes(
   app.get("/api/trading-bots", requireWallet, async (req, res) => {
     try {
       const bots = await storage.getTradingBots(req.walletAddress!);
+      const wallet = await storage.getWallet(req.walletAddress!);
       
-      // Enrich with actual trade counts and position data from database
+      // Enrich with actual trade counts, position data, and net PnL from database
       const enrichedBots = await Promise.all(bots.map(async (bot) => {
         const [tradeCount, position] = await Promise.all([
           storage.getBotTradeCount(bot.id),
           storage.getBotPosition(bot.id, bot.market),
         ]);
         
+        // Calculate net deposited from equity events for this bot's subaccount
+        let netDeposited = 0;
+        let driftBalance = 0;
+        let netPnl = 0;
+        let netPnlPercent = 0;
+        
+        try {
+          // Get equity events to calculate net deposited
+          const events = await storage.getEquityEvents(req.walletAddress!, 1000);
+          const botDeposits = events.filter(e => 
+            (e.eventType === 'drift_deposit' || e.eventType === 'drift_withdraw') &&
+            e.notes?.includes(`subaccount ${bot.driftSubaccountId}`)
+          );
+          netDeposited = botDeposits.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+          
+          // Get drift balance for this bot's subaccount
+          if (wallet?.agentPublicKey) {
+            const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, bot.driftSubaccountId ?? 0);
+            driftBalance = accountInfo.totalCollateral;
+          }
+          
+          // Calculate true Net P&L = drift balance - net deposited
+          netPnl = driftBalance - netDeposited;
+          netPnlPercent = netDeposited > 0 ? (netPnl / netDeposited) * 100 : 0;
+        } catch (err) {
+          console.warn(`[trading-bots] Failed to calculate net PnL for bot ${bot.id}:`, err);
+        }
+        
         return {
           ...bot,
           actualTradeCount: tradeCount,
           realizedPnl: position?.realizedPnl || "0",
           totalFees: position?.totalFees || "0",
+          driftBalance,
+          netDeposited,
+          netPnl,
+          netPnlPercent,
         };
       }));
       

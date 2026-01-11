@@ -897,11 +897,11 @@ export default function AppPage() {
                             </div>
                             <div className="flex items-center justify-between text-xs">
                               <span className="text-muted-foreground">{(bot as any).actualTradeCount ?? (bot.stats as any)?.totalTrades ?? 0} trades</span>
-                              <span className={parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                                {parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? '+' : ''}${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
-                                {parseFloat(bot.maxPositionSize || '0') > 0 && (
+                              <span className={((bot as any).netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                                {((bot as any).netPnl ?? 0) >= 0 ? '+' : ''}${((bot as any).netPnl ?? 0).toFixed(2)}
+                                {((bot as any).netDeposited ?? 0) > 0 && (
                                   <span className="ml-1">
-                                    ({((parseFloat((bot as any).realizedPnl ?? 0) / parseFloat(bot.maxPositionSize || '1')) * 100).toFixed(1)}%)
+                                    ({((bot as any).netPnlPercent ?? 0).toFixed(1)}%)
                                   </span>
                                 )}
                               </span>
@@ -1074,15 +1074,15 @@ export default function AppPage() {
                             <p className="text-xs text-muted-foreground">Leverage</p>
                           </div>
                           <div className="p-2 rounded-lg bg-muted/30">
-                            <p className={`text-lg font-bold ${parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              {parseFloat((bot as any).realizedPnl ?? 0) >= 0 ? '+' : ''}${parseFloat((bot as any).realizedPnl ?? 0).toFixed(2)}
-                              {parseFloat(bot.maxPositionSize || '0') > 0 && (
+                            <p className={`text-lg font-bold ${((bot as any).netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {((bot as any).netPnl ?? 0) >= 0 ? '+' : ''}${((bot as any).netPnl ?? 0).toFixed(2)}
+                              {((bot as any).netDeposited ?? 0) > 0 && (
                                 <span className="text-xs ml-1">
-                                  ({((parseFloat((bot as any).realizedPnl ?? 0) / parseFloat(bot.maxPositionSize || '1')) * 100).toFixed(1)}%)
+                                  ({((bot as any).netPnlPercent ?? 0).toFixed(1)}%)
                                 </span>
                               )}
                             </p>
-                            <p className="text-xs text-muted-foreground">PnL</p>
+                            <p className="text-xs text-muted-foreground">Net P&L</p>
                           </div>
                         </div>
                       </div>
