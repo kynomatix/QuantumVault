@@ -814,24 +814,34 @@ export async function registerRoutes(
 
       console.log(`[ClosePosition] Close order executed: ${txSignature}`);
 
-      // Fetch current ticker price for accurate trade record
+      // Get entry price FIRST from on-chain position (captured before close)
+      const entryPrice = onChainPosition.entryPrice || 0;
+      console.log(`[ClosePosition] Entry price from on-chain: $${entryPrice}`);
+
+      // Fetch current ticker price for accurate exit price
       let fillPrice = 0;
       try {
         const priceRes = await fetch(`http://localhost:5000/api/prices`);
         if (priceRes.ok) {
           const priceData = await priceRes.json();
-          // Map market name to price key (e.g., "SOL-PERP" -> "SOL-PERP")
+          console.log(`[ClosePosition] Price data keys: ${Object.keys(priceData).join(', ')}, looking for: ${bot.market}`);
           fillPrice = priceData[bot.market] || 0;
-          console.log(`[ClosePosition] Fetched ticker price for ${bot.market}: $${fillPrice}`);
+          if (fillPrice > 0) {
+            console.log(`[ClosePosition] Fetched ticker price for ${bot.market}: $${fillPrice}`);
+          } else {
+            console.warn(`[ClosePosition] Market ${bot.market} not found in price data`);
+          }
+        } else {
+          console.warn(`[ClosePosition] Price fetch failed with status: ${priceRes.status}`);
         }
       } catch (priceErr) {
         console.warn(`[ClosePosition] Could not fetch ticker price:`, priceErr);
       }
       
-      // Fallback: use entry price if ticker fetch failed
-      if (!fillPrice && onChainPosition.entryPrice) {
-        fillPrice = onChainPosition.entryPrice;
-        console.log(`[ClosePosition] Using entry price as fallback: $${fillPrice}`);
+      // Fallback: use entry price if ticker fetch failed (price will be close enough for PnL estimate)
+      if (!fillPrice && entryPrice > 0) {
+        fillPrice = entryPrice;
+        console.log(`[ClosePosition] Using entry price as fallback exit price: $${fillPrice}`);
       }
 
       // Calculate fee (0.05% taker fee on notional value)
@@ -841,7 +851,6 @@ export async function registerRoutes(
       // Calculate trade PnL based on entry and exit prices
       // closeSide = 'short' means we're closing a LONG (bought low, selling high)
       // closeSide = 'long' means we're closing a SHORT (sold high, buying low)
-      const entryPrice = onChainPosition.entryPrice || 0;
       let tradePnl = 0;
       if (entryPrice > 0 && fillPrice > 0) {
         if (closeSide === 'short') {
@@ -852,6 +861,8 @@ export async function registerRoutes(
           tradePnl = (entryPrice - fillPrice) * closeSize - closeFee;
         }
         console.log(`[ClosePosition] Trade PnL: entry=$${entryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${tradePnl.toFixed(4)}`);
+      } else {
+        console.warn(`[ClosePosition] Cannot calculate PnL - entryPrice=$${entryPrice}, fillPrice=$${fillPrice}`);
       }
 
       // CRITICAL: Verify on-chain that position is actually closed
