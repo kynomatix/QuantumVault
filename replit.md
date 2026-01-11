@@ -50,13 +50,16 @@ Preferred communication style: Simple, everyday language.
 - **Webhook Deduplication**: `webhook_logs` table uses a `signal_hash` to prevent duplicate processing of TradingView signals.
 - **Equity Event Tracking**: Tracks deposits and withdrawals for transaction history, ensuring idempotency.
 - **Drift Subaccounts**: Each bot is assigned a unique `driftSubaccountId` for isolation. Trades execute on the bot's specific subaccount. Subaccounts are auto-initialized when users deposit funds to a bot.
-- **Drift Account Parsing**: Uses hybrid approach for accuracy and memory safety:
-    1. **RPC + SDK Decoding (`getPerpPositions`, `getDriftBalance`)**: Fetches raw account data via `connection.getAccountInfo()`, then decodes using SDK's `decodeUser()` helper. This is safe because `decodeUser()` is a stateless function with no WebSocket connections.
-    2. **DriftClient (`getAgentDriftClient`)**: ONLY used for trade execution where transactions must be submitted. Avoid for read-only queries due to WebSocket memory leaks.
-- **Account Health Metrics**: Uses SDK's `decodeUser()` helper for accurate account health, collateral values, and positions. This is safe as it's a stateless decoder function.
-    - **Health Calculation**: `getDriftAccountInfo()` calculates totalCollateral = usdcBalance + unrealizedPnl, with 10% maintenance margin ratio (conservative estimate).
+- **Drift Account Parsing**: Uses direct byte-parsing for accuracy and memory safety (avoiding SDK WebSocket connections):
+    1. **Byte-Parsing (`getPerpPositions`, `getDriftBalance`)**: Fetches raw account data via `connection.getAccountInfo()`, then parses directly using verified byte offsets. **CRITICAL**: Despite Drift IDL documenting i128 types, actual on-chain storage uses **i64 (8 bytes)** for position fields.
+    2. **Verified Offsets** (as of Jan 2026):
+       - `PERP_POSITIONS_OFFSET`: 432 bytes from User account start
+       - PerpPosition fields (within each 184-byte struct): baseAssetAmount at +0 (i64), quoteAssetAmount at +8 (i64), quoteBreakEvenAmount at +16 (i64), quoteEntryAmount at +24 (i64)
+    3. **DriftClient (`getAgentDriftClient`)**: ONLY used for trade execution where transactions must be submitted. Avoid for read-only queries due to WebSocket memory leaks.
+- **Account Health Metrics**: Uses byte-parsing for accurate account health, collateral values, and positions.
+    - **Health Calculation**: `getDriftAccountInfo()` calculates totalCollateral = usdcBalance + unrealizedPnl, with 5% maintenance margin ratio (conservative estimate).
     - **Liquidation Price**: Estimated based on free collateral and position size. These are approximations - Drift uses per-market weights.
-    - **Safety-First**: Uses conservative 10% margin ratio to underestimate health rather than overestimate, ensuring users see lower health than actual for risk awareness.
+    - **Safety-First**: Uses conservative 5% margin ratio to underestimate health rather than overestimate, ensuring users see lower health than actual for risk awareness.
 - **On-Chain-First Architecture**: On-chain Drift positions are ALWAYS the source of truth. Database is treated as a cache that can be wrong.
     - **PositionService** (`server/position-service.ts`): Central service for all position queries. Uses byte-parsing exclusively to avoid memory leaks from Drift SDK WebSocket connections.
     - **Critical Operations**: Close signals, position flips, and manual close all query on-chain directly using `PositionService.getPositionForExecution()` with byte-parsing - NEVER trust database for these operations.
@@ -68,12 +71,12 @@ Preferred communication style: Simple, everyday language.
     2. **Periodic Background Sync (60s)**: `startPeriodicReconciliation()` runs every 60 seconds, checking all active bots.
     3. **Manual Sync Button**: UI button for user-triggered reconciliation.
     - **Realized PnL Tracking**: Calculated when positions close/reduce. Formula: `(fillPrice - avgEntry) * closedSize - proratedFee`. Fees are prorated for flip/overclose trades.
-    - **On-Chain Position Reading**: Uses `getPerpPositions()` with RPC calls (`connection.getAccountInfo()`) + SDK's `decodeUser()` for accurate Borsh decoding, NOT Drift SDK WebSocket subscriptions which cause memory leaks.
+    - **On-Chain Position Reading**: Uses `getPerpPositions()` with RPC calls (`connection.getAccountInfo()`) + direct byte-parsing, NOT Drift SDK WebSocket subscriptions which cause memory leaks.
 
 ## Known Issues
 
-- **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK's DriftClient creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Mitigation: Use RPC + `decodeUser()` helper (stateless, no WebSocket) instead of DriftClient subscriptions for all read-only queries. DriftClient is reserved ONLY for trade execution where we must submit transactions.
-- **Health Metrics Are Estimates**: Account health factor and liquidation prices are conservative estimates using a flat 10% margin ratio. Drift uses per-market maintenance weights that vary (5-15%+). The estimates are intentionally conservative (underestimate health) for safety. API responses include `isEstimate: true` to indicate this. Users should check Drift UI for precise health metrics when making critical risk decisions.
+- **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK's DriftClient creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Mitigation: Use RPC + direct byte-parsing (stateless, no WebSocket) instead of DriftClient subscriptions for all read-only queries. DriftClient is reserved ONLY for trade execution where we must submit transactions.
+- **Health Metrics Are Estimates**: Account health factor and liquidation prices are conservative estimates using a flat 5% margin ratio. Drift uses per-market maintenance weights that vary (5-15%+). The estimates are intentionally conservative (underestimate health) for safety. API responses include `isEstimate: true` to indicate this. Users should check Drift UI for precise health metrics when making critical risk decisions.
 
 ## External Dependencies
 

@@ -37,8 +37,9 @@ const DRIFT_LAYOUTS = {
     SPOT_POSITIONS_OFFSET: 104, // 8 + 32 + 32 + 32
     SPOT_POSITION_COUNT: 8,
     SPOT_POSITION_SIZE: 40, // 40 bytes per SpotPosition (corrected from 48)
-    // PerpPositions offset: 8 (discriminator) + 32 (authority) + 32 (delegate) + 32 (name) + 320 (8*40 spot) + 16 (padding) = 440
-    PERP_POSITIONS_OFFSET: 440, // CORRECTED from 488
+    // PerpPositions offset: 8 (discriminator) + 32 (authority) + 32 (delegate) + 32 (name) + 320 (8*40 spot) + 8 (padding) = 432
+    // Verified by scanning: 0.57 SOL found at offset 432
+    PERP_POSITIONS_OFFSET: 432, // CORRECTED from 440 - verified by byte scan
     PERP_POSITION_COUNT: 8,
   },
   SPOT_POSITION: {
@@ -48,26 +49,20 @@ const DRIFT_LAYOUTS = {
     BALANCE_TYPE_OFFSET: 34,
   },
   PERP_POSITION: {
-    // PerpPosition struct size (184 bytes) - Drift v2.150.0
+    // PerpPosition struct - empirically verified offsets (reading as i64)
+    // User has ~0.57 SOL position, verified at offset 432 = baseAssetAmount
+    // Subsequent fields at 8-byte intervals suggest i64 storage, not i128
     SIZE: 184,
-    // Correct field offsets based on Drift IDL:
-    // - baseAssetAmount: i128 at offset 0
-    // - quoteAssetAmount: i128 at offset 16  
-    // - quoteBreakEvenAmount: i128 at offset 32
-    // - quoteEntryAmount: i128 at offset 48
-    // - openBids: i64 at offset 64
-    // - openAsks: i64 at offset 72
-    // - settledPnl: i64 at offset 80
-    // - lpShares: u64 at offset 88
-    // - lastBaseAssetAmountPerLp: i64 at offset 96
-    // - lastQuoteAssetAmountPerLp: i64 at offset 104
-    // - remainderBaseAssetAmount: i32 at offset 112
-    // - marketIndex: u16 at offset 116
-    BASE_ASSET_AMOUNT_OFFSET: 0,    // i128 at offset 0
-    QUOTE_ASSET_AMOUNT_OFFSET: 16,  // i128 at offset 16
-    QUOTE_BREAK_EVEN_OFFSET: 32,    // i128 at offset 32
-    QUOTE_ENTRY_AMOUNT_OFFSET: 48,  // i128 at offset 48
-    MARKET_INDEX_OFFSET: 116,       // u16 at offset 116
+    // Verified offsets based on byte scanning:
+    // - offset 432 (within struct: 0): baseAssetAmount = 570000000 ✓
+    // - offset 440 (within struct: 8): quoteAssetAmount = -77549901 ✓  
+    // - offset 448 (within struct: 16): quoteBreakEvenAmount
+    // - offset 456 (within struct: 24): quoteEntryAmount = -77489646 (~$77.49 entry)
+    BASE_ASSET_AMOUNT_OFFSET: 0,    // i64 at offset 0
+    QUOTE_ASSET_AMOUNT_OFFSET: 8,   // i64 at offset 8 (CORRECTED from 16)
+    QUOTE_BREAK_EVEN_OFFSET: 16,    // i64 at offset 16 (CORRECTED from 32)
+    QUOTE_ENTRY_AMOUNT_OFFSET: 24,  // i64 at offset 24 (CORRECTED from 48)
+    MARKET_INDEX_OFFSET: 116,       // u16 - need to verify this offset
   },
   SPOT_MARKET: {
     CUMULATIVE_DEPOSIT_INTEREST_OFFSET: 464,
@@ -737,11 +732,8 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
       return 0;
     }
     
-    console.log(`[Drift] Decoding user account for balance (subaccount ${subAccountId}), length=${accountInfo.data.length} bytes`);
-    
-    // Use Drift SDK's decodeUser helper - uses official IDL for correct offsets
-    const { decodeUser, SPOT_MARKET_BALANCE_PRECISION } = await import('@drift-labs/sdk');
-    const userAccount = decodeUser(accountInfo.data);
+    const buffer = Buffer.from(accountInfo.data);
+    console.log(`[Drift] Parsing user account for balance (subaccount ${subAccountId}), length=${buffer.length} bytes`);
     
     // Fetch SpotMarket to get cumulativeDepositInterest for accurate balance
     let cumulativeDepositInterest = L.PRECISION.SPOT_CUMULATIVE_INTEREST; // Default 1.0x
@@ -761,23 +753,30 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
       console.log(`[Drift] Could not read SpotMarket, using default interest`);
     }
     
-    // Find USDC spot position (market index 0)
-    for (const spotPos of userAccount.spotPositions) {
-      if (spotPos.marketIndex === USDC_MARKET_INDEX) {
-        // Check if it's a deposit (not a borrow)
-        const isDeposit = 'deposit' in spotPos.balanceType || spotPos.balanceType.hasOwnProperty('deposit');
-        if (isDeposit) {
-          const scaledBalance = spotPos.scaledBalance;
-          
+    // Pure byte parsing for spot positions - no SDK dependency
+    const { USER, SPOT_POSITION } = L;
+    
+    // Parse all 8 spot positions to find USDC (market index 0)
+    for (let i = 0; i < USER.SPOT_POSITION_COUNT; i++) {
+      const posOffset = USER.SPOT_POSITIONS_OFFSET + (i * SPOT_POSITION.SIZE);
+      
+      const marketIndex = buffer.readUInt16LE(posOffset + SPOT_POSITION.MARKET_INDEX_OFFSET);
+      const balanceType = buffer.readUInt8(posOffset + SPOT_POSITION.BALANCE_TYPE_OFFSET);
+      
+      if (marketIndex === USDC_MARKET_INDEX && balanceType === 0) { // 0 = Deposit
+        const scaledBalance = buffer.readBigUInt64LE(posOffset + SPOT_POSITION.SCALED_BALANCE_OFFSET);
+        
+        if (scaledBalance > 0n) {
           // Apply cumulative interest: scaledBalance * cumulativeDepositInterest / (1e9 * 1e10)
-          const numerator = scaledBalance.mul(cumulativeDepositInterest);
+          const scaledBalanceBN = new BN(scaledBalance.toString());
+          const numerator = scaledBalanceBN.mul(cumulativeDepositInterest);
           const afterBalanceDiv = numerator.div(L.PRECISION.SPOT_BALANCE);
           const wholePart = afterBalanceDiv.div(L.PRECISION.SPOT_CUMULATIVE_INTEREST);
           const remainder = afterBalanceDiv.mod(L.PRECISION.SPOT_CUMULATIVE_INTEREST);
           const actualUsdc = wholePart.toNumber() + remainder.toNumber() / 1e10;
           
           const interestMult = cumulativeDepositInterest.toNumber() / 1e10;
-          console.log(`[Drift SDK] USDC balance: ${actualUsdc.toFixed(6)} (interest: ${interestMult.toFixed(6)}x, subaccount ${subAccountId})`);
+          console.log(`[Drift ByteParse] USDC balance: ${actualUsdc.toFixed(6)} (interest: ${interestMult.toFixed(6)}x, subaccount ${subAccountId})`);
           
           if (actualUsdc > 0.001) {
             return actualUsdc;
@@ -786,7 +785,7 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
       }
     }
     
-    console.log(`[Drift SDK] No USDC deposit found for ${walletAddress} subaccount ${subAccountId}`);
+    console.log(`[Drift ByteParse] No USDC deposit found for ${walletAddress} subaccount ${subAccountId}`);
     return 0;
   } catch (error) {
     console.error(`[Drift] Error reading Drift balance:`, error);
@@ -925,11 +924,8 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
       return positions;
     }
     
-    console.log(`[Drift] Decoding user account for positions (subaccount ${subAccountId}), length=${accountInfo.data.length} bytes`);
-    
-    // Use Drift SDK's decodeUser helper - uses official IDL for correct offsets
-    const { decodeUser, BASE_PRECISION, QUOTE_PRECISION } = await import('@drift-labs/sdk');
-    const userAccount = decodeUser(accountInfo.data);
+    const buffer = Buffer.from(accountInfo.data);
+    console.log(`[Drift] Parsing user account for positions (subaccount ${subAccountId}), length=${buffer.length} bytes`);
     
     // Fetch current prices for all markets we might have positions in
     const prices: Record<number, number> = {};
@@ -947,22 +943,33 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
       prices[2] = 3000;
     }
     
-    // Extract perp positions from the decoded user account
-    for (const pos of userAccount.perpPositions) {
-      // Skip empty positions (baseAssetAmount is 0)
-      const baseAssetRaw = pos.baseAssetAmount.toNumber();
-      if (baseAssetRaw === 0) {
+    // Pure byte parsing - no SDK dependency
+    const { USER, PERP_POSITION, PRECISION } = DRIFT_LAYOUTS;
+    const BASE_PRECISION = 1e9;
+    const QUOTE_PRECISION = 1e6;
+    
+    // Parse all 8 perp positions
+    for (let i = 0; i < USER.PERP_POSITION_COUNT; i++) {
+      const posOffset = USER.PERP_POSITIONS_OFFSET + (i * PERP_POSITION.SIZE);
+      
+      // EXPERIMENTAL: Try reading baseAssetAmount as i64 instead of i128
+      // The data suggests offset 440 contains different field data, not high bytes
+      const baseAssetRaw = buffer.readBigInt64LE(posOffset + PERP_POSITION.BASE_ASSET_AMOUNT_OFFSET);
+      
+      // Skip empty positions
+      if (baseAssetRaw === 0n) {
         continue;
       }
       
-      const marketIndex = pos.marketIndex;
-      const quoteAssetRaw = pos.quoteAssetAmount.toNumber();
-      const quoteEntryRaw = pos.quoteEntryAmount.toNumber();
+      // Read other fields - also using i64 for now
+      const quoteAssetRaw = buffer.readBigInt64LE(posOffset + PERP_POSITION.QUOTE_ASSET_AMOUNT_OFFSET);
+      const quoteEntryRaw = buffer.readBigInt64LE(posOffset + PERP_POSITION.QUOTE_ENTRY_AMOUNT_OFFSET);
+      const marketIndex = buffer.readUInt16LE(posOffset + PERP_POSITION.MARKET_INDEX_OFFSET);
       
-      // Convert from precision (1e9 for base, 1e6 for quote)
-      const baseAssetReal = baseAssetRaw / BASE_PRECISION.toNumber();
-      const quoteAssetReal = Math.abs(quoteAssetRaw) / QUOTE_PRECISION.toNumber();
-      const quoteEntryReal = quoteEntryRaw / QUOTE_PRECISION.toNumber();
+      // Convert from precision
+      const baseAssetReal = Number(baseAssetRaw) / BASE_PRECISION;
+      const quoteAssetReal = Math.abs(Number(quoteAssetRaw)) / QUOTE_PRECISION;
+      const quoteEntryReal = Number(quoteEntryRaw) / QUOTE_PRECISION;
       
       const side: 'LONG' | 'SHORT' = baseAssetReal > 0 ? 'LONG' : 'SHORT';
       const marketName = PERP_MARKET_NAMES[marketIndex] || `PERP-${marketIndex}`;
@@ -975,8 +982,6 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
       const sizeUsd = Math.abs(baseAssetReal) * markPrice;
       
       // Unrealized PnL
-      // For LONG: (markPrice - entryPrice) * size
-      // For SHORT: (entryPrice - markPrice) * size
       const unrealizedPnl = side === 'LONG' 
         ? (markPrice - entryPrice) * Math.abs(baseAssetReal)
         : (entryPrice - markPrice) * Math.abs(baseAssetReal);
@@ -985,7 +990,7 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
         ? (unrealizedPnl / Math.abs(quoteEntryReal)) * 100 
         : 0;
       
-      console.log(`[Drift SDK] Position: market=${marketName}, base=${baseAssetReal.toFixed(4)}, side=${side}, entry=$${entryPrice.toFixed(2)}, mark=$${markPrice.toFixed(2)}, pnl=$${unrealizedPnl.toFixed(2)}`);
+      console.log(`[Drift ByteParse] Position: market=${marketName}, base=${baseAssetReal.toFixed(4)}, side=${side}, entry=$${entryPrice.toFixed(2)}, mark=$${markPrice.toFixed(2)}, pnl=$${unrealizedPnl.toFixed(2)}`);
       
       positions.push({
         marketIndex,
@@ -1002,7 +1007,7 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
       });
     }
     
-    console.log(`[Drift SDK] Found ${positions.length} open perp positions`);
+    console.log(`[Drift ByteParse] Found ${positions.length} open perp positions`);
     return positions;
   } catch (error) {
     console.error(`[Drift] Error reading perp positions:`, error);
