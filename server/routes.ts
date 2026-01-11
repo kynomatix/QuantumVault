@@ -95,11 +95,18 @@ export async function registerRoutes(
     const headerWallet = req.query.wallet || req.body.walletAddress || req.headers['x-wallet-address'];
     const sessionWallet = req.session?.walletAddress;
     
+    // Debug logging for close-position requests
+    if (req.path.includes('close-position')) {
+      console.log(`[requireWallet] close-position request - sessionWallet: ${sessionWallet}, headerWallet: ${headerWallet}`);
+    }
+    
     if (!sessionWallet) {
+      console.log(`[requireWallet] Rejecting - no session wallet for ${req.method} ${req.path}`);
       return res.status(401).json({ error: "Wallet not connected - please connect your wallet first" });
     }
     
     if (headerWallet && sessionWallet !== headerWallet) {
+      console.log(`[requireWallet] Rejecting - wallet mismatch for ${req.method} ${req.path}: session=${sessionWallet}, header=${headerWallet}`);
       return res.status(403).json({ error: "Wallet mismatch - please reconnect wallet" });
     }
     
