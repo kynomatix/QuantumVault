@@ -180,7 +180,8 @@ async function ensureAgentHasSolForFees(agentPubkey: PublicKey): Promise<{ succe
 }
 
 async function getAgentDriftClient(
-  encryptedPrivateKey: string
+  encryptedPrivateKey: string,
+  subAccountId: number = 0
 ): Promise<{ driftClient: any; cleanup: () => Promise<void> }> {
   const { DriftClient, Wallet, initialize } = await import('@drift-labs/sdk');
   
@@ -197,9 +198,24 @@ async function getAgentDriftClient(
     wallet,
     programID: new PublicKey(sdkConfig.DRIFT_PROGRAM_ID),
     env: sdkEnv,
+    activeSubAccountId: subAccountId,
+    subAccountIds: [subAccountId],
   });
   
   await driftClient.subscribe();
+  
+  // If using a non-zero subaccount, verify it exists before trading
+  if (subAccountId !== 0) {
+    try {
+      const user = driftClient.getUser();
+      const userExists = user && user.getUserAccount();
+      if (!userExists) {
+        console.warn(`[Drift] Subaccount ${subAccountId} not initialized, trades may fail`);
+      }
+    } catch (e) {
+      console.warn(`[Drift] Could not verify subaccount ${subAccountId}:`, e);
+    }
+  }
   
   return {
     driftClient,
@@ -1700,15 +1716,10 @@ export async function executePerpOrder(
     
     console.log(`[Drift] Executing ${side} ${reduceOnly ? 'REDUCE-ONLY ' : ''}order for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}`);
     
-    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey);
+    // Create DriftClient configured for the specific subaccount
+    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
     
     try {
-      // NOTE: Currently all trades execute on subaccount 0
-      // Multi-subaccount support requires additional setup (addUser + proper PDA derivation)
-      // This is marked as future implementation in the architecture
-      if (subAccountId !== 0) {
-        console.log(`[Drift] Bot configured for subaccount ${subAccountId}, but executing on subaccount 0 (multi-subaccount not yet implemented)`);
-      }
       
       // Convert size to base precision (1e9)
       const basePrecision = new BN(BASE_PRECISION.toString());
@@ -1806,6 +1817,7 @@ export async function executePerpOrder(
 export async function closePerpPosition(
   encryptedPrivateKey: string,
   market: string,
+  subAccountId: number = 0,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const { PositionDirection, OrderType, MarketType } = await import('@drift-labs/sdk');
@@ -1813,9 +1825,9 @@ export async function closePerpPosition(
     const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
     const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
     
-    console.log(`[Drift] Closing position for ${market} (index ${marketIndex})`);
+    console.log(`[Drift] Closing position for ${market} (index ${marketIndex}) on subaccount ${subAccountId}`);
     
-    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey);
+    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
     
     try {
       // Get current position
@@ -1885,7 +1897,7 @@ export async function getAccountHealthMetrics(
     
     console.log(`[Drift] Fetching health metrics for subaccount ${subAccountId}`);
     
-    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey);
+    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
     
     try {
       const user = driftClient.getUser();
