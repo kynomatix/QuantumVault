@@ -57,6 +57,33 @@ async function fetchPrices(): Promise<Record<string, number>> {
   return res.json();
 }
 
+export interface HealthMetrics {
+  healthFactor: number;
+  marginRatio: number;
+  totalCollateral: number;
+  freeCollateral: number;
+  unrealizedPnl: number;
+  positions: Array<{
+    marketIndex: number;
+    market: string;
+    baseSize: number;
+    notionalValue: number;
+    liquidationPrice: number | null;
+    entryPrice: number;
+    unrealizedPnl: number;
+  }>;
+}
+
+async function fetchHealthMetrics(): Promise<HealthMetrics | null> {
+  try {
+    const res = await fetch("/api/health-metrics", { credentials: "include" });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
 async function fetchTradingBots(walletAddress: string) {
   const res = await fetch(`/api/trading-bots?wallet=${walletAddress}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch trading bots");
@@ -195,5 +222,16 @@ export function useTradingBots() {
     refetchOnMount: true,
     staleTime: 1000,
     refetchOnWindowFocus: true,
+  });
+}
+
+export function useHealthMetrics() {
+  const { publicKeyString, sessionConnected } = useWallet();
+  return useQuery({
+    queryKey: ["healthMetrics", publicKeyString],
+    queryFn: fetchHealthMetrics,
+    enabled: !!publicKeyString && sessionConnected,
+    refetchInterval: 10000,
+    staleTime: 8000,
   });
 }

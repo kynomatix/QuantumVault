@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, type HealthMetrics } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
@@ -118,6 +118,7 @@ export default function AppPage() {
   const { data: botsData, refetch: refetchBots } = useTradingBots();
   const { data: leaderboardData } = useLeaderboard(100);
   const { data: pricesData } = usePrices();
+  const { data: healthMetrics } = useHealthMetrics();
   const subscribeBot = useSubscribeToBot();
   const updateSub = useUpdateSubscription();
 
@@ -718,6 +719,53 @@ export default function AppPage() {
                   </div>
                 </div>
 
+                {healthMetrics && positionsData && positionsData.length > 0 && (
+                  <div className="gradient-border p-4 noise">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="font-display font-semibold text-sm">Account Health</h3>
+                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                        healthMetrics.healthFactor >= 50 ? 'bg-emerald-500/20 text-emerald-400' :
+                        healthMetrics.healthFactor >= 20 ? 'bg-amber-500/20 text-amber-400' :
+                        'bg-red-500/20 text-red-400'
+                      }`}>
+                        {healthMetrics.healthFactor >= 50 ? 'Healthy' :
+                         healthMetrics.healthFactor >= 20 ? 'Warning' : 'At Risk'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div>
+                        <p className="text-xs text-muted-foreground">Health Factor</p>
+                        <p className={`text-lg font-mono font-semibold ${
+                          healthMetrics.healthFactor >= 50 ? 'text-emerald-400' :
+                          healthMetrics.healthFactor >= 20 ? 'text-amber-400' : 'text-red-400'
+                        }`} data-testid="text-health-factor">
+                          {healthMetrics.healthFactor.toFixed(0)}%
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">Total Collateral</p>
+                        <p className="text-lg font-mono font-semibold" data-testid="text-total-collateral">
+                          ${healthMetrics.totalCollateral.toFixed(2)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">Free Collateral</p>
+                        <p className="text-lg font-mono font-semibold text-muted-foreground" data-testid="text-free-collateral">
+                          ${healthMetrics.freeCollateral.toFixed(2)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">Unrealized PnL</p>
+                        <p className={`text-lg font-mono font-semibold ${
+                          healthMetrics.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                        }`} data-testid="text-account-pnl">
+                          {healthMetrics.unrealizedPnl >= 0 ? '+' : ''}${healthMetrics.unrealizedPnl.toFixed(2)}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid lg:grid-cols-3 gap-6">
                   <div className="lg:col-span-2 gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
@@ -734,31 +782,42 @@ export default function AppPage() {
                               <th className="text-left py-3 font-medium">Side</th>
                               <th className="text-right py-3 font-medium">Size</th>
                               <th className="text-right py-3 font-medium">Entry</th>
+                              <th className="text-right py-3 font-medium">Liq. Price</th>
                               <th className="text-right py-3 font-medium">PnL</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {positionsData.map((pos: any, i: number) => (
-                              <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-position-${i}`}>
-                                <td className="py-3 font-medium text-primary">{pos.botName || 'Unknown'}</td>
-                                <td className="py-3 font-medium">{pos.market}</td>
-                                <td className="py-3">
-                                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                    pos.side === 'LONG' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
-                                  }`}>
-                                    {pos.side}
-                                  </span>
-                                </td>
-                                <td className="py-3 text-right font-mono">
-                                  {Math.abs(pos.baseAssetAmount).toFixed(4)} ({pos.sizeUsd ? `$${pos.sizeUsd.toFixed(2)}` : '--'})
-                                </td>
-                                <td className="py-3 text-right font-mono text-muted-foreground">${Number(pos.entryPrice).toFixed(2)}</td>
-                                <td className={`py-3 text-right font-mono ${Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                  {Number(pos.unrealizedPnl) >= 0 ? '+' : ''}${Number(pos.unrealizedPnl).toFixed(2)}
-                                  <span className="text-xs ml-1">({Number(pos.unrealizedPnlPercent) >= 0 ? '+' : ''}{Number(pos.unrealizedPnlPercent).toFixed(1)}%)</span>
-                                </td>
-                              </tr>
-                            ))}
+                            {positionsData.map((pos: any, i: number) => {
+                              const normalizeMarket = (m: string) => m.toUpperCase().replace('-PERP', '').replace('USD', '').replace('PERP-', '');
+                              const liqPriceData = healthMetrics?.positions?.find(
+                                (hp: any) => normalizeMarket(hp.market) === normalizeMarket(pos.market)
+                              );
+                              const liquidationPrice = liqPriceData?.liquidationPrice;
+                              return (
+                                <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-position-${i}`}>
+                                  <td className="py-3 font-medium text-primary">{pos.botName || 'Unknown'}</td>
+                                  <td className="py-3 font-medium">{pos.market}</td>
+                                  <td className="py-3">
+                                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                      pos.side === 'LONG' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                                    }`}>
+                                      {pos.side}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 text-right font-mono">
+                                    {Math.abs(pos.baseAssetAmount).toFixed(4)} ({pos.sizeUsd ? `$${pos.sizeUsd.toFixed(2)}` : '--'})
+                                  </td>
+                                  <td className="py-3 text-right font-mono text-muted-foreground">${Number(pos.entryPrice).toFixed(2)}</td>
+                                  <td className="py-3 text-right font-mono text-amber-400">
+                                    {liquidationPrice ? `$${liquidationPrice.toFixed(2)}` : '--'}
+                                  </td>
+                                  <td className={`py-3 text-right font-mono ${Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                    {Number(pos.unrealizedPnl) >= 0 ? '+' : ''}${Number(pos.unrealizedPnl).toFixed(2)}
+                                    <span className="text-xs ml-1">({Number(pos.unrealizedPnlPercent) >= 0 ? '+' : ''}{Number(pos.unrealizedPnlPercent).toFixed(1)}%)</span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
                       ) : (
