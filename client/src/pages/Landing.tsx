@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { motion } from 'framer-motion';
+import { useEffect, useRef } from 'react';
+import { motion, useScroll, useTransform } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { 
   Wallet, 
@@ -10,7 +10,8 @@ import {
   BarChart3,
   Sparkles,
   Lock,
-  Globe
+  Globe,
+  ChevronDown
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useWallet } from '@/hooks/useWallet';
@@ -54,6 +55,13 @@ export default function Landing() {
   const [, navigate] = useLocation();
   const { connected, connecting } = useWallet();
   const { setVisible } = useWalletModal();
+  const heroRef = useRef<HTMLDivElement>(null);
+  
+  const { scrollY } = useScroll();
+  const heroY = useTransform(scrollY, [0, 800], [0, 300]);
+  const heroOpacity = useTransform(scrollY, [0, 400], [1, 0]);
+  const heroScale = useTransform(scrollY, [0, 800], [1, 1.1]);
+  const contentY = useTransform(scrollY, [0, 400], [0, 100]);
 
   useEffect(() => {
     if (connected) {
@@ -66,25 +74,18 @@ export default function Landing() {
   };
 
   return (
-    <div className="min-h-screen">
-      <div className="fixed inset-0 -z-10">
-        <div className="absolute top-0 left-1/4 w-[600px] h-[600px] bg-primary/30 rounded-full blur-[150px]" />
-        <div className="absolute top-1/4 right-1/4 w-[500px] h-[500px] bg-accent/20 rounded-full blur-[120px]" />
-        <div className="absolute bottom-1/4 left-1/3 w-[400px] h-[400px] bg-purple-500/15 rounded-full blur-[100px]" />
-      </div>
-      <div className="fixed inset-0 -z-10 bg-gradient-to-b from-transparent via-background/80 to-background" />
-      
-      <nav className="fixed top-0 left-0 right-0 z-50 glass border-b border-border/30">
+    <div className="min-h-screen bg-black">
+      <nav className="fixed top-0 left-0 right-0 z-50 bg-black/50 backdrop-blur-xl border-b border-white/10">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-10 h-10 rounded-xl" />
-            <span className="font-display font-bold text-xl">QuantumVault</span>
+            <span className="font-display font-bold text-xl text-white">QuantumVault</span>
           </div>
           
           <div className="hidden md:flex items-center gap-8">
-            <a href="#features" className="text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="link-features">Features</a>
-            <a href="#how-it-works" className="text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="link-how">How It Works</a>
-            <a href="https://docs.quantumvault.io" className="text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="link-docs">Docs</a>
+            <a href="#features" className="text-sm text-white/60 hover:text-white transition-colors" data-testid="link-features">Features</a>
+            <a href="#how-it-works" className="text-sm text-white/60 hover:text-white transition-colors" data-testid="link-how">How It Works</a>
+            <a href="https://docs.quantumvault.io" className="text-sm text-white/60 hover:text-white transition-colors" data-testid="link-docs">Docs</a>
           </div>
 
           <Button 
@@ -99,107 +100,149 @@ export default function Landing() {
         </div>
       </nav>
 
-      <main className="pt-16">
-        <section className="relative min-h-[90vh] flex items-center justify-center px-6 overflow-hidden">
-          <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/20 rounded-full blur-[120px] animate-pulse-slow" />
-          <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-accent/20 rounded-full blur-[120px] animate-pulse-slow" style={{ animationDelay: '2s' }} />
-          
+      <main>
+        <section ref={heroRef} className="relative h-screen overflow-hidden">
           <motion.div 
-            initial="hidden"
-            animate="visible"
-            variants={staggerContainer}
-            className="max-w-4xl mx-auto text-center relative z-10"
+            className="absolute inset-0 z-0"
+            style={{ y: heroY, scale: heroScale }}
+          >
+            <img 
+              src="/images/QV_Hero.jpeg" 
+              alt="QuantumVault Hero"
+              className="w-full h-full object-cover"
+            />
+            <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-black/60 to-black" />
+            <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-transparent to-accent/20" />
+          </motion.div>
+
+          <motion.div 
+            className="absolute inset-0 flex items-center justify-center z-10"
+            style={{ y: contentY, opacity: heroOpacity }}
           >
             <motion.div 
-              variants={fadeInUp} 
-              className="mb-8 flex justify-center"
+              initial="hidden"
+              animate="visible"
+              variants={staggerContainer}
+              className="max-w-4xl mx-auto text-center px-6"
             >
-              <div className="relative">
-                <div className="absolute inset-0 bg-gradient-to-r from-primary/50 to-accent/50 rounded-3xl blur-2xl opacity-60 animate-pulse" />
-                <img 
-                  src="/images/QV_Logo_02.png" 
-                  alt="QuantumVault" 
-                  className="relative w-28 h-28 sm:w-36 sm:h-36 rounded-3xl shadow-2xl ring-2 ring-white/10"
-                />
-              </div>
-            </motion.div>
-
-            <motion.div variants={fadeInUp} className="mb-6">
-              <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary">
-                <Zap className="w-4 h-4" />
-                Powered by Drift Protocol on Solana
-              </span>
-            </motion.div>
-            
-            <motion.h1 
-              variants={fadeInUp}
-              className="text-5xl sm:text-6xl lg:text-7xl font-display font-bold mb-6 leading-tight"
-            >
-              Trade Smarter with{' '}
-              <span className="gradient-text glow-text">Quantum Bots</span>
-            </motion.h1>
-            
-            <motion.p 
-              variants={fadeInUp}
-              className="text-xl text-muted-foreground max-w-2xl mx-auto mb-10 leading-relaxed"
-            >
-              Deploy algorithmic trading bots on Solana's fastest DEX. 
-              Non-custodial, TradingView-powered, and built for serious traders.
-            </motion.p>
-            
-            <motion.div variants={fadeInUp} className="flex flex-col sm:flex-row items-center justify-center gap-4">
-              <Button 
-                size="lg" 
-                className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity text-lg px-8 py-6 glow"
-                onClick={handleConnectWallet}
-                disabled={connecting}
-                data-testid="button-hero-connect"
+              <motion.div 
+                variants={fadeInUp} 
+                className="mb-8 flex justify-center"
               >
-                <Wallet className="w-5 h-5 mr-2" />
-                {connecting ? 'Connecting...' : 'Connect Wallet'}
-              </Button>
-              <Button 
-                size="lg" 
-                variant="outline"
-                className="text-lg px-8 py-6"
-                onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
-                data-testid="button-learn-more"
-              >
-                Learn More
-              </Button>
-            </motion.div>
+                <div className="relative">
+                  <div className="absolute inset-0 bg-gradient-to-r from-primary/50 to-accent/50 rounded-3xl blur-2xl opacity-60 animate-pulse" />
+                  <img 
+                    src="/images/QV_Logo_02.png" 
+                    alt="QuantumVault" 
+                    className="relative w-24 h-24 sm:w-32 sm:h-32 rounded-3xl shadow-2xl ring-2 ring-white/20 backdrop-blur-sm"
+                  />
+                </div>
+              </motion.div>
 
-            <motion.div 
-              variants={fadeInUp}
-              className="mt-16 grid grid-cols-3 gap-8 max-w-lg mx-auto"
+              <motion.div variants={fadeInUp} className="mb-6">
+                <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-sm text-white">
+                  <Zap className="w-4 h-4 text-primary" />
+                  Powered by Drift Protocol on Solana
+                </span>
+              </motion.div>
+              
+              <motion.h1 
+                variants={fadeInUp}
+                className="text-5xl sm:text-6xl lg:text-7xl font-display font-bold mb-6 leading-tight text-white"
+              >
+                Trade Smarter with{' '}
+                <span className="bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent bg-[length:200%_auto] animate-gradient">
+                  Quantum Bots
+                </span>
+              </motion.h1>
+              
+              <motion.p 
+                variants={fadeInUp}
+                className="text-xl text-white/70 max-w-2xl mx-auto mb-10 leading-relaxed"
+              >
+                Deploy algorithmic trading bots on Solana's fastest DEX. 
+                Non-custodial, TradingView-powered, and built for serious traders.
+              </motion.p>
+              
+              <motion.div variants={fadeInUp} className="flex flex-col sm:flex-row items-center justify-center gap-4">
+                <Button 
+                  size="lg" 
+                  className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-all text-lg px-8 py-6 shadow-lg shadow-primary/25"
+                  onClick={handleConnectWallet}
+                  disabled={connecting}
+                  data-testid="button-hero-connect"
+                >
+                  <Wallet className="w-5 h-5 mr-2" />
+                  {connecting ? 'Connecting...' : 'Connect Wallet'}
+                </Button>
+                <Button 
+                  size="lg" 
+                  variant="outline"
+                  className="text-lg px-8 py-6 border-white/20 text-white hover:bg-white/10 backdrop-blur-sm"
+                  onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
+                  data-testid="button-learn-more"
+                >
+                  Learn More
+                </Button>
+              </motion.div>
+
+              <motion.div 
+                variants={fadeInUp}
+                className="mt-16 grid grid-cols-3 gap-8 max-w-lg mx-auto"
+              >
+                <div className="text-center">
+                  <p className="text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-volume">$48M+</p>
+                  <p className="text-sm text-white/50 mt-1">Trading Volume</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-bots">127</p>
+                  <p className="text-sm text-white/50 mt-1">Active Bots</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-users">4.2K</p>
+                  <p className="text-sm text-white/50 mt-1">Traders</p>
+                </div>
+              </motion.div>
+            </motion.div>
+          </motion.div>
+
+          <motion.div 
+            className="absolute bottom-8 left-1/2 -translate-x-1/2 z-20"
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 1.5, duration: 0.5 }}
+          >
+            <motion.div
+              animate={{ y: [0, 8, 0] }}
+              transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut" }}
+              className="flex flex-col items-center cursor-pointer"
+              onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
             >
-              <div className="text-center">
-                <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-volume">$48M+</p>
-                <p className="text-sm text-muted-foreground mt-1">Trading Volume</p>
-              </div>
-              <div className="text-center">
-                <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-bots">127</p>
-                <p className="text-sm text-muted-foreground mt-1">Active Bots</p>
-              </div>
-              <div className="text-center">
-                <p className="text-3xl font-display font-bold gradient-text" data-testid="text-stat-users">4.2K</p>
-                <p className="text-sm text-muted-foreground mt-1">Traders</p>
-              </div>
+              <span className="text-white/50 text-sm mb-2">Scroll to explore</span>
+              <ChevronDown className="w-6 h-6 text-white/50" />
             </motion.div>
           </motion.div>
         </section>
 
-        <section id="features" className="py-20 px-6">
-          <div className="max-w-7xl mx-auto">
+        <section id="features" className="relative py-24 px-6 bg-background">
+          <div className="absolute inset-0 bg-gradient-to-b from-black via-background to-background" />
+          <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-primary/10 rounded-full blur-[150px]" />
+          <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] bg-accent/10 rounded-full blur-[120px]" />
+          
+          <div className="max-w-7xl mx-auto relative z-10">
             <motion.div 
               initial="hidden"
               whileInView="visible"
               viewport={{ once: true }}
               variants={staggerContainer}
             >
-              <motion.div variants={fadeInUp} className="text-center mb-12">
-                <h2 className="text-3xl sm:text-4xl font-display font-bold mb-4">Why QuantumVault?</h2>
-                <p className="text-muted-foreground max-w-2xl mx-auto">
+              <motion.div variants={fadeInUp} className="text-center mb-16">
+                <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary mb-6">
+                  <Sparkles className="w-4 h-4" />
+                  Platform Features
+                </span>
+                <h2 className="text-4xl sm:text-5xl font-display font-bold mb-4">Why QuantumVault?</h2>
+                <p className="text-muted-foreground max-w-2xl mx-auto text-lg">
                   Built for traders who demand performance, security, and transparency.
                 </p>
               </motion.div>
@@ -240,17 +283,23 @@ export default function Landing() {
           </div>
         </section>
 
-        <section id="how-it-works" className="py-20 px-6 bg-gradient-to-b from-transparent to-card/30">
-          <div className="max-w-5xl mx-auto">
+        <section id="how-it-works" className="relative py-24 px-6 bg-background overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-b from-background via-card/20 to-background" />
+          
+          <div className="max-w-5xl mx-auto relative z-10">
             <motion.div 
               initial="hidden"
               whileInView="visible"
               viewport={{ once: true }}
               variants={staggerContainer}
             >
-              <motion.div variants={fadeInUp} className="text-center mb-12">
-                <h2 className="text-3xl sm:text-4xl font-display font-bold mb-4">How It Works</h2>
-                <p className="text-muted-foreground max-w-2xl mx-auto">
+              <motion.div variants={fadeInUp} className="text-center mb-16">
+                <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-accent/10 border border-accent/20 text-sm text-accent mb-6">
+                  <ArrowRight className="w-4 h-4" />
+                  Getting Started
+                </span>
+                <h2 className="text-4xl sm:text-5xl font-display font-bold mb-4">How It Works</h2>
+                <p className="text-muted-foreground max-w-2xl mx-auto text-lg">
                   Get started in three simple steps
                 </p>
               </motion.div>
@@ -261,12 +310,12 @@ export default function Landing() {
                   { step: '02', title: 'Deposit Collateral', description: 'Deposit SOL or USDC to your Drift subaccount. Full control remains with you.' },
                   { step: '03', title: 'Deploy Bots', description: 'Subscribe to signal bots or create grid strategies. Start earning 24/7.' },
                 ].map((item, i) => (
-                  <motion.div key={i} variants={fadeInUp} className="text-center">
-                    <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+                  <motion.div key={i} variants={fadeInUp} className="text-center group">
+                    <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg shadow-primary/25 group-hover:scale-110 transition-transform duration-300">
                       <span className="text-2xl font-display font-bold text-white">{item.step}</span>
                     </div>
-                    <h3 className="font-display font-semibold text-xl mb-2">{item.title}</h3>
-                    <p className="text-muted-foreground">{item.description}</p>
+                    <h3 className="font-display font-semibold text-xl mb-3">{item.title}</h3>
+                    <p className="text-muted-foreground leading-relaxed">{item.description}</p>
                   </motion.div>
                 ))}
               </div>
@@ -274,34 +323,39 @@ export default function Landing() {
           </div>
         </section>
 
-        <section className="py-20 px-6">
-          <div className="max-w-4xl mx-auto">
+        <section className="relative py-24 px-6 bg-background overflow-hidden">
+          <div className="absolute inset-0">
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[400px] bg-gradient-to-r from-primary/20 via-accent/20 to-primary/20 rounded-full blur-[100px]" />
+          </div>
+          
+          <div className="max-w-4xl mx-auto relative z-10">
             <motion.div 
               initial="hidden"
               whileInView="visible"
               viewport={{ once: true }}
               variants={staggerContainer}
-              className="gradient-border p-12 noise text-center relative overflow-hidden"
+              className="relative rounded-3xl bg-gradient-to-br from-card/80 to-card/40 backdrop-blur-xl border border-white/10 p-12 sm:p-16 text-center overflow-hidden"
             >
-              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-96 h-32 bg-primary/30 rounded-full blur-[80px]" />
+              <div className="absolute inset-0 noise opacity-50" />
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[400px] h-24 bg-primary/40 rounded-full blur-[60px]" />
               
               <motion.div variants={fadeInUp} className="relative z-10">
-                <h2 className="text-3xl sm:text-4xl font-display font-bold mb-4">
+                <h2 className="text-4xl sm:text-5xl font-display font-bold mb-6">
                   Ready to Trade Smarter?
                 </h2>
-                <p className="text-muted-foreground max-w-lg mx-auto mb-8">
+                <p className="text-muted-foreground max-w-lg mx-auto mb-10 text-lg">
                   Connect your Phantom wallet and start deploying bots in minutes. 
                   No signup required, just pure trading.
                 </p>
                 <Button 
                   size="lg"
-                  className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity text-lg px-8 py-6 glow"
+                  className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-all text-lg px-10 py-7 shadow-xl shadow-primary/30"
                   onClick={handleConnectWallet}
                   disabled={connecting}
                   data-testid="button-cta-connect"
                 >
                   <Wallet className="w-5 h-5 mr-2" />
-                  {connecting ? 'Connecting...' : 'Connect Wallet'}
+                  {connecting ? 'Connecting...' : 'Launch App'}
                 </Button>
               </motion.div>
             </motion.div>
@@ -309,18 +363,18 @@ export default function Landing() {
         </section>
       </main>
 
-      <footer className="border-t border-border/30 py-12 px-6">
+      <footer className="relative bg-black/50 border-t border-white/10 py-16 px-6">
         <div className="max-w-7xl mx-auto">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-8">
             <div className="flex items-center gap-3">
-              <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-8 h-8 rounded-lg" />
-              <span className="font-display font-bold">QuantumVault</span>
+              <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-10 h-10 rounded-xl" />
+              <span className="font-display font-bold text-xl">QuantumVault</span>
             </div>
-            <div className="flex items-center gap-6 text-sm text-muted-foreground">
-              <a href="#" className="hover:text-foreground transition-colors" data-testid="link-footer-docs">Docs</a>
-              <a href="#" className="hover:text-foreground transition-colors" data-testid="link-twitter">Twitter</a>
-              <a href="#" className="hover:text-foreground transition-colors" data-testid="link-discord">Discord</a>
-              <a href="#" className="hover:text-foreground transition-colors" data-testid="link-github">GitHub</a>
+            <div className="flex items-center gap-8 text-sm">
+              <a href="#" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-footer-docs">Docs</a>
+              <a href="#" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-twitter">Twitter</a>
+              <a href="#" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-discord">Discord</a>
+              <a href="#" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-github">GitHub</a>
             </div>
             <p className="text-sm text-muted-foreground">
               © 2026 QuantumVault. Built on Solana.
