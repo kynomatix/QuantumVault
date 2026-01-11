@@ -561,6 +561,7 @@ export async function registerRoutes(
             // Update database with on-chain data
             await storage.upsertBotPosition({
               tradingBotId: bot.id,
+              walletAddress: bot.walletAddress,
               market: pos.market,
               baseSize: String(onChainBaseSize),
               avgEntryPrice: String(pos.entryPrice),
@@ -597,6 +598,7 @@ export async function registerRoutes(
           // Zero out the database position
           await storage.upsertBotPosition({
             tradingBotId: bot.id,
+            walletAddress: bot.walletAddress,
             market: bot.market,
             baseSize: "0",
             avgEntryPrice: "0",
