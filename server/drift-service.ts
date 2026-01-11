@@ -727,87 +727,40 @@ export async function getDriftBalance(walletAddress: string, subAccountId: numbe
   const userAccountPDA = getUserAccountPDA(userPubkey, subAccountId);
   
   const USDC_MARKET_INDEX = 0;
-  const L = DRIFT_LAYOUTS; // Layout constants
   
   try {
-    // Fetch User account with slot info for freshness verification
-    const result = await connection.getAccountInfoAndContext(userAccountPDA, { commitment: 'confirmed' });
-    const accountInfo = result.value;
-    const slot = result.context.slot;
+    const accountInfo = await connection.getAccountInfo(userAccountPDA, { commitment: 'confirmed' });
     
     if (!accountInfo || !accountInfo.data) {
       console.log(`[Drift] User account not found for ${walletAddress} subaccount ${subAccountId}`);
       return 0;
     }
     
-    const data = accountInfo.data;
-    console.log(`[Drift] User account: ${userAccountPDA.toString().slice(0, 16)}... length=${data.length} bytes, slot=${slot}`);
+    console.log(`[Drift] Decoding user account for balance, length=${accountInfo.data.length} bytes`);
     
-    // Fetch SpotMarket to get cumulativeDepositInterest using deterministic offset
-    let cumulativeDepositInterest = L.PRECISION.SPOT_CUMULATIVE_INTEREST; // Default 1.0x
-    try {
-      const spotMarketPDA = getSpotMarketPDA(USDC_MARKET_INDEX);
-      const spotMarketInfo = await connection.getAccountInfo(spotMarketPDA, { commitment: 'confirmed' });
-      if (spotMarketInfo && spotMarketInfo.data) {
-        const marketData = spotMarketInfo.data;
-        const offset = L.SPOT_MARKET.CUMULATIVE_DEPOSIT_INTEREST_OFFSET;
-        // Read u128 as two u64s (little-endian), use low 64 bits for BN
-        const lowBits = marketData.readBigUInt64LE(offset);
-        const highBits = marketData.readBigUInt64LE(offset + 8);
-        // For typical interest values (1.0x-2.0x), high bits should be 0
-        if (highBits === BigInt(0)) {
-          cumulativeDepositInterest = new BN(lowBits.toString());
-        }
-        const interestFloat = cumulativeDepositInterest.toNumber() / L.PRECISION.SPOT_CUMULATIVE_INTEREST.toNumber();
-        console.log(`[Drift] SpotMarket cumulativeDepositInterest: ${cumulativeDepositInterest.toString()} (${interestFloat.toFixed(10)}x)`);
-      }
-    } catch (marketError) {
-      console.log(`[Drift] Could not read SpotMarket, using default interest`);
-    }
+    // Use Drift SDK's decodeUser helper - uses official IDL for correct offsets
+    const { decodeUser, SPOT_MARKET_BALANCE_PRECISION, SpotBalanceType } = await import('@drift-labs/sdk');
+    const userAccount = decodeUser(accountInfo.data);
     
-    // Read spot positions using deterministic offsets
-    for (let i = 0; i < L.USER.SPOT_POSITION_COUNT; i++) {
-      const posOffset = L.USER.SPOT_POSITIONS_OFFSET + (i * L.SPOT_POSITION.SIZE);
-      
-      if (posOffset + L.SPOT_POSITION.SIZE > data.length) break;
-      
-      try {
-        // Read fields at their exact offsets within the SpotPosition struct
-        const marketIndex = data.readUInt16LE(posOffset + L.SPOT_POSITION.MARKET_INDEX_OFFSET);
-        const balanceType = data.readUInt8(posOffset + L.SPOT_POSITION.BALANCE_TYPE_OFFSET);
-        
-        // balanceType: 0 = Deposit, 1 = Borrow
-        if (marketIndex === USDC_MARKET_INDEX && balanceType === 0) {
-          // Read scaledBalance as u64, keep as BN for precision
-          const scaledBalanceBigInt = data.readBigUInt64LE(posOffset + L.SPOT_POSITION.SCALED_BALANCE_OFFSET);
-          const scaledBalance = new BN(scaledBalanceBigInt.toString());
+    // Find USDC spot position (market index 0)
+    for (const spotPos of userAccount.spotPositions) {
+      if (spotPos.marketIndex === USDC_MARKET_INDEX) {
+        // Check if it's a deposit (not a borrow)
+        const isDeposit = 'deposit' in spotPos.balanceType || spotPos.balanceType.hasOwnProperty('deposit');
+        if (isDeposit) {
+          const scaledBalance = spotPos.scaledBalance.toNumber();
+          // scaledBalance is in 1e9 precision, divide to get actual USDC
+          const actualUsdc = scaledBalance / SPOT_MARKET_BALANCE_PRECISION.toNumber();
           
-          // Calculate actual tokens: scaledBalance * cumulativeDepositInterest / (1e9 * 1e10)
-          // Keep all math in BN to avoid 53-bit precision loss for large balances
-          // Step 1: Multiply (result fits in ~128 bits for reasonable balances)
-          const numerator = scaledBalance.mul(cumulativeDepositInterest);
-          // Step 2: Divide by 1e9 (SPOT_BALANCE_PRECISION)
-          const afterBalanceDiv = numerator.div(L.PRECISION.SPOT_BALANCE);
-          // Step 3: Divide by 1e10 (SPOT_CUMULATIVE_INTEREST_PRECISION)
-          // Result is now small enough for Number (max ~1e9 USDC is 1e15 after 1e6 decimals)
-          const wholePart = afterBalanceDiv.div(L.PRECISION.SPOT_CUMULATIVE_INTEREST);
-          const remainder = afterBalanceDiv.mod(L.PRECISION.SPOT_CUMULATIVE_INTEREST);
-          const actualTokens = wholePart.toNumber() + remainder.toNumber() / 1e10;
-          
-          const interestMult = cumulativeDepositInterest.toNumber() / 1e10;
-          console.log(`[Drift] Position ${i}: marketIndex=${marketIndex}, balanceType=${balanceType}, scaledBalance=${scaledBalanceBigInt}, interest=${interestMult.toFixed(10)}x, actualUSDC=${actualTokens.toFixed(6)}`);
-          
-          if (actualTokens > 0.001) {
-            console.log(`[Drift] Deterministic balance: ${actualTokens.toFixed(6)} USDC`);
-            return actualTokens;
+          if (actualUsdc > 0.001) {
+            console.log(`[Drift SDK] USDC balance: ${actualUsdc.toFixed(6)}`);
+            return actualUsdc;
           }
         }
-      } catch (e) {
-        console.error(`[Drift] Error reading position ${i}:`, e);
       }
     }
     
-    console.log(`[Drift] No USDC deposit position found for ${walletAddress} subaccount ${subAccountId}`);
+    console.log(`[Drift SDK] No USDC deposit found for ${walletAddress} subaccount ${subAccountId}`);
     return 0;
   } catch (error) {
     console.error(`[Drift] Error reading Drift balance:`, error);
@@ -935,25 +888,23 @@ export interface PerpPosition {
 export async function getPerpPositions(walletAddress: string, subAccountId: number = 0): Promise<PerpPosition[]> {
   const connection = getConnection();
   const userPubkey = new PublicKey(walletAddress);
-  const userAccount = getUserAccountPDA(userPubkey, subAccountId);
+  const userAccountPDA = getUserAccountPDA(userPubkey, subAccountId);
   
   const positions: PerpPosition[] = [];
   
   try {
-    const accountInfo = await connection.getAccountInfo(userAccount);
+    const accountInfo = await connection.getAccountInfo(userAccountPDA);
     
     if (!accountInfo || !accountInfo.data) {
       console.log(`[Drift] No account data found for positions`);
       return positions;
     }
     
-    const data = accountInfo.data;
-    console.log(`[Drift] Reading perp positions from account data, length=${data.length} bytes`);
+    console.log(`[Drift] Decoding user account using SDK, length=${accountInfo.data.length} bytes`);
     
-    // Use DRIFT_LAYOUTS constants for consistent offsets
-    const PERP_POSITIONS_OFFSET = DRIFT_LAYOUTS.USER.PERP_POSITIONS_OFFSET;
-    const PERP_POSITION_SIZE = DRIFT_LAYOUTS.PERP_POSITION.SIZE;
-    const MAX_PERP_POSITIONS = DRIFT_LAYOUTS.USER.PERP_POSITION_COUNT;
+    // Use Drift SDK's decodeUser helper - uses official IDL for correct offsets
+    const { decodeUser, BASE_PRECISION, QUOTE_PRECISION } = await import('@drift-labs/sdk');
+    const userAccount = decodeUser(accountInfo.data);
     
     // Fetch current prices for all markets we might have positions in
     const prices: Record<number, number> = {};
@@ -966,86 +917,67 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
         prices[2] = priceData['ETH-PERP'] || 3000;
       }
     } catch (e) {
-      // Default prices if fetch fails
       prices[0] = 136;
       prices[1] = 90000;
       prices[2] = 3000;
     }
     
-    for (let i = 0; i < MAX_PERP_POSITIONS; i++) {
-      const posOffset = PERP_POSITIONS_OFFSET + (i * PERP_POSITION_SIZE);
-      
-      if (posOffset + PERP_POSITION_SIZE > data.length) {
-        console.log(`[Drift] Position ${i} offset ${posOffset} exceeds data length ${data.length}`);
-        break;
+    // Extract perp positions from the decoded user account
+    for (const pos of userAccount.perpPositions) {
+      // Skip empty positions (baseAssetAmount is 0)
+      const baseAssetRaw = pos.baseAssetAmount.toNumber();
+      if (baseAssetRaw === 0) {
+        continue;
       }
       
-      try {
-        // Use DRIFT_LAYOUTS offsets and readI128LE for full precision with BigInt
-        const baseAssetRaw = readI128LE(data, posOffset + DRIFT_LAYOUTS.PERP_POSITION.BASE_ASSET_AMOUNT_OFFSET);
-        
-        // Skip empty positions
-        if (baseAssetRaw === 0n) {
-          continue;
-        }
-        
-        const quoteAssetRaw = readI128LE(data, posOffset + DRIFT_LAYOUTS.PERP_POSITION.QUOTE_ASSET_AMOUNT_OFFSET);
-        const quoteEntryRaw = readI128LE(data, posOffset + DRIFT_LAYOUTS.PERP_POSITION.QUOTE_ENTRY_AMOUNT_OFFSET);
-        const marketIndex = data.readUInt16LE(posOffset + DRIFT_LAYOUTS.PERP_POSITION.MARKET_INDEX_OFFSET);
-        
-        // Keep as BigInt until after scaling to preserve precision
-        // Base asset: scaled by 1e9, Quote: scaled by 1e6
-        const baseAssetAmount = bigintToNumber(baseAssetRaw);
-        const quoteAssetAmount = bigintToNumber(quoteAssetRaw);
-        const quoteEntryAmount = bigintToNumber(quoteEntryRaw);
-        
-        // Convert from precision (1e9 for base, 1e6 for quote)
-        const baseAssetReal = baseAssetAmount / 1e9;
-        const quoteAssetReal = quoteAssetAmount / 1e6;
-        const quoteEntryReal = quoteEntryAmount / 1e6;
-        
-        const side: 'LONG' | 'SHORT' = baseAssetReal > 0 ? 'LONG' : 'SHORT';
-        const marketName = PERP_MARKET_NAMES[marketIndex] || `PERP-${marketIndex}`;
-        const markPrice = prices[marketIndex] || 0;
-        
-        // Calculate entry price: quoteEntryAmount / baseAssetAmount
-        const entryPrice = Math.abs(baseAssetReal) > 0 ? Math.abs(quoteEntryReal / baseAssetReal) : 0;
-        
-        // Position size in USD
-        const sizeUsd = Math.abs(baseAssetReal) * markPrice;
-        
-        // Unrealized PnL
-        // For LONG: (markPrice - entryPrice) * size
-        // For SHORT: (entryPrice - markPrice) * size
-        const unrealizedPnl = side === 'LONG' 
-          ? (markPrice - entryPrice) * Math.abs(baseAssetReal)
-          : (entryPrice - markPrice) * Math.abs(baseAssetReal);
-        
-        const unrealizedPnlPercent = Math.abs(quoteEntryReal) > 0 
-          ? (unrealizedPnl / Math.abs(quoteEntryReal)) * 100 
-          : 0;
-        
-        console.log(`[Drift] Position ${i}: market=${marketName}, base=${baseAssetReal.toFixed(4)}, side=${side}, entry=$${entryPrice.toFixed(2)}, mark=$${markPrice.toFixed(2)}, pnl=$${unrealizedPnl.toFixed(2)}`);
-        
-        positions.push({
-          marketIndex,
-          market: marketName,
-          baseAssetAmount: baseAssetReal,
-          quoteAssetAmount: quoteAssetReal,
-          quoteEntryAmount: quoteEntryReal,
-          side,
-          sizeUsd,
-          entryPrice,
-          markPrice,
-          unrealizedPnl,
-          unrealizedPnlPercent,
-        });
-      } catch (e) {
-        console.error(`[Drift] Error parsing position ${i}:`, e);
-      }
+      const marketIndex = pos.marketIndex;
+      const quoteAssetRaw = pos.quoteAssetAmount.toNumber();
+      const quoteEntryRaw = pos.quoteEntryAmount.toNumber();
+      
+      // Convert from precision (1e9 for base, 1e6 for quote)
+      const baseAssetReal = baseAssetRaw / BASE_PRECISION.toNumber();
+      const quoteAssetReal = Math.abs(quoteAssetRaw) / QUOTE_PRECISION.toNumber();
+      const quoteEntryReal = quoteEntryRaw / QUOTE_PRECISION.toNumber();
+      
+      const side: 'LONG' | 'SHORT' = baseAssetReal > 0 ? 'LONG' : 'SHORT';
+      const marketName = PERP_MARKET_NAMES[marketIndex] || `PERP-${marketIndex}`;
+      const markPrice = prices[marketIndex] || 0;
+      
+      // Calculate entry price: quoteEntryAmount / baseAssetAmount
+      const entryPrice = Math.abs(baseAssetReal) > 0 ? Math.abs(quoteEntryReal / baseAssetReal) : 0;
+      
+      // Position size in USD
+      const sizeUsd = Math.abs(baseAssetReal) * markPrice;
+      
+      // Unrealized PnL
+      // For LONG: (markPrice - entryPrice) * size
+      // For SHORT: (entryPrice - markPrice) * size
+      const unrealizedPnl = side === 'LONG' 
+        ? (markPrice - entryPrice) * Math.abs(baseAssetReal)
+        : (entryPrice - markPrice) * Math.abs(baseAssetReal);
+      
+      const unrealizedPnlPercent = Math.abs(quoteEntryReal) > 0 
+        ? (unrealizedPnl / Math.abs(quoteEntryReal)) * 100 
+        : 0;
+      
+      console.log(`[Drift SDK] Position: market=${marketName}, base=${baseAssetReal.toFixed(4)}, side=${side}, entry=$${entryPrice.toFixed(2)}, mark=$${markPrice.toFixed(2)}, pnl=$${unrealizedPnl.toFixed(2)}`);
+      
+      positions.push({
+        marketIndex,
+        market: marketName,
+        baseAssetAmount: baseAssetReal,
+        quoteAssetAmount: quoteAssetReal,
+        quoteEntryAmount: quoteEntryReal,
+        side,
+        sizeUsd,
+        entryPrice,
+        markPrice,
+        unrealizedPnl,
+        unrealizedPnlPercent,
+      });
     }
     
-    console.log(`[Drift] Found ${positions.length} open perp positions`);
+    console.log(`[Drift SDK] Found ${positions.length} open perp positions`);
     return positions;
   } catch (error) {
     console.error(`[Drift] Error reading perp positions:`, error);
