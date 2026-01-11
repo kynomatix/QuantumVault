@@ -1004,26 +1004,74 @@ export async function registerRoutes(
         console.warn(`[ClosePosition] Cannot calculate PnL - entryPrice=$${entryPrice}, fillPrice=$${fillPrice}`);
       }
 
-      // CRITICAL: Verify on-chain that position is actually closed
+      // CRITICAL: Verify on-chain that position is actually closed and retry if dust remains
+      // This handles partial fills and ensures position is truly flat
       let verificationWarning: string | null = null;
+      let finalTxSignature = txSignature;
+      let retryCount = 0;
+      const maxRetries = 3;
+      
+      while (retryCount < maxRetries) {
+        try {
+          // Wait a moment for on-chain state to settle
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+          const postClosePosition = await PositionService.getPositionForExecution(
+            bot.id,
+            wallet.agentPublicKey,
+            subAccountId,
+            bot.market,
+            wallet.agentPrivateKeyEncrypted
+          );
+          
+          if (postClosePosition.side === 'FLAT' || Math.abs(postClosePosition.size) < 0.0001) {
+            console.log(`[ClosePosition] Post-close verification: Position confirmed FLAT`);
+            break; // Position fully closed, exit retry loop
+          }
+          
+          // Position still exists - this is dust that needs cleanup
+          console.warn(`[ClosePosition] Position NOT fully closed (attempt ${retryCount + 1}/${maxRetries})`);
+          console.warn(`[ClosePosition] Remaining dust: ${postClosePosition.side} ${postClosePosition.size} - attempting cleanup...`);
+          
+          // Retry closePerpPosition to clean up the dust
+          const retryResult = await closePerpPosition(
+            wallet.agentPrivateKeyEncrypted,
+            bot.market,
+            subAccountId
+          );
+          
+          if (retryResult.success && retryResult.signature) {
+            console.log(`[ClosePosition] Dust cleanup attempt ${retryCount + 1} succeeded: ${retryResult.signature}`);
+            finalTxSignature = retryResult.signature;
+          } else if (retryResult.success && !retryResult.signature) {
+            console.log(`[ClosePosition] Dust cleanup: position already closed`);
+            break;
+          } else {
+            console.error(`[ClosePosition] Dust cleanup attempt ${retryCount + 1} failed:`, retryResult.error);
+          }
+          
+          retryCount++;
+        } catch (verifyErr) {
+          console.warn(`[ClosePosition] Could not verify/cleanup post-close position (attempt ${retryCount + 1}):`, verifyErr);
+          retryCount++;
+        }
+      }
+      
+      // Final verification after all retries
       try {
-        const postClosePosition = await PositionService.getPositionForExecution(
+        const finalCheck = await PositionService.getPositionForExecution(
           bot.id,
           wallet.agentPublicKey,
           subAccountId,
           bot.market,
           wallet.agentPrivateKeyEncrypted
         );
-        
-        if (postClosePosition.side !== 'FLAT' && Math.abs(postClosePosition.size) > 0.0001) {
-          console.error(`[ClosePosition] CRITICAL: Position NOT fully closed!`);
-          console.error(`[ClosePosition] Expected: FLAT, Actual: ${postClosePosition.side} ${postClosePosition.size}`);
-          verificationWarning = `Position not fully closed. Remaining: ${postClosePosition.side} ${postClosePosition.size}`;
-        } else {
-          console.log(`[ClosePosition] Post-close verification: Position confirmed FLAT`);
+        if (finalCheck.side !== 'FLAT' && Math.abs(finalCheck.size) > 0.0001) {
+          verificationWarning = `Position not fully closed after ${maxRetries} attempts. Remaining: ${finalCheck.side} ${finalCheck.size}`;
+          console.error(`[ClosePosition] CRITICAL: ${verificationWarning}`);
         }
-      } catch (verifyErr) {
-        console.warn(`[ClosePosition] Could not verify post-close position:`, verifyErr);
+      } catch (finalVerifyErr) {
+        console.warn(`[ClosePosition] Could not perform final position verification:`, finalVerifyErr);
       }
 
       // Create trade record for the close with PnL
@@ -1037,7 +1085,7 @@ export async function registerRoutes(
         fee: String(closeFee),
         pnl: tradePnl !== 0 ? String(tradePnl) : null,
         status: "executed",
-        txSignature: txSignature,
+        txSignature: finalTxSignature,
         webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice, exitPrice: fillPrice },
         errorMessage: verificationWarning,
       });
@@ -1064,7 +1112,7 @@ export async function registerRoutes(
         closeSide,
         fillPrice,
         fee: closeFee,
-        txSignature: txSignature,
+        txSignature: finalTxSignature,
         tradeId: closeTrade.id
       });
     } catch (error) {
@@ -2066,65 +2114,110 @@ export async function registerRoutes(
               console.log(`[Webhook] Close PnL: entry=$${closeEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${closeTradePnl.toFixed(4)}`);
             }
             
-            // CRITICAL: Verify on-chain that position is actually closed
-            // This prevents issues where reduceOnly wasn't respected
+            // CRITICAL: Verify on-chain that position is actually closed and retry if dust remains
+            // This handles partial fills and ensures position is truly flat
+            let finalTxSignature = txSignature;
+            let retryCount = 0;
+            const maxRetries = 3;
+            
+            while (retryCount < maxRetries) {
+              try {
+                // Wait a moment for on-chain state to settle
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                const postClosePosition = await PositionService.getPositionForExecution(
+                  botId,
+                  wallet.agentPublicKey,
+                  subAccountId,
+                  bot.market,
+                  wallet.agentPrivateKeyEncrypted
+                );
+                
+                if (postClosePosition.side === 'FLAT' || Math.abs(postClosePosition.size) < 0.0001) {
+                  console.log(`[Webhook] Post-close verification: Position confirmed FLAT`);
+                  break; // Position fully closed, exit retry loop
+                }
+                
+                // Position still exists - this is dust that needs cleanup
+                console.warn(`[Webhook] Position NOT fully closed after close order (attempt ${retryCount + 1}/${maxRetries})`);
+                console.warn(`[Webhook] Remaining dust: ${postClosePosition.side} ${postClosePosition.size} - attempting cleanup...`);
+                
+                // Retry closePerpPosition to clean up the dust
+                const retryResult = await closePerpPosition(
+                  wallet.agentPrivateKeyEncrypted,
+                  bot.market,
+                  subAccountId
+                );
+                
+                if (retryResult.success && retryResult.signature) {
+                  console.log(`[Webhook] Dust cleanup attempt ${retryCount + 1} succeeded: ${retryResult.signature}`);
+                  finalTxSignature = retryResult.signature; // Use the latest successful signature
+                } else if (retryResult.success && !retryResult.signature) {
+                  console.log(`[Webhook] Dust cleanup: position already closed`);
+                  break;
+                } else {
+                  console.error(`[Webhook] Dust cleanup attempt ${retryCount + 1} failed:`, retryResult.error);
+                }
+                
+                retryCount++;
+              } catch (verifyErr) {
+                console.warn(`[Webhook] Could not verify/cleanup post-close position (attempt ${retryCount + 1}):`, verifyErr);
+                retryCount++;
+              }
+            }
+            
+            // Final verification after all retries
+            let finalPositionRemaining = null;
             try {
-              const postClosePosition = await PositionService.getPositionForExecution(
+              const finalCheck = await PositionService.getPositionForExecution(
                 botId,
                 wallet.agentPublicKey,
                 subAccountId,
                 bot.market,
                 wallet.agentPrivateKeyEncrypted
               );
-              
-              if (postClosePosition.side !== 'FLAT' && Math.abs(postClosePosition.size) > 0.0001) {
-                // Position still exists after "close" - this is a problem!
-                console.error(`[Webhook] CRITICAL: Position NOT fully closed after reduce-only order!`);
-                console.error(`[Webhook] Expected: FLAT, Actual: ${postClosePosition.side} ${postClosePosition.size}`);
-                console.error(`[Webhook] reduceOnly may not have been respected by Drift!`);
-                
-                // Still mark trade as executed (it did execute something)
-                await storage.updateBotTrade(closeTrade.id, {
-                  status: "executed",
-                  txSignature: txSignature,
-                  price: signalPrice,
-                  fee: String(closeFee),
-                  pnl: closeTradePnl !== 0 ? String(closeTradePnl) : null,
-                  errorMessage: `WARNING: Position not fully closed. Remaining: ${postClosePosition.side} ${postClosePosition.size}`,
-                });
-                
-                await storage.updateWebhookLog(log.id, { 
-                  processed: true, 
-                  tradeExecuted: true,
-                  errorMessage: `Close executed but position remains: ${postClosePosition.side} ${postClosePosition.size}`
-                });
-                
-                // Return warning response
-                return res.json({
-                  status: "partial",
-                  warning: "Position not fully closed - residual position remains",
-                  type: "close",
-                  trade: closeTrade.id,
-                  txSignature: txSignature,
-                  closedSize: closeSize,
-                  side: closeSide,
-                  remainingPosition: {
-                    side: postClosePosition.side,
-                    size: postClosePosition.size,
-                  },
-                });
+              if (finalCheck.side !== 'FLAT' && Math.abs(finalCheck.size) > 0.0001) {
+                finalPositionRemaining = { side: finalCheck.side, size: finalCheck.size };
+                console.error(`[Webhook] CRITICAL: Position still not flat after ${maxRetries} cleanup attempts!`);
+                console.error(`[Webhook] Final remaining: ${finalCheck.side} ${finalCheck.size}`);
               }
-              
-              console.log(`[Webhook] Post-close verification: Position confirmed FLAT`);
-            } catch (verifyErr) {
-              console.warn(`[Webhook] Could not verify post-close position:`, verifyErr);
-              // Continue anyway - the order executed successfully
+            } catch (finalVerifyErr) {
+              console.warn(`[Webhook] Could not perform final position verification:`, finalVerifyErr);
             }
             
-            // Update trade record with execution details and PnL
+            // If dust still remains after all retries, log error but continue
+            if (finalPositionRemaining) {
+              await storage.updateBotTrade(closeTrade.id, {
+                status: "executed",
+                txSignature: finalTxSignature,
+                price: signalPrice,
+                fee: String(closeFee),
+                pnl: closeTradePnl !== 0 ? String(closeTradePnl) : null,
+                errorMessage: `WARNING: Position not fully closed after ${maxRetries} attempts. Remaining: ${finalPositionRemaining.side} ${finalPositionRemaining.size}`,
+              });
+              
+              await storage.updateWebhookLog(log.id, { 
+                processed: true, 
+                tradeExecuted: true,
+                errorMessage: `Close executed but dust remains after ${maxRetries} attempts: ${finalPositionRemaining.side} ${finalPositionRemaining.size}`
+              });
+              
+              return res.json({
+                status: "partial",
+                warning: `Position not fully closed after ${maxRetries} attempts - dust remains`,
+                type: "close",
+                trade: closeTrade.id,
+                txSignature: finalTxSignature,
+                closedSize: closeSize,
+                side: closeSide,
+                remainingPosition: finalPositionRemaining,
+              });
+            }
+            
+            // Update trade record with execution details and PnL (use finalTxSignature which may include retry signatures)
             await storage.updateBotTrade(closeTrade.id, {
               status: "executed",
-              txSignature: txSignature,
+              txSignature: finalTxSignature,
               price: signalPrice,
               fee: String(closeFee),
               pnl: closeTradePnl !== 0 ? String(closeTradePnl) : null,
@@ -2162,7 +2255,7 @@ export async function registerRoutes(
               status: "success",
               type: "close",
               trade: closeTrade.id,
-              txSignature: txSignature,
+              txSignature: finalTxSignature,
               closedSize: closeSize,
               side: closeSide,
             });
