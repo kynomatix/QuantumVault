@@ -248,8 +248,21 @@ export class DatabaseStorage implements IStorage {
     return result[0]?.count || 0;
   }
 
-  async getWalletBotTrades(walletAddress: string, limit: number = 50): Promise<BotTrade[]> {
-    return db.select().from(botTrades).where(eq(botTrades.walletAddress, walletAddress)).orderBy(desc(botTrades.executedAt)).limit(limit);
+  async getWalletBotTrades(walletAddress: string, limit: number = 50): Promise<(BotTrade & { botName?: string })[]> {
+    const results = await db.select({
+      trade: botTrades,
+      botName: tradingBots.name,
+    })
+    .from(botTrades)
+    .leftJoin(tradingBots, eq(botTrades.tradingBotId, tradingBots.id))
+    .where(eq(botTrades.walletAddress, walletAddress))
+    .orderBy(desc(botTrades.executedAt))
+    .limit(limit);
+    
+    return results.map(r => ({
+      ...r.trade,
+      botName: r.botName ?? undefined,
+    }));
   }
 
   async createBotTrade(trade: InsertBotTrade): Promise<BotTrade> {

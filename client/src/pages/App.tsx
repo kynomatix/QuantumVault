@@ -923,6 +923,7 @@ export default function AppPage() {
                         <thead>
                           <tr className="text-muted-foreground text-xs border-b border-border/50">
                             <th className="text-left py-3 font-medium">Time</th>
+                            <th className="text-left py-3 font-medium">Bot</th>
                             <th className="text-left py-3 font-medium">Market</th>
                             <th className="text-left py-3 font-medium">Side</th>
                             <th className="text-right py-3 font-medium">Size</th>
@@ -967,6 +968,9 @@ export default function AppPage() {
                               <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-trade-${i}`}>
                                 <td className="py-3 font-mono text-muted-foreground text-xs">
                                   {trade.executedAt ? new Date(trade.executedAt).toLocaleTimeString() : '--'}
+                                </td>
+                                <td className="py-3 text-xs text-muted-foreground max-w-[100px] truncate" title={trade.botName || 'Unknown'}>
+                                  {trade.botName || 'Unknown'}
                                 </td>
                                 <td className="py-3 font-medium">{trade.market}</td>
                                 <td className="py-3">
