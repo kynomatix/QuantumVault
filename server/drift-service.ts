@@ -1870,7 +1870,8 @@ export async function getAccountHealthMetrics(
       try {
         // Get health as percentage (0-100, 100 = healthy)
         const health = user.getHealth();
-        healthFactor = health.toNumber();
+        // getHealth() returns a number directly in newer SDK versions
+        healthFactor = typeof health === 'number' ? health : (health as any).toNumber?.() ?? 100;
         console.log(`[Drift] Raw health: ${healthFactor}`);
       } catch (e) {
         console.warn('[Drift] Could not get health:', e);
@@ -1878,8 +1879,9 @@ export async function getAccountHealthMetrics(
       
       try {
         // Margin ratio (higher = more risk)
-        const marginRatioBN = user.getMarginRatio();
-        marginRatio = marginRatioBN.toNumber() / 10000; // Convert from basis points
+        const marginRatioVal = user.getMarginRatio();
+        const marginRatioNum = typeof marginRatioVal === 'number' ? marginRatioVal : (marginRatioVal as any).toNumber?.() ?? 0;
+        marginRatio = marginRatioNum / 10000; // Convert from basis points
         console.log(`[Drift] Margin ratio: ${marginRatio}%`);
       } catch (e) {
         console.warn('[Drift] Could not get margin ratio:', e);

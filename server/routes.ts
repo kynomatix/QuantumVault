@@ -1138,6 +1138,31 @@ export async function registerRoutes(
         ? currentValue - costBasis  // Long: current value - cost
         : costBasis - currentValue; // Short: cost - current value
 
+      // Fetch health metrics for the bot's subaccount
+      let healthMetrics: { healthFactor?: number; liquidationPrice?: number; totalCollateral?: number; freeCollateral?: number } = {};
+      try {
+        const wallet = await storage.getWallet(bot.walletAddress);
+        if (wallet?.agentPrivateKeyEncrypted) {
+          const subAccountId = bot.driftSubaccountId ?? 0;
+          const healthResult = await getAccountHealthMetrics(wallet.agentPrivateKeyEncrypted, subAccountId);
+          if (healthResult.success && healthResult.data) {
+            healthMetrics.healthFactor = healthResult.data.healthFactor;
+            healthMetrics.totalCollateral = healthResult.data.totalCollateral;
+            healthMetrics.freeCollateral = healthResult.data.freeCollateral;
+            // Find liquidation price for this market
+            const normalizeMarket = (m: string) => m.toUpperCase().replace('-PERP', '').replace('USD', '').replace('PERP-', '');
+            const posHealth = healthResult.data.positions.find(
+              p => normalizeMarket(p.market) === normalizeMarket(bot.market)
+            );
+            if (posHealth?.liquidationPrice) {
+              healthMetrics.liquidationPrice = posHealth.liquidationPrice;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("Could not fetch health metrics for bot position:", e);
+      }
+
       res.json({
         hasPosition: true,
         side: baseSize > 0 ? 'LONG' : 'SHORT',
@@ -1147,6 +1172,7 @@ export async function registerRoutes(
         unrealizedPnl,
         realizedPnl: parseFloat(position.realizedPnl || "0"),
         market: position.market,
+        ...healthMetrics,
       });
     } catch (error) {
       console.error("Get bot position error:", error);

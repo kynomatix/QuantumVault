@@ -121,6 +121,10 @@ interface BotPosition {
   unrealizedPnl?: number;
   realizedPnl?: number;
   market?: string;
+  healthFactor?: number;
+  liquidationPrice?: number;
+  totalCollateral?: number;
+  freeCollateral?: number;
 }
 
 interface BotManagementDrawerProps {
@@ -769,6 +773,45 @@ export function BotManagementDrawer({
                       {(botPosition.unrealizedPnl ?? 0) >= 0 ? '+' : ''}${botPosition.unrealizedPnl?.toFixed(2)}
                     </p>
                   </div>
+                  
+                  {/* Health Metrics */}
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="p-2 rounded-lg bg-background/50">
+                      <p className="text-xs text-muted-foreground">Health Factor</p>
+                      <p 
+                        className={`font-mono font-semibold ${
+                          (botPosition.healthFactor ?? 100) >= 50 ? 'text-emerald-500' :
+                          (botPosition.healthFactor ?? 100) >= 20 ? 'text-amber-500' : 'text-red-500'
+                        }`}
+                        data-testid="text-bot-health"
+                      >
+                        {botPosition.healthFactor !== undefined ? `${botPosition.healthFactor.toFixed(0)}%` : '--'}
+                      </p>
+                    </div>
+                    <div className="p-2 rounded-lg bg-background/50">
+                      <p className="text-xs text-muted-foreground">Liq. Price</p>
+                      <p className="font-mono font-semibold text-amber-500" data-testid="text-liq-price">
+                        {botPosition.liquidationPrice ? `$${botPosition.liquidationPrice.toFixed(2)}` : '--'}
+                      </p>
+                    </div>
+                  </div>
+                  
+                  {botPosition.totalCollateral !== undefined && (
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div className="p-2 rounded-lg bg-background/50">
+                        <p className="text-xs text-muted-foreground">Total Collateral</p>
+                        <p className="font-mono font-semibold" data-testid="text-bot-collateral">
+                          ${botPosition.totalCollateral.toFixed(2)}
+                        </p>
+                      </div>
+                      <div className="p-2 rounded-lg bg-background/50">
+                        <p className="text-xs text-muted-foreground">Free Collateral</p>
+                        <p className="font-mono font-semibold text-muted-foreground" data-testid="text-free-collateral">
+                          ${botPosition.freeCollateral?.toFixed(2) ?? '--'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="text-center py-4 text-muted-foreground">
