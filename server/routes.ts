@@ -428,47 +428,10 @@ export async function registerRoutes(
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet || !wallet.agentPublicKey) {
-        return res.json({ positions: [], source: 'none' });
+        return res.json({ positions: [] });
       }
 
-      // PRIORITY: Fetch REAL on-chain positions from Drift User Account PDA
-      let onChainPositions: any[] = [];
-      try {
-        onChainPositions = await getPerpPositions(wallet.agentPublicKey, 0);
-        console.log(`[Positions] Got ${onChainPositions.length} on-chain positions from Drift`);
-      } catch (e) {
-        console.error('[Positions] Failed to fetch on-chain positions:', e);
-      }
-
-      // If we have on-chain positions, use them as source of truth
-      if (onChainPositions.length > 0) {
-        const bots = await storage.getTradingBots(req.walletAddress!);
-        
-        // Try to match on-chain positions to bots by market
-        const positions = onChainPositions.map(pos => {
-          const matchingBot = bots.find(b => b.market === pos.market);
-          return {
-            botId: matchingBot?.id || null,
-            botName: matchingBot?.name || 'Unknown Bot',
-            market: pos.market,
-            side: pos.side,
-            baseAssetAmount: pos.baseAssetAmount,
-            sizeUsd: pos.sizeUsd,
-            entryPrice: pos.entryPrice,
-            markPrice: pos.markPrice,
-            unrealizedPnl: pos.unrealizedPnl,
-            unrealizedPnlPercent: pos.unrealizedPnlPercent,
-            realizedPnl: 0,
-            totalFees: 0,
-            lastTradeAt: null,
-            source: 'on-chain',
-          };
-        });
-
-        return res.json({ positions, source: 'on-chain' });
-      }
-
-      // Fallback: Get bot positions from database if no on-chain positions
+      // Use database positions (tracked from actual trade executions with real fill prices)
       const botPositions = await storage.getBotPositions(req.walletAddress!);
       const bots = await storage.getTradingBots(req.walletAddress!);
       const botMap = new Map(bots.map(b => [b.id, b]));
@@ -518,11 +481,10 @@ export async function registerRoutes(
           realizedPnl,
           totalFees,
           lastTradeAt: pos.lastTradeAt,
-          source: 'database',
         });
       }
 
-      res.json({ positions, source: 'database' });
+      res.json({ positions });
     } catch (error) {
       console.error("Get positions error:", error);
       res.status(500).json({ error: "Internal server error" });

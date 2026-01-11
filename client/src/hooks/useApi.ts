@@ -25,7 +25,7 @@ async function fetchPositions(walletAddress: string) {
   const res = await fetch(`/api/positions`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch positions");
   const data = await res.json();
-  return { positions: data.positions || [], source: data.source || 'unknown' };
+  return data.positions || [];
 }
 
 async function reconcilePositions() {
