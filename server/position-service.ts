@@ -1,6 +1,43 @@
 import { storage } from './storage';
 import { getPerpPositions, getDriftAccountInfo } from './drift-service';
 
+// Drift maintenance margin weights by market (in decimal, e.g., 0.0625 = 6.25%)
+// These affect when liquidation occurs - higher weight = liquidation at less adverse price
+// Values sourced from Drift Protocol's perp market configs
+const MAINTENANCE_MARGIN_WEIGHTS: Record<string, number> = {
+  'SOL': 0.0625,      // 6.25% for SOL-PERP
+  'BTC': 0.05,        // 5% for BTC-PERP
+  'ETH': 0.05,        // 5% for ETH-PERP
+  'APT': 0.10,        // 10% for smaller caps
+  'MATIC': 0.10,
+  'DOGE': 0.10,
+  'BNB': 0.0625,
+  'SUI': 0.10,
+  'PEPE': 0.15,       // 15% for memecoins
+  'ARB': 0.10,
+  'PYTH': 0.10,
+  'WIF': 0.15,
+  'JUP': 0.10,
+  'JTO': 0.10,
+  'INJ': 0.10,
+  'SEI': 0.10,
+  'TIA': 0.10,
+  'LINK': 0.0625,
+  'AVAX': 0.0625,
+  'POPCAT': 0.15,
+  'ONDO': 0.10,
+  'TRUMP': 0.15,
+};
+
+function getMaintenanceMarginWeight(market: string): number {
+  const normalized = market.toUpperCase()
+    .replace(/-PERP$/i, '')
+    .replace(/PERP$/i, '')
+    .replace(/USD[CT]?$/i, '')
+    .replace(/[-_/]/g, '');
+  return MAINTENANCE_MARGIN_WEIGHTS[normalized] ?? 0.10; // Default 10% if unknown
+}
+
 function normalizeMarket(market: string): string {
   return market.toUpperCase()
     .replace(/-PERP$/i, '')
@@ -131,24 +168,36 @@ export class PositionService {
             healthFactor = 0; // Negative collateral = critical
           }
           
-          // Estimate liquidation price
-          // Liquidation occurs when freeCollateral = 0 (margin fully consumed)
-          // freeCollateral already accounts for maintenance margin requirements
-          // Price buffer = how much price can move before freeCollateral is consumed
-          // For a LONG: liqPrice = markPrice - (freeCollateral / |size|)
-          // For a SHORT: liqPrice = markPrice + (freeCollateral / |size|)
+          // Estimate liquidation price with maintenance margin weight
+          // Liquidation occurs when freeCollateral is consumed by price movement
+          // The maintenance margin weight affects how quickly margin is consumed:
+          // - Higher weight (e.g., 15% for memecoins) = liquidation at less adverse price
+          // - Lower weight (e.g., 5% for BTC) = can withstand larger price moves
+          // 
+          // Formula incorporates maintenance margin:
+          // priceBuffer = freeCollateral / (|size| * (1 + maintenanceWeight))
+          // This gives a more conservative (safer) liquidation price estimate
           let liquidationPrice: number | null = null;
           if (onChainPos && Math.abs(onChainSize) > 0.0001) {
             if (accountInfo.freeCollateral <= 0) {
               // Already at or past liquidation threshold
               liquidationPrice = onChainPos.markPrice;
             } else {
-              const priceBuffer = accountInfo.freeCollateral / Math.abs(onChainSize);
+              // Get market-specific maintenance margin weight
+              const maintenanceWeight = getMaintenanceMarginWeight(onChainPos.market);
+              
+              // Adjusted formula: divide by (1 + maintenanceWeight) to account for
+              // the additional margin required as position value changes
+              const adjustedSize = Math.abs(onChainSize) * (1 + maintenanceWeight);
+              const priceBuffer = accountInfo.freeCollateral / adjustedSize;
+              
               if (onChainPos.side === 'LONG') {
                 liquidationPrice = Math.max(0, onChainPos.markPrice - priceBuffer);
               } else {
                 liquidationPrice = onChainPos.markPrice + priceBuffer;
               }
+              
+              console.log(`[PositionService] Liquidation price calc: market=${onChainPos.market}, maintenanceWeight=${(maintenanceWeight * 100).toFixed(2)}%, markPrice=${onChainPos.markPrice.toFixed(2)}, freeCollateral=${accountInfo.freeCollateral.toFixed(2)}, priceBuffer=${priceBuffer.toFixed(2)}, liqPrice=${liquidationPrice?.toFixed(2)}`);
             }
           }
           

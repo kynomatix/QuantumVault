@@ -9,7 +9,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
@@ -761,29 +761,48 @@ export async function registerRoutes(
       const closeSide: 'long' | 'short' = onChainPosition.side === 'LONG' ? 'short' : 'long';
       const closeSize = Math.abs(onChainPosition.size);
 
-      console.log(`[ClosePosition] Closing ${closeSize} ${bot.market} (${closeSide}) with reduce-only order`);
+      console.log(`[ClosePosition] Closing ${closeSize} ${bot.market} (${closeSide}) with closePerpPosition (exact BN precision)`);
 
-      // Execute reduce-only close order on Drift
-      const result = await executePerpOrder(
+      // Execute close order using closePerpPosition for exact BN precision
+      // This prevents JavaScript float precision issues (e.g., 0.4374 → 437399999 instead of 437400000)
+      const result = await closePerpPosition(
         wallet.agentPrivateKeyEncrypted,
         bot.market,
-        closeSide,
-        closeSize,
-        subAccountId,
-        true // reduceOnly
+        subAccountId
+        // positionSizeBase intentionally omitted - subprocess queries exact BN from Drift
       );
 
-      if (!result.success || !result.txSignature) {
+      // Map closePerpPosition result format (signature) to expected format (txSignature)
+      const txSignature = result.signature || null;
+
+      // Handle error case
+      if (!result.success) {
         return res.status(500).json({ 
           error: "Failed to execute close order",
           details: result.error || "Unknown error"
         });
       }
+      
+      // Handle case where subprocess found no position to close (success=true, signature=null)
+      // This can happen if position was closed by another process (e.g., liquidation, webhook)
+      if (result.success && !txSignature) {
+        console.log(`[ClosePosition] closePerpPosition returned success but no signature - position was already closed`);
+        return res.json({ 
+          success: true,
+          message: "Position was already closed (no trade executed)",
+          closedSize: 0,
+          closeSide,
+          fillPrice: 0,
+          fee: 0,
+          txSignature: null,
+        });
+      }
 
-      console.log(`[ClosePosition] Close order executed: ${result.txSignature}`);
+      console.log(`[ClosePosition] Close order executed: ${txSignature}`);
 
       // Calculate fee (0.05% taker fee on notional value)
-      const fillPrice = result.fillPrice || 0;
+      // Use onChainPosition.markPrice as fill price estimate since closePerpPosition doesn't return fillPrice
+      const fillPrice = onChainPosition.markPrice || 0;
       const closeNotional = closeSize * fillPrice;
       const closeFee = closeNotional * 0.0005;
 
@@ -819,7 +838,7 @@ export async function registerRoutes(
         price: String(fillPrice),
         fee: String(closeFee),
         status: "executed",
-        txSignature: result.txSignature,
+        txSignature: txSignature,
         webhookPayload: { action: "manual_close", reason: "User requested position close" },
         errorMessage: verificationWarning,
       });
@@ -846,7 +865,7 @@ export async function registerRoutes(
         closeSide,
         fillPrice,
         fee: closeFee,
-        txSignature: result.txSignature,
+        txSignature: txSignature,
         tradeId: closeTrade.id
       });
     } catch (error) {
@@ -1724,20 +1743,48 @@ export async function registerRoutes(
         });
         
         try {
-          // Execute close order on Drift (reduce-only)
+          // Execute close order on Drift using closePerpPosition
+          // CRITICAL: Do NOT pass closeSize - let the subprocess query exact BN from DriftClient
+          // This prevents JavaScript float precision loss (e.g., 0.4374 → 437399999 instead of 437400000)
           const subAccountId = bot.driftSubaccountId ?? 0;
-          const result = await executePerpOrder(
+          console.log(`[Webhook] Using closePerpPosition (exact BN precision) for closeSize=${closeSize}`);
+          const result = await closePerpPosition(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
-            closeSide,
-            closeSize,
-            subAccountId,
-            true // reduceOnly = true for closing
+            subAccountId
+            // positionSizeBase intentionally omitted - subprocess queries exact BN from Drift
           );
           
-          if (result.success && result.txSignature) {
+          // closePerpPosition returns { success, signature, error } - map to expected format
+          const txSignature = result.signature || null;
+          
+          // Handle case where subprocess found no position to close (success=true, signature=null)
+          // This is a benign case - position was already flat or closed by another process
+          if (result.success && !txSignature) {
+            console.log(`[Webhook] closePerpPosition returned success but no signature - position was already closed`);
+            await storage.updateBotTrade(closeTrade.id, { 
+              status: "executed",
+              txSignature: null,
+              errorMessage: "Position already closed (no trade executed)"
+            });
+            await storage.updateWebhookLog(log.id, { 
+              processed: true, 
+              tradeExecuted: false,
+              errorMessage: "Close signal processed - position was already flat"
+            });
+            return res.json({
+              status: "success",
+              type: "close",
+              trade: closeTrade.id,
+              message: "Position was already closed (no trade executed)",
+            });
+          }
+          
+          if (result.success && txSignature) {
             // Calculate fee (0.05% taker fee on notional value)
-            const closeNotional = closeSize * (result.fillPrice || 0);
+            // Since closePerpPosition doesn't return fillPrice, use the signal price as estimate
+            const closeFillPrice = parseFloat(signalPrice) || 0;
+            const closeNotional = closeSize * closeFillPrice;
             const closeFee = closeNotional * 0.0005;
             
             // CRITICAL: Verify on-chain that position is actually closed
@@ -1760,8 +1807,8 @@ export async function registerRoutes(
                 // Still mark trade as executed (it did execute something)
                 await storage.updateBotTrade(closeTrade.id, {
                   status: "executed",
-                  txSignature: result.txSignature,
-                  price: result.fillPrice ? String(result.fillPrice) : signalPrice,
+                  txSignature: txSignature,
+                  price: signalPrice,
                   fee: String(closeFee),
                   errorMessage: `WARNING: Position not fully closed. Remaining: ${postClosePosition.side} ${postClosePosition.size}`,
                 });
@@ -1778,7 +1825,7 @@ export async function registerRoutes(
                   warning: "Position not fully closed - residual position remains",
                   type: "close",
                   trade: closeTrade.id,
-                  txSignature: result.txSignature,
+                  txSignature: txSignature,
                   closedSize: closeSize,
                   side: closeSide,
                   remainingPosition: {
@@ -1797,8 +1844,8 @@ export async function registerRoutes(
             // Update trade record with execution details
             await storage.updateBotTrade(closeTrade.id, {
               status: "executed",
-              txSignature: result.txSignature,
-              price: result.fillPrice ? String(result.fillPrice) : signalPrice,
+              txSignature: txSignature,
+              price: signalPrice,
               fee: String(closeFee),
             });
             
@@ -1811,7 +1858,7 @@ export async function registerRoutes(
               bot.market,
               closeTrade.id,
               closeFee,
-              result.fillPrice || 0,
+              closeFillPrice,
               closeSide,
               closeSize
             );
@@ -1834,7 +1881,7 @@ export async function registerRoutes(
               status: "success",
               type: "close",
               trade: closeTrade.id,
-              txSignature: result.txSignature,
+              txSignature: txSignature,
               closedSize: closeSize,
               side: closeSide,
             });
@@ -1934,13 +1981,13 @@ export async function registerRoutes(
         });
         
         try {
-          const closeResult = await executePerpOrder(
+          // Use closePerpPosition for exact BN precision (prevents float precision dust)
+          console.log(`[Webhook] Using closePerpPosition (exact BN) for position flip close`);
+          const closeResult = await closePerpPosition(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
-            closeSide,
-            closeSize,
-            subAccountId,
-            true // reduceOnly for closing
+            subAccountId
+            // positionSizeBase intentionally omitted - subprocess queries exact BN from Drift
           );
           
           if (!closeResult.success) {
@@ -1949,41 +1996,57 @@ export async function registerRoutes(
             return res.status(500).json({ error: `Position flip close failed: ${closeResult.error}` });
           }
           
-          // Update close trade with execution details
-          const closeFillPrice = closeResult.fillPrice || parseFloat(signalPrice || "0");
-          const closeNotional = closeSize * closeFillPrice;
-          const closeFee = closeNotional * 0.0005;
+          // closePerpPosition returns signature, not txSignature
+          const flipTxSignature = closeResult.signature || null;
           
-          await storage.updateBotTrade(closeTrade.id, {
-            status: "executed",
-            txSignature: closeResult.txSignature || null,
-            price: String(closeFillPrice),
-            fee: String(closeFee),
-          });
+          // Handle case where subprocess found no position to close (success=true, signature=null)
+          // This is unexpected for flip since we verified position exists, but handle gracefully
+          if (closeResult.success && !flipTxSignature) {
+            console.warn(`[Webhook] Position flip close: success but no signature - position may have been closed by another process`);
+            await storage.updateBotTrade(closeTrade.id, { 
+              status: "executed",
+              txSignature: null,
+              errorMessage: "Position was already closed (no trade executed)"
+            });
+            // Continue to execute the new position anyway
+            console.log(`[Webhook] Proceeding to open ${side.toUpperCase()} position despite no close signature`);
+          } else {
+            // Update close trade with execution details
+            const closeFillPrice = parseFloat(signalPrice || "0");
+            const closeNotional = closeSize * closeFillPrice;
+            const closeFee = closeNotional * 0.0005;
+            
+            await storage.updateBotTrade(closeTrade.id, {
+              status: "executed",
+              txSignature: flipTxSignature,
+              price: String(closeFillPrice),
+              fee: String(closeFee),
+            });
           
-          // Sync position from on-chain (replaces client-side math with actual Drift state)
-          await syncPositionFromOnChain(
-            botId,
-            bot.walletAddress,
-            wallet.agentPublicKey!,
-            subAccountId,
-            bot.market,
-            closeTrade.id,
-            closeFee,
-            closeFillPrice,
-            closeSide,
-            closeSize
-          );
+            // Sync position from on-chain (replaces client-side math with actual Drift state)
+            await syncPositionFromOnChain(
+              botId,
+              bot.walletAddress,
+              wallet.agentPublicKey!,
+              subAccountId,
+              bot.market,
+              closeTrade.id,
+              closeFee,
+              closeFillPrice,
+              closeSide,
+              closeSize
+            );
           
-          console.log(`[Webhook] Position closed successfully. Now proceeding to open ${side.toUpperCase()} position.`);
+            console.log(`[Webhook] Position closed successfully. Now proceeding to open ${side.toUpperCase()} position.`);
           
-          // Update stats for close trade
-          const stats1 = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
-          await storage.updateTradingBotStats(botId, {
-            ...stats1,
-            totalTrades: (stats1.totalTrades || 0) + 1,
-            lastTradeAt: new Date().toISOString(),
-          });
+            // Update stats for close trade
+            const stats1 = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+            await storage.updateTradingBotStats(botId, {
+              ...stats1,
+              totalTrades: (stats1.totalTrades || 0) + 1,
+              lastTradeAt: new Date().toISOString(),
+            });
+          }
           
         } catch (closeError: any) {
           console.error(`[Webhook] Position flip close failed:`, closeError);
