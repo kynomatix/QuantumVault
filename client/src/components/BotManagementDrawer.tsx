@@ -791,6 +791,13 @@ export function BotManagementDrawer({
                     </div>
                   </div>
                   
+                  <div className="p-2 rounded-lg bg-primary/10 border border-primary/20">
+                    <p className="text-xs text-muted-foreground">Position Value</p>
+                    <p className="font-mono font-bold text-lg" data-testid="text-position-value">
+                      ${((botPosition.size ?? 0) * (botPosition.currentPrice ?? 0)).toFixed(2)}
+                    </p>
+                  </div>
+                  
                   <div className="p-2 rounded-lg bg-background/50">
                     <p className="text-xs text-muted-foreground">Unrealized P&L</p>
                     <p 
