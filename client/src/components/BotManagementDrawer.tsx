@@ -638,7 +638,7 @@ export function BotManagementDrawer({
                   {balanceLoading ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    `$${botBalance.toFixed(2)}`
+                    `$${(botBalance + parseFloat((bot as any).realizedPnl ?? 0)).toFixed(2)}`
                   )}
                 </p>
               </div>
@@ -668,25 +668,6 @@ export function BotManagementDrawer({
                 </p>
               </div>
             </div>
-            
-            <div className="grid grid-cols-3 gap-3">
-              <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
-                <p className="text-xs text-muted-foreground">Daily Interest</p>
-                <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-interest-card">
-                  {balanceLoading ? '-' : `+$${interestEarned.toFixed(4)}`}
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
-                <p className="text-xs text-muted-foreground">Current APY</p>
-                <p className="text-lg font-semibold text-blue-400 mt-1">~5.3%</p>
-              </div>
-              <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
-                <p className="text-xs text-muted-foreground">Total Earned</p>
-                <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-total-interest">
-                  {balanceLoading ? '-' : `$${(interestEarned * 30).toFixed(2)}`}
-                </p>
-              </div>
-            </div>
 
             <div className="grid grid-cols-3 gap-3">
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
@@ -704,6 +685,28 @@ export function BotManagementDrawer({
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Leverage</p>
                 <p className="text-lg font-semibold mt-1" data-testid="text-leverage">{localBot?.leverage ?? bot.leverage}x</p>
+              </div>
+            </div>
+            
+            <div>
+              <p className="text-xs text-muted-foreground mb-2">Lending Interest</p>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
+                  <p className="text-xs text-muted-foreground">Daily</p>
+                  <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-interest-card">
+                    {balanceLoading ? '-' : `+$${interestEarned.toFixed(4)}`}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
+                  <p className="text-xs text-muted-foreground">APY</p>
+                  <p className="text-lg font-semibold text-blue-400 mt-1">~5.3%</p>
+                </div>
+                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
+                  <p className="text-xs text-muted-foreground">Total Earned</p>
+                  <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-total-interest">
+                    {balanceLoading ? '-' : `$${(interestEarned * 30).toFixed(2)}`}
+                  </p>
+                </div>
               </div>
             </div>
 
