@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, type HealthMetrics } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, type HealthMetrics } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
@@ -124,6 +124,7 @@ export default function AppPage() {
   const { data: expandedBotHealth, isLoading: healthLoading } = useBotHealth(expandedPositionBotId, !!expandedPositionBotId);
   const subscribeBot = useSubscribeToBot();
   const updateSub = useUpdateSubscription();
+  const reconcilePositions = useReconcilePositions();
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [driftBalance, setDriftBalance] = useState<number | null>(null);
@@ -726,7 +727,24 @@ export default function AppPage() {
                   <div className="lg:col-span-2 gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
                       <h2 className="font-display font-semibold">Open Positions</h2>
-                      <Button variant="outline" size="sm" data-testid="button-view-all-positions">View All</Button>
+                      <div className="flex gap-2">
+                        <Button 
+                          variant="outline" 
+                          size="sm" 
+                          onClick={() => {
+                            reconcilePositions.mutate(undefined, {
+                              onSuccess: () => toast({ title: "Synced", description: "Positions synced with Drift" }),
+                              onError: () => toast({ title: "Sync failed", description: "Could not sync positions", variant: "destructive" })
+                            });
+                          }}
+                          disabled={reconcilePositions.isPending}
+                          data-testid="button-sync-positions"
+                        >
+                          <RefreshCw className={`w-4 h-4 mr-1 ${reconcilePositions.isPending ? 'animate-spin' : ''}`} />
+                          Sync
+                        </Button>
+                        <Button variant="outline" size="sm" data-testid="button-view-all-positions">View All</Button>
+                      </div>
                     </div>
                     <div className="space-y-3">
                       {positionsData && positionsData.length > 0 ? (
