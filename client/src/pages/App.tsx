@@ -779,13 +779,20 @@ export default function AppPage() {
                                       <p className="text-xs text-muted-foreground">{pos.market}</p>
                                     </div>
                                   </div>
-                                  <div className="flex items-center gap-4">
+                                  <div className="flex items-center gap-6">
                                     <div className="text-right">
+                                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-0.5">Size</p>
+                                      <p className="font-mono font-semibold text-foreground">
+                                        ${(Math.abs(pos.baseAssetAmount) * Number(pos.entryPrice)).toFixed(2)}
+                                      </p>
+                                      <p className="text-[10px] text-muted-foreground">
+                                        {Math.abs(pos.baseAssetAmount).toFixed(4)} @ ${Number(pos.entryPrice).toFixed(2)}
+                                      </p>
+                                    </div>
+                                    <div className="text-right border-l border-border/30 pl-4">
+                                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-0.5">PnL</p>
                                       <p className={`font-mono font-semibold ${Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                         {Number(pos.unrealizedPnl) >= 0 ? '+' : ''}${Number(pos.unrealizedPnl).toFixed(2)}
-                                      </p>
-                                      <p className="text-xs text-muted-foreground">
-                                        {Math.abs(pos.baseAssetAmount).toFixed(4)} @ ${Number(pos.entryPrice).toFixed(2)}
                                       </p>
                                     </div>
                                     <ChevronDown className={`w-5 h-5 text-muted-foreground transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
