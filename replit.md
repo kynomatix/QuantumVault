@@ -42,13 +42,17 @@ Preferred communication style: Simple, everyday language.
     - **Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol via the agent wallet.
     - **TradingView Signal Logic (CRITICAL - DO NOT CHANGE)**: TradingView `contracts` are converted from `USDT / price` to a **percentage** of `bot.maxPositionSize`. `tradeAmountUsd = (usdtValue / 100) * bot.maxPositionSize`. This logic ensures pyramiding strategies work as intended.
 - **Close Signal Detection**: `strategy.position_size = 0` from TradingView triggers a reduce-only close order for existing positions.
-- **Position Flip Detection**: Signals in the opposite direction of an open position trigger a two-step process: first, close the existing position, then open a new one in the signal direction.
+- **Position Flip Detection**: Signals in the opposite direction of an open position trigger a two-step process: first, close the existing position using the **actual on-chain Drift position size** (queried via `getPerpPositions`), then open a new one in the signal direction. This ensures complete position closes without "dust" remaining.
 - **Bot Pause Behavior**: Pausing a bot (`isActive: false`) automatically triggers a close of any open positions associated with it.
 - **Webhook Deduplication**: `webhook_logs` table uses a `signal_hash` to prevent duplicate processing of TradingView signals.
 - **Equity Event Tracking**: Tracks deposits and withdrawals for transaction history, ensuring idempotency.
 - **Drift Subaccounts**: Currently, all trades execute on `subaccount 0`. Multi-subaccount support is planned.
 - **Drift Account Parsing**: Custom byte parsing is used for Solana Drift User and PerpPosition accounts to extract balances and positions, as direct Drift SDK usage has dependency conflicts.
 - **Account Health Metrics**: Uses official Drift SDK methods (`getHealth()`, `getMarginRatio()`, `getTotalCollateral()`, `getFreeCollateral()`, `getUnrealizedPNL()`) to display account health factor, collateral values, and per-position liquidation prices on the dashboard.
+
+## Known Issues
+
+- **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Under heavy load, this can lead to JavaScript heap out of memory crashes. Mitigation: Consider implementing a singleton DriftClient connection pool or increasing Node.js memory limit (`--max-old-space-size=4096`).
 
 ## External Dependencies
 
