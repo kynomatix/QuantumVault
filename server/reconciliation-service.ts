@@ -7,6 +7,120 @@ const RECONCILE_INTERVAL_MS = 60 * 1000; // 60 seconds
 let reconcileInterval: NodeJS.Timeout | null = null;
 const lastReconcileTime = new Map<string, number>();
 
+/**
+ * Force sync position from on-chain Drift to database
+ * This should be called AFTER every trade to ensure DB matches on-chain truth
+ * Unlike updateBotPositionFromTrade which does client-side math, this queries actual on-chain state
+ * 
+ * @param tradeFillPrice - Fill price of the trade (for realized PnL calculation)
+ * @param tradeSide - 'long' or 'short' for the trade that was just executed
+ * @param tradeSize - Size of the trade in base units
+ */
+export async function syncPositionFromOnChain(
+  botId: string,
+  walletAddress: string,
+  agentPublicKey: string,
+  subAccountId: number,
+  market: string,
+  tradeId: string,
+  tradeFee: number,
+  tradeFillPrice: number = 0,
+  tradeSide: string = '',
+  tradeSize: number = 0
+): Promise<{ success: boolean; position?: any; error?: string }> {
+  try {
+    console.log(`[Sync] Force syncing bot ${botId} from on-chain (market=${market}, subaccount=${subAccountId})`);
+    
+    // Query actual on-chain position using raw RPC (no WebSocket)
+    const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
+    const onChainPos = onChainPositions.find(p => p.market === market);
+    
+    // Get existing DB position to calculate realized PnL delta
+    const dbPosition = await storage.getBotPosition(botId, market);
+    const existingRealizedPnl = dbPosition ? parseFloat(dbPosition.realizedPnl) : 0;
+    const existingFees = dbPosition ? parseFloat(dbPosition.totalFees) : 0;
+    const previousBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
+    const previousAvgEntry = dbPosition ? parseFloat(dbPosition.avgEntryPrice) : 0;
+    
+    const onChainBaseSize = onChainPos?.baseAssetAmount || 0;
+    
+    // Calculate realized PnL from this trade
+    // Realized PnL occurs when position size decreases (closing or reducing position)
+    let tradePnl = 0;
+    
+    if (Math.abs(previousBaseSize) > 0.0001 && tradeFillPrice > 0 && tradeSize > 0) {
+      // Normalize trade side for comparison
+      const normalizedSide = tradeSide.toLowerCase();
+      
+      // Check if this trade reduced the position (opposite side)
+      const isReducing = (previousBaseSize > 0 && normalizedSide === 'short') ||
+                         (previousBaseSize < 0 && normalizedSide === 'long');
+      
+      if (isReducing) {
+        // Calculate PnL on the closed portion only
+        const closedSize = Math.min(Math.abs(previousBaseSize), tradeSize);
+        
+        // Prorate fee: only the portion of fee for the closed size affects realized PnL
+        // If trade size > closed size (flip/overclose), some fee goes to the new position
+        const feeRatio = closedSize / tradeSize;
+        const closeFee = tradeFee * feeRatio;
+        
+        if (previousBaseSize > 0) {
+          // Was LONG, selling to close - PnL = (fillPrice - avgEntry) * closedSize - prorated fee
+          tradePnl = (tradeFillPrice - previousAvgEntry) * closedSize - closeFee;
+        } else {
+          // Was SHORT, buying to close - PnL = (avgEntry - fillPrice) * closedSize - prorated fee
+          tradePnl = (previousAvgEntry - tradeFillPrice) * closedSize - closeFee;
+        }
+        
+        console.log(`[Sync] Realized PnL from close: $${tradePnl.toFixed(4)} (closed ${closedSize.toFixed(4)} @ $${tradeFillPrice.toFixed(2)}, entry was $${previousAvgEntry.toFixed(2)}, fee prorated: $${closeFee.toFixed(4)})`);
+      }
+    }
+    
+    const newRealizedPnl = existingRealizedPnl + tradePnl;
+    const newTotalFees = existingFees + tradeFee;
+    
+    if (onChainPos && Math.abs(onChainBaseSize) > 0.0001) {
+      // Position exists on-chain - update DB with actual values
+      const position = await storage.upsertBotPosition({
+        tradingBotId: botId,
+        walletAddress,
+        market,
+        baseSize: String(onChainBaseSize),
+        avgEntryPrice: String(onChainPos.entryPrice),
+        costBasis: String(Math.abs(onChainBaseSize) * onChainPos.entryPrice),
+        realizedPnl: String(newRealizedPnl),
+        totalFees: String(newTotalFees),
+        lastTradeId: tradeId,
+        lastTradeAt: new Date(),
+      });
+      
+      console.log(`[Sync] On-chain position: ${onChainBaseSize.toFixed(4)} ${market} @ $${onChainPos.entryPrice.toFixed(2)}, cumulative PnL: $${newRealizedPnl.toFixed(4)}`);
+      return { success: true, position };
+    } else {
+      // No position on-chain (position fully closed)
+      const position = await storage.upsertBotPosition({
+        tradingBotId: botId,
+        walletAddress,
+        market,
+        baseSize: "0",
+        avgEntryPrice: "0",
+        costBasis: "0",
+        realizedPnl: String(newRealizedPnl),
+        totalFees: String(newTotalFees),
+        lastTradeId: tradeId,
+        lastTradeAt: new Date(),
+      });
+      
+      console.log(`[Sync] Position cleared, cumulative realized PnL: $${newRealizedPnl.toFixed(4)}`);
+      return { success: true, position };
+    }
+  } catch (error) {
+    console.error(`[Sync] Failed to sync position from on-chain:`, error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export async function reconcileBotPosition(
   botId: string,
   walletAddress: string,

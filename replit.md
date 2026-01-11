@@ -49,11 +49,12 @@ Preferred communication style: Simple, everyday language.
 - **Drift Subaccounts**: Each bot is assigned a unique `driftSubaccountId` for isolation. Trades execute on the bot's specific subaccount. Subaccounts are auto-initialized when users deposit funds to a bot.
 - **Drift Account Parsing**: Custom byte parsing is used for Solana Drift User and PerpPosition accounts to extract balances and positions, as direct Drift SDK usage has dependency conflicts.
 - **Account Health Metrics**: Uses official Drift SDK methods (`getHealth()`, `getMarginRatio()`, `getTotalCollateral()`, `getFreeCollateral()`, `getUnrealizedPNL()`) to display account health factor, collateral values, and per-position liquidation prices on the dashboard.
-- **Automated Position Reconciliation**: Three-layer system ensures database positions stay synced with on-chain Drift positions:
-    1. **Periodic Background Sync (60s)**: `startPeriodicReconciliation()` runs every 60 seconds on server startup, checking all active bots.
-    2. **Post-Trade Reconciliation**: Fire-and-forget `setImmediate()` call after each successful trade execution.
+- **Automated Position Reconciliation**: On-chain is the source of truth. Database syncs from Drift after every trade.
+    1. **Immediate Post-Trade Sync**: `syncPositionFromOnChain()` called after every successful trade execution. Queries actual on-chain position via `getPerpPositions()` (raw RPC, no WebSocket) and updates database with real values.
+    2. **Periodic Background Sync (60s)**: `startPeriodicReconciliation()` runs every 60 seconds, checking all active bots.
     3. **Manual Sync Button**: UI button in Open Positions section for user-triggered reconciliation.
-    - Reconciliation queries on-chain position via `getPerpPositions()` and updates database if discrepancies found.
+    - **Realized PnL Tracking**: Calculated when positions close/reduce. Formula: `(fillPrice - avgEntry) * closedSize - proratedFee`. Fees are prorated for flip/overclose trades.
+    - **On-Chain Position Reading**: Uses `getPerpPositions()` with raw RPC calls (`connection.getAccountInfo()`) and custom byte parsing, NOT Drift SDK WebSocket subscriptions which are unreliable.
 
 ## Known Issues
 

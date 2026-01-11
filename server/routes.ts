@@ -8,7 +8,7 @@ import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shar
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, getAccountHealthMetrics } from "./drift-service";
-import { reconcileBotPosition } from "./reconciliation-service";
+import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
 
 declare module "express-session" {
@@ -1017,26 +1017,19 @@ export async function registerRoutes(
                 webhookPayload: { action: "pause_close", reason: "Bot paused by user" },
               });
               
-              // Update bot position (will be zeroed out)
-              await storage.updateBotPositionFromTrade(
+              // Sync position from on-chain (replaces client-side math with actual Drift state)
+              await syncPositionFromOnChain(
                 bot.id,
-                bot.market,
                 bot.walletAddress,
-                closeSide,
-                closeSize,
-                result.fillPrice || 0,
+                wallet.agentPublicKey!,
+                pauseSubAccountId,
+                bot.market,
+                closeTrade.id,
                 closeFee,
-                closeTrade.id
+                result.fillPrice || 0,
+                closeSide,
+                closeSize
               );
-              
-              // Fire-and-forget reconciliation to ensure database matches on-chain
-              setImmediate(async () => {
-                try {
-                  await reconcileBotPosition(bot.id, bot.walletAddress, wallet.agentPublicKey!, pauseSubAccountId, bot.market);
-                } catch (err) {
-                  console.error(`[Bot] Post-pause reconciliation failed:`, err);
-                }
-              });
               
               positionClosed = positionVerified;
             } else {
@@ -1558,16 +1551,18 @@ export async function registerRoutes(
               fee: String(closeFee),
             });
             
-            // Update bot position (will be zeroed out)
-            await storage.updateBotPositionFromTrade(
+            // Sync position from on-chain (replaces client-side math with actual Drift state)
+            await syncPositionFromOnChain(
               botId,
-              bot.market,
               bot.walletAddress,
-              closeSide,
-              closeSize,
-              result.fillPrice || 0,
+              wallet.agentPublicKey!,
+              subAccountId,
+              bot.market,
+              closeTrade.id,
               closeFee,
-              closeTrade.id
+              result.fillPrice || 0,
+              closeSide,
+              closeSize
             );
             
             // Update bot stats
@@ -1689,10 +1684,18 @@ export async function registerRoutes(
             fee: String(closeFee),
           });
           
-          // Update position (should zero it out)
-          await storage.updateBotPositionFromTrade(
-            botId, bot.market, bot.walletAddress,
-            closeSide, closeSize, closeFillPrice, closeFee, closeTrade.id
+          // Sync position from on-chain (replaces client-side math with actual Drift state)
+          await syncPositionFromOnChain(
+            botId,
+            bot.walletAddress,
+            wallet.agentPublicKey!,
+            subAccountId,
+            bot.market,
+            closeTrade.id,
+            closeFee,
+            closeFillPrice,
+            closeSide,
+            closeSize
           );
           
           console.log(`[Webhook] Position closed successfully. Now proceeding to open ${side.toUpperCase()} position.`);
@@ -1851,26 +1854,19 @@ export async function registerRoutes(
         size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
 
-      // Update bot position snapshot with actual fill data
-      await storage.updateBotPositionFromTrade(
+      // Sync position from on-chain (replaces client-side math with actual Drift state)
+      await syncPositionFromOnChain(
         botId,
-        bot.market,
         bot.walletAddress,
-        side,
-        contractSize,
-        fillPrice,
+        wallet.agentPublicKey!,
+        subAccountId,
+        bot.market,
+        trade.id,
         tradeFee,
-        trade.id
+        fillPrice,
+        side,
+        contractSize
       );
-
-      // Fire-and-forget reconciliation to sync with on-chain position
-      setImmediate(async () => {
-        try {
-          await reconcileBotPosition(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market);
-        } catch (err) {
-          console.error(`[Webhook] Post-trade reconciliation failed for bot ${botId}:`, err);
-        }
-      });
 
       // Update bot stats
       const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
@@ -2187,16 +2183,18 @@ export async function registerRoutes(
         size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
 
-      // Update bot position snapshot with actual fill data
-      await storage.updateBotPositionFromTrade(
+      // Sync position from on-chain (replaces client-side math with actual Drift state)
+      await syncPositionFromOnChain(
         botId,
-        bot.market,
         bot.walletAddress,
-        side,
-        contractSize,
-        userFillPrice,
+        userWallet.agentPublicKey!,
+        subAccountId,
+        bot.market,
+        trade.id,
         userTradeFee,
-        trade.id
+        userFillPrice,
+        side,
+        contractSize
       );
 
       // Update bot stats
