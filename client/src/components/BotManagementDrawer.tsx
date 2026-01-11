@@ -143,6 +143,7 @@ export function BotManagementDrawer({
 
   const [activeTab, setActiveTab] = useState('overview');
   const [botBalance, setBotBalance] = useState<number>(0);
+  const [interestEarned, setInterestEarned] = useState<number>(0);
   const [mainAccountBalance, setMainAccountBalance] = useState<number>(0);
   const [driftBalance, setDriftBalance] = useState<number>(0);
   const [driftFreeCollateral, setDriftFreeCollateral] = useState<number>(0);
@@ -242,6 +243,7 @@ export function BotManagementDrawer({
       if (balanceRes.ok) {
         const data = await balanceRes.json();
         setBotBalance(data.usdcBalance ?? 0);
+        setInterestEarned(data.interestEarned ?? 0);
       }
 
       if (agentRes.ok) {
@@ -660,7 +662,7 @@ export function BotManagementDrawer({
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-4 gap-3">
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Total Trades</p>
                 <p className="text-lg font-semibold mt-1" data-testid="text-total-trades">
@@ -676,6 +678,12 @@ export function BotManagementDrawer({
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Leverage</p>
                 <p className="text-lg font-semibold mt-1" data-testid="text-leverage">{localBot?.leverage ?? bot.leverage}x</p>
+              </div>
+              <div className="p-3 rounded-lg bg-muted/30 border text-center">
+                <p className="text-xs text-muted-foreground">Interest</p>
+                <p className="text-lg font-semibold mt-1 text-blue-400" data-testid="text-interest-earned">
+                  {balanceLoading ? '-' : `+$${interestEarned.toFixed(4)}`}
+                </p>
               </div>
             </div>
 
