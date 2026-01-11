@@ -197,7 +197,25 @@ async function getAgentDriftClient(
   encryptedPrivateKey: string,
   subAccountId: number = 0
 ): Promise<{ driftClient: any; cleanup: () => Promise<void> }> {
-  const { DriftClient, Wallet, initialize } = await import('@drift-labs/sdk');
+  // Import with retry to handle intermittent "Class extends value is not a constructor" errors
+  let sdk: any;
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      sdk = await import('@drift-labs/sdk');
+      break;
+    } catch (importErr: any) {
+      const errMsg = importErr.message || String(importErr);
+      console.error(`[Drift] SDK import failed (attempt ${attempt}/${maxRetries}):`, errMsg);
+      if (attempt === maxRetries) {
+        throw new Error(`Failed to load Drift SDK after ${maxRetries} attempts: ${errMsg}`);
+      }
+      // Small delay before retry
+      await new Promise(r => setTimeout(r, 100 * attempt));
+    }
+  }
+  
+  const { DriftClient, Wallet, initialize } = sdk;
   
   const connection = getConnection();
   const agentKeypair = getAgentKeypair(encryptedPrivateKey);
