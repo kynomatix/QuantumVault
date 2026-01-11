@@ -792,6 +792,7 @@ export async function subaccountExists(walletAddress: string, subAccountId: numb
 
 export interface DriftAccountInfo {
   usdcBalance: number;
+  totalCollateral: number;
   freeCollateral: number;
   hasOpenPositions: boolean;
   marginUsed: number;
@@ -804,6 +805,7 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
   
   const defaultResult: DriftAccountInfo = {
     usdcBalance: 0,
+    totalCollateral: 0,
     freeCollateral: 0,
     hasOpenPositions: false,
     marginUsed: 0,
@@ -866,10 +868,15 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
     const buffer = hasOpenPositions ? 0.0001 : 0;
     const freeCollateral = Math.max(0, usdcBalance - marginUsed - buffer);
     
-    console.log(`[Drift] Account info: balance=${usdcBalance.toFixed(4)}, marginUsed=${marginUsed.toFixed(4)}, free=${freeCollateral.toFixed(4)}, hasPositions=${hasOpenPositions}`);
+    // For basic account info, totalCollateral is approximately usdcBalance + unrealized PnL
+    // For accurate totalCollateral, use getAccountHealthMetrics which uses SDK
+    const totalCollateral = usdcBalance;
+    
+    console.log(`[Drift] Account info: balance=${usdcBalance.toFixed(4)}, totalCollateral=${totalCollateral.toFixed(4)}, marginUsed=${marginUsed.toFixed(4)}, free=${freeCollateral.toFixed(4)}, hasPositions=${hasOpenPositions}`);
     
     return {
       usdcBalance,
+      totalCollateral,
       freeCollateral,
       hasOpenPositions,
       marginUsed,

@@ -323,7 +323,7 @@ export async function registerRoutes(
 
   app.post("/api/agent/drift-deposit", requireWallet, async (req, res) => {
     try {
-      const { amount } = req.body;
+      const { amount, botId } = req.body;
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
       }
@@ -334,6 +334,16 @@ export async function registerRoutes(
       }
       if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      // If botId provided, verify ownership
+      let tradingBotId: string | null = null;
+      if (botId) {
+        const bot = await storage.getTradingBotById(botId);
+        if (!bot || bot.walletAddress !== req.walletAddress) {
+          return res.status(403).json({ error: "Bot not found or not owned" });
+        }
+        tradingBotId = botId;
       }
 
       const result = await executeAgentDriftDeposit(
@@ -348,10 +358,11 @@ export async function registerRoutes(
 
       await storage.createEquityEvent({
         walletAddress: req.walletAddress!,
+        tradingBotId,
         eventType: 'drift_deposit',
         amount: String(amount),
         txSignature: result.signature || null,
-        notes: 'Deposit to Drift Protocol',
+        notes: tradingBotId ? `Deposit to bot` : 'Deposit to Drift Protocol',
       });
 
       res.json(result);
@@ -363,7 +374,7 @@ export async function registerRoutes(
 
   app.post("/api/agent/drift-withdraw", requireWallet, async (req, res) => {
     try {
-      const { amount } = req.body;
+      const { amount, botId } = req.body;
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
       }
@@ -374,6 +385,16 @@ export async function registerRoutes(
       }
       if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      // If botId provided, verify ownership
+      let tradingBotId: string | null = null;
+      if (botId) {
+        const bot = await storage.getTradingBotById(botId);
+        if (!bot || bot.walletAddress !== req.walletAddress) {
+          return res.status(403).json({ error: "Bot not found or not owned" });
+        }
+        tradingBotId = botId;
       }
 
       const result = await executeAgentDriftWithdraw(
@@ -388,10 +409,11 @@ export async function registerRoutes(
 
       await storage.createEquityEvent({
         walletAddress: req.walletAddress!,
+        tradingBotId,
         eventType: 'drift_withdraw',
         amount: String(-amount),
         txSignature: result.signature || null,
-        notes: 'Withdraw from Drift Protocol',
+        notes: tradingBotId ? `Withdraw from bot` : 'Withdraw from Drift Protocol',
       });
 
       res.json(result);
@@ -715,8 +737,16 @@ export async function registerRoutes(
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      // Get net deposited for this specific bot's subaccount
-      const netDeposited = await storage.getBotNetDeposited(botId);
+      
+      // First try bot-specific deposits
+      let netDeposited = await storage.getBotNetDeposited(botId);
+      
+      // For legacy bots on subaccount 0 with no bot-specific deposits,
+      // fall back to wallet-level deposits
+      if (netDeposited === 0 && (bot.driftSubaccountId === 0 || bot.driftSubaccountId === null)) {
+        netDeposited = await storage.getWalletNetDeposited(req.walletAddress!);
+      }
+      
       res.json({ netDeposited });
     } catch (error) {
       console.error("Get bot net deposited error:", error);

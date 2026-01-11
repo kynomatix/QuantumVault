@@ -290,7 +290,7 @@ export function BotManagementDrawer({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ amount }),
+        body: JSON.stringify({ amount, botId: bot?.id }),
       });
 
       const data = await res.json();
@@ -299,7 +299,7 @@ export function BotManagementDrawer({
         throw new Error(data.error || 'Failed to add to Drift');
       }
 
-      toast({ title: `Successfully added $${amount} to Drift`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
+      toast({ title: `Successfully added $${amount} to bot`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
       setAddEquityAmount('');
       setTimeout(() => fetchBotBalance(), 1500);
     } catch (error) {
@@ -332,7 +332,7 @@ export function BotManagementDrawer({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ amount }),
+        body: JSON.stringify({ amount, botId: bot?.id }),
       });
 
       const data = await res.json();
@@ -348,7 +348,7 @@ export function BotManagementDrawer({
         throw new Error(friendlyMessage);
       }
 
-      toast({ title: `Successfully removed $${amount} from Drift`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
+      toast({ title: `Successfully removed $${amount} from bot`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
       setRemoveEquityAmount('');
       setTimeout(() => fetchBotBalance(), 1500);
     } catch (error) {
