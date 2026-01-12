@@ -284,13 +284,16 @@ async function getAgentDriftClient(
   const sdkEnv = IS_MAINNET ? 'mainnet-beta' : 'devnet';
   const sdkConfig = initialize({ env: sdkEnv });
   
+  // Include both subaccount 0 and target subaccount so we can initialize them if needed
+  const subAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
+  
   const driftClient = new DriftClient({
     connection,
     wallet,
     programID: new PublicKey(sdkConfig.DRIFT_PROGRAM_ID),
     env: sdkEnv,
     activeSubAccountId: subAccountId,
-    subAccountIds: [subAccountId],
+    subAccountIds,
   });
   
   await driftClient.subscribe();
@@ -1662,14 +1665,26 @@ export async function executeAgentDriftDeposit(
         // Convert amount to precision (USDC has 6 decimals)
         const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
         
-        // Initialize user if needed
-        const userAccountExists = await driftClient.getUserAccountAndSlot();
-        if (!userAccountExists) {
-          console.log('[Drift] Initializing user account via SDK...');
-          await driftClient.initializeUserAccount();
+        // Initialize the specific subaccount if needed
+        // First check if subaccount 0 exists (required before creating other subaccounts)
+        const mainAccountExists = await driftClient.getUserAccountAndSlot(0);
+        if (!mainAccountExists) {
+          console.log('[Drift] Initializing main user account (subaccount 0) via SDK...');
+          await driftClient.initializeUserAccount(0);
         }
         
-        console.log('[Drift] Calling SDK deposit...');
+        // If depositing to a non-zero subaccount, initialize it if needed
+        if (subAccountId > 0) {
+          const subAccountExists = await driftClient.getUserAccountAndSlot(subAccountId);
+          if (!subAccountExists) {
+            console.log(`[Drift] Initializing subaccount ${subAccountId} via SDK...`);
+            await driftClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
+            // Wait a moment for the account to be confirmed on-chain
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+        
+        console.log(`[Drift] Calling SDK deposit to subaccount ${subAccountId}...`);
         const txSig = await driftClient.deposit(
           amountBN,
           0, // USDC market index
