@@ -1616,6 +1616,7 @@ export async function executeAgentDriftDeposit(
   agentPublicKey: string,
   encryptedPrivateKey: string,
   amountUsdc: number,
+  subAccountId: number = 0,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const connection = getConnection();
@@ -1651,11 +1652,11 @@ export async function executeAgentDriftDeposit(
       };
     }
     
-    console.log(`[Drift] Using SDK deposit method: ${amountUsdc} USDC`);
+    console.log(`[Drift] Using SDK deposit method: ${amountUsdc} USDC to subaccount ${subAccountId}`);
     
     // Try SDK approach first (handles oracles automatically)
     try {
-      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey);
+      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
       
       try {
         // Convert amount to precision (USDC has 6 decimals)
