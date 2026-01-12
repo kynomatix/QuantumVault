@@ -1659,28 +1659,53 @@ export async function executeAgentDriftDeposit(
     
     // Try SDK approach first (handles oracles automatically)
     try {
+      // First, check on-chain if the target subaccount exists BEFORE creating DriftClient
+      // This uses the actual on-chain state, not the SDK's internal cache
+      const agentKeypair = getAgentKeypair(encryptedPrivateKey);
+      
+      // Check if main subaccount (0) exists on-chain
+      const mainAccountPDA = getUserAccountPDA(agentKeypair.publicKey, 0);
+      const mainAccountInfo = await connection.getAccountInfo(mainAccountPDA);
+      const mainExists = mainAccountInfo !== null && mainAccountInfo.data.length > 0;
+      console.log(`[Drift] Main subaccount 0 exists on-chain: ${mainExists}`);
+      
+      // Check if target subaccount exists on-chain (if not subaccount 0)
+      let targetExists = mainExists; // If target is 0, use mainExists
+      if (subAccountId > 0) {
+        const targetAccountPDA = getUserAccountPDA(agentKeypair.publicKey, subAccountId);
+        const targetAccountInfo = await connection.getAccountInfo(targetAccountPDA);
+        targetExists = targetAccountInfo !== null && targetAccountInfo.data.length > 0;
+        console.log(`[Drift] Target subaccount ${subAccountId} exists on-chain: ${targetExists}`);
+      }
+      
       const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
       
       try {
         // Convert amount to precision (USDC has 6 decimals)
         const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
         
-        // Initialize the specific subaccount if needed
-        // First check if subaccount 0 exists (required before creating other subaccounts)
-        const mainAccountExists = await driftClient.getUserAccountAndSlot(0);
-        if (!mainAccountExists) {
+        // Initialize the main subaccount if it doesn't exist on-chain
+        if (!mainExists) {
           console.log('[Drift] Initializing main user account (subaccount 0) via SDK...');
-          await driftClient.initializeUserAccount(0);
+          const initTx = await driftClient.initializeUserAccount(0);
+          console.log(`[Drift] Main account initialized: ${initTx}`);
+          // Wait for confirmation
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
         
         // If depositing to a non-zero subaccount, initialize it if needed
         if (subAccountId > 0) {
-          const subAccountExists = await driftClient.getUserAccountAndSlot(subAccountId);
-          if (!subAccountExists) {
+          if (!targetExists) {
             console.log(`[Drift] Initializing subaccount ${subAccountId} via SDK...`);
-            await driftClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
-            // Wait a moment for the account to be confirmed on-chain
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            const initTx = await driftClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
+            console.log(`[Drift] Subaccount ${subAccountId} initialized: ${initTx}`);
+            // Wait for confirmation
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Need to re-subscribe after creating new subaccount so SDK knows about it
+            console.log(`[Drift] Re-subscribing DriftClient after subaccount creation...`);
+            await driftClient.unsubscribe();
+            await driftClient.subscribe();
           }
           
           // CRITICAL: Switch active user to target subaccount before deposit
