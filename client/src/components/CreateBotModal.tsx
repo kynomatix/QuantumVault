@@ -198,6 +198,18 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
       return;
     }
 
+    const depositAmount = parseFloat(editMaxPositionSize);
+    const availableBalance = agentBalance ? parseFloat(agentBalance) : 0;
+    
+    if (depositAmount > availableBalance) {
+      toast({ 
+        title: 'Insufficient balance', 
+        description: `You only have $${availableBalance.toFixed(2)} available in your agent wallet`,
+        variant: 'destructive' 
+      });
+      return;
+    }
+
     setIsProcessingEquity(true);
     try {
       // First, save the bot settings (leverage and max position size)
@@ -207,7 +219,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
         credentials: 'include',
         body: JSON.stringify({ 
           leverage: editLeverage,
-          maxPositionSize: parseFloat(editMaxPositionSize),
+          maxPositionSize: depositAmount,
         }),
       });
       
@@ -216,9 +228,22 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
         throw new Error(err.error || 'Failed to save bot settings');
       }
 
+      // Then deposit to the bot's Drift subaccount
+      const depositRes = await fetch('/api/agent/drift-deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ amount: depositAmount, botId: createdBot.id }),
+      });
+
+      if (!depositRes.ok) {
+        const err = await depositRes.json();
+        throw new Error(err.error || 'Failed to deposit to Drift');
+      }
+
       toast({ 
-        title: 'Bot Configured Successfully!', 
-        description: `${editLeverage}x leverage, $${editMaxPositionSize} max position` 
+        title: 'Bot Ready to Trade!', 
+        description: `Deposited $${depositAmount.toFixed(2)} with ${editLeverage}x leverage` 
       });
       
       onBotCreated();
