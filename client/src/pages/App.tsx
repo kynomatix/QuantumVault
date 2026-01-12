@@ -91,7 +91,7 @@ type NavItem = 'dashboard' | 'bots' | 'marketplace' | 'leaderboard' | 'settings'
 
 export default function AppPage() {
   const [, navigate] = useLocation();
-  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString } = useWallet();
+  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected } = useWallet();
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
   const { toast } = useToast();
@@ -297,8 +297,9 @@ export default function AppPage() {
   };
 
   // Check if agent wallet needs SOL for gas and show welcome popup
+  // Use sessionConnected (not just connected) to ensure backend session is established first
   useEffect(() => {
-    if (!connected || welcomeCheckedRef.current) return;
+    if (!sessionConnected || welcomeCheckedRef.current) return;
     
     const checkAgentSolBalance = async () => {
       try {
@@ -319,7 +320,7 @@ export default function AppPage() {
     };
     
     checkAgentSolBalance();
-  }, [connected]);
+  }, [sessionConnected]);
 
   const handleDisconnect = async () => {
     await disconnect();
