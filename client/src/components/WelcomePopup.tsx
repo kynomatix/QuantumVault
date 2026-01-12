@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { Buffer } from 'buffer';
@@ -50,10 +50,14 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
     }
   };
 
-  const handleOpenChange = (open: boolean) => {
-    if (open) {
+  // Fetch balance when popup opens or wallet changes
+  useEffect(() => {
+    if (isOpen && wallet.publicKey) {
       fetchUserSolBalance();
     }
+  }, [isOpen, wallet.publicKey]);
+
+  const handleOpenChange = (open: boolean) => {
     if (!open && !isDepositing) {
       onClose();
     }
