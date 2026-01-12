@@ -202,6 +202,12 @@ export function WalletContent() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
+      // Show immediate feedback - transaction is on chain
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming deposit...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -216,7 +222,7 @@ export function WalletContent() {
       });
 
       toast({ 
-        title: 'Deposit Successful!', 
+        title: 'Deposit Confirmed!', 
         description: message || `Deposited ${amount} USDC to Agent Wallet`
       });
       
@@ -273,6 +279,12 @@ export function WalletContent() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming withdrawal...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -287,7 +299,7 @@ export function WalletContent() {
       });
 
       toast({ 
-        title: 'Withdrawal Successful!', 
+        title: 'Withdrawal Confirmed!', 
         description: message || `Withdrew ${amount} USDC to your wallet`
       });
       
@@ -389,6 +401,12 @@ export function WalletContent() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming SOL deposit...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -396,7 +414,7 @@ export function WalletContent() {
       });
 
       toast({ 
-        title: 'SOL Deposit Successful!', 
+        title: 'SOL Deposit Confirmed!', 
         description: message || `Deposited ${amount} SOL to Agent Wallet for gas fees`
       });
       
@@ -447,6 +465,12 @@ export function WalletContent() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming Drift deposit...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -454,7 +478,7 @@ export function WalletContent() {
       });
 
       toast({ 
-        title: 'Drift Deposit Successful!', 
+        title: 'Drift Deposit Confirmed!', 
         description: message || `Deposited ${amount} USDC to Drift Protocol`
       });
       
@@ -505,6 +529,12 @@ export function WalletContent() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming Drift withdrawal...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -512,7 +542,7 @@ export function WalletContent() {
       });
 
       toast({ 
-        title: 'Drift Withdrawal Successful!', 
+        title: 'Drift Withdrawal Confirmed!', 
         description: message || `Withdrew ${amount} USDC from Drift to Agent Wallet`
       });
       
@@ -563,6 +593,12 @@ export function WalletContent() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming withdrawal...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -577,7 +613,7 @@ export function WalletContent() {
       });
 
       toast({ 
-        title: 'Withdrawal Successful!', 
+        title: 'Withdrawal Confirmed!', 
         description: message || `Withdrew ${amount} USDC to your wallet`
       });
       
@@ -1168,6 +1204,12 @@ export default function WalletManagement() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
+      // Show immediate feedback - transaction is on chain
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming deposit...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -1182,7 +1224,7 @@ export default function WalletManagement() {
       });
 
       toast({ 
-        title: 'Deposit Successful!', 
+        title: 'Deposit Confirmed!', 
         description: message || `Deposited ${amount} USDC to Agent Wallet`
       });
       
@@ -1239,6 +1281,12 @@ export default function WalletManagement() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming withdrawal...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -1253,7 +1301,7 @@ export default function WalletManagement() {
       });
 
       toast({ 
-        title: 'Withdrawal Successful!', 
+        title: 'Withdrawal Confirmed!', 
         description: message || `Withdrew ${amount} USDC to your wallet`
       });
       
@@ -1355,6 +1403,12 @@ export default function WalletManagement() {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming SOL deposit...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -1362,7 +1416,7 @@ export default function WalletManagement() {
       });
 
       toast({ 
-        title: 'SOL Deposit Successful!', 
+        title: 'SOL Deposit Confirmed!', 
         description: message || `Deposited ${amount} SOL to Agent Wallet for gas fees`
       });
       
@@ -1413,6 +1467,12 @@ export default function WalletManagement() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming Drift deposit...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -1420,7 +1480,7 @@ export default function WalletManagement() {
       });
 
       toast({ 
-        title: 'Drift Deposit Successful!', 
+        title: 'Drift Deposit Confirmed!', 
         description: message || `Deposited ${amount} USDC to Drift Protocol`
       });
       
@@ -1471,6 +1531,12 @@ export default function WalletManagement() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming Drift withdrawal...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -1478,7 +1544,7 @@ export default function WalletManagement() {
       });
 
       toast({ 
-        title: 'Drift Withdrawal Successful!', 
+        title: 'Drift Withdrawal Confirmed!', 
         description: message || `Withdrew ${amount} USDC from Drift to Agent Wallet`
       });
       
@@ -1529,6 +1595,12 @@ export default function WalletManagement() {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming withdrawal...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -1543,7 +1615,7 @@ export default function WalletManagement() {
       });
 
       toast({ 
-        title: 'Withdrawal Successful!', 
+        title: 'Withdrawal Confirmed!', 
         description: message || `Withdrew ${amount} USDC to your wallet`
       });
       

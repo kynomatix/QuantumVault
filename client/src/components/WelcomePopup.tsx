@@ -125,6 +125,12 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
       const signedTx = await wallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
+      // Show immediate feedback
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming SOL deposit...'
+      });
+      
       await confirmTransactionWithFallback(connection, {
         signature,
         blockhash,
@@ -132,7 +138,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
       });
 
       toast({ 
-        title: 'SOL Deposit Successful!', 
+        title: 'SOL Deposit Confirmed!', 
         description: message || `Deposited ${amount} SOL to Agent Wallet for gas fees`
       });
 
