@@ -1844,6 +1844,111 @@ export async function executeAgentDriftWithdraw(
   }
 }
 
+export async function executeAgentTransferBetweenSubaccounts(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  fromSubAccountId: number,
+  toSubAccountId: number,
+  amountUsdc: number,
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    const connection = getConnection();
+    const agentPubkey = new PublicKey(agentPublicKey);
+    
+    // Ensure agent has SOL for transaction fees
+    const solCheck = await ensureAgentHasSolForFees(agentPubkey);
+    if (!solCheck.success) {
+      return {
+        success: false,
+        error: solCheck.error || 'Agent wallet needs SOL for transaction fees',
+      };
+    }
+    
+    // Check source subaccount balance
+    const sourceBalance = await getDriftBalance(agentPublicKey, fromSubAccountId);
+    if (sourceBalance < amountUsdc) {
+      return {
+        success: false,
+        error: `Insufficient balance in source subaccount. Available: $${sourceBalance.toFixed(2)}, Requested: $${amountUsdc.toFixed(2)}`,
+      };
+    }
+    
+    console.log(`[Drift] Transferring ${amountUsdc} USDC from subaccount ${fromSubAccountId} to subaccount ${toSubAccountId}`);
+    
+    // Use SDK approach - need to include all involved subaccounts
+    const subAccountIds = Array.from(new Set([0, fromSubAccountId, toSubAccountId]));
+    
+    const sdk = await getDriftSDK();
+    const { DriftClient, Wallet, initialize } = sdk;
+    
+    const agentKeypair = getAgentKeypair(encryptedPrivateKey);
+    const wallet = new Wallet(agentKeypair);
+    
+    const sdkEnv = IS_MAINNET ? 'mainnet-beta' : 'devnet';
+    const sdkConfig = initialize({ env: sdkEnv });
+    
+    const driftClient = new DriftClient({
+      connection,
+      wallet,
+      programID: new PublicKey(sdkConfig.DRIFT_PROGRAM_ID),
+      env: sdkEnv,
+      activeSubAccountId: fromSubAccountId,
+      subAccountIds,
+    });
+    
+    await driftClient.subscribe();
+    
+    try {
+      // Initialize target subaccount if it doesn't exist
+      try {
+        const targetAccount = await driftClient.getUserAccountAndSlot(toSubAccountId);
+        if (!targetAccount) {
+          console.log(`[Drift] Initializing target subaccount ${toSubAccountId}...`);
+          await driftClient.initializeUserAccount(toSubAccountId, `Bot-${toSubAccountId}`);
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for confirmation
+          console.log(`[Drift] Target subaccount ${toSubAccountId} initialized`);
+        }
+      } catch (initError) {
+        console.log(`[Drift] Target subaccount ${toSubAccountId} may not exist, attempting initialization...`);
+        try {
+          await driftClient.initializeUserAccount(toSubAccountId, `Bot-${toSubAccountId}`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          console.log(`[Drift] Target subaccount ${toSubAccountId} initialized`);
+        } catch (e) {
+          console.log(`[Drift] Subaccount ${toSubAccountId} initialization may have already existed:`, e);
+        }
+      }
+      
+      // Convert amount to BN (USDC has 6 decimals)
+      const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
+      
+      // Execute the transfer using SDK's transferDeposit
+      console.log(`[Drift] Calling transferDeposit from ${fromSubAccountId} to ${toSubAccountId}...`);
+      const txSig = await driftClient.transferDeposit(
+        amountBN,
+        0, // USDC market index
+        fromSubAccountId,
+        toSubAccountId
+      );
+      
+      console.log(`[Drift] Transfer successful: ${txSig}`);
+      
+      await driftClient.unsubscribe();
+      return { success: true, signature: txSig };
+    } catch (sdkError) {
+      await driftClient.unsubscribe();
+      console.error('[Drift] SDK transfer failed:', sdkError);
+      throw sdkError;
+    }
+  } catch (error) {
+    console.error('[Drift] Transfer error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export async function getAgentDriftBalance(
   agentPublicKey: string,
 ): Promise<number> {
