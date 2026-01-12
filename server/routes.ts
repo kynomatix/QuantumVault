@@ -506,8 +506,12 @@ export async function registerRoutes(
         }
         tradingBotId = botId;
         subAccountId = bot.driftSubaccountId ?? 0;
+        console.log(`[Drift Deposit] Bot ${bot.name} (${botId}) has driftSubaccountId=${bot.driftSubaccountId}, using subAccountId=${subAccountId}`);
+      } else {
+        console.log(`[Drift Deposit] No botId provided, depositing to main account (subaccount 0)`);
       }
 
+      console.log(`[Drift Deposit] Executing deposit: amount=${amount}, subAccountId=${subAccountId}`);
       const result = await executeAgentDriftDeposit(
         wallet.agentPublicKey,
         wallet.agentPrivateKeyEncrypted,

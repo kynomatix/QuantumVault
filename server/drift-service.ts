@@ -1682,9 +1682,22 @@ export async function executeAgentDriftDeposit(
             // Wait a moment for the account to be confirmed on-chain
             await new Promise(resolve => setTimeout(resolve, 1000));
           }
+          
+          // CRITICAL: Switch active user to target subaccount before deposit
+          // The DriftClient's deposit() method uses the active user, not a parameter
+          console.log(`[Drift] Switching active user to subaccount ${subAccountId}...`);
+          await driftClient.switchActiveUser(subAccountId);
+          
+          // Verify the switch worked
+          const activeSubId = driftClient.activeSubAccountId;
+          console.log(`[Drift] Active subaccount after switch: ${activeSubId}`);
+          if (activeSubId !== subAccountId) {
+            console.error(`[Drift] Failed to switch to subaccount ${subAccountId}, still on ${activeSubId}`);
+            throw new Error(`Failed to switch to subaccount ${subAccountId}`);
+          }
         }
         
-        console.log(`[Drift] Calling SDK deposit to subaccount ${subAccountId}...`);
+        console.log(`[Drift] Calling SDK deposit to subaccount ${subAccountId} (activeSubAccountId: ${driftClient.activeSubAccountId})...`);
         const txSig = await driftClient.deposit(
           amountBN,
           0, // USDC market index
