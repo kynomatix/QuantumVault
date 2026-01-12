@@ -525,17 +525,33 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
 
           <div className="space-y-2">
             <Label htmlFor="max-position-size">Max Position Size (USDC)</Label>
-            <Input
-              id="max-position-size"
-              type="number"
-              placeholder="100"
-              value={editMaxPositionSize}
-              onChange={(e) => setEditMaxPositionSize(e.target.value)}
-              className="font-mono"
-              data-testid="input-max-position-size"
-            />
+            <div className="flex gap-2">
+              <Input
+                id="max-position-size"
+                type="number"
+                placeholder="100"
+                value={editMaxPositionSize}
+                onChange={(e) => setEditMaxPositionSize(e.target.value)}
+                className="font-mono flex-1"
+                data-testid="input-max-position-size"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => agentBalance && setEditMaxPositionSize(agentBalance)}
+                disabled={!agentBalance || parseFloat(agentBalance) <= 0}
+                className="px-3"
+                data-testid="button-max-position"
+              >
+                Max
+              </Button>
+            </div>
             <p className="text-xs text-muted-foreground">
               Maximum capital for this bot. TradingView sends a % of this amount per trade.
+              {agentBalance && parseFloat(agentBalance) > 0 && (
+                <span className="ml-1">(Available: ${parseFloat(agentBalance).toFixed(2)})</span>
+              )}
             </p>
           </div>
 
@@ -558,11 +574,6 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
             </div>
           </div>
 
-          <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
-            <p className="text-xs text-blue-600">
-              <strong>Example:</strong> $100 max position × 33.33% signal × {editLeverage}x leverage = ${(100 * 0.3333 * editLeverage).toFixed(2)} position
-            </p>
-          </div>
         </div>
 
         <DialogFooter className="flex-col gap-2 sm:flex-col">
