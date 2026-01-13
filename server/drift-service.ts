@@ -557,7 +557,6 @@ async function getSpotMarketOracle(connection: Connection, marketIndex: number =
 function createInitializeUserStatsInstruction(
   userPubkey: PublicKey,
   userStats: PublicKey,
-  referrerInfo?: { user: PublicKey; userStats: PublicKey } | null,
 ): TransactionInstruction {
   const discriminator = getAnchorDiscriminator('initialize_user_stats');
   
@@ -569,16 +568,6 @@ function createInitializeUserStatsInstruction(
     { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
   ];
-  
-  // Add referrer accounts if provided (for referral attribution)
-  // Order per Drift IDL: referrer (User account), referrerStats (UserStats account)
-  if (referrerInfo) {
-    keys.push(
-      { pubkey: referrerInfo.user, isSigner: false, isWritable: true },
-      { pubkey: referrerInfo.userStats, isSigner: false, isWritable: true },
-    );
-    console.log(`[Drift] Adding referrer to initialize_user_stats: user=${referrerInfo.user.toBase58()}, stats=${referrerInfo.userStats.toBase58()}`);
-  }
 
   return new TransactionInstruction({
     keys,
@@ -592,7 +581,8 @@ function createInitializeUserInstruction(
   userAccount: PublicKey,
   userStats: PublicKey,
   subAccountId: number = 0,
-  name: string = 'QuantumVault'
+  name: string = 'QuantumVault',
+  referrerInfo?: { user: PublicKey; userStats: PublicKey } | null,
 ): TransactionInstruction {
   const discriminator = getAnchorDiscriminator('initialize_user');
   
@@ -613,6 +603,16 @@ function createInitializeUserInstruction(
     { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
   ];
+  
+  // Add referrer accounts if provided (for referral attribution on first account creation)
+  // Only applies to subaccount 0 - subsequent subaccounts inherit the referral
+  if (referrerInfo && subAccountId === 0) {
+    keys.push(
+      { pubkey: referrerInfo.user, isSigner: false, isWritable: true },
+      { pubkey: referrerInfo.userStats, isSigner: false, isWritable: true },
+    );
+    console.log(`[Drift] Adding referrer to initialize_user (subaccount 0): user=${referrerInfo.user.toBase58()}, stats=${referrerInfo.userStats.toBase58()}`);
+  }
 
   return new TransactionInstruction({
     keys,
@@ -737,18 +737,18 @@ export async function buildDepositTransaction(
   const userStatsInfo = await connection.getAccountInfo(userStats);
   if (!userStatsInfo) {
     console.log('[Drift] User stats not found, adding initialization instruction');
-    // Fetch platform referrer for new accounts (kryptolytix)
-    const referrerInfo = await getPlatformReferrerInfo();
     instructions.push(
-      createInitializeUserStatsInstruction(userPubkey, userStats, referrerInfo)
+      createInitializeUserStatsInstruction(userPubkey, userStats)
     );
   }
 
   const userAccountInfo = await connection.getAccountInfo(userAccount);
   if (!userAccountInfo) {
     console.log('[Drift] User account not found, adding initialization instruction');
+    // Fetch platform referrer for new accounts (kryptolytix) - only for subaccount 0
+    const referrerInfo = await getPlatformReferrerInfo();
     instructions.push(
-      createInitializeUserInstruction(userPubkey, userAccount, userStats)
+      createInitializeUserInstruction(userPubkey, userAccount, userStats, 0, 'QuantumVault', referrerInfo)
     );
   }
 
@@ -1385,15 +1385,15 @@ export async function buildInitializeSubaccountTransaction(
   const userStatsInfo = await connection.getAccountInfo(userStats);
   if (!userStatsInfo) {
     console.log('[Drift] User stats not found, adding initialization instruction');
-    // Fetch platform referrer for new accounts (kryptolytix)
-    const referrerInfo = await getPlatformReferrerInfo();
-    instructions.push(createInitializeUserStatsInstruction(userPubkey, userStats, referrerInfo));
+    instructions.push(createInitializeUserStatsInstruction(userPubkey, userStats));
   }
   
   const userAccountInfo = await connection.getAccountInfo(userAccount);
   if (!userAccountInfo) {
     console.log(`[Drift] Subaccount ${subAccountId} not found, adding initialization instruction`);
-    instructions.push(createInitializeUserInstruction(userPubkey, userAccount, userStats, subAccountId, name));
+    // Fetch platform referrer only for subaccount 0 (first account creation)
+    const referrerInfo = subAccountId === 0 ? await getPlatformReferrerInfo() : null;
+    instructions.push(createInitializeUserInstruction(userPubkey, userAccount, userStats, subAccountId, name, referrerInfo));
   } else {
     console.log(`[Drift] Subaccount ${subAccountId} already exists`);
     return {
@@ -1484,12 +1484,11 @@ export async function buildTransferToSubaccountTransaction(
     
     const userStatsInfo = await connection.getAccountInfo(userStats);
     if (!userStatsInfo) {
-      // Fetch platform referrer for new accounts (kryptolytix)
-      const referrerInfo = await getPlatformReferrerInfo();
-      instructions.push(createInitializeUserStatsInstruction(userPubkey, userStats, referrerInfo));
+      instructions.push(createInitializeUserStatsInstruction(userPubkey, userStats));
     }
     
-    instructions.push(createInitializeUserInstruction(userPubkey, toUserAccount, userStats, toSubaccountId, `Bot${toSubaccountId}`));
+    // No referrer for subaccount transfers - referral is only set on first account (subaccount 0)
+    instructions.push(createInitializeUserInstruction(userPubkey, toUserAccount, userStats, toSubaccountId, `Bot${toSubaccountId}`, null));
   }
   
   const transferAmountLamports = Math.round(amountUsdc * 1_000_000);
@@ -1566,18 +1565,18 @@ async function initializeDriftAccountsIfNeeded(
   const userStatsInfo = await connection.getAccountInfo(userStats);
   if (!userStatsInfo) {
     console.log('[Drift] Agent user stats not found, adding initialization instruction');
-    // Fetch platform referrer for new accounts (kryptolytix)
-    const referrerInfo = await getPlatformReferrerInfo();
     initInstructions.push(
-      createInitializeUserStatsInstruction(agentPubkey, userStats, referrerInfo)
+      createInitializeUserStatsInstruction(agentPubkey, userStats)
     );
   }
 
   const userAccountInfo = await connection.getAccountInfo(userAccount);
   if (!userAccountInfo) {
     console.log('[Drift] Agent user account not found, adding initialization instruction');
+    // Fetch platform referrer for new accounts (kryptolytix) - only for subaccount 0
+    const referrerInfo = await getPlatformReferrerInfo();
     initInstructions.push(
-      createInitializeUserInstruction(agentPubkey, userAccount, userStats)
+      createInitializeUserInstruction(agentPubkey, userAccount, userStats, 0, 'QuantumVault', referrerInfo)
     );
   }
   
