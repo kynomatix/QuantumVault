@@ -14,7 +14,8 @@ import {
   Copy,
   Check,
   Bot,
-  ArrowRight
+  ArrowRight,
+  ExternalLink
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -709,6 +710,16 @@ export function WalletContent() {
                   data-testid="button-copy-agent-address"
                 >
                   {copiedAgentAddress ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => window.open(`https://app.drift.trade/?userAccount=${agentWallet?.agentPublicKey}`, '_blank')}
+                  disabled={!agentWallet?.agentPublicKey}
+                  title="View on Drift"
+                  data-testid="button-view-on-drift"
+                >
+                  <ExternalLink className="w-4 h-4" />
                 </Button>
               </div>
             </div>
@@ -1735,6 +1746,16 @@ export default function WalletManagement() {
                       data-testid="button-copy-agent-address"
                     >
                       {copiedAgentAddress ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => window.open(`https://app.drift.trade/?userAccount=${agentWallet?.agentPublicKey}`, '_blank')}
+                      disabled={!agentWallet?.agentPublicKey}
+                      title="View on Drift"
+                      data-testid="button-view-on-drift"
+                    >
+                      <ExternalLink className="w-4 h-4" />
                     </Button>
                   </div>
                 </div>

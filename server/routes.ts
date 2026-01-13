@@ -1634,29 +1634,52 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Forbidden" });
       }
 
+      // Get the wallet's agent public key - Drift accounts are under the AGENT wallet
+      const wallet = await storage.getWallet(req.walletAddress!);
+      const agentAddress = wallet?.agentPublicKey;
+      
+      // CRITICAL: If bot has a subaccount but wallet/agent is missing, refuse to delete
+      // This prevents orphaning funds when wallet record is corrupted or missing
+      if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
+        if (!wallet || !agentAddress) {
+          console.error(`[Delete] CRITICAL: Bot ${bot.id} has subaccount ${bot.driftSubaccountId} but wallet/agent is missing`);
+          return res.status(500).json({
+            error: "Cannot verify bot funds - wallet data missing",
+            driftSubaccountId: bot.driftSubaccountId,
+            message: "Unable to check if this bot has funds. Please contact support."
+          });
+        }
+      }
+      
+      if (!agentAddress) {
+        // No agent wallet AND no subaccount assigned, safe to delete
+        await storage.deleteTradingBot(req.params.id);
+        return res.json({ success: true });
+      }
+
       // Check if bot has a drift subaccount with potential funds
       if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
-        // Check if subaccount exists and has balance
-        const exists = await subaccountExists(req.walletAddress!, bot.driftSubaccountId);
+        // Check if subaccount exists and has balance - use AGENT wallet address, not user wallet
+        const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
         if (exists) {
-          const balance = await getDriftBalance(req.walletAddress!, bot.driftSubaccountId);
-          if (balance > 0) {
+          const balance = await getDriftBalance(agentAddress, bot.driftSubaccountId);
+          if (balance > 0.01) { // Use small threshold to avoid dust issues
             return res.status(409).json({ 
               error: "Bot has funds that need to be withdrawn first",
               requiresSweep: true,
               balance,
               driftSubaccountId: bot.driftSubaccountId,
-              message: `This bot has $${balance.toFixed(2)} USDC. Use the force delete endpoint to sweep funds before deletion.`
+              message: `This bot has $${balance.toFixed(2)} USDC. Please withdraw the funds before deleting, or use force delete to auto-sweep.`
             });
           }
         }
         // No balance or subaccount doesn't exist, safe to delete
         // Try to close the subaccount to reclaim rent (~0.035 SOL)
         let rentReclaimed = false;
-        if (exists && bot.agentPrivateKeyEncrypted) {
+        if (exists && wallet.agentPrivateKeyEncrypted) {
           try {
             const closeResult = await closeDriftSubaccount(
-              bot.agentPrivateKeyEncrypted,
+              wallet.agentPrivateKeyEncrypted,
               bot.driftSubaccountId
             );
             if (closeResult.success) {
@@ -1673,14 +1696,13 @@ export async function registerRoutes(
         return res.json({ success: true, rentReclaimed });
       }
 
-      // Legacy bot with agentPublicKey but no driftSubaccountId
-      if (bot.agentPublicKey && !bot.driftSubaccountId) {
-        return res.status(409).json({
-          error: "Legacy bot may have funds in agent wallet",
-          isLegacy: true,
-          agentPublicKey: bot.agentPublicKey,
-          message: "This bot uses an older wallet system. Please manually check the agent wallet for any remaining funds before deletion."
-        });
+      // Bot without driftSubaccountId - check subaccount 0 (main account) for safety
+      // This prevents orphaning funds in the main Drift account
+      const mainBalance = await getDriftBalance(agentAddress, 0);
+      if (mainBalance > 0.01) {
+        console.log(`[Delete] Warning: Main Drift account has $${mainBalance.toFixed(2)} - may be from this bot`);
+        // Don't block deletion for main account funds, but log warning
+        // Main account funds can still be withdrawn via wallet management
       }
 
       await storage.deleteTradingBot(req.params.id);
@@ -1691,7 +1713,7 @@ export async function registerRoutes(
     }
   });
 
-  // Force delete with sweep - builds transaction to transfer funds before deletion
+  // Force delete with sweep - auto-withdraws funds before deletion
   app.delete("/api/trading-bots/:id/force", requireWallet, async (req, res) => {
     try {
       const bot = await storage.getTradingBotById(req.params.id);
@@ -1702,6 +1724,28 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Forbidden" });
       }
 
+      // Get the wallet's agent public key - Drift accounts are under the AGENT wallet
+      const wallet = await storage.getWallet(req.walletAddress!);
+      const agentAddress = wallet?.agentPublicKey;
+      
+      // CRITICAL: If bot has a subaccount but wallet/agent is missing, refuse to delete
+      if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
+        if (!wallet || !agentAddress || !wallet.agentPrivateKeyEncrypted) {
+          console.error(`[ForceDelete] CRITICAL: Bot ${bot.id} has subaccount ${bot.driftSubaccountId} but wallet/agent keys are missing`);
+          return res.status(500).json({
+            error: "Cannot sweep bot funds - wallet data missing",
+            driftSubaccountId: bot.driftSubaccountId,
+            message: "Unable to access the agent wallet to sweep funds. Please contact support."
+          });
+        }
+      }
+      
+      if (!agentAddress) {
+        // No agent wallet AND no subaccount assigned, safe to delete
+        await storage.deleteTradingBot(req.params.id);
+        return res.json({ success: true, swept: false });
+      }
+
       // Must have a subaccount to sweep
       if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
         // No subaccount, just delete directly
@@ -1709,16 +1753,16 @@ export async function registerRoutes(
         return res.json({ success: true, swept: false });
       }
 
-      // Check balance
-      const balance = await getDriftBalance(req.walletAddress!, bot.driftSubaccountId);
+      // Check balance using correct agent wallet address
+      const balance = await getDriftBalance(agentAddress, bot.driftSubaccountId);
       
-      if (balance <= 0) {
-        // No balance, try to close subaccount to reclaim rent
+      if (balance <= 0.01) {
+        // No meaningful balance, try to close subaccount to reclaim rent
         let rentReclaimed = false;
-        if (bot.agentPrivateKeyEncrypted) {
+        if (wallet.agentPrivateKeyEncrypted) {
           try {
             const closeResult = await closeDriftSubaccount(
-              bot.agentPrivateKeyEncrypted,
+              wallet.agentPrivateKeyEncrypted,
               bot.driftSubaccountId
             );
             if (closeResult.success) {
@@ -1733,23 +1777,73 @@ export async function registerRoutes(
         return res.json({ success: true, swept: false, rentReclaimed });
       }
 
-      // Build sweep transaction (transfer from subaccount to main account)
-      const txData = await buildTransferFromSubaccountTransaction(
-        req.walletAddress!,
-        bot.driftSubaccountId,
-        0, // to main account
-        balance
-      );
+      // Auto-sweep: Transfer funds from bot's subaccount to main account (subaccount 0)
+      // This is done server-side using the agent wallet
+      if (wallet.agentPrivateKeyEncrypted && bot.driftSubaccountId !== 0) {
+        try {
+          console.log(`[Delete] Auto-sweeping $${balance.toFixed(2)} from subaccount ${bot.driftSubaccountId} to main account`);
+          const sweepResult = await executeAgentTransferBetweenSubaccounts(
+            agentAddress,
+            wallet.agentPrivateKeyEncrypted,
+            bot.driftSubaccountId,
+            0, // to main account
+            balance
+          );
+          
+          if (sweepResult.success) {
+            console.log(`[Delete] Sweep successful: ${sweepResult.signature}`);
+            
+            // Try to close the now-empty subaccount
+            let rentReclaimed = false;
+            try {
+              const closeResult = await closeDriftSubaccount(
+                wallet.agentPrivateKeyEncrypted,
+                bot.driftSubaccountId
+              );
+              if (closeResult.success) {
+                console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed, rent reclaimed`);
+                rentReclaimed = true;
+              }
+            } catch (closeErr) {
+              console.warn(`[Delete] Rent reclaim failed:`, closeErr);
+            }
+            
+            await storage.deleteTradingBot(req.params.id);
+            return res.json({ 
+              success: true, 
+              swept: true, 
+              amount: balance,
+              txSignature: sweepResult.signature,
+              rentReclaimed,
+              message: `Swept $${balance.toFixed(2)} USDC to main account before deletion`
+            });
+          } else {
+            // Sweep failed - don't delete, let user know
+            return res.status(500).json({
+              error: "Failed to sweep funds before deletion",
+              sweepError: sweepResult.error,
+              balance,
+              driftSubaccountId: bot.driftSubaccountId,
+              message: `Could not transfer $${balance.toFixed(2)} from subaccount. Please withdraw manually first.`
+            });
+          }
+        } catch (sweepErr: any) {
+          console.error(`[Delete] Sweep error:`, sweepErr);
+          return res.status(500).json({
+            error: "Sweep transaction failed",
+            details: sweepErr.message,
+            balance,
+            driftSubaccountId: bot.driftSubaccountId
+          });
+        }
+      }
 
-      res.json({
-        success: false,
-        requiresTransaction: true,
-        isSweepAndDelete: true,
+      // Subaccount 0 or no encrypted key - can't auto-sweep, inform user
+      return res.status(409).json({
+        error: "Bot has funds in main Drift account",
         balance,
-        botId: bot.id,
         driftSubaccountId: bot.driftSubaccountId,
-        ...txData,
-        message: `Sweep ${balance.toFixed(2)} USDC from subaccount ${bot.driftSubaccountId} to main account`
+        message: `This bot has $${balance.toFixed(2)} USDC. Please withdraw from Drift to Agent Wallet first via Wallet Management.`
       });
     } catch (error) {
       console.error("Force delete trading bot error:", error);
@@ -1757,7 +1851,7 @@ export async function registerRoutes(
     }
   });
 
-  // Confirm deletion after sweep transaction is confirmed
+  // Confirm deletion after sweep transaction is confirmed (legacy endpoint)
   app.post("/api/trading-bots/:id/confirm-delete", requireWallet, async (req, res) => {
     try {
       const bot = await storage.getTradingBotById(req.params.id);
@@ -1770,15 +1864,21 @@ export async function registerRoutes(
 
       const { txSignature } = req.body;
       
-      // Optionally validate that the transaction was confirmed
-      // For now, we trust the client that the sweep was successful
+      // Get the wallet's agent key for subaccount operations
+      const wallet = await storage.getWallet(req.walletAddress!);
+
+      // Safety check: verify wallet exists for bots with subaccounts
+      if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined && !wallet?.agentPublicKey) {
+        console.error(`[ConfirmDelete] Warning: Bot ${bot.id} has subaccount but wallet is missing`);
+        // Still allow deletion since this is a confirmation after user signed sweep tx
+      }
 
       // Try to close the subaccount to reclaim rent (~0.035 SOL)
       let rentReclaimed = false;
-      if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined && bot.agentPrivateKeyEncrypted) {
+      if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined && wallet?.agentPrivateKeyEncrypted) {
         try {
           const closeResult = await closeDriftSubaccount(
-            bot.agentPrivateKeyEncrypted,
+            wallet.agentPrivateKeyEncrypted,
             bot.driftSubaccountId
           );
           if (closeResult.success) {
