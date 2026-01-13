@@ -9,7 +9,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
@@ -1651,8 +1651,26 @@ export async function registerRoutes(
           }
         }
         // No balance or subaccount doesn't exist, safe to delete
+        // Try to close the subaccount to reclaim rent (~0.035 SOL)
+        let rentReclaimed = false;
+        if (exists && bot.agentPrivateKeyEncrypted) {
+          try {
+            const closeResult = await closeDriftSubaccount(
+              bot.agentPrivateKeyEncrypted,
+              bot.driftSubaccountId
+            );
+            if (closeResult.success) {
+              console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed, rent reclaimed`);
+              rentReclaimed = true;
+            } else {
+              console.warn(`[Delete] Could not reclaim rent: ${closeResult.error}`);
+            }
+          } catch (closeErr) {
+            console.warn(`[Delete] Rent reclaim failed:`, closeErr);
+          }
+        }
         await storage.deleteTradingBot(req.params.id);
-        return res.json({ success: true });
+        return res.json({ success: true, rentReclaimed });
       }
 
       // Legacy bot with agentPublicKey but no driftSubaccountId
@@ -1695,9 +1713,24 @@ export async function registerRoutes(
       const balance = await getDriftBalance(req.walletAddress!, bot.driftSubaccountId);
       
       if (balance <= 0) {
-        // No balance, just delete
+        // No balance, try to close subaccount to reclaim rent
+        let rentReclaimed = false;
+        if (bot.agentPrivateKeyEncrypted) {
+          try {
+            const closeResult = await closeDriftSubaccount(
+              bot.agentPrivateKeyEncrypted,
+              bot.driftSubaccountId
+            );
+            if (closeResult.success) {
+              console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed, rent reclaimed`);
+              rentReclaimed = true;
+            }
+          } catch (closeErr) {
+            console.warn(`[Delete] Rent reclaim failed:`, closeErr);
+          }
+        }
         await storage.deleteTradingBot(req.params.id);
-        return res.json({ success: true, swept: false });
+        return res.json({ success: true, swept: false, rentReclaimed });
       }
 
       // Build sweep transaction (transfer from subaccount to main account)
@@ -1740,8 +1773,27 @@ export async function registerRoutes(
       // Optionally validate that the transaction was confirmed
       // For now, we trust the client that the sweep was successful
 
+      // Try to close the subaccount to reclaim rent (~0.035 SOL)
+      let rentReclaimed = false;
+      if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined && bot.agentPrivateKeyEncrypted) {
+        try {
+          const closeResult = await closeDriftSubaccount(
+            bot.agentPrivateKeyEncrypted,
+            bot.driftSubaccountId
+          );
+          if (closeResult.success) {
+            console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed after sweep, rent reclaimed`);
+            rentReclaimed = true;
+          } else {
+            console.warn(`[Delete] Could not reclaim rent after sweep: ${closeResult.error}`);
+          }
+        } catch (closeErr) {
+          console.warn(`[Delete] Rent reclaim failed after sweep:`, closeErr);
+        }
+      }
+
       await storage.deleteTradingBot(req.params.id);
-      res.json({ success: true, txSignature });
+      res.json({ success: true, txSignature, rentReclaimed });
     } catch (error) {
       console.error("Confirm delete trading bot error:", error);
       res.status(500).json({ error: "Internal server error" });
