@@ -177,7 +177,7 @@ const MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const DEVNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
 const USDC_MINT = IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
 
-const MIN_SOL_FOR_FEES = 0.05 * LAMPORTS_PER_SOL;
+const MIN_SOL_FOR_FEES = 0.01 * LAMPORTS_PER_SOL;
 const AIRDROP_AMOUNT = 1 * LAMPORTS_PER_SOL;
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
@@ -1965,6 +1965,7 @@ export async function executeAgentDriftWithdraw(
   agentPublicKey: string,
   encryptedPrivateKey: string,
   amountUsdc: number,
+  subAccountId: number = 0,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const connection = getConnection();
@@ -1979,43 +1980,52 @@ export async function executeAgentDriftWithdraw(
       };
     }
     
-    console.log(`[Drift] Building manual withdraw transaction: ${amountUsdc} USDC`);
+    console.log(`[Drift] Using SDK-based withdraw: ${amountUsdc} USDC from subaccount ${subAccountId}`);
     
-    // Build transaction using manual Anchor instruction builder (handles oracle accounts)
-    const txData = await buildAgentDriftWithdrawTransaction(
-      agentPublicKey,
-      encryptedPrivateKey,
-      amountUsdc
-    );
+    // Get agent's USDC token account (ATA)
+    const usdcMint = new PublicKey(USDC_MINT);
+    const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
+    console.log(`[Drift] Agent USDC ATA: ${agentAta.toBase58()}`);
     
-    const txBuffer = Buffer.from(txData.transaction, 'base64');
+    // Use DriftClient SDK which automatically handles all remaining accounts (perp markets, oracles)
+    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
     
-    console.log(`[Drift] Sending withdraw transaction...`);
-    
-    const signature = await connection.sendRawTransaction(txBuffer, {
-      skipPreflight: false,
-      preflightCommitment: 'confirmed',
-    });
-    
-    console.log(`[Drift] Withdraw transaction sent: ${signature}`);
-    
-    const confirmation = await connection.confirmTransaction({
-      signature,
-      blockhash: txData.blockhash,
-      lastValidBlockHeight: txData.lastValidBlockHeight,
-    }, 'confirmed');
-    
-    if (confirmation.value.err) {
-      console.error('[Drift] Withdraw confirmed with error:', confirmation.value.err);
-      return {
-        success: false,
-        error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}`,
-      };
+    try {
+      // Convert amount to BN with USDC precision (6 decimals)
+      const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
+      
+      console.log(`[Drift] Withdrawing ${amountUsdc} USDC via SDK...`);
+      
+      // SDK withdraw automatically includes all necessary remaining accounts for margin calculation
+      const txSig = await driftClient.withdraw(
+        amountBN,
+        0, // USDC market index
+        agentAta, // userTokenAccount - where to receive USDC
+        true, // reduceOnly - don't open new positions
+      );
+      
+      console.log(`[Drift] Withdraw transaction sent: ${txSig}`);
+      
+      // Wait for confirmation
+      const confirmation = await connection.confirmTransaction(txSig, 'confirmed');
+      
+      if (confirmation.value.err) {
+        console.error('[Drift] Withdraw confirmed with error:', confirmation.value.err);
+        await cleanup();
+        return {
+          success: false,
+          error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}`,
+        };
+      }
+      
+      console.log(`[Drift] Withdraw confirmed: ${txSig}`);
+      await cleanup();
+      
+      return { success: true, signature: txSig };
+    } catch (innerError) {
+      await cleanup();
+      throw innerError;
     }
-    
-    console.log(`[Drift] Withdraw confirmed: ${signature}`);
-    
-    return { success: true, signature };
   } catch (error) {
     console.error('[Drift] Withdraw error:', error);
     return {
