@@ -57,6 +57,44 @@ function generateWebhookUrl(botId: string, secret: string): string {
   return `${baseUrl}/api/webhook/tradingview/${botId}?secret=${secret}`;
 }
 
+// Parse Drift protocol errors into user-friendly messages
+function parseDriftError(error: string | undefined): string {
+  if (!error) return "Trade execution failed";
+  
+  // Check for common Drift errors and provide clear messages
+  if (error.includes("InsufficientCollateral")) {
+    return "Insufficient capital in bot's account. Add more funds or reduce your Max Position Size.";
+  }
+  if (error.includes("OracleNotFound") || error.includes("Stale")) {
+    return "Price feed temporarily unavailable. Try again in a few seconds.";
+  }
+  if (error.includes("MaxNumberOfPositions")) {
+    return "Maximum positions reached. Close existing positions first.";
+  }
+  if (error.includes("InvalidOracle")) {
+    return "Market price data unavailable. Try again later.";
+  }
+  if (error.includes("MarketWrongMutability") || error.includes("MarketNotActive")) {
+    return "Market is currently paused or unavailable.";
+  }
+  if (error.includes("ReduceOnlyOrderIncreasedRisk")) {
+    return "Cannot increase position size with reduce-only order.";
+  }
+  if (error.includes("timeout") || error.includes("Timeout")) {
+    return "Transaction timed out. The trade may have executed - check Drift.";
+  }
+  
+  // For other errors, return a simplified version
+  if (error.length > 100) {
+    // Extract the main error message if it's too long
+    const match = error.match(/Error Message: ([^.]+)/);
+    if (match) return match[1].trim();
+    return "Trade failed. Check bot balance and try again.";
+  }
+  
+  return error;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -2919,13 +2957,16 @@ export async function registerRoutes(
       );
 
       if (!orderResult.success) {
+        const userFriendlyError = parseDriftError(orderResult.error);
+        console.log(`[Webhook] Trade failed: ${orderResult.error}`);
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
-          size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
+          size: contractSize.toFixed(8),
+          errorMessage: userFriendlyError,
         });
         await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
-        return res.status(500).json({ error: orderResult.error || "Order execution failed" });
+        return res.status(500).json({ error: userFriendlyError });
       }
 
       const fillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
@@ -3460,13 +3501,16 @@ export async function registerRoutes(
       );
 
       if (!orderResult.success) {
+        const userFriendlyError = parseDriftError(orderResult.error);
+        console.log(`[User Webhook] Trade failed: ${orderResult.error}`);
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
-          size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
+          size: contractSize.toFixed(8),
+          errorMessage: userFriendlyError,
         });
         await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
-        return res.status(500).json({ error: orderResult.error || "Order execution failed" });
+        return res.status(500).json({ error: userFriendlyError });
       }
 
       const userFillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
