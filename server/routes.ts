@@ -1293,28 +1293,9 @@ export async function registerRoutes(
         let netPnlPercent = 0;
         
         try {
-          // Get equity events to calculate net deposited
-          const events = await storage.getEquityEvents(req.walletAddress!, 1000);
-          const subId = bot.driftSubaccountId ?? 0;
-          
-          // Filter deposits for this bot's subaccount
-          // For subaccount 0 (main account), also include deposits without subaccount in notes
-          const botDeposits = events.filter(e => {
-            if (e.eventType !== 'drift_deposit' && e.eventType !== 'drift_withdraw') {
-              return false;
-            }
-            const notes = e.notes || '';
-            // Check if notes explicitly mention this subaccount
-            if (notes.includes(`subaccount ${subId}`)) {
-              return true;
-            }
-            // For subaccount 0, also match deposits without subaccount mention (legacy deposits)
-            if (subId === 0 && !notes.includes('subaccount')) {
-              return true;
-            }
-            return false;
-          });
-          netDeposited = botDeposits.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+          // Get equity events for THIS specific bot using the trading_bot_id
+          const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
+          netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
           
           // Get drift balance for this bot's subaccount
           if (wallet?.agentPublicKey) {
