@@ -398,9 +398,10 @@ export function BotManagementDrawer({
   };
 
   const fetchEquityEvents = async () => {
+    if (!bot) return;
     setEquityEventsLoading(true);
     try {
-      const res = await fetch(`/api/equity-events?limit=50`, {
+      const res = await fetch(`/api/equity-events?limit=50&botId=${bot.id}`, {
         credentials: 'include',
       });
       if (res.ok) {

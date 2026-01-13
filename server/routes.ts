@@ -1191,7 +1191,20 @@ export async function registerRoutes(
   app.get("/api/equity-events", requireWallet, async (req, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 50;
-      const events = await storage.getEquityEvents(req.walletAddress!, limit);
+      const botId = req.query.botId as string | undefined;
+      
+      let events;
+      if (botId) {
+        // Verify bot ownership
+        const bot = await storage.getTradingBotById(botId);
+        if (!bot || bot.walletAddress !== req.walletAddress) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+        events = await storage.getBotEquityEvents(botId, limit);
+      } else {
+        events = await storage.getEquityEvents(req.walletAddress!, limit);
+      }
+      
       res.json(events);
     } catch (error) {
       console.error("Get equity events error:", error);
