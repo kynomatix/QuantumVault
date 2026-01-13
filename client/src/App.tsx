@@ -8,12 +8,14 @@ import NotFound from "@/pages/not-found";
 import Landing from "@/pages/Landing";
 import AppPage from "@/pages/App";
 import WalletManagement from "@/pages/WalletManagement";
+import BotSetup from "@/pages/BotSetup";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Landing} />
       <Route path="/app" component={AppPage} />
+      <Route path="/bots" component={BotSetup} />
       <Route path="/wallet" component={WalletManagement} />
       <Route component={NotFound} />
     </Switch>
