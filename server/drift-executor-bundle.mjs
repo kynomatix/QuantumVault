@@ -59,14 +59,30 @@ var PERP_MARKET_INDICES = {
   "TRUMP": 25,
   "TRUMP-PERP": 25
 };
-var ENCRYPTION_KEY = process.env.WALLET_ENCRYPTION_KEY || "default-dev-key-32-chars-long!!";
+// Must match server/crypto.ts encryption exactly
+function getEncryptionKey() {
+  const key = process.env.AGENT_ENCRYPTION_KEY;
+  if (!key) {
+    // Development fallback - matches crypto.ts
+    return "a".repeat(64);
+  }
+  return key;
+}
+var ENCRYPTION_KEY = getEncryptionKey();
 function decryptPrivateKey(encryptedKey) {
   const parts = encryptedKey.split(":");
-  if (parts.length !== 2) return encryptedKey;
-  const [ivHex, encryptedHex] = parts;
-  const key = crypto.scryptSync(ENCRYPTION_KEY, "salt", 32);
-  const decipher = crypto.createDecipheriv("aes-256-cbc", key, Buffer.from(ivHex, "hex"));
-  let decrypted = decipher.update(encryptedHex, "hex", "utf8");
+  // Format is iv:authTag:encrypted (3 parts) from crypto.ts
+  if (parts.length !== 3) {
+    // Not encrypted or wrong format, return as-is
+    return encryptedKey;
+  }
+  const key = Buffer.from(ENCRYPTION_KEY, "hex");
+  const iv = Buffer.from(parts[0], "hex");
+  const authTag = Buffer.from(parts[1], "hex");
+  const encrypted = parts[2];
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(authTag);
+  let decrypted = decipher.update(encrypted, "hex", "utf8");
   decrypted += decipher.final("utf8");
   return decrypted;
 }
@@ -76,6 +92,7 @@ async function createDriftClient(encryptedPrivateKey, subAccountId) {
   const privateKeyBase58 = decryptPrivateKey(encryptedPrivateKey);
   const keypair = Keypair.fromSecretKey(bs58.decode(privateKeyBase58));
   const wallet = new Wallet(keypair);
+  // Use websocket subscription to avoid batch RPC requests (required for free RPC plans)
   const driftClient = new DriftClient({
     connection,
     wallet,
@@ -83,11 +100,7 @@ async function createDriftClient(encryptedPrivateKey, subAccountId) {
     activeSubAccountId: subAccountId,
     subAccountIds: [subAccountId],
     accountSubscription: {
-      type: "polling",
-      accountLoader: {
-        type: "polling",
-        frequency: 1e3
-      }
+      type: "websocket"
     },
     ...getMarketsAndOraclesForSubscription("mainnet-beta")
   });
