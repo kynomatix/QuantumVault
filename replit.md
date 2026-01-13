@@ -42,6 +42,7 @@ Preferred communication style: Simple, everyday language.
     - **Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol via the agent wallet.
     - **TradingView Signal Logic (CRITICAL - DO NOT CHANGE)**: TradingView `contracts` are converted from `USDT / price` to a **percentage** of `bot.maxPositionSize`. `tradeAmountUsd = (usdtValue / 100) * bot.maxPositionSize`. This logic ensures pyramiding strategies work as intended.
 - **Close Signal Detection**: `strategy.position_size = 0` from TradingView triggers a reduce-only close order for existing positions.
+    - **Early Extraction (CRITICAL FIX)**: `position_size` is extracted from webhook payload at the TOP of parsing logic, BEFORE any format-specific parsing. This ensures close signals are detected regardless of payload format (new JSON format with `signalType`, legacy regex format, or direct JSON).
     - **On-Chain Verification**: Close signals ALWAYS query on-chain position first via `PositionService.getPositionForExecution()` before execution.
     - **Reduce-Only Enforcement**: Close orders are executed with `reduceOnly: true` to prevent accidental position openings.
     - **Enhanced Logging**: Close signal flow logs every step for debugging: detection, on-chain query result, execution.

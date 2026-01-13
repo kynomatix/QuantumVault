@@ -1935,6 +1935,27 @@ export async function registerRoutes(
       let signalPrice: string = "0";
       let signalTime: string | null = null;
 
+      // CRITICAL FIX: Extract position_size from payload FIRST, before any format-specific parsing
+      // This ensures close signal detection works regardless of payload format
+      if (typeof payload === 'object' && payload !== null) {
+        // Check for position_size at root level (most common format)
+        if (payload.position_size !== undefined) {
+          strategyPositionSize = String(payload.position_size);
+          console.log(`[Webhook] Extracted position_size from root: "${strategyPositionSize}"`);
+        }
+        // Also check nested data.position_size
+        if (payload.data && payload.data.position_size !== undefined) {
+          strategyPositionSize = String(payload.data.position_size);
+          console.log(`[Webhook] Extracted position_size from data: "${strategyPositionSize}"`);
+        }
+        // Extract other common fields from root level
+        if (payload.action) action = String(payload.action).toLowerCase();
+        if (payload.contracts) contracts = String(payload.contracts);
+        if (payload.price) signalPrice = String(payload.price);
+        if (payload.time) signalTime = String(payload.time);
+        if (payload.symbol) ticker = String(payload.symbol);
+      }
+
       // Try parsing as the new JSON format first
       if (typeof payload === 'object' && payload.signalType === 'trade' && payload.data) {
         // New JSON format
@@ -2766,9 +2787,27 @@ export async function registerRoutes(
       let action: string | null = null;
       let contracts: string = "0";
       let positionSize: string = bot.maxPositionSize || "100";
+      let strategyPositionSize: string | null = null; // Track strategy.position_size for close detection
       let ticker: string = "";
       let signalPrice: string = "0";
       let signalTime: string | null = null;
+
+      // CRITICAL FIX: Extract position_size from payload FIRST, before any format-specific parsing
+      if (typeof payload === 'object' && payload !== null) {
+        if (payload.position_size !== undefined) {
+          strategyPositionSize = String(payload.position_size);
+          console.log(`[User Webhook] Extracted position_size from root: "${strategyPositionSize}"`);
+        }
+        if (payload.data && payload.data.position_size !== undefined) {
+          strategyPositionSize = String(payload.data.position_size);
+          console.log(`[User Webhook] Extracted position_size from data: "${strategyPositionSize}"`);
+        }
+        if (payload.action) action = String(payload.action).toLowerCase();
+        if (payload.contracts) contracts = String(payload.contracts);
+        if (payload.price) signalPrice = String(payload.price);
+        if (payload.time) signalTime = String(payload.time);
+        if (payload.symbol) ticker = String(payload.symbol);
+      }
 
       if (typeof payload === 'object' && payload.signalType === 'trade' && payload.data) {
         if (payload.data.action) action = payload.data.action.toLowerCase();
