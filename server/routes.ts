@@ -1013,15 +1013,18 @@ export async function registerRoutes(
 
       // CRITICAL: Verify on-chain that position is actually closed and retry if dust remains
       // This handles partial fills and ensures position is truly flat
+      // Use 1s delays with 5 retries (~5s total to stay within HTTP timeout)
       let verificationWarning: string | null = null;
       let finalTxSignature = txSignature;
       let retryCount = 0;
-      const maxRetries = 3;
+      const maxRetries = 5; // Increased from 3 to 5 for stubborn dust
       
       while (retryCount < maxRetries) {
         try {
-          // Wait a moment for on-chain state to settle
-          await new Promise(resolve => setTimeout(resolve, 500));
+          // Wait 1s for on-chain state to settle - consistent delay keeps total under HTTP timeout
+          const delayMs = 1000;
+          console.log(`[ClosePosition] Waiting ${delayMs}ms for on-chain state to settle (attempt ${retryCount + 1}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
           
           const postClosePosition = await PositionService.getPositionForExecution(
             bot.id,
@@ -1038,7 +1041,7 @@ export async function registerRoutes(
           
           // Position still exists - this is dust that needs cleanup
           console.warn(`[ClosePosition] Position NOT fully closed (attempt ${retryCount + 1}/${maxRetries})`);
-          console.warn(`[ClosePosition] Remaining dust: ${postClosePosition.side} ${postClosePosition.size} - attempting cleanup...`);
+          console.warn(`[ClosePosition] Remaining dust: ${postClosePosition.side} ${Math.abs(postClosePosition.size).toFixed(6)} contracts - attempting cleanup...`);
           
           // Retry closePerpPosition to clean up the dust
           const retryResult = await closePerpPosition(
@@ -2150,14 +2153,17 @@ export async function registerRoutes(
             
             // CRITICAL: Verify on-chain that position is actually closed and retry if dust remains
             // This handles partial fills and ensures position is truly flat
+            // Use 1s delays with 5 retries (~5s total to stay within HTTP timeout)
             let finalTxSignature = txSignature;
             let retryCount = 0;
-            const maxRetries = 3;
+            const maxRetries = 5; // Increased from 3 to 5 for stubborn dust
             
             while (retryCount < maxRetries) {
               try {
-                // Wait a moment for on-chain state to settle
-                await new Promise(resolve => setTimeout(resolve, 500));
+                // Wait 1s for on-chain state to settle - consistent delay keeps total under HTTP timeout
+                const delayMs = 1000;
+                console.log(`[Webhook] Waiting ${delayMs}ms for on-chain state to settle (attempt ${retryCount + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, delayMs));
                 
                 const postClosePosition = await PositionService.getPositionForExecution(
                   botId,
@@ -2174,7 +2180,7 @@ export async function registerRoutes(
                 
                 // Position still exists - this is dust that needs cleanup
                 console.warn(`[Webhook] Position NOT fully closed after close order (attempt ${retryCount + 1}/${maxRetries})`);
-                console.warn(`[Webhook] Remaining dust: ${postClosePosition.side} ${postClosePosition.size} - attempting cleanup...`);
+                console.warn(`[Webhook] Remaining dust: ${postClosePosition.side} ${Math.abs(postClosePosition.size).toFixed(6)} contracts - attempting cleanup...`);
                 
                 // Retry closePerpPosition to clean up the dust
                 const retryResult = await closePerpPosition(

@@ -157,8 +157,8 @@ function readI128LE(buffer: Buffer, offset: number): bigint {
   // Read low 64 bits as unsigned, high 64 bits as signed
   const lowUnsigned = buffer.readBigUInt64LE(offset);
   const highSigned = buffer.readBigInt64LE(offset + 8);
-  // Combine: value = high * 2^64 + low
-  return (highSigned << 64n) | lowUnsigned;
+  // Combine: value = high * 2^64 + low (using BigInt() instead of n suffix for ES2019 compatibility)
+  return (highSigned << BigInt(64)) | lowUnsigned;
 }
 
 // Convert bigint to number safely, returns NaN for values outside safe integer range
