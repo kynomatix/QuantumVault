@@ -2502,37 +2502,43 @@ export async function registerRoutes(
           // closePerpPosition returns signature, not txSignature
           const flipTxSignature = closeResult.signature || null;
           
+          // Calculate PnL for the flip close regardless of whether we have a signature
+          // This ensures PnL is recorded even if position was closed by another process
+          const closeFillPrice = parseFloat(signalPrice || "0");
+          const closeNotional = closeSize * closeFillPrice;
+          const closeFee = closeNotional * 0.0005;
+          
+          // Calculate trade PnL for position flip close
+          const flipEntryPrice = onChainPosition.entryPrice || 0;
+          let flipClosePnl = 0;
+          if (flipEntryPrice > 0 && closeFillPrice > 0) {
+            if (closeSide === 'short') {
+              // Closing LONG: profit if exitPrice > entryPrice
+              flipClosePnl = (closeFillPrice - flipEntryPrice) * closeSize - closeFee;
+            } else {
+              // Closing SHORT: profit if entryPrice > exitPrice
+              flipClosePnl = (flipEntryPrice - closeFillPrice) * closeSize - closeFee;
+            }
+            console.log(`[Webhook] Flip close PnL: entry=$${flipEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${flipClosePnl.toFixed(4)}`);
+          }
+
           // Handle case where subprocess found no position to close (success=true, signature=null)
           // This is unexpected for flip since we verified position exists, but handle gracefully
           if (closeResult.success && !flipTxSignature) {
             console.warn(`[Webhook] Position flip close: success but no signature - position may have been closed by another process`);
+            // Still save the PnL calculation based on the position we queried before
             await storage.updateBotTrade(closeTrade.id, { 
               status: "executed",
               txSignature: null,
+              price: String(closeFillPrice),
+              fee: String(closeFee),
+              pnl: flipClosePnl !== 0 ? String(flipClosePnl) : null,
               errorMessage: "Position was already closed (no trade executed)"
             });
             // Continue to execute the new position anyway
             console.log(`[Webhook] Proceeding to open ${side.toUpperCase()} position despite no close signature`);
           } else {
             // Update close trade with execution details
-            const closeFillPrice = parseFloat(signalPrice || "0");
-            const closeNotional = closeSize * closeFillPrice;
-            const closeFee = closeNotional * 0.0005;
-            
-            // Calculate trade PnL for position flip close
-            const flipEntryPrice = onChainPosition.entryPrice || 0;
-            let flipClosePnl = 0;
-            if (flipEntryPrice > 0 && closeFillPrice > 0) {
-              if (closeSide === 'short') {
-                // Closing LONG: profit if exitPrice > entryPrice
-                flipClosePnl = (closeFillPrice - flipEntryPrice) * closeSize - closeFee;
-              } else {
-                // Closing SHORT: profit if entryPrice > exitPrice
-                flipClosePnl = (flipEntryPrice - closeFillPrice) * closeSize - closeFee;
-              }
-              console.log(`[Webhook] Flip close PnL: entry=$${flipEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${flipClosePnl.toFixed(4)}`);
-            }
-            
             await storage.updateBotTrade(closeTrade.id, {
               status: "executed",
               txSignature: flipTxSignature,
