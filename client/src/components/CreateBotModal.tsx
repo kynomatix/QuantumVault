@@ -24,12 +24,9 @@ import {
   Loader2, 
   Check, 
   Copy, 
-  Wallet, 
   ExternalLink, 
   AlertCircle, 
-  Sparkles,
-  Bot,
-  Settings
+  Sparkles
 } from 'lucide-react';
 
 interface TradingBot {
@@ -52,39 +49,54 @@ const MARKETS = ['SOL-PERP', 'BTC-PERP', 'ETH-PERP'];
 export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }: CreateBotModalProps) {
   const { toast } = useToast();
   const [isCreating, setIsCreating] = useState(false);
-  const [step, setStep] = useState<'create' | 'success' | 'equity'>('create');
+  const [step, setStep] = useState<'create' | 'success'>('create');
   const [createdBot, setCreatedBot] = useState<TradingBot | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  const [equityAmount, setEquityAmount] = useState('');
-  const [isProcessingEquity, setIsProcessingEquity] = useState(false);
   const [agentBalance, setAgentBalance] = useState<string | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [isLoadingWebhookUrl, setIsLoadingWebhookUrl] = useState(false);
-  const [editLeverage, setEditLeverage] = useState(10);
-  const [editMaxPositionSize, setEditMaxPositionSize] = useState('100');
   
   const [newBot, setNewBot] = useState({
     name: '',
     market: 'SOL-PERP',
     leverage: 1,
-    totalInvestment: '100',
+    maxPositionSize: '',
   });
+  
+  // Fetch agent balance when modal opens
+  const fetchAgentBalanceOnOpen = async () => {
+    if (!walletAddress || agentBalance !== null) return;
+    setIsLoadingBalance(true);
+    try {
+      const res = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setAgentBalance(data.balance?.toString() || '0');
+      }
+    } catch (error) {
+      console.error('Failed to fetch balance:', error);
+    } finally {
+      setIsLoadingBalance(false);
+    }
+  };
+  
+  // Fetch balance when modal opens
+  if (isOpen && agentBalance === null && !isLoadingBalance) {
+    fetchAgentBalanceOnOpen();
+  }
 
   const resetState = () => {
     setStep('create');
     setCreatedBot(null);
     setCopiedField(null);
-    setEquityAmount('');
     setAgentBalance(null);
     setUserWebhookUrl(null);
-    setEditLeverage(10);
-    setEditMaxPositionSize('100');
     setNewBot({
       name: '',
       market: 'SOL-PERP',
       leverage: 1,
-      totalInvestment: '100',
+      maxPositionSize: '',
     });
   };
 
@@ -94,8 +106,22 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
       return;
     }
     
+    const fundingAmount = parseFloat(newBot.maxPositionSize) || 0;
+    const availableBalance = agentBalance ? parseFloat(agentBalance) : 0;
+    
+    // Validate funding amount if provided
+    if (fundingAmount > 0 && fundingAmount > availableBalance) {
+      toast({ 
+        title: 'Insufficient balance', 
+        description: `You only have $${availableBalance.toFixed(2)} available in your agent wallet`,
+        variant: 'destructive' 
+      });
+      return;
+    }
+    
     setIsCreating(true);
     try {
+      // Step 1: Create the bot
       const res = await fetch('/api/trading-bots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -104,23 +130,67 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
           name: newBot.name,
           market: newBot.market,
           leverage: newBot.leverage,
-          totalInvestment: newBot.totalInvestment || '100',
+          totalInvestment: fundingAmount > 0 ? String(fundingAmount) : '100',
         }),
       });
       
-      if (res.ok) {
-        const bot = await res.json();
-        setCreatedBot(bot);
-        setStep('success');
-        fetchUserWebhookUrl();
-        toast({ title: 'Bot created! Copy your webhook details below.' });
-        onBotCreated();
-      } else {
+      if (!res.ok) {
         const error = await res.json();
         toast({ title: 'Failed to create bot', description: error.error, variant: 'destructive' });
+        return;
       }
-    } catch (error) {
-      toast({ title: 'Failed to create bot', variant: 'destructive' });
+      
+      const bot = await res.json();
+      setCreatedBot(bot);
+      
+      // Step 2: If funding amount provided, deposit to the bot's subaccount
+      if (fundingAmount > 0) {
+        // First update bot settings
+        const settingsRes = await fetch(`/api/trading-bots/${bot.id}?wallet=${walletAddress}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ 
+            leverage: newBot.leverage,
+            maxPositionSize: fundingAmount,
+          }),
+        });
+        
+        if (!settingsRes.ok) {
+          console.error('Failed to update bot settings, but bot was created');
+        }
+        
+        // Then deposit to the bot's Drift subaccount
+        const depositRes = await fetch('/api/agent/drift-deposit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ amount: fundingAmount, botId: bot.id }),
+        });
+        
+        if (depositRes.ok) {
+          toast({ 
+            title: 'Bot created and funded!', 
+            description: `Deposited $${fundingAmount.toFixed(2)} with ${newBot.leverage}x leverage` 
+          });
+        } else {
+          const err = await depositRes.json();
+          toast({ 
+            title: 'Bot created but funding failed', 
+            description: err.error || 'You can fund it later from the bot details',
+            variant: 'destructive' 
+          });
+        }
+      } else {
+        toast({ title: 'Bot created! Copy your webhook details below.' });
+      }
+      
+      setStep('success');
+      fetchUserWebhookUrl();
+      onBotCreated();
+    } catch (error: any) {
+      console.error('Bot creation error:', error);
+      toast({ title: 'Failed to create bot', description: error.message, variant: 'destructive' });
     } finally {
       setIsCreating(false);
     }
@@ -170,99 +240,6 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   "time": "{{timenow}}",
   "position_size": "{{strategy.position_size}}"
 }`;
-  };
-
-  const fetchAgentBalance = async () => {
-    setIsLoadingBalance(true);
-    try {
-      const res = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
-      if (res.ok) {
-        const data = await res.json();
-        setAgentBalance(data.balance?.toString() || '0');
-      }
-    } catch (error) {
-      console.error('Failed to fetch balance:', error);
-    } finally {
-      setIsLoadingBalance(false);
-    }
-  };
-
-  const handleAddEquity = async () => {
-    if (!createdBot) {
-      toast({ title: 'No bot found', variant: 'destructive' });
-      return;
-    }
-    
-    if (!editMaxPositionSize || parseFloat(editMaxPositionSize) <= 0) {
-      toast({ title: 'Please set a valid Max Position Size', variant: 'destructive' });
-      return;
-    }
-
-    const depositAmount = parseFloat(editMaxPositionSize);
-    const availableBalance = agentBalance ? parseFloat(agentBalance) : 0;
-    
-    if (depositAmount > availableBalance) {
-      toast({ 
-        title: 'Insufficient balance', 
-        description: `You only have $${availableBalance.toFixed(2)} available in your agent wallet`,
-        variant: 'destructive' 
-      });
-      return;
-    }
-
-    setIsProcessingEquity(true);
-    try {
-      // First, save the bot settings (leverage and max position size)
-      const settingsRes = await fetch(`/api/trading-bots/${createdBot.id}?wallet=${walletAddress}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ 
-          leverage: editLeverage,
-          maxPositionSize: depositAmount,
-        }),
-      });
-      
-      if (!settingsRes.ok) {
-        const err = await settingsRes.json();
-        throw new Error(err.error || 'Failed to save bot settings');
-      }
-
-      // Then deposit to the bot's Drift subaccount
-      const depositRes = await fetch('/api/agent/drift-deposit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ amount: depositAmount, botId: createdBot.id }),
-      });
-
-      if (!depositRes.ok) {
-        const err = await depositRes.json();
-        throw new Error(err.error || 'Failed to deposit to Drift');
-      }
-
-      toast({ 
-        title: 'Bot Ready to Trade!', 
-        description: `Deposited $${depositAmount.toFixed(2)} with ${editLeverage}x leverage` 
-      });
-      
-      onBotCreated();
-      handleClose();
-    } catch (error: any) {
-      console.error('Bot configuration error:', error);
-      toast({ 
-        title: 'Failed to configure bot', 
-        description: error.message || 'Please try again',
-        variant: 'destructive' 
-      });
-    } finally {
-      setIsProcessingEquity(false);
-    }
-  };
-
-  const goToEquityStep = () => {
-    setStep('equity');
-    fetchAgentBalance();
   };
 
   const renderCreateStep = () => (
@@ -322,6 +299,41 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
             <span>1x (Safe)</span>
             <span>20x (High Risk)</span>
           </div>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="max-position-size">Max Position Size (USDC)</Label>
+          <div className="flex gap-2">
+            <Input
+              id="max-position-size"
+              type="number"
+              placeholder="100"
+              value={newBot.maxPositionSize}
+              onChange={(e) => setNewBot({ ...newBot, maxPositionSize: e.target.value })}
+              className="font-mono flex-1"
+              data-testid="input-max-position-size"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => agentBalance && setNewBot({ ...newBot, maxPositionSize: agentBalance })}
+              disabled={!agentBalance || parseFloat(agentBalance) <= 0}
+              className="px-3"
+              data-testid="button-max-position"
+            >
+              Max
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {isLoadingBalance ? (
+              'Loading balance...'
+            ) : agentBalance && parseFloat(agentBalance) > 0 ? (
+              <>Available in agent wallet: <span className="font-medium">${parseFloat(agentBalance).toFixed(2)}</span></>
+            ) : (
+              <span className="text-yellow-600">No USDC in agent wallet. Fund it from Wallet Management first.</span>
+            )}
+          </p>
         </div>
 
       </div>
@@ -469,34 +481,6 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
             </ul>
           </div>
 
-          <div className="p-4 rounded-xl bg-gradient-to-br from-green-500/10 to-emerald-500/10 border border-green-500/20">
-            <h3 className="font-semibold text-lg mb-3 flex items-center gap-2">
-              <span className="w-6 h-6 rounded-full bg-green-500 text-white text-sm flex items-center justify-center">4</span>
-              Configure Trading Settings
-            </h3>
-            <p className="text-sm text-muted-foreground mb-4">
-              Set your leverage and max position size to complete the bot setup.
-            </p>
-            <div className="flex flex-col gap-2">
-              <Button
-                className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600"
-                onClick={goToEquityStep}
-                data-testid="button-add-equity-now"
-              >
-                <Settings className="w-4 h-4 mr-2" />
-                Configure Now
-              </Button>
-              <Button
-                variant="ghost"
-                className="w-full text-muted-foreground"
-                onClick={handleClose}
-                data-testid="button-add-equity-later"
-              >
-                I'll do this later
-              </Button>
-            </div>
-          </div>
-
           <div className="flex gap-3">
             <Button
               variant="outline"
@@ -520,121 +504,11 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
     );
   };
 
-  const renderEquityStep = () => {
-    if (!createdBot) return null;
-
-    return (
-      <>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Settings className="w-5 h-5 text-primary" />
-            Configure Your Bot
-          </DialogTitle>
-          <DialogDescription>
-            Set your trading parameters to complete the setup.
-          </DialogDescription>
-        </DialogHeader>
-        
-        <div className="space-y-4 py-4">
-          <div className="p-3 rounded-lg bg-muted/50 border">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-                <Bot className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <p className="font-semibold">{createdBot.name}</p>
-                <p className="text-sm text-muted-foreground">{createdBot.market}</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="max-position-size">Max Position Size (USDC)</Label>
-            <div className="flex gap-2">
-              <Input
-                id="max-position-size"
-                type="number"
-                placeholder="100"
-                value={editMaxPositionSize}
-                onChange={(e) => setEditMaxPositionSize(e.target.value)}
-                className="font-mono flex-1"
-                data-testid="input-max-position-size"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => agentBalance && setEditMaxPositionSize(agentBalance)}
-                disabled={!agentBalance || parseFloat(agentBalance) <= 0}
-                className="px-3"
-                data-testid="button-max-position"
-              >
-                Max
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Maximum capital for this bot. TradingView sends a % of this amount per trade.
-              {agentBalance && parseFloat(agentBalance) > 0 && (
-                <span className="ml-1">(Available: ${parseFloat(agentBalance).toFixed(2)})</span>
-              )}
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            <div className="flex justify-between">
-              <Label>Leverage</Label>
-              <span className="text-sm font-medium text-primary">{editLeverage}x</span>
-            </div>
-            <Slider
-              value={[editLeverage]}
-              onValueChange={(v) => setEditLeverage(v[0])}
-              min={1}
-              max={20}
-              step={1}
-              data-testid="slider-leverage-equity"
-            />
-            <div className="flex justify-between text-xs text-muted-foreground">
-              <span>1x (Safe)</span>
-              <span>20x (High Risk)</span>
-            </div>
-          </div>
-
-        </div>
-
-        <DialogFooter className="flex-col gap-2 sm:flex-col">
-          <Button
-            className="w-full bg-gradient-to-r from-green-500 to-emerald-500"
-            onClick={handleAddEquity}
-            disabled={!editMaxPositionSize || parseFloat(editMaxPositionSize) <= 0 || isProcessingEquity}
-            data-testid="button-confirm-equity"
-          >
-            {isProcessingEquity ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Saving...
-              </>
-            ) : (
-              'Complete Setup'
-            )}
-          </Button>
-          <Button
-            variant="ghost"
-            className="w-full"
-            onClick={() => setStep('success')}
-          >
-            Back
-          </Button>
-        </DialogFooter>
-      </>
-    );
-  };
-
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogContent className={step === 'success' ? "sm:max-w-[600px]" : "sm:max-w-[450px]"}>
         {step === 'create' && renderCreateStep()}
         {step === 'success' && renderSuccessStep()}
-        {step === 'equity' && renderEquityStep()}
       </DialogContent>
     </Dialog>
   );
