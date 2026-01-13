@@ -671,7 +671,16 @@ export default function AppPage() {
                       <p className="text-sm font-medium truncate" data-testid="text-wallet-address">{shortenedAddress}</p>
                       <p className="text-xs text-muted-foreground">Connected</p>
                     </div>
-                    <button className="p-1.5 hover:bg-muted rounded-lg transition-colors" data-testid="button-copy-address">
+                    <button 
+                      className="p-1.5 hover:bg-muted rounded-lg transition-colors" 
+                      data-testid="button-copy-address"
+                      onClick={() => {
+                        if (publicKeyString) {
+                          navigator.clipboard.writeText(publicKeyString);
+                          toast({ title: 'Wallet address copied' });
+                        }
+                      }}
+                    >
                       <Copy className="w-4 h-4 text-muted-foreground" />
                     </button>
                   </div>
@@ -701,7 +710,15 @@ export default function AppPage() {
                       <p className="text-sm font-medium truncate" data-testid="text-wallet-address-mobile">{shortenedAddress}</p>
                       <p className="text-xs text-muted-foreground">Connected</p>
                     </div>
-                    <button className="p-1.5 hover:bg-muted rounded-lg transition-colors">
+                    <button 
+                      className="p-1.5 hover:bg-muted rounded-lg transition-colors"
+                      onClick={() => {
+                        if (publicKeyString) {
+                          navigator.clipboard.writeText(publicKeyString);
+                          toast({ title: 'Wallet address copied' });
+                        }
+                      }}
+                    >
                       <Copy className="w-4 h-4 text-muted-foreground" />
                     </button>
                   </div>
@@ -1829,12 +1846,22 @@ export default function AppPage() {
           agentPublicKey={agentPublicKey}
           onDepositComplete={async () => {
             try {
+              // Check agent balance
               const res = await fetch('/api/agent/balance', { credentials: 'include' });
               if (res.ok) {
                 const data = await res.json();
                 if (data.solBalance >= 0.01) {
                   setWelcomePopupOpen(false);
                 }
+              }
+              // Refresh settings to get the displayName saved in WelcomePopup
+              const settingsRes = await fetch('/api/wallet/settings', { credentials: 'include' });
+              if (settingsRes.ok) {
+                const settingsData = await settingsRes.json();
+                setDisplayName(settingsData.displayName || '');
+                setXUsername(settingsData.xUsername || '');
+                setDefaultLeverage(String(settingsData.defaultLeverage || 5));
+                setSlippageBps(String(settingsData.slippageBps || 30));
               }
             } catch (error) {
               console.error('Error checking agent balance after deposit:', error);
