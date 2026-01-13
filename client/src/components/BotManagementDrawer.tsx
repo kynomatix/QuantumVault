@@ -193,7 +193,10 @@ export function BotManagementDrawer({
       setLocalBot(bot);
       setEditName(bot.name);
       setEditLeverage(bot.leverage);
-      setEditMaxPositionSize(bot.maxPositionSize || '');
+      // Convert stored maxPositionSize (leveraged) to investment amount (raw)
+      const storedMaxPos = parseFloat(bot.maxPositionSize || '0');
+      const investmentAmount = bot.leverage > 0 ? storedMaxPos / bot.leverage : storedMaxPos;
+      setEditMaxPositionSize(investmentAmount > 0 ? investmentAmount.toFixed(2) : '');
     }
   }, [bot]);
 
@@ -579,17 +582,19 @@ export function BotManagementDrawer({
       return;
     }
     
-    // Validate maxPositionSize doesn't exceed what's possible with available collateral
-    const maxPosValue = editMaxPositionSize ? parseFloat(editMaxPositionSize) : 0;
-    const maxAllowed = botBalance * editLeverage;
-    if (maxPosValue > 0 && botBalance > 0 && maxPosValue > maxAllowed) {
+    // Validate investment amount doesn't exceed bot's available equity
+    const investmentValue = editMaxPositionSize ? parseFloat(editMaxPositionSize) : 0;
+    if (investmentValue > 0 && botBalance > 0 && investmentValue > botBalance) {
       toast({ 
-        title: 'Max Position Size too high', 
-        description: `With $${botBalance.toFixed(2)} balance and ${editLeverage}x leverage, max allowed is $${maxAllowed.toFixed(2)}`,
+        title: 'Investment too high', 
+        description: `Bot only has $${botBalance.toFixed(2)} available. Click "Max" to use full balance.`,
         variant: 'destructive' 
       });
       return;
     }
+    
+    // Calculate leveraged max position size (investment × leverage) for backend
+    const calculatedMaxPosition = investmentValue * editLeverage;
     
     setSaveSettingsLoading(true);
     try {
@@ -600,7 +605,7 @@ export function BotManagementDrawer({
         body: JSON.stringify({ 
           name: editName.trim(),
           leverage: editLeverage,
-          maxPositionSize: editMaxPositionSize ? parseFloat(editMaxPositionSize) : null,
+          maxPositionSize: calculatedMaxPosition > 0 ? calculatedMaxPosition : null,
         }),
       });
 
@@ -631,14 +636,25 @@ export function BotManagementDrawer({
     if (localBot) {
       setEditName(localBot.name);
       setEditLeverage(localBot.leverage);
-      setEditMaxPositionSize(localBot.maxPositionSize || '');
+      // Convert stored maxPositionSize (leveraged) to investment amount (raw)
+      const storedMaxPos = parseFloat(localBot.maxPositionSize || '0');
+      const investmentAmount = localBot.leverage > 0 ? storedMaxPos / localBot.leverage : storedMaxPos;
+      setEditMaxPositionSize(investmentAmount > 0 ? investmentAmount.toFixed(2) : '');
     }
   };
 
+  // Compare investment amounts (convert stored leveraged value to raw for comparison)
+  const getStoredInvestmentAmount = () => {
+    if (!localBot?.maxPositionSize) return '';
+    const storedMaxPos = parseFloat(localBot.maxPositionSize);
+    const investment = localBot.leverage > 0 ? storedMaxPos / localBot.leverage : storedMaxPos;
+    return investment > 0 ? investment.toFixed(2) : '';
+  };
+  
   const hasSettingsChanges = localBot ? (
     editName !== localBot.name || 
     editLeverage !== localBot.leverage || 
-    editMaxPositionSize !== (localBot.maxPositionSize || '')
+    editMaxPositionSize !== getStoredInvestmentAmount()
   ) : false;
 
   const formatDate = (dateString: string) => {
@@ -1499,7 +1515,7 @@ export function BotManagementDrawer({
                 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <label className="text-sm text-muted-foreground">Max Position Size (USDC)</label>
+                    <label className="text-sm text-muted-foreground">Investment Amount (USDC)</label>
                   </div>
                   <div className="flex gap-2">
                     <Input
@@ -1508,7 +1524,7 @@ export function BotManagementDrawer({
                       onChange={(e) => setEditMaxPositionSize(e.target.value)}
                       placeholder="Required for trading"
                       min="1"
-                      step="1"
+                      step="0.01"
                       className="flex-1"
                       data-testid="input-max-position-size"
                     />
@@ -1516,7 +1532,7 @@ export function BotManagementDrawer({
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => setEditMaxPositionSize((botBalance * editLeverage).toFixed(2))}
+                      onClick={() => setEditMaxPositionSize(botBalance.toFixed(2))}
                       disabled={botBalance <= 0}
                       className="px-3"
                       data-testid="button-max-position-size"
@@ -1526,7 +1542,7 @@ export function BotManagementDrawer({
                   </div>
                   <p className="text-xs text-muted-foreground flex items-center gap-1">
                     <Info className="w-3 h-3" />
-                    Leveraged position limit. With {editLeverage}x leverage, max is ${(botBalance * editLeverage).toFixed(2)}.
+                    Bot equity: ${botBalance.toFixed(2)}. With {editLeverage}x leverage = ${(botBalance * editLeverage).toFixed(2)} max position.
                   </p>
                 </div>
                 
