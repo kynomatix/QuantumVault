@@ -133,8 +133,8 @@ export default function BotSetup() {
   });
 
   useEffect(() => {
-    if (!connected) {
-      navigate('/');
+    if (!connected || !publicKeyString) {
+      if (!connected) navigate('/');
       return;
     }
     fetchBots();
@@ -160,8 +160,9 @@ export default function BotSetup() {
   };
 
   const fetchPositions = async () => {
+    if (!publicKeyString) return;
     try {
-      const res = await fetch('/api/positions', { credentials: 'include' });
+      const res = await fetch(`/api/positions?wallet=${publicKeyString}`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setPositions(data.positions || []);
