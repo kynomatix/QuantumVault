@@ -2535,6 +2535,21 @@ export async function registerRoutes(
               pnl: flipClosePnl !== 0 ? String(flipClosePnl) : null,
               errorMessage: "Position was already closed (no trade executed)"
             });
+            
+            // Sync position from on-chain to keep DB aligned
+            await syncPositionFromOnChain(
+              botId,
+              bot.walletAddress,
+              wallet.agentPublicKey!,
+              subAccountId,
+              bot.market,
+              closeTrade.id,
+              closeFee,
+              closeFillPrice,
+              closeSide,
+              closeSize
+            );
+            
             // Continue to execute the new position anyway
             console.log(`[Webhook] Proceeding to open ${side.toUpperCase()} position despite no close signature`);
           } else {
