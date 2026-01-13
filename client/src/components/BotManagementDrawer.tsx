@@ -1515,6 +1515,24 @@ export function BotManagementDrawer({
               </div>
             </div>
 
+            {displayBot?.driftSubaccountId !== null && displayBot?.driftSubaccountId !== undefined && (
+              <div className="p-4 rounded-xl border border-border/50 bg-muted/30">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Info className="w-4 h-4 text-muted-foreground" />
+                    <span className="text-sm text-muted-foreground">Drift Subaccount</span>
+                  </div>
+                  <span className="text-sm font-mono font-medium">
+                    Subaccount {displayBot.driftSubaccountId}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  This bot's funds are isolated in Drift Subaccount {displayBot.driftSubaccountId}. 
+                  Use this to identify the account in Drift's interface.
+                </p>
+              </div>
+            )}
+
             <div className="p-4 rounded-xl border border-destructive/30 bg-destructive/5">
               <div className="flex items-center gap-2 mb-3">
                 <Trash2 className="w-4 h-4 text-destructive" />
