@@ -197,6 +197,19 @@ export function BotManagementDrawer({
     }
   }, [bot]);
 
+  const fetchWithTimeout = async (url: string, options: RequestInit = {}, timeoutMs = 10000): Promise<Response | null> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeoutId);
+      return response;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      return null;
+    }
+  };
+
   const fetchUserWebhookUrl = async () => {
     setWebhookUrlLoading(true);
     try {
@@ -216,10 +229,10 @@ export function BotManagementDrawer({
     if (!bot) return;
     setPositionLoading(true);
     try {
-      const res = await fetch(`/api/trading-bots/${bot.id}/position?wallet=${walletAddress}`, { 
+      const res = await fetchWithTimeout(`/api/trading-bots/${bot.id}/position?wallet=${walletAddress}`, { 
         credentials: 'include' 
       });
-      if (res.ok) {
+      if (res?.ok) {
         const data = await res.json();
         setBotPosition(data);
       }
@@ -262,25 +275,25 @@ export function BotManagementDrawer({
     try {
       const cacheBust = Date.now();
       const [balanceRes, agentRes, botDriftRes, netDepositedRes] = await Promise.all([
-        fetch(`/api/bot/${bot.id}/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
-        fetch(`/api/agent/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
-        fetch(`/api/bots/${bot.id}/drift-balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
-        fetch(`/api/bots/${bot.id}/net-deposited?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
+        fetchWithTimeout(`/api/bot/${bot.id}/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
+        fetchWithTimeout(`/api/agent/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
+        fetchWithTimeout(`/api/bots/${bot.id}/drift-balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
+        fetchWithTimeout(`/api/bots/${bot.id}/net-deposited?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
       ]);
 
-      if (balanceRes.ok) {
+      if (balanceRes?.ok) {
         const data = await balanceRes.json();
         setBotBalance(data.usdcBalance ?? 0);
         setInterestEarned(data.estimatedDailyInterest ?? 0);
       }
 
-      if (agentRes.ok) {
+      if (agentRes?.ok) {
         const data = await agentRes.json();
         setMainAccountBalance(data.balance ?? 0);
       }
 
       // Use bot-specific drift balance from its subaccount
-      if (botDriftRes.ok) {
+      if (botDriftRes?.ok) {
         const data = await botDriftRes.json();
         // Bot Equity = Total Collateral from Drift (what the bot is worth now)
         setDriftBalance(data.totalCollateral ?? data.balance ?? 0);
@@ -288,7 +301,7 @@ export function BotManagementDrawer({
         setHasOpenPositions(data.hasOpenPositions ?? false);
       }
 
-      if (netDepositedRes.ok) {
+      if (netDepositedRes?.ok) {
         const data = await netDepositedRes.json();
         setNetDeposited(data.netDeposited ?? 0);
       }
