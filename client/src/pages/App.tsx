@@ -1231,14 +1231,16 @@ export default function AppPage() {
                             </div>
                             <div className="p-2.5 rounded-lg bg-muted/30">
                               <p className={`text-lg font-bold ${((bot as any).netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                ${Math.abs((bot as any).netPnl ?? 0).toFixed(2)}
+                                {((bot as any).netPnl ?? 0) >= 0 ? '+' : '-'}${Math.abs((bot as any).netPnl ?? 0).toFixed(2)}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                Net P&L
                                 {((bot as any).netDeposited ?? 0) > 0 && (
-                                  <span className="text-xs ml-1">
+                                  <span className={`ml-1 ${((bot as any).netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                     ({((bot as any).netPnlPercent ?? 0).toFixed(1)}%)
                                   </span>
                                 )}
                               </p>
-                              <p className="text-xs text-muted-foreground">Net P&L</p>
                             </div>
                           </div>
                         </div>
