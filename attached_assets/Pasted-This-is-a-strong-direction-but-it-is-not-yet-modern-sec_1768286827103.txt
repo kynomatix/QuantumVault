@@ -1,0 +1,264 @@
+This is a strong direction, but it is not yet “modern security standards” as written. The primitives are fine. The protocol details around key derivation, session handling, webhook execution, and mnemonic handling need tightening, otherwise you end up with a system that is cryptographically pretty but operationally brittle or silently insecure.
+
+Below is a surgical review: what is good, what is risky, and the exact upgrades I would require before calling it production grade.
+
+## What is already good
+
+### Per user isolation
+
+Moving from a single server wide key to per user keys is a huge improvement. Database exfiltration no longer equals total compromise.
+
+### AES 256 GCM
+
+Correct choice for fast authenticated encryption.
+
+### Nonce in signed message
+
+Good instinct to prevent replay.
+
+### Envelope concept implied
+
+You are basically doing envelope encryption even if you did not name it that way.
+
+## The biggest issue: your key derivation depends on a signature that changes every time
+
+Right now, you derive the user encryption key from the wallet signature. Wallet signatures are intentionally non deterministic because they include the signed message and sometimes wallet behavior varies. If you include a nonce or timestamp in the message, the signature changes every login. That means the derived key changes every login.
+
+If the derived key changes, you cannot decrypt previously stored ciphertext unless you keep the exact old signature derived key around or you re encrypt everything each session. Your plan says “re encrypt mnemonic with new signature derived key on recovery”, but your normal login flow does not mention re encryption of all existing encrypted material. That is a functional break.
+
+### Modern fix: use wallet signature only to unwrap a stable per user master key
+
+Do not use the signature derived key to encrypt data directly, except for wrapping another key.
+
+Recommended structure:
+
+1. Generate a random 32 byte User Master Key (UMK) once per user.
+2. On login, user signs an auth message.
+3. Derive a Session Key (SK) from the signature via HKDF.
+4. Store UMK encrypted under SK as EUMK in DB.
+5. Use UMK to encrypt agent mnemonic and any other sensitive user scoped secrets.
+
+Effect:
+
+* Signature can change every login, SK changes every login, that is fine.
+* You decrypt EUMK using SK, get UMK, then decrypt the real secrets.
+* No mass re encryption every session.
+* You can rotate SK without touching secrets.
+* You can rotate UMK with a standard rewrap flow.
+
+This is the single most important change.
+
+## Your “zero knowledge server” claim is not accurate
+
+As soon as you run bots server side, the server necessarily sees decrypted key material at runtime or it cannot sign transactions. Even with UMK in memory, a compromised server can steal it.
+
+So instead of “zero knowledge server”, phrase it as:
+
+* “At rest encryption per user”
+* “Server cannot decrypt user keys without a fresh wallet authentication event”
+* “Runtime keys are ephemeral in memory”
+  This is materially true and defensible.
+
+## Replay protection needs to be specified precisely
+
+Nonce in message is good, but you must define:
+
+* nonce length, recommended 16 to 32 bytes random
+* server stores nonce hash and expiration
+* each nonce is single use
+* message includes domain binding and chain binding
+
+Recommended message payload:
+
+* domain: quantumvault.app
+* wallet pubkey
+* nonce random
+* issuedAt ISO
+* expiresAt ISO
+* cluster mainnet beta
+* purpose string like “unlock UMK” or “reveal mnemonic” or “enable trading for 15 minutes”
+
+This prevents:
+
+* replay across environments
+* replay after expiry
+* signature reuse for a different privilege
+
+## Session model is currently too permissive for webhook trading
+
+You say “Trade execution: check if encryption key in session, if not prompt user to sign message.” That does not work for autonomous bots triggered by TradingView webhooks. Users will not be there to sign.
+
+You need a headless execution authorization model, otherwise your bot system cannot run while the user is asleep.
+
+Modern approach for this class of app is one of these:
+
+### Option A: Session key escrow with short lived execution tokens
+
+* User signs an “Enable execution” message.
+* Server unwraps UMK and then derives an Execution Key EK specific to that bot or that subaccount.
+* Store EK encrypted under a server side KMS or HSM style key, or at least a separate process secret, with strict access controls.
+* EK is time bound and scope bound.
+* User can revoke at any time.
+
+This re introduces a server secret, but in a controlled, least privilege way. Without it, webhook bots are not viable.
+
+### Option B: Use a separate agent keypair with explicit consent and revocation
+
+* User explicitly creates an agent wallet and funds it.
+* User accepts that agent wallet is controlled by the platform while enabled.
+* Platform protects it with UMK and an execution authorization layer.
+  This is basically what you are doing, but your plan needs explicit “enable execution” state.
+
+Minimum requirement:
+
+* A per bot “enabled” flag
+* A per bot max notional, max leverage, allowed markets, allowed order types
+* A per bot daily loss limit, kill switch
+* A per bot time based execution window
+  Those are security controls too.
+
+## Mnemonic handling is the highest risk part
+
+Adding a mnemonic backup is helpful for recovery, but it greatly increases blast radius if mishandled. Many mature systems avoid ever showing mnemonics server side.
+
+If you keep it:
+
+* Never log it, never store it unencrypted, never send it to analytics
+* Reveal only after a fresh high privilege signature
+* Rate limit reveal
+* Provide an explicit “I understand” confirmation UX
+* Prefer returning it as a downloadable file in browser memory only
+* Consider splitting mnemonic into Shamir shares if you want strong recovery patterns, but that adds complexity
+
+Also, for Solana agent wallets, you do not need HD derivation at all unless you want deterministic regen. If you do use BIP39 plus derivation, ensure you use a Solana compatible derivation path.
+
+Common safe approach:
+
+* Use bip39 to generate seed
+* Derive ed25519 key using a Solana path, typically m/44'/501'/0'/0'
+* Many libs do this but you must verify output matches Solana expectations
+
+Your dependency list shows ed25519-hd-key, but not a Solana specific helper. That is a red flag. You need to confirm the derivation path and library semantics.
+
+## AES GCM details you must pin down
+
+Your doc does not specify:
+
+* IV size: must be 12 bytes random
+* tag length: 16 bytes
+* AAD: include walletAddress plus record type plus version
+* key separation: do not use UMK directly for everything, derive per purpose subkeys with HKDF
+
+Suggested:
+
+* UMK is a root key
+* derive key_mnemonic = HKDF(UMK, info="mnemonic")
+* derive key_privkey = HKDF(UMK, info="agent_privkey")
+* derive key_profile = HKDF(UMK, info="profile_secrets")
+  This avoids cross protocol issues and is standard practice.
+
+## Development fallback key is a serious issue
+
+“Dev Mode Risk: falls back to weak key” should be deleted. Even in dev, use proper keys. You can use a local env var but it must be strong and unique per dev environment.
+
+## Executor architecture change is directionally good but missing a critical control
+
+You want to pass a decrypted private key to executor via stdin. That reduces env var leakage risk, good.
+
+But:
+
+* stdin can still be read by a compromised process
+* the parent process must enforce strict lifecycle
+* executor should run as a separate user with least privileges if possible
+* ideally the executor never receives the raw key, it receives a signer abstraction. On Node this is hard, but you can at least enforce process isolation.
+
+At minimum:
+
+* zeroize buffers after use
+* limit plaintext key lifetime to milliseconds
+* do not cache plaintext key per request
+* do not write to disk, ever
+
+## Migration strategy: “only user is you” is fine but be careful
+
+You say old data deleted, no rollback. That is okay if you accept it.
+
+But make sure you also:
+
+* rotate any old env key immediately
+* invalidate all old sessions
+* ensure no old encrypted blob remains in backups
+
+## What I would change in your plan, explicitly
+
+### Change 1: Introduce UMK and EUMK
+
+Add to schema:
+
+* encryptedUserMasterKey
+* encryptedUserMasterKeyVersion
+* maybe encryptedUserMasterKeyNonce
+
+Flow:
+
+* first login: generate UMK, wrap under SK, store EUMK
+* subsequent logins: unwrap EUMK using SK
+
+### Change 2: Separate auth signatures by purpose and TTL
+
+* login unlock: TTL 24h ok
+* trading enable: TTL 15m to 1h recommended
+* mnemonic reveal: one time token, TTL 2 minutes
+
+### Change 3: Add bot scoped execution policy
+
+For every bot record store:
+
+* allowedMarkets
+* maxPositionNotional
+* maxLeverage
+* allowedOrderTypes
+* slippage cap for market orders
+* daily loss limit
+* kill switch
+  These are security controls and reduce catastrophic loss from logic bugs.
+
+### Change 4: Remove “server cannot decrypt without user signature” for autonomous bots
+
+Replace with:
+
+* “server requires user authorization to enable autonomous execution”
+* “execution can be revoked”
+* “keys are encrypted at rest per user and unwrapped into memory only when needed”
+
+### Change 5: Derivation library validation
+
+Confirm Solana derivation path and library correctness. If not validated, do not ship mnemonics yet. You can still do per user encryption of agent private keys without adding mnemonics in v1.
+
+## Quick pass fail checklist
+
+Pass if all are true:
+
+* Uses UMK envelope pattern, not signature key direct encryption
+* Nonce single use, stored server side, expires
+* Domain and cluster bound signed messages
+* Per purpose signature messages and TTLs
+* AES GCM IV random 12 bytes and never reused, AAD used
+* Per purpose subkeys derived from UMK
+* No dev fallback weak keys
+* Headless bot execution model defined with explicit enable and revoke
+* Bot execution limits and kill switch implemented
+* Mnemonic reveal locked behind high privilege auth and rate limit
+
+Fail if any are true:
+
+* Signature derived key used directly to encrypt long lived data without rewrap plan
+* Nonce is not stored server side or is reusable
+* Bots require live user signing to execute
+* Mnemonic can be revealed repeatedly without strong controls
+
+## Bottom line
+
+Your plan is 70 percent there. The cryptography choices are fine. The key hierarchy and the automation reality are the gaps.
+
+If you want, paste the current `server/crypto.ts` and the proposed new message payload format, and I will rewrite the “correct” crypto interface in a way Replit can implement without ambiguity, including UMK wrapping, GCM parameters, and exact session policy.
