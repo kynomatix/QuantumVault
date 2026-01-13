@@ -71,20 +71,41 @@ function getEncryptionKey() {
 var ENCRYPTION_KEY = getEncryptionKey();
 function decryptPrivateKey(encryptedKey) {
   const parts = encryptedKey.split(":");
-  // Format is iv:authTag:encrypted (3 parts) from crypto.ts
-  if (parts.length !== 3) {
-    // Not encrypted or wrong format, return as-is
-    return encryptedKey;
-  }
   const key = Buffer.from(ENCRYPTION_KEY, "hex");
-  const iv = Buffer.from(parts[0], "hex");
-  const authTag = Buffer.from(parts[1], "hex");
-  const encrypted = parts[2];
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(authTag);
-  let decrypted = decipher.update(encrypted, "hex", "utf8");
-  decrypted += decipher.final("utf8");
-  return decrypted;
+  
+  // New format: iv:authTag:encrypted (3 parts) - AES-256-GCM
+  if (parts.length === 3) {
+    try {
+      const iv = Buffer.from(parts[0], "hex");
+      const authTag = Buffer.from(parts[1], "hex");
+      const encrypted = parts[2];
+      const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+      decipher.setAuthTag(authTag);
+      let decrypted = decipher.update(encrypted, "hex", "utf8");
+      decrypted += decipher.final("utf8");
+      return decrypted;
+    } catch (e) {
+      console.error("[Executor] GCM decryption failed, trying legacy format:", e.message);
+    }
+  }
+  
+  // Legacy format: iv:encrypted (2 parts) - AES-256-CBC
+  if (parts.length === 2) {
+    try {
+      const iv = Buffer.from(parts[0], "hex");
+      const encrypted = parts[1];
+      const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
+      let decrypted = decipher.update(encrypted, "hex", "utf8");
+      decrypted += decipher.final("utf8");
+      console.error("[Executor] Successfully decrypted using legacy CBC format");
+      return decrypted;
+    } catch (e) {
+      console.error("[Executor] CBC decryption failed:", e.message);
+    }
+  }
+  
+  // If not encrypted or all decryption failed, return as-is
+  return encryptedKey;
 }
 async function createDriftClient(encryptedPrivateKey, subAccountId) {
   const rpcUrl = process.env.SOLANA_RPC_URL || (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : "https://api.mainnet-beta.solana.com");
