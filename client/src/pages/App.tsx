@@ -1157,59 +1157,93 @@ export default function AppPage() {
                 </div>
 
                 {botsData && botsData.length > 0 ? (
-                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {botsData.map((bot: TradingBot) => (
-                      <div 
-                        key={bot.id} 
-                        className="gradient-border p-4 noise hover:scale-[1.01] transition-transform cursor-pointer"
-                        data-testid={`bot-card-${bot.id}`}
-                        onClick={() => {
-                          setSelectedManagedBot(bot);
-                          setManageBotDrawerOpen(true);
-                        }}
-                      >
-                        <div className="flex items-start justify-between mb-4">
-                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center">
-                              <Bot className="w-5 h-5 text-primary" />
+                  <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                    {botsData.map((bot: TradingBot) => {
+                      const position = positionsData?.find((p: any) => p.botId === bot.id);
+                      const hasPosition = position && Math.abs(position.baseAssetAmount) > 0.0001;
+                      const unrealizedPnl = position?.unrealizedPnl ?? 0;
+                      
+                      return (
+                        <div 
+                          key={bot.id} 
+                          className="gradient-border p-5 noise hover:scale-[1.01] transition-transform cursor-pointer"
+                          data-testid={`bot-card-${bot.id}`}
+                          onClick={() => {
+                            setSelectedManagedBot(bot);
+                            setManageBotDrawerOpen(true);
+                          }}
+                        >
+                          <div className="flex items-start justify-between mb-4">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
+                                bot.isActive 
+                                  ? 'bg-gradient-to-br from-primary to-accent' 
+                                  : 'bg-gradient-to-br from-primary/30 to-accent/30'
+                              }`}>
+                                <Bot className={`w-6 h-6 ${bot.isActive ? 'text-white' : 'text-primary'}`} />
+                              </div>
+                              <div>
+                                <h3 className="font-semibold text-base">{bot.name}</h3>
+                                <p className="text-sm text-muted-foreground">{bot.market}</p>
+                              </div>
                             </div>
-                            <div>
-                              <h3 className="font-semibold">{bot.name}</h3>
-                              <p className="text-sm text-muted-foreground">{bot.market}</p>
-                            </div>
+                            <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
+                              bot.isActive 
+                                ? 'bg-emerald-500/20 text-emerald-400' 
+                                : 'bg-yellow-500/20 text-yellow-400'
+                            }`}>
+                              {bot.isActive ? 'Active' : 'Paused'}
+                            </span>
                           </div>
-                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                            bot.isActive 
-                              ? 'bg-emerald-500/20 text-emerald-400' 
-                              : 'bg-yellow-500/20 text-yellow-400'
-                          }`}>
-                            {bot.isActive ? 'Active' : 'Inactive'}
-                          </span>
-                        </div>
 
-                        <div className="grid grid-cols-3 gap-2 text-center">
-                          <div className="p-2 rounded-lg bg-muted/30">
-                            <p className="text-lg font-bold">{(bot as any).actualTradeCount ?? (bot.stats as any)?.totalTrades ?? 0}</p>
-                            <p className="text-xs text-muted-foreground">Trades</p>
-                          </div>
-                          <div className="p-2 rounded-lg bg-muted/30">
-                            <p className="text-lg font-bold">{bot.leverage}x</p>
-                            <p className="text-xs text-muted-foreground">Leverage</p>
-                          </div>
-                          <div className="p-2 rounded-lg bg-muted/30">
-                            <p className={`text-lg font-bold ${((bot as any).netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              {((bot as any).netPnl ?? 0) >= 0 ? '+' : ''}${((bot as any).netPnl ?? 0).toFixed(2)}
-                              {((bot as any).netDeposited ?? 0) > 0 && (
-                                <span className="text-xs ml-1">
-                                  ({((bot as any).netPnlPercent ?? 0).toFixed(1)}%)
+                          {hasPosition && (
+                            <div className={`mb-4 px-3 py-2.5 rounded-lg flex items-center justify-between ${
+                              position.side === 'LONG' ? 'bg-emerald-500/10 border border-emerald-500/20' : 'bg-red-500/10 border border-red-500/20'
+                            }`}>
+                              <div className="flex items-center gap-2">
+                                <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                                  position.side === 'LONG' 
+                                    ? 'bg-emerald-500/20 text-emerald-400' 
+                                    : 'bg-red-500/20 text-red-400'
+                                }`}>
+                                  {position.side}
                                 </span>
-                              )}
-                            </p>
-                            <p className="text-xs text-muted-foreground">Net P&L</p>
+                                <span className="text-sm font-medium">
+                                  {Math.abs(position.baseAssetAmount).toFixed(4)} {bot.market.replace('-PERP', '')}
+                                </span>
+                              </div>
+                              <span className={`text-sm font-semibold ${
+                                unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                              }`}>
+                                {unrealizedPnl >= 0 ? '+' : ''}{unrealizedPnl.toFixed(2)}
+                              </span>
+                            </div>
+                          )}
+
+                          <div className="grid grid-cols-3 gap-3 text-center">
+                            <div className="p-2.5 rounded-lg bg-muted/30">
+                              <p className="text-lg font-bold">{(bot as any).actualTradeCount ?? (bot.stats as any)?.totalTrades ?? 0}</p>
+                              <p className="text-xs text-muted-foreground">Trades</p>
+                            </div>
+                            <div className="p-2.5 rounded-lg bg-muted/30">
+                              <p className="text-lg font-bold">{bot.leverage}x</p>
+                              <p className="text-xs text-muted-foreground">Leverage</p>
+                            </div>
+                            <div className="p-2.5 rounded-lg bg-muted/30">
+                              <p className={`text-lg font-bold ${((bot as any).netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                ${Math.abs((bot as any).netPnl ?? 0).toFixed(2)}
+                                {((bot as any).netDeposited ?? 0) > 0 && (
+                                  <span className="text-xs ml-1">
+                                    ({((bot as any).netPnlPercent ?? 0).toFixed(1)}%)
+                                  </span>
+                                )}
+                              </p>
+                              <p className="text-xs text-muted-foreground">Net P&L</p>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className="gradient-border p-12 noise text-center">
