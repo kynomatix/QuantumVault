@@ -61,9 +61,7 @@ export function useTokenBalance() {
       return;
     }
 
-    if (showLoading || usdcBalance === null) {
-      setUsdcLoading(true);
-    }
+    setUsdcLoading(prev => showLoading || prev);
     try {
       const ata = getAssociatedTokenAddressSync(usdcMint, wallet.publicKey);
       
@@ -79,14 +77,10 @@ export function useTokenBalance() {
       }
     } catch (error) {
       console.error('Failed to fetch USDC balance:', error);
-      if (usdcBalance === null) {
-        setUsdcBalance(null);
-        setTokenAccountExists(null);
-      }
     } finally {
       setUsdcLoading(false);
     }
-  }, [wallet.publicKey, connection, usdcMint, usdcBalance]);
+  }, [wallet.publicKey, connection, usdcMint]);
 
   const createTokenAccount = useCallback(async () => {
     if (!wallet.publicKey || !wallet.signTransaction) {

@@ -3981,7 +3981,14 @@ export async function registerRoutes(
     }
   });
 
-  // Solana RPC proxy - forwards requests to Helius securely (no API key exposed to frontend)
+  // Solana RPC proxy - forwards requests to Helius securely with rate limiting and caching
+  const rpcCache = new Map<string, { data: any; timestamp: number }>();
+  const RPC_CACHE_TTL = 2000; // 2 second cache for balance/account queries
+  const RPC_RATE_LIMIT_WINDOW = 1000; // 1 second window
+  const RPC_MAX_REQUESTS_PER_WINDOW = 25; // Max requests per second
+  let rpcRequestCount = 0;
+  let rpcWindowStart = Date.now();
+  
   app.post("/api/solana-rpc", async (req, res) => {
     try {
       const IS_MAINNET = process.env.DRIFT_ENV !== 'devnet';
@@ -3995,6 +4002,39 @@ export async function registerRoutes(
         rpcUrl = IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
       }
       
+      // Create cache key from request body (excluding id which changes per request)
+      const { id, ...bodyWithoutId } = req.body;
+      const cacheKey = JSON.stringify(bodyWithoutId);
+      
+      // Check cache first for read-only methods
+      const readOnlyMethods = ['getAccountInfo', 'getBalance', 'getTokenAccountBalance', 'getMultipleAccounts'];
+      const method = req.body?.method;
+      if (readOnlyMethods.includes(method)) {
+        const cached = rpcCache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < RPC_CACHE_TTL) {
+          // Return cached response with the current request's id
+          return res.json({ ...cached.data, id });
+        }
+      }
+      
+      // Rate limiting check
+      const now = Date.now();
+      if (now - rpcWindowStart > RPC_RATE_LIMIT_WINDOW) {
+        rpcWindowStart = now;
+        rpcRequestCount = 0;
+      }
+      
+      if (rpcRequestCount >= RPC_MAX_REQUESTS_PER_WINDOW) {
+        // Return rate limited response without crashing
+        return res.json({
+          jsonrpc: "2.0",
+          error: { code: -32429, message: "rate limited" },
+          id
+        });
+      }
+      
+      rpcRequestCount++;
+      
       const response = await fetch(rpcUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4002,6 +4042,21 @@ export async function registerRoutes(
       });
       
       const data = await response.json();
+      
+      // Cache successful responses for read-only methods
+      if (readOnlyMethods.includes(method) && !data.error) {
+        rpcCache.set(cacheKey, { data, timestamp: Date.now() });
+        // Cleanup old cache entries periodically
+        if (rpcCache.size > 500) {
+          const cutoff = Date.now() - RPC_CACHE_TTL;
+          const keysToDelete: string[] = [];
+          rpcCache.forEach((value, key) => {
+            if (value.timestamp < cutoff) keysToDelete.push(key);
+          });
+          keysToDelete.forEach(key => rpcCache.delete(key));
+        }
+      }
+      
       res.json(data);
     } catch (error: any) {
       console.error("RPC proxy error:", error);
