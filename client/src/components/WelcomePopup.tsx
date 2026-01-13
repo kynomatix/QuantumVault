@@ -3,7 +3,8 @@ import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
-import { Loader2, Copy, Check, Fuel, Wallet, CheckCircle2, User } from 'lucide-react';
+import { motion } from 'framer-motion';
+import { Loader2, Copy, Check, Fuel, Wallet, CheckCircle2, User, Zap, Shield } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -36,6 +37,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
   const [copiedAddress, setCopiedAddress] = useState(false);
   const [userSolBalance, setUserSolBalance] = useState<number | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
+  const [processingStep, setProcessingStep] = useState<'idle' | 'preparing' | 'signing' | 'confirming' | 'finalizing'>('idle');
 
   const fetchUserSolBalance = async () => {
     if (!wallet.publicKey) return;
@@ -104,6 +106,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
     }
 
     setIsDepositing(true);
+    setProcessingStep('preparing');
     try {
       const response = await fetch('/api/agent/deposit-sol', {
         method: 'POST',
@@ -121,15 +124,12 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
 
       const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
       
+      setProcessingStep('signing');
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
       const signedTx = await wallet.signTransaction(transaction);
-      const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      // Show immediate feedback
-      toast({ 
-        title: 'Transaction Submitted', 
-        description: 'Confirming SOL deposit...'
-      });
+      setProcessingStep('confirming');
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
       
       await confirmTransactionWithFallback(connection, {
         signature,
@@ -137,11 +137,8 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
         lastValidBlockHeight,
       });
 
-      toast({ 
-        title: 'SOL Deposit Confirmed!', 
-        description: message || `Deposited ${amount} SOL to Agent Wallet for gas fees`
-      });
-
+      setProcessingStep('finalizing');
+      
       if (displayName.trim()) {
         try {
           await fetch('/api/wallet/settings', {
@@ -155,6 +152,11 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
         }
       }
       
+      toast({ 
+        title: 'Setup Complete!', 
+        description: message || `Deposited ${amount} SOL to Agent Wallet`
+      });
+      
       setDepositSuccess(true);
       onDepositComplete();
     } catch (error: any) {
@@ -166,6 +168,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
       });
     } finally {
       setIsDepositing(false);
+      setProcessingStep('idle');
     }
   };
 
@@ -174,6 +177,104 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
       setSolDepositAmount((userSolBalance - 0.01).toFixed(4));
     }
   };
+
+  const processingSteps = [
+    { id: 'preparing', label: 'Preparing transaction', icon: Shield },
+    { id: 'signing', label: 'Sign with your wallet', icon: Wallet },
+    { id: 'confirming', label: 'Confirming on Solana', icon: Zap },
+    { id: 'finalizing', label: 'Finalizing setup', icon: CheckCircle2 },
+  ];
+
+  const getStepStatus = (stepId: string) => {
+    const stepOrder = ['preparing', 'signing', 'confirming', 'finalizing'];
+    const currentIndex = stepOrder.indexOf(processingStep);
+    const stepIndex = stepOrder.indexOf(stepId);
+    if (stepIndex < currentIndex) return 'complete';
+    if (stepIndex === currentIndex) return 'active';
+    return 'pending';
+  };
+
+  if (isDepositing) {
+    return (
+      <Dialog open={isOpen} onOpenChange={handleOpenChange}>
+        <DialogContent className="sm:max-w-md" data-testid="dialog-welcome-processing">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wallet className="w-5 h-5 text-primary" />
+              Setting Up Your Account
+            </DialogTitle>
+            <DialogDescription>
+              Please wait while we set up your trading agent...
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="py-6 space-y-4">
+            {processingSteps.map((step, index) => {
+              const status = getStepStatus(step.id);
+              const Icon = step.icon;
+              return (
+                <motion.div
+                  key={step.id}
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: index * 0.1 }}
+                  className={`flex items-center gap-4 p-3 rounded-lg transition-colors ${
+                    status === 'active' 
+                      ? 'bg-primary/10 border border-primary/30' 
+                      : status === 'complete'
+                        ? 'bg-green-500/10 border border-green-500/30'
+                        : 'bg-muted/30'
+                  }`}
+                >
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
+                    status === 'active'
+                      ? 'bg-primary/20'
+                      : status === 'complete'
+                        ? 'bg-green-500/20'
+                        : 'bg-muted/50'
+                  }`}>
+                    {status === 'active' ? (
+                      <Loader2 className="w-5 h-5 text-primary animate-spin" />
+                    ) : status === 'complete' ? (
+                      <Check className="w-5 h-5 text-green-500" />
+                    ) : (
+                      <Icon className={`w-5 h-5 ${status === 'pending' ? 'text-muted-foreground' : 'text-primary'}`} />
+                    )}
+                  </div>
+                  <div className="flex-1">
+                    <p className={`text-sm font-medium ${
+                      status === 'active' 
+                        ? 'text-primary' 
+                        : status === 'complete'
+                          ? 'text-green-500'
+                          : 'text-muted-foreground'
+                    }`}>
+                      {step.label}
+                    </p>
+                  </div>
+                  {status === 'active' && (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="flex items-center gap-1"
+                    >
+                      <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" />
+                      <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" style={{ animationDelay: '0.2s' }} />
+                      <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" style={{ animationDelay: '0.4s' }} />
+                    </motion.div>
+                  )}
+                </motion.div>
+              );
+            })}
+          </div>
+
+          <div className="text-center text-xs text-muted-foreground">
+            <p>This may take up to 30 seconds. Please don't close this window.</p>
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   if (depositSuccess) {
     return (
@@ -190,9 +291,14 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
           </DialogHeader>
           
           <div className="p-6 text-center">
-            <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+            <motion.div
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              transition={{ type: "spring", stiffness: 200, damping: 15 }}
+              className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4"
+            >
               <CheckCircle2 className="w-8 h-8 text-green-500" />
-            </div>
+            </motion.div>
             <p className="text-muted-foreground">
               Your trading agent is ready to execute trades on the Solana blockchain.
             </p>
