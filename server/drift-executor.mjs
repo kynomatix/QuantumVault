@@ -184,6 +184,49 @@ async function closePosition(command) {
   }
 }
 
+async function deleteSubaccount(command) {
+  const { encryptedPrivateKey, subAccountId } = command;
+  
+  console.error(`[Executor] Deleting subaccount ${subAccountId} to reclaim rent`);
+  
+  const driftClient = await createDriftClient(encryptedPrivateKey, subAccountId);
+  
+  try {
+    await driftClient.subscribe();
+    
+    // Verify subaccount has no positions or balance before deletion
+    const user = driftClient.getUser();
+    const perpPositions = user.getActivePerpPositions();
+    const spotPositions = user.getActiveSpotPositions();
+    
+    if (perpPositions.length > 0) {
+      throw new Error(`Cannot delete subaccount: has ${perpPositions.length} open perp position(s)`);
+    }
+    
+    if (spotPositions.length > 0) {
+      // Check if any spot position has significant balance
+      const hasBalance = spotPositions.some(pos => {
+        const balance = pos.scaledBalance?.toNumber?.() || 0;
+        return balance > 1000; // More than 0.001 USDC
+      });
+      if (hasBalance) {
+        throw new Error('Cannot delete subaccount: has remaining spot balance');
+      }
+    }
+    
+    // Delete the subaccount to reclaim rent (~0.035 SOL)
+    const txSig = await driftClient.deleteUser(subAccountId);
+    
+    console.error(`[Executor] Subaccount ${subAccountId} deleted, rent reclaimed: ${txSig}`);
+    await driftClient.unsubscribe();
+    
+    return { success: true, signature: txSig };
+  } catch (error) {
+    await driftClient.unsubscribe().catch(() => {});
+    throw error;
+  }
+}
+
 // Read command from stdin
 let inputData = '';
 process.stdin.setEncoding('utf8');
@@ -195,6 +238,8 @@ process.stdin.on('end', async () => {
     
     if (command.action === 'close') {
       result = await closePosition(command);
+    } else if (command.action === 'deleteSubaccount') {
+      result = await deleteSubaccount(command);
     } else {
       // Default to trade execution
       result = await executeTrade(command);

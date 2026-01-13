@@ -2626,3 +2626,40 @@ export async function getAccountHealthMetrics(
     };
   }
 }
+
+/**
+ * Close a Drift subaccount to reclaim the rent (~0.035 SOL).
+ * The subaccount must be empty (no positions, no balance) before deletion.
+ * 
+ * @param encryptedPrivateKey - The encrypted agent wallet private key
+ * @param subAccountId - The subaccount ID to close
+ * @returns Result with success status and transaction signature
+ */
+export async function closeDriftSubaccount(
+  encryptedPrivateKey: string,
+  subAccountId: number
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  console.log(`[Drift] Closing subaccount ${subAccountId} to reclaim rent`);
+  
+  try {
+    const result = await executeDriftCommandViaSubprocess({
+      action: 'deleteSubaccount',
+      encryptedPrivateKey,
+      subAccountId,
+    });
+    
+    if (result.success) {
+      console.log(`[Drift] Subaccount ${subAccountId} closed, rent reclaimed: ${result.signature}`);
+      return { success: true, signature: result.signature };
+    } else {
+      console.error(`[Drift] Failed to close subaccount: ${result.error}`);
+      return { success: false, error: result.error };
+    }
+  } catch (error) {
+    console.error('[Drift] Close subaccount error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
