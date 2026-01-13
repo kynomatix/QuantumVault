@@ -140,41 +140,27 @@ async function closePosition(command) {
     
     const BN = (await import('bn.js')).default;
     
-    // If positionSizeBase provided, use it; otherwise query from DriftClient
-    let baseAssetAmount, isLong;
+    // First check if there's a position to close
+    const user = driftClient.getUser();
+    const perpPosition = user.getPerpPosition(marketIndex);
     
-    if (positionSizeBase !== undefined && positionSizeBase !== null) {
-      isLong = positionSizeBase > 0;
-      baseAssetAmount = new BN(Math.abs(Math.round(positionSizeBase * 1e9)));
-      console.error(`[Executor] Using provided position size: ${positionSizeBase}`);
-    } else {
-      const user = driftClient.getUser();
-      const perpPosition = user.getPerpPosition(marketIndex);
-      
-      if (!perpPosition || perpPosition.baseAssetAmount.isZero()) {
-        await driftClient.unsubscribe();
-        return { success: true, signature: null }; // No position to close
-      }
-      
-      isLong = perpPosition.baseAssetAmount.gt(new BN(0));
-      baseAssetAmount = perpPosition.baseAssetAmount.abs();
-      console.error(`[Executor] Found position: ${baseAssetAmount.toNumber() / 1e9} ${isLong ? 'long' : 'short'}`);
+    if (!perpPosition || perpPosition.baseAssetAmount.isZero()) {
+      await driftClient.unsubscribe();
+      console.error(`[Executor] No position to close for market ${marketIndex}`);
+      return { success: true, signature: null }; // No position to close
     }
     
-    const closeDirection = isLong ? PositionDirection.SHORT : PositionDirection.LONG;
+    const isLong = perpPosition.baseAssetAmount.gt(new BN(0));
+    const positionSize = perpPosition.baseAssetAmount.abs().toNumber() / 1e9;
+    console.error(`[Executor] Found position: ${positionSize} ${isLong ? 'long' : 'short'}`);
     
-    console.error(`[Executor] Closing ${isLong ? 'long' : 'short'} with ${closeDirection === PositionDirection.SHORT ? 'SHORT' : 'LONG'} order`);
+    // Use the SDK's closePosition method - this handles reduce-only correctly
+    // and prevents overshooting that can create dust positions in opposite direction
+    console.error(`[Executor] Using driftClient.closePosition(${marketIndex}) for clean close`);
     
-    const txSig = await driftClient.placeAndTakePerpOrder({
-      direction: closeDirection,
-      baseAssetAmount,
-      marketIndex,
-      marketType: MarketType.PERP,
-      orderType: OrderType.MARKET,
-      reduceOnly: true,
-    });
+    const txSig = await driftClient.closePosition(marketIndex);
     
-    console.error(`[Executor] Position closed: ${txSig}`);
+    console.error(`[Executor] Position closed via SDK closePosition: ${txSig}`);
     await driftClient.unsubscribe();
     
     return { success: true, signature: txSig };
