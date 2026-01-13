@@ -478,7 +478,12 @@ export class DatabaseStorage implements IStorage {
       let totalPnl = 0;
 
       for (const botId of botIds) {
-        const trades = await db.select().from(botTrades).where(eq(botTrades.tradingBotId, botId));
+        // Only count executed trades for volume (not failed/pending trades)
+        const trades = await db.select().from(botTrades)
+          .where(and(
+            eq(botTrades.tradingBotId, botId),
+            eq(botTrades.status, "executed")
+          ));
         for (const trade of trades) {
           const size = parseFloat(trade.size);
           const price = parseFloat(trade.price);
