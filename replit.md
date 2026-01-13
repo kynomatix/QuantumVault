@@ -1,107 +1,36 @@
 # QuantumVault - Solana Bot Trading Platform
 
 ## Overview
-
-QuantumVault is a Solana-based bot trading platform designed for deploying and managing perpetual futures trading bots on the Drift Protocol. It integrates with Phantom Wallet, enables automated trade execution via TradingView webhooks, and provides real-time position tracking. The platform aims to offer a robust and user-friendly experience for automated DeFi trading.
+QuantumVault is a Solana-based bot trading platform enabling the deployment and management of perpetual futures trading bots on the Drift Protocol. It offers automated trade execution via TradingView webhooks, real-time position tracking, and Phantom Wallet integration. The platform aims to provide a robust and user-friendly experience for automated DeFi trading, leveraging Solana for high-speed, low-cost transactions. Key capabilities include real-time PnL tracking, automated position management, and robust error handling for critical trading operations. The platform also integrates a referral system for Drift Protocol, contributing to operational sustainability and offering user benefits.
 
 ## User Preferences
-
 Preferred communication style: Simple, everyday language.
 
 ## System Architecture
 
-### Frontend
-- **Framework**: React 18 with TypeScript
-- **Routing**: Wouter
-- **State Management**: TanStack React Query for server state, React hooks for local state
-- **Styling**: Tailwind CSS v4 with shadcn/ui (New York style)
-- **Animations**: Framer Motion
-- **Wallet Integration**: Solana Wallet Adapter with Phantom support
-- **Build Tool**: Vite
-
-### Backend
-- **Runtime**: Node.js with Express.js
-- **Language**: TypeScript with ESM modules
-- **Session Management**: Express-session with cookie-based authentication
-- **API Design**: RESTful endpoints
-- **Build**: esbuild
-
-### Data Storage
-- **Database**: PostgreSQL via Drizzle ORM
-- **Schema**: Defined in `shared/schema.ts`
-- **Tables**: Users, wallets, bots, tradingBots, botTrades, botPositions, equityEvents, webhookLogs, subscriptions, portfolios, positions, trades, leaderboardStats.
-- **Migrations**: Drizzle-kit
-
-### Core Features
-- **Real-Time Position Tracking**: The `bot_positions` table tracks running positions per bot/market, including PnL and fees. Position updates are precise using Decimal.js.
-- **Fee Tracking**: Drift Taker Fee (0.05%) is tracked per trade and accumulated in `bot_positions.totalFees` for accurate PnL and breakeven calculations.
-- **Authentication**: Primarily Solana wallet-based (Phantom), with traditional username/password as a secondary option.
+### Core Architecture
 - **Monorepo Structure**: Organized into `client/`, `server/`, and `shared/` directories.
-- **Agent Wallet Architecture**: A server-managed Solana wallet per user for autonomous trading, with encrypted private keys.
-    - **Simplified Capital Flow**: User deposits USDC from Phantom to Agent Wallet, then manually to Drift. Withdrawals go from Agent Wallet to Phantom.
-    - **Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol via the agent wallet.
-    - **TradingView Signal Logic (CRITICAL - DO NOT CHANGE)**: TradingView `contracts` are converted from `USDT / price` to a **percentage** of `bot.maxPositionSize`. `tradeAmountUsd = (usdtValue / 100) * bot.maxPositionSize`. This logic ensures pyramiding strategies work as intended.
-- **Close Signal Detection**: `strategy.position_size = 0` from TradingView triggers a reduce-only close order for existing positions.
-    - **Early Extraction (CRITICAL FIX)**: `position_size` is extracted from webhook payload at the TOP of parsing logic, BEFORE any format-specific parsing. This ensures close signals are detected regardless of payload format (new JSON format with `signalType`, legacy regex format, or direct JSON).
-    - **On-Chain Verification**: Close signals ALWAYS query on-chain position first via `PositionService.getPositionForExecution()` before execution.
-    - **Reduce-Only Enforcement**: Close orders are executed with `reduceOnly: true` to prevent accidental position openings.
-    - **Enhanced Logging**: Close signal flow logs every step for debugging: detection, on-chain query result, execution.
-    - **Guaranteed Return (CRITICAL)**: The entire close signal handler is wrapped in an outer try/catch that ALWAYS returns, even if an unexpected exception escapes inner try/catch blocks. This prevents any fallthrough to the open-order logic that could accidentally open new positions when close signals fail.
-- **Position Flip Detection**: Signals in the opposite direction of an open position trigger a two-step process: first, close the existing position using the **actual on-chain Drift position size** (queried via `getPerpPositions`), then open a new one in the signal direction. This ensures complete position closes without "dust" remaining.
-- **Close Order Precision (CRITICAL)**: All close paths (webhook close, position flip, manual close) use `closePerpPosition()` which does NOT pass position size. Instead, the subprocess queries the exact BN value directly from DriftClient. This prevents JavaScript float precision loss (e.g., 0.4374 → 437399999 vs 437400000) that causes dust positions remaining after close.
-    - **Graceful "Already Closed" Handling**: If closePerpPosition returns success=true but no signature (position was closed by another process), all paths return a graceful 200 response and run reconciliation to sync database with on-chain state.
-    - **Dust Cleanup Retry Loop**: After each close order, the system verifies on-chain if position is truly flat. If residual dust remains (> 0.0001 contracts), it automatically retries closePerpPosition up to 5 times with exponential backoff delays (1s, 2s, 3s, 4s, 5s - total ~15s max). This handles partial fills and ensures complete position closure.
-- **Bot Pause Behavior**: Pausing a bot (`isActive: false`) automatically triggers a close of any open positions associated with it.
-- **Bot Deletion Safety (CRITICAL FIX - Jan 2026)**: Bot deletion endpoints now properly check the AGENT wallet address (not user wallet) for Drift balance before allowing deletion. Force delete auto-sweeps funds from bot's subaccount to main account (subaccount 0) before deletion. Deletion is blocked if wallet data is missing for bots with subaccounts, preventing orphaned funds.
-- **Webhook Deduplication**: `webhook_logs` table uses a `signal_hash` to prevent duplicate processing of TradingView signals.
-- **Equity Event Tracking**: Tracks deposits and withdrawals for transaction history, ensuring idempotency.
-- **Drift Subaccounts**: Each bot is assigned a unique `driftSubaccountId` for isolation. Trades execute on the bot's specific subaccount. Subaccounts are auto-initialized when users deposit funds to a bot.
-- **Platform Referral Integration**: All new Drift accounts created through the platform are automatically attributed to the platform's referral code (`kryptolytix`) during `initialize_user_stats`. This provides:
-    - 15% of taker fees back to the platform for operations
-    - 5% trading fee discount for users
-    - Referral is set once and cannot be changed (Drift protocol limitation)
-    - No UI mention - handled silently during account creation
-    - QuantumVault's in-app referral system remains separate (for future token rewards)
-- **Drift Account Parsing**: Uses SDK's `decodeUser` function for reliable account parsing without WebSocket connections:
-    1. **SDK decodeUser (`getPerpPositions`, `getDriftBalance`)**: Fetches raw account data via `connection.getAccountInfo()`, then decodes using `decodeUser(buffer)` from `@drift-labs/sdk/lib/node/decode/user`. This handles all byte offsets correctly as per the official Drift IDL.
-    2. **Why decodeUser**: Manual byte-parsing is error-prone due to struct layout changes. The SDK's decodeUser function is the official, reliable way to decode User accounts. It's stateless (no WebSocket connections) unlike DriftClient.
-    3. **DriftClient (`getAgentDriftClient`)**: ONLY used for trade execution where transactions must be submitted. Avoid for read-only queries due to WebSocket memory leaks.
-    4. **Session Persistence**: Uses `connect-pg-simple` with PostgreSQL to persist sessions across server restarts.
-- **Account Health Metrics**: Uses SDK decodeUser for accurate account health, collateral values, and positions.
-    - **Health Calculation**: `getDriftAccountInfo()` calculates totalCollateral = usdcBalance + unrealizedPnl, with per-market maintenance margins (SOL: 3.3%, BTC/ETH: 2.5%, others: 5%) for closer alignment with Drift.
-    - **Liquidation Price**: Uses per-market maintenance margin weights for more accurate estimates:
-    - SOL: 6.25%, BTC: 5%, ETH: 5%, memecoins (BONK, WIF, DOGE, etc.): 15%, smaller caps: 10%
-    - Formula: `priceBuffer = freeCollateral / (|size| * (1 + maintenanceWeight))`
-    - **Safety-First**: Estimates are intentionally conservative (underestimate health) for safety. Users should check Drift UI for precise health metrics when making critical risk decisions.
-- **On-Chain-First Architecture**: On-chain Drift positions are ALWAYS the source of truth. Database is treated as a cache that can be wrong.
-    - **PositionService** (`server/position-service.ts`): Central service for all position queries. Uses SDK's decodeUser (stateless) to avoid memory leaks from Drift SDK WebSocket connections.
-    - **Critical Operations**: Close signals, position flips, and manual close all query on-chain directly using `PositionService.getPositionForExecution()` with byte-parsing - NEVER trust database for these operations.
-    - **Drift Detection & Auto-Correction**: When on-chain differs from database, logs a warning and automatically updates database to match on-chain.
-    - **UI Data Freshness**: API responses include `source` ('on-chain' | 'database') and `driftDetected` flags so UI can show data reliability.
-    - **Market Normalization**: Uses regex to normalize market names (strips PERP, USD, separators) ensuring `SOL-PERP`, `SOLPERP`, `SOL/USD` all match correctly.
-- **Automated Position Reconciliation**: Multi-layer sync ensures database stays updated:
-    1. **Immediate Post-Trade Sync**: `syncPositionFromOnChain()` called after every successful trade. Queries actual on-chain position and updates database.
-    2. **Periodic Background Sync (60s)**: `startPeriodicReconciliation()` runs every 60 seconds, checking all active bots.
-    3. **Manual Sync Button**: UI button for user-triggered reconciliation.
-    - **Realized PnL Tracking**: Calculated when positions close/reduce. Formula: `(fillPrice - avgEntry) * closedSize - proratedFee`. Fees are prorated for flip/overclose trades.
-    - **On-Chain Position Reading**: Uses `getPerpPositions()` with RPC calls (`connection.getAccountInfo()`) + SDK's `decodeUser()`, NOT Drift SDK WebSocket subscriptions which cause memory leaks.
+- **Agent Wallet Architecture**: Server-managed Solana wallet per user for autonomous trading, with encrypted private keys and simplified capital flow.
+- **On-Chain-First Architecture**: On-chain Drift positions are the single source of truth. The database acts as a cache, with automated reconciliation and correction mechanisms.
+- **Drift Subaccounts**: Each bot operates on a unique `driftSubaccountId` for isolation, with auto-initialization upon user deposits.
+- **Referral Integration**: All new Drift accounts created are attributed to the platform's referral code (`kryptolytix`) for fee benefits and platform sustainability.
 
-## Known Issues
+### Technical Stack
+- **Frontend**: React 18 (TypeScript), Wouter for routing, TanStack React Query for server state, Tailwind CSS v4 with shadcn/ui (New York style), Framer Motion for animations, Solana Wallet Adapter (Phantom), Vite build tool.
+- **Backend**: Node.js with Express.js (TypeScript, ESM modules), Express-session for cookie-based authentication, RESTful API design, esbuild for compilation.
+- **Data Storage**: PostgreSQL via Drizzle ORM, with a defined schema for users, wallets, bots, trades, positions, and more. Migrations handled by Drizzle-kit.
 
-- **Drift SDK Nested Dependency Conflict (CRITICAL)**: The Drift SDK has nested dependencies (`@pythnetwork/solana-utils` → `jito-ts` → old `@solana/web3.js`) that cause "Class extends value is not a constructor" errors. Fix: After any `npm install`, run:
-    ```bash
-    rm -rf node_modules/@pythnetwork/solana-utils/node_modules/jito-ts/node_modules/@solana/web3.js
-    rm -rf node_modules/jito-ts/node_modules/@solana
-    ```
-- **Encryption Pattern (CRITICAL)**: All private key encryption uses `aes-256-gcm` with `AGENT_ENCRYPTION_KEY` env var (defaults to 'a'.repeat(64) in dev). Format is `iv:authTag:encrypted` (3 parts separated by colons). Both `crypto.ts` and subprocess executors (`drift-executor.mjs`, `drift-executor-bundle.mjs`) MUST use identical encryption/decryption logic. Executors have backward compatibility for legacy `aes-256-cbc` format (2 parts: `iv:encrypted`) to support older bot credentials.
-- **Subprocess Trade Executor Fallback**: If DriftClient fails to load, the system uses `drift-executor.mjs` subprocess for trade execution (~1-2s latency per trade). Uses websocket subscription mode to avoid batch RPC requests (not supported on free RPC plans like Helius free tier).
-- **Memory Leak (Drift SDK WebSocket Connections)**: The Drift SDK's DriftClient creates WebSocket connections that don't properly cleanup, causing `accountUnsubscribe` timeout errors. Mitigation: Use RPC + SDK's `decodeUser()` (stateless, no WebSocket) instead of DriftClient subscriptions for all read-only queries. DriftClient is reserved ONLY for trade execution where we must submit transactions.
-- **Health Metrics Are Estimates**: Account health factor and liquidation prices are conservative estimates using a flat 5% margin ratio. Drift uses per-market maintenance weights that vary (5-15%+). The estimates are intentionally conservative (underestimate health) for safety. API responses include `isEstimate: true` to indicate this. Users should check Drift UI for precise health metrics when making critical risk decisions.
-- **Equity Discrepancy (~1-2%)**: Displayed Bot Equity may differ slightly from Drift UI due to:
-    1. **Funding Rate Payments**: Our unrealized PnL calculation uses `(markPrice - entryPrice) * size` which doesn't include cumulative funding payments that Drift adds/subtracts.
-    2. **Price Latency**: 15-second polling vs Drift's real-time WebSocket updates means our mark price may be slightly stale.
-    3. **Precision Differences**: Drift uses on-chain BN math with settlement amounts; we use JavaScript floats.
-    - **Workaround**: For precise values, check Drift UI directly. Our estimates are sufficient for monitoring but not for exact accounting.
+### Key Features
+- **Automated Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol. Includes critical logic for converting TradingView `contracts` to a percentage of `bot.maxPositionSize` for pyramiding.
+- **Robust Position Management**:
+    - **Close Signal Detection**: `strategy.position_size = 0` from TradingView triggers a reduce-only close order. Close signals are prioritized, verified on-chain, and executed with `reduceOnly: true`. Enhanced logging and a guaranteed return mechanism prevent accidental open orders.
+    - **Position Flip Detection**: Signals in the opposite direction trigger a two-step process: close existing position (using actual on-chain size), then open a new one.
+    - **Close Order Precision**: Uses `closePerpPosition()` without explicit size, relying on DriftClient to query exact BN values, preventing float precision loss. Includes graceful handling for already closed positions and a dust cleanup retry loop.
+- **Bot Lifecycle Management**: Pausing a bot (`isActive: false`) closes open positions. Bot deletion includes safety checks on agent wallet balance and an auto-sweep mechanism for funds.
+- **Real-Time Data**: Tracks running positions, PnL, and fees. Uses `PositionService` for all position queries, leveraging SDK's `decodeUser` for reliable, stateless account parsing to avoid Drift SDK WebSocket memory leaks.
+- **Account Health Metrics**: Uses SDK `decodeUser` for accurate account health, collateral, and liquidation price estimates, with conservative calculations for safety.
+- **Webhook Deduplication**: `webhook_logs` table prevents duplicate processing of TradingView signals.
+- **Equity Event Tracking**: Monitors deposits and withdrawals for transaction history.
 
 ## External Dependencies
 
@@ -109,21 +38,22 @@ Preferred communication style: Simple, everyday language.
 - **Solana Web3.js**: Core Solana blockchain interaction.
 - **Drift Protocol SDK**: For perpetual futures trading on Drift.
 - **SPL Token**: For Solana Program Library token interactions.
-- **RPC Endpoint**: Configurable via `SOLANA_RPC_URL`, defaults to Helius API key for reliability, with a fallback to public mainnet RPC.
-- **Drift Protocol Configuration**: Uses Solana Mainnet-Beta by default, with real USDC.
+- **RPC Endpoint**: Configurable via `SOLANA_RPC_URL` (defaults to Helius API key with public mainnet RPC fallback).
+- **Drift Protocol Configuration**: Solana Mainnet-Beta (default).
 
 ### Database
-- **PostgreSQL**: Required database.
-- **Drizzle ORM**: Type-safe database queries.
+- **PostgreSQL**: Primary database.
+- **Drizzle ORM**: Type-safe database interactions.
 
 ### Environment Variables
 - `DATABASE_URL`
 - `SESSION_SECRET`
-- `HELIUS_API_KEY` (recommended for production)
-- `SOLANA_RPC_URL` (optional, overrides Helius)
-- `DRIFT_ENV` (defaults to mainnet-beta)
+- `HELIUS_API_KEY`
+- `SOLANA_RPC_URL`
+- `DRIFT_ENV`
+- `AGENT_ENCRYPTION_KEY`
 
 ### Frontend Libraries
-- **shadcn/ui**: Component library based on Radix UI primitives.
-- **React Hook Form with Zod**: For form management and validation.
-- **Recharts**: For data visualization.
+- **shadcn/ui**: Component library.
+- **React Hook Form with Zod**: Form management and validation.
+- **Recharts**: Data visualization.

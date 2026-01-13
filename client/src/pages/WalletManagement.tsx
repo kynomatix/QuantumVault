@@ -714,7 +714,7 @@ export function WalletContent() {
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={() => window.open(`https://app.drift.trade/?userAccount=${agentWallet?.agentPublicKey}`, '_blank')}
+                  onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentWallet?.agentPublicKey}`, '_blank')}
                   disabled={!agentWallet?.agentPublicKey}
                   title="View on Drift"
                   data-testid="button-view-on-drift"
@@ -1750,7 +1750,7 @@ export default function WalletManagement() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      onClick={() => window.open(`https://app.drift.trade/?userAccount=${agentWallet?.agentPublicKey}`, '_blank')}
+                      onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentWallet?.agentPublicKey}`, '_blank')}
                       disabled={!agentWallet?.agentPublicKey}
                       title="View on Drift"
                       data-testid="button-view-on-drift"
