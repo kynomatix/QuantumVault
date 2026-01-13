@@ -1235,6 +1235,33 @@ export async function registerRoutes(
         netDeposited = await storage.getWalletNetDeposited(req.walletAddress!);
       }
       
+      // Reconciliation: If bot has on-chain funds but no recorded deposits,
+      // auto-create a reconciliation equity event (handles server restart during deposit)
+      if (netDeposited === 0 && bot.driftSubaccountId && bot.driftSubaccountId > 0) {
+        try {
+          const wallet = await storage.getWallet(req.walletAddress!);
+          if (wallet?.agentPublicKey) {
+            const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, bot.driftSubaccountId);
+            const onChainBalance = accountInfo.totalCollateral;
+            
+            if (onChainBalance > 0.01) {
+              console.log(`[Reconciliation] Bot ${bot.name} has $${onChainBalance.toFixed(2)} on-chain but no recorded deposits - creating reconciliation event`);
+              await storage.createEquityEvent({
+                walletAddress: req.walletAddress!,
+                tradingBotId: botId,
+                eventType: 'drift_deposit',
+                amount: String(onChainBalance),
+                txSignature: null,
+                notes: 'Deposit reconciled from on-chain state',
+              });
+              netDeposited = onChainBalance;
+            }
+          }
+        } catch (reconcileErr) {
+          console.warn(`[Reconciliation] Failed to check on-chain balance for bot ${botId}:`, reconcileErr);
+        }
+      }
+      
       res.json({ netDeposited });
     } catch (error) {
       console.error("Get bot net deposited error:", error);
