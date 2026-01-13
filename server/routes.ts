@@ -9,7 +9,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
@@ -1360,10 +1360,33 @@ export async function registerRoutes(
       }
 
       // Ensure wallet exists before creating bot
-      await storage.getOrCreateWallet(req.walletAddress!);
+      const wallet = await storage.getOrCreateWallet(req.walletAddress!);
 
       const webhookSecret = generateWebhookSecret();
-      const nextSubaccountId = await storage.getNextSubaccountId(req.walletAddress!);
+      
+      // Use on-chain discovery combined with database state to find the next valid sequential subaccount ID
+      // This ensures Drift's sequential requirement is met and avoids conflicts with pending creations
+      let nextSubaccountId: number;
+      try {
+        // Get all subaccount IDs currently allocated in the database for this wallet
+        const dbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
+        
+        if (wallet.agentPublicKey) {
+          nextSubaccountId = await getNextOnChainSubaccountId(wallet.agentPublicKey, dbAllocatedIds);
+          console.log(`[Bot Creation] On-chain discovery returned subaccount ID: ${nextSubaccountId}`);
+        } else {
+          // No agent wallet yet - find next ID not in database
+          const usedSet = new Set(dbAllocatedIds);
+          nextSubaccountId = 1;
+          while (usedSet.has(nextSubaccountId)) {
+            nextSubaccountId++;
+          }
+          console.log(`[Bot Creation] No agent wallet, using next available ID: ${nextSubaccountId}`);
+        }
+      } catch (error) {
+        console.error(`[Bot Creation] On-chain discovery failed, falling back to database:`, error);
+        nextSubaccountId = await storage.getNextSubaccountId(req.walletAddress!);
+      }
 
       const bot = await storage.createTradingBot({
         walletAddress: req.walletAddress!,

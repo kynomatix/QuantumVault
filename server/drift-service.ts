@@ -880,6 +880,79 @@ export async function subaccountExists(walletAddress: string, subAccountId: numb
   return accountInfo !== null;
 }
 
+/**
+ * Discover which subaccounts actually exist on-chain for an agent wallet.
+ * Returns an array of existing subaccount IDs (0-7) that have been initialized on Drift.
+ * This is the source of truth for sequential subaccount creation.
+ */
+export async function discoverOnChainSubaccounts(walletAddress: string): Promise<number[]> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  const existingSubaccounts: number[] = [];
+  
+  // Check subaccounts 0-7 (Drift max is typically 8)
+  for (let subId = 0; subId <= 7; subId++) {
+    try {
+      const userAccount = getUserAccountPDA(userPubkey, subId);
+      const accountInfo = await connection.getAccountInfo(userAccount);
+      if (accountInfo !== null) {
+        existingSubaccounts.push(subId);
+        console.log(`[Drift Discovery] Subaccount ${subId} EXISTS on-chain for ${walletAddress.slice(0, 8)}...`);
+      }
+    } catch (error) {
+      // Error checking this subaccount, skip
+    }
+  }
+  
+  console.log(`[Drift Discovery] Found ${existingSubaccounts.length} subaccounts on-chain: [${existingSubaccounts.join(', ')}]`);
+  return existingSubaccounts;
+}
+
+/**
+ * Get the next valid sequential subaccount ID based on BOTH on-chain state AND database allocations.
+ * Drift requires subaccounts to be created sequentially (0, then 1, then 2, etc.)
+ * 
+ * @param walletAddress - The agent wallet address to check
+ * @param dbAllocatedIds - IDs already allocated in the database (may not exist on-chain yet)
+ */
+export async function getNextOnChainSubaccountId(walletAddress: string, dbAllocatedIds: number[] = []): Promise<number> {
+  const existingOnChain = await discoverOnChainSubaccounts(walletAddress);
+  
+  // Merge on-chain and database allocations to avoid conflicts
+  const allAllocatedIds = new Set([...existingOnChain, ...dbAllocatedIds]);
+  
+  console.log(`[Drift Discovery] On-chain IDs: [${existingOnChain.join(', ')}], DB IDs: [${dbAllocatedIds.join(', ')}]`);
+  
+  // Subaccount 0 is the main account
+  // For bots, we use subaccounts 1+
+  // Find the next sequential ID that can be created
+  // Must be the smallest missing from on-chain (not just from combined set)
+  
+  // Drift requires: to create subaccount N, subaccounts 0..N-1 must exist on-chain
+  // So find the first ID not on-chain
+  let nextId = 1;
+  while (existingOnChain.includes(nextId)) {
+    nextId++;
+  }
+  
+  // But also skip any ID that's already allocated in DB (pending creation)
+  while (allAllocatedIds.has(nextId) && nextId <= 8) {
+    nextId++;
+  }
+  
+  // Verify we can actually create this ID (all previous must exist on-chain)
+  for (let prevId = 1; prevId < nextId; prevId++) {
+    if (!existingOnChain.includes(prevId)) {
+      // There's a gap on-chain - we must fill it first
+      console.log(`[Drift Discovery] Must fill gap first - next subaccount ID: ${prevId}`);
+      return prevId;
+    }
+  }
+  
+  console.log(`[Drift Discovery] Next available subaccount ID: ${nextId}`);
+  return nextId;
+}
+
 export interface DriftAccountInfo {
   usdcBalance: number;
   totalCollateral: number;

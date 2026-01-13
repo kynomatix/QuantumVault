@@ -67,6 +67,7 @@ export interface IStorage {
   getTradingBotById(id: string): Promise<TradingBot | undefined>;
   getTradingBotBySecret(webhookSecret: string): Promise<TradingBot | undefined>;
   getNextSubaccountId(walletAddress: string): Promise<number>;
+  getAllocatedSubaccountIds(walletAddress: string): Promise<number[]>;
   createTradingBot(bot: InsertTradingBot): Promise<TradingBot>;
   updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined>;
   deleteTradingBot(id: string): Promise<void>;
@@ -239,6 +240,16 @@ export class DatabaseStorage implements IStorage {
     }
     
     return nextId;
+  }
+  
+  async getAllocatedSubaccountIds(walletAddress: string): Promise<number[]> {
+    const bots = await db.select({ driftSubaccountId: tradingBots.driftSubaccountId })
+      .from(tradingBots)
+      .where(eq(tradingBots.walletAddress, walletAddress));
+    
+    return bots
+      .map(b => b.driftSubaccountId)
+      .filter((id): id is number => id !== null);
   }
 
   async createTradingBot(bot: InsertTradingBot): Promise<TradingBot> {
