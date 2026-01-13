@@ -228,6 +228,9 @@ export function WalletContent() {
       });
       
       setDepositAmount('');
+      
+      // Wait for blockchain state to propagate before fetching updated balances
+      await new Promise(resolve => setTimeout(resolve, 2000));
       await Promise.all([fetchUsdcBalance(), fetchAgentBalance()]);
     } catch (error: any) {
       console.error('Deposit error:', error);
@@ -420,6 +423,9 @@ export function WalletContent() {
       });
       
       setSolDepositAmount('');
+      
+      // Wait for blockchain state to propagate before fetching updated balances
+      await new Promise(resolve => setTimeout(resolve, 2000));
       await Promise.all([fetchUserSolBalance(), fetchAgentBalance()]);
     } catch (error: any) {
       console.error('SOL deposit error:', error);
@@ -1240,6 +1246,9 @@ export default function WalletManagement() {
       });
       
       setDepositAmount('');
+      
+      // Wait for blockchain state to propagate before fetching updated balances
+      await new Promise(resolve => setTimeout(resolve, 2000));
       await Promise.all([fetchUsdcBalance(), fetchAgentBalance()]);
     } catch (error: any) {
       console.error('Deposit error:', error);
@@ -1432,6 +1441,9 @@ export default function WalletManagement() {
       });
       
       setSolDepositAmount('');
+      
+      // Wait for blockchain state to propagate before fetching updated balances
+      await new Promise(resolve => setTimeout(resolve, 2000));
       await Promise.all([fetchUserSolBalance(), fetchAgentBalance()]);
     } catch (error: any) {
       console.error('SOL deposit error:', error);
