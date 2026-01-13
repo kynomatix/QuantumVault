@@ -78,6 +78,22 @@ interface BotTrade {
   executedAt: string;
 }
 
+interface BotPosition {
+  botId: string;
+  botName: string;
+  market: string;
+  side: 'LONG' | 'SHORT';
+  baseAssetAmount: number;
+  sizeUsd: number;
+  entryPrice: number;
+  markPrice: number;
+  unrealizedPnl: number;
+  unrealizedPnlPercent: number;
+  realizedPnl: number;
+  totalFees: number;
+  lastTradeAt: string;
+}
+
 const MARKETS = [
   'SOL-PERP',
   'BTC-PERP',
@@ -100,6 +116,7 @@ export default function BotSetup() {
   const [bots, setBots] = useState<TradingBot[]>([]);
   const [selectedBot, setSelectedBot] = useState<TradingBot | null>(null);
   const [botTrades, setBotTrades] = useState<BotTrade[]>([]);
+  const [positions, setPositions] = useState<BotPosition[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [showWebhookDialog, setShowWebhookDialog] = useState(false);
@@ -121,6 +138,9 @@ export default function BotSetup() {
       return;
     }
     fetchBots();
+    fetchPositions();
+    const positionInterval = setInterval(fetchPositions, 15000);
+    return () => clearInterval(positionInterval);
   }, [connected, publicKeyString]);
 
   const fetchBots = async () => {
@@ -137,6 +157,22 @@ export default function BotSetup() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const fetchPositions = async () => {
+    try {
+      const res = await fetch('/api/positions', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setPositions(data.positions || []);
+      }
+    } catch (error) {
+      console.error('Failed to fetch positions:', error);
+    }
+  };
+
+  const getPositionForBot = (botId: string): BotPosition | undefined => {
+    return positions.find(p => p.botId === botId);
   };
 
   const fetchBotTrades = async (botId: string) => {
@@ -747,48 +783,94 @@ export default function BotSetup() {
                   ))}
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {bots.map((bot) => (
-                    <motion.div
-                      key={bot.id}
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      className={`p-4 rounded-xl border cursor-pointer transition-all ${
-                        selectedBot?.id === bot.id 
-                          ? 'border-primary bg-primary/5' 
-                          : 'border-border/50 bg-card/50 hover:border-primary/50'
-                      }`}
-                      onClick={() => selectBot(bot)}
-                      data-testid={`bot-card-${bot.id}`}
-                    >
-                      <div className="flex items-start justify-between mb-2">
-                        <div className="flex items-center gap-3">
-                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                            bot.isActive 
-                              ? 'bg-gradient-to-br from-primary to-accent' 
-                              : 'bg-muted'
-                          }`}>
-                            <Bot className={`w-5 h-5 ${bot.isActive ? 'text-white' : 'text-muted-foreground'}`} />
+                <div className="space-y-4">
+                  {bots.map((bot) => {
+                    const position = getPositionForBot(bot.id);
+                    const hasPosition = position && position.baseAssetAmount > 0.0001;
+                    const totalPnl = bot.stats?.totalPnl || 0;
+                    const unrealizedPnl = position?.unrealizedPnl || 0;
+                    
+                    return (
+                      <motion.div
+                        key={bot.id}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className={`p-5 rounded-xl border cursor-pointer transition-all ${
+                          selectedBot?.id === bot.id 
+                            ? 'border-primary bg-primary/5' 
+                            : 'border-border/50 bg-card/50 hover:border-primary/50'
+                        }`}
+                        onClick={() => selectBot(bot)}
+                        data-testid={`bot-card-${bot.id}`}
+                      >
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex items-center gap-3">
+                            <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
+                              bot.isActive 
+                                ? 'bg-gradient-to-br from-primary to-accent' 
+                                : 'bg-muted'
+                            }`}>
+                              <Bot className={`w-6 h-6 ${bot.isActive ? 'text-white' : 'text-muted-foreground'}`} />
+                            </div>
+                            <div>
+                              <h3 className="font-semibold text-base">{bot.name}</h3>
+                              <p className="text-sm text-muted-foreground">{bot.market}</p>
+                            </div>
                           </div>
-                          <div>
-                            <h3 className="font-semibold">{bot.name}</h3>
-                            <p className="text-sm text-muted-foreground">{bot.market}</p>
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
+                            bot.isActive 
+                              ? 'bg-emerald-500/20 text-emerald-400' 
+                              : 'bg-muted text-muted-foreground'
+                          }`}>
+                            {bot.isActive ? 'Active' : 'Paused'}
+                          </span>
+                        </div>
+                        
+                        {hasPosition && (
+                          <div className={`mb-3 px-3 py-2 rounded-lg flex items-center justify-between ${
+                            position.side === 'LONG' ? 'bg-emerald-500/10' : 'bg-red-500/10'
+                          }`}>
+                            <div className="flex items-center gap-2">
+                              <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                                position.side === 'LONG' 
+                                  ? 'bg-emerald-500/20 text-emerald-400' 
+                                  : 'bg-red-500/20 text-red-400'
+                              }`}>
+                                {position.side}
+                              </span>
+                              <span className="text-sm font-medium">
+                                {position.baseAssetAmount.toFixed(4)} {position.market.replace('-PERP', '')}
+                              </span>
+                            </div>
+                            <span className={`text-sm font-semibold ${
+                              unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                            }`}>
+                              {unrealizedPnl >= 0 ? '+' : ''}{unrealizedPnl.toFixed(2)}
+                            </span>
+                          </div>
+                        )}
+                        
+                        <div className="grid grid-cols-3 gap-2 text-center">
+                          <div className="p-2 rounded-lg bg-muted/50">
+                            <p className="text-lg font-bold">{bot.stats?.totalTrades || 0}</p>
+                            <p className="text-xs text-muted-foreground">Trades</p>
+                          </div>
+                          <div className="p-2 rounded-lg bg-muted/50">
+                            <p className="text-lg font-bold">{bot.leverage}x</p>
+                            <p className="text-xs text-muted-foreground">Leverage</p>
+                          </div>
+                          <div className="p-2 rounded-lg bg-muted/50">
+                            <p className={`text-lg font-bold ${
+                              totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                            }`}>
+                              ${Math.abs(totalPnl).toFixed(2)}
+                            </p>
+                            <p className="text-xs text-muted-foreground">Net P&L</p>
                           </div>
                         </div>
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          bot.isActive 
-                            ? 'bg-emerald-500/20 text-emerald-400' 
-                            : 'bg-muted text-muted-foreground'
-                        }`}>
-                          {bot.isActive ? 'Active' : 'Paused'}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                        <span>{bot.leverage}x Leverage</span>
-                        <span>${bot.maxPositionSize}/trade</span>
-                      </div>
-                    </motion.div>
-                  ))}
+                      </motion.div>
+                    );
+                  })}
                 </div>
               )}
             </div>
