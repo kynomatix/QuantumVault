@@ -2177,7 +2177,11 @@ const PERP_MARKET_INDICES: Record<string, number> = {
 // Execute trade/close via subprocess to avoid ESM/CJS issues with Drift SDK
 async function executeDriftCommandViaSubprocess(command: Record<string, any>): Promise<any> {
   return new Promise((resolve) => {
-    const executorPath = join(__dirname, 'drift-executor.mjs');
+    // In production (CJS bundle), use server/ path from project root
+    // In development (ESM), use currentDirname
+    const executorPath = currentDirname 
+      ? join(currentDirname, 'drift-executor.mjs')
+      : join(process.cwd(), 'server', 'drift-executor.mjs');
     
     console.log(`[Drift] Spawning subprocess executor for ${command.action || 'trade'}`);
     
