@@ -1,161 +1,198 @@
-# QuantumVault Security Upgrade Plan v2
+# QuantumVault Security Upgrade Plan v3
 
 ## Overview
 
-This document outlines a major security upgrade to implement Web3-native encryption for agent wallets using an envelope encryption pattern with per-user master keys.
+This document outlines a major security upgrade implementing Web3-native encryption for agent wallets using an envelope encryption pattern with per-user master keys.
 
-**Status**: Planning (Revised after security review)  
+**Status**: Planning (Final revision after multi-source security audit)  
 **Priority**: Critical  
 **Breaking Change**: Yes (clean migration required)  
-**Reviews**: Architect + External AI Security Review
+**Reviews**: Internal Architect + ChatGPT Security Review + Gemini Pro 3 Institutional Review
 
 ---
 
-## Executive Summary of Changes from v1
+## Audit Summary
 
-| Issue | v1 Problem | v2 Fix |
-|-------|------------|--------|
-| Key derivation | Signature-derived key used directly; changes each login | UMK envelope pattern with stable master key |
-| Automation | Bots can't execute without live user | Execution authorization layer with bot policies |
-| Zero-knowledge claim | Inaccurate - server sees keys at runtime | Corrected terminology |
-| AES-GCM params | Unspecified | Pinned IV size, AAD, subkey derivation |
-| Dev fallback | Weak key in dev mode | Removed entirely |
-| Mnemonic handling | Basic | Rate-limited, high-privilege auth required |
+### v3 Fixes Applied
+
+| Issue | Source | Fix Applied |
+|-------|--------|-------------|
+| Deterministic message contradiction | ChatGPT | Removed - all signatures use nonce |
+| Nonce reuse for unlock | ChatGPT | ALL nonces single-use, session TTL separate |
+| EK can't decrypt privkey | ChatGPT | Design A: wrap UMK for execution |
+| JSON AAD encoding | ChatGPT | Binary AAD encoding |
+| Static app salt | Gemini | Per-user random 32-byte salt |
+| String immutability trap | Both | Buffer-only for all secrets |
+| Session hygiene missing | ChatGPT | Added web security controls |
+| No emergency kill switch | Gemini | Admin emergency stop added |
+| HMAC bot policies | Gemini | Added integrity verification |
+| Core dumps leak keys | Gemini | Disable core dumps guidance |
+
+### Institutional Grade (Future Roadmap)
+
+These require infrastructure beyond Replit's capabilities but are documented for future scaling:
+
+| Feature | Why Not Now | Future Implementation |
+|---------|-------------|----------------------|
+| Cloud KMS | Replit doesn't support AWS/GCP KMS | Migrate to dedicated infra |
+| TEE/Nitro Enclaves | Replit doesn't support | Requires AWS/Azure infra |
+| HSM | Hardware requirement | Dedicated secure datacenter |
 
 ---
 
-## Current State Analysis
+## Architecture: Envelope Encryption with UMK
 
-### Existing Architecture (INSECURE)
+### Key Hierarchy
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    CURRENT (INSECURE)                       │
+│                    KEY HIERARCHY                            │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  AGENT_ENCRYPTION_KEY (env var)                             │
-│         │                                                   │
-│         ▼                                                   │
-│  ┌──────────────┐                                           │
-│  │ AES-256-GCM  │◄─── Single key for ALL users              │
-│  └──────────────┘                                           │
+│  User signs message with Phantom                            │
 │         │                                                   │
 │         ▼                                                   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ Database                                             │   │
-│  │ ├─ wallet_1.agentPrivateKeyEncrypted                 │   │
-│  │ ├─ wallet_2.agentPrivateKeyEncrypted                 │   │
-│  │ └─ wallet_N.agentPrivateKeyEncrypted                 │   │
+│  │ Session Key (SK) - derived via HKDF                  │   │
+│  │ Input: signature + wallet + per_user_salt + purpose  │   │
 │  └──────────────────────────────────────────────────────┘   │
+│         │                                                   │
+│         ▼                                                   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ User Master Key (UMK) - random 32 bytes, stable      │   │
+│  │ Stored as: EUMK (encrypted with SK)                  │   │
+│  └──────────────────────────────────────────────────────┘   │
+│         │                                                   │
+│         ├─────────────────────────────────────────────────┐ │
+│         ▼                                                 ▼ │
+│  ┌──────────────┐                              ┌──────────┐ │
+│  │ key_mnemonic │                              │ key_priv │ │
+│  │ HKDF(UMK,    │                              │ HKDF(UMK,│ │
+│  │ "mnemonic")  │                              │ "privkey")│ │
+│  └──────────────┘                              └──────────┘ │
+│         │                                           │       │
+│         ▼                                           ▼       │
+│  ┌──────────────┐                              ┌──────────┐ │
+│  │ Encrypted    │                              │ Encrypted│ │
+│  │ Mnemonic     │                              │ Agent Key│ │
+│  └──────────────┘                              └──────────┘ │
 │                                                             │
-│  RISK: Compromised AGENT_ENCRYPTION_KEY = ALL funds lost    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Execution Authorization (Design A: Wrap UMK)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│           HEADLESS EXECUTION FLOW (Design A)                │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ENABLE EXECUTION:                                          │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ 1. User signs "enable_execution" message               │ │
+│  │ 2. Server derives SK from signature                    │ │
+│  │ 3. Server decrypts EUMK → UMK                          │ │
+│  │ 4. Server encrypts UMK with SERVER_EXECUTION_KEY       │ │
+│  │    → EUMK_exec (stored with expiry)                    │ │
+│  │ 5. Set bot.executionEnabled = true                     │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  WEBHOOK EXECUTION (user not present):                      │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ 1. Check bot.executionEnabled && !expired              │ │
+│  │ 2. Verify bot policy limits (HMAC check)               │ │
+│  │ 3. Decrypt EUMK_exec with SERVER_EXECUTION_KEY → UMK   │ │
+│  │ 4. Derive key_privkey from UMK                         │ │
+│  │ 5. Decrypt agent private key (as Buffer, NOT string)   │ │
+│  │ 6. Sign and submit transaction                         │ │
+│  │ 7. Zeroize all Buffers immediately                     │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  REVOKE (user present):                                     │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ 1. User signs "revoke_execution" message               │ │
+│  │ 2. Delete EUMK_exec from database                      │ │
+│  │ 3. Set bot.executionEnabled = false                    │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  EMERGENCY ADMIN STOP (no signature needed):                │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ 1. Admin triggers emergency stop (2FA/password)        │ │
+│  │ 2. Set bot.executionEnabled = false                    │ │
+│  │ 3. Set bot.emergencyStopTriggered = true               │ │
+│  │ 4. CANNOT re-enable - only user signature can do that  │ │
+│  └────────────────────────────────────────────────────────┘ │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Proposed Architecture v2
+## Signature Message Specification
 
-### Envelope Encryption with User Master Key (UMK)
+### CRITICAL: No Deterministic Messages
 
+**WRONG** (v2 - removed):
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    PROPOSED (SECURE)                        │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  User's Phantom Wallet                                      │
-│         │                                                   │
-│         ▼                                                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ Sign deterministic message for key derivation        │   │
-│  │ "QuantumVault:Unlock:{wallet_address}"               │   │
-│  └──────────────────────────────────────────────────────┘   │
-│         │                                                   │
-│         ▼                                                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ HKDF Key Derivation → Session Key (SK)               │   │
-│  │ Input: signature + wallet_address + app_salt         │   │
-│  └──────────────────────────────────────────────────────┘   │
-│         │                                                   │
-│         ▼                                                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ Decrypt EUMK (Encrypted User Master Key) → UMK       │   │
-│  │ UMK is a random 32-byte key, stable per user         │   │
-│  └──────────────────────────────────────────────────────┘   │
-│         │                                                   │
-│         ▼                                                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ Derive subkeys from UMK via HKDF                     │   │
-│  │ ├─ key_mnemonic = HKDF(UMK, info="mnemonic")         │   │
-│  │ ├─ key_privkey = HKDF(UMK, info="agent_privkey")     │   │
-│  │ └─ key_execution = HKDF(UMK, info="execution")       │   │
-│  └──────────────────────────────────────────────────────┘   │
-│         │                                                   │
-│         ▼                                                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ Database (per-user encrypted)                        │   │
-│  │ ├─ encryptedUserMasterKey (EUMK) - wrapped with SK   │   │
-│  │ ├─ encryptedMnemonic - encrypted with key_mnemonic   │   │
-│  │ └─ encryptedPrivateKey - encrypted with key_privkey  │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+"QuantumVault:Unlock:{wallet_address}"  // NEVER - phishing risk
 ```
 
-### Why Envelope Encryption?
-
-**Problem with v1**: Signature-derived key changes every login if message includes timestamp/nonce. Previously encrypted data becomes unrecoverable.
-
-**Solution**: 
-1. Generate a random **User Master Key (UMK)** once per user (stable, never changes)
-2. Wrap UMK with the **Session Key (SK)** derived from signature
-3. SK can change every login - we just re-wrap UMK
-4. UMK encrypts the actual secrets (mnemonic, private keys)
-5. No mass re-encryption needed on each login
-
----
-
-## Signature Message Specifications
+**CORRECT** (v3):
+Every signature MUST include a unique nonce. There are no "deterministic" signatures.
 
 ### Message Format
 
-All signed messages MUST include:
-
 ```typescript
-interface SignedMessage {
+interface SignedMessagePayload {
   domain: "quantumvault.app";
-  wallet: string;           // Full public key
+  wallet: string;           // Full base58 public key
   cluster: "mainnet-beta";
   purpose: SignaturePurpose;
-  nonce: string;            // 32 bytes random, hex encoded
-  issuedAt: string;         // ISO 8601
-  expiresAt: string;        // ISO 8601
+  nonce: string;            // 32 bytes random, hex encoded (64 chars)
+  issuedAt: string;         // ISO 8601 UTC
+  expiresAt: string;        // ISO 8601 UTC
 }
 
 type SignaturePurpose = 
-  | "unlock_umk"           // Derive SK to unwrap UMK
-  | "enable_execution"     // Authorize bot trading
-  | "reveal_mnemonic"      // View backup phrase
-  | "revoke_execution";    // Disable bot trading
+  | "unlock_umk"           
+  | "enable_execution"     
+  | "reveal_mnemonic"      
+  | "revoke_execution";
+
+// Human-readable format shown to user:
+function formatForSigning(payload: SignedMessagePayload): string {
+  return [
+    `Domain: ${payload.domain}`,
+    `Wallet: ${payload.wallet}`,
+    `Network: ${payload.cluster}`,
+    `Action: ${payload.purpose}`,
+    `Nonce: ${payload.nonce}`,
+    `Issued: ${payload.issuedAt}`,
+    `Expires: ${payload.expiresAt}`,
+  ].join('\n');
+}
 ```
+
+### Nonce Rules (ALL purposes)
+
+| Rule | Implementation |
+|------|----------------|
+| Length | 32 bytes random (64 hex chars) |
+| Single-use | **YES for ALL purposes** |
+| Server storage | Store SHA-256(nonce) + expiry |
+| Verification | Reject if hash exists in DB |
+| Cleanup | Delete expired nonces daily |
+
+**IMPORTANT**: Session TTL (e.g., 24 hours) is SEPARATE from nonce validity. Nonce is always single-use. Session persists until TTL.
 
 ### Purpose-Specific TTLs
 
-| Purpose | TTL | Single Use | Rate Limit |
-|---------|-----|------------|------------|
-| `unlock_umk` | 24 hours | No | None |
-| `enable_execution` | 1 hour | No | None |
-| `reveal_mnemonic` | 2 minutes | Yes | 3/hour |
-| `revoke_execution` | Immediate | Yes | None |
-
-### Nonce Requirements
-
-- **Length**: 32 bytes random
-- **Encoding**: Hex string (64 chars)
-- **Storage**: Server stores hash of nonce + expiration
-- **Single Use**: Each nonce valid for one signature only
-- **Verification**: Server rejects replayed nonces
+| Purpose | Signature TTL | Session TTL | Rate Limit |
+|---------|---------------|-------------|------------|
+| `unlock_umk` | 5 minutes | 24 hours | None |
+| `enable_execution` | 5 minutes | 1 hour | None |
+| `reveal_mnemonic` | 2 minutes | N/A | 3/hour |
+| `revoke_execution` | 5 minutes | Immediate | None |
 
 ---
 
@@ -166,19 +203,33 @@ type SignaturePurpose =
 ```typescript
 function deriveSessionKey(
   walletAddress: string,
-  signature: Uint8Array
+  signature: Uint8Array,
+  userSalt: Buffer,        // Per-user random 32 bytes from DB
+  purpose: SignaturePurpose
 ): Buffer {
+  // Include signature AND the signed message content
   const ikm = Buffer.concat([
     Buffer.from(walletAddress, 'utf8'),
     Buffer.from(signature),
   ]);
   
-  // App salt - stable, can be public
-  const salt = Buffer.from('QuantumVault-v2-2026');
-  const info = Buffer.from('session-key-derivation');
+  // Per-user salt (NOT static app salt)
+  const salt = userSalt;  // 32 bytes, stored in wallets table
+  
+  // Include purpose in info for domain separation
+  const info = Buffer.from(`QuantumVault:SK:${purpose}`);
   
   // HKDF-SHA256, output 32 bytes
   return crypto.hkdfSync('sha256', ikm, salt, info, 32);
+}
+```
+
+### Per-User Salt Generation
+
+```typescript
+// Generated ONCE when user first connects wallet
+function generateUserSalt(): Buffer {
+  return crypto.randomBytes(32);
 }
 ```
 
@@ -186,148 +237,336 @@ function deriveSessionKey(
 
 ```typescript
 function deriveSubkey(umk: Buffer, purpose: string): Buffer {
-  const info = Buffer.from(`QuantumVault:${purpose}`);
-  const salt = Buffer.alloc(32, 0); // Zero salt for subkey derivation
+  // Zero salt for subkey derivation (UMK already has entropy)
+  const salt = Buffer.alloc(32, 0);
+  const info = Buffer.from(`QuantumVault:subkey:${purpose}`);
   
   return crypto.hkdfSync('sha256', umk, salt, info, 32);
 }
 
-// Usage:
-const keyMnemonic = deriveSubkey(umk, 'mnemonic');
-const keyPrivkey = deriveSubkey(umk, 'agent_privkey');
-const keyExecution = deriveSubkey(umk, 'execution_token');
+// Defined subkeys:
+const SUBKEY_PURPOSES = {
+  MNEMONIC: 'mnemonic',
+  AGENT_PRIVKEY: 'agent_privkey',
+  POLICY_HMAC: 'policy_hmac',  // NEW: for bot policy integrity
+} as const;
 ```
 
 ---
 
 ## AES-256-GCM Specification
 
-### Parameters (MUST be followed exactly)
+### Parameters
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Algorithm | AES-256-GCM | Authenticated encryption |
-| Key size | 256 bits (32 bytes) | From HKDF derivation |
-| IV size | 96 bits (12 bytes) | Random, never reused |
-| Auth tag | 128 bits (16 bytes) | Full length |
-| AAD | Required | See below |
+| Parameter | Value |
+|-----------|-------|
+| Algorithm | AES-256-GCM |
+| Key size | 256 bits (32 bytes) |
+| IV size | 96 bits (12 bytes) - random, never reused |
+| Auth tag | 128 bits (16 bytes) |
+| AAD | Required - binary format |
 
-### Additional Authenticated Data (AAD)
-
-AAD prevents ciphertext from being moved between contexts:
+### Binary AAD Format (NOT JSON)
 
 ```typescript
-function buildAAD(walletAddress: string, recordType: string, version: number): Buffer {
-  return Buffer.from(JSON.stringify({
-    wallet: walletAddress,
-    type: recordType,   // "mnemonic" | "privkey" | "umk"
-    version: version,   // Schema version for migration
-  }));
+// WRONG (v2):
+// JSON.stringify({ wallet, type, version })  // Ordering issues, whitespace
+
+// CORRECT (v3):
+function buildAAD(
+  walletAddress: string,
+  recordType: RecordType,
+  version: number
+): Buffer {
+  const RECORD_TYPES = {
+    UMK: 0x01,
+    MNEMONIC: 0x02,
+    AGENT_PRIVKEY: 0x03,
+    EUMK_EXEC: 0x04,
+  } as const;
+  
+  // Fixed binary format: version(4) + recordType(1) + walletPubkey(32)
+  const buffer = Buffer.alloc(37);
+  buffer.writeUInt32LE(version, 0);
+  buffer.writeUInt8(RECORD_TYPES[recordType], 4);
+  
+  // Decode base58 wallet to raw 32 bytes
+  const walletBytes = bs58.decode(walletAddress);
+  walletBytes.copy(buffer, 5);
+  
+  return buffer;
 }
+
+type RecordType = 'UMK' | 'MNEMONIC' | 'AGENT_PRIVKEY' | 'EUMK_EXEC';
 ```
 
 ### Ciphertext Format
 
 ```
-Base64(IV || AuthTag || Ciphertext)
+iv (12 bytes) || authTag (16 bytes) || ciphertext (variable)
 ```
 
-Where:
-- IV: 12 bytes
-- AuthTag: 16 bytes
-- Ciphertext: Variable length
+Store as: `Buffer.toString('base64')`
 
 ---
 
-## Headless Execution Model
+## Memory Security (CRITICAL)
 
-### The Problem
+### The JavaScript String Problem
 
-Bots receive TradingView webhooks while users sleep. v1 required live user signature for every trade - impossible for automation.
+**Problem**: JavaScript strings are IMMUTABLE. When you overwrite a string variable, the old data remains in heap memory until GC collects it (non-deterministic).
 
-### Solution: Execution Authorization Layer
+**Consequence**: A memory dump (crash, unhandled exception, malicious dependency) exposes plaintext keys.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│              EXECUTION AUTHORIZATION FLOW                   │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  1. USER ENABLES EXECUTION                                  │
-│     ┌────────────────────────────────────────────────────┐  │
-│     │ User signs "enable_execution" message              │  │
-│     │ Server derives SK, unwraps UMK                     │  │
-│     │ Derive Execution Key (EK) from UMK                 │  │
-│     │ Store EK encrypted with SERVER_EXECUTION_KEY      │  │
-│     │ Set bot.executionEnabled = true                    │  │
-│     │ Set bot.executionExpiresAt = now + 24h             │  │
-│     └────────────────────────────────────────────────────┘  │
-│                                                             │
-│  2. WEBHOOK ARRIVES (User not present)                      │
-│     ┌────────────────────────────────────────────────────┐  │
-│     │ Check bot.executionEnabled && !expired             │  │
-│     │ Decrypt EK using SERVER_EXECUTION_KEY              │  │
-│     │ Use EK to decrypt agent private key                │  │
-│     │ Execute trade                                      │  │
-│     │ Zeroize all keys from memory immediately           │  │
-│     └────────────────────────────────────────────────────┘  │
-│                                                             │
-│  3. USER REVOKES (Optional)                                 │
-│     ┌────────────────────────────────────────────────────┐  │
-│     │ User signs "revoke_execution" message              │  │
-│     │ Delete EK from database                            │  │
-│     │ Set bot.executionEnabled = false                   │  │
-│     │ Bots stop executing immediately                    │  │
-│     └────────────────────────────────────────────────────┘  │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+### Solution: Buffer-Only Policy
+
+```typescript
+// ❌ NEVER DO THIS:
+const privateKeyString = bs58.encode(keypair.secretKey);  // String!
+const mnemonicString = bip39.generateMnemonic();          // String!
+
+// ✅ ALWAYS DO THIS:
+const privateKeyBuffer = Buffer.from(keypair.secretKey);  // Buffer!
+const mnemonicBuffer = Buffer.from(mnemonic, 'utf8');     // Buffer!
+
+// Libraries that return strings: immediately convert and zeroize
+function safeGenerateMnemonic(): Buffer {
+  const mnemonicStr = bip39.generateMnemonic(256);
+  const mnemonicBuffer = Buffer.from(mnemonicStr, 'utf8');
+  // Note: We cannot truly zeroize the string, but we minimize exposure
+  // by immediately converting and never storing the string
+  return mnemonicBuffer;
+}
 ```
 
-### SERVER_EXECUTION_KEY
+### Buffer Zeroization
 
-This is a necessary compromise for automation:
+```typescript
+function zeroizeBuffer(buffer: Buffer): void {
+  if (buffer && buffer.length > 0) {
+    // Overwrite with random data first (prevents pattern analysis)
+    crypto.randomFillSync(buffer);
+    // Then zero
+    buffer.fill(0);
+  }
+}
 
-- Stored in environment variable (like current AGENT_ENCRYPTION_KEY)
-- ONLY used to wrap per-user Execution Keys
-- Per-user EK can only decrypt THAT user's agent wallet
-- User can revoke at any time
-- Execution has time limits and policy constraints
+// Usage pattern:
+async function executeTradeSecurely(encryptedPrivKey: string, ...) {
+  let privKeyBuffer: Buffer | null = null;
+  
+  try {
+    // Decrypt to Buffer (never string)
+    privKeyBuffer = decryptToBuffer(encryptedPrivKey, key, aad);
+    
+    // Use the key
+    const keypair = Keypair.fromSecretKey(new Uint8Array(privKeyBuffer));
+    await signAndSubmitTransaction(keypair, ...);
+    
+  } finally {
+    // ALWAYS zeroize, even on error
+    if (privKeyBuffer) zeroizeBuffer(privKeyBuffer);
+  }
+}
+```
 
-**Security Properties**:
-- Server compromise + DB breach = only active users' EKs exposed
-- Inactive/revoked users' data still protected by their UMK
-- EK expires, limiting exposure window
+### Disable Core Dumps
 
-### Bot Execution Policies
+Add to server startup or deployment config:
 
-Each bot MUST have configurable security limits:
+```bash
+# Linux: Disable core dumps for this process
+ulimit -c 0
+
+# Or in Node.js startup script:
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err.message);
+  // Do NOT dump heap or stack with key material
+  process.exit(1);
+});
+```
+
+---
+
+## Bot Policy Integrity (HMAC)
+
+### The Insider Threat
+
+**Problem**: A database admin could modify `allowedMarkets` or `maxPositionNotionalUsd` to enable draining via malicious trades.
+
+**Solution**: HMAC the policy using a key derived from UMK. If policy is modified without user's key, HMAC won't match.
+
+### Implementation
 
 ```typescript
 interface BotExecutionPolicy {
-  // Authorization
-  executionEnabled: boolean;
-  executionExpiresAt: Date | null;
+  allowedMarkets: string[];
+  maxPositionNotionalUsd: number;
+  maxLeverage: number;
+  maxSlippageBps: number;
+  dailyLossLimitUsd: number;
+}
+
+function computePolicyHmac(policy: BotExecutionPolicy, umk: Buffer): string {
+  const policyKey = deriveSubkey(umk, SUBKEY_PURPOSES.POLICY_HMAC);
   
-  // Risk Limits
-  allowedMarkets: string[];           // ["SOL-PERP", "BTC-PERP"]
-  maxPositionNotionalUsd: number;     // e.g., 1000
-  maxLeverage: number;                // e.g., 5
-  allowedOrderTypes: OrderType[];     // ["MARKET", "LIMIT"]
-  maxSlippageBps: number;             // e.g., 50 (0.5%)
+  // Canonical serialization (sorted keys, no whitespace)
+  const canonical = JSON.stringify(policy, Object.keys(policy).sort());
   
-  // Loss Prevention
-  dailyLossLimitUsd: number;          // e.g., 100
-  dailyLossUsedUsd: number;           // Tracked per day
-  killSwitchTriggered: boolean;       // Emergency stop
-  
-  // Audit
-  lastExecutionAt: Date | null;
-  totalExecutions: number;
+  const hmac = crypto.createHmac('sha256', policyKey);
+  hmac.update(canonical);
+  return hmac.digest('hex');
+}
+
+// On policy update: compute and store HMAC
+// On trade execution: verify HMAC before executing
+function verifyPolicyIntegrity(bot: TradingBot, umk: Buffer): boolean {
+  const expected = computePolicyHmac(bot.policy, umk);
+  return crypto.timingSafeEqual(
+    Buffer.from(bot.policyHmac, 'hex'),
+    Buffer.from(expected, 'hex')
+  );
 }
 ```
 
 ---
 
-## Mnemonic Backup System
+## Emergency Kill Switch
+
+### The Lost Wallet Scenario
+
+**Problem**: User loses access to their Phantom wallet. They cannot sign revocation message. Bot keeps trading (potentially draining funds).
+
+**Solution**: Admin emergency stop that doesn't require user signature.
+
+### Implementation
+
+```typescript
+// Database field
+emergencyStopTriggered: boolean  // Default false
+
+// Admin endpoint (requires admin auth, 2FA)
+app.post('/admin/emergency-stop/:botId', adminAuth, twoFactorAuth, async (req, res) => {
+  await db.update(tradingBots)
+    .set({
+      executionEnabled: false,
+      emergencyStopTriggered: true,
+      emergencyStopAt: new Date(),
+      emergencyStopBy: req.adminId,
+    })
+    .where(eq(tradingBots.id, req.params.botId));
+  
+  // Delete execution key
+  await db.update(wallets)
+    .set({ executionKeyEncrypted: null })
+    .where(eq(wallets.address, bot.walletAddress));
+  
+  // Log for audit
+  await auditLog('EMERGENCY_STOP', { botId, adminId: req.adminId });
+  
+  res.json({ success: true });
+});
+
+// Re-enabling requires user signature (admin cannot re-enable)
+// emergencyStopTriggered flag remains true for audit trail
+```
+
+---
+
+## Web Session Security
+
+### Required Controls
+
+| Control | Implementation |
+|---------|----------------|
+| Cookie flags | `httpOnly: true, secure: true, sameSite: 'strict'` |
+| CSRF protection | Double-submit cookie or token |
+| Session rotation | New session ID after unlock_umk |
+| Rate limiting | Unlock: 10/min, Enable: 5/min, Mnemonic: 3/hour |
+| IP logging | Log IP for mnemonic reveal (anomaly detection) |
+
+### Session Schema
+
+```typescript
+interface SecureSession {
+  id: string;                    // Random UUID, rotated on privilege escalation
+  walletAddress: string;
+  sessionKey: Buffer;            // Derived from signature, memory only
+  sessionKeyExpiry: Date;        // TTL from unlock
+  createdAt: Date;
+  lastActivityAt: Date;
+  ipAddress: string;
+  userAgent: string;
+}
+```
+
+---
+
+## Database Schema Changes
+
+### wallets Table Additions
+
+```typescript
+// Security fields
+userSalt: text("user_salt"),                              // 32 bytes hex, per-user
+encryptedUserMasterKey: text("encrypted_user_master_key"),
+umkVersion: integer("umk_version").default(1),
+agentMnemonicEncrypted: text("agent_mnemonic_encrypted"),
+
+// Execution authorization
+executionUmkEncrypted: text("execution_umk_encrypted"),   // EUMK_exec
+executionExpiresAt: timestamp("execution_expires_at"),
+executionEnabled: boolean("execution_enabled").default(false),
+
+// Emergency controls
+emergencyStopTriggered: boolean("emergency_stop_triggered").default(false),
+emergencyStopAt: timestamp("emergency_stop_at"),
+emergencyStopBy: text("emergency_stop_by"),               // Admin ID
+
+// Mnemonic reveal tracking
+mnemonicRevealCount: integer("mnemonic_reveal_count").default(0),
+mnemonicLastRevealAt: timestamp("mnemonic_last_reveal_at"),
+
+// Version
+securityVersion: integer("security_version").default(3),
+```
+
+### tradingBots Table Additions
+
+```typescript
+// Execution policy
+allowedMarkets: text("allowed_markets").array(),
+maxPositionNotionalUsd: decimal("max_position_notional_usd"),
+maxLeverage: integer("max_leverage_limit"),
+maxSlippageBps: integer("max_slippage_bps").default(50),
+dailyLossLimitUsd: decimal("daily_loss_limit_usd"),
+dailyLossUsedUsd: decimal("daily_loss_used_usd").default("0"),
+
+// Policy integrity
+policyHmac: text("policy_hmac"),                          // HMAC of policy
+policyVersion: integer("policy_version").default(1),
+
+// Kill switch
+killSwitchTriggered: boolean("kill_switch_triggered").default(false),
+```
+
+### New Table: auth_nonces
+
+```typescript
+export const authNonces = pgTable("auth_nonces", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull(),
+  nonceHash: text("nonce_hash").notNull().unique(),       // SHA-256 of nonce
+  purpose: text("purpose").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),                           // NULL until used
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+```
+
+---
+
+## Mnemonic Handling
 
 ### BIP-39 + Solana Derivation
 
@@ -336,380 +575,144 @@ import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
 import { Keypair } from '@solana/web3.js';
 
-// MUST use this exact derivation path for Solana compatibility
 const SOLANA_DERIVATION_PATH = "m/44'/501'/0'/0'";
 
-function generateAgentWallet(): { mnemonic: string; keypair: Keypair } {
-  // Generate 24-word mnemonic (256 bits entropy)
-  const mnemonic = bip39.generateMnemonic(256);
+function generateAgentWallet(): { mnemonicBuffer: Buffer; keypair: Keypair } {
+  // Generate mnemonic (returns string - minimize exposure time)
+  const mnemonicStr = bip39.generateMnemonic(256);
+  const mnemonicBuffer = Buffer.from(mnemonicStr, 'utf8');
   
-  // Derive seed
-  const seed = bip39.mnemonicToSeedSync(mnemonic);
-  
-  // Derive Ed25519 keypair using Solana path
+  // Derive keypair
+  const seed = bip39.mnemonicToSeedSync(mnemonicStr);
   const derivedSeed = derivePath(SOLANA_DERIVATION_PATH, seed.toString('hex')).key;
+  
+  // Verify derivedSeed is exactly 32 bytes
+  if (derivedSeed.length !== 32) {
+    throw new Error('Invalid derived seed length');
+  }
+  
   const keypair = Keypair.fromSeed(derivedSeed);
   
-  return { mnemonic, keypair };
+  // Zeroize intermediate values
+  zeroizeBuffer(Buffer.from(seed));
+  
+  return { mnemonicBuffer, keypair };
 }
 
-function recoverFromMnemonic(mnemonic: string): Keypair {
-  const seed = bip39.mnemonicToSeedSync(mnemonic);
-  const derivedSeed = derivePath(SOLANA_DERIVATION_PATH, seed.toString('hex')).key;
-  return Keypair.fromSeed(derivedSeed);
-}
+// IMPORTANT: Test that this matches Phantom's derivation for same mnemonic
 ```
 
-### Mnemonic Reveal Flow
+### Mnemonic Reveal Controls
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                 MNEMONIC REVEAL FLOW                        │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  1. User clicks "Reveal Backup Phrase"                      │
-│                                                             │
-│  2. UI shows warning:                                       │
-│     "Your backup phrase controls your agent wallet.         │
-│      Never share it. Store it offline securely.             │
-│      Anyone with this phrase can steal your funds."         │
-│                                                             │
-│  3. User confirms understanding                             │
-│                                                             │
-│  4. User signs "reveal_mnemonic" message (2 min TTL)        │
-│                                                             │
-│  5. Server:                                                 │
-│     ├─ Check rate limit (max 3/hour)                        │
-│     ├─ Verify signature and nonce                           │
-│     ├─ Derive SK from signature                             │
-│     ├─ Unwrap UMK using SK                                  │
-│     ├─ Derive key_mnemonic from UMK                         │
-│     ├─ Decrypt mnemonic                                     │
-│     ├─ Return to client (HTTPS only)                        │
-│     ├─ Log reveal event (wallet, timestamp, IP - NOT words) │
-│     └─ Zeroize all keys from memory                         │
-│                                                             │
-│  6. Client displays mnemonic once, never caches             │
-│                                                             │
-│  7. User copies manually, UI clears after 60 seconds        │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Mnemonic Security Controls
-
-| Control | Implementation |
-|---------|----------------|
-| Rate limiting | Max 3 reveals per hour per wallet |
-| High-privilege auth | Requires fresh signature with 2-min TTL |
-| Single-use nonce | Prevents replay |
-| No logging | Mnemonic words NEVER logged anywhere |
-| No caching | Server doesn't cache decrypted mnemonic |
-| Memory wipe | Buffer zeroized after use |
-| HTTPS only | TLS required for transport |
-| Client timeout | UI clears display after 60 seconds |
-| Audit trail | Log reveal attempts (not content) |
-
----
-
-## Database Schema Changes
-
-### New Columns for `wallets` Table
-
-```typescript
-// Add to wallets table in shared/schema.ts
-encryptedUserMasterKey: text("encrypted_user_master_key"),
-umkVersion: integer("umk_version").default(1),
-agentMnemonicEncrypted: text("agent_mnemonic_encrypted"),
-executionKeyEncrypted: text("execution_key_encrypted"),
-executionExpiresAt: timestamp("execution_expires_at"),
-executionEnabled: boolean("execution_enabled").default(false),
-mnemonicRevealCount: integer("mnemonic_reveal_count").default(0),
-mnemonicLastRevealAt: timestamp("mnemonic_last_reveal_at"),
-securityVersion: integer("security_version").default(2),
-```
-
-### New Columns for `tradingBots` Table
-
-```typescript
-// Add to tradingBots table for execution policies
-allowedMarkets: text("allowed_markets").array(),
-maxPositionNotionalUsd: decimal("max_position_notional_usd"),
-maxLeverage: integer("max_leverage_limit"),
-maxSlippageBps: integer("max_slippage_bps").default(50),
-dailyLossLimitUsd: decimal("daily_loss_limit_usd"),
-dailyLossUsedUsd: decimal("daily_loss_used_usd").default("0"),
-killSwitchTriggered: boolean("kill_switch_triggered").default(false),
-executionPolicyVersion: integer("execution_policy_version").default(1),
-```
-
-### New Table: `auth_nonces`
-
-```typescript
-export const authNonces = pgTable("auth_nonces", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  walletAddress: text("wallet_address").notNull(),
-  nonceHash: text("nonce_hash").notNull().unique(),
-  purpose: text("purpose").notNull(),
-  expiresAt: timestamp("expires_at").notNull(),
-  usedAt: timestamp("used_at"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
-```
-
----
-
-## Executor Security
-
-### IPC (Inter-Process Communication)
-
-Decrypted private keys passed to executor subprocess via stdin:
-
-```typescript
-// Parent process
-const executor = spawn('node', ['drift-executor.mjs']);
-
-// Pass key via stdin, not env var or args
-executor.stdin.write(JSON.stringify({
-  action: 'trade',
-  privateKey: decryptedPrivateKeyBase58,  // Already decrypted
-  market: 'SOL-PERP',
-  // ... other params
-}));
-executor.stdin.end();
-
-// Immediately zeroize in parent
-zeroizeBuffer(decryptedPrivateKeyBuffer);
-```
-
-### Executor Security Controls
-
-| Control | Implementation |
-|---------|----------------|
-| No disk writes | Private key never written to any file |
-| No logging | Private key never logged, even on error |
-| Memory wipe | Zeroize key buffer after transaction signed |
-| Process isolation | Executor runs as separate process |
-| Crash handling | Crash dumps excluded from key memory regions |
-| Lifetime limit | Key in memory for milliseconds only |
-| No caching | Fresh decryption for each trade |
-
-### Zeroize Implementation
-
-```typescript
-function zeroizeBuffer(buffer: Buffer): void {
-  if (buffer && buffer.length > 0) {
-    crypto.randomFillSync(buffer);  // Overwrite with random
-    buffer.fill(0);                  // Then zero
-  }
-}
-
-function zeroizeString(str: string): void {
-  // Strings are immutable in JS, but we can request GC
-  str = '';
-  if (global.gc) global.gc();
-}
-```
-
----
-
-## Security Terminology Corrections
-
-### Incorrect Claims (v1)
-
-> "Zero-knowledge server - server can't access funds without user signature"
-
-**Why incorrect**: Server MUST see decrypted keys at runtime to sign Solana transactions for automated trading.
-
-### Correct Claims (v2)
-
-- "At-rest encryption per user"
-- "Server requires user authorization to enable autonomous execution"
-- "Execution authorization can be revoked at any time"
-- "Keys are encrypted at rest per user and unwrapped into memory only when needed"
-- "Runtime keys are ephemeral in memory with sub-second lifetime"
-- "Database breach without server compromise exposes only ciphertext"
-
----
-
-## Development Mode
-
-### NO WEAK FALLBACK KEYS
-
-```typescript
-// OLD (INSECURE - REMOVED)
-if (process.env.NODE_ENV === 'development') {
-  return 'a'.repeat(64);  // NEVER DO THIS
-}
-
-// NEW (SECURE)
-function getServerExecutionKey(): Buffer {
-  const key = process.env.SERVER_EXECUTION_KEY;
-  if (!key || key.length !== 64) {
-    throw new Error(
-      'SERVER_EXECUTION_KEY must be set to a 64-character hex string (256 bits). ' +
-      'Generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
-    );
-  }
-  return Buffer.from(key, 'hex');
-}
-```
-
-### Development Key Generation
-
-```bash
-# Generate a proper dev key (run once, store in .env)
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-```
-
----
-
-## Migration Strategy
-
-### For Existing Data (Single User)
-
-Since you're the only user, migration is a clean cut-over:
-
-1. **Backup current agent wallet public key** (write it down)
-2. **Record current agent wallet balance** (for verification)
-3. **Deploy new code**
-4. **Connect wallet, sign unlock message**
-5. **System generates new UMK**
-6. **System generates new agent wallet with mnemonic**
-7. **REVEAL AND SECURELY STORE MNEMONIC**
-8. **Transfer funds from old agent wallet to new one**
-9. **Enable execution for bots**
-10. **Delete old `AGENT_ENCRYPTION_KEY` from environment**
-11. **Invalidate all old sessions**
-12. **Verify no old encrypted blobs in backups**
-
-### Post-Migration Verification
-
-- [ ] New agent wallet has funds
-- [ ] Mnemonic backed up securely
-- [ ] Bots can execute trades
-- [ ] Old wallet is empty
-- [ ] Old encryption key deleted
-- [ ] Sessions invalidated
+| Control | Value |
+|---------|-------|
+| Rate limit | 3 per hour per wallet |
+| Signature TTL | 2 minutes |
+| Display timeout | 60 seconds client-side |
+| Logging | Log event (wallet, time, IP) - NEVER log words |
+| Nonce | Single-use, verified server-side |
 
 ---
 
 ## Implementation Phases
 
-### Phase 1: Schema & Crypto Foundation (2-3 hours)
-
-- Add new schema columns
-- Implement UMK envelope encryption
-- Implement HKDF key derivation
-- Implement subkey derivation
-- Implement proper AES-GCM with AAD
-- Remove dev fallback key
-
-### Phase 2: Authentication Flow (2-3 hours)
-
-- Implement nonce generation and validation
-- Implement purpose-specific signatures
-- Implement UMK creation flow (first login)
-- Implement UMK unwrap flow (subsequent logins)
-- Implement session key caching
-
-### Phase 3: Agent Wallet with Mnemonic (2 hours)
-
-- Implement BIP-39 mnemonic generation
-- Implement Solana derivation path
-- Implement mnemonic encryption/storage
-- Implement mnemonic reveal flow with rate limiting
-
-### Phase 4: Execution Authorization (2-3 hours)
-
-- Implement enable/revoke execution flow
-- Implement execution key wrapping
-- Implement bot execution policies
-- Update webhook handler to check authorization
-- Implement daily loss tracking
-
-### Phase 5: Executor Updates (1 hour)
-
-- Remove in-executor decryption
-- Accept pre-decrypted key via stdin
+### Phase 1: Crypto Foundation (3-4 hours)
+- Implement binary AAD encoding
+- Implement per-user salt generation and storage
+- Implement HKDF with purpose binding
+- Implement Buffer-only encryption/decryption
 - Implement buffer zeroization
-- Ensure no logging of keys
+- Remove dev fallback key
+- Add schema columns
 
-### Phase 6: Testing & Hardening (2-3 hours)
+### Phase 2: UMK Envelope (2-3 hours)
+- Implement UMK generation (first login)
+- Implement EUMK encryption with SK
+- Implement subkey derivation
+- Implement session management
 
-- Test full authentication flow
-- Test mnemonic backup/reveal
-- Test bot execution
-- Test rate limiting
-- Test revocation
-- Verify no key logging
+### Phase 3: Authentication (2-3 hours)
+- Implement nonce generation/validation
+- Implement all signature purposes
+- Implement session rotation
+- Add rate limiting
+- Add CSRF protection
 
-**Total Estimate**: 12-16 hours
+### Phase 4: Agent Wallet with Mnemonic (2 hours)
+- Implement BIP-39 generation (Buffer-only)
+- Verify Solana derivation path matches Phantom
+- Implement mnemonic encryption/storage
+- Implement reveal flow with controls
+
+### Phase 5: Execution Authorization (2-3 hours)
+- Implement enable/revoke flow (Design A)
+- Implement EUMK_exec wrapping
+- Update webhook handler
+- Implement policy HMAC verification
+- Implement emergency admin stop
+
+### Phase 6: Executor Updates (1-2 hours)
+- Pass pre-decrypted key as Buffer via stdin
+- Implement buffer zeroization in executor
+- Disable core dumps
+- Remove all key logging
+
+### Phase 7: Testing (2-3 hours)
+- Test full auth flow
+- Test execution flow
+- Test mnemonic reveal
+- Test emergency stop
+- Verify no key leakage in logs/dumps
+- Verify Phantom derivation compatibility
+
+**Total Estimate**: 15-20 hours
 
 ---
 
 ## Security Checklist
 
-### Pass Criteria (ALL must be true)
+### Must Pass (ALL required)
 
-- [ ] Uses UMK envelope pattern, not signature-derived key for direct encryption
-- [ ] Nonces are single-use, stored server-side, expire
-- [ ] Messages are domain-bound and cluster-bound
-- [ ] Per-purpose signatures with appropriate TTLs
-- [ ] AES-GCM uses 12-byte random IV, never reused
-- [ ] AAD includes wallet + record type + version
-- [ ] Per-purpose subkeys derived from UMK
-- [ ] No dev fallback weak keys
-- [ ] Headless bot execution model with explicit enable/revoke
-- [ ] Bot execution policies with limits and kill switch
-- [ ] Mnemonic reveal locked behind high-privilege auth and rate limit
-- [ ] Solana derivation path verified: m/44'/501'/0'/0'
-- [ ] Executor never logs or caches private keys
+- [ ] UMK envelope pattern with Design A execution flow
+- [ ] Per-user random salt (32 bytes)
+- [ ] ALL nonces single-use, stored server-side
+- [ ] Binary AAD encoding (not JSON)
+- [ ] Purpose included in HKDF info
+- [ ] Buffer-only for all secrets (no strings)
 - [ ] Buffer zeroization implemented
+- [ ] No dev fallback weak keys
+- [ ] Core dumps disabled
+- [ ] HMAC on bot policies
+- [ ] Emergency admin stop implemented
+- [ ] Mnemonic reveal rate-limited
+- [ ] Session rotation after unlock
+- [ ] httpOnly + secure + sameSite cookies
 
-### Fail Criteria (ANY means not ready)
+### Fail Criteria (ANY blocks deployment)
 
-- [ ] Signature-derived key used directly for long-lived data
-- [ ] Nonces are reusable or not stored server-side
-- [ ] Bots require live user signing to execute
-- [ ] Mnemonic can be revealed without fresh signature
-- [ ] Dev mode uses weak/default keys
+- [ ] Secrets stored as JavaScript strings
+- [ ] Static app-wide salt
+- [ ] Nonces reusable
+- [ ] JSON AAD encoding
+- [ ] No policy integrity verification
 - [ ] Private keys logged anywhere
+- [ ] Dev mode uses weak keys
 
 ---
 
-## Open Questions Resolved
+## Future: Institutional Grade
 
-| Question | Resolution |
-|----------|------------|
-| Session timeout | 24 hours for UMK unlock |
-| Execution timeout | 1 hour (re-enable required) |
-| Mnemonic reveal limit | 3 per hour, 2-min TTL signature |
-| Derivation path | m/44'/501'/0'/0' (Solana standard) |
-| Automation model | SERVER_EXECUTION_KEY wraps per-user EK |
+When scaling to handle "very large amounts of money":
 
----
-
-## Dependencies
-
-### NPM Packages Required
-
-```json
-{
-  "bip39": "^3.1.0",
-  "ed25519-hd-key": "^1.3.0"
-}
-```
-
-### Environment Variables Required
-
-```bash
-# Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-SERVER_EXECUTION_KEY=<64-char-hex-string>
-```
+| Upgrade | Implementation |
+|---------|----------------|
+| Cloud KMS | AWS KMS / Google KMS for SERVER_EXECUTION_KEY |
+| TEE | AWS Nitro Enclaves for executor |
+| HSM | Hardware Security Module for key storage |
+| Multi-sig | Require multiple signatures for large trades |
+| Insurance | Smart contract insurance for custodied funds |
 
 ---
 
 *Document created: January 2026*  
-*Revised after security review: January 2026*  
-*Version: 2.0*
+*Version: 3.0 (Final after multi-source audit)*
