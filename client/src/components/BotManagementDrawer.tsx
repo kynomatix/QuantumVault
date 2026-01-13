@@ -579,6 +579,18 @@ export function BotManagementDrawer({
       return;
     }
     
+    // Validate maxPositionSize doesn't exceed what's possible with available collateral
+    const maxPosValue = editMaxPositionSize ? parseFloat(editMaxPositionSize) : 0;
+    const maxAllowed = botBalance * editLeverage;
+    if (maxPosValue > 0 && botBalance > 0 && maxPosValue > maxAllowed) {
+      toast({ 
+        title: 'Max Position Size too high', 
+        description: `With $${botBalance.toFixed(2)} balance and ${editLeverage}x leverage, max allowed is $${maxAllowed.toFixed(2)}`,
+        variant: 'destructive' 
+      });
+      return;
+    }
+    
     setSaveSettingsLoading(true);
     try {
       const res = await fetch(`/api/trading-bots/${localBot.id}?wallet=${walletAddress}`, {
@@ -1504,7 +1516,7 @@ export function BotManagementDrawer({
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => setEditMaxPositionSize(botBalance.toFixed(2))}
+                      onClick={() => setEditMaxPositionSize((botBalance * editLeverage).toFixed(2))}
                       disabled={botBalance <= 0}
                       className="px-3"
                       data-testid="button-max-position-size"
@@ -1514,10 +1526,7 @@ export function BotManagementDrawer({
                   </div>
                   <p className="text-xs text-muted-foreground flex items-center gap-1">
                     <Info className="w-3 h-3" />
-                    Your capital base. TradingView signals trade a % of this amount.
-                    {botBalance > 0 && (
-                      <span className="ml-1">(Bot has ${botBalance.toFixed(2)})</span>
-                    )}
+                    Leveraged position limit. With {editLeverage}x leverage, max is ${(botBalance * editLeverage).toFixed(2)}.
                   </p>
                 </div>
                 

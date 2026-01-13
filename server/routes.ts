@@ -2881,11 +2881,12 @@ export async function registerRoutes(
       
       console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
 
-      // Calculate contract size (with leverage) using oracle price for execution
+      // Calculate contract size - maxPositionSize already includes leverage (set during bot creation)
+      // So we just divide by price to get contracts, no additional leverage multiplication needed
       const leverage = bot.leverage || 1;
-      const contractSize = (tradeAmountUsd * leverage) / oraclePrice;
+      const contractSize = tradeAmountUsd / oraclePrice;
       
-      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x leverage / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} (from ${leverage}x leveraged capital) / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Minimum order sizes per market (from Drift Protocol)
       const MIN_ORDER_SIZES: Record<string, number> = {
@@ -2896,8 +2897,8 @@ export async function registerRoutes(
       const minOrderSize = MIN_ORDER_SIZES[bot.market] || 0.01;
       
       if (contractSize < minOrderSize) {
-        const minCapitalNeeded = (minOrderSize * oraclePrice) / leverage;
-        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. With ${leverage}x leverage at $${oraclePrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} per entry. Increase your Total Investment or reduce pyramid entries.`;
+        const minCapitalNeeded = minOrderSize * oraclePrice;
+        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. At $${oraclePrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} Max Position Size. Increase your investment or reduce pyramid entries.`;
         console.log(`[Webhook] ${errorMsg}`);
         await storage.updateBotTrade(trade.id, {
           status: "failed",
@@ -3419,11 +3420,12 @@ export async function registerRoutes(
       
       console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
 
-      // Calculate contract size (with leverage) using oracle price for execution
+      // Calculate contract size - maxPositionSize already includes leverage (set during bot creation)
+      // So we just divide by price to get contracts, no additional leverage multiplication needed
       const leverage = bot.leverage || 1;
-      const contractSize = (tradeAmountUsd * leverage) / oraclePrice;
+      const contractSize = tradeAmountUsd / oraclePrice;
       
-      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} × ${leverage}x leverage / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} (from ${leverage}x leveraged capital) / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Minimum order sizes per market (from Drift Protocol)
       const MIN_ORDER_SIZES: Record<string, number> = {
@@ -3434,8 +3436,8 @@ export async function registerRoutes(
       const minOrderSize = MIN_ORDER_SIZES[bot.market] || 0.01;
       
       if (contractSize < minOrderSize) {
-        const minCapitalNeeded = (minOrderSize * oraclePrice) / leverage;
-        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. With ${leverage}x leverage at $${oraclePrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} per entry. Increase your Total Investment or reduce pyramid entries.`;
+        const minCapitalNeeded = minOrderSize * oraclePrice;
+        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. At $${oraclePrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} Max Position Size. Increase your investment or reduce pyramid entries.`;
         console.log(`[User Webhook] ${errorMsg}`);
         await storage.updateBotTrade(trade.id, {
           status: "failed",
