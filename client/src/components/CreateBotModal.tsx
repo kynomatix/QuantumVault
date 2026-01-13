@@ -416,6 +416,18 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
           </CollapsibleContent>
         </Collapsible>
 
+        <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-yellow-500 mt-0.5 flex-shrink-0" />
+            <div className="text-xs">
+              <p className="font-medium text-yellow-500">Subaccount Rent</p>
+              <p className="text-muted-foreground">
+                Creating a bot allocates a Drift subaccount which requires ~0.035 SOL rent from your agent wallet's gas balance. This rent is reclaimable when you delete the bot.
+              </p>
+            </div>
+          </div>
+        </div>
+
       </div>
 
       <DialogFooter>
