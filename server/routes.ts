@@ -13,6 +13,7 @@ import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getD
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
+import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket } from "./market-liquidity-service";
 
 declare module "express-session" {
   interface SessionData {
@@ -3815,6 +3816,51 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get prices error:", error);
       res.status(500).json({ error: "Failed to fetch prices" });
+    }
+  });
+
+  // Get all available Drift perp markets with liquidity info
+  app.get("/api/drift/markets", async (req, res) => {
+    try {
+      const forceRefresh = req.query.refresh === 'true';
+      const markets = await getAllPerpMarkets(forceRefresh);
+      
+      // Add risk tier info to each market
+      const marketsWithInfo = markets.map(market => ({
+        ...market,
+        riskTierInfo: getRiskTierInfo(market.riskTier),
+      }));
+      
+      res.json({
+        markets: marketsWithInfo,
+        totalMarkets: markets.length,
+        recommended: markets.filter(m => m.riskTier === 'recommended').length,
+        caution: markets.filter(m => m.riskTier === 'caution').length,
+        highRisk: markets.filter(m => m.riskTier === 'high_risk').length,
+      });
+    } catch (error) {
+      console.error("Get Drift markets error:", error);
+      res.status(500).json({ error: "Failed to fetch markets" });
+    }
+  });
+
+  // Get single market info
+  app.get("/api/drift/markets/:symbol", async (req, res) => {
+    try {
+      const { symbol } = req.params;
+      const market = await getMarketBySymbol(symbol);
+      
+      if (!market) {
+        return res.status(404).json({ error: "Market not found" });
+      }
+      
+      res.json({
+        ...market,
+        riskTierInfo: getRiskTierInfo(market.riskTier),
+      });
+    } catch (error) {
+      console.error("Get market error:", error);
+      res.status(500).json({ error: "Failed to fetch market" });
     }
   });
 

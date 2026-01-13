@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
   DialogContent,
@@ -24,6 +25,12 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { 
   Zap, 
   Loader2, 
@@ -34,8 +41,29 @@ import {
   Sparkles,
   ChevronDown,
   Info,
-  TrendingUp
+  TrendingUp,
+  AlertTriangle,
+  ShieldCheck,
+  ShieldAlert
 } from 'lucide-react';
+
+interface MarketInfo {
+  symbol: string;
+  fullName: string;
+  marketIndex: number;
+  category: string[];
+  baseAssetSymbol: string;
+  riskTier: 'recommended' | 'caution' | 'high_risk';
+  estimatedSlippagePct: number;
+  lastPrice: number | null;
+  isActive: boolean;
+  warning?: string;
+  riskTierInfo: {
+    label: string;
+    color: string;
+    description: string;
+  };
+}
 
 interface TradingBot {
   id: string;
@@ -52,8 +80,6 @@ interface CreateBotModalProps {
   onBotCreated: () => void;
 }
 
-const MARKETS = ['SOL-PERP', 'BTC-PERP', 'ETH-PERP'];
-
 export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }: CreateBotModalProps) {
   const { toast } = useToast();
   const [isCreating, setIsCreating] = useState(false);
@@ -65,6 +91,9 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [isLoadingWebhookUrl, setIsLoadingWebhookUrl] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [markets, setMarkets] = useState<MarketInfo[]>([]);
+  const [isLoadingMarkets, setIsLoadingMarkets] = useState(false);
+  const [showHighRiskWarning, setShowHighRiskWarning] = useState(false);
   
   const [newBot, setNewBot] = useState({
     name: '',
@@ -72,6 +101,38 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
     leverage: 1,
     investmentAmount: '',
   });
+  
+  // Fetch markets on mount
+  useEffect(() => {
+    const fetchMarkets = async () => {
+      if (markets.length > 0) return;
+      setIsLoadingMarkets(true);
+      try {
+        const res = await fetch('/api/drift/markets');
+        if (res.ok) {
+          const data = await res.json();
+          setMarkets(data.markets || []);
+        }
+      } catch (error) {
+        console.error('Failed to fetch markets:', error);
+      } finally {
+        setIsLoadingMarkets(false);
+      }
+    };
+    fetchMarkets();
+  }, []);
+  
+  // Get selected market info
+  const selectedMarket = markets.find(m => m.symbol === newBot.market);
+  
+  // Check if high-risk market selected
+  useEffect(() => {
+    if (selectedMarket?.riskTier === 'high_risk') {
+      setShowHighRiskWarning(true);
+    } else {
+      setShowHighRiskWarning(false);
+    }
+  }, [newBot.market, selectedMarket]);
   
   // Calculate max position size (investment × leverage)
   const investmentValue = parseFloat(newBot.investmentAmount) || 0;
@@ -282,19 +343,76 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
         </div>
         
         <div className="space-y-2">
-          <Label>Market</Label>
+          <div className="flex items-center justify-between">
+            <Label>Market</Label>
+            {selectedMarket && (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge 
+                      variant={selectedMarket.riskTier === 'recommended' ? 'default' : selectedMarket.riskTier === 'caution' ? 'secondary' : 'destructive'}
+                      className={`text-xs cursor-help ${
+                        selectedMarket.riskTier === 'recommended' ? 'bg-green-500/20 text-green-400 border-green-500/30' :
+                        selectedMarket.riskTier === 'caution' ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' :
+                        'bg-red-500/20 text-red-400 border-red-500/30'
+                      }`}
+                    >
+                      {selectedMarket.riskTier === 'recommended' && <ShieldCheck className="w-3 h-3 mr-1" />}
+                      {selectedMarket.riskTier === 'caution' && <AlertTriangle className="w-3 h-3 mr-1" />}
+                      {selectedMarket.riskTier === 'high_risk' && <ShieldAlert className="w-3 h-3 mr-1" />}
+                      ~{selectedMarket.estimatedSlippagePct}% slippage
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="left" className="max-w-xs">
+                    <p className="font-medium">{selectedMarket.riskTierInfo.label}</p>
+                    <p className="text-xs text-muted-foreground">{selectedMarket.riskTierInfo.description}</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+          </div>
           <Select value={newBot.market} onValueChange={(v) => setNewBot({ ...newBot, market: v })}>
             <SelectTrigger data-testid="select-market">
-              <SelectValue />
+              <SelectValue placeholder={isLoadingMarkets ? "Loading markets..." : "Select market"} />
             </SelectTrigger>
-            <SelectContent>
-              {MARKETS.map((market) => (
-                <SelectItem key={market} value={market}>
-                  {market}
-                </SelectItem>
-              ))}
+            <SelectContent className="max-h-[300px]">
+              {isLoadingMarkets ? (
+                <div className="flex items-center justify-center py-4">
+                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                  <span className="text-sm">Loading markets...</span>
+                </div>
+              ) : (
+                markets.map((market) => (
+                  <SelectItem key={market.symbol} value={market.symbol} className="py-2">
+                    <div className="flex items-center justify-between w-full gap-3">
+                      <span className="font-medium">{market.symbol}</span>
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${
+                        market.riskTier === 'recommended' ? 'bg-green-500/20 text-green-400' :
+                        market.riskTier === 'caution' ? 'bg-yellow-500/20 text-yellow-400' :
+                        'bg-red-500/20 text-red-400'
+                      }`}>
+                        {market.riskTier === 'recommended' ? 'Low slip' : 
+                         market.riskTier === 'caution' ? 'Med slip' : 'High slip'}
+                      </span>
+                    </div>
+                  </SelectItem>
+                ))
+              )}
             </SelectContent>
           </Select>
+          {showHighRiskWarning && selectedMarket && (
+            <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm">
+              <AlertTriangle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="font-medium text-red-400">High Slippage Warning</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {selectedMarket.fullName} has ~{selectedMarket.estimatedSlippagePct}% estimated slippage. 
+                  Your strategy needs to beat {(selectedMarket.estimatedSlippagePct + 0.05).toFixed(2)}% per trade (slippage + fees) to be profitable.
+                  {selectedMarket.warning && ` ${selectedMarket.warning}.`}
+                </p>
+              </div>
+            </div>
+          )}
         </div>
         
         <div className="space-y-3">
