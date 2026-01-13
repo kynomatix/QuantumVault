@@ -14,6 +14,11 @@ declare module "http" {
   }
 }
 
+// Health check endpoint - must respond quickly for deployment health checks
+app.get("/health", (_req, res) => {
+  res.status(200).json({ status: "ok", timestamp: Date.now() });
+});
+
 app.use(
   express.json({
     verify: (req, _res, buf) => {
