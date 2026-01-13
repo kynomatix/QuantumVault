@@ -1551,6 +1551,27 @@ export default function AppPage() {
                       </div>
                     </div>
 
+                    {agentPublicKey && (
+                      <div className="border-t border-border/50 pt-6">
+                        <h3 className="font-display font-semibold mb-4">Drift Account</h3>
+                        <p className="text-sm text-muted-foreground mb-3">
+                          View your on-chain Drift trading account and positions directly.
+                        </p>
+                        <Button
+                          variant="outline"
+                          onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentPublicKey}`, '_blank')}
+                          className="w-full sm:w-auto"
+                          data-testid="button-view-drift-settings"
+                        >
+                          <ExternalLink className="w-4 h-4 mr-2" />
+                          View on Drift
+                        </Button>
+                        <p className="text-xs text-muted-foreground mt-2 font-mono break-all">
+                          Agent: {agentPublicKey}
+                        </p>
+                      </div>
+                    )}
+
                     <div className="border-t border-border/50 pt-6">
                       <h3 className="font-display font-semibold mb-4">Trading Defaults</h3>
                       <div className="space-y-4">
