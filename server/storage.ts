@@ -225,15 +225,20 @@ export class DatabaseStorage implements IStorage {
       .from(tradingBots)
       .where(eq(tradingBots.walletAddress, walletAddress));
     
-    const usedIds = bots
-      .map(b => b.driftSubaccountId)
-      .filter((id): id is number => id !== null);
+    const usedIds = new Set(
+      bots
+        .map(b => b.driftSubaccountId)
+        .filter((id): id is number => id !== null)
+    );
     
-    if (usedIds.length === 0) {
-      return 0;
+    // Drift requires sequential subaccounts starting from 1 (0 is main account)
+    // Find the first available ID in sequence
+    let nextId = 1;
+    while (usedIds.has(nextId)) {
+      nextId++;
     }
     
-    return Math.max(...usedIds) + 1;
+    return nextId;
   }
 
   async createTradingBot(bot: InsertTradingBot): Promise<TradingBot> {
