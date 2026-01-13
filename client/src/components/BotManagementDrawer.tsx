@@ -81,6 +81,7 @@ interface TradingBot {
     winningTrades: number;
     losingTrades: number;
     totalPnl: number;
+    totalVolume?: number;
     lastTradeAt?: string;
   } | null;
   createdAt: string;
@@ -811,7 +812,7 @@ export function BotManagementDrawer({
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Total Trades</p>
                 <p className="text-lg font-semibold mt-1" data-testid="text-total-trades">
@@ -827,6 +828,24 @@ export function BotManagementDrawer({
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Leverage</p>
                 <p className="text-lg font-semibold mt-1" data-testid="text-leverage">{localBot?.leverage ?? displayBot?.leverage}x</p>
+              </div>
+              <div className="p-3 rounded-lg bg-muted/30 border text-center">
+                <div className="flex items-center justify-center gap-1">
+                  <p className="text-xs text-muted-foreground">Volume</p>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <Info className="w-3 h-3 text-muted-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>Total traded volume = FUEL earned (1 FUEL per $1)</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <p className="text-lg font-semibold mt-1 text-primary" data-testid="text-volume">
+                  ${((displayBot?.stats?.totalVolume ?? 0)).toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                </p>
               </div>
             </div>
             
