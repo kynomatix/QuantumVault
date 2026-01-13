@@ -195,6 +195,98 @@ function getDriftStatePDA(): PublicKey {
 const DRIFT_STATE_PUBKEY = getDriftStatePDA();
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
+// Platform referral code: kryptolytix
+// This is used to fund platform operations - referrer earns 15% of taker fees, users get 5% discount
+const PLATFORM_REFERRAL_CODE = 'kryptolytix';
+
+// Derive the ReferrerName PDA from the referral code
+function getReferrerNamePDA(referralCode: string): PublicKey {
+  const [referrerName] = PublicKey.findProgramAddressSync(
+    [Buffer.from('referrer_name'), Buffer.from(referralCode)],
+    DRIFT_PROGRAM_ID
+  );
+  return referrerName;
+}
+
+// Derive the UserStats PDA from an authority (wallet address)
+function getUserStatsPDA(authority: PublicKey): PublicKey {
+  const [userStats] = PublicKey.findProgramAddressSync(
+    [Buffer.from('user_stats'), authority.toBuffer()],
+    DRIFT_PROGRAM_ID
+  );
+  return userStats;
+}
+
+// Cached referrer info - fetched once on first use
+let cachedReferrerInfo: { authority: PublicKey; userStats: PublicKey; user: PublicKey } | null = null;
+
+/**
+ * Fetch the kryptolytix referrer's wallet address from the on-chain ReferrerName account
+ * and derive the required PDAs for referral attribution.
+ * 
+ * MANDATORY: This must succeed for all new account creations to ensure platform
+ * referral attribution. Will retry up to 3 times before throwing an error.
+ */
+async function getPlatformReferrerInfo(): Promise<{ authority: PublicKey; userStats: PublicKey; user: PublicKey }> {
+  if (cachedReferrerInfo) {
+    return cachedReferrerInfo;
+  }
+  
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 1000;
+  
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const connection = getConnection();
+      const referrerNamePDA = getReferrerNamePDA(PLATFORM_REFERRAL_CODE);
+      
+      console.log(`[Drift] Fetching referrer info for code: ${PLATFORM_REFERRAL_CODE} (attempt ${attempt}/${MAX_RETRIES})`);
+      console.log(`[Drift] ReferrerName PDA: ${referrerNamePDA.toBase58()}`);
+      
+      const accountInfo = await connection.getAccountInfo(referrerNamePDA);
+      if (!accountInfo) {
+        throw new Error(`ReferrerName account not found for code: ${PLATFORM_REFERRAL_CODE}`);
+      }
+      
+      // ReferrerName account layout (from Drift IDL):
+      // - 8 bytes: discriminator
+      // - 32 bytes: authority (the referrer's wallet address)
+      // - 32 bytes: user (the referrer's User account for subaccount 0)
+      // - 32 bytes: user_stats (the referrer's UserStats account)
+      // - 32 bytes: name (the referral code as bytes)
+      const AUTHORITY_OFFSET = 8;
+      const USER_OFFSET = 8 + 32;
+      const USER_STATS_OFFSET = 8 + 32 + 32;
+      
+      if (accountInfo.data.length < USER_STATS_OFFSET + 32) {
+        throw new Error(`ReferrerName account data too short: ${accountInfo.data.length} bytes`);
+      }
+      
+      const authority = new PublicKey(accountInfo.data.slice(AUTHORITY_OFFSET, AUTHORITY_OFFSET + 32));
+      const user = new PublicKey(accountInfo.data.slice(USER_OFFSET, USER_OFFSET + 32));
+      const userStats = new PublicKey(accountInfo.data.slice(USER_STATS_OFFSET, USER_STATS_OFFSET + 32));
+      
+      console.log(`[Drift] Platform referrer (${PLATFORM_REFERRAL_CODE}) fetched successfully:`);
+      console.log(`[Drift]   Authority: ${authority.toBase58()}`);
+      console.log(`[Drift]   User: ${user.toBase58()}`);
+      console.log(`[Drift]   UserStats: ${userStats.toBase58()}`);
+      
+      cachedReferrerInfo = { authority, userStats, user };
+      return cachedReferrerInfo;
+    } catch (error) {
+      console.error(`[Drift] Failed to fetch referrer info (attempt ${attempt}/${MAX_RETRIES}):`, error);
+      
+      if (attempt < MAX_RETRIES) {
+        console.log(`[Drift] Retrying in ${RETRY_DELAY_MS}ms...`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+      }
+    }
+  }
+  
+  // All retries exhausted - this is a critical failure
+  throw new Error(`CRITICAL: Failed to fetch platform referrer info after ${MAX_RETRIES} attempts. Cannot create Drift account without referral attribution.`);
+}
+
 function getSolanaRpcUrl(): string {
   if (process.env.SOLANA_RPC_URL) {
     return process.env.SOLANA_RPC_URL;
@@ -374,17 +466,6 @@ function getUserAccountPDA(userPubkey: PublicKey, subAccountId: number = 0): Pub
   return userAccount;
 }
 
-function getUserStatsPDA(userPubkey: PublicKey): PublicKey {
-  const [userStats] = PublicKey.findProgramAddressSync(
-    [
-      Buffer.from('user_stats'),
-      userPubkey.toBuffer(),
-    ],
-    DRIFT_PROGRAM_ID
-  );
-  return userStats;
-}
-
 function getSpotMarketVaultPDA(marketIndex: number): PublicKey {
   const [vault] = PublicKey.findProgramAddressSync(
     [
@@ -476,6 +557,7 @@ async function getSpotMarketOracle(connection: Connection, marketIndex: number =
 function createInitializeUserStatsInstruction(
   userPubkey: PublicKey,
   userStats: PublicKey,
+  referrerInfo?: { user: PublicKey; userStats: PublicKey } | null,
 ): TransactionInstruction {
   const discriminator = getAnchorDiscriminator('initialize_user_stats');
   
@@ -487,6 +569,16 @@ function createInitializeUserStatsInstruction(
     { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
   ];
+  
+  // Add referrer accounts if provided (for referral attribution)
+  // Order per Drift IDL: referrer (User account), referrerStats (UserStats account)
+  if (referrerInfo) {
+    keys.push(
+      { pubkey: referrerInfo.user, isSigner: false, isWritable: true },
+      { pubkey: referrerInfo.userStats, isSigner: false, isWritable: true },
+    );
+    console.log(`[Drift] Adding referrer to initialize_user_stats: user=${referrerInfo.user.toBase58()}, stats=${referrerInfo.userStats.toBase58()}`);
+  }
 
   return new TransactionInstruction({
     keys,
@@ -645,8 +737,10 @@ export async function buildDepositTransaction(
   const userStatsInfo = await connection.getAccountInfo(userStats);
   if (!userStatsInfo) {
     console.log('[Drift] User stats not found, adding initialization instruction');
+    // Fetch platform referrer for new accounts (kryptolytix)
+    const referrerInfo = await getPlatformReferrerInfo();
     instructions.push(
-      createInitializeUserStatsInstruction(userPubkey, userStats)
+      createInitializeUserStatsInstruction(userPubkey, userStats, referrerInfo)
     );
   }
 
@@ -1291,7 +1385,9 @@ export async function buildInitializeSubaccountTransaction(
   const userStatsInfo = await connection.getAccountInfo(userStats);
   if (!userStatsInfo) {
     console.log('[Drift] User stats not found, adding initialization instruction');
-    instructions.push(createInitializeUserStatsInstruction(userPubkey, userStats));
+    // Fetch platform referrer for new accounts (kryptolytix)
+    const referrerInfo = await getPlatformReferrerInfo();
+    instructions.push(createInitializeUserStatsInstruction(userPubkey, userStats, referrerInfo));
   }
   
   const userAccountInfo = await connection.getAccountInfo(userAccount);
@@ -1388,7 +1484,9 @@ export async function buildTransferToSubaccountTransaction(
     
     const userStatsInfo = await connection.getAccountInfo(userStats);
     if (!userStatsInfo) {
-      instructions.push(createInitializeUserStatsInstruction(userPubkey, userStats));
+      // Fetch platform referrer for new accounts (kryptolytix)
+      const referrerInfo = await getPlatformReferrerInfo();
+      instructions.push(createInitializeUserStatsInstruction(userPubkey, userStats, referrerInfo));
     }
     
     instructions.push(createInitializeUserInstruction(userPubkey, toUserAccount, userStats, toSubaccountId, `Bot${toSubaccountId}`));
@@ -1468,8 +1566,10 @@ async function initializeDriftAccountsIfNeeded(
   const userStatsInfo = await connection.getAccountInfo(userStats);
   if (!userStatsInfo) {
     console.log('[Drift] Agent user stats not found, adding initialization instruction');
+    // Fetch platform referrer for new accounts (kryptolytix)
+    const referrerInfo = await getPlatformReferrerInfo();
     initInstructions.push(
-      createInitializeUserStatsInstruction(agentPubkey, userStats)
+      createInitializeUserStatsInstruction(agentPubkey, userStats, referrerInfo)
     );
   }
 

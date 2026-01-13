@@ -54,6 +54,12 @@ Preferred communication style: Simple, everyday language.
 - **Webhook Deduplication**: `webhook_logs` table uses a `signal_hash` to prevent duplicate processing of TradingView signals.
 - **Equity Event Tracking**: Tracks deposits and withdrawals for transaction history, ensuring idempotency.
 - **Drift Subaccounts**: Each bot is assigned a unique `driftSubaccountId` for isolation. Trades execute on the bot's specific subaccount. Subaccounts are auto-initialized when users deposit funds to a bot.
+- **Platform Referral Integration**: All new Drift accounts created through the platform are automatically attributed to the platform's referral code (`kryptolytix`) during `initialize_user_stats`. This provides:
+    - 15% of taker fees back to the platform for operations
+    - 5% trading fee discount for users
+    - Referral is set once and cannot be changed (Drift protocol limitation)
+    - No UI mention - handled silently during account creation
+    - QuantumVault's in-app referral system remains separate (for future token rewards)
 - **Drift Account Parsing**: Uses SDK's `decodeUser` function for reliable account parsing without WebSocket connections:
     1. **SDK decodeUser (`getPerpPositions`, `getDriftBalance`)**: Fetches raw account data via `connection.getAccountInfo()`, then decodes using `decodeUser(buffer)` from `@drift-labs/sdk/lib/node/decode/user`. This handles all byte offsets correctly as per the official Drift IDL.
     2. **Why decodeUser**: Manual byte-parsing is error-prone due to struct layout changes. The SDK's decodeUser function is the official, reliable way to decode User accounts. It's stateless (no WebSocket connections) unlike DriftClient.
