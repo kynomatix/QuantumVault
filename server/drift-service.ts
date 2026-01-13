@@ -1737,44 +1737,14 @@ export async function executeAgentDriftDeposit(
         throw sdkError;
       }
     } catch (sdkError) {
-      console.error('[Drift] SDK deposit failed, trying manual approach:', sdkError);
-      
-      // Fall back to manual approach
-      console.log(`[Drift] Building manual deposit transaction: ${amountUsdc} USDC`);
-      
-      const txData = await buildAgentDriftDepositTransaction(
-        agentPublicKey,
-        encryptedPrivateKey,
-        amountUsdc
-      );
-      
-      const txBuffer = Buffer.from(txData.transaction, 'base64');
-      
-      console.log(`[Drift] Sending deposit transaction (skipping preflight)...`);
-      
-      const signature = await connection.sendRawTransaction(txBuffer, {
-        skipPreflight: true,
-        preflightCommitment: 'confirmed',
-      });
-      
-      console.log(`[Drift] Deposit transaction sent: ${signature}`);
-      
-      const confirmation = await connection.confirmTransaction({
-        signature,
-        blockhash: txData.blockhash,
-        lastValidBlockHeight: txData.lastValidBlockHeight,
-      }, 'confirmed');
-      
-      if (confirmation.value.err) {
-        console.error('[Drift] Transaction confirmed with error:', confirmation.value.err);
-        return {
-          success: false,
-          error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}`,
-        };
-      }
-      
-      console.log(`[Drift] Deposit confirmed: ${signature}`);
-      return { success: true, signature };
+      // CRITICAL: Do NOT fall back to manual approach - it only supports subaccount 0
+      // The SDK path is the only one that supports depositing to specific subaccounts
+      console.error('[Drift] SDK deposit failed:', sdkError);
+      const errorMessage = sdkError instanceof Error ? sdkError.message : String(sdkError);
+      return {
+        success: false,
+        error: `Drift deposit failed: ${errorMessage}. Please try again or contact support.`,
+      };
     }
   } catch (error) {
     console.error('[Drift] Deposit error:', error);
