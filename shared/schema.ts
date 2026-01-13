@@ -97,8 +97,9 @@ export const tradingBots = pgTable("trading_bots", {
     winningTrades: number;
     losingTrades: number;
     totalPnl: number;
+    totalVolume: number;
     lastTradeAt?: string;
-  }>().default({ totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 }),
+  }>().default({ totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

@@ -2350,14 +2350,16 @@ export async function registerRoutes(
               closeSize
             );
             
-            // Update bot stats
-            const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+            // Update bot stats (including volume for FUEL tracking)
+            const closeNotionalVolume = closeSize * closeFillPrice;
+            const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
             await storage.updateTradingBotStats(botId, {
               ...stats,
               totalTrades: (stats.totalTrades || 0) + 1,
               winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
               losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
               totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
+              totalVolume: (stats.totalVolume || 0) + closeNotionalVolume,
               lastTradeAt: new Date().toISOString(),
             });
             
@@ -2578,11 +2580,13 @@ export async function registerRoutes(
           
             console.log(`[Webhook] Position closed successfully. Now proceeding to open ${side.toUpperCase()} position.`);
           
-            // Update stats for close trade
-            const stats1 = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+            // Update stats for close trade (including volume for FUEL tracking)
+            const flipCloseVolume = closeSize * closeFillPrice;
+            const stats1 = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
             await storage.updateTradingBotStats(botId, {
               ...stats1,
               totalTrades: (stats1.totalTrades || 0) + 1,
+              totalVolume: (stats1.totalVolume || 0) + flipCloseVolume,
               lastTradeAt: new Date().toISOString(),
             });
           }
@@ -2747,14 +2751,15 @@ export async function registerRoutes(
         contractSize
       );
 
-      // Update bot stats
-      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+      // Update bot stats (including volume for FUEL tracking)
+      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
       await storage.updateTradingBotStats(botId, {
         ...stats,
         totalTrades: (stats.totalTrades || 0) + 1,
         winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
         losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
         totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
+        totalVolume: (stats.totalVolume || 0) + tradeNotional,
         lastTradeAt: new Date().toISOString(),
       });
 
@@ -3097,14 +3102,15 @@ export async function registerRoutes(
         contractSize
       );
 
-      // Update bot stats
-      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+      // Update bot stats (including volume for FUEL tracking)
+      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
       await storage.updateTradingBotStats(botId, {
         ...stats,
         totalTrades: (stats.totalTrades || 0) + 1,
         winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
         losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
         totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
+        totalVolume: (stats.totalVolume || 0) + userTradeNotional,
         lastTradeAt: new Date().toISOString(),
       });
 
