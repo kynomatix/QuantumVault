@@ -19,6 +19,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { 
   Zap, 
   Loader2, 
@@ -26,7 +31,10 @@ import {
   Copy, 
   ExternalLink, 
   AlertCircle, 
-  Sparkles
+  Sparkles,
+  ChevronDown,
+  Info,
+  TrendingUp
 } from 'lucide-react';
 
 interface TradingBot {
@@ -56,13 +64,18 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [isLoadingWebhookUrl, setIsLoadingWebhookUrl] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
   
   const [newBot, setNewBot] = useState({
     name: '',
     market: 'SOL-PERP',
     leverage: 1,
-    maxPositionSize: '',
+    investmentAmount: '',
   });
+  
+  // Calculate max position size (investment × leverage)
+  const investmentValue = parseFloat(newBot.investmentAmount) || 0;
+  const maxPositionSize = investmentValue * newBot.leverage;
   
   // Fetch agent balance when modal opens
   const fetchAgentBalanceOnOpen = async () => {
@@ -92,11 +105,12 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
     setCopiedField(null);
     setAgentBalance(null);
     setUserWebhookUrl(null);
+    setInfoOpen(false);
     setNewBot({
       name: '',
       market: 'SOL-PERP',
       leverage: 1,
-      maxPositionSize: '',
+      investmentAmount: '',
     });
   };
 
@@ -106,7 +120,8 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
       return;
     }
     
-    const fundingAmount = parseFloat(newBot.maxPositionSize) || 0;
+    // Investment amount is what gets deposited to the bot's subaccount
+    const fundingAmount = parseFloat(newBot.investmentAmount) || 0;
     const availableBalance = agentBalance ? parseFloat(agentBalance) : 0;
     
     // Validate funding amount if provided
@@ -145,14 +160,14 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
       
       // Step 2: If funding amount provided, deposit to the bot's subaccount
       if (fundingAmount > 0) {
-        // First update bot settings
+        // First update bot settings - maxPositionSize = investment × leverage
         const settingsRes = await fetch(`/api/trading-bots/${bot.id}?wallet=${walletAddress}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify({ 
             leverage: newBot.leverage,
-            maxPositionSize: fundingAmount,
+            maxPositionSize: fundingAmount * newBot.leverage,
           }),
         });
         
@@ -160,7 +175,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
           console.error('Failed to update bot settings, but bot was created');
         }
         
-        // Then deposit to the bot's Drift subaccount
+        // Then deposit the investment amount to the bot's Drift subaccount
         const depositRes = await fetch('/api/agent/drift-deposit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -171,7 +186,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
         if (depositRes.ok) {
           toast({ 
             title: 'Bot created and funded!', 
-            description: `Deposited $${fundingAmount.toFixed(2)} with ${newBot.leverage}x leverage` 
+            description: `Invested $${fundingAmount.toFixed(2)} with ${newBot.leverage}x leverage = $${(fundingAmount * newBot.leverage).toFixed(2)} max position` 
           });
         } else {
           const err = await depositRes.json();
@@ -302,25 +317,25 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="max-position-size">Max Position Size (USDC)</Label>
+          <Label htmlFor="investment-amount">Investment Amount (USDC)</Label>
           <div className="flex gap-2">
             <Input
-              id="max-position-size"
+              id="investment-amount"
               type="number"
               placeholder="100"
-              value={newBot.maxPositionSize}
-              onChange={(e) => setNewBot({ ...newBot, maxPositionSize: e.target.value })}
+              value={newBot.investmentAmount}
+              onChange={(e) => setNewBot({ ...newBot, investmentAmount: e.target.value })}
               className="font-mono flex-1"
-              data-testid="input-max-position-size"
+              data-testid="input-investment-amount"
             />
             <Button
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => agentBalance && setNewBot({ ...newBot, maxPositionSize: agentBalance })}
+              onClick={() => agentBalance && setNewBot({ ...newBot, investmentAmount: agentBalance })}
               disabled={!agentBalance || parseFloat(agentBalance) <= 0}
               className="px-3"
-              data-testid="button-max-position"
+              data-testid="button-max-investment"
             >
               Max
             </Button>
@@ -335,6 +350,57 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
             )}
           </p>
         </div>
+
+        {investmentValue > 0 && (
+          <div className="p-3 rounded-lg bg-gradient-to-r from-primary/10 to-accent/10 border border-primary/20">
+            <div className="flex items-center gap-2 text-sm">
+              <TrendingUp className="w-4 h-4 text-primary" />
+              <span className="text-muted-foreground">Max Position Size:</span>
+              <span className="font-bold text-lg text-primary">
+                ${maxPositionSize.toFixed(2)}
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              ${investmentValue.toFixed(2)} investment × {newBot.leverage}x leverage
+            </p>
+          </div>
+        )}
+
+        <Collapsible open={infoOpen} onOpenChange={setInfoOpen}>
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="sm" className="w-full justify-between text-muted-foreground hover:text-foreground">
+              <span className="flex items-center gap-2">
+                <Info className="w-4 h-4" />
+                How TradingView signals work
+              </span>
+              <ChevronDown className={`w-4 h-4 transition-transform ${infoOpen ? 'rotate-180' : ''}`} />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="mt-2 p-3 rounded-lg bg-muted/50 text-sm space-y-3">
+              <div>
+                <p className="font-medium mb-1">Signal to Trade Mapping</p>
+                <p className="text-muted-foreground text-xs">
+                  TradingView sends a dollar value in its signals. This value is treated as a <span className="font-medium text-foreground">percentage of your Max Position Size</span>.
+                </p>
+              </div>
+              <div className="bg-background/50 p-2 rounded border">
+                <p className="text-xs font-medium mb-1">Example with $500 Max Position:</p>
+                <ul className="text-xs text-muted-foreground space-y-1">
+                  <li>• Signal sends $33 → Opens <span className="font-medium text-foreground">33%</span> = $165 position</li>
+                  <li>• Signal sends $50 → Opens <span className="font-medium text-foreground">50%</span> = $250 position</li>
+                  <li>• Signal sends $100 → Opens <span className="font-medium text-foreground">100%</span> = $500 position</li>
+                </ul>
+              </div>
+              <div>
+                <p className="font-medium mb-1">Pyramiding Strategy</p>
+                <p className="text-muted-foreground text-xs">
+                  With 3 pyramid orders, set Initial Capital: 100 and Order Size: 33.33 in TradingView. Each signal will add ~33% until fully positioned.
+                </p>
+              </div>
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
 
       </div>
 
