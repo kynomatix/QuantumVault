@@ -377,28 +377,42 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
             </Button>
           </CollapsibleTrigger>
           <CollapsibleContent>
-            <div className="mt-2 p-3 rounded-lg bg-muted/50 text-sm space-y-3">
-              <div>
-                <p className="font-medium mb-1">Signal to Trade Mapping</p>
-                <p className="text-muted-foreground text-xs">
-                  TradingView sends a dollar value in its signals. This value is treated as a <span className="font-medium text-foreground">percentage of your Max Position Size</span>.
-                </p>
-              </div>
-              <div className="bg-background/50 p-2 rounded border">
-                <p className="text-xs font-medium mb-1">Example with $500 Max Position:</p>
-                <ul className="text-xs text-muted-foreground space-y-1">
-                  <li>• Signal sends $33 → Opens <span className="font-medium text-foreground">33%</span> = $165 position</li>
-                  <li>• Signal sends $50 → Opens <span className="font-medium text-foreground">50%</span> = $250 position</li>
-                  <li>• Signal sends $100 → Opens <span className="font-medium text-foreground">100%</span> = $500 position</li>
-                </ul>
-              </div>
-              <div>
-                <p className="font-medium mb-1">Pyramiding Strategy</p>
-                <p className="text-muted-foreground text-xs">
-                  With 3 pyramid orders, set Initial Capital: 100 and Order Size: 33.33 in TradingView. Each signal will add ~33% until fully positioned.
-                </p>
-              </div>
-            </div>
+            {(() => {
+              // Use actual max position size if user entered values, otherwise show $500 example
+              const exampleMax = maxPositionSize > 0 ? maxPositionSize : 500;
+              const isCustom = maxPositionSize > 0;
+              
+              return (
+                <div className="mt-2 p-3 rounded-lg bg-muted/50 text-sm space-y-3">
+                  <div>
+                    <p className="font-medium mb-1">Signal to Trade Mapping</p>
+                    <p className="text-muted-foreground text-xs">
+                      TradingView sends a dollar value in its signals. This value is treated as a <span className="font-medium text-foreground">percentage of your Max Position Size</span>.
+                    </p>
+                  </div>
+                  <div className="bg-background/50 p-2 rounded border">
+                    <p className="text-xs font-medium mb-1">
+                      {isCustom ? (
+                        <>With your <span className="text-primary">${exampleMax.toFixed(2)}</span> Max Position:</>
+                      ) : (
+                        <>Example with $500 Max Position:</>
+                      )}
+                    </p>
+                    <ul className="text-xs text-muted-foreground space-y-1">
+                      <li>• Signal sends $33 → Opens <span className="font-medium text-foreground">33%</span> = <span className={isCustom ? "text-primary font-medium" : ""}>${(exampleMax * 0.33).toFixed(2)}</span> position</li>
+                      <li>• Signal sends $50 → Opens <span className="font-medium text-foreground">50%</span> = <span className={isCustom ? "text-primary font-medium" : ""}>${(exampleMax * 0.50).toFixed(2)}</span> position</li>
+                      <li>• Signal sends $100 → Opens <span className="font-medium text-foreground">100%</span> = <span className={isCustom ? "text-primary font-medium" : ""}>${exampleMax.toFixed(2)}</span> position</li>
+                    </ul>
+                  </div>
+                  <div>
+                    <p className="font-medium mb-1">Pyramiding Strategy</p>
+                    <p className="text-muted-foreground text-xs">
+                      With 3 pyramid orders, set Initial Capital: 100 and Order Size: 33.33 in TradingView. Each signal will add ~33% (${(exampleMax * 0.3333).toFixed(2)}) until fully positioned.
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
           </CollapsibleContent>
         </Collapsible>
 
