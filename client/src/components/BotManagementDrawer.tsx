@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { useLocation } from 'wouter';
 import { useToast } from '@/hooks/use-toast';
 import {
   Sheet,
@@ -135,6 +134,7 @@ interface BotManagementDrawerProps {
   onClose: () => void;
   walletAddress: string;
   onBotUpdated: () => void;
+  onShowWalletTab?: () => void;
 }
 
 export function BotManagementDrawer({
@@ -143,9 +143,9 @@ export function BotManagementDrawer({
   onClose,
   walletAddress,
   onBotUpdated,
+  onShowWalletTab,
 }: BotManagementDrawerProps) {
   const { toast } = useToast();
-  const [, navigate] = useLocation();
 
   const [activeTab, setActiveTab] = useState('overview');
   const [botBalance, setBotBalance] = useState<number>(0);
@@ -438,7 +438,9 @@ export function BotManagementDrawer({
 
   const handleNavigateToWalletManagement = () => {
     onClose();
-    navigate('/wallet');
+    if (onShowWalletTab) {
+      onShowWalletTab();
+    }
   };
 
   const handlePauseResume = async () => {

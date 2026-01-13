@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { useLocation } from 'wouter';
 import { ArrowDownToLine, ArrowUpFromLine, Loader2, Wallet, Bot, TrendingUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useWallet } from '@/hooks/useWallet';
@@ -10,8 +9,11 @@ interface CapitalPool {
   totalEquity: number;
 }
 
-export function DepositWithdraw() {
-  const [, navigate] = useLocation();
+interface DepositWithdrawProps {
+  onShowWalletTab?: () => void;
+}
+
+export function DepositWithdraw({ onShowWalletTab }: DepositWithdrawProps) {
   const { connected, publicKeyString } = useWallet();
   
   const [capitalPool, setCapitalPool] = useState<CapitalPool | null>(null);
@@ -99,7 +101,7 @@ export function DepositWithdraw() {
               variant="outline"
               size="sm"
               className="flex-1"
-              onClick={() => navigate('/wallet')}
+              onClick={() => onShowWalletTab?.()}
               data-testid="button-deposit"
             >
               <ArrowDownToLine className="w-4 h-4 mr-2" />
@@ -109,7 +111,7 @@ export function DepositWithdraw() {
               variant="outline"
               size="sm"
               className="flex-1"
-              onClick={() => navigate('/wallet')}
+              onClick={() => onShowWalletTab?.()}
               data-testid="button-withdraw"
             >
               <ArrowUpFromLine className="w-4 h-4 mr-2" />

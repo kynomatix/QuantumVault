@@ -1804,6 +1804,7 @@ export default function AppPage() {
         onBotUpdated={() => {
           refetchBots();
         }}
+        onShowWalletTab={() => setActiveNav('wallet')}
       />
 
       <CreateBotModal

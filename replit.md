@@ -27,6 +27,9 @@ Preferred communication style: Simple, everyday language.
     - **Position Flip Detection**: Signals in the opposite direction trigger a two-step process: close existing position (using actual on-chain size), then open a new one.
     - **Close Order Precision**: Uses `closePerpPosition()` without explicit size, relying on DriftClient to query exact BN values, preventing float precision loss. Includes graceful handling for already closed positions and a dust cleanup retry loop.
 - **Bot Lifecycle Management**: Pausing a bot (`isActive: false`) closes open positions. Bot deletion includes safety checks on agent wallet balance and an auto-sweep mechanism for funds.
+- **Bot Deletion Safety (Jan 2026 Fix)**: Bot deletion correctly checks the AGENT wallet address for Drift balance before deletion. Force delete auto-sweeps funds from subaccounts to main account. Guards prevent deletion if wallet data is missing.
+- **Single Page Architecture**: All functionality is under `/app` with tab-based navigation (Dashboard, Bots, Wallet, Leaderboard, Settings). Only `/` (landing) and `/app` routes exist.
+- **Drift Account Link**: Settings tab includes "View on Drift" button that opens `https://app.drift.trade/portfolio/accounts?authority={agentWalletAddress}` for on-chain balance verification.
 - **Real-Time Data**: Tracks running positions, PnL, and fees. Uses `PositionService` for all position queries, leveraging SDK's `decodeUser` for reliable, stateless account parsing to avoid Drift SDK WebSocket memory leaks.
 - **Account Health Metrics**: Uses SDK `decodeUser` for accurate account health, collateral, and liquidation price estimates, with conservative calculations for safety.
 - **Webhook Deduplication**: `webhook_logs` table prevents duplicate processing of TradingView signals.
