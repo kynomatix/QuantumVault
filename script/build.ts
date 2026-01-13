@@ -52,8 +52,11 @@ async function buildAll() {
     bundle: true,
     format: "cjs",
     outfile: "dist/index.cjs",
+    target: "node20",
     define: {
       "process.env.NODE_ENV": '"production"',
+      "import.meta.url": '""',
+      "__ESBUILD_CJS_BUNDLE__": "true",
     },
     minify: true,
     external: externals,

@@ -9,12 +9,28 @@ import * as anchor from '@coral-xyz/anchor';
 import { getAgentKeypair } from './agent-wallet';
 import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+// ESM/CJS compatibility for bundled production builds
+// In esbuild CJS bundle, __ESBUILD_CJS_BUNDLE__ is defined as true
+declare const __ESBUILD_CJS_BUNDLE__: boolean | undefined;
 
-// Drift SDK components loaded individually via require() from CJS files
-// DriftClient fails due to ESM/CJS interop issues, so we build transactions manually with Anchor
-const requireSync = createRequire(import.meta.url);
+let currentFilename: string;
+let currentDirname: string;
+let requireSync: NodeRequire;
+
+// Check if we're running in esbuild CJS bundle or native ESM
+const isBundledCJS = typeof __ESBUILD_CJS_BUNDLE__ !== 'undefined' && __ESBUILD_CJS_BUNDLE__;
+
+if (isBundledCJS) {
+  // CJS bundle - use module.createRequire and process.cwd for paths
+  currentFilename = '';
+  currentDirname = process.cwd();
+  requireSync = createRequire(`file://${process.cwd()}/`);
+} else {
+  // ESM environment (dev mode) - derive from import.meta
+  currentFilename = fileURLToPath(import.meta.url);
+  currentDirname = dirname(currentFilename);
+  requireSync = createRequire(import.meta.url);
+}
 
 // Load SDK components - try browser build for DriftClient (different bundling)
 let sdkTypes: any = null;
