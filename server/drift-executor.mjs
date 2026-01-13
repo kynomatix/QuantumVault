@@ -155,11 +155,12 @@ async function executeTrade(command) {
       console.error('[Executor] Could not get fill price');
     }
     
-    await driftClient.unsubscribe();
+    // Skip unsubscribe - subprocess exits anyway and SDK's cleanup floods logs with errors
+    // The OS will forcefully close WebSocket connections when process exits
     
     return { success: true, signature: txSig, txSignature: txSig, fillPrice };
   } catch (error) {
-    await driftClient.unsubscribe().catch(() => {});
+    // Don't try to unsubscribe on error either - just let process exit
     throw error;
   }
 }
@@ -184,7 +185,6 @@ async function closePosition(command) {
     const perpPosition = user.getPerpPosition(marketIndex);
     
     if (!perpPosition || perpPosition.baseAssetAmount.isZero()) {
-      await driftClient.unsubscribe();
       console.error(`[Executor] No position to close for market ${marketIndex}`);
       return { success: true, signature: null }; // No position to close
     }
@@ -200,11 +200,9 @@ async function closePosition(command) {
     const txSig = await driftClient.closePosition(marketIndex);
     
     console.error(`[Executor] Position closed via SDK closePosition: ${txSig}`);
-    await driftClient.unsubscribe();
     
     return { success: true, signature: txSig };
   } catch (error) {
-    await driftClient.unsubscribe().catch(() => {});
     throw error;
   }
 }
@@ -243,11 +241,9 @@ async function deleteSubaccount(command) {
     const txSig = await driftClient.deleteUser(subAccountId);
     
     console.error(`[Executor] Subaccount ${subAccountId} deleted, rent reclaimed: ${txSig}`);
-    await driftClient.unsubscribe();
     
     return { success: true, signature: txSig };
   } catch (error) {
-    await driftClient.unsubscribe().catch(() => {});
     throw error;
   }
 }

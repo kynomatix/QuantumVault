@@ -155,11 +155,9 @@ async function executeTrade(command) {
     } catch (e) {
       console.error("[Executor] Could not get fill price");
     }
-    await driftClient.unsubscribe();
+    // Skip unsubscribe - subprocess exits anyway and SDK's cleanup floods logs with errors
     return { success: true, signature: txSig, txSignature: txSig, fillPrice };
   } catch (error) {
-    await driftClient.unsubscribe().catch(() => {
-    });
     throw error;
   }
 }
@@ -181,7 +179,6 @@ async function closePosition(command) {
       const user = driftClient.getUser();
       const perpPosition = user.getPerpPosition(marketIndex);
       if (!perpPosition || perpPosition.baseAssetAmount.isZero()) {
-        await driftClient.unsubscribe();
         return { success: true, signature: null };
       }
       isLong = perpPosition.baseAssetAmount.gt(new BN(0));
@@ -199,11 +196,8 @@ async function closePosition(command) {
       reduceOnly: true
     });
     console.error(`[Executor] Position closed: ${txSig}`);
-    await driftClient.unsubscribe();
     return { success: true, signature: txSig };
   } catch (error) {
-    await driftClient.unsubscribe().catch(() => {
-    });
     throw error;
   }
 }
