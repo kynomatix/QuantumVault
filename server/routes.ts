@@ -3151,6 +3151,195 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No valid action found", received: payload });
       }
 
+      // CLOSE SIGNAL DETECTION: Check if this is a position close signal (SL/TP)
+      // TradingView sends strategy.position_size = 0 when closing a position
+      const isCloseSignal = strategyPositionSize !== null && 
+        (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
+      
+      console.log(`[User Webhook] Signal analysis: action=${action}, contracts=${contracts}, strategyPositionSize=${strategyPositionSize}, isCloseSignal=${isCloseSignal}`);
+      
+      // CLOSE SIGNAL HANDLING - mirrors logic from /api/webhook/tradingview/:botId
+      if (isCloseSignal) {
+        console.log(`[User Webhook] *** CLOSE SIGNAL DETECTED *** (strategyPositionSize=${strategyPositionSize}) - Entering close handler`);
+        
+        try {
+          // Get wallet for execution
+          const wallet = await storage.getWallet(walletAddress);
+          if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+            await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured for close", processed: true });
+            return res.status(400).json({ error: "Agent wallet not configured" });
+          }
+          
+          const subAccountId = bot.driftSubaccountId ?? 0;
+          console.log(`[User Webhook] Close signal: querying on-chain position for bot=${bot.name}, market=${bot.market}, subaccount=${subAccountId}`);
+          
+          // Query on-chain position directly
+          let onChainPosition;
+          try {
+            onChainPosition = await PositionService.getPositionForExecution(
+              botId,
+              wallet.agentPublicKey,
+              subAccountId,
+              bot.market,
+              wallet.agentPrivateKeyEncrypted
+            );
+            console.log(`[User Webhook] On-chain position query result: size=${onChainPosition.size}, side=${onChainPosition.side}, entryPrice=${onChainPosition.entryPrice}`);
+          } catch (onChainErr) {
+            console.error(`[User Webhook] CRITICAL: Failed to query on-chain position for close:`, onChainErr);
+            await storage.updateWebhookLog(log.id, { 
+              errorMessage: "Failed to query on-chain position - cannot safely close", 
+              processed: true 
+            });
+            return res.status(500).json({ error: "Failed to query on-chain position" });
+          }
+          
+          if (onChainPosition.side === 'FLAT' || Math.abs(onChainPosition.size) < 0.0001) {
+            console.log(`[User Webhook] Close signal SKIPPED - no on-chain position found for bot ${bot.name} on ${bot.market} (subaccount ${subAccountId})`);
+            await storage.updateWebhookLog(log.id, { 
+              errorMessage: "Close signal ignored - no on-chain position", 
+              processed: true 
+            });
+            return res.status(200).json({ 
+              status: "skipped", 
+              reason: "No on-chain position to close - this may be a stale SL/TP signal" 
+            });
+          }
+          
+          // Execute close using closePerpPosition
+          const currentPositionSize = onChainPosition.size;
+          console.log(`[User Webhook] *** EXECUTING CLOSE *** ON-CHAIN position: ${onChainPosition.side} ${Math.abs(currentPositionSize)} contracts on ${bot.market}`);
+          
+          const closeSide = onChainPosition.side === 'LONG' ? 'short' : 'long';
+          const closeSize = Math.abs(currentPositionSize);
+          
+          // Create trade record for close
+          const closeTrade = await storage.createBotTrade({
+            tradingBotId: botId,
+            walletAddress: bot.walletAddress,
+            market: bot.market,
+            side: closeSide.toUpperCase(),
+            size: String(closeSize),
+            price: signalPrice,
+            status: "pending",
+            webhookPayload: payload,
+          });
+          
+          // Execute close
+          const result = await closePerpPosition(
+            wallet.agentPrivateKeyEncrypted,
+            bot.market,
+            subAccountId
+          );
+          
+          if (result.success && !result.signature) {
+            console.log(`[User Webhook] closePerpPosition returned success but no signature - position was already closed`);
+            await storage.updateBotTrade(closeTrade.id, { 
+              status: "executed",
+              txSignature: null,
+              errorMessage: "Position already closed (no trade executed)"
+            });
+            await storage.updateWebhookLog(log.id, { 
+              processed: true, 
+              tradeExecuted: false,
+              errorMessage: "Close signal processed - position was already flat"
+            });
+            return res.json({
+              status: "success",
+              type: "close",
+              trade: closeTrade.id,
+              message: "Position was already closed (no trade executed)",
+            });
+          }
+          
+          if (result.success && result.signature) {
+            const closeFillPrice = parseFloat(signalPrice) || 0;
+            const closeNotional = closeSize * closeFillPrice;
+            const closeFee = closeNotional * 0.0005;
+            
+            // Calculate PnL
+            const closeEntryPrice = onChainPosition.entryPrice || 0;
+            let closeTradePnl = 0;
+            if (closeEntryPrice > 0 && closeFillPrice > 0) {
+              if (closeSide === 'short') {
+                closeTradePnl = (closeFillPrice - closeEntryPrice) * closeSize - closeFee;
+              } else {
+                closeTradePnl = (closeEntryPrice - closeFillPrice) * closeSize - closeFee;
+              }
+              console.log(`[User Webhook] Close PnL: entry=$${closeEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, pnl=$${closeTradePnl.toFixed(4)}`);
+            }
+            
+            await storage.updateBotTrade(closeTrade.id, {
+              status: "executed",
+              txSignature: result.signature,
+              price: closeFillPrice.toString(),
+              fee: closeFee.toString(),
+              pnl: closeTradePnl.toString(),
+            });
+            
+            // Sync position from on-chain (this will clear the position since we just closed it)
+            await syncPositionFromOnChain(
+              botId,
+              bot.walletAddress,
+              wallet.agentPublicKey,
+              subAccountId,
+              bot.market,
+              closeTrade.id,
+              closeFee,
+              closeFillPrice,
+              closeSide,
+              closeSize
+            );
+            
+            // Update bot stats
+            const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
+            await storage.updateTradingBotStats(botId, {
+              ...stats,
+              totalTrades: (stats.totalTrades || 0) + 1,
+              winningTrades: closeTradePnl > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
+              losingTrades: closeTradePnl < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
+              totalPnl: (stats.totalPnl || 0) + closeTradePnl,
+              totalVolume: (stats.totalVolume || 0) + closeNotional,
+              lastTradeAt: new Date().toISOString(),
+            });
+            
+            await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
+            
+            return res.json({
+              status: "success",
+              type: "close",
+              trade: closeTrade.id,
+              txSignature: result.signature,
+              closedSize: closeSize,
+              pnl: closeTradePnl,
+            });
+          }
+          
+          // Close failed
+          console.error(`[User Webhook] Close order failed:`, result.error);
+          await storage.updateBotTrade(closeTrade.id, {
+            status: "failed",
+            txSignature: null,
+            errorMessage: result.error || "Close order failed",
+          });
+          await storage.updateWebhookLog(log.id, { 
+            errorMessage: result.error || "Close order failed", 
+            processed: true 
+          });
+          return res.status(500).json({ error: result.error || "Close order failed" });
+          
+        } catch (closeHandlerError: any) {
+          console.error(`[User Webhook] Close handler error:`, closeHandlerError);
+          await storage.updateWebhookLog(log.id, { 
+            errorMessage: closeHandlerError.message || "Close signal processing failed", 
+            processed: true 
+          });
+          return res.status(500).json({ 
+            error: "Close signal processing failed", 
+            details: closeHandlerError.message 
+          });
+        }
+      }
+
       // Create trade record
       const trade = await storage.createBotTrade({
         tradingBotId: botId,
