@@ -47,6 +47,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from "@/components/ui/sheet";
 import { BotManagementDrawer } from '@/components/BotManagementDrawer';
 import { CreateBotModal } from '@/components/CreateBotModal';
 import { TradeHistoryModal } from '@/components/TradeHistoryModal';
@@ -893,123 +900,142 @@ export default function AppPage() {
             >
               <Menu className="w-5 h-5" />
             </button>
-            <div className="relative hidden sm:block">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-              <Input 
-                placeholder="Search markets..." 
-                className="pl-9 w-64 bg-muted/30 border-border/50"
-                data-testid="input-search"
-              />
-            </div>
           </div>
           <div className="flex items-center gap-2">
-            <div className="relative">
-              <button 
-                className="p-2 hover:bg-muted rounded-lg relative" 
-                data-testid="button-notifications"
-                onClick={() => setNotificationDropdownOpen(!notificationDropdownOpen)}
-              >
-                <Bell className="w-5 h-5 text-muted-foreground" />
-                {!telegramConnected && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-amber-500 rounded-full" />
-                )}
-              </button>
-              
-              {notificationDropdownOpen && (
-                <div className="absolute right-0 top-full mt-2 w-80 bg-card border border-border rounded-lg shadow-lg z-50">
-                  <div className="p-4 border-b border-border">
-                    <div className="flex items-center justify-between">
-                      <h3 className="font-semibold">Notifications</h3>
-                      <button 
-                        onClick={() => setNotificationDropdownOpen(false)}
-                        className="text-muted-foreground hover:text-foreground"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                  
-                  <div className="p-4 space-y-4">
-                    {!telegramConnected ? (
-                      <div className="text-center py-4">
-                        <Bell className="w-8 h-8 text-muted-foreground mx-auto mb-2" />
-                        <p className="text-sm font-medium">Telegram Not Connected</p>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          Connect Telegram to receive trade alerts
-                        </p>
-                        <p className="text-xs text-amber-600 mt-2">
-                          Coming soon
-                        </p>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-medium">Enable Notifications</span>
-                          <button
-                            onClick={() => handleSaveNotificationPrefs({ notificationsEnabled: !notificationsEnabled })}
-                            disabled={savingNotifications}
-                            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                              notificationsEnabled ? 'bg-primary' : 'bg-muted'
-                            }`}
-                          >
-                            <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                              notificationsEnabled ? 'translate-x-5' : 'translate-x-1'
-                            }`} />
-                          </button>
-                        </div>
-                        
-                        {notificationsEnabled && (
-                          <div className="space-y-3 pt-2 border-t border-border">
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm">Trade Executed</span>
-                              <button
-                                onClick={() => handleSaveNotificationPrefs({ notifyTradeExecuted: !notifyTradeExecuted })}
-                                disabled={savingNotifications}
-                                className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
-                                  notifyTradeExecuted ? 'bg-primary' : 'bg-muted'
-                                }`}
-                              >
-                                <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${
-                                  notifyTradeExecuted ? 'translate-x-3.5' : 'translate-x-0.5'
-                                }`} />
-                              </button>
-                            </div>
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm">Trade Failed</span>
-                              <button
-                                onClick={() => handleSaveNotificationPrefs({ notifyTradeFailed: !notifyTradeFailed })}
-                                disabled={savingNotifications}
-                                className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
-                                  notifyTradeFailed ? 'bg-primary' : 'bg-muted'
-                                }`}
-                              >
-                                <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${
-                                  notifyTradeFailed ? 'translate-x-3.5' : 'translate-x-0.5'
-                                }`} />
-                              </button>
-                            </div>
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm">Position Closed</span>
-                              <button
-                                onClick={() => handleSaveNotificationPrefs({ notifyPositionClosed: !notifyPositionClosed })}
-                                disabled={savingNotifications}
-                                className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
-                                  notifyPositionClosed ? 'bg-primary' : 'bg-muted'
-                                }`}
-                              >
-                                <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${
-                                  notifyPositionClosed ? 'translate-x-3.5' : 'translate-x-0.5'
-                                }`} />
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
+            <button 
+              className="p-2 hover:bg-muted rounded-lg relative" 
+              data-testid="button-notifications"
+              onClick={() => setNotificationDropdownOpen(true)}
+            >
+              <Bell className="w-5 h-5 text-muted-foreground" />
+              {!telegramConnected && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-amber-500 rounded-full" />
               )}
-            </div>
+            </button>
+            
+            <Sheet open={notificationDropdownOpen} onOpenChange={setNotificationDropdownOpen}>
+              <SheetContent side="right" className="w-full sm:max-w-md">
+                <SheetHeader>
+                  <SheetTitle>Notifications</SheetTitle>
+                  <SheetDescription>
+                    {telegramConnected 
+                      ? 'Your recent trade alerts and notifications' 
+                      : 'Connect Telegram to receive trade alerts'}
+                  </SheetDescription>
+                </SheetHeader>
+                
+                <div className="mt-6 space-y-6">
+                  {!telegramConnected ? (
+                    <div className="text-center py-8 px-4 bg-muted/30 rounded-lg border border-border/50">
+                      <Bell className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+                      <p className="text-lg font-medium">Telegram Not Connected</p>
+                      <p className="text-sm text-muted-foreground mt-2">
+                        Connect your Telegram account to receive instant trade alerts when your bots execute trades, close positions, or encounter errors.
+                      </p>
+                      <Button 
+                        variant="outline" 
+                        className="mt-4"
+                        onClick={() => {
+                          setNotificationDropdownOpen(false);
+                          setActiveNav('settings');
+                        }}
+                        data-testid="button-go-to-settings"
+                      >
+                        <Settings className="w-4 h-4 mr-2" />
+                        Configure in Settings
+                      </Button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="space-y-4">
+                        <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Preferences</h4>
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium">Enable Notifications</span>
+                            <button
+                              onClick={() => handleSaveNotificationPrefs({ notificationsEnabled: !notificationsEnabled })}
+                              disabled={savingNotifications}
+                              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                                notificationsEnabled ? 'bg-primary' : 'bg-muted'
+                              }`}
+                            >
+                              <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                                notificationsEnabled ? 'translate-x-5' : 'translate-x-1'
+                              }`} />
+                            </button>
+                          </div>
+                          
+                          {notificationsEnabled && (
+                            <div className="space-y-3 pl-4 border-l-2 border-border">
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <span className="text-sm">Trade Executed</span>
+                                  <p className="text-xs text-muted-foreground">When a bot opens a position</p>
+                                </div>
+                                <button
+                                  onClick={() => handleSaveNotificationPrefs({ notifyTradeExecuted: !notifyTradeExecuted })}
+                                  disabled={savingNotifications}
+                                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                                    notifyTradeExecuted ? 'bg-primary' : 'bg-muted'
+                                  }`}
+                                >
+                                  <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                                    notifyTradeExecuted ? 'translate-x-5' : 'translate-x-1'
+                                  }`} />
+                                </button>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <span className="text-sm">Trade Failed</span>
+                                  <p className="text-xs text-muted-foreground">When a trade fails with error</p>
+                                </div>
+                                <button
+                                  onClick={() => handleSaveNotificationPrefs({ notifyTradeFailed: !notifyTradeFailed })}
+                                  disabled={savingNotifications}
+                                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                                    notifyTradeFailed ? 'bg-primary' : 'bg-muted'
+                                  }`}
+                                >
+                                  <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                                    notifyTradeFailed ? 'translate-x-5' : 'translate-x-1'
+                                  }`} />
+                                </button>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <span className="text-sm">Position Closed</span>
+                                  <p className="text-xs text-muted-foreground">When a position closes with PnL</p>
+                                </div>
+                                <button
+                                  onClick={() => handleSaveNotificationPrefs({ notifyPositionClosed: !notifyPositionClosed })}
+                                  disabled={savingNotifications}
+                                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                                    notifyPositionClosed ? 'bg-primary' : 'bg-muted'
+                                  }`}
+                                >
+                                  <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                                    notifyPositionClosed ? 'translate-x-5' : 'translate-x-1'
+                                  }`} />
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      
+                      <div className="space-y-4">
+                        <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Recent Notifications</h4>
+                        <div className="text-center py-8 text-muted-foreground">
+                          <Bell className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                          <p className="text-sm">No notifications yet</p>
+                          <p className="text-xs mt-1">Notifications will appear here when your bots execute trades</p>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </SheetContent>
+            </Sheet>
             <button className="p-2 hover:bg-muted rounded-lg" data-testid="button-refresh">
               <RefreshCw className="w-5 h-5 text-muted-foreground" />
             </button>
@@ -1822,6 +1848,44 @@ export default function AppPage() {
                         </p>
                       </div>
                     )}
+
+                    <div className="border-t border-border/50 pt-6">
+                      <h3 className="font-display font-semibold mb-4">Notifications</h3>
+                      <div className="bg-muted/30 rounded-lg border border-border/50 p-4">
+                        <div className="flex items-start gap-3">
+                          <div className={`p-2 rounded-full ${telegramConnected ? 'bg-green-500/20' : 'bg-amber-500/20'}`}>
+                            <Bell className={`w-5 h-5 ${telegramConnected ? 'text-green-500' : 'text-amber-500'}`} />
+                          </div>
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2">
+                              <p className="font-medium">Telegram</p>
+                              {telegramConnected ? (
+                                <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full">Connected</span>
+                              ) : (
+                                <span className="text-xs px-2 py-0.5 bg-amber-500/20 text-amber-500 rounded-full">Not Connected</span>
+                              )}
+                            </div>
+                            <p className="text-sm text-muted-foreground mt-1">
+                              {telegramConnected 
+                                ? 'You will receive trade alerts via Telegram.'
+                                : 'Connect Telegram to receive instant trade alerts when your bots execute trades.'}
+                            </p>
+                            {!telegramConnected && (
+                              <div className="mt-3">
+                                <p className="text-xs text-muted-foreground mb-2">
+                                  Telegram connection is coming soon. Once available, you'll be able to:
+                                </p>
+                                <ul className="text-xs text-muted-foreground space-y-1 ml-4 list-disc">
+                                  <li>Receive instant alerts when trades execute</li>
+                                  <li>Get notified on trade failures</li>
+                                  <li>See position close summaries with PnL</li>
+                                </ul>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
 
                     <div className="border-t border-border/50 pt-6">
                       <Button 
