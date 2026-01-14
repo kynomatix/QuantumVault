@@ -288,7 +288,7 @@ export async function registerRoutes(
   // Telegram connection - prepare Telegram channel via Dialect API
   app.post("/api/telegram/connect", requireWallet, async (req, res) => {
     try {
-      const DIALECT_CLIENT_KEY = process.env.DIALECT_CLIENT_KEY;
+      const DIALECT_CLIENT_KEY = process.env.DIALECT_CLIENT_KEY || process.env.DIALECT_API_KEY;
       
       if (!DIALECT_CLIENT_KEY) {
         return res.status(503).json({ 
@@ -344,7 +344,7 @@ export async function registerRoutes(
   // Verify Telegram connection status
   app.get("/api/telegram/status", requireWallet, async (req, res) => {
     try {
-      const DIALECT_CLIENT_KEY = process.env.DIALECT_CLIENT_KEY;
+      const DIALECT_CLIENT_KEY = process.env.DIALECT_CLIENT_KEY || process.env.DIALECT_API_KEY;
       
       if (!DIALECT_CLIENT_KEY) {
         return res.json({ 
