@@ -1201,20 +1201,26 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      // If botId provided, verify ownership
+      // If botId provided, verify ownership and get subaccount
       let tradingBotId: string | null = null;
+      let subAccountId = 0; // Default to main account
       if (botId) {
         const bot = await storage.getTradingBotById(botId);
         if (!bot || bot.walletAddress !== req.walletAddress) {
           return res.status(403).json({ error: "Bot not found or not owned" });
         }
         tradingBotId = botId;
+        // Use bot's specific subaccount, not the main account
+        if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
+          subAccountId = bot.driftSubaccountId;
+        }
       }
 
       const result = await executeAgentDriftWithdraw(
         wallet.agentPublicKey,
         wallet.agentPrivateKeyEncrypted,
-        amount
+        amount,
+        subAccountId
       );
 
       if (!result.success) {
