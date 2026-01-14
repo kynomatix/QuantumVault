@@ -321,6 +321,7 @@ export async function registerRoutes(
         console.error('[Telegram] Dialect API error:', dialectResponse.status, errorText);
         return res.status(500).json({ 
           error: "Failed to prepare Telegram channel",
+          message: `Dialect API error: ${dialectResponse.status}. Please try again later.`,
           details: errorText 
         });
       }
@@ -339,7 +340,10 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("[Telegram] Connect error:", error);
-      res.status(500).json({ error: "Failed to connect Telegram" });
+      res.status(500).json({ 
+        error: "Failed to connect Telegram",
+        message: "An error occurred while connecting to Telegram. Please try again."
+      });
     }
   });
 
