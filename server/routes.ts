@@ -318,9 +318,9 @@ export async function registerRoutes(
 
       console.log('[Telegram] Using agent wallet:', agentAddress);
 
-      // Step 1: Get auth challenge from Dialect (uses Client Key for user-side auth)
-      console.log('[Telegram] Step 1: Getting auth challenge...');
-      const challengeRes = await fetch('https://alerts-api.dial.to/v2/auth/challenge', {
+      // Step 1: Prepare Solana auth challenge from Dialect
+      console.log('[Telegram] Step 1: Preparing auth challenge...');
+      const prepareAuthRes = await fetch('https://alerts-api.dial.to/v2/auth/solana/prepare', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -329,46 +329,47 @@ export async function registerRoutes(
         body: JSON.stringify({ walletAddress: agentAddress }),
       });
 
-      if (!challengeRes.ok) {
-        const err = await challengeRes.text();
-        console.error('[Telegram] Challenge failed:', challengeRes.status, err);
+      if (!prepareAuthRes.ok) {
+        const err = await prepareAuthRes.text();
+        console.error('[Telegram] Prepare auth failed:', prepareAuthRes.status, err);
         return res.status(500).json({ error: "Failed to get auth challenge", details: err });
       }
 
-      const challengeData = await challengeRes.json();
-      const message = challengeData.message;
-      console.log('[Telegram] Got challenge message');
+      const prepareAuthData = await prepareAuthRes.json();
+      const message = prepareAuthData.message;
+      console.log('[Telegram] Got challenge message:', message);
 
-      // Step 2: Sign the challenge with agent wallet
+      // Step 2: Sign the challenge with agent wallet using nacl
       console.log('[Telegram] Step 2: Signing challenge...');
+      const nacl = await import('tweetnacl');
+      const bs58 = await import('bs58');
       const messageBytes = new TextEncoder().encode(message);
-      const signature = agentKeypair.sign(messageBytes);
-      const signatureBase64 = Buffer.from(signature).toString('base64');
-      const messageBase64 = Buffer.from(messageBytes).toString('base64');
+      const signature = nacl.default.sign.detached(messageBytes, agentKeypair.secretKey);
+      const signatureBase58 = bs58.default.encode(signature);
+      console.log('[Telegram] Signature (first 20 chars):', signatureBase58.substring(0, 20));
 
-      // Step 3: Exchange signature for bearer token
-      console.log('[Telegram] Step 3: Getting bearer token...');
-      const tokenRes = await fetch('https://alerts-api.dial.to/v2/auth/token', {
+      // Step 3: Verify signature and get bearer token
+      console.log('[Telegram] Step 3: Verifying and getting bearer token...');
+      const verifyRes = await fetch('https://alerts-api.dial.to/v2/auth/solana/verify', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
           'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
         },
         body: JSON.stringify({
-          walletAddress: agentAddress,
-          signature: signatureBase64,
-          messageBase64: messageBase64,
+          message: message,
+          signature: signatureBase58,
         }),
       });
 
-      if (!tokenRes.ok) {
-        const err = await tokenRes.text();
-        console.error('[Telegram] Token exchange failed:', tokenRes.status, err);
+      if (!verifyRes.ok) {
+        const err = await verifyRes.text();
+        console.error('[Telegram] Verify failed:', verifyRes.status, err);
         return res.status(500).json({ error: "Failed to authenticate with Dialect", details: err });
       }
 
-      const tokenData = await tokenRes.json();
-      const bearerToken = tokenData.token || tokenData.accessToken;
+      const verifyData = await verifyRes.json();
+      const bearerToken = verifyData.token;
       console.log('[Telegram] Got bearer token');
 
       // Step 4: Prepare Telegram channel (uses Bearer token + Client Key)
