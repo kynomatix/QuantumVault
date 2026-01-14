@@ -221,6 +221,11 @@ export async function registerRoutes(
         xUsername: wallet.xUsername,
         defaultLeverage: wallet.defaultLeverage,
         slippageBps: wallet.slippageBps,
+        notificationsEnabled: wallet.notificationsEnabled ?? false,
+        notifyTradeExecuted: wallet.notifyTradeExecuted ?? true,
+        notifyTradeFailed: wallet.notifyTradeFailed ?? true,
+        notifyPositionClosed: wallet.notifyPositionClosed ?? true,
+        telegramConnected: wallet.telegramConnected ?? false,
       });
     } catch (error) {
       console.error("Get wallet settings error:", error);
@@ -230,7 +235,7 @@ export async function registerRoutes(
 
   app.put("/api/wallet/settings", requireWallet, async (req, res) => {
     try {
-      const { displayName, xUsername, defaultLeverage, slippageBps } = req.body;
+      const { displayName, xUsername, defaultLeverage, slippageBps, notificationsEnabled, notifyTradeExecuted, notifyTradeFailed, notifyPositionClosed } = req.body;
       
       const updates: any = {};
       if (displayName !== undefined) updates.displayName = displayName;
@@ -249,6 +254,10 @@ export async function registerRoutes(
         }
         updates.slippageBps = slippage;
       }
+      if (notificationsEnabled !== undefined) updates.notificationsEnabled = !!notificationsEnabled;
+      if (notifyTradeExecuted !== undefined) updates.notifyTradeExecuted = !!notifyTradeExecuted;
+      if (notifyTradeFailed !== undefined) updates.notifyTradeFailed = !!notifyTradeFailed;
+      if (notifyPositionClosed !== undefined) updates.notifyPositionClosed = !!notifyPositionClosed;
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ error: "No valid updates provided" });
@@ -263,6 +272,11 @@ export async function registerRoutes(
         xUsername: wallet.xUsername,
         defaultLeverage: wallet.defaultLeverage,
         slippageBps: wallet.slippageBps,
+        notificationsEnabled: wallet.notificationsEnabled ?? false,
+        notifyTradeExecuted: wallet.notifyTradeExecuted ?? true,
+        notifyTradeFailed: wallet.notifyTradeFailed ?? true,
+        notifyPositionClosed: wallet.notifyPositionClosed ?? true,
+        telegramConnected: wallet.telegramConnected ?? false,
       });
     } catch (error) {
       console.error("Update wallet settings error:", error);

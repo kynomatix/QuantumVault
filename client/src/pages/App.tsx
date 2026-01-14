@@ -125,6 +125,11 @@ export default function AppPage() {
   const [xUsername, setXUsername] = useState('');
   const [defaultLeverage, setDefaultLeverage] = useState('5');
   const [slippageBps, setSlippageBps] = useState('30');
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [notifyTradeExecuted, setNotifyTradeExecuted] = useState(true);
+  const [notifyTradeFailed, setNotifyTradeFailed] = useState(true);
+  const [notifyPositionClosed, setNotifyPositionClosed] = useState(true);
+  const [telegramConnected, setTelegramConnected] = useState(false);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
   const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
@@ -207,6 +212,11 @@ export default function AppPage() {
           setXUsername(data.xUsername || '');
           setDefaultLeverage(String(data.defaultLeverage || 5));
           setSlippageBps(String(data.slippageBps || 30));
+          setNotificationsEnabled(data.notificationsEnabled ?? false);
+          setNotifyTradeExecuted(data.notifyTradeExecuted ?? true);
+          setNotifyTradeFailed(data.notifyTradeFailed ?? true);
+          setNotifyPositionClosed(data.notifyPositionClosed ?? true);
+          setTelegramConnected(data.telegramConnected ?? false);
         }
       } catch (error) {
         console.error('Error loading settings:', error);
@@ -230,6 +240,10 @@ export default function AppPage() {
           xUsername,
           defaultLeverage: parseInt(defaultLeverage),
           slippageBps: parseInt(slippageBps),
+          notificationsEnabled,
+          notifyTradeExecuted,
+          notifyTradeFailed,
+          notifyPositionClosed,
         }),
       });
       
@@ -1677,6 +1691,110 @@ export default function AppPage() {
                         </p>
                       </div>
                     )}
+
+                    <div className="border-t border-border/50 pt-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="font-display font-semibold">Notifications</h3>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground">
+                            {telegramConnected ? 'Telegram connected' : 'Connect Telegram to enable'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setNotificationsEnabled(!notificationsEnabled)}
+                            disabled={!telegramConnected}
+                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                              notificationsEnabled && telegramConnected
+                                ? 'bg-primary' 
+                                : 'bg-muted'
+                            } ${!telegramConnected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                            data-testid="toggle-notifications"
+                          >
+                            <span
+                              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                notificationsEnabled && telegramConnected ? 'translate-x-6' : 'translate-x-1'
+                              }`}
+                            />
+                          </button>
+                        </div>
+                      </div>
+                      
+                      {!telegramConnected && (
+                        <div className="bg-muted/30 border border-border/50 rounded-lg p-4 mb-4">
+                          <div className="flex items-start gap-3">
+                            <Bell className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
+                            <div>
+                              <p className="text-sm font-medium">Get trade alerts on Telegram</p>
+                              <p className="text-sm text-muted-foreground mt-1">
+                                Receive instant notifications when your bots execute trades, close positions, or encounter errors.
+                              </p>
+                              <p className="text-xs text-muted-foreground mt-2 italic">
+                                Telegram connection coming soon - notifications will be sent to your connected Telegram account.
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      
+                      {telegramConnected && notificationsEnabled && (
+                        <div className="space-y-3 mb-4">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="text-sm font-medium">Trade Executed</p>
+                              <p className="text-xs text-muted-foreground">When a bot successfully opens a position</p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setNotifyTradeExecuted(!notifyTradeExecuted)}
+                              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                                notifyTradeExecuted ? 'bg-primary' : 'bg-muted'
+                              }`}
+                              data-testid="toggle-notify-trade-executed"
+                            >
+                              <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                                notifyTradeExecuted ? 'translate-x-5' : 'translate-x-1'
+                              }`} />
+                            </button>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="text-sm font-medium">Trade Failed</p>
+                              <p className="text-xs text-muted-foreground">When a trade fails with an error</p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setNotifyTradeFailed(!notifyTradeFailed)}
+                              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                                notifyTradeFailed ? 'bg-primary' : 'bg-muted'
+                              }`}
+                              data-testid="toggle-notify-trade-failed"
+                            >
+                              <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                                notifyTradeFailed ? 'translate-x-5' : 'translate-x-1'
+                              }`} />
+                            </button>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="text-sm font-medium">Position Closed</p>
+                              <p className="text-xs text-muted-foreground">When a position is closed with PnL</p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setNotifyPositionClosed(!notifyPositionClosed)}
+                              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                                notifyPositionClosed ? 'bg-primary' : 'bg-muted'
+                              }`}
+                              data-testid="toggle-notify-position-closed"
+                            >
+                              <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                                notifyPositionClosed ? 'translate-x-5' : 'translate-x-1'
+                              }`} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
 
                     <div className="border-t border-border/50 pt-6">
                       <h3 className="font-display font-semibold mb-4">Trading Defaults</h3>

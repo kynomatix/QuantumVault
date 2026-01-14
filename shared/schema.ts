@@ -32,6 +32,12 @@ export const wallets = pgTable("wallets", {
   agentPublicKey: text("agent_public_key"),
   agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),
   userWebhookSecret: text("user_webhook_secret"),
+  notificationsEnabled: boolean("notifications_enabled").default(false),
+  notifyTradeExecuted: boolean("notify_trade_executed").default(true),
+  notifyTradeFailed: boolean("notify_trade_failed").default(true),
+  notifyPositionClosed: boolean("notify_position_closed").default(true),
+  telegramConnected: boolean("telegram_connected").default(false),
+  dialectAddress: text("dialect_address"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   lastSeen: timestamp("last_seen").defaultNow().notNull(),
 });
