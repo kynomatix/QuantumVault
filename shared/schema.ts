@@ -173,6 +173,7 @@ export const equityEvents = pgTable("equity_events", {
   tradingBotId: varchar("trading_bot_id").references(() => tradingBots.id, { onDelete: "set null" }),
   eventType: text("event_type").notNull(),
   amount: decimal("amount", { precision: 20, scale: 6 }).notNull(),
+  assetType: text("asset_type").notNull().default('USDC'),
   txSignature: text("tx_signature"),
   balanceAfter: decimal("balance_after", { precision: 20, scale: 6 }),
   notes: text("notes"),

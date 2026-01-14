@@ -10,6 +10,7 @@ interface EquityEvent {
   tradingBotId: string | null;
   eventType: string;
   amount: string;
+  assetType: string;
   txSignature: string | null;
   balanceAfter: string | null;
   notes: string | null;
@@ -46,14 +47,19 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
     fetchEvents();
   }, [walletAddress]);
 
-  const formatEventType = (type: string) => {
+  const formatEventType = (type: string, assetType: string) => {
     switch (type) {
       case 'agent_deposit': return 'Deposit to Agent';
       case 'agent_withdraw': return 'Withdraw from Agent';
       case 'drift_deposit': return 'Deposit to Bot';
       case 'drift_withdraw': return 'Withdraw from Bot';
+      case 'sol_deposit': return 'SOL Deposit (Gas)';
       default: return type.replace(/_/g, ' ');
     }
+  };
+
+  const getAssetLabel = (assetType: string | undefined | null) => {
+    return assetType === 'SOL' ? 'SOL' : 'USDC';
   };
 
   const isPositive = (amount: string) => parseFloat(amount) > 0;
@@ -98,14 +104,14 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
                     <ArrowUpFromLine className="h-4 w-4 text-orange-500" />
                   )}
                   <div>
-                    <p className="text-sm font-medium">{formatEventType(event.eventType)}</p>
+                    <p className="text-sm font-medium">{formatEventType(event.eventType, event.assetType)}</p>
                     <p className="text-xs text-muted-foreground">
                       {format(new Date(event.createdAt), 'MMM d, yyyy h:mm a')}
                     </p>
                   </div>
                 </div>
                 <span className={`font-mono text-sm ${isPositive(event.amount) ? 'text-green-500' : 'text-orange-500'}`}>
-                  {isPositive(event.amount) ? '+' : ''}{parseFloat(event.amount).toFixed(2)} USDC
+                  {isPositive(event.amount) ? '+' : ''}{parseFloat(event.amount).toFixed(event.assetType === 'SOL' ? 4 : 2)} {getAssetLabel(event.assetType)}
                 </span>
               </div>
             ))}

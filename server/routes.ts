@@ -1230,6 +1230,37 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/agent/confirm-sol-deposit", requireWallet, async (req, res) => {
+    try {
+      const { amount, txSignature } = req.body;
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+      if (!txSignature || typeof txSignature !== 'string' || txSignature.length < 20) {
+        return res.status(400).json({ error: "Valid transaction signature required" });
+      }
+
+      const existingEvents = await storage.getEquityEvents(req.walletAddress!, 100);
+      if (existingEvents.some(e => e.txSignature === txSignature)) {
+        return res.json({ success: true, duplicate: true });
+      }
+
+      await storage.createEquityEvent({
+        walletAddress: req.walletAddress!,
+        eventType: 'sol_deposit',
+        amount: String(amount),
+        assetType: 'SOL',
+        txSignature,
+        notes: 'SOL deposit to agent wallet for gas',
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Confirm SOL deposit error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   app.get("/api/equity-events", requireWallet, async (req, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 50;

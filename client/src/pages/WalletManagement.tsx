@@ -417,6 +417,14 @@ export function WalletContent() {
         lastValidBlockHeight,
       });
 
+      // Record SOL deposit in transaction history
+      await fetch('/api/agent/confirm-sol-deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, txSignature: signature }),
+        credentials: 'include',
+      });
+
       toast({ 
         title: 'SOL Deposit Confirmed!', 
         description: message || `Deposited ${amount} SOL to Agent Wallet for gas fees`
@@ -1438,6 +1446,14 @@ export default function WalletManagement() {
         signature,
         blockhash,
         lastValidBlockHeight,
+      });
+
+      // Record SOL deposit in transaction history
+      await fetch('/api/agent/confirm-sol-deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, txSignature: signature }),
+        credentials: 'include',
       });
 
       toast({ 
