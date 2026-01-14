@@ -67,6 +67,88 @@ interface MarketInfo {
   };
 }
 
+const MARKET_MAX_LEVERAGE: Record<string, number> = {
+  'SOL-PERP': 20,
+  'BTC-PERP': 20,
+  'ETH-PERP': 20,
+  'APT-PERP': 20,
+  'ARB-PERP': 20,
+  'AVAX-PERP': 20,
+  'BNB-PERP': 20,
+  'DOGE-PERP': 20,
+  'LINK-PERP': 20,
+  'OP-PERP': 20,
+  'POL-PERP': 20,
+  'SUI-PERP': 20,
+  'XRP-PERP': 20,
+  'LTC-PERP': 10,
+  'BCH-PERP': 10,
+  'DOT-PERP': 10,
+  'ATOM-PERP': 10,
+  'NEAR-PERP': 10,
+  'FTM-PERP': 10,
+  'INJ-PERP': 10,
+  'SEI-PERP': 10,
+  'TIA-PERP': 10,
+  'JTO-PERP': 10,
+  'JUP-PERP': 10,
+  'PYTH-PERP': 10,
+  'RENDER-PERP': 10,
+  'WIF-PERP': 10,
+  'BONK-PERP': 10,
+  '1MBONK-PERP': 10,
+  'PEPE-PERP': 10,
+  '1MPEPE-PERP': 10,
+  'TRUMP-PERP': 10,
+  'HYPE-PERP': 10,
+  'TAO-PERP': 10,
+  'FARTCOIN-PERP': 5,
+  'AI16Z-PERP': 5,
+  'PENGU-PERP': 5,
+  'MELANIA-PERP': 5,
+  'BERA-PERP': 5,
+  'KAITO-PERP': 5,
+  'IP-PERP': 5,
+  'ZEC-PERP': 5,
+  'ADA-PERP': 5,
+  'PAXG-PERP': 5,
+  'PUMP-PERP': 5,
+  'GOAT-PERP': 5,
+  'MOODENG-PERP': 5,
+  'POPCAT-PERP': 5,
+  'MEW-PERP': 5,
+  '1KMEW-PERP': 5,
+  'MOTHER-PERP': 5,
+  'W-PERP': 3,
+  'TNSR-PERP': 5,
+  'DRIFT-PERP': 5,
+  'CLOUD-PERP': 5,
+  'IO-PERP': 5,
+  'ME-PERP': 5,
+  'RAY-PERP': 5,
+  'PNUT-PERP': 5,
+  'MICHI-PERP': 5,
+  'FWOG-PERP': 5,
+  'TON-PERP': 5,
+  'HNT-PERP': 5,
+  'RLB-PERP': 5,
+  'DYM-PERP': 5,
+  'KMNO-PERP': 5,
+  'ZEX-PERP': 5,
+  '1KWEN-PERP': 5,
+  'DBR-PERP': 5,
+  'WLD-PERP': 5,
+  'ASTER-PERP': 5,
+  'XPL-PERP': 5,
+  '2Z-PERP': 5,
+  'MNT-PERP': 5,
+  '1KPUMP-PERP': 5,
+  'MET-PERP': 5,
+  '1KMON-PERP': 5,
+  'LIT-PERP': 5,
+  'LAUNCHCOIN-PERP': 3,
+};
+
 interface TradingBot {
   id: string;
   name: string;
@@ -135,6 +217,14 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
       setShowHighRiskWarning(false);
     }
   }, [newBot.market, selectedMarket]);
+  
+  // Clamp leverage to market's max when market changes
+  useEffect(() => {
+    const maxLev = MARKET_MAX_LEVERAGE[newBot.market] || 20;
+    if (newBot.leverage > maxLev) {
+      setNewBot(prev => ({ ...prev, leverage: maxLev }));
+    }
+  }, [newBot.market]);
   
   // Calculate max position size (investment × leverage)
   const investmentValue = parseFloat(newBot.investmentAmount) || 0;
@@ -450,21 +540,43 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
         
         <div className="space-y-3">
           <div className="flex justify-between">
-            <Label>Leverage</Label>
+            <Label className="flex items-center gap-1.5">
+              Leverage
+              {(() => {
+                const maxLev = MARKET_MAX_LEVERAGE[newBot.market] || 20;
+                if (maxLev < 10) {
+                  return (
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400">
+                      Max {maxLev}x
+                    </span>
+                  );
+                }
+                return null;
+              })()}
+            </Label>
             <span className="text-sm font-medium text-primary">{newBot.leverage}x</span>
           </div>
           <Slider
-            value={[newBot.leverage]}
+            value={[Math.min(newBot.leverage, MARKET_MAX_LEVERAGE[newBot.market] || 20)]}
             onValueChange={(v) => setNewBot({ ...newBot, leverage: v[0] })}
             min={1}
-            max={20}
+            max={MARKET_MAX_LEVERAGE[newBot.market] || 20}
             step={1}
             data-testid="slider-leverage"
           />
           <div className="flex justify-between text-xs text-muted-foreground">
             <span>1x (Safe)</span>
-            <span>20x (High Risk)</span>
+            <span>{MARKET_MAX_LEVERAGE[newBot.market] || 20}x (Max for {newBot.market.replace('-PERP', '')})</span>
           </div>
+          {(MARKET_MAX_LEVERAGE[newBot.market] || 20) < 10 && (
+            <div className="flex items-start gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs">
+              <Info className="w-3.5 h-3.5 text-amber-400 mt-0.5 flex-shrink-0" />
+              <p className="text-muted-foreground">
+                {newBot.market.replace('-PERP', '')} has a max leverage of {MARKET_MAX_LEVERAGE[newBot.market]}x on Drift. 
+                Trades exceeding this will fail with "insufficient margin".
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="space-y-2">
