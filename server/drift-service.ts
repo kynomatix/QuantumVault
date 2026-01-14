@@ -1874,9 +1874,16 @@ export async function executeAgentDriftDeposit(
         
         // Initialize the main subaccount if it doesn't exist on-chain
         if (!mainExists) {
-          console.log('[Drift] Initializing main user account (subaccount 0) via SDK...');
-          const initTx = await driftClient.initializeUserAccount(0);
-          console.log(`[Drift] Main account initialized: ${initTx}`);
+          console.log('[Drift] Initializing main user account (subaccount 0) via SDK with referral...');
+          // CRITICAL: Fetch platform referrer (kryptolytix) and pass to SDK for referral attribution
+          const platformReferrer = await getPlatformReferrerInfo();
+          const referrerInfo = {
+            referrer: platformReferrer.user,         // referrer's User account (subaccount 0)
+            referrerStats: platformReferrer.userStats // referrer's UserStats account
+          };
+          console.log(`[Drift] Using referrer: user=${referrerInfo.referrer.toBase58()}, stats=${referrerInfo.referrerStats.toBase58()}`);
+          const initTx = await driftClient.initializeUserAccount(0, 'QuantumVault', referrerInfo);
+          console.log(`[Drift] Main account initialized with referral: ${initTx}`);
           // Wait for confirmation
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
