@@ -36,7 +36,8 @@ import {
   Trash2,
   AlertTriangle,
   XCircle,
-  ExternalLink
+  ExternalLink,
+  X
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -123,8 +124,6 @@ export default function AppPage() {
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [xUsername, setXUsername] = useState('');
-  const [defaultLeverage, setDefaultLeverage] = useState('5');
-  const [slippageBps, setSlippageBps] = useState('30');
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [notifyTradeExecuted, setNotifyTradeExecuted] = useState(true);
   const [notifyTradeFailed, setNotifyTradeFailed] = useState(true);
@@ -134,6 +133,8 @@ export default function AppPage() {
   const [closingAllPositions, setClosingAllPositions] = useState(false);
   const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
   const [resettingDriftAccount, setResettingDriftAccount] = useState(false);
+  const [notificationDropdownOpen, setNotificationDropdownOpen] = useState(false);
+  const [savingNotifications, setSavingNotifications] = useState(false);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -210,8 +211,6 @@ export default function AppPage() {
           const data = await res.json();
           setDisplayName(data.displayName || '');
           setXUsername(data.xUsername || '');
-          setDefaultLeverage(String(data.defaultLeverage || 5));
-          setSlippageBps(String(data.slippageBps || 30));
           setNotificationsEnabled(data.notificationsEnabled ?? false);
           setNotifyTradeExecuted(data.notifyTradeExecuted ?? true);
           setNotifyTradeFailed(data.notifyTradeFailed ?? true);
@@ -238,12 +237,6 @@ export default function AppPage() {
         body: JSON.stringify({
           displayName,
           xUsername,
-          defaultLeverage: parseInt(defaultLeverage),
-          slippageBps: parseInt(slippageBps),
-          notificationsEnabled,
-          notifyTradeExecuted,
-          notifyTradeFailed,
-          notifyPositionClosed,
         }),
       });
       
@@ -261,6 +254,41 @@ export default function AppPage() {
       });
     } finally {
       setSettingsSaving(false);
+    }
+  };
+
+  const handleSaveNotificationPrefs = async (updates: {
+    notificationsEnabled?: boolean;
+    notifyTradeExecuted?: boolean;
+    notifyTradeFailed?: boolean;
+    notifyPositionClosed?: boolean;
+  }) => {
+    setSavingNotifications(true);
+    try {
+      const res = await fetch('/api/wallet/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(updates),
+      });
+      
+      if (!res.ok) {
+        throw new Error('Failed to save');
+      }
+      
+      // Update local state
+      if (updates.notificationsEnabled !== undefined) setNotificationsEnabled(updates.notificationsEnabled);
+      if (updates.notifyTradeExecuted !== undefined) setNotifyTradeExecuted(updates.notifyTradeExecuted);
+      if (updates.notifyTradeFailed !== undefined) setNotifyTradeFailed(updates.notifyTradeFailed);
+      if (updates.notifyPositionClosed !== undefined) setNotifyPositionClosed(updates.notifyPositionClosed);
+    } catch (error) {
+      toast({ 
+        title: 'Failed to save', 
+        description: 'Could not update notification preferences',
+        variant: 'destructive' 
+      });
+    } finally {
+      setSavingNotifications(false);
     }
   };
 
@@ -875,10 +903,113 @@ export default function AppPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button className="p-2 hover:bg-muted rounded-lg relative" data-testid="button-notifications">
-              <Bell className="w-5 h-5 text-muted-foreground" />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-primary rounded-full" />
-            </button>
+            <div className="relative">
+              <button 
+                className="p-2 hover:bg-muted rounded-lg relative" 
+                data-testid="button-notifications"
+                onClick={() => setNotificationDropdownOpen(!notificationDropdownOpen)}
+              >
+                <Bell className="w-5 h-5 text-muted-foreground" />
+                {!telegramConnected && (
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-amber-500 rounded-full" />
+                )}
+              </button>
+              
+              {notificationDropdownOpen && (
+                <div className="absolute right-0 top-full mt-2 w-80 bg-card border border-border rounded-lg shadow-lg z-50">
+                  <div className="p-4 border-b border-border">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-semibold">Notifications</h3>
+                      <button 
+                        onClick={() => setNotificationDropdownOpen(false)}
+                        className="text-muted-foreground hover:text-foreground"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <div className="p-4 space-y-4">
+                    {!telegramConnected ? (
+                      <div className="text-center py-4">
+                        <Bell className="w-8 h-8 text-muted-foreground mx-auto mb-2" />
+                        <p className="text-sm font-medium">Telegram Not Connected</p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Connect Telegram to receive trade alerts
+                        </p>
+                        <p className="text-xs text-amber-600 mt-2">
+                          Coming soon
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium">Enable Notifications</span>
+                          <button
+                            onClick={() => handleSaveNotificationPrefs({ notificationsEnabled: !notificationsEnabled })}
+                            disabled={savingNotifications}
+                            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                              notificationsEnabled ? 'bg-primary' : 'bg-muted'
+                            }`}
+                          >
+                            <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                              notificationsEnabled ? 'translate-x-5' : 'translate-x-1'
+                            }`} />
+                          </button>
+                        </div>
+                        
+                        {notificationsEnabled && (
+                          <div className="space-y-3 pt-2 border-t border-border">
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm">Trade Executed</span>
+                              <button
+                                onClick={() => handleSaveNotificationPrefs({ notifyTradeExecuted: !notifyTradeExecuted })}
+                                disabled={savingNotifications}
+                                className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
+                                  notifyTradeExecuted ? 'bg-primary' : 'bg-muted'
+                                }`}
+                              >
+                                <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${
+                                  notifyTradeExecuted ? 'translate-x-3.5' : 'translate-x-0.5'
+                                }`} />
+                              </button>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm">Trade Failed</span>
+                              <button
+                                onClick={() => handleSaveNotificationPrefs({ notifyTradeFailed: !notifyTradeFailed })}
+                                disabled={savingNotifications}
+                                className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
+                                  notifyTradeFailed ? 'bg-primary' : 'bg-muted'
+                                }`}
+                              >
+                                <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${
+                                  notifyTradeFailed ? 'translate-x-3.5' : 'translate-x-0.5'
+                                }`} />
+                              </button>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm">Position Closed</span>
+                              <button
+                                onClick={() => handleSaveNotificationPrefs({ notifyPositionClosed: !notifyPositionClosed })}
+                                disabled={savingNotifications}
+                                className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
+                                  notifyPositionClosed ? 'bg-primary' : 'bg-muted'
+                                }`}
+                              >
+                                <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${
+                                  notifyPositionClosed ? 'translate-x-3.5' : 'translate-x-0.5'
+                                }`} />
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
             <button className="p-2 hover:bg-muted rounded-lg" data-testid="button-refresh">
               <RefreshCw className="w-5 h-5 text-muted-foreground" />
             </button>
@@ -1693,141 +1824,6 @@ export default function AppPage() {
                     )}
 
                     <div className="border-t border-border/50 pt-6">
-                      <div className="flex items-center justify-between mb-4">
-                        <h3 className="font-display font-semibold">Notifications</h3>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-muted-foreground">
-                            {telegramConnected ? 'Telegram connected' : 'Connect Telegram to enable'}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => setNotificationsEnabled(!notificationsEnabled)}
-                            disabled={!telegramConnected}
-                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                              notificationsEnabled && telegramConnected
-                                ? 'bg-primary' 
-                                : 'bg-muted'
-                            } ${!telegramConnected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
-                            data-testid="toggle-notifications"
-                          >
-                            <span
-                              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                                notificationsEnabled && telegramConnected ? 'translate-x-6' : 'translate-x-1'
-                              }`}
-                            />
-                          </button>
-                        </div>
-                      </div>
-                      
-                      {!telegramConnected && (
-                        <div className="bg-muted/30 border border-border/50 rounded-lg p-4 mb-4">
-                          <div className="flex items-start gap-3">
-                            <Bell className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
-                            <div>
-                              <p className="text-sm font-medium">Get trade alerts on Telegram</p>
-                              <p className="text-sm text-muted-foreground mt-1">
-                                Receive instant notifications when your bots execute trades, close positions, or encounter errors.
-                              </p>
-                              <p className="text-xs text-muted-foreground mt-2 italic">
-                                Telegram connection coming soon - notifications will be sent to your connected Telegram account.
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                      
-                      {telegramConnected && notificationsEnabled && (
-                        <div className="space-y-3 mb-4">
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <p className="text-sm font-medium">Trade Executed</p>
-                              <p className="text-xs text-muted-foreground">When a bot successfully opens a position</p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => setNotifyTradeExecuted(!notifyTradeExecuted)}
-                              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                                notifyTradeExecuted ? 'bg-primary' : 'bg-muted'
-                              }`}
-                              data-testid="toggle-notify-trade-executed"
-                            >
-                              <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                                notifyTradeExecuted ? 'translate-x-5' : 'translate-x-1'
-                              }`} />
-                            </button>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <p className="text-sm font-medium">Trade Failed</p>
-                              <p className="text-xs text-muted-foreground">When a trade fails with an error</p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => setNotifyTradeFailed(!notifyTradeFailed)}
-                              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                                notifyTradeFailed ? 'bg-primary' : 'bg-muted'
-                              }`}
-                              data-testid="toggle-notify-trade-failed"
-                            >
-                              <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                                notifyTradeFailed ? 'translate-x-5' : 'translate-x-1'
-                              }`} />
-                            </button>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <p className="text-sm font-medium">Position Closed</p>
-                              <p className="text-xs text-muted-foreground">When a position is closed with PnL</p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => setNotifyPositionClosed(!notifyPositionClosed)}
-                              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                                notifyPositionClosed ? 'bg-primary' : 'bg-muted'
-                              }`}
-                              data-testid="toggle-notify-position-closed"
-                            >
-                              <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                                notifyPositionClosed ? 'translate-x-5' : 'translate-x-1'
-                              }`} />
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="border-t border-border/50 pt-6">
-                      <h3 className="font-display font-semibold mb-4">Trading Defaults</h3>
-                      <div className="space-y-4">
-                        <div>
-                          <label className="text-sm text-muted-foreground mb-1.5 block">Default Leverage (1-20x)</label>
-                          <Input 
-                            type="number" 
-                            min="1"
-                            max="20"
-                            value={defaultLeverage} 
-                            onChange={(e) => setDefaultLeverage(e.target.value)}
-                            className="bg-muted/30 border-border/50" 
-                            data-testid="input-leverage" 
-                          />
-                        </div>
-                        <div>
-                          <label className="text-sm text-muted-foreground mb-1.5 block">Slippage Tolerance (1-500 bps)</label>
-                          <Input 
-                            type="number" 
-                            min="1"
-                            max="500"
-                            value={slippageBps} 
-                            onChange={(e) => setSlippageBps(e.target.value)}
-                            className="bg-muted/30 border-border/50" 
-                            data-testid="input-slippage" 
-                          />
-                          <p className="text-xs text-muted-foreground mt-1">1 bps = 0.01%. Default: 30 bps (0.3%)</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="border-t border-border/50 pt-6">
                       <Button 
                         onClick={handleSaveSettings} 
                         disabled={settingsSaving}
@@ -2153,8 +2149,6 @@ export default function AppPage() {
                 const settingsData = await settingsRes.json();
                 setDisplayName(settingsData.displayName || '');
                 setXUsername(settingsData.xUsername || '');
-                setDefaultLeverage(String(settingsData.defaultLeverage || 5));
-                setSlippageBps(String(settingsData.slippageBps || 30));
               }
             } catch (error) {
               console.error('Error checking agent balance after deposit:', error);
