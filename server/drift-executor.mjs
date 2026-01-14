@@ -272,32 +272,70 @@ async function deleteSubaccount(command) {
   
   console.error(`[Executor] Deleting subaccount ${subAccountId} to reclaim rent`);
   
+  // Cannot delete subaccount 0 (main account)
+  if (subAccountId === 0) {
+    throw new Error('Cannot delete subaccount 0 (main account)');
+  }
+  
   const driftClient = await createDriftClient(encryptedPrivateKey, subAccountId);
   
   try {
     await driftClient.subscribe();
+    const BN = (await import('bn.js')).default;
     
-    // Verify subaccount has no positions or balance before deletion
     const user = driftClient.getUser();
     const perpPositions = user.getActivePerpPositions();
-    const spotPositions = user.getActiveSpotPositions();
     
     if (perpPositions.length > 0) {
-      throw new Error(`Cannot delete subaccount: has ${perpPositions.length} open perp position(s)`);
+      throw new Error(`Cannot delete subaccount: has ${perpPositions.length} open perp position(s) - close them first`);
     }
     
-    if (spotPositions.length > 0) {
-      // Check if any spot position has significant balance
-      const hasBalance = spotPositions.some(pos => {
-        const balance = pos.scaledBalance?.toNumber?.() || 0;
-        return balance > 1000; // More than 0.001 USDC
-      });
-      if (hasBalance) {
-        throw new Error('Cannot delete subaccount: has remaining spot balance');
+    // Check for any spot balances and sweep them to subaccount 0
+    const spotPositions = user.getActiveSpotPositions();
+    
+    for (const pos of spotPositions) {
+      const marketIndex = pos.marketIndex;
+      // Get the token amount using the SDK's getter for precision
+      const tokenAmount = user.getTokenAmount(marketIndex);
+      
+      if (tokenAmount && !tokenAmount.isZero()) {
+        console.error(`[Executor] Found spot balance at market ${marketIndex}: ${tokenAmount.toString()} (raw BN)`);
+        
+        // Only sweep if positive (deposit, not borrow)
+        if (tokenAmount.gt(new BN(0))) {
+          console.error(`[Executor] Sweeping ${tokenAmount.toString()} from subaccount ${subAccountId} to 0`);
+          
+          try {
+            // Transfer the exact BN amount to subaccount 0
+            const txSig = await driftClient.transferDeposit(
+              tokenAmount,
+              marketIndex,
+              subAccountId,
+              0 // to subaccount 0
+            );
+            console.error(`[Executor] Swept dust to subaccount 0: ${txSig}`);
+          } catch (sweepErr) {
+            console.error(`[Executor] Sweep error (may already be zero):`, sweepErr.message);
+          }
+        }
       }
     }
     
-    // Delete the subaccount to reclaim rent (~0.035 SOL)
+    // Wait a moment for state to settle
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // Re-fetch and verify truly empty
+    await driftClient.getUser().fetchAccounts();
+    const remainingSpot = user.getActiveSpotPositions();
+    for (const pos of remainingSpot) {
+      const tokenAmount = user.getTokenAmount(pos.marketIndex);
+      if (tokenAmount && tokenAmount.abs().gt(new BN(0))) {
+        throw new Error(`Subaccount still has balance after sweep: market ${pos.marketIndex} = ${tokenAmount.toString()}`);
+      }
+    }
+    
+    // Delete the subaccount to reclaim rent (~0.031 SOL)
+    console.error(`[Executor] Subaccount ${subAccountId} is empty, deleting to reclaim rent...`);
     const txSig = await driftClient.deleteUser(subAccountId);
     
     console.error(`[Executor] Subaccount ${subAccountId} deleted, rent reclaimed: ${txSig}`);

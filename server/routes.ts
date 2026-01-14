@@ -531,7 +531,7 @@ export async function registerRoutes(
             },
             recipient: {
               type: 'subscriber',
-              walletAddress: wallet.agentWalletAddress,
+              walletAddress: wallet.agentPublicKey,
             },
           }),
         });
@@ -673,7 +673,7 @@ export async function registerRoutes(
             
             for (const pos of openPositions) {
               try {
-                const closeResult = await closePerpPosition(agentKey, subId, pos.market);
+                const closeResult = await closePerpPosition(agentKey, pos.market, subId);
                 if (closeResult.success) {
                   log(`Closed ${pos.market} position in subaccount ${subId}: ${closeResult.signature}`);
                 } else {
@@ -700,7 +700,7 @@ export async function registerRoutes(
             progress.push(`Sweeping $${balance.toFixed(2)} from subaccount ${subId}...`);
             
             try {
-              const transferResult = await executeAgentTransferBetweenSubaccounts(agentKey, subId, 0, balance);
+              const transferResult = await executeAgentTransferBetweenSubaccounts(agentPubKey, agentKey, subId, 0, balance);
               if (transferResult.success) {
                 totalSwept += balance;
                 log(`Swept $${balance.toFixed(2)} to subaccount 0: ${transferResult.signature}`);
@@ -757,7 +757,7 @@ export async function registerRoutes(
             
             for (const pos of openPositions) {
               try {
-                const closeResult = await closePerpPosition(agentKey, 0, pos.market);
+                const closeResult = await closePerpPosition(agentKey, pos.market, 0);
                 if (closeResult.success) {
                   log(`Closed ${pos.market} in main account: ${closeResult.signature}`);
                 } else {
@@ -780,7 +780,7 @@ export async function registerRoutes(
             progress.push(`Withdrawing $${balance.toFixed(2)} to agent wallet...`);
             
             try {
-              const withdrawResult = await executeAgentDriftWithdraw(agentKey, 0, balance);
+              const withdrawResult = await executeAgentDriftWithdraw(agentPubKey, agentKey, balance, 0);
               if (withdrawResult.success) {
                 log(`Withdrawn $${balance.toFixed(2)}: ${withdrawResult.signature}`);
               } else {
