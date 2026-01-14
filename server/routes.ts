@@ -492,12 +492,13 @@ export async function registerRoutes(
       const { token: bearerToken } = await verifyAuthRes.json();
       console.log('[Telegram Verify] Got bearer token');
 
-      const channelId = wallet.dialectAddress;
-      console.log('[Telegram Verify] Checking verification for channel:', channelId);
+      console.log('[Telegram Verify] Checking verification status via prepare endpoint');
 
-      // Check channel status with bearer token
-      const checkRes = await fetch(`https://alerts-api.dial.to/v2/channel/${channelId}`, {
+      // Call prepare endpoint again to get current channel status
+      const checkRes = await fetch('https://alerts-api.dial.to/v2/channel/telegram/prepare', {
+        method: 'POST',
         headers: { 
+          'Content-Type': 'application/json',
           'Authorization': `Bearer ${bearerToken}`,
           'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
         },
@@ -511,6 +512,8 @@ export async function registerRoutes(
 
       const channelData = await checkRes.json();
       console.log('[Telegram Verify] Channel data:', JSON.stringify(channelData));
+      
+      const channelId = channelData.id;
 
       if (!channelData.verified) {
         return res.json({
