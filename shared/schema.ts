@@ -294,3 +294,24 @@ export const leaderboardStats = pgTable("leaderboard_stats", {
 export const insertLeaderboardStatsSchema = createInsertSchema(leaderboardStats);
 export type InsertLeaderboardStats = z.infer<typeof insertLeaderboardStatsSchema>;
 export type LeaderboardStats = typeof leaderboardStats.$inferSelect;
+
+export const orphanedSubaccounts = pgTable("orphaned_subaccounts", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  agentPublicKey: text("agent_public_key").notNull(),
+  agentPrivateKeyEncrypted: text("agent_private_key_encrypted").notNull(),
+  driftSubaccountId: integer("drift_subaccount_id").notNull(),
+  reason: text("reason"),
+  retryCount: integer("retry_count").default(0).notNull(),
+  lastRetryAt: timestamp("last_retry_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertOrphanedSubaccountSchema = createInsertSchema(orphanedSubaccounts).omit({
+  id: true,
+  retryCount: true,
+  lastRetryAt: true,
+  createdAt: true,
+});
+export type InsertOrphanedSubaccount = z.infer<typeof insertOrphanedSubaccountSchema>;
+export type OrphanedSubaccount = typeof orphanedSubaccounts.$inferSelect;
