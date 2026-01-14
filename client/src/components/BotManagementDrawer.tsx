@@ -605,8 +605,10 @@ export function BotManagementDrawer({
     }
     
     // Validate investment amount doesn't exceed bot's available equity
+    // Use small tolerance (0.01) to handle floating point precision when clicking "Max"
     const investmentValue = editMaxPositionSize ? parseFloat(editMaxPositionSize) : 0;
-    if (investmentValue > 0 && botBalance > 0 && investmentValue > botBalance) {
+    const tolerance = 0.01;
+    if (investmentValue > 0 && botBalance > 0 && investmentValue > botBalance + tolerance) {
       toast({ 
         title: 'Investment too high', 
         description: `Bot only has $${botBalance.toFixed(2)} available. Click "Max" to use full balance.`,
