@@ -51,10 +51,16 @@ export function getDialectSdk(): DialectSdk<Solana> | null {
 }
 
 export async function sendTradeNotification(
-  walletAddress: string,
+  walletAddress: string | undefined | null,
   notification: TradeNotification
 ): Promise<boolean> {
   try {
+    // Guard against undefined/null wallet addresses
+    if (!walletAddress) {
+      console.log('[Notifications] Skipping notification - no wallet address provided');
+      return false;
+    }
+
     const [wallet] = await db
       .select()
       .from(wallets)
@@ -101,6 +107,16 @@ export async function sendTradeNotification(
 
     console.log(`[Notifications] Sending notification to ${walletAddress}: ${message}`);
     
+    // TODO: Implement actual Dialect messaging when SDK credentials are configured
+    // When DIALECT_SDK_CREDENTIALS is set, this will use the SDK to send to user's Telegram
+    // For now, we log the notification for debugging and return true to indicate success
+    // The actual sending will be:
+    // await sdk.messages.send({ 
+    //   message, 
+    //   recipient: new PublicKey(wallet.dialectAddress || walletAddress) 
+    // });
+    
+    console.log(`[Notifications] WOULD SEND (Dialect not configured): "${message}"`);
     return true;
   } catch (error) {
     console.error('[Notifications] Error sending notification:', error);
