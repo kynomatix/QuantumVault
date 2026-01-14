@@ -270,6 +270,125 @@ export async function registerRoutes(
     }
   });
 
+  // Reset Drift Account - Deletes all Drift subaccounts so a fresh account can be created with referral
+  // This is a dangerous operation and should only be done when the account is empty
+  app.post("/api/wallet/reset-drift-account", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      console.log(`[Reset Drift] Starting Drift account reset for ${wallet.agentPublicKey}`);
+
+      // 1. Discover all existing subaccounts on-chain
+      const existingSubaccounts = await discoverOnChainSubaccounts(wallet.agentPublicKey);
+      if (existingSubaccounts.length === 0) {
+        return res.json({ 
+          success: true, 
+          message: "No Drift accounts found to delete",
+          deletedSubaccounts: []
+        });
+      }
+
+      console.log(`[Reset Drift] Found ${existingSubaccounts.length} subaccounts: [${existingSubaccounts.join(', ')}]`);
+
+      // 2. Check that all subaccounts are empty using comprehensive account info
+      // This checks USDC balance, total collateral, and open positions
+      const subaccountInfo: { subId: number; balance: number; hasPositions: boolean; collateral: number }[] = [];
+      for (const subId of existingSubaccounts) {
+        try {
+          const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, subId);
+          subaccountInfo.push({ 
+            subId, 
+            balance: accountInfo.usdcBalance, 
+            hasPositions: accountInfo.hasOpenPositions,
+            collateral: accountInfo.totalCollateral 
+          });
+          
+          // Check for any balance (USDC or collateral from positions)
+          if (accountInfo.usdcBalance > 0.01 || accountInfo.totalCollateral > 0.01) {
+            return res.status(400).json({ 
+              error: `Subaccount ${subId} still has $${Math.max(accountInfo.usdcBalance, accountInfo.totalCollateral).toFixed(2)} in balance/collateral. Please withdraw all funds first.`,
+              subaccountInfo 
+            });
+          }
+          
+          // Check for open positions
+          if (accountInfo.hasOpenPositions) {
+            return res.status(400).json({ 
+              error: `Subaccount ${subId} has open position(s). Please close all positions first.`,
+              subaccountInfo 
+            });
+          }
+        } catch (e: any) {
+          // If we can't read account info, be conservative and block deletion
+          console.error(`[Reset Drift] Failed to read account info for subaccount ${subId}:`, e);
+          return res.status(400).json({ 
+            error: `Cannot verify subaccount ${subId} is empty: ${e.message || 'Unknown error'}. Please try again later.` 
+          });
+        }
+      }
+
+      // 4. Delete subaccounts in reverse order (highest first, 0 last)
+      // Subaccount 0 must be deleted last as it contains UserStats
+      const sortedSubaccounts = [...existingSubaccounts].sort((a, b) => b - a);
+      const deletedSubaccounts: number[] = [];
+      const errors: string[] = [];
+
+      for (const subId of sortedSubaccounts) {
+        console.log(`[Reset Drift] Deleting subaccount ${subId}...`);
+        try {
+          const result = await closeDriftSubaccount(wallet.agentPrivateKeyEncrypted, subId);
+          if (result.success) {
+            console.log(`[Reset Drift] Subaccount ${subId} deleted successfully: ${result.signature}`);
+            deletedSubaccounts.push(subId);
+          } else {
+            console.error(`[Reset Drift] Failed to delete subaccount ${subId}: ${result.error}`);
+            errors.push(`Subaccount ${subId}: ${result.error}`);
+          }
+          // Wait a bit between deletions
+          await new Promise(resolve => setTimeout(resolve, 1500));
+        } catch (error: any) {
+          console.error(`[Reset Drift] Error deleting subaccount ${subId}:`, error);
+          errors.push(`Subaccount ${subId}: ${error.message || String(error)}`);
+        }
+      }
+
+      // 5. Clear bot driftSubaccountId assignments in database (since subaccounts are gone)
+      const bots = await storage.getTradingBots(req.walletAddress!);
+      for (const bot of bots) {
+        if (bot.driftSubaccountId !== null) {
+          await storage.clearTradingBotSubaccount(bot.id);
+          console.log(`[Reset Drift] Cleared driftSubaccountId for bot ${bot.id}`);
+        }
+      }
+
+      if (errors.length > 0) {
+        return res.status(207).json({
+          success: false,
+          message: `Partially completed. Deleted ${deletedSubaccounts.length} of ${existingSubaccounts.length} subaccounts.`,
+          deletedSubaccounts,
+          errors
+        });
+      }
+
+      console.log(`[Reset Drift] Successfully deleted all ${deletedSubaccounts.length} Drift subaccounts`);
+      res.json({
+        success: true,
+        message: `Successfully deleted ${deletedSubaccounts.length} Drift subaccount(s). Your next deposit will create a new account with referral attribution.`,
+        deletedSubaccounts
+      });
+
+    } catch (error: any) {
+      console.error("Reset Drift account error:", error);
+      res.status(500).json({ error: error.message || "Failed to reset Drift account" });
+    }
+  });
+
   app.post("/api/close-all-positions", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);

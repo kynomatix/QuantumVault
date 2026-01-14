@@ -121,6 +121,8 @@ export default function AppPage() {
   const [slippageBps, setSlippageBps] = useState('30');
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
+  const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
+  const [resettingDriftAccount, setResettingDriftAccount] = useState(false);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -293,6 +295,40 @@ export default function AppPage() {
       });
     } finally {
       setClosingAllPositions(false);
+    }
+  };
+
+  const handleResetDriftAccount = async () => {
+    setResettingDriftAccount(true);
+    try {
+      const res = await fetch('/api/wallet/reset-drift-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+      });
+      
+      const data = await res.json();
+      
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to reset Drift account');
+      }
+      
+      toast({ 
+        title: 'Drift Account Reset', 
+        description: data.message || 'Your Drift account has been deleted. Your next deposit will create a new account with referral attribution.'
+      });
+      
+      setResetDriftDialogOpen(false);
+      // Refresh data
+      refetchBots();
+    } catch (error: any) {
+      toast({ 
+        title: 'Reset Failed', 
+        description: error.message || 'Failed to reset Drift account',
+        variant: 'destructive' 
+      });
+    } finally {
+      setResettingDriftAccount(false);
     }
   };
 
@@ -1640,18 +1676,37 @@ export default function AppPage() {
 
                     <div className="border-t border-border/50 pt-6">
                       <h3 className="font-display font-semibold mb-4 text-red-400">Danger Zone</h3>
-                      <p className="text-sm text-muted-foreground mb-4">
-                        Close all open positions across all your trading bots. This action cannot be undone.
-                      </p>
-                      <Button 
-                        variant="outline" 
-                        className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
-                        onClick={() => setCloseAllDialogOpen(true)}
-                        data-testid="button-close-positions"
-                      >
-                        <XCircle className="w-4 h-4 mr-2" />
-                        Close All Positions
-                      </Button>
+                      <div className="space-y-4">
+                        <div>
+                          <p className="text-sm text-muted-foreground mb-2">
+                            Close all open positions across all your trading bots.
+                          </p>
+                          <Button 
+                            variant="outline" 
+                            className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
+                            onClick={() => setCloseAllDialogOpen(true)}
+                            data-testid="button-close-positions"
+                          >
+                            <XCircle className="w-4 h-4 mr-2" />
+                            Close All Positions
+                          </Button>
+                        </div>
+                        <div>
+                          <p className="text-sm text-muted-foreground mb-2">
+                            Delete your Drift account to recreate it with proper referral attribution. 
+                            All funds must be withdrawn first.
+                          </p>
+                          <Button 
+                            variant="outline" 
+                            className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
+                            onClick={() => setResetDriftDialogOpen(true)}
+                            data-testid="button-reset-drift"
+                          >
+                            <Trash2 className="w-4 h-4 mr-2" />
+                            Reset Drift Account
+                          </Button>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1724,6 +1779,76 @@ export default function AppPage() {
                   </>
                 ) : (
                   'Close All Positions'
+                )}
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {resetDriftDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="gradient-border p-6 noise max-w-md w-full mx-4"
+            data-testid="modal-reset-drift"
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center">
+                <Trash2 className="w-6 h-6 text-red-400" />
+              </div>
+              <div>
+                <h3 className="font-display font-semibold text-lg">Reset Drift Account</h3>
+                <p className="text-sm text-muted-foreground">Delete and recreate with referral</p>
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-4">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-red-400">Requirements</p>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Before resetting, ensure:
+                    </p>
+                    <ul className="text-sm text-muted-foreground mt-2 list-disc ml-4 space-y-1">
+                      <li>All positions are closed</li>
+                      <li>All funds are withdrawn from Drift</li>
+                      <li>Bot balances are zero</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                This will delete all your Drift subaccounts. When you deposit again, a new account will be created with proper referral attribution.
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <Button 
+                variant="outline" 
+                className="flex-1" 
+                onClick={() => setResetDriftDialogOpen(false)}
+                disabled={resettingDriftAccount}
+                data-testid="button-cancel-reset-drift"
+              >
+                Cancel
+              </Button>
+              <Button 
+                className="flex-1 bg-red-500 hover:bg-red-600 text-white"
+                onClick={handleResetDriftAccount}
+                disabled={resettingDriftAccount}
+                data-testid="button-confirm-reset-drift"
+              >
+                {resettingDriftAccount ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Resetting...
+                  </>
+                ) : (
+                  'Reset Account'
                 )}
               </Button>
             </div>

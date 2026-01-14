@@ -70,6 +70,7 @@ export interface IStorage {
   getAllocatedSubaccountIds(walletAddress: string): Promise<number[]>;
   createTradingBot(bot: InsertTradingBot): Promise<TradingBot>;
   updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined>;
+  clearTradingBotSubaccount(id: string): Promise<void>;
   deleteTradingBot(id: string): Promise<void>;
   updateTradingBotStats(id: string, stats: TradingBot['stats']): Promise<void>;
 
@@ -260,6 +261,10 @@ export class DatabaseStorage implements IStorage {
   async updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined> {
     const result = await db.update(tradingBots).set({ ...updates, updatedAt: sql`NOW()` } as any).where(eq(tradingBots.id, id)).returning();
     return result[0];
+  }
+
+  async clearTradingBotSubaccount(id: string): Promise<void> {
+    await db.update(tradingBots).set({ driftSubaccountId: null, updatedAt: sql`NOW()` }).where(eq(tradingBots.id, id));
   }
 
   async deleteTradingBot(id: string): Promise<void> {
