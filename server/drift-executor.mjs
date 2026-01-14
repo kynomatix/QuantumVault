@@ -188,6 +188,35 @@ async function executeTrade(command) {
     await driftClient.subscribe();
     console.error(`[Executor] Subscribed, executing ${side} ${sizeInBase} ${market}`);
     
+    // Check market status before placing order
+    const perpMarket = driftClient.getPerpMarketAccount(marketIndex);
+    if (perpMarket) {
+      const status = perpMarket.status;
+      const statusNames = ['Initialized', 'Active', 'FundingPaused', 'AMMPaused', 'FillPaused', 'WithdrawPaused', 'ReduceOnly', 'Settlement', 'Delisted'];
+      const statusName = statusNames[status] || `Unknown(${status})`;
+      console.error(`[Executor] Market ${market} status: ${statusName} (${status})`);
+      
+      // Status 1 = Active, others may have restrictions
+      if (status !== 1) {
+        // Status 6 = ReduceOnly - can only close positions
+        if (status === 6 && !reduceOnly) {
+          throw new Error(`Market ${market} is in ReduceOnly mode - can only close existing positions, not open new ones`);
+        }
+        // Status 4 = FillPaused - no orders at all
+        if (status === 4) {
+          throw new Error(`Market ${market} is FillPaused - no orders can be placed. Try again later.`);
+        }
+        // Status 3 = AMMPaused
+        if (status === 3) {
+          throw new Error(`Market ${market} is AMMPaused - trading temporarily suspended. Try again later.`);
+        }
+        // Other paused states
+        if (status !== 1 && status !== 2 && status !== 5) {
+          console.error(`[Executor] Warning: Market status ${statusName} may restrict orders`);
+        }
+      }
+    }
+    
     const BN = (await import('bn.js')).default;
     const baseAssetAmount = new BN(Math.round(sizeInBase * 1e9));
     const direction = side === 'long' ? PositionDirection.LONG : PositionDirection.SHORT;
