@@ -38,6 +38,7 @@ export const wallets = pgTable("wallets", {
   notifyPositionClosed: boolean("notify_position_closed").default(true),
   telegramConnected: boolean("telegram_connected").default(false),
   dialectAddress: text("dialect_address"),
+  dialectBearerToken: text("dialect_bearer_token"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   lastSeen: timestamp("last_seen").defaultNow().notNull(),
 });

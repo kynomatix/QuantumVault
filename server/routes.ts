@@ -396,8 +396,10 @@ export async function registerRoutes(
       console.log('[Telegram] Channel prepared:', channelId);
       console.log('[Telegram] Verification link:', verificationLink);
 
+      // Store both channel ID and bearer token for later verification
       await storage.updateWallet(req.walletAddress!, {
         dialectAddress: channelId,
+        dialectBearerToken: bearerToken,
       });
 
       res.json({
@@ -438,59 +440,15 @@ export async function registerRoutes(
         });
       }
 
-      if (!wallet.agentPrivateKeyEncrypted || !wallet.agentPublicKey) {
-        return res.status(400).json({ error: "Agent wallet not initialized" });
+      if (!wallet.dialectBearerToken) {
+        return res.status(400).json({ 
+          error: "Session expired",
+          message: "Please click 'Connect Telegram' again to get a new verification link."
+        });
       }
 
-      // Re-authenticate with Dialect to get a bearer token
-      const { getAgentKeypair } = await import('./agent-wallet');
-      const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
-      const agentAddress = wallet.agentPublicKey;
-
-      console.log('[Telegram Verify] Getting auth token for agent:', agentAddress);
-
-      // Step 1: Prepare auth
-      const prepareAuthRes = await fetch('https://alerts-api.dial.to/v2/auth/solana/prepare', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
-        },
-        body: JSON.stringify({ walletAddress: agentAddress }),
-      });
-
-      if (!prepareAuthRes.ok) {
-        const err = await prepareAuthRes.text();
-        console.error('[Telegram Verify] Prepare auth failed:', err);
-        return res.status(500).json({ error: "Failed to authenticate", details: err });
-      }
-
-      const { message } = await prepareAuthRes.json();
-
-      // Step 2: Sign and verify
-      const nacl = await import('tweetnacl');
-      const bs58 = await import('bs58');
-      const messageBytes = new TextEncoder().encode(message);
-      const signature = nacl.default.sign.detached(messageBytes, agentKeypair.secretKey);
-      const signatureBase58 = bs58.default.encode(signature);
-
-      const verifyAuthRes = await fetch('https://alerts-api.dial.to/v2/auth/solana/verify', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
-        },
-        body: JSON.stringify({ message, signature: signatureBase58 }),
-      });
-
-      if (!verifyAuthRes.ok) {
-        const err = await verifyAuthRes.text();
-        console.error('[Telegram Verify] Auth verify failed:', err);
-        return res.status(500).json({ error: "Failed to authenticate", details: err });
-      }
-
-      const { token: bearerToken } = await verifyAuthRes.json();
-      console.log('[Telegram Verify] Got bearer token');
+      const bearerToken = wallet.dialectBearerToken;
+      console.log('[Telegram Verify] Using stored bearer token');
 
       console.log('[Telegram Verify] Checking verification status via prepare endpoint');
 
