@@ -2161,27 +2161,97 @@ export async function getAgentDriftBalance(
   return getDriftBalance(agentPublicKey, 0);
 }
 
-// Market indices for perpetual markets
+// Complete Drift Protocol perp market indices (mainnet-beta)
+// Source: https://drift-labs.github.io/v2-teacher/#market-indexes-names
+// MUST be kept in sync with server/drift-executor.mjs
 const PERP_MARKET_INDICES: Record<string, number> = {
-  'SOL-PERP': 0,
-  'BTC-PERP': 1,
-  'ETH-PERP': 2,
-  'SOL': 0,
-  'BTC': 1,
-  'ETH': 2,
-  'SOLUSD': 0,
-  'BTCUSD': 1,
-  'ETHUSD': 2,
+  'SOL': 0, 'SOL-PERP': 0, 'SOLUSD': 0,
+  'BTC': 1, 'BTC-PERP': 1, 'BTCUSD': 1,
+  'ETH': 2, 'ETH-PERP': 2, 'ETHUSD': 2,
+  'APT': 3, 'APT-PERP': 3, 'APTUSD': 3,
+  '1MBONK': 4, '1MBONK-PERP': 4, 'BONK': 4, 'BONK-PERP': 4, 'BONKUSD': 4,
+  'POL': 5, 'POL-PERP': 5, 'MATIC': 5, 'MATIC-PERP': 5, 'POLUSD': 5,
+  'ARB': 6, 'ARB-PERP': 6, 'ARBUSD': 6,
+  'DOGE': 7, 'DOGE-PERP': 7, 'DOGEUSD': 7,
+  'BNB': 8, 'BNB-PERP': 8, 'BNBUSD': 8,
+  'SUI': 9, 'SUI-PERP': 9, 'SUIUSD': 9,
+  '1MPEPE': 10, '1MPEPE-PERP': 10, 'PEPE': 10, 'PEPE-PERP': 10, 'PEPEUSD': 10,
+  'OP': 11, 'OP-PERP': 11, 'OPUSD': 11,
+  'RENDER': 12, 'RENDER-PERP': 12, 'RNDR': 12, 'RNDR-PERP': 12, 'RNDRUSD': 12,
+  'XRP': 13, 'XRP-PERP': 13, 'XRPUSD': 13,
+  'HNT': 14, 'HNT-PERP': 14, 'HNTUSD': 14,
+  'INJ': 15, 'INJ-PERP': 15, 'INJUSD': 15,
+  'LINK': 16, 'LINK-PERP': 16, 'LINKUSD': 16,
+  'RLB': 17, 'RLB-PERP': 17, 'RLBUSD': 17,
+  'PYTH': 18, 'PYTH-PERP': 18, 'PYTHUSD': 18,
+  'TIA': 19, 'TIA-PERP': 19, 'TIAUSD': 19,
+  'JTO': 20, 'JTO-PERP': 20, 'JTOUSD': 20,
+  'SEI': 21, 'SEI-PERP': 21, 'SEIUSD': 21,
+  'AVAX': 22, 'AVAX-PERP': 22, 'AVAXUSD': 22,
+  'WIF': 23, 'WIF-PERP': 23, 'WIFUSD': 23,
+  'JUP': 24, 'JUP-PERP': 24, 'JUPUSD': 24,
+  'DYM': 25, 'DYM-PERP': 25, 'DYMUSD': 25,
+  'TAO': 26, 'TAO-PERP': 26, 'TAOUSD': 26,
+  'W': 27, 'W-PERP': 27, 'WUSD': 27,
+  'KMNO': 28, 'KMNO-PERP': 28, 'KMNOUSD': 28,
+  'TNSR': 29, 'TNSR-PERP': 29, 'TNSRUSD': 29,
+  'DRIFT': 30, 'DRIFT-PERP': 30, 'DRIFTUSD': 30,
+  'CLOUD': 31, 'CLOUD-PERP': 31, 'CLOUDUSD': 31,
+  'IO': 32, 'IO-PERP': 32, 'IOUSD': 32,
+  'ZEX': 33, 'ZEX-PERP': 33, 'ZEXUSD': 33,
+  'POPCAT': 34, 'POPCAT-PERP': 34, 'POPCATUSD': 34,
+  '1KWEN': 35, '1KWEN-PERP': 35, '1KWENUSD': 35,
+  'TON': 36, 'TON-PERP': 36, 'TONUSD': 36,
+  'MOTHER': 37, 'MOTHER-PERP': 37, 'MOTHERUSD': 37,
+  'ZEC': 38, 'ZEC-PERP': 38, 'ZECUSD': 38,
+  'MOODENG': 39, 'MOODENG-PERP': 39, 'MOODENGUSD': 39,
+  'DBR': 40, 'DBR-PERP': 40, 'DBRUSD': 40,
+  '1KMEW': 41, '1KMEW-PERP': 41, '1KMEWUSD': 41,
+  'MICHI': 42, 'MICHI-PERP': 42, 'MICHIUSD': 42,
+  'GOAT': 43, 'GOAT-PERP': 43, 'GOATUSD': 43,
+  'FWOG': 44, 'FWOG-PERP': 44, 'FWOGUSD': 44,
+  'PNUT': 45, 'PNUT-PERP': 45, 'PNUTUSD': 45,
+  'RAY': 46, 'RAY-PERP': 46, 'RAYUSD': 46,
+  'HYPE': 47, 'HYPE-PERP': 47, 'HYPEUSD': 47,
+  'LTC': 48, 'LTC-PERP': 48, 'LTCUSD': 48,
+  'ME': 49, 'ME-PERP': 49, 'MEUSD': 49,
+  'PENGU': 50, 'PENGU-PERP': 50, 'PENGUUSD': 50,
+  'AI16Z': 51, 'AI16Z-PERP': 51, 'AI16ZUSD': 51,
+  'TRUMP': 52, 'TRUMP-PERP': 52, 'TRUMPUSD': 52,
+  'MELANIA': 53, 'MELANIA-PERP': 53, 'MELANIAUSD': 53,
+  'BERA': 54, 'BERA-PERP': 54, 'BERAUSD': 54,
+  'KAITO': 55, 'KAITO-PERP': 55, 'KAITOUSD': 55,
+  'IP': 56, 'IP-PERP': 56, 'IPUSD': 56,
+  'FARTCOIN': 57, 'FARTCOIN-PERP': 57, 'FARTCOINUSD': 57,
+  'ADA': 58, 'ADA-PERP': 58, 'ADAUSD': 58,
+  'PAXG': 59, 'PAXG-PERP': 59, 'PAXGUSD': 59,
+  'LAUNCHCOIN': 60, 'LAUNCHCOIN-PERP': 60, 'LAUNCHCOINUSD': 60,
+  'PUMP': 61, 'PUMP-PERP': 61, 'PUMPUSD': 61,
+  'ASTER': 62, 'ASTER-PERP': 62, 'ASTERUSD': 62,
+  'XPL': 63, 'XPL-PERP': 63, 'XPLUSD': 63,
+  '2Z': 64, '2Z-PERP': 64, '2ZUSD': 64,
+  'MNT': 65, 'MNT-PERP': 65, 'MNTUSD': 65,
+  '1KPUMP': 66, '1KPUMP-PERP': 66, '1KPUMPUSD': 66,
+  'MET': 67, 'MET-PERP': 67, 'METUSD': 67,
+  '1KMON': 68, '1KMON-PERP': 68, '1KMONUSD': 68,
+  'LIT': 69, 'LIT-PERP': 69, 'LITUSD': 69,
+  'WLD': 70, 'WLD-PERP': 70, 'WLDUSD': 70,
+  'NEAR': 71, 'NEAR-PERP': 71, 'NEARUSD': 71,
+  'FTM': 72, 'FTM-PERP': 72, 'FTMUSD': 72,
+  'ATOM': 73, 'ATOM-PERP': 73, 'ATOMUSD': 73,
+  'DOT': 74, 'DOT-PERP': 74, 'DOTUSD': 74,
+  'BCH': 75, 'BCH-PERP': 75, 'BCHUSD': 75,
 };
 
 // Execute trade/close via subprocess to avoid ESM/CJS issues with Drift SDK
 async function executeDriftCommandViaSubprocess(command: Record<string, any>): Promise<any> {
   return new Promise((resolve) => {
-    // In production (CJS bundle), use server/ path from project root
-    // In development (ESM), use currentDirname
-    const executorPath = currentDirname 
-      ? join(currentDirname, 'drift-executor.mjs')
-      : join(process.cwd(), 'server', 'drift-executor.mjs');
+    // Always use server/drift-executor.mjs relative to project root
+    // In CJS bundle mode, currentDirname is process.cwd() (project root), not server/
+    // In ESM dev mode, currentDirname is dirname of this file (/server)
+    const executorPath = isBundledCJS
+      ? join(process.cwd(), 'server', 'drift-executor.mjs')
+      : join(currentDirname, 'drift-executor.mjs');
     
     console.log(`[Drift] Spawning subprocess executor for ${command.action || 'trade'}`);
     
@@ -2257,7 +2327,12 @@ export async function executePerpOrder(
   reduceOnly: boolean = false,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number }> {
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
-  const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
+  const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
+  
+  if (marketIndex === undefined) {
+    console.error(`[Drift] Unknown market: ${market}. Market index not found in PERP_MARKET_INDICES.`);
+    return { success: false, error: `Unknown market: ${market}. Please add this market to PERP_MARKET_INDICES in drift-service.ts.` };
+  }
   
   console.log(`[Drift] *** Executing ${side.toUpperCase()} ${reduceOnly ? 'REDUCE-ONLY ' : ''}order *** for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}`);
   if (reduceOnly) {
@@ -2360,7 +2435,12 @@ export async function closePerpPosition(
   positionSizeBase?: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
-  const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`] ?? 0;
+  const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
+  
+  if (marketIndex === undefined) {
+    console.error(`[Drift] Unknown market: ${market}. Market index not found in PERP_MARKET_INDICES.`);
+    return { success: false, error: `Unknown market: ${market}. Please add this market to PERP_MARKET_INDICES in drift-service.ts.` };
+  }
   
   console.log(`[Drift] Closing position for ${market} (index ${marketIndex}) on subaccount ${subAccountId}`);
   
