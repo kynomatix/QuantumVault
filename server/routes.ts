@@ -289,13 +289,15 @@ export async function registerRoutes(
   app.post("/api/telegram/connect", requireWallet, async (req, res) => {
     console.log('[Telegram] Connect endpoint hit, walletAddress:', req.walletAddress);
     try {
-      const DIALECT_CLIENT_KEY = process.env.DIALECT_CLIENT_KEY || process.env.DIALECT_API_KEY;
-      console.log('[Telegram] DIALECT_CLIENT_KEY available:', !!DIALECT_CLIENT_KEY);
+      const DIALECT_API_KEY = process.env.DIALECT_API_KEY;
+      const DIALECT_APP_ID = process.env.DIALECT_APP_ID;
+      console.log('[Telegram] DIALECT_API_KEY available:', !!DIALECT_API_KEY);
+      console.log('[Telegram] DIALECT_APP_ID available:', !!DIALECT_APP_ID);
       
-      if (!DIALECT_CLIENT_KEY) {
+      if (!DIALECT_API_KEY) {
         return res.status(503).json({ 
           error: "Telegram notifications not configured",
-          message: "The platform administrator needs to set up Dialect API credentials (DIALECT_CLIENT_KEY) to enable Telegram notifications."
+          message: "The platform administrator needs to set up Dialect API credentials to enable Telegram notifications."
         });
       }
 
@@ -306,15 +308,20 @@ export async function registerRoutes(
 
       // Call Dialect API to prepare Telegram channel
       // Use x-dialect-api-key for server-side authentication
+      const requestBody: any = {
+        walletAddress: req.walletAddress,
+      };
+      if (DIALECT_APP_ID) {
+        requestBody.appId = DIALECT_APP_ID;
+      }
+      
       const dialectResponse = await fetch('https://alerts-api.dial.to/v2/channel/telegram/prepare', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-dialect-api-key': DIALECT_CLIENT_KEY,
+          'x-dialect-api-key': DIALECT_API_KEY,
         },
-        body: JSON.stringify({
-          walletAddress: req.walletAddress,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!dialectResponse.ok) {
@@ -351,9 +358,9 @@ export async function registerRoutes(
   // Verify Telegram connection status
   app.get("/api/telegram/status", requireWallet, async (req, res) => {
     try {
-      const DIALECT_CLIENT_KEY = process.env.DIALECT_CLIENT_KEY || process.env.DIALECT_API_KEY;
+      const DIALECT_API_KEY = process.env.DIALECT_API_KEY;
       
-      if (!DIALECT_CLIENT_KEY) {
+      if (!DIALECT_API_KEY) {
         return res.json({ 
           configured: false,
           connected: false,
@@ -371,7 +378,7 @@ export async function registerRoutes(
         try {
           const statusResponse = await fetch(`https://alerts-api.dial.to/v2/channel/${wallet.dialectAddress}`, {
             headers: {
-              'x-dialect-api-key': DIALECT_CLIENT_KEY,
+              'x-dialect-api-key': DIALECT_API_KEY,
             },
           });
 
