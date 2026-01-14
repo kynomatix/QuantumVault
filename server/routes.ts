@@ -14,6 +14,7 @@ import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
+import { sendTradeNotification, type TradeNotification } from "./notification-service";
 
 declare module "express-session" {
   interface SessionData {
@@ -2913,6 +2914,14 @@ export async function registerRoutes(
             
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
             
+            // Send position closed notification
+            sendTradeNotification(wallet.address, {
+              type: 'position_closed',
+              botName: bot.name,
+              market: bot.market,
+              pnl: closeTradePnl,
+            }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
+            
             console.log(`[Webhook] Position closed successfully: ${closeSize} ${bot.market} ${closeSide.toUpperCase()}`);
             return res.json({
               status: "success",
@@ -3272,6 +3281,16 @@ export async function registerRoutes(
           errorMessage: userFriendlyError,
         });
         await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
+        
+        // Send trade failed notification
+        sendTradeNotification(wallet.address, {
+          type: 'trade_failed',
+          botName: bot.name,
+          market: bot.market,
+          side: side === 'long' ? 'LONG' : 'SHORT',
+          error: userFriendlyError,
+        }).catch(err => console.error('[Notifications] Failed to send trade_failed notification:', err));
+        
         return res.status(500).json({ error: userFriendlyError });
       }
 
@@ -3314,6 +3333,16 @@ export async function registerRoutes(
         totalVolume: (stats.totalVolume || 0) + tradeNotional,
         lastTradeAt: new Date().toISOString(),
       });
+
+      // Send trade notification (async, don't block response)
+      sendTradeNotification(wallet.address, {
+        type: 'trade_executed',
+        botName: bot.name,
+        market: bot.market,
+        side: side === 'long' ? 'LONG' : 'SHORT',
+        size: tradeNotional,
+        price: fillPrice,
+      }).catch(err => console.error('[Notifications] Failed to send trade_executed notification:', err));
 
       // Mark signal as executed (unique index prevents concurrent duplicates)
       try {
@@ -3652,6 +3681,14 @@ export async function registerRoutes(
             
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
             
+            // Send position closed notification
+            sendTradeNotification(walletAddress, {
+              type: 'position_closed',
+              botName: bot.name,
+              market: bot.market,
+              pnl: closeTradePnl,
+            }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
+            
             return res.json({
               status: "success",
               type: "close",
@@ -3816,6 +3853,16 @@ export async function registerRoutes(
           errorMessage: userFriendlyError,
         });
         await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
+        
+        // Send trade failed notification
+        sendTradeNotification(walletAddress, {
+          type: 'trade_failed',
+          botName: bot.name,
+          market: bot.market,
+          side: side === 'long' ? 'LONG' : 'SHORT',
+          error: userFriendlyError,
+        }).catch(err => console.error('[Notifications] Failed to send trade_failed notification:', err));
+        
         return res.status(500).json({ error: userFriendlyError });
       }
 
@@ -3858,6 +3905,16 @@ export async function registerRoutes(
         totalVolume: (stats.totalVolume || 0) + userTradeNotional,
         lastTradeAt: new Date().toISOString(),
       });
+
+      // Send trade notification (async, don't block response)
+      sendTradeNotification(walletAddress, {
+        type: 'trade_executed',
+        botName: bot.name,
+        market: bot.market,
+        side: side === 'long' ? 'LONG' : 'SHORT',
+        size: userTradeNotional,
+        price: userFillPrice,
+      }).catch(err => console.error('[Notifications] Failed to send trade_executed notification:', err));
 
       // Mark signal as executed (unique index prevents concurrent duplicates)
       try {
