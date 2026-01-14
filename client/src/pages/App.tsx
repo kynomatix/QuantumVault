@@ -1154,6 +1154,30 @@ export default function AppPage() {
                               return 'bg-yellow-500/20 text-yellow-400';
                             };
                             
+                            const getErrorExplanation = (error: string | null | undefined): string | null => {
+                              if (!error) return null;
+                              const e = error.toLowerCase();
+                              if (e.includes('market status') || e.includes('doesnt allow placing orders')) {
+                                return 'Market temporarily paused';
+                              }
+                              if (e.includes('insufficientcollateral') || e.includes('insufficient collateral')) {
+                                return 'Not enough margin';
+                              }
+                              if (e.includes('max leverage') || e.includes('exceeds leverage')) {
+                                return 'Exceeds leverage limit';
+                              }
+                              if (e.includes('oracle') || e.includes('stale oracle')) {
+                                return 'Price feed issue';
+                              }
+                              if (e.includes('reduce only')) {
+                                return 'Reduce-only mode';
+                              }
+                              if (e.includes('user not found') || e.includes('no user account')) {
+                                return 'Account not initialized';
+                              }
+                              return error.length > 30 ? error.substring(0, 30) + '...' : error;
+                            };
+                            
                             return (
                               <tr key={i} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-trade-${i}`}>
                                 <td className="py-3 font-mono text-muted-foreground text-xs">
@@ -1172,9 +1196,16 @@ export default function AppPage() {
                                 <td className="py-3 text-right font-mono">{trade.size}</td>
                                 <td className="py-3 text-right font-mono">${Number(trade.price).toLocaleString()}</td>
                                 <td className="py-3 text-right">
-                                  <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle()}`}>
-                                    {trade.status}
-                                  </span>
+                                  <div className="flex flex-col items-end gap-0.5">
+                                    <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle()}`}>
+                                      {trade.status}
+                                    </span>
+                                    {isFailed && trade.errorMessage && (
+                                      <span className="text-[10px] text-red-400/80 max-w-[120px] truncate" title={trade.errorMessage}>
+                                        {getErrorExplanation(trade.errorMessage)}
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
                               </tr>
                             );

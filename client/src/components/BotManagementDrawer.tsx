@@ -1361,6 +1361,33 @@ export function BotManagementDrawer({
                       return 'text-red-500';
                     };
                     
+                    const getErrorExplanation = (error: string | null | undefined): string | null => {
+                      if (!error) return null;
+                      const e = error.toLowerCase();
+                      if (e.includes('market status') || e.includes('doesnt allow placing orders')) {
+                        return 'Market temporarily paused - try again later';
+                      }
+                      if (e.includes('insufficientcollateral') || e.includes('insufficient collateral')) {
+                        return 'Not enough margin - reduce position size or add funds';
+                      }
+                      if (e.includes('max leverage') || e.includes('exceeds leverage')) {
+                        return 'Position too large for this market\'s leverage limit';
+                      }
+                      if (e.includes('oracle') || e.includes('stale oracle')) {
+                        return 'Price feed issue - try again in a moment';
+                      }
+                      if (e.includes('reduce only')) {
+                        return 'Market in reduce-only mode - can only close positions';
+                      }
+                      if (e.includes('user not found') || e.includes('no user account')) {
+                        return 'Trading account not initialized - deposit funds first';
+                      }
+                      if (e.includes('subaccount')) {
+                        return 'Bot trading account issue - check bot funding';
+                      }
+                      return error.length > 50 ? error.substring(0, 50) + '...' : error;
+                    };
+                    
                     return (
                       <div 
                         key={trade.id} 
@@ -1388,6 +1415,11 @@ export function BotManagementDrawer({
                             <p className="text-xs text-muted-foreground">
                               {formatDate(trade.executedAt)}
                             </p>
+                            {isFailed && (trade as any).errorMessage && (
+                              <p className="text-xs text-red-400 mt-0.5">
+                                {getErrorExplanation((trade as any).errorMessage)}
+                              </p>
+                            )}
                           </div>
                         </div>
                         <div className="text-right">
