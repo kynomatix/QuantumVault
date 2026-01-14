@@ -290,14 +290,16 @@ export async function registerRoutes(
     console.log('[Telegram] Connect endpoint hit, walletAddress:', req.walletAddress);
     try {
       const DIALECT_API_KEY = process.env.DIALECT_API_KEY;
+      const DIALECT_CLIENT_KEY = process.env.DIALECT_CLIENT_KEY;
       const DIALECT_APP_ID = process.env.DIALECT_APP_ID;
       console.log('[Telegram] DIALECT_API_KEY available:', !!DIALECT_API_KEY);
+      console.log('[Telegram] DIALECT_CLIENT_KEY available:', !!DIALECT_CLIENT_KEY);
       console.log('[Telegram] DIALECT_APP_ID available:', !!DIALECT_APP_ID);
       
-      if (!DIALECT_API_KEY || !DIALECT_APP_ID) {
+      if (!DIALECT_CLIENT_KEY || !DIALECT_APP_ID) {
         return res.status(503).json({ 
           error: "Telegram notifications not configured",
-          message: "The platform administrator needs to set up Dialect API credentials to enable Telegram notifications."
+          message: "The platform administrator needs to set up Dialect Client Key to enable Telegram notifications."
         });
       }
 
@@ -316,13 +318,13 @@ export async function registerRoutes(
 
       console.log('[Telegram] Using agent wallet:', agentAddress);
 
-      // Step 1: Get auth challenge from Dialect
+      // Step 1: Get auth challenge from Dialect (uses Client Key for user-side auth)
       console.log('[Telegram] Step 1: Getting auth challenge...');
       const challengeRes = await fetch('https://alerts-api.dial.to/v2/auth/challenge', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'x-dialect-api-key': DIALECT_API_KEY,
+          'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
         },
         body: JSON.stringify({ walletAddress: agentAddress }),
       });
@@ -350,7 +352,7 @@ export async function registerRoutes(
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'x-dialect-api-key': DIALECT_API_KEY,
+          'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
         },
         body: JSON.stringify({
           walletAddress: agentAddress,
@@ -369,14 +371,14 @@ export async function registerRoutes(
       const bearerToken = tokenData.token || tokenData.accessToken;
       console.log('[Telegram] Got bearer token');
 
-      // Step 4: Prepare Telegram channel
+      // Step 4: Prepare Telegram channel (uses Bearer token + Client Key)
       console.log('[Telegram] Step 4: Preparing Telegram channel...');
       const prepareRes = await fetch('https://alerts-api.dial.to/v2/channel/telegram/prepare', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${bearerToken}`,
-          'x-dialect-api-key': DIALECT_API_KEY,
+          'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
         },
       });
 
