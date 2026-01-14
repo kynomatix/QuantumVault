@@ -2380,8 +2380,7 @@ export async function registerRoutes(
           
           // Only auto-withdraw for bots with ISOLATED subaccounts (non-zero)
           // Subaccount 0 is the shared main account - don't auto-withdraw from it
-          // as it may contain funds from multiple bots or pooled capital
-          if (balance > 0.01 && bot.driftSubaccountId > 0) {
+          if (bot.driftSubaccountId > 0) {
             // CRITICAL: Require encrypted key to withdraw, abort if missing
             if (!wallet.agentPrivateKeyEncrypted) {
               console.error(`[Delete] Cannot withdraw - agent key missing for bot ${bot.id}`);
@@ -2392,87 +2391,102 @@ export async function registerRoutes(
                 message: "Unable to access agent wallet to withdraw funds. Please contact support."
               });
             }
-            
-            // AUTO-WITHDRAW: Transfer funds from isolated subaccount to agent wallet
-            console.log(`[Delete] Auto-withdrawing $${balance.toFixed(2)} from isolated subaccount ${bot.driftSubaccountId}`);
+
+            // Always attempt to sweep funds from isolated subaccounts before deletion
+            // Even tiny dust amounts can prevent subaccount closure on Drift
+            console.log(`[Delete] Sweeping funds from isolated subaccount ${bot.driftSubaccountId} (reported balance: $${balance.toFixed(6)})`);
             
             try {
-              // Step 1: Transfer funds from bot's isolated subaccount to main account
-              console.log(`[Delete] Transferring $${balance.toFixed(2)} from subaccount ${bot.driftSubaccountId} to main account`);
+              // Step 1: Transfer ALL funds from bot's isolated subaccount to main account
+              // Use a minimum of 0.000001 or the reported balance, whichever is higher
+              const sweepAmount = Math.max(balance, 0.000001);
+              console.log(`[Delete] Transferring $${sweepAmount.toFixed(6)} from subaccount ${bot.driftSubaccountId} to main account`);
               const transferResult = await executeAgentTransferBetweenSubaccounts(
                 agentAddress,
                 wallet.agentPrivateKeyEncrypted,
                 bot.driftSubaccountId,
                 0, // to main account
-                balance
+                sweepAmount
               );
               if (!transferResult.success) {
-                console.error(`[Delete] Transfer failed: ${transferResult.error}`);
-                return res.status(500).json({
-                  error: "Failed to transfer funds before deletion",
-                  details: transferResult.error,
-                  balance,
-                  driftSubaccountId: bot.driftSubaccountId
-                });
-              }
-              console.log(`[Delete] Transfer successful: ${transferResult.signature}`);
-              
-              // Step 2: Withdraw the transferred amount from main account to agent wallet
-              console.log(`[Delete] Withdrawing $${balance.toFixed(2)} from Drift to agent wallet`);
-              const withdrawResult = await executeAgentDriftWithdraw(
-                agentAddress,
-                wallet.agentPrivateKeyEncrypted,
-                balance, // Only withdraw the amount we just transferred, not entire main account
-                0 // withdraw from main account
-              );
-              
-              if (withdrawResult.success) {
-                withdrawnAmount = balance;
-                withdrawTxSignature = withdrawResult.signature;
-                console.log(`[Delete] Withdrawal successful: ${withdrawResult.signature}`);
+                // Transfer might fail if balance is already truly 0
+                console.warn(`[Delete] Transfer warning: ${transferResult.error}`);
+                // Continue to close attempt - might work if balance was already 0
               } else {
-                console.error(`[Delete] Withdrawal failed: ${withdrawResult.error}`);
-                return res.status(500).json({
-                  error: "Failed to withdraw funds before deletion",
-                  details: withdrawResult.error,
-                  balance,
-                  driftSubaccountId: bot.driftSubaccountId
-                });
+                console.log(`[Delete] Transfer successful: ${transferResult.signature}`);
+                
+                // Step 2: Withdraw the transferred amount from main account to agent wallet
+                // Only withdraw if it's a meaningful amount (> $0.01 to save on tx fees)
+                if (balance > 0.01) {
+                  console.log(`[Delete] Withdrawing $${balance.toFixed(2)} from Drift to agent wallet`);
+                  const withdrawResult = await executeAgentDriftWithdraw(
+                    agentAddress,
+                    wallet.agentPrivateKeyEncrypted,
+                    balance,
+                    0 // withdraw from main account
+                  );
+                  
+                  if (withdrawResult.success) {
+                    withdrawnAmount = balance;
+                    withdrawTxSignature = withdrawResult.signature;
+                    console.log(`[Delete] Withdrawal successful: ${withdrawResult.signature}`);
+                  } else {
+                    console.warn(`[Delete] Withdrawal warning: ${withdrawResult.error}`);
+                    // Don't fail - funds are still in main Drift account, not lost
+                  }
+                } else if (balance > 0) {
+                  console.log(`[Delete] Dust amount $${balance.toFixed(6)} transferred to main account (not withdrawing to save fees)`);
+                }
               }
             } catch (err: any) {
-              console.error(`[Delete] Auto-withdraw error:`, err);
-              return res.status(500).json({
-                error: "Failed to withdraw funds before deletion",
-                details: err.message,
-                balance,
-                driftSubaccountId: bot.driftSubaccountId
-              });
+              console.warn(`[Delete] Sweep error (continuing to close attempt):`, err.message);
+              // Continue to close attempt - might work
             }
           } else if (balance > 0.01 && bot.driftSubaccountId === 0) {
             // Bot is on shared main account (subaccount 0) - warn but don't auto-withdraw
-            // as it may contain funds from other sources
             console.log(`[Delete] Bot ${bot.id} is on shared subaccount 0 with $${balance.toFixed(2)} - not auto-withdrawing`);
           }
         }
         
-        // Try to close the subaccount to reclaim rent (~0.035 SOL)
+        // Try to close the subaccount to reclaim rent (~0.023 SOL)
+        // CRITICAL: For isolated subaccounts (>0), we MUST close the subaccount or fail the deletion
+        // This prevents orphaning subaccounts with locked rent
         let rentReclaimed = false;
-        if (exists && wallet.agentPrivateKeyEncrypted) {
+        let rentReclaimError: string | undefined;
+        if (exists && wallet.agentPrivateKeyEncrypted && bot.driftSubaccountId > 0) {
+          console.log(`[Delete] Attempting to close subaccount ${bot.driftSubaccountId} to reclaim rent...`);
           try {
             const closeResult = await closeDriftSubaccount(
               wallet.agentPrivateKeyEncrypted,
               bot.driftSubaccountId
             );
             if (closeResult.success) {
-              console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed, rent reclaimed`);
+              console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed, rent reclaimed: ${closeResult.signature}`);
               rentReclaimed = true;
             } else {
-              console.warn(`[Delete] Could not reclaim rent: ${closeResult.error}`);
+              console.error(`[Delete] RENT NOT RECLAIMED - subaccount ${bot.driftSubaccountId}: ${closeResult.error}`);
+              rentReclaimError = closeResult.error;
             }
-          } catch (closeErr) {
-            console.warn(`[Delete] Rent reclaim failed:`, closeErr);
+          } catch (closeErr: any) {
+            console.error(`[Delete] RENT RECLAIM FAILED - subaccount ${bot.driftSubaccountId}:`, closeErr.message);
+            rentReclaimError = closeErr.message;
+          }
+          
+          // BLOCK DELETION if rent could not be reclaimed
+          // User must use "Reset Drift Account" or resolve the issue first
+          if (!rentReclaimed) {
+            console.error(`[Delete] BLOCKING DELETION - subaccount ${bot.driftSubaccountId} not closed, would orphan rent`);
+            return res.status(409).json({
+              error: "Cannot delete bot - subaccount still exists on-chain",
+              details: rentReclaimError,
+              driftSubaccountId: bot.driftSubaccountId,
+              message: "The on-chain subaccount could not be closed. This may be due to remaining balance or open positions. Use 'Reset Drift Account' in Settings to clean up, or manually close the subaccount on Drift first.",
+              withdrawn: withdrawnAmount > 0,
+              withdrawnAmount
+            });
           }
         }
+        
         await storage.deleteTradingBot(req.params.id);
         return res.json({ 
           success: true, 
@@ -2480,7 +2494,9 @@ export async function registerRoutes(
           withdrawn: withdrawnAmount > 0,
           withdrawnAmount,
           withdrawTxSignature,
-          message: withdrawnAmount > 0 ? `Automatically withdrew $${withdrawnAmount.toFixed(2)} USDC to your agent wallet` : undefined
+          message: withdrawnAmount > 0 
+            ? `Automatically withdrew $${withdrawnAmount.toFixed(2)} USDC to your agent wallet and reclaimed subaccount rent`
+            : rentReclaimed ? 'Subaccount closed and rent reclaimed' : 'Bot deleted'
         });
       }
 
