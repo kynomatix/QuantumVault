@@ -1839,12 +1839,16 @@ export default function AppPage() {
                                 <Button
                                   variant="outline"
                                   onClick={async () => {
+                                    console.log('[Telegram] Connect button clicked');
                                     try {
+                                      console.log('[Telegram] Calling /api/telegram/connect...');
                                       const res = await fetch('/api/telegram/connect', { 
                                         method: 'POST',
                                         credentials: 'include' 
                                       });
+                                      console.log('[Telegram] Response status:', res.status);
                                       const data = await res.json();
+                                      console.log('[Telegram] Response data:', data);
                                       
                                       if (res.ok && data.verificationLink) {
                                         window.open(data.verificationLink, '_blank');
