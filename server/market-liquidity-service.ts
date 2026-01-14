@@ -69,6 +69,7 @@ const DRIFT_PERP_MARKETS: Omit<MarketInfo, 'openInterestUsd' | 'lastPrice'>[] = 
   { symbol: 'DOT-PERP', fullName: 'Polkadot', marketIndex: 36, category: ['L0', 'Infra'], baseAssetSymbol: 'DOT', riskTier: 'high_risk', estimatedSlippagePct: 0.55, isActive: true },
   { symbol: 'TRUMP-PERP', fullName: 'Trump', marketIndex: 42, category: ['Meme', 'Politics'], baseAssetSymbol: 'TRUMP', riskTier: 'high_risk', estimatedSlippagePct: 0.80, isActive: true, warning: 'High volatility meme token' },
   { symbol: 'MELANIA-PERP', fullName: 'Melania', marketIndex: 43, category: ['Meme', 'Politics'], baseAssetSymbol: 'MELANIA', riskTier: 'high_risk', estimatedSlippagePct: 0.90, isActive: true, warning: 'Very low liquidity' },
+  { symbol: 'LIT-PERP', fullName: 'Litentry', marketIndex: 44, category: ['Identity', 'Infra'], baseAssetSymbol: 'LIT', riskTier: 'high_risk', estimatedSlippagePct: 0.75, isActive: true },
 ];
 
 // Cache for price data (refreshed hourly)
