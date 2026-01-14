@@ -285,7 +285,7 @@ export async function registerRoutes(
     }
   });
 
-  // Telegram connection - returns bot link for user to subscribe
+  // Telegram connection - uses agent wallet to authenticate with Dialect and prepare channel
   app.post("/api/telegram/connect", requireWallet, async (req, res) => {
     console.log('[Telegram] Connect endpoint hit, walletAddress:', req.walletAddress);
     try {
@@ -306,30 +306,192 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Wallet not found" });
       }
 
-      // Generate the Dialect Telegram bot subscription link
-      // Users click this to subscribe to our app's notifications
-      const botLink = `https://t.me/dialectbot?start=subscribe_${DIALECT_APP_ID}`;
-      
-      // Mark wallet as having initiated Telegram setup
+      if (!wallet.agentPrivateKeyEncrypted || !wallet.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not initialized. Please refresh the page." });
+      }
+
+      const { getAgentKeypair } = await import('./agent-wallet');
+      const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+      const agentAddress = wallet.agentPublicKey;
+
+      console.log('[Telegram] Using agent wallet:', agentAddress);
+
+      // Step 1: Get auth challenge from Dialect
+      console.log('[Telegram] Step 1: Getting auth challenge...');
+      const challengeRes = await fetch('https://alerts-api.dial.to/v2/auth/challenge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ walletAddress: agentAddress }),
+      });
+
+      if (!challengeRes.ok) {
+        const err = await challengeRes.text();
+        console.error('[Telegram] Challenge failed:', challengeRes.status, err);
+        return res.status(500).json({ error: "Failed to get auth challenge", details: err });
+      }
+
+      const challengeData = await challengeRes.json();
+      const message = challengeData.message;
+      console.log('[Telegram] Got challenge message');
+
+      // Step 2: Sign the challenge with agent wallet
+      console.log('[Telegram] Step 2: Signing challenge...');
+      const messageBytes = new TextEncoder().encode(message);
+      const signature = agentKeypair.sign(messageBytes);
+      const signatureBase64 = Buffer.from(signature).toString('base64');
+      const messageBase64 = Buffer.from(messageBytes).toString('base64');
+
+      // Step 3: Exchange signature for bearer token
+      console.log('[Telegram] Step 3: Getting bearer token...');
+      const tokenRes = await fetch('https://alerts-api.dial.to/v2/auth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          walletAddress: agentAddress,
+          signature: signatureBase64,
+          messageBase64: messageBase64,
+        }),
+      });
+
+      if (!tokenRes.ok) {
+        const err = await tokenRes.text();
+        console.error('[Telegram] Token exchange failed:', tokenRes.status, err);
+        return res.status(500).json({ error: "Failed to authenticate with Dialect", details: err });
+      }
+
+      const tokenData = await tokenRes.json();
+      const bearerToken = tokenData.token || tokenData.accessToken;
+      console.log('[Telegram] Got bearer token');
+
+      // Step 4: Prepare Telegram channel
+      console.log('[Telegram] Step 4: Preparing Telegram channel...');
+      const prepareRes = await fetch('https://alerts-api.dial.to/v2/channel/telegram/prepare', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${bearerToken}`,
+          'X-Dialect-Client-Key': DIALECT_API_KEY,
+        },
+      });
+
+      if (!prepareRes.ok) {
+        const err = await prepareRes.text();
+        console.error('[Telegram] Prepare channel failed:', prepareRes.status, err);
+        return res.status(500).json({ error: "Failed to prepare Telegram channel", details: err });
+      }
+
+      const prepareData = await prepareRes.json();
+      const channelId = prepareData.id;
+      const verificationLink = prepareData.verification?.link;
+
+      console.log('[Telegram] Channel prepared:', channelId);
+      console.log('[Telegram] Verification link:', verificationLink);
+
       await storage.updateWallet(req.walletAddress!, {
-        dialectAddress: DIALECT_APP_ID, // Store app ID for sending notifications
+        dialectAddress: channelId,
       });
 
       res.json({
         success: true,
-        verificationLink: botLink,
-        message: "Click the link to open Telegram and subscribe to QuantumVault notifications."
+        verificationLink: verificationLink || `https://t.me/dialectbot?start=verify_${channelId}`,
+        channelId: channelId,
+        message: "Click the link to verify your Telegram in the Dialect bot, then click 'Verify Connection'."
       });
     } catch (error) {
       console.error("[Telegram] Connect error:", error);
       res.status(500).json({ 
         error: "Failed to connect Telegram",
-        message: "An error occurred while setting up Telegram. Please try again."
+        message: error instanceof Error ? error.message : "An error occurred while setting up Telegram."
       });
     }
   });
 
-  // Verify Telegram connection status
+  // Verify and subscribe Telegram channel after user completes bot verification
+  app.post("/api/telegram/verify", requireWallet, async (req, res) => {
+    console.log('[Telegram] Verify endpoint hit, walletAddress:', req.walletAddress);
+    try {
+      const DIALECT_API_KEY = process.env.DIALECT_API_KEY;
+      const DIALECT_APP_ID = process.env.DIALECT_APP_ID;
+
+      if (!DIALECT_API_KEY || !DIALECT_APP_ID) {
+        return res.status(503).json({ error: "Dialect not configured" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+
+      if (!wallet.dialectAddress) {
+        return res.status(400).json({ 
+          error: "No Telegram setup in progress",
+          message: "Please click 'Connect Telegram' first."
+        });
+      }
+
+      const channelId = wallet.dialectAddress;
+      console.log('[Telegram] Checking verification for channel:', channelId);
+
+      const checkRes = await fetch(`https://alerts-api.dial.to/v2/channel/${channelId}`, {
+        headers: { 'x-dialect-api-key': DIALECT_API_KEY },
+      });
+
+      if (!checkRes.ok) {
+        const err = await checkRes.text();
+        console.error('[Telegram] Check channel failed:', checkRes.status, err);
+        return res.status(500).json({ error: "Failed to check channel status", details: err });
+      }
+
+      const channelData = await checkRes.json();
+      console.log('[Telegram] Channel data:', JSON.stringify(channelData));
+
+      if (!channelData.verified) {
+        return res.json({
+          success: false,
+          verified: false,
+          message: "Please complete the verification in Telegram first by clicking /start in the Dialect bot."
+        });
+      }
+
+      console.log('[Telegram] Channel verified! Subscribing to app...');
+      const subscribeRes = await fetch(`https://alerts-api.dial.to/v2/channel/${channelId}/subscribe`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-dialect-api-key': DIALECT_API_KEY,
+        },
+        body: JSON.stringify({ appId: DIALECT_APP_ID }),
+      });
+
+      if (!subscribeRes.ok) {
+        const err = await subscribeRes.text();
+        console.error('[Telegram] Subscribe failed:', subscribeRes.status, err);
+        if (!err.includes('already subscribed')) {
+          return res.status(500).json({ error: "Failed to subscribe channel", details: err });
+        }
+      }
+
+      await storage.updateWallet(req.walletAddress!, {
+        telegramConnected: true,
+      });
+
+      console.log('[Telegram] Successfully connected and subscribed!');
+      res.json({
+        success: true,
+        verified: true,
+        subscribed: true,
+        message: "Telegram notifications are now active! You'll receive alerts for your trading bots."
+      });
+    } catch (error) {
+      console.error("[Telegram] Verify error:", error);
+      res.status(500).json({ 
+        error: "Failed to verify Telegram",
+        message: error instanceof Error ? error.message : "An error occurred."
+      });
+    }
+  });
+
+  // Check Telegram connection status
   app.get("/api/telegram/status", requireWallet, async (req, res) => {
     try {
       const DIALECT_API_KEY = process.env.DIALECT_API_KEY;

@@ -37,7 +37,8 @@ import {
   AlertTriangle,
   XCircle,
   ExternalLink,
-  X
+  X,
+  Check
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -1835,51 +1836,91 @@ export default function AppPage() {
                                 : 'Connect Telegram to receive instant trade alerts when your bots execute trades.'}
                             </p>
                             {!telegramConnected && (
-                              <div className="mt-3">
-                                <Button
-                                  variant="outline"
-                                  onClick={async () => {
-                                    console.log('[Telegram] Connect button clicked');
-                                    try {
-                                      console.log('[Telegram] Calling /api/telegram/connect...');
-                                      const res = await fetch('/api/telegram/connect', { 
-                                        method: 'POST',
-                                        credentials: 'include' 
-                                      });
-                                      console.log('[Telegram] Response status:', res.status);
-                                      const data = await res.json();
-                                      console.log('[Telegram] Response data:', data);
-                                      
-                                      if (res.ok && data.verificationLink) {
-                                        window.open(data.verificationLink, '_blank');
-                                        toast({
-                                          title: "Telegram Setup Started",
-                                          description: "Complete the verification in Telegram, then refresh this page.",
+                              <div className="mt-3 space-y-3">
+                                <div className="flex gap-2 flex-wrap">
+                                  <Button
+                                    variant="outline"
+                                    onClick={async () => {
+                                      console.log('[Telegram] Connect button clicked');
+                                      try {
+                                        console.log('[Telegram] Calling /api/telegram/connect...');
+                                        const res = await fetch('/api/telegram/connect', { 
+                                          method: 'POST',
+                                          credentials: 'include' 
                                         });
-                                      } else {
+                                        console.log('[Telegram] Response status:', res.status);
+                                        const data = await res.json();
+                                        console.log('[Telegram] Response data:', data);
+                                        
+                                        if (res.ok && data.verificationLink) {
+                                          window.open(data.verificationLink, '_blank');
+                                          toast({
+                                            title: "Step 1: Open Telegram",
+                                            description: "Click /start in the bot, then come back and click 'Verify Connection'.",
+                                          });
+                                        } else {
+                                          toast({
+                                            title: "Setup Not Available",
+                                            description: data.message || "Telegram notifications are not yet configured.",
+                                            variant: "destructive",
+                                          });
+                                        }
+                                      } catch (error) {
                                         toast({
-                                          title: "Setup Not Available",
-                                          description: data.message || "Telegram notifications are not yet configured.",
+                                          title: "Error",
+                                          description: "Failed to start Telegram connection",
                                           variant: "destructive",
                                         });
                                       }
-                                    } catch (error) {
-                                      toast({
-                                        title: "Error",
-                                        description: "Failed to start Telegram connection",
-                                        variant: "destructive",
-                                      });
-                                    }
-                                  }}
-                                  data-testid="button-connect-telegram"
-                                >
-                                  <ExternalLink className="w-4 h-4 mr-2" />
-                                  Connect Telegram
-                                </Button>
-                                <p className="text-xs text-muted-foreground mt-3">
+                                    }}
+                                    data-testid="button-connect-telegram"
+                                  >
+                                    <ExternalLink className="w-4 h-4 mr-2" />
+                                    1. Connect Telegram
+                                  </Button>
+                                  <Button
+                                    variant="default"
+                                    onClick={async () => {
+                                      console.log('[Telegram] Verify button clicked');
+                                      try {
+                                        const res = await fetch('/api/telegram/verify', { 
+                                          method: 'POST',
+                                          credentials: 'include' 
+                                        });
+                                        const data = await res.json();
+                                        console.log('[Telegram] Verify response:', data);
+                                        
+                                        if (data.success && data.verified) {
+                                          setTelegramConnected(true);
+                                          toast({
+                                            title: "Telegram Connected!",
+                                            description: "You'll now receive trade alerts via Telegram.",
+                                          });
+                                        } else {
+                                          toast({
+                                            title: "Not Verified Yet",
+                                            description: data.message || "Please complete the Telegram bot setup first.",
+                                            variant: "destructive",
+                                          });
+                                        }
+                                      } catch (error) {
+                                        toast({
+                                          title: "Error",
+                                          description: "Failed to verify Telegram connection",
+                                          variant: "destructive",
+                                        });
+                                      }
+                                    }}
+                                    data-testid="button-verify-telegram"
+                                  >
+                                    <Check className="w-4 h-4 mr-2" />
+                                    2. Verify Connection
+                                  </Button>
+                                </div>
+                                <p className="text-xs text-muted-foreground">
                                   Once connected, you'll receive:
                                 </p>
-                                <ul className="text-xs text-muted-foreground space-y-1 ml-4 list-disc mt-1">
+                                <ul className="text-xs text-muted-foreground space-y-1 ml-4 list-disc">
                                   <li>Instant alerts when trades execute</li>
                                   <li>Notifications on trade failures</li>
                                   <li>Position close summaries with PnL</li>
