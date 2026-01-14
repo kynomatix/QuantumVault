@@ -320,7 +320,10 @@ export async function registerRoutes(
       console.log('[Telegram] Step 1: Getting auth challenge...');
       const challengeRes = await fetch('https://alerts-api.dial.to/v2/auth/challenge', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-dialect-api-key': DIALECT_API_KEY,
+        },
         body: JSON.stringify({ walletAddress: agentAddress }),
       });
 
@@ -345,7 +348,10 @@ export async function registerRoutes(
       console.log('[Telegram] Step 3: Getting bearer token...');
       const tokenRes = await fetch('https://alerts-api.dial.to/v2/auth/token', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-dialect-api-key': DIALECT_API_KEY,
+        },
         body: JSON.stringify({
           walletAddress: agentAddress,
           signature: signatureBase64,
@@ -370,7 +376,7 @@ export async function registerRoutes(
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${bearerToken}`,
-          'X-Dialect-Client-Key': DIALECT_API_KEY,
+          'x-dialect-api-key': DIALECT_API_KEY,
         },
       });
 
