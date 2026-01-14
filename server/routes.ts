@@ -287,8 +287,10 @@ export async function registerRoutes(
 
   // Telegram connection - prepare Telegram channel via Dialect API
   app.post("/api/telegram/connect", requireWallet, async (req, res) => {
+    console.log('[Telegram] Connect endpoint hit, walletAddress:', req.walletAddress);
     try {
       const DIALECT_CLIENT_KEY = process.env.DIALECT_CLIENT_KEY || process.env.DIALECT_API_KEY;
+      console.log('[Telegram] DIALECT_CLIENT_KEY available:', !!DIALECT_CLIENT_KEY);
       
       if (!DIALECT_CLIENT_KEY) {
         return res.status(503).json({ 
