@@ -305,11 +305,12 @@ export async function registerRoutes(
       }
 
       // Call Dialect API to prepare Telegram channel
+      // Use x-dialect-api-key for server-side authentication
       const dialectResponse = await fetch('https://alerts-api.dial.to/v2/channel/telegram/prepare', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
+          'x-dialect-api-key': DIALECT_CLIENT_KEY,
         },
         body: JSON.stringify({
           walletAddress: req.walletAddress,
@@ -370,7 +371,7 @@ export async function registerRoutes(
         try {
           const statusResponse = await fetch(`https://alerts-api.dial.to/v2/channel/${wallet.dialectAddress}`, {
             headers: {
-              'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
+              'x-dialect-api-key': DIALECT_CLIENT_KEY,
             },
           });
 
