@@ -1,7 +1,12 @@
 /**
  * Market Liquidity Service
  * Provides information about Drift perpetual markets with OI-based slippage estimates
- * OI data is based on known market liquidity as of Jan 2026
+ * 
+ * Data sources:
+ * 1. Primary: Drift public stats API (driftapi.com)
+ * 2. Fallback: Static estimates based on Drift UI (updated periodically)
+ * 
+ * Cache: 24 hours with manual refresh capability
  */
 
 export type RiskTier = 'recommended' | 'caution' | 'high_risk';
@@ -18,69 +23,139 @@ export interface MarketInfo {
   lastPrice: number | null;
   isActive: boolean;
   warning?: string;
+  maxLeverage?: number;
 }
 
-// Static market data with OI-based tiers (updated based on Drift UI data Jan 2026)
-// OI thresholds: $10M+ = Recommended, $1M+ = Caution, <$1M = High Risk
-interface MarketData {
+interface MarketMetadata {
   symbol: string;
   fullName: string;
   marketIndex: number;
   category: string[];
   baseAssetSymbol: string;
   isActive: boolean;
-  oiUsd: number; // Approximate OI in USD (for tier calculation)
+  maxLeverage: number;
   warning?: string;
 }
 
-// Markets ordered by approximate OI (descending) based on Drift UI Jan 2026
-const DRIFT_PERP_MARKETS: MarketData[] = [
-  // Tier 1: Recommended ($10M+ OI)
-  { symbol: 'SOL-PERP', fullName: 'Solana', marketIndex: 0, category: ['L1', 'Infra'], baseAssetSymbol: 'SOL', isActive: true, oiUsd: 147_000_000 },
-  { symbol: 'BTC-PERP', fullName: 'Bitcoin', marketIndex: 1, category: ['L1', 'Payment'], baseAssetSymbol: 'BTC', isActive: true, oiUsd: 77_000_000 },
-  { symbol: 'ETH-PERP', fullName: 'Ethereum', marketIndex: 2, category: ['L1', 'Infra'], baseAssetSymbol: 'ETH', isActive: true, oiUsd: 37_000_000 },
-  
-  // Tier 2: Caution ($1M-$10M OI)
-  { symbol: 'SUI-PERP', fullName: 'Sui', marketIndex: 9, category: ['L1'], baseAssetSymbol: 'SUI', isActive: true, oiUsd: 1_780_000 },
-  { symbol: 'ZEC-PERP', fullName: 'Zcash', marketIndex: 37, category: ['L1', 'Privacy'], baseAssetSymbol: 'ZEC', isActive: true, oiUsd: 1_760_000 },
-  { symbol: 'DRIFT-PERP', fullName: 'Drift Protocol', marketIndex: 29, category: ['DeFi', 'Solana'], baseAssetSymbol: 'DRIFT', isActive: true, oiUsd: 1_530_000 },
-  { symbol: 'HYPE-PERP', fullName: 'Hyperliquid', marketIndex: 38, category: ['DeFi', 'L1'], baseAssetSymbol: 'HYPE', isActive: true, oiUsd: 1_450_000 },
-  { symbol: 'JUP-PERP', fullName: 'Jupiter', marketIndex: 26, category: ['DeFi', 'Solana'], baseAssetSymbol: 'JUP', isActive: true, oiUsd: 1_360_000 },
-  { symbol: 'TRUMP-PERP', fullName: 'Trump', marketIndex: 42, category: ['Meme', 'Politics'], baseAssetSymbol: 'TRUMP', isActive: true, oiUsd: 1_200_000, warning: 'High volatility meme token' },
-  { symbol: 'WIF-PERP', fullName: 'dogwifhat', marketIndex: 24, category: ['Meme', 'Dog'], baseAssetSymbol: 'WIF', isActive: true, oiUsd: 1_100_000 },
-  { symbol: 'XRP-PERP', fullName: 'XRP', marketIndex: 14, category: ['L1', 'Payment'], baseAssetSymbol: 'XRP', isActive: true, oiUsd: 1_050_000 },
-  
-  // Tier 3: High Risk (<$1M OI)
-  { symbol: 'DOGE-PERP', fullName: 'Dogecoin', marketIndex: 7, category: ['Meme', 'Dog'], baseAssetSymbol: 'DOGE', isActive: true, oiUsd: 900_000 },
-  { symbol: 'LINK-PERP', fullName: 'Chainlink', marketIndex: 17, category: ['Oracle', 'DeFi'], baseAssetSymbol: 'LINK', isActive: true, oiUsd: 850_000 },
-  { symbol: 'BNB-PERP', fullName: 'Binance Coin', marketIndex: 8, category: ['Exchange'], baseAssetSymbol: 'BNB', isActive: true, oiUsd: 800_000 },
-  { symbol: '1MBONK-PERP', fullName: 'Bonk', marketIndex: 4, category: ['Meme', 'Dog'], baseAssetSymbol: '1MBONK', isActive: true, oiUsd: 750_000, warning: 'High volatility meme token' },
-  { symbol: 'JTO-PERP', fullName: 'Jito', marketIndex: 20, category: ['DeFi', 'Solana'], baseAssetSymbol: 'JTO', isActive: true, oiUsd: 700_000 },
-  { symbol: 'ARB-PERP', fullName: 'Arbitrum', marketIndex: 6, category: ['L2', 'Infra'], baseAssetSymbol: 'ARB', isActive: true, oiUsd: 650_000 },
-  { symbol: 'OP-PERP', fullName: 'Optimism', marketIndex: 11, category: ['L2', 'Infra'], baseAssetSymbol: 'OP', isActive: true, oiUsd: 600_000 },
-  { symbol: 'AVAX-PERP', fullName: 'Avalanche', marketIndex: 15, category: ['L1', 'Infra'], baseAssetSymbol: 'AVAX', isActive: true, oiUsd: 550_000 },
-  { symbol: 'APT-PERP', fullName: 'Aptos', marketIndex: 3, category: ['L1', 'Infra'], baseAssetSymbol: 'APT', isActive: true, oiUsd: 500_000 },
-  { symbol: '1MPEPE-PERP', fullName: 'Pepe', marketIndex: 10, category: ['Meme'], baseAssetSymbol: '1MPEPE', isActive: true, oiUsd: 480_000, warning: 'High volatility meme token' },
-  { symbol: 'POL-PERP', fullName: 'Polygon', marketIndex: 5, category: ['L2', 'Infra'], baseAssetSymbol: 'POL', isActive: true, oiUsd: 450_000 },
-  { symbol: 'TIA-PERP', fullName: 'Celestia', marketIndex: 23, category: ['L1', 'Modular'], baseAssetSymbol: 'TIA', isActive: true, oiUsd: 400_000 },
-  { symbol: 'INJ-PERP', fullName: 'Injective', marketIndex: 19, category: ['L1', 'DeFi'], baseAssetSymbol: 'INJ', isActive: true, oiUsd: 380_000 },
-  { symbol: 'PYTH-PERP', fullName: 'Pyth Network', marketIndex: 21, category: ['Oracle', 'Solana'], baseAssetSymbol: 'PYTH', isActive: true, oiUsd: 350_000 },
-  { symbol: 'RENDER-PERP', fullName: 'Render', marketIndex: 16, category: ['AI', 'GPU'], baseAssetSymbol: 'RENDER', isActive: true, oiUsd: 320_000 },
-  { symbol: 'SEI-PERP', fullName: 'Sei', marketIndex: 18, category: ['L1', 'Trading'], baseAssetSymbol: 'SEI', isActive: true, oiUsd: 300_000 },
-  { symbol: 'NEAR-PERP', fullName: 'Near', marketIndex: 22, category: ['L1', 'Infra'], baseAssetSymbol: 'NEAR', isActive: true, oiUsd: 280_000 },
-  { symbol: 'TAO-PERP', fullName: 'Bittensor', marketIndex: 31, category: ['AI'], baseAssetSymbol: 'TAO', isActive: true, oiUsd: 260_000 },
-  { symbol: 'ATOM-PERP', fullName: 'Cosmos', marketIndex: 12, category: ['L0', 'Infra'], baseAssetSymbol: 'ATOM', isActive: true, oiUsd: 240_000 },
-  { symbol: 'DOT-PERP', fullName: 'Polkadot', marketIndex: 36, category: ['L0', 'Infra'], baseAssetSymbol: 'DOT', isActive: true, oiUsd: 220_000 },
-  { symbol: 'LTC-PERP', fullName: 'Litecoin', marketIndex: 13, category: ['L1', 'Payment'], baseAssetSymbol: 'LTC', isActive: true, oiUsd: 200_000 },
-  { symbol: 'W-PERP', fullName: 'Wormhole', marketIndex: 27, category: ['Bridge', 'Infra'], baseAssetSymbol: 'W', isActive: true, oiUsd: 180_000 },
-  { symbol: 'TNSR-PERP', fullName: 'Tensor', marketIndex: 28, category: ['NFT', 'Solana'], baseAssetSymbol: 'TNSR', isActive: true, oiUsd: 150_000 },
-  { symbol: 'KMNO-PERP', fullName: 'Kamino', marketIndex: 32, category: ['DeFi', 'Solana'], baseAssetSymbol: 'KMNO', isActive: true, oiUsd: 120_000 },
-  { symbol: 'POPCAT-PERP', fullName: 'Popcat', marketIndex: 30, category: ['Meme'], baseAssetSymbol: 'POPCAT', isActive: true, oiUsd: 100_000, warning: 'High volatility meme token' },
-  { symbol: 'BOME-PERP', fullName: 'Book of Meme', marketIndex: 25, category: ['Meme'], baseAssetSymbol: 'BOME', isActive: true, oiUsd: 80_000, warning: 'High volatility meme token' },
-  { symbol: 'MOG-PERP', fullName: 'Mog Coin', marketIndex: 33, category: ['Meme'], baseAssetSymbol: 'MOG', isActive: true, oiUsd: 60_000, warning: 'Low liquidity meme token' },
-  { symbol: 'MELANIA-PERP', fullName: 'Melania', marketIndex: 43, category: ['Meme', 'Politics'], baseAssetSymbol: 'MELANIA', isActive: true, oiUsd: 50_000, warning: 'Very low liquidity' },
-  { symbol: 'LIT-PERP', fullName: 'Litentry', marketIndex: 44, category: ['Identity', 'Infra'], baseAssetSymbol: 'LIT', isActive: true, oiUsd: 40_000 },
-];
+interface StaticOiData {
+  oiUsd: number;
+  lastUpdated: string; // ISO date
+}
+
+// Market metadata (static - describes the market)
+const MARKET_METADATA: Record<string, MarketMetadata> = {
+  'SOL-PERP': { symbol: 'SOL-PERP', fullName: 'Solana', marketIndex: 0, category: ['L1', 'Infra'], baseAssetSymbol: 'SOL', isActive: true, maxLeverage: 101 },
+  'BTC-PERP': { symbol: 'BTC-PERP', fullName: 'Bitcoin', marketIndex: 1, category: ['L1', 'Payment'], baseAssetSymbol: 'BTC', isActive: true, maxLeverage: 101 },
+  'ETH-PERP': { symbol: 'ETH-PERP', fullName: 'Ethereum', marketIndex: 2, category: ['L1', 'Infra'], baseAssetSymbol: 'ETH', isActive: true, maxLeverage: 101 },
+  'APT-PERP': { symbol: 'APT-PERP', fullName: 'Aptos', marketIndex: 3, category: ['L1', 'Infra'], baseAssetSymbol: 'APT', isActive: true, maxLeverage: 10 },
+  '1MBONK-PERP': { symbol: '1MBONK-PERP', fullName: 'Bonk', marketIndex: 4, category: ['Meme', 'Dog'], baseAssetSymbol: '1MBONK', isActive: true, maxLeverage: 10, warning: 'High volatility meme token' },
+  'POL-PERP': { symbol: 'POL-PERP', fullName: 'Polygon', marketIndex: 5, category: ['L2', 'Infra'], baseAssetSymbol: 'POL', isActive: true, maxLeverage: 10 },
+  'ARB-PERP': { symbol: 'ARB-PERP', fullName: 'Arbitrum', marketIndex: 6, category: ['L2', 'Infra'], baseAssetSymbol: 'ARB', isActive: true, maxLeverage: 10 },
+  'DOGE-PERP': { symbol: 'DOGE-PERP', fullName: 'Dogecoin', marketIndex: 7, category: ['Meme', 'Dog'], baseAssetSymbol: 'DOGE', isActive: true, maxLeverage: 10 },
+  'BNB-PERP': { symbol: 'BNB-PERP', fullName: 'Binance Coin', marketIndex: 8, category: ['Exchange'], baseAssetSymbol: 'BNB', isActive: true, maxLeverage: 10 },
+  'SUI-PERP': { symbol: 'SUI-PERP', fullName: 'Sui', marketIndex: 9, category: ['L1'], baseAssetSymbol: 'SUI', isActive: true, maxLeverage: 10 },
+  '1MPEPE-PERP': { symbol: '1MPEPE-PERP', fullName: 'Pepe', marketIndex: 10, category: ['Meme'], baseAssetSymbol: '1MPEPE', isActive: true, maxLeverage: 4, warning: 'High volatility meme token' },
+  'OP-PERP': { symbol: 'OP-PERP', fullName: 'Optimism', marketIndex: 11, category: ['L2', 'Infra'], baseAssetSymbol: 'OP', isActive: true, maxLeverage: 10 },
+  'RENDER-PERP': { symbol: 'RENDER-PERP', fullName: 'Render', marketIndex: 16, category: ['AI', 'GPU'], baseAssetSymbol: 'RENDER', isActive: true, maxLeverage: 10 },
+  'LINK-PERP': { symbol: 'LINK-PERP', fullName: 'Chainlink', marketIndex: 17, category: ['Oracle', 'DeFi'], baseAssetSymbol: 'LINK', isActive: true, maxLeverage: 10 },
+  'SEI-PERP': { symbol: 'SEI-PERP', fullName: 'Sei', marketIndex: 18, category: ['L1', 'Trading'], baseAssetSymbol: 'SEI', isActive: true, maxLeverage: 10 },
+  'INJ-PERP': { symbol: 'INJ-PERP', fullName: 'Injective', marketIndex: 19, category: ['L1', 'DeFi'], baseAssetSymbol: 'INJ', isActive: true, maxLeverage: 10 },
+  'JTO-PERP': { symbol: 'JTO-PERP', fullName: 'Jito', marketIndex: 20, category: ['DeFi', 'Solana'], baseAssetSymbol: 'JTO', isActive: true, maxLeverage: 10 },
+  'PYTH-PERP': { symbol: 'PYTH-PERP', fullName: 'Pyth Network', marketIndex: 21, category: ['Oracle', 'Solana'], baseAssetSymbol: 'PYTH', isActive: true, maxLeverage: 10 },
+  'TIA-PERP': { symbol: 'TIA-PERP', fullName: 'Celestia', marketIndex: 23, category: ['L1', 'Modular'], baseAssetSymbol: 'TIA', isActive: true, maxLeverage: 10 },
+  'WIF-PERP': { symbol: 'WIF-PERP', fullName: 'dogwifhat', marketIndex: 24, category: ['Meme', 'Dog'], baseAssetSymbol: 'WIF', isActive: true, maxLeverage: 10 },
+  'JUP-PERP': { symbol: 'JUP-PERP', fullName: 'Jupiter', marketIndex: 26, category: ['DeFi', 'Solana'], baseAssetSymbol: 'JUP', isActive: true, maxLeverage: 10 },
+  'W-PERP': { symbol: 'W-PERP', fullName: 'Wormhole', marketIndex: 27, category: ['Bridge', 'Infra'], baseAssetSymbol: 'W', isActive: true, maxLeverage: 5 },
+  'TNSR-PERP': { symbol: 'TNSR-PERP', fullName: 'Tensor', marketIndex: 28, category: ['NFT', 'Solana'], baseAssetSymbol: 'TNSR', isActive: true, maxLeverage: 5 },
+  'DRIFT-PERP': { symbol: 'DRIFT-PERP', fullName: 'Drift Protocol', marketIndex: 29, category: ['DeFi', 'Solana'], baseAssetSymbol: 'DRIFT', isActive: true, maxLeverage: 5 },
+  'POPCAT-PERP': { symbol: 'POPCAT-PERP', fullName: 'Popcat', marketIndex: 30, category: ['Meme'], baseAssetSymbol: 'POPCAT', isActive: true, maxLeverage: 4, warning: 'High volatility meme token' },
+  'TAO-PERP': { symbol: 'TAO-PERP', fullName: 'Bittensor', marketIndex: 31, category: ['AI'], baseAssetSymbol: 'TAO', isActive: true, maxLeverage: 5 },
+  'KMNO-PERP': { symbol: 'KMNO-PERP', fullName: 'Kamino', marketIndex: 32, category: ['DeFi', 'Solana'], baseAssetSymbol: 'KMNO', isActive: true, maxLeverage: 3 },
+  'ZEC-PERP': { symbol: 'ZEC-PERP', fullName: 'Zcash', marketIndex: 37, category: ['L1', 'Privacy'], baseAssetSymbol: 'ZEC', isActive: true, maxLeverage: 5 },
+  'HYPE-PERP': { symbol: 'HYPE-PERP', fullName: 'Hyperliquid', marketIndex: 38, category: ['DeFi', 'L1'], baseAssetSymbol: 'HYPE', isActive: true, maxLeverage: 10 },
+  'TRUMP-PERP': { symbol: 'TRUMP-PERP', fullName: 'Trump', marketIndex: 42, category: ['Meme', 'Politics'], baseAssetSymbol: 'TRUMP', isActive: true, maxLeverage: 10, warning: 'High volatility meme token' },
+  'LIT-PERP': { symbol: 'LIT-PERP', fullName: 'Litentry', marketIndex: 44, category: ['Identity', 'Infra'], baseAssetSymbol: 'LIT', isActive: true, maxLeverage: 10 },
+  'XRP-PERP': { symbol: 'XRP-PERP', fullName: 'XRP', marketIndex: 14, category: ['L1', 'Payment'], baseAssetSymbol: 'XRP', isActive: true, maxLeverage: 20 },
+  'AVAX-PERP': { symbol: 'AVAX-PERP', fullName: 'Avalanche', marketIndex: 15, category: ['L1', 'Infra'], baseAssetSymbol: 'AVAX', isActive: true, maxLeverage: 10 },
+  'LTC-PERP': { symbol: 'LTC-PERP', fullName: 'Litecoin', marketIndex: 13, category: ['L1', 'Payment'], baseAssetSymbol: 'LTC', isActive: true, maxLeverage: 10 },
+  // New markets from user's list
+  'PAXG-PERP': { symbol: 'PAXG-PERP', fullName: 'PAX Gold', marketIndex: 45, category: ['Commodity', 'Gold'], baseAssetSymbol: 'PAXG', isActive: true, maxLeverage: 10 },
+  'FARTCOIN-PERP': { symbol: 'FARTCOIN-PERP', fullName: 'Fartcoin', marketIndex: 46, category: ['Meme'], baseAssetSymbol: 'FARTCOIN', isActive: true, maxLeverage: 10, warning: 'High volatility meme token' },
+  'XPL-PERP': { symbol: 'XPL-PERP', fullName: 'XPL', marketIndex: 47, category: ['Infra'], baseAssetSymbol: 'XPL', isActive: true, maxLeverage: 10 },
+  'ADA-PERP': { symbol: 'ADA-PERP', fullName: 'Cardano', marketIndex: 48, category: ['L1'], baseAssetSymbol: 'ADA', isActive: true, maxLeverage: 10 },
+  'RAY-PERP': { symbol: 'RAY-PERP', fullName: 'Raydium', marketIndex: 49, category: ['DeFi', 'Solana'], baseAssetSymbol: 'RAY', isActive: true, maxLeverage: 5 },
+  'ASTER-PERP': { symbol: 'ASTER-PERP', fullName: 'Aster', marketIndex: 50, category: ['L1'], baseAssetSymbol: 'ASTER', isActive: true, maxLeverage: 10 },
+  'IP-PERP': { symbol: 'IP-PERP', fullName: 'Story Protocol', marketIndex: 51, category: ['Infra'], baseAssetSymbol: 'IP', isActive: true, maxLeverage: 5 },
+  'HNT-PERP': { symbol: 'HNT-PERP', fullName: 'Helium', marketIndex: 52, category: ['IoT', 'Infra'], baseAssetSymbol: 'HNT', isActive: true, maxLeverage: 5 },
+  '1KPUMP-PERP': { symbol: '1KPUMP-PERP', fullName: 'Pump', marketIndex: 53, category: ['Meme', 'Solana'], baseAssetSymbol: '1KPUMP', isActive: true, maxLeverage: 5, warning: 'High volatility' },
+  '1KMON-PERP': { symbol: '1KMON-PERP', fullName: 'Mon', marketIndex: 54, category: ['Meme'], baseAssetSymbol: '1KMON', isActive: true, maxLeverage: 5, warning: 'High volatility' },
+  'BERA-PERP': { symbol: 'BERA-PERP', fullName: 'Berachain', marketIndex: 55, category: ['L1', 'DeFi'], baseAssetSymbol: 'BERA', isActive: true, maxLeverage: 5 },
+  'TON-PERP': { symbol: 'TON-PERP', fullName: 'Toncoin', marketIndex: 56, category: ['L1'], baseAssetSymbol: 'TON', isActive: true, maxLeverage: 10 },
+  'MET-PERP': { symbol: 'MET-PERP', fullName: 'Metaplex', marketIndex: 57, category: ['NFT', 'Solana'], baseAssetSymbol: 'MET', isActive: true, maxLeverage: 5 },
+  'CLOUD-PERP': { symbol: 'CLOUD-PERP', fullName: 'Cloud', marketIndex: 58, category: ['Infra'], baseAssetSymbol: 'CLOUD', isActive: true, maxLeverage: 3 },
+  'KAITO-PERP': { symbol: 'KAITO-PERP', fullName: 'Kaito', marketIndex: 59, category: ['AI'], baseAssetSymbol: 'KAITO', isActive: true, maxLeverage: 5 },
+  '2Z-PERP': { symbol: '2Z-PERP', fullName: '2Z', marketIndex: 60, category: ['Meme'], baseAssetSymbol: '2Z', isActive: true, maxLeverage: 5 },
+  'PENGU-PERP': { symbol: 'PENGU-PERP', fullName: 'Pudgy Penguins', marketIndex: 61, category: ['NFT', 'Meme'], baseAssetSymbol: 'PENGU', isActive: true, maxLeverage: 5 },
+  'ME-PERP': { symbol: 'ME-PERP', fullName: 'Magic Eden', marketIndex: 62, category: ['NFT', 'Solana'], baseAssetSymbol: 'ME', isActive: true, maxLeverage: 5 },
+  'MNT-PERP': { symbol: 'MNT-PERP', fullName: 'Mantle', marketIndex: 63, category: ['L2'], baseAssetSymbol: 'MNT', isActive: true, maxLeverage: 5 },
+};
+
+// Static OI estimates (fallback data from Drift UI - Jan 14, 2026)
+const STATIC_OI_DATA: Record<string, StaticOiData> = {
+  'SOL-PERP': { oiUsd: 147_160_000, lastUpdated: '2026-01-14' },
+  'BTC-PERP': { oiUsd: 77_100_000, lastUpdated: '2026-01-14' },
+  'ETH-PERP': { oiUsd: 37_070_000, lastUpdated: '2026-01-14' },
+  'SUI-PERP': { oiUsd: 1_770_000, lastUpdated: '2026-01-14' },
+  'ZEC-PERP': { oiUsd: 1_750_000, lastUpdated: '2026-01-14' },
+  'DRIFT-PERP': { oiUsd: 1_510_000, lastUpdated: '2026-01-14' },
+  'HYPE-PERP': { oiUsd: 1_450_000, lastUpdated: '2026-01-14' },
+  'JUP-PERP': { oiUsd: 1_360_000, lastUpdated: '2026-01-14' },
+  'XRP-PERP': { oiUsd: 1_340_000, lastUpdated: '2026-01-14' },
+  'PAXG-PERP': { oiUsd: 979_570, lastUpdated: '2026-01-14' },
+  'FARTCOIN-PERP': { oiUsd: 835_930, lastUpdated: '2026-01-14' },
+  'TAO-PERP': { oiUsd: 733_370, lastUpdated: '2026-01-14' },
+  'LIT-PERP': { oiUsd: 598_240, lastUpdated: '2026-01-14' },
+  '1MBONK-PERP': { oiUsd: 597_560, lastUpdated: '2026-01-14' },
+  'DOGE-PERP': { oiUsd: 572_270, lastUpdated: '2026-01-14' },
+  'LINK-PERP': { oiUsd: 397_510, lastUpdated: '2026-01-14' },
+  'XPL-PERP': { oiUsd: 319_240, lastUpdated: '2026-01-14' },
+  'WIF-PERP': { oiUsd: 297_390, lastUpdated: '2026-01-14' },
+  'BNB-PERP': { oiUsd: 282_460, lastUpdated: '2026-01-14' },
+  'PYTH-PERP': { oiUsd: 246_500, lastUpdated: '2026-01-14' },
+  'ADA-PERP': { oiUsd: 213_120, lastUpdated: '2026-01-14' },
+  'AVAX-PERP': { oiUsd: 207_090, lastUpdated: '2026-01-14' },
+  'RAY-PERP': { oiUsd: 206_900, lastUpdated: '2026-01-14' },
+  'JTO-PERP': { oiUsd: 194_380, lastUpdated: '2026-01-14' },
+  'KMNO-PERP': { oiUsd: 180_070, lastUpdated: '2026-01-14' },
+  'ASTER-PERP': { oiUsd: 173_280, lastUpdated: '2026-01-14' },
+  'RENDER-PERP': { oiUsd: 169_250, lastUpdated: '2026-01-14' },
+  'LTC-PERP': { oiUsd: 132_790, lastUpdated: '2026-01-14' },
+  'IP-PERP': { oiUsd: 128_640, lastUpdated: '2026-01-14' },
+  'TRUMP-PERP': { oiUsd: 123_740, lastUpdated: '2026-01-14' },
+  'POPCAT-PERP': { oiUsd: 103_880, lastUpdated: '2026-01-14' },
+  'HNT-PERP': { oiUsd: 95_660, lastUpdated: '2026-01-14' },
+  'SEI-PERP': { oiUsd: 91_830, lastUpdated: '2026-01-14' },
+  'TNSR-PERP': { oiUsd: 88_220, lastUpdated: '2026-01-14' },
+  'INJ-PERP': { oiUsd: 87_610, lastUpdated: '2026-01-14' },
+  'ARB-PERP': { oiUsd: 81_310, lastUpdated: '2026-01-14' },
+  '1KPUMP-PERP': { oiUsd: 79_790, lastUpdated: '2026-01-14' },
+  '1KMON-PERP': { oiUsd: 75_060, lastUpdated: '2026-01-14' },
+  'BERA-PERP': { oiUsd: 74_390, lastUpdated: '2026-01-14' },
+  'APT-PERP': { oiUsd: 63_890, lastUpdated: '2026-01-14' },
+  'W-PERP': { oiUsd: 47_910, lastUpdated: '2026-01-14' },
+  'TON-PERP': { oiUsd: 40_050, lastUpdated: '2026-01-14' },
+  'TIA-PERP': { oiUsd: 39_810, lastUpdated: '2026-01-14' },
+  '1MPEPE-PERP': { oiUsd: 32_800, lastUpdated: '2026-01-14' },
+  'POL-PERP': { oiUsd: 32_520, lastUpdated: '2026-01-14' },
+  'MET-PERP': { oiUsd: 28_170, lastUpdated: '2026-01-14' },
+  'CLOUD-PERP': { oiUsd: 24_630, lastUpdated: '2026-01-14' },
+  'KAITO-PERP': { oiUsd: 24_540, lastUpdated: '2026-01-14' },
+  '2Z-PERP': { oiUsd: 24_270, lastUpdated: '2026-01-14' },
+  'PENGU-PERP': { oiUsd: 23_130, lastUpdated: '2026-01-14' },
+  'ME-PERP': { oiUsd: 19_680, lastUpdated: '2026-01-14' },
+  'MNT-PERP': { oiUsd: 18_570, lastUpdated: '2026-01-14' },
+  'OP-PERP': { oiUsd: 17_630, lastUpdated: '2026-01-14' },
+};
 
 // OI thresholds for risk tier classification (in USD)
 const OI_THRESHOLDS = {
@@ -99,7 +174,6 @@ function calculateRiskTier(oiUsd: number): RiskTier {
 
 /**
  * Get estimated slippage based on OI
- * More granular scaling based on actual OI
  */
 function calculateSlippage(oiUsd: number): number {
   if (oiUsd >= 100_000_000) return 0.02;
@@ -117,15 +191,82 @@ function calculateSlippage(oiUsd: number): number {
 // Cache for market data
 interface MarketCache {
   markets: MarketInfo[];
+  oiData: Record<string, number>;
   lastUpdated: Date;
   expiresAt: Date;
+  source: 'api' | 'static';
 }
 
 let marketCache: MarketCache | null = null;
-const CACHE_DURATION_MS = 60 * 60 * 1000; // 1 hour for price updates
+const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
- * Get oracle price for a market (using existing price endpoint)
+ * Try to fetch OI data from Drift's public Data API
+ * Endpoint: https://data.api.drift.trade/contracts
+ * Returns open_interest in base units, need to multiply by index_price for USD value
+ */
+async function fetchDynamicOi(): Promise<Record<string, number> | null> {
+  try {
+    console.log('[MarketLiquidity] Fetching OI from Drift Data API...');
+    
+    const response = await fetch('https://data.api.drift.trade/contracts', {
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(15000), // 15 second timeout
+    });
+    
+    if (!response.ok) {
+      console.warn(`[MarketLiquidity] Drift Data API returned ${response.status}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    const oiData: Record<string, number> = {};
+    
+    // Parse contracts array - each has ticker_id, open_interest (base units), index_price
+    const contracts = data.contracts || data;
+    if (Array.isArray(contracts)) {
+      for (const contract of contracts) {
+        const symbol = contract.ticker_id;
+        const openInterestBase = parseFloat(contract.open_interest);
+        const indexPrice = parseFloat(contract.index_price);
+        
+        if (symbol && !isNaN(openInterestBase) && !isNaN(indexPrice) && openInterestBase > 0) {
+          // Calculate OI in USD: base units * price
+          const oiUsd = openInterestBase * indexPrice;
+          oiData[symbol] = oiUsd;
+        }
+      }
+    }
+    
+    if (Object.keys(oiData).length > 0) {
+      console.log(`[MarketLiquidity] Fetched OI for ${Object.keys(oiData).length} markets from Drift API`);
+      // Log top 5 for verification
+      const sorted = Object.entries(oiData).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      console.log(`[MarketLiquidity] Top 5 by OI: ${sorted.map(([s, oi]) => `${s}: $${(oi/1000000).toFixed(2)}M`).join(', ')}`);
+      return oiData;
+    }
+    
+    console.warn('[MarketLiquidity] No valid OI data in API response');
+    return null;
+  } catch (error: any) {
+    console.warn('[MarketLiquidity] Failed to fetch from Drift API:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Get static OI data as fallback
+ */
+function getStaticOiData(): Record<string, number> {
+  const oiData: Record<string, number> = {};
+  for (const [symbol, data] of Object.entries(STATIC_OI_DATA)) {
+    oiData[symbol] = data.oiUsd;
+  }
+  return oiData;
+}
+
+/**
+ * Get oracle price for markets (using existing price endpoint)
  */
 async function fetchMarketPrices(): Promise<Record<string, number>> {
   try {
@@ -134,7 +275,7 @@ async function fetchMarketPrices(): Promise<Record<string, number>> {
       return await response.json();
     }
   } catch (error) {
-    console.warn('[MarketLiquidity] Could not fetch prices:', error);
+    // Silently fail - prices are optional
   }
   return {};
 }
@@ -150,32 +291,46 @@ export async function getAllPerpMarkets(forceRefresh = false): Promise<MarketInf
     return marketCache.markets;
   }
   
-  console.log('[MarketLiquidity] Refreshing market data');
+  console.log('[MarketLiquidity] Refreshing market data...');
+  
+  // Try to fetch dynamic OI, fall back to static
+  let oiData = await fetchDynamicOi();
+  let source: 'api' | 'static' = 'api';
+  
+  if (!oiData || Object.keys(oiData).length === 0) {
+    console.log('[MarketLiquidity] Using static OI data as fallback');
+    oiData = getStaticOiData();
+    source = 'static';
+  }
   
   // Fetch current prices
   const prices = await fetchMarketPrices();
   
-  // Build market info with OI-based tiers
-  const markets: MarketInfo[] = DRIFT_PERP_MARKETS
-    .filter(m => m.isActive)
-    .map(market => {
-      const riskTier = calculateRiskTier(market.oiUsd);
-      const slippage = calculateSlippage(market.oiUsd);
-      
-      return {
-        symbol: market.symbol,
-        fullName: market.fullName,
-        marketIndex: market.marketIndex,
-        category: market.category,
-        baseAssetSymbol: market.baseAssetSymbol,
-        isActive: market.isActive,
-        warning: market.warning,
-        riskTier,
-        estimatedSlippagePct: slippage,
-        lastPrice: prices[market.symbol] || null,
-        openInterestUsd: market.oiUsd,
-      };
+  // Build market info
+  const markets: MarketInfo[] = [];
+  
+  for (const [symbol, metadata] of Object.entries(MARKET_METADATA)) {
+    if (!metadata.isActive) continue;
+    
+    const oi = oiData[symbol] || STATIC_OI_DATA[symbol]?.oiUsd || 0;
+    const riskTier = calculateRiskTier(oi);
+    const slippage = calculateSlippage(oi);
+    
+    markets.push({
+      symbol: metadata.symbol,
+      fullName: metadata.fullName,
+      marketIndex: metadata.marketIndex,
+      category: metadata.category,
+      baseAssetSymbol: metadata.baseAssetSymbol,
+      isActive: metadata.isActive,
+      warning: metadata.warning,
+      maxLeverage: metadata.maxLeverage,
+      riskTier,
+      estimatedSlippagePct: slippage,
+      lastPrice: prices[symbol] || null,
+      openInterestUsd: oi > 0 ? oi : null,
     });
+  }
   
   // Sort by OI descending (most liquid first)
   markets.sort((a, b) => (b.openInterestUsd || 0) - (a.openInterestUsd || 0));
@@ -183,15 +338,17 @@ export async function getAllPerpMarkets(forceRefresh = false): Promise<MarketInf
   // Update cache
   marketCache = {
     markets,
+    oiData,
     lastUpdated: now,
     expiresAt: new Date(now.getTime() + CACHE_DURATION_MS),
+    source,
   };
   
   const recommended = markets.filter(m => m.riskTier === 'recommended').length;
   const caution = markets.filter(m => m.riskTier === 'caution').length;
   const highRisk = markets.filter(m => m.riskTier === 'high_risk').length;
   
-  console.log(`[MarketLiquidity] Cached ${markets.length} markets: ${recommended} recommended, ${caution} caution, ${highRisk} high risk`);
+  console.log(`[MarketLiquidity] Cached ${markets.length} markets (source: ${source}): ${recommended} recommended, ${caution} caution, ${highRisk} high risk`);
   
   return markets;
 }
@@ -234,33 +391,71 @@ export function getRiskTierInfo(tier: RiskTier): { label: string; color: string;
  * Check if a market symbol is valid and tradeable
  */
 export function isValidMarket(symbol: string): boolean {
-  return DRIFT_PERP_MARKETS.some(m => m.symbol === symbol && m.isActive);
+  return symbol in MARKET_METADATA && MARKET_METADATA[symbol].isActive;
 }
 
 /**
  * Get the market index for a symbol
  */
 export function getMarketIndex(symbol: string): number | null {
-  const market = DRIFT_PERP_MARKETS.find(m => m.symbol === symbol);
-  return market?.marketIndex ?? null;
+  return MARKET_METADATA[symbol]?.marketIndex ?? null;
 }
 
 /**
- * Force refresh market data
+ * Force refresh market data and return status
  */
-export async function refreshMarketData(): Promise<{ success: boolean; marketCount: number; message: string }> {
+export async function refreshMarketData(): Promise<{ 
+  success: boolean; 
+  marketCount: number; 
+  source: 'api' | 'static';
+  message: string;
+  cacheExpiresAt: string;
+}> {
   try {
     const markets = await getAllPerpMarkets(true);
     return {
       success: true,
       marketCount: markets.length,
-      message: `Refreshed ${markets.length} markets with static OI estimates`,
+      source: marketCache?.source || 'static',
+      message: `Refreshed ${markets.length} markets from ${marketCache?.source || 'static'} data`,
+      cacheExpiresAt: marketCache?.expiresAt.toISOString() || new Date().toISOString(),
     };
   } catch (error: any) {
     return {
       success: false,
       marketCount: 0,
+      source: 'static',
       message: error.message || 'Failed to refresh market data',
+      cacheExpiresAt: new Date().toISOString(),
     };
   }
+}
+
+/**
+ * Get cache status
+ */
+export function getCacheStatus(): {
+  cached: boolean;
+  source: 'api' | 'static' | null;
+  lastUpdated: string | null;
+  expiresAt: string | null;
+  marketCount: number;
+} {
+  if (!marketCache) {
+    return {
+      cached: false,
+      source: null,
+      lastUpdated: null,
+      expiresAt: null,
+      marketCount: 0,
+    };
+  }
+  
+  return {
+    cached: true,
+    source: marketCache.source,
+    lastUpdated: marketCache.lastUpdated.toISOString(),
+    expiresAt: marketCache.expiresAt.toISOString(),
+    marketCount: marketCache.markets.length,
+  };
 }

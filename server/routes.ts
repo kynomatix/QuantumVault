@@ -13,7 +13,7 @@ import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getD
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
-import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket } from "./market-liquidity-service";
+import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 
 declare module "express-session" {
   interface SessionData {
@@ -3892,6 +3892,29 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get market error:", error);
       res.status(500).json({ error: "Failed to fetch market" });
+    }
+  });
+
+  // Get market liquidity cache status
+  app.get("/api/drift/markets/cache/status", async (req, res) => {
+    try {
+      const status = getCacheStatus();
+      res.json(status);
+    } catch (error) {
+      console.error("Get cache status error:", error);
+      res.status(500).json({ error: "Failed to get cache status" });
+    }
+  });
+
+  // Force refresh market OI data (admin endpoint)
+  app.post("/api/admin/liquidity/refresh", async (req, res) => {
+    try {
+      console.log('[Admin] Force refreshing market liquidity data...');
+      const result = await refreshMarketData();
+      res.json(result);
+    } catch (error: any) {
+      console.error("Refresh market data error:", error);
+      res.status(500).json({ error: error.message || "Failed to refresh market data" });
     }
   });
 
