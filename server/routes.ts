@@ -3563,16 +3563,65 @@ export async function registerRoutes(
       }
       
       // Calculate trade amount: signalPercent% of maxPositionSize
-      const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+      let tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
       
-      console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
+      console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
+
+      // PRE-TRADE COLLATERAL GATE: Cap trade size to actual available margin
+      // This prevents InsufficientCollateral errors when bot has lost equity
+      // IMPORTANT: freeCollateral from Drift already accounts for leverage/margin requirements
+      // We use it directly as the maximum allowable notional value for new positions
+      const leverage = bot.leverage || 1;
+      try {
+        const accountInfo = await getDriftAccountInfo(wallet.agentPrivateKeyEncrypted, subAccountId);
+        const freeCollateral = accountInfo.freeCollateral;
+        // freeCollateral IS the max notional we can add - no leverage multiplication needed
+        // Drift calculates it as: totalCollateral - usedMargin, where usedMargin already includes leverage
+        const maxTradeableValue = freeCollateral;
+        
+        console.log(`[Webhook] Collateral check: freeCollateral=$${freeCollateral.toFixed(2)} (this is max notional for new positions)`);
+        
+        if (freeCollateral <= 1.0) {
+          // No meaningful free collateral available - cannot open new position
+          const errorMsg = `Insufficient margin: Bot only has $${freeCollateral.toFixed(2)} free collateral. Need more funds to open a $${tradeAmountUsd.toFixed(2)} position.`;
+          console.log(`[Webhook] ${errorMsg}`);
+          await storage.updateBotTrade(trade.id, {
+            status: "failed",
+            txSignature: null,
+            errorMessage: errorMsg,
+          });
+          await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
+          
+          sendTradeNotification(wallet.address, {
+            type: 'trade_failed',
+            botName: bot.name,
+            market: bot.market,
+            side: side === 'long' ? 'LONG' : 'SHORT',
+            error: errorMsg,
+          }).catch(err => console.error('[Notifications] Failed to send trade_failed notification:', err));
+          
+          return res.status(400).json({ error: errorMsg });
+        }
+        
+        if (tradeAmountUsd > maxTradeableValue) {
+          // Cap trade to available margin (with 10% buffer for fees and slippage)
+          const originalAmount = tradeAmountUsd;
+          tradeAmountUsd = maxTradeableValue * 0.90;
+          console.log(`[Webhook] COLLATERAL CAPPED: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (90% of $${freeCollateral.toFixed(2)} free collateral)`);
+        }
+      } catch (collateralErr: any) {
+        // If we can't check collateral, log warning but continue with original amount
+        // The Drift execution will fail if there's truly insufficient collateral
+        console.warn(`[Webhook] Could not check collateral (proceeding with trade): ${collateralErr.message}`);
+      }
+      
+      console.log(`[Webhook] Final trade amount: $${tradeAmountUsd.toFixed(2)}`);
 
       // Calculate contract size - maxPositionSize already includes leverage (set during bot creation)
       // So we just divide by price to get contracts, no additional leverage multiplication needed
-      const leverage = bot.leverage || 1;
       const contractSize = tradeAmountUsd / oraclePrice;
       
-      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} (from ${leverage}x leveraged capital) / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Minimum order sizes per market (from Drift Protocol)
       const MIN_ORDER_SIZES: Record<string, number> = {
@@ -4133,16 +4182,66 @@ export async function registerRoutes(
       }
       
       // Calculate trade amount: signalPercent% of maxPositionSize
-      const tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+      let tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
       
-      console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade`);
+      console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
+
+      // PRE-TRADE COLLATERAL GATE: Cap trade size to actual available margin
+      // This prevents InsufficientCollateral errors when bot has lost equity
+      // IMPORTANT: freeCollateral from Drift already accounts for leverage/margin requirements
+      // We use it directly as the maximum allowable notional value for new positions
+      const leverage = bot.leverage || 1;
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      try {
+        const accountInfo = await getDriftAccountInfo(userWallet.agentPrivateKeyEncrypted, subAccountId);
+        const freeCollateral = accountInfo.freeCollateral;
+        // freeCollateral IS the max notional we can add - no leverage multiplication needed
+        // Drift calculates it as: totalCollateral - usedMargin, where usedMargin already includes leverage
+        const maxTradeableValue = freeCollateral;
+        
+        console.log(`[User Webhook] Collateral check: freeCollateral=$${freeCollateral.toFixed(2)} (this is max notional for new positions)`);
+        
+        if (freeCollateral <= 1.0) {
+          // No meaningful free collateral available - cannot open new position
+          const errorMsg = `Insufficient margin: Bot only has $${freeCollateral.toFixed(2)} free collateral. Need more funds to open a $${tradeAmountUsd.toFixed(2)} position.`;
+          console.log(`[User Webhook] ${errorMsg}`);
+          await storage.updateBotTrade(trade.id, {
+            status: "failed",
+            txSignature: null,
+            errorMessage: errorMsg,
+          });
+          await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
+          
+          sendTradeNotification(userWallet.address, {
+            type: 'trade_failed',
+            botName: bot.name,
+            market: bot.market,
+            side: side === 'long' ? 'LONG' : 'SHORT',
+            error: errorMsg,
+          }).catch(err => console.error('[Notifications] Failed to send trade_failed notification:', err));
+          
+          return res.status(400).json({ error: errorMsg });
+        }
+        
+        if (tradeAmountUsd > maxTradeableValue) {
+          // Cap trade to available margin (with 10% buffer for fees and slippage)
+          const originalAmount = tradeAmountUsd;
+          tradeAmountUsd = maxTradeableValue * 0.90;
+          console.log(`[User Webhook] COLLATERAL CAPPED: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (90% of $${freeCollateral.toFixed(2)} free collateral)`);
+        }
+      } catch (collateralErr: any) {
+        // If we can't check collateral, log warning but continue with original amount
+        // The Drift execution will fail if there's truly insufficient collateral
+        console.warn(`[User Webhook] Could not check collateral (proceeding with trade): ${collateralErr.message}`);
+      }
+      
+      console.log(`[User Webhook] Final trade amount: $${tradeAmountUsd.toFixed(2)}`);
 
       // Calculate contract size - maxPositionSize already includes leverage (set during bot creation)
       // So we just divide by price to get contracts, no additional leverage multiplication needed
-      const leverage = bot.leverage || 1;
       const contractSize = tradeAmountUsd / oraclePrice;
       
-      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} (from ${leverage}x leveraged capital) / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+      console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
       // Minimum order sizes per market (from Drift Protocol)
       const MIN_ORDER_SIZES: Record<string, number> = {
@@ -4165,9 +4264,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: errorMsg });
       }
 
-      // Execute on Drift
-      // Use bot's subaccount if configured, otherwise use main account (0)
-      const subAccountId = bot.driftSubaccountId ?? 0;
+      // Execute on Drift (subAccountId already declared above for collateral check)
       const orderResult = await executePerpOrder(
         userWallet.agentPrivateKeyEncrypted,
         bot.market,
