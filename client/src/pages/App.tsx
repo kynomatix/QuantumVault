@@ -137,6 +137,7 @@ export default function AppPage() {
   const [notifyTradeFailed, setNotifyTradeFailed] = useState(true);
   const [notifyPositionClosed, setNotifyPositionClosed] = useState(true);
   const [telegramConnected, setTelegramConnected] = useState(false);
+  const [telegramVerifyCode, setTelegramVerifyCode] = useState<string | null>(null);
   const [dangerZoneExpanded, setDangerZoneExpanded] = useState(false);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
@@ -1855,10 +1856,10 @@ export default function AppPage() {
                                         if (res.ok && data.verificationLink) {
                                           window.open(data.verificationLink, '_blank');
                                           if (data.verificationCode) {
+                                            setTelegramVerifyCode(`/start ${data.verificationCode}`);
                                             toast({
-                                              title: "Important: Send this command in Telegram",
-                                              description: `/start ${data.verificationCode}`,
-                                              duration: 30000,
+                                              title: "Telegram opened",
+                                              description: "Copy the command below and paste it in the bot chat.",
                                             });
                                           } else {
                                             toast({
@@ -1925,6 +1926,32 @@ export default function AppPage() {
                                     2. Verify Connection
                                   </Button>
                                 </div>
+                                {telegramVerifyCode && (
+                                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+                                    <p className="text-xs text-amber-400 mb-2 font-medium">
+                                      Paste this command in @DialectLabsBot:
+                                    </p>
+                                    <div className="flex items-center gap-2">
+                                      <code className="flex-1 bg-background/50 px-3 py-2 rounded text-xs font-mono break-all select-all">
+                                        {telegramVerifyCode}
+                                      </code>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => {
+                                          navigator.clipboard.writeText(telegramVerifyCode);
+                                          toast({
+                                            title: "Copied!",
+                                            description: "Paste this in the Dialect bot chat.",
+                                          });
+                                        }}
+                                        data-testid="button-copy-telegram-code"
+                                      >
+                                        <Copy className="w-4 h-4" />
+                                      </Button>
+                                    </div>
+                                  </div>
+                                )}
                                 <p className="text-xs text-muted-foreground">
                                   Once connected, you'll receive:
                                 </p>
