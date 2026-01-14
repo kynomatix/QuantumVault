@@ -926,114 +926,77 @@ export default function AppPage() {
                 </SheetHeader>
                 
                 <div className="mt-6 space-y-6">
-                  {!telegramConnected ? (
-                    <div className="text-center py-8 px-4 bg-muted/30 rounded-lg border border-border/50">
-                      <Bell className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
-                      <p className="text-lg font-medium">Telegram Not Connected</p>
-                      <p className="text-sm text-muted-foreground mt-2">
-                        Connect your Telegram account to receive instant trade alerts when your bots execute trades, close positions, or encounter errors.
-                      </p>
+                  {!telegramConnected && (
+                    <div className="flex items-center gap-3 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                      <Bell className="w-5 h-5 text-amber-500 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium">Get push alerts on Telegram</p>
+                        <p className="text-xs text-muted-foreground">Connect in Settings to receive instant alerts</p>
+                      </div>
                       <Button 
                         variant="outline" 
-                        className="mt-4"
+                        size="sm"
                         onClick={() => {
                           setNotificationDropdownOpen(false);
                           setActiveNav('settings');
                         }}
                         data-testid="button-go-to-settings"
                       >
-                        <Settings className="w-4 h-4 mr-2" />
-                        Configure in Settings
+                        Setup
                       </Button>
                     </div>
-                  ) : (
-                    <>
-                      <div className="space-y-4">
-                        <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Preferences</h4>
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm font-medium">Enable Notifications</span>
-                            <button
-                              onClick={() => handleSaveNotificationPrefs({ notificationsEnabled: !notificationsEnabled })}
-                              disabled={savingNotifications}
-                              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                                notificationsEnabled ? 'bg-primary' : 'bg-muted'
-                              }`}
-                            >
-                              <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                                notificationsEnabled ? 'translate-x-5' : 'translate-x-1'
-                              }`} />
-                            </button>
-                          </div>
-                          
-                          {notificationsEnabled && (
-                            <div className="space-y-3 pl-4 border-l-2 border-border">
-                              <div className="flex items-center justify-between">
-                                <div>
-                                  <span className="text-sm">Trade Executed</span>
-                                  <p className="text-xs text-muted-foreground">When a bot opens a position</p>
-                                </div>
-                                <button
-                                  onClick={() => handleSaveNotificationPrefs({ notifyTradeExecuted: !notifyTradeExecuted })}
-                                  disabled={savingNotifications}
-                                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                                    notifyTradeExecuted ? 'bg-primary' : 'bg-muted'
-                                  }`}
-                                >
-                                  <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                                    notifyTradeExecuted ? 'translate-x-5' : 'translate-x-1'
-                                  }`} />
-                                </button>
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <div>
-                                  <span className="text-sm">Trade Failed</span>
-                                  <p className="text-xs text-muted-foreground">When a trade fails with error</p>
-                                </div>
-                                <button
-                                  onClick={() => handleSaveNotificationPrefs({ notifyTradeFailed: !notifyTradeFailed })}
-                                  disabled={savingNotifications}
-                                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                                    notifyTradeFailed ? 'bg-primary' : 'bg-muted'
-                                  }`}
-                                >
-                                  <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                                    notifyTradeFailed ? 'translate-x-5' : 'translate-x-1'
-                                  }`} />
-                                </button>
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <div>
-                                  <span className="text-sm">Position Closed</span>
-                                  <p className="text-xs text-muted-foreground">When a position closes with PnL</p>
-                                </div>
-                                <button
-                                  onClick={() => handleSaveNotificationPrefs({ notifyPositionClosed: !notifyPositionClosed })}
-                                  disabled={savingNotifications}
-                                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                                    notifyPositionClosed ? 'bg-primary' : 'bg-muted'
-                                  }`}
-                                >
-                                  <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                                    notifyPositionClosed ? 'translate-x-5' : 'translate-x-1'
-                                  }`} />
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      
-                      <div className="space-y-4">
-                        <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Recent Notifications</h4>
-                        <div className="text-center py-8 text-muted-foreground">
-                          <Bell className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                          <p className="text-sm">No notifications yet</p>
-                          <p className="text-xs mt-1">Notifications will appear here when your bots execute trades</p>
-                        </div>
-                      </div>
-                    </>
                   )}
+                  
+                  <div className="space-y-4">
+                    <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Recent Activity</h4>
+                    {tradesData && tradesData.length > 0 ? (
+                      <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                        {tradesData.slice(0, 10).map((trade: any) => (
+                          <div 
+                            key={trade.id} 
+                            className={`p-3 rounded-lg border ${
+                              trade.status === 'executed' 
+                                ? 'bg-green-500/5 border-green-500/20' 
+                                : trade.status === 'failed' 
+                                  ? 'bg-red-500/5 border-red-500/20'
+                                  : 'bg-muted/30 border-border/50'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
+                                  trade.side === 'LONG' || trade.side === 'BUY' 
+                                    ? 'bg-green-500/20 text-green-500' 
+                                    : trade.side === 'SHORT' || trade.side === 'SELL'
+                                      ? 'bg-red-500/20 text-red-500'
+                                      : 'bg-muted text-muted-foreground'
+                                }`}>
+                                  {trade.side === 'CLOSE' ? 'CLOSE' : trade.side}
+                                </span>
+                                <span className="text-sm font-medium">{trade.market}</span>
+                              </div>
+                              <span className={`text-xs ${
+                                trade.status === 'executed' ? 'text-green-500' : 
+                                trade.status === 'failed' ? 'text-red-500' : 'text-muted-foreground'
+                              }`}>
+                                {trade.status}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between mt-1.5 text-xs text-muted-foreground">
+                              <span>{trade.botName}</span>
+                              <span>{new Date(trade.executedAt).toLocaleTimeString()}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-center py-8 text-muted-foreground">
+                        <Bell className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                        <p className="text-sm">No activity yet</p>
+                        <p className="text-xs mt-1">Trade activity will appear here when your bots execute trades</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </SheetContent>
             </Sheet>
