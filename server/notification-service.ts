@@ -1,12 +1,6 @@
-import { Dialect, DialectCloudEnvironment, DialectSdk } from "@dialectlabs/sdk";
-import { Solana, SolanaSdkFactory, NodeDialectSolanaWalletAdapter } from "@dialectlabs/blockchain-sdk-solana";
 import { db } from "./db";
 import { wallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
-
-let dialectSdk: DialectSdk<Solana> | null = null;
-
-const DAPP_PUBLIC_KEY = process.env.DIALECT_DAPP_PUBLIC_KEY;
 
 export interface TradeNotification {
   type: 'trade_executed' | 'trade_failed' | 'position_closed';
@@ -19,45 +13,21 @@ export interface TradeNotification {
   error?: string;
 }
 
-function initDialectSdk(): DialectSdk<Solana> | null {
-  if (!process.env.DIALECT_SDK_CREDENTIALS) {
-    console.log('[Dialect] No DIALECT_SDK_CREDENTIALS found - notifications disabled');
-    return null;
-  }
-
-  try {
-    const environment: DialectCloudEnvironment = "production";
-    
-    const sdk = Dialect.sdk(
-      { environment },
-      SolanaSdkFactory.create({
-        wallet: NodeDialectSolanaWalletAdapter.create(),
-      })
-    );
-    
-    console.log('[Dialect] SDK initialized successfully');
-    return sdk;
-  } catch (error) {
-    console.error('[Dialect] Failed to initialize SDK:', error);
-    return null;
-  }
-}
-
-export function getDialectSdk(): DialectSdk<Solana> | null {
-  if (!dialectSdk) {
-    dialectSdk = initDialectSdk();
-  }
-  return dialectSdk;
-}
-
 export async function sendTradeNotification(
   walletAddress: string | undefined | null,
   notification: TradeNotification
 ): Promise<boolean> {
   try {
-    // Guard against undefined/null wallet addresses
     if (!walletAddress) {
       console.log('[Notifications] Skipping notification - no wallet address provided');
+      return false;
+    }
+
+    const DIALECT_API_KEY = process.env.DIALECT_API_KEY;
+    const DIALECT_APP_ID = process.env.DIALECT_APP_ID;
+
+    if (!DIALECT_API_KEY || !DIALECT_APP_ID) {
+      console.log('[Notifications] Dialect credentials not configured');
       return false;
     }
 
@@ -77,11 +47,6 @@ export async function sendTradeNotification(
       return false;
     }
 
-    if (!wallet.telegramConnected) {
-      console.log(`[Notifications] Telegram not connected for ${walletAddress}`);
-      return false;
-    }
-
     const shouldNotify = 
       (notification.type === 'trade_executed' && wallet.notifyTradeExecuted) ||
       (notification.type === 'trade_failed' && wallet.notifyTradeFailed) ||
@@ -92,31 +57,36 @@ export async function sendTradeNotification(
       return false;
     }
 
-    const message = formatNotificationMessage(notification);
+    const { title, body } = formatNotificationMessage(notification);
     
-    const sdk = getDialectSdk();
-    if (!sdk) {
-      console.log('[Notifications] Dialect SDK not available');
+    console.log(`[Notifications] Sending to ${walletAddress}: ${title} - ${body}`);
+
+    const response = await fetch(`https://alerts-api.dial.to/v2/${DIALECT_APP_ID}/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-dialect-api-key': DIALECT_API_KEY,
+      },
+      body: JSON.stringify({
+        channels: ['TELEGRAM'],
+        message: {
+          title,
+          body,
+        },
+        recipient: {
+          type: 'subscriber',
+          walletAddress: walletAddress,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[Notifications] Dialect API error ${response.status}:`, errorText);
       return false;
     }
 
-    if (!DAPP_PUBLIC_KEY) {
-      console.log('[Notifications] DIALECT_DAPP_PUBLIC_KEY not configured');
-      return false;
-    }
-
-    console.log(`[Notifications] Sending notification to ${walletAddress}: ${message}`);
-    
-    // TODO: Implement actual Dialect messaging when SDK credentials are configured
-    // When DIALECT_SDK_CREDENTIALS is set, this will use the SDK to send to user's Telegram
-    // For now, we log the notification for debugging and return true to indicate success
-    // The actual sending will be:
-    // await sdk.messages.send({ 
-    //   message, 
-    //   recipient: new PublicKey(wallet.dialectAddress || walletAddress) 
-    // });
-    
-    console.log(`[Notifications] WOULD SEND (Dialect not configured): "${message}"`);
+    console.log(`[Notifications] Successfully sent notification to ${walletAddress}`);
     return true;
   } catch (error) {
     console.error('[Notifications] Error sending notification:', error);
@@ -124,27 +94,38 @@ export async function sendTradeNotification(
   }
 }
 
-function formatNotificationMessage(notification: TradeNotification): string {
+function formatNotificationMessage(notification: TradeNotification): { title: string; body: string } {
   const { type, botName, market, side, size, price, pnl, error } = notification;
   
   switch (type) {
-    case 'trade_executed':
+    case 'trade_executed': {
       const sizeStr = size ? `$${size.toFixed(2)}` : '';
       const priceStr = price ? `@ $${price.toFixed(2)}` : '';
-      return `${botName}: ${side} ${market} ${sizeStr} ${priceStr}`.trim();
+      return {
+        title: `Trade Executed`,
+        body: `${botName}: ${side} ${market} ${sizeStr} ${priceStr}`.trim()
+      };
+    }
     
     case 'trade_failed':
-      return `${botName}: Trade FAILED on ${market} - ${error || 'Unknown error'}`;
+      return {
+        title: `Trade Failed`,
+        body: `${botName}: ${market} - ${error || 'Unknown error'}`
+      };
     
-    case 'position_closed':
+    case 'position_closed': {
       const pnlStr = pnl !== undefined 
         ? (pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`)
         : '';
       const emoji = pnl !== undefined ? (pnl >= 0 ? '🟢' : '🔴') : '';
-      return `${emoji} ${botName}: Closed ${market} position ${pnlStr}`.trim();
+      return {
+        title: `Position Closed`,
+        body: `${emoji} ${botName}: ${market} ${pnlStr}`.trim()
+      };
+    }
     
     default:
-      return `${botName}: ${type}`;
+      return { title: 'QuantumVault', body: `${botName}: ${type}` };
   }
 }
 

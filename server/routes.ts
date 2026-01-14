@@ -285,7 +285,7 @@ export async function registerRoutes(
     }
   });
 
-  // Telegram connection - prepare Telegram channel via Dialect API
+  // Telegram connection - returns bot link for user to subscribe
   app.post("/api/telegram/connect", requireWallet, async (req, res) => {
     console.log('[Telegram] Connect endpoint hit, walletAddress:', req.walletAddress);
     try {
@@ -294,7 +294,7 @@ export async function registerRoutes(
       console.log('[Telegram] DIALECT_API_KEY available:', !!DIALECT_API_KEY);
       console.log('[Telegram] DIALECT_APP_ID available:', !!DIALECT_APP_ID);
       
-      if (!DIALECT_API_KEY) {
+      if (!DIALECT_API_KEY || !DIALECT_APP_ID) {
         return res.status(503).json({ 
           error: "Telegram notifications not configured",
           message: "The platform administrator needs to set up Dialect API credentials to enable Telegram notifications."
@@ -306,51 +306,25 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Wallet not found" });
       }
 
-      // Call Dialect API to prepare Telegram channel
-      // Use x-dialect-api-key for server-side authentication
-      const requestBody: any = {
-        walletAddress: req.walletAddress,
-      };
-      if (DIALECT_APP_ID) {
-        requestBody.appId = DIALECT_APP_ID;
-      }
+      // Generate the Dialect Telegram bot subscription link
+      // Users click this to subscribe to our app's notifications
+      const botLink = `https://t.me/dialectbot?start=subscribe_${DIALECT_APP_ID}`;
       
-      const dialectResponse = await fetch('https://alerts-api.dial.to/v2/channel/telegram/prepare', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-dialect-api-key': DIALECT_API_KEY,
-        },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!dialectResponse.ok) {
-        const errorText = await dialectResponse.text();
-        console.error('[Telegram] Dialect API error:', dialectResponse.status, errorText);
-        return res.status(500).json({ 
-          error: "Failed to prepare Telegram channel",
-          message: `Dialect API error: ${dialectResponse.status}. Please try again later.`,
-          details: errorText 
-        });
-      }
-
-      const dialectData = await dialectResponse.json();
-      
-      // Store the channel ID for later verification
+      // Mark wallet as having initiated Telegram setup
       await storage.updateWallet(req.walletAddress!, {
-        dialectAddress: dialectData.id,
+        dialectAddress: DIALECT_APP_ID, // Store app ID for sending notifications
       });
 
       res.json({
         success: true,
-        verificationLink: dialectData.verification?.link || `https://t.me/dialectbot?start=verify_${dialectData.id}`,
-        channelId: dialectData.id,
+        verificationLink: botLink,
+        message: "Click the link to open Telegram and subscribe to QuantumVault notifications."
       });
     } catch (error) {
       console.error("[Telegram] Connect error:", error);
       res.status(500).json({ 
         error: "Failed to connect Telegram",
-        message: "An error occurred while connecting to Telegram. Please try again."
+        message: "An error occurred while setting up Telegram. Please try again."
       });
     }
   });
