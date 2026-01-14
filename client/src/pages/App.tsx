@@ -309,17 +309,24 @@ export default function AppPage() {
       
       const data = await res.json();
       
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to reset Drift account');
+      if (res.status === 400 || res.status === 500) {
+        throw new Error(data.message || data.error || 'Failed to reset Drift account');
       }
       
-      toast({ 
-        title: 'Drift Account Reset', 
-        description: data.message || 'Your Drift account has been deleted. Your next deposit will create a new account with referral attribution.'
-      });
+      if (res.status === 207 || data.partialSuccess) {
+        toast({ 
+          title: 'Partial Reset', 
+          description: data.message || 'Some operations failed. Please try again or check manually.',
+          variant: 'destructive'
+        });
+      } else if (data.success) {
+        toast({ 
+          title: 'Reset Complete', 
+          description: 'Your Drift account has been reset. Funds have been withdrawn to your agent wallet.'
+        });
+      }
       
       setResetDriftDialogOpen(false);
-      // Refresh data
       refetchBots();
     } catch (error: any) {
       toast({ 
@@ -1693,8 +1700,7 @@ export default function AppPage() {
                         </div>
                         <div>
                           <p className="text-sm text-muted-foreground mb-2">
-                            Delete your Drift account to recreate it with proper referral attribution. 
-                            All funds must be withdrawn first.
+                            Close all positions, withdraw all funds, and delete your Drift account.
                           </p>
                           <Button 
                             variant="outline" 
@@ -1800,29 +1806,27 @@ export default function AppPage() {
               </div>
               <div>
                 <h3 className="font-display font-semibold text-lg">Reset Drift Account</h3>
-                <p className="text-sm text-muted-foreground">Delete and recreate with referral</p>
+                <p className="text-sm text-muted-foreground">Close all positions and withdraw funds</p>
               </div>
             </div>
 
             <div className="mb-6">
-              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-4">
+              <div className="bg-primary/10 border border-primary/30 rounded-lg p-4 mb-4">
                 <div className="flex items-start gap-3">
-                  <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                  <ArrowUpFromLine className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
                   <div>
-                    <p className="text-sm font-medium text-red-400">Requirements</p>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      Before resetting, ensure:
-                    </p>
+                    <p className="text-sm font-medium">This will automatically:</p>
                     <ul className="text-sm text-muted-foreground mt-2 list-disc ml-4 space-y-1">
-                      <li>All positions are closed</li>
-                      <li>All funds are withdrawn from Drift</li>
-                      <li>Bot balances are zero</li>
+                      <li>Close all open trading positions</li>
+                      <li>Withdraw all funds to your agent wallet</li>
+                      <li>Delete all Drift subaccounts</li>
+                      <li>Recover any rent deposits</li>
                     </ul>
                   </div>
                 </div>
               </div>
               <p className="text-sm text-muted-foreground">
-                This will delete all your Drift subaccounts. When you deposit again, a new account will be created with proper referral attribution.
+                This process may take a minute to complete. Your funds will be returned to your agent wallet.
               </p>
             </div>
 
