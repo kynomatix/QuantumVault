@@ -63,6 +63,25 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 
+const MARKET_MAX_LEVERAGE: Record<string, number> = {
+  'SOL-PERP': 20, 'BTC-PERP': 20, 'ETH-PERP': 20, 'APT-PERP': 20, 'ARB-PERP': 20,
+  'AVAX-PERP': 20, 'BNB-PERP': 20, 'DOGE-PERP': 20, 'LINK-PERP': 20, 'OP-PERP': 20,
+  'POL-PERP': 20, 'SUI-PERP': 20, 'XRP-PERP': 20,
+  'LTC-PERP': 10, 'BCH-PERP': 10, 'DOT-PERP': 10, 'ATOM-PERP': 10, 'NEAR-PERP': 10,
+  'FTM-PERP': 10, 'INJ-PERP': 10, 'SEI-PERP': 10, 'TIA-PERP': 10, 'JTO-PERP': 10,
+  'JUP-PERP': 10, 'PYTH-PERP': 10, 'RENDER-PERP': 10, 'WIF-PERP': 10, 'BONK-PERP': 10,
+  '1MBONK-PERP': 10, 'PEPE-PERP': 10, '1MPEPE-PERP': 10, 'TRUMP-PERP': 10, 'HYPE-PERP': 10, 'TAO-PERP': 10,
+  'FARTCOIN-PERP': 5, 'AI16Z-PERP': 5, 'PENGU-PERP': 5, 'MELANIA-PERP': 5, 'BERA-PERP': 5,
+  'KAITO-PERP': 5, 'IP-PERP': 5, 'ZEC-PERP': 5, 'ADA-PERP': 5, 'PAXG-PERP': 5, 'PUMP-PERP': 5,
+  'GOAT-PERP': 5, 'MOODENG-PERP': 5, 'POPCAT-PERP': 5, 'MEW-PERP': 5, '1KMEW-PERP': 5,
+  'MOTHER-PERP': 5, 'TNSR-PERP': 5, 'DRIFT-PERP': 5, 'CLOUD-PERP': 5, 'IO-PERP': 5,
+  'ME-PERP': 5, 'RAY-PERP': 5, 'PNUT-PERP': 5, 'MICHI-PERP': 5, 'FWOG-PERP': 5,
+  'TON-PERP': 5, 'HNT-PERP': 5, 'RLB-PERP': 5, 'DYM-PERP': 5, 'KMNO-PERP': 5,
+  'ZEX-PERP': 5, '1KWEN-PERP': 5, 'DBR-PERP': 5, 'WLD-PERP': 5, 'ASTER-PERP': 5,
+  'XPL-PERP': 5, '2Z-PERP': 5, 'MNT-PERP': 5, '1KPUMP-PERP': 5, 'MET-PERP': 5,
+  '1KMON-PERP': 5, 'LIT-PERP': 5, 'W-PERP': 3, 'LAUNCHCOIN-PERP': 3,
+};
+
 interface TradingBot {
   id: string;
   name: string;
@@ -192,7 +211,9 @@ export function BotManagementDrawer({
     if (bot) {
       setLocalBot(bot);
       setEditName(bot.name);
-      setEditLeverage(bot.leverage);
+      // Clamp leverage to market's max
+      const maxLev = MARKET_MAX_LEVERAGE[bot.market] || 20;
+      setEditLeverage(Math.min(bot.leverage, maxLev));
       // Convert stored maxPositionSize (leveraged) to investment amount (raw)
       const storedMaxPos = parseFloat(bot.maxPositionSize || '0');
       const investmentAmount = bot.leverage > 0 ? storedMaxPos / bot.leverage : storedMaxPos;
@@ -572,8 +593,9 @@ export function BotManagementDrawer({
   const handleSaveSettings = async () => {
     if (!localBot) return;
     
-    if (editLeverage < 1 || editLeverage > 20) {
-      toast({ title: 'Leverage must be between 1 and 20', variant: 'destructive' });
+    const maxLev = MARKET_MAX_LEVERAGE[localBot.market] || 20;
+    if (editLeverage < 1 || editLeverage > maxLev) {
+      toast({ title: `Leverage must be between 1 and ${maxLev}x for ${localBot.market}`, variant: 'destructive' });
       return;
     }
     
@@ -635,7 +657,9 @@ export function BotManagementDrawer({
   const handleCancelEdit = () => {
     if (localBot) {
       setEditName(localBot.name);
-      setEditLeverage(localBot.leverage);
+      // Clamp leverage to market's max when resetting
+      const maxLev = MARKET_MAX_LEVERAGE[localBot.market] || 20;
+      setEditLeverage(Math.min(localBot.leverage, maxLev));
       // Convert stored maxPositionSize (leveraged) to investment amount (raw)
       const storedMaxPos = parseFloat(localBot.maxPositionSize || '0');
       const investmentAmount = localBot.leverage > 0 ? storedMaxPos / localBot.leverage : storedMaxPos;
@@ -653,7 +677,7 @@ export function BotManagementDrawer({
   
   const hasSettingsChanges = localBot ? (
     editName !== localBot.name || 
-    editLeverage !== localBot.leverage || 
+    editLeverage !== Math.min(localBot.leverage, MARKET_MAX_LEVERAGE[localBot.market] || 20) || 
     editMaxPositionSize !== getStoredInvestmentAmount()
   ) : false;
 
@@ -1522,27 +1546,41 @@ export function BotManagementDrawer({
                 
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
-                    <label className="text-sm text-muted-foreground">Leverage</label>
+                    <label className="text-sm text-muted-foreground flex items-center gap-1.5">
+                      Leverage
+                      {(() => {
+                        const maxLev = MARKET_MAX_LEVERAGE[localBot?.market || ''] || 20;
+                        if (maxLev < 10) {
+                          return (
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400">
+                              Max {maxLev}x
+                            </span>
+                          );
+                        }
+                        return null;
+                      })()}
+                    </label>
                     <span className="text-sm font-semibold" data-testid="text-edit-leverage">{editLeverage}x</span>
                   </div>
                   <Slider
-                    value={[editLeverage]}
+                    value={[Math.min(editLeverage, MARKET_MAX_LEVERAGE[localBot?.market || ''] || 20)]}
                     onValueChange={(value) => setEditLeverage(value[0])}
                     min={1}
-                    max={20}
+                    max={MARKET_MAX_LEVERAGE[localBot?.market || ''] || 20}
                     step={1}
                     className="w-full"
                     data-testid="slider-leverage"
                   />
                   <div className="flex justify-between text-xs text-muted-foreground">
                     <span>1x</span>
-                    <span>10x</span>
-                    <span>20x</span>
+                    <span>{MARKET_MAX_LEVERAGE[localBot?.market || ''] || 20}x (Max)</span>
                   </div>
-                  <p className="text-xs text-muted-foreground flex items-center gap-1">
-                    <Info className="w-3 h-3" />
-                    Applied to your trades when bot executes signals
-                  </p>
+                  {(MARKET_MAX_LEVERAGE[localBot?.market || ''] || 20) < 10 && (
+                    <p className="text-xs text-amber-400 flex items-center gap-1">
+                      <Info className="w-3 h-3" />
+                      {localBot?.market.replace('-PERP', '')} has a {MARKET_MAX_LEVERAGE[localBot?.market || '']}x max leverage limit on Drift
+                    </p>
+                  )}
                 </div>
                 
                 <div className="space-y-2">
