@@ -421,6 +421,15 @@ export async function registerRoutes(
       console.log('[Telegram] Channel prepared:', channelId);
       console.log('[Telegram] Verification link:', verificationLink);
 
+      // Extract verification code from link for users with existing Dialect chats
+      let verificationCode = '';
+      if (verificationLink) {
+        const match = verificationLink.match(/\?start=(.+)$/);
+        if (match) {
+          verificationCode = match[1];
+        }
+      }
+
       // Store both channel ID and bearer token for later verification
       await storage.updateWallet(req.walletAddress!, {
         dialectAddress: channelId,
@@ -430,8 +439,9 @@ export async function registerRoutes(
       res.json({
         success: true,
         verificationLink: verificationLink || `https://t.me/dialectbot?start=verify_${channelId}`,
+        verificationCode: verificationCode,
         channelId: channelId,
-        message: "Click the link to verify your Telegram in the Dialect bot, then click 'Verify Connection'."
+        message: "Open @DialectLabsBot in Telegram and send the verification command, then click 'Verify Connection'."
       });
     } catch (error) {
       console.error("[Telegram] Connect error:", error);

@@ -1854,10 +1854,18 @@ export default function AppPage() {
                                         
                                         if (res.ok && data.verificationLink) {
                                           window.open(data.verificationLink, '_blank');
-                                          toast({
-                                            title: "Step 1: Open Telegram",
-                                            description: "Click /start in the bot, then come back and click 'Verify Connection'.",
-                                          });
+                                          if (data.verificationCode) {
+                                            toast({
+                                              title: "Important: Send this command in Telegram",
+                                              description: `/start ${data.verificationCode}`,
+                                              duration: 30000,
+                                            });
+                                          } else {
+                                            toast({
+                                              title: "Step 1: Open Telegram",
+                                              description: "Click /start in the bot, then come back and click 'Verify Connection'.",
+                                            });
+                                          }
                                         } else {
                                           toast({
                                             title: "Setup Not Available",
