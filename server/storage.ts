@@ -15,6 +15,7 @@ import {
   positions,
   trades,
   leaderboardStats,
+  orphanedSubaccounts,
   type User,
   type InsertUser,
   type Wallet,
@@ -41,6 +42,8 @@ import {
   type InsertTrade,
   type LeaderboardStats,
   type InsertLeaderboardStats,
+  type OrphanedSubaccount,
+  type InsertOrphanedSubaccount,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -121,6 +124,12 @@ export interface IStorage {
   upsertBotPosition(position: InsertBotPosition): Promise<BotPosition>;
   updateBotPositionFromTrade(tradingBotId: string, market: string, walletAddress: string, side: string, size: number, price: number, fee: number, tradeId: string): Promise<BotPosition>;
   getWalletsWithActiveBots(): Promise<string[]>;
+
+  createOrphanedSubaccount(data: InsertOrphanedSubaccount): Promise<OrphanedSubaccount>;
+  getOrphanedSubaccounts(): Promise<OrphanedSubaccount[]>;
+  getOrphanedSubaccountsByWallet(walletAddress: string): Promise<OrphanedSubaccount[]>;
+  deleteOrphanedSubaccount(id: string): Promise<void>;
+  updateOrphanedSubaccountRetry(id: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -672,6 +681,30 @@ export class DatabaseStorage implements IStorage {
       .from(tradingBots)
       .where(eq(tradingBots.isActive, true));
     return result.map(r => r.walletAddress);
+  }
+
+  async createOrphanedSubaccount(data: InsertOrphanedSubaccount): Promise<OrphanedSubaccount> {
+    const result = await db.insert(orphanedSubaccounts).values(data).returning();
+    return result[0];
+  }
+
+  async getOrphanedSubaccounts(): Promise<OrphanedSubaccount[]> {
+    return db.select().from(orphanedSubaccounts).orderBy(desc(orphanedSubaccounts.createdAt));
+  }
+
+  async getOrphanedSubaccountsByWallet(walletAddress: string): Promise<OrphanedSubaccount[]> {
+    return db.select().from(orphanedSubaccounts).where(eq(orphanedSubaccounts.walletAddress, walletAddress)).orderBy(desc(orphanedSubaccounts.createdAt));
+  }
+
+  async deleteOrphanedSubaccount(id: string): Promise<void> {
+    await db.delete(orphanedSubaccounts).where(eq(orphanedSubaccounts.id, id));
+  }
+
+  async updateOrphanedSubaccountRetry(id: string): Promise<void> {
+    await db.update(orphanedSubaccounts).set({
+      retryCount: sql`${orphanedSubaccounts.retryCount} + 1`,
+      lastRetryAt: sql`NOW()`,
+    }).where(eq(orphanedSubaccounts.id, id));
   }
 }
 

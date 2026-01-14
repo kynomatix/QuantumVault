@@ -4,6 +4,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { storage } from "./storage";
 import { startPeriodicReconciliation } from "./reconciliation-service";
+import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 
 const app = express();
 const httpServer = createServer(app);
@@ -122,6 +123,9 @@ app.use((req, res, next) => {
       
       // Start periodic position reconciliation (syncs DB with on-chain Drift positions)
       startPeriodicReconciliation();
+      
+      // Start orphaned subaccount cleanup (retries closing subaccounts that failed during bot deletion)
+      startOrphanedSubaccountCleanup();
     },
   );
 })();

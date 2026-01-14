@@ -2472,31 +2472,35 @@ export async function registerRoutes(
             rentReclaimError = closeErr.message;
           }
           
-          // BLOCK DELETION if rent could not be reclaimed
-          // User must use "Reset Drift Account" or resolve the issue first
-          if (!rentReclaimed) {
-            console.error(`[Delete] BLOCKING DELETION - subaccount ${bot.driftSubaccountId} not closed, would orphan rent`);
-            return res.status(409).json({
-              error: "Cannot delete bot - subaccount still exists on-chain",
-              details: rentReclaimError,
-              driftSubaccountId: bot.driftSubaccountId,
-              message: "The on-chain subaccount could not be closed. This may be due to remaining balance or open positions. Use 'Reset Drift Account' in Settings to clean up, or manually close the subaccount on Drift first.",
-              withdrawn: withdrawnAmount > 0,
-              withdrawnAmount
-            });
+          // Track orphaned subaccount if rent could not be reclaimed
+          if (!rentReclaimed && wallet.agentPrivateKeyEncrypted) {
+            console.warn(`[Delete] Tracking orphaned subaccount ${bot.driftSubaccountId} for later cleanup`);
+            try {
+              await storage.createOrphanedSubaccount({
+                walletAddress: req.walletAddress!,
+                agentPublicKey: agentAddress,
+                agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
+                driftSubaccountId: bot.driftSubaccountId,
+                reason: rentReclaimError,
+              });
+            } catch (orphanErr: any) {
+              console.error(`[Delete] Failed to track orphaned subaccount:`, orphanErr.message);
+            }
           }
         }
         
         await storage.deleteTradingBot(req.params.id);
+        const rentReclaimPending = !rentReclaimed && bot.driftSubaccountId > 0;
         return res.json({ 
           success: true, 
           rentReclaimed,
+          rentReclaimPending,
           withdrawn: withdrawnAmount > 0,
           withdrawnAmount,
           withdrawTxSignature,
           message: withdrawnAmount > 0 
-            ? `Automatically withdrew $${withdrawnAmount.toFixed(2)} USDC to your agent wallet and reclaimed subaccount rent`
-            : rentReclaimed ? 'Subaccount closed and rent reclaimed' : 'Bot deleted'
+            ? `Automatically withdrew $${withdrawnAmount.toFixed(2)} USDC to your agent wallet${rentReclaimed ? ' and reclaimed subaccount rent' : '. Rent reclaim pending.'}`
+            : rentReclaimed ? 'Subaccount closed and rent reclaimed' : rentReclaimPending ? 'Bot deleted. Subaccount rent reclaim pending.' : 'Bot deleted'
         });
       }
 
