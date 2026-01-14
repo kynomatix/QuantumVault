@@ -318,6 +318,10 @@ export async function registerRoutes(
 
       console.log('[Telegram] Using agent wallet:', agentAddress);
 
+      // Step 0: Delete any existing Telegram channel for this wallet (fresh start)
+      console.log('[Telegram] Step 0: Cleaning up any existing channel...');
+      
+      // First we need to authenticate to delete, so we'll do the auth flow first
       // Step 1: Prepare Solana auth challenge from Dialect
       console.log('[Telegram] Step 1: Preparing auth challenge...');
       const prepareAuthRes = await fetch('https://alerts-api.dial.to/v2/auth/solana/prepare', {
@@ -371,6 +375,27 @@ export async function registerRoutes(
       const verifyData = await verifyRes.json();
       const bearerToken = verifyData.token;
       console.log('[Telegram] Got bearer token');
+
+      // Step 3.5: Delete any existing Telegram channel to start fresh
+      console.log('[Telegram] Step 3.5: Deleting existing channel if any...');
+      try {
+        const deleteRes = await fetch('https://alerts-api.dial.to/v2/channel/telegram/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${bearerToken}`,
+            'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
+          },
+        });
+        if (deleteRes.ok) {
+          console.log('[Telegram] Deleted existing channel successfully');
+        } else {
+          const deleteErr = await deleteRes.text();
+          console.log('[Telegram] No existing channel to delete or delete failed:', deleteRes.status, deleteErr);
+        }
+      } catch (deleteError) {
+        console.log('[Telegram] Delete step skipped (no existing channel):', deleteError);
+      }
 
       // Step 4: Prepare Telegram channel (uses Bearer token + Client Key)
       console.log('[Telegram] Step 4: Preparing Telegram channel...');
