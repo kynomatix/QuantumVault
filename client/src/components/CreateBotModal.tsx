@@ -44,7 +44,8 @@ import {
   TrendingUp,
   AlertTriangle,
   ShieldCheck,
-  ShieldAlert
+  ShieldAlert,
+  HelpCircle
 } from 'lucide-react';
 
 interface MarketInfo {
@@ -56,6 +57,7 @@ interface MarketInfo {
   riskTier: 'recommended' | 'caution' | 'high_risk';
   estimatedSlippagePct: number;
   lastPrice: number | null;
+  openInterestUsd?: number;
   isActive: boolean;
   warning?: string;
   riskTierInfo: {
@@ -361,11 +363,42 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
                       {selectedMarket.riskTier === 'caution' && <AlertTriangle className="w-3 h-3 mr-1" />}
                       {selectedMarket.riskTier === 'high_risk' && <ShieldAlert className="w-3 h-3 mr-1" />}
                       ~{selectedMarket.estimatedSlippagePct}% slippage
+                      <HelpCircle className="w-3 h-3 ml-1 opacity-70" />
                     </Badge>
                   </TooltipTrigger>
-                  <TooltipContent side="left" className="max-w-xs">
-                    <p className="font-medium">{selectedMarket.riskTierInfo.label}</p>
-                    <p className="text-xs text-muted-foreground">{selectedMarket.riskTierInfo.description}</p>
+                  <TooltipContent side="left" className="max-w-xs bg-slate-900 border-slate-700 p-3">
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`font-semibold ${
+                          selectedMarket.riskTier === 'recommended' ? 'text-green-400' :
+                          selectedMarket.riskTier === 'caution' ? 'text-yellow-400' :
+                          'text-red-400'
+                        }`}>
+                          {selectedMarket.riskTierInfo.label}
+                        </span>
+                      </div>
+                      <p className="text-sm text-slate-300">{selectedMarket.riskTierInfo.description}</p>
+                      <div className="border-t border-slate-700 pt-2 mt-2 space-y-1">
+                        <div className="flex justify-between text-xs">
+                          <span className="text-slate-400">Open Interest:</span>
+                          <span className="text-slate-200 font-medium">
+                            {selectedMarket.openInterestUsd 
+                              ? `$${(selectedMarket.openInterestUsd / 1_000_000).toFixed(2)}M`
+                              : 'N/A'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-xs">
+                          <span className="text-slate-400">Est. Slippage:</span>
+                          <span className="text-slate-200 font-medium">~{selectedMarket.estimatedSlippagePct}%</span>
+                        </div>
+                        {selectedMarket.lastPrice && (
+                          <div className="flex justify-between text-xs">
+                            <span className="text-slate-400">Price:</span>
+                            <span className="text-slate-200 font-medium">${selectedMarket.lastPrice.toLocaleString()}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
