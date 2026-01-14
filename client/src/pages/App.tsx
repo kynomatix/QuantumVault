@@ -1952,6 +1952,10 @@ export default function AppPage() {
                                     </div>
                                   </div>
                                 )}
+                                <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 text-xs text-blue-300">
+                                  <p className="font-medium mb-1">Already use Dialect with Drift?</p>
+                                  <p>If your Telegram is linked to another wallet, message @DialectLabsBot with <code className="bg-background/50 px-1 rounded">/unlink</code> first, then reconnect here.</p>
+                                </div>
                                 <p className="text-xs text-muted-foreground">
                                   Once connected, you'll receive:
                                 </p>
