@@ -508,15 +508,8 @@ export async function registerRoutes(
       
       const channelId = channelData.id;
 
-      if (!channelData.verified) {
-        return res.json({
-          success: false,
-          verified: false,
-          message: "Please complete the verification in Telegram first by clicking /start in the Dialect bot."
-        });
-      }
-
-      console.log('[Telegram Verify] Channel verified! Subscribing to app...');
+      // Try to subscribe even if not marked as verified - Telegram may already be linked via another wallet
+      console.log(`[Telegram Verify] Channel verified: ${channelData.verified}, attempting subscription anyway...`);
       const subscribeRes = await fetch(`https://alerts-api.dial.to/v2/channel/${channelId}/subscribe`, {
         method: 'POST',
         headers: {
@@ -527,12 +520,45 @@ export async function registerRoutes(
         body: JSON.stringify({ appId: DIALECT_APP_ID }),
       });
 
-      if (!subscribeRes.ok) {
-        const err = await subscribeRes.text();
-        console.error('[Telegram Verify] Subscribe failed:', subscribeRes.status, err);
-        if (!err.includes('already subscribed')) {
-          return res.status(500).json({ error: "Failed to subscribe channel", details: err });
+      const subscribeResult = await subscribeRes.text();
+      console.log('[Telegram Verify] Subscribe result:', subscribeRes.status, subscribeResult);
+      
+      if (!subscribeRes.ok && !subscribeResult.includes('already subscribed')) {
+        // Subscription failed, but let's check if it's because channel isn't verified
+        if (subscribeResult.includes('not verified') || subscribeResult.includes('UNVERIFIED')) {
+          return res.json({
+            success: false,
+            verified: false,
+            message: "Your Telegram may already be linked to another wallet. Try messaging @DialectLabsBot with /unlink first, then reconnect here."
+          });
         }
+        return res.status(500).json({ error: "Failed to subscribe channel", details: subscribeResult });
+      }
+
+      // Subscription succeeded or already subscribed - try sending a test notification
+      const DIALECT_API_KEY = process.env.DIALECT_API_KEY;
+      if (DIALECT_API_KEY) {
+        console.log('[Telegram Verify] Sending test notification...');
+        const testNotify = await fetch(`https://alerts-api.dial.to/v2/${DIALECT_APP_ID}/send`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-dialect-api-key': DIALECT_API_KEY,
+          },
+          body: JSON.stringify({
+            channels: ['TELEGRAM'],
+            message: {
+              title: 'QuantumVault Connected!',
+              body: 'Telegram notifications are now active for your trading bots.',
+            },
+            recipient: {
+              type: 'subscriber',
+              walletAddress: wallet.agentWalletAddress,
+            },
+          }),
+        });
+        const testResult = await testNotify.text();
+        console.log('[Telegram Verify] Test notification result:', testNotify.status, testResult);
       }
 
       await storage.updateWallet(req.walletAddress!, {
@@ -542,7 +568,7 @@ export async function registerRoutes(
       console.log('[Telegram Verify] Successfully connected and subscribed!');
       res.json({
         success: true,
-        verified: true,
+        verified: channelData.verified,
         subscribed: true,
         message: "Telegram notifications are now active! You'll receive alerts for your trading bots."
       });
