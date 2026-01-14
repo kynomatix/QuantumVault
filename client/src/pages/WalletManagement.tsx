@@ -965,6 +965,11 @@ export function WalletContent() {
                 <p className="text-sm text-muted-foreground">
                   SOL is required to pay transaction fees (gas) on the Solana blockchain. 
                   The trading agent needs SOL to execute trades, deposits, and withdrawals on Drift Protocol.
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  Each bot also requires ~0.035 SOL for Solana account rent when created. This rent is automatically reclaimed when you delete the bot.
+                </p>
+                <p className="text-sm text-muted-foreground font-medium">
                   We recommend keeping at least 0.1 SOL for smooth operations.
                 </p>
               </div>
@@ -2030,6 +2035,11 @@ export default function WalletManagement() {
                       <p className="text-sm text-muted-foreground">
                         SOL is required to pay transaction fees (gas) on the Solana blockchain. 
                         The trading agent needs SOL to execute trades, deposits, and withdrawals on Drift Protocol.
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Each bot also requires ~0.035 SOL for Solana account rent when created. This rent is automatically reclaimed when you delete the bot.
+                      </p>
+                      <p className="text-sm text-muted-foreground font-medium">
                         We recommend keeping at least 0.1 SOL for smooth operations.
                       </p>
                     </div>

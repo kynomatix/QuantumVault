@@ -581,8 +581,22 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
             <Check className="w-6 h-6 text-emerald-500" />
             Bot Created Successfully!
           </DialogTitle>
-          <DialogDescription>
-            <span className="font-medium">{createdBot.name}</span> • {createdBot.market}
+          <DialogDescription className="flex items-center gap-2">
+            <span className="font-medium">{createdBot.name}</span>
+            <button
+              onClick={() => copyToClipboard(createdBot.name, 'Bot Name')}
+              className="p-1 rounded hover:bg-muted/50 transition-colors"
+              title="Copy bot name for TradingView alert"
+              data-testid="button-copy-bot-name"
+            >
+              {copiedField === 'Bot Name' ? (
+                <Check className="w-3.5 h-3.5 text-emerald-500" />
+              ) : (
+                <Copy className="w-3.5 h-3.5 text-muted-foreground" />
+              )}
+            </button>
+            <span className="text-muted-foreground">•</span>
+            <span>{createdBot.market}</span>
           </DialogDescription>
         </DialogHeader>
         
