@@ -136,6 +136,7 @@ export default function AppPage() {
   const [notifyTradeFailed, setNotifyTradeFailed] = useState(true);
   const [notifyPositionClosed, setNotifyPositionClosed] = useState(true);
   const [telegramConnected, setTelegramConnected] = useState(false);
+  const [dangerZoneExpanded, setDangerZoneExpanded] = useState(false);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
   const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
@@ -1873,7 +1874,7 @@ export default function AppPage() {
                             {!telegramConnected && (
                               <div className="mt-3">
                                 <p className="text-xs text-muted-foreground mb-2">
-                                  Telegram connection is coming soon. Once available, you'll be able to:
+                                  Telegram integration requires API credentials to be configured. Once set up, you'll be able to:
                                 </p>
                                 <ul className="text-xs text-muted-foreground space-y-1 ml-4 list-disc">
                                   <li>Receive instant alerts when trades execute</li>
@@ -1906,37 +1907,46 @@ export default function AppPage() {
                     </div>
 
                     <div className="border-t border-border/50 pt-6">
-                      <h3 className="font-display font-semibold mb-4 text-red-400">Danger Zone</h3>
-                      <div className="space-y-4">
-                        <div>
-                          <p className="text-sm text-muted-foreground mb-2">
-                            Close all open positions across all your trading bots.
-                          </p>
-                          <Button 
-                            variant="outline" 
-                            className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
-                            onClick={() => setCloseAllDialogOpen(true)}
-                            data-testid="button-close-positions"
-                          >
-                            <XCircle className="w-4 h-4 mr-2" />
-                            Close All Positions
-                          </Button>
+                      <button
+                        onClick={() => setDangerZoneExpanded(!dangerZoneExpanded)}
+                        className="w-full flex items-center justify-between text-left"
+                        data-testid="button-toggle-danger-zone"
+                      >
+                        <h3 className="font-display font-semibold text-red-400">Danger Zone</h3>
+                        <ChevronDown className={`w-4 h-4 text-red-400 transition-transform ${dangerZoneExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      {dangerZoneExpanded && (
+                        <div className="space-y-4 mt-4">
+                          <div>
+                            <p className="text-sm text-muted-foreground mb-2">
+                              Close all open positions across all your trading bots.
+                            </p>
+                            <Button 
+                              variant="outline" 
+                              className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
+                              onClick={() => setCloseAllDialogOpen(true)}
+                              data-testid="button-close-positions"
+                            >
+                              <XCircle className="w-4 h-4 mr-2" />
+                              Close All Positions
+                            </Button>
+                          </div>
+                          <div>
+                            <p className="text-sm text-muted-foreground mb-2">
+                              Close all positions, withdraw all funds, and delete your Drift account.
+                            </p>
+                            <Button 
+                              variant="outline" 
+                              className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
+                              onClick={() => setResetDriftDialogOpen(true)}
+                              data-testid="button-reset-drift"
+                            >
+                              <Trash2 className="w-4 h-4 mr-2" />
+                              Reset Drift Account
+                            </Button>
+                          </div>
                         </div>
-                        <div>
-                          <p className="text-sm text-muted-foreground mb-2">
-                            Close all positions, withdraw all funds, and delete your Drift account.
-                          </p>
-                          <Button 
-                            variant="outline" 
-                            className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
-                            onClick={() => setResetDriftDialogOpen(true)}
-                            data-testid="button-reset-drift"
-                          >
-                            <Trash2 className="w-4 h-4 mr-2" />
-                            Reset Drift Account
-                          </Button>
-                        </div>
-                      </div>
+                      )}
                     </div>
                   </div>
                 )}
