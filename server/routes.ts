@@ -2449,10 +2449,16 @@ export async function registerRoutes(
         }
         
         // Try to close the subaccount to reclaim rent (~0.023 SOL)
-        // CRITICAL: For isolated subaccounts (>0), we MUST close the subaccount or fail the deletion
-        // This prevents orphaning subaccounts with locked rent
         let rentReclaimed = false;
         let rentReclaimError: string | undefined;
+        
+        // Edge case: subaccount exists but agent keys are missing (data corruption)
+        if (exists && !wallet.agentPrivateKeyEncrypted && bot.driftSubaccountId > 0) {
+          console.error(`[Delete] CRITICAL: Subaccount ${bot.driftSubaccountId} exists but agent keys missing - cannot auto-recover!`);
+          console.error(`[Delete] User must use "Reset Drift Account" in Settings or manually close on Drift`);
+          rentReclaimError = "Agent keys missing - manual recovery required";
+        }
+        
         if (exists && wallet.agentPrivateKeyEncrypted && bot.driftSubaccountId > 0) {
           console.log(`[Delete] Attempting to close subaccount ${bot.driftSubaccountId} to reclaim rent...`);
           try {
@@ -2491,16 +2497,35 @@ export async function registerRoutes(
         
         await storage.deleteTradingBot(req.params.id);
         const rentReclaimPending = !rentReclaimed && bot.driftSubaccountId > 0;
+        const needsManualRecovery = rentReclaimError?.includes('Agent keys missing');
+        
+        let message = 'Bot deleted';
+        if (withdrawnAmount > 0) {
+          message = `Automatically withdrew $${withdrawnAmount.toFixed(2)} USDC to your agent wallet`;
+          if (rentReclaimed) {
+            message += ' and reclaimed subaccount rent';
+          } else if (needsManualRecovery) {
+            message += '. Subaccount requires manual recovery via Settings.';
+          } else if (rentReclaimPending) {
+            message += '. Rent reclaim pending.';
+          }
+        } else if (rentReclaimed) {
+          message = 'Subaccount closed and rent reclaimed';
+        } else if (needsManualRecovery) {
+          message = 'Bot deleted. Subaccount requires manual recovery - use "Reset Drift Account" in Settings.';
+        } else if (rentReclaimPending) {
+          message = 'Bot deleted. Subaccount rent reclaim pending.';
+        }
+        
         return res.json({ 
           success: true, 
           rentReclaimed,
           rentReclaimPending,
+          needsManualRecovery,
           withdrawn: withdrawnAmount > 0,
           withdrawnAmount,
           withdrawTxSignature,
-          message: withdrawnAmount > 0 
-            ? `Automatically withdrew $${withdrawnAmount.toFixed(2)} USDC to your agent wallet${rentReclaimed ? ' and reclaimed subaccount rent' : '. Rent reclaim pending.'}`
-            : rentReclaimed ? 'Subaccount closed and rent reclaimed' : rentReclaimPending ? 'Bot deleted. Subaccount rent reclaim pending.' : 'Bot deleted'
+          message
         });
       }
 
