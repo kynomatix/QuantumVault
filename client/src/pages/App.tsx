@@ -40,6 +40,12 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { BotManagementDrawer } from '@/components/BotManagementDrawer';
 import { CreateBotModal } from '@/components/CreateBotModal';
 import { TradeHistoryModal } from '@/components/TradeHistoryModal';
@@ -1196,16 +1202,25 @@ export default function AppPage() {
                                 <td className="py-3 text-right font-mono">{trade.size}</td>
                                 <td className="py-3 text-right font-mono">${Number(trade.price).toLocaleString()}</td>
                                 <td className="py-3 text-right">
-                                  <div className="flex flex-col items-end gap-0.5">
+                                  {isFailed && trade.errorMessage ? (
+                                    <TooltipProvider>
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <span className={`px-2 py-0.5 rounded text-xs cursor-help ${getStatusStyle()}`}>
+                                            {trade.status}
+                                          </span>
+                                        </TooltipTrigger>
+                                        <TooltipContent side="left" className="max-w-[250px] bg-popover border border-border">
+                                          <p className="text-sm font-medium text-red-400 mb-1">Trade Failed</p>
+                                          <p className="text-xs">{getErrorExplanation(trade.errorMessage)}</p>
+                                        </TooltipContent>
+                                      </Tooltip>
+                                    </TooltipProvider>
+                                  ) : (
                                     <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle()}`}>
                                       {trade.status}
                                     </span>
-                                    {isFailed && trade.errorMessage && (
-                                      <span className="text-[10px] text-red-400/80 max-w-[120px] truncate" title={trade.errorMessage}>
-                                        {getErrorExplanation(trade.errorMessage)}
-                                      </span>
-                                    )}
-                                  </div>
+                                  )}
                                 </td>
                               </tr>
                             );
