@@ -1873,13 +1873,49 @@ export default function AppPage() {
                             </p>
                             {!telegramConnected && (
                               <div className="mt-3">
-                                <p className="text-xs text-muted-foreground mb-2">
-                                  Telegram integration requires API credentials to be configured. Once set up, you'll be able to:
+                                <Button
+                                  variant="outline"
+                                  onClick={async () => {
+                                    try {
+                                      const res = await fetch('/api/telegram/connect', { 
+                                        method: 'POST',
+                                        credentials: 'include' 
+                                      });
+                                      const data = await res.json();
+                                      
+                                      if (res.ok && data.verificationLink) {
+                                        window.open(data.verificationLink, '_blank');
+                                        toast({
+                                          title: "Telegram Setup Started",
+                                          description: "Complete the verification in Telegram, then refresh this page.",
+                                        });
+                                      } else {
+                                        toast({
+                                          title: "Setup Not Available",
+                                          description: data.message || "Telegram notifications are not yet configured.",
+                                          variant: "destructive",
+                                        });
+                                      }
+                                    } catch (error) {
+                                      toast({
+                                        title: "Error",
+                                        description: "Failed to start Telegram connection",
+                                        variant: "destructive",
+                                      });
+                                    }
+                                  }}
+                                  data-testid="button-connect-telegram"
+                                >
+                                  <ExternalLink className="w-4 h-4 mr-2" />
+                                  Connect Telegram
+                                </Button>
+                                <p className="text-xs text-muted-foreground mt-3">
+                                  Once connected, you'll receive:
                                 </p>
-                                <ul className="text-xs text-muted-foreground space-y-1 ml-4 list-disc">
-                                  <li>Receive instant alerts when trades execute</li>
-                                  <li>Get notified on trade failures</li>
-                                  <li>See position close summaries with PnL</li>
+                                <ul className="text-xs text-muted-foreground space-y-1 ml-4 list-disc mt-1">
+                                  <li>Instant alerts when trades execute</li>
+                                  <li>Notifications on trade failures</li>
+                                  <li>Position close summaries with PnL</li>
                                 </ul>
                               </div>
                             )}

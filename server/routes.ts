@@ -285,6 +285,121 @@ export async function registerRoutes(
     }
   });
 
+  // Telegram connection - prepare Telegram channel via Dialect API
+  app.post("/api/telegram/connect", requireWallet, async (req, res) => {
+    try {
+      const DIALECT_CLIENT_KEY = process.env.DIALECT_CLIENT_KEY;
+      
+      if (!DIALECT_CLIENT_KEY) {
+        return res.status(503).json({ 
+          error: "Telegram notifications not configured",
+          message: "The platform administrator needs to set up Dialect API credentials (DIALECT_CLIENT_KEY) to enable Telegram notifications."
+        });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+
+      // Call Dialect API to prepare Telegram channel
+      const dialectResponse = await fetch('https://alerts-api.dial.to/v2/channel/telegram/prepare', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
+        },
+        body: JSON.stringify({
+          walletAddress: req.walletAddress,
+        }),
+      });
+
+      if (!dialectResponse.ok) {
+        const errorText = await dialectResponse.text();
+        console.error('[Telegram] Dialect API error:', dialectResponse.status, errorText);
+        return res.status(500).json({ 
+          error: "Failed to prepare Telegram channel",
+          details: errorText 
+        });
+      }
+
+      const dialectData = await dialectResponse.json();
+      
+      // Store the channel ID for later verification
+      await storage.updateWallet(req.walletAddress!, {
+        dialectAddress: dialectData.id,
+      });
+
+      res.json({
+        success: true,
+        verificationLink: dialectData.verification?.link || `https://t.me/dialectbot?start=verify_${dialectData.id}`,
+        channelId: dialectData.id,
+      });
+    } catch (error) {
+      console.error("[Telegram] Connect error:", error);
+      res.status(500).json({ error: "Failed to connect Telegram" });
+    }
+  });
+
+  // Verify Telegram connection status
+  app.get("/api/telegram/status", requireWallet, async (req, res) => {
+    try {
+      const DIALECT_CLIENT_KEY = process.env.DIALECT_CLIENT_KEY;
+      
+      if (!DIALECT_CLIENT_KEY) {
+        return res.json({ 
+          configured: false,
+          connected: false,
+          message: "Telegram notifications not configured by administrator"
+        });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+
+      // If we have a dialectAddress, check if it's verified
+      if (wallet.dialectAddress) {
+        try {
+          const statusResponse = await fetch(`https://alerts-api.dial.to/v2/channel/${wallet.dialectAddress}`, {
+            headers: {
+              'X-Dialect-Client-Key': DIALECT_CLIENT_KEY,
+            },
+          });
+
+          if (statusResponse.ok) {
+            const statusData = await statusResponse.json();
+            const verified = statusData.verified === true;
+            
+            // Update local DB if verified status changed
+            if (verified !== wallet.telegramConnected) {
+              await storage.updateWallet(req.walletAddress!, {
+                telegramConnected: verified,
+              });
+            }
+
+            return res.json({
+              configured: true,
+              connected: verified,
+              channelId: wallet.dialectAddress,
+            });
+          }
+        } catch (e) {
+          console.error('[Telegram] Status check error:', e);
+        }
+      }
+
+      res.json({
+        configured: true,
+        connected: wallet.telegramConnected ?? false,
+      });
+    } catch (error) {
+      console.error("[Telegram] Status error:", error);
+      res.status(500).json({ error: "Failed to check Telegram status" });
+    }
+  });
+
   // Reset Drift Account - Fully automated: closes positions, sweeps funds, deletes subaccounts
   app.post("/api/wallet/reset-drift-account", requireWallet, async (req, res) => {
     try {
