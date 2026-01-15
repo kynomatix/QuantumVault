@@ -2149,7 +2149,7 @@ export default function AppPage() {
                         </div>
                         <div>
                           <label className="text-sm text-muted-foreground mb-1.5 block">Max Slippage</label>
-                          <p className="text-xs text-muted-foreground mb-2">Maximum price slippage tolerance for trades. Higher values help with volatile markets like ZEC.</p>
+                          <p className="text-xs text-muted-foreground mb-2">Maximum price slippage tolerance for trades. Higher values help with volatile markets.</p>
                           <div className="flex items-center gap-3">
                             <Input 
                               type="number"
