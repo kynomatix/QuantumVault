@@ -272,45 +272,98 @@ export default function Landing() {
           </motion.div>
         </section>
 
-        {/* Brand transition section */}
-        <section className="relative py-20 px-6 bg-black">
+        {/* Brand transition section - Vault reveal */}
+        <section className="relative py-24 px-6 bg-black overflow-hidden">
           <div className="absolute inset-0 backdrop-blur-xl bg-black/80" />
           <div className="absolute inset-0 bg-gradient-to-b from-transparent via-black/50 to-background" />
           
+          {/* Vault door left */}
+          <motion.div
+            initial={{ x: 0 }}
+            whileInView={{ x: "-100%" }}
+            viewport={{ once: true, margin: "-100px" }}
+            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
+            className="absolute left-0 top-0 w-1/2 h-full bg-gradient-to-r from-black via-gray-900 to-gray-800 z-20 border-r border-white/5"
+          >
+            <div className="absolute right-4 top-1/2 -translate-y-1/2 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full" />
+          </motion.div>
+          
+          {/* Vault door right */}
+          <motion.div
+            initial={{ x: 0 }}
+            whileInView={{ x: "100%" }}
+            viewport={{ once: true, margin: "-100px" }}
+            transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
+            className="absolute right-0 top-0 w-1/2 h-full bg-gradient-to-l from-black via-gray-900 to-gray-800 z-20 border-l border-white/5"
+          >
+            <div className="absolute left-4 top-1/2 -translate-y-1/2 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full" />
+          </motion.div>
+          
           <div className="relative z-10 max-w-4xl mx-auto text-center">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.8, y: 20 }}
-              whileInView={{ opacity: 1, scale: 1, y: 0 }}
-              viewport={{ once: true, margin: "-50px" }}
-              transition={{ duration: 0.7, ease: "easeOut" }}
-              className="relative inline-block mb-6"
+            {/* Glow ring effect */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.5 }}
+              whileInView={{ opacity: 1, scale: 1 }}
+              viewport={{ once: true, margin: "-100px" }}
+              transition={{ duration: 1, delay: 0.3, ease: "easeOut" }}
+              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 sm:w-64 sm:h-64"
             >
-              <div className="absolute inset-0 bg-gradient-to-r from-primary/50 to-accent/50 rounded-3xl blur-2xl opacity-60 animate-pulse" />
-              <img 
-                src="/images/QV_Logo_02.png" 
-                alt="QuantumVault" 
-                className="relative w-20 h-20 sm:w-24 sm:h-24 rounded-3xl shadow-2xl ring-2 ring-white/20"
+              <div className="absolute inset-0 rounded-full bg-gradient-to-r from-primary/30 to-accent/30 blur-3xl animate-pulse" />
+              <motion.div 
+                animate={{ rotate: 360 }}
+                transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+                className="absolute inset-4 rounded-full border border-white/10"
+                style={{ borderStyle: 'dashed' }}
               />
             </motion.div>
             
+            {/* Logo with reveal */}
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.3, rotateY: -90 }}
+              whileInView={{ opacity: 1, scale: 1, rotateY: 0 }}
+              viewport={{ once: true, margin: "-100px" }}
+              transition={{ duration: 0.8, delay: 0.5, ease: [0.16, 1, 0.3, 1] }}
+              className="relative inline-block mb-6"
+              style={{ perspective: 1000 }}
+            >
+              <motion.div 
+                animate={{ boxShadow: ['0 0 20px rgba(168, 85, 247, 0.4)', '0 0 40px rgba(168, 85, 247, 0.6)', '0 0 20px rgba(168, 85, 247, 0.4)'] }}
+                transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                className="relative"
+              >
+                <img 
+                  src="/images/QV_Logo_02.png" 
+                  alt="QuantumVault" 
+                  className="relative w-20 h-20 sm:w-28 sm:h-28 rounded-3xl shadow-2xl ring-2 ring-white/20"
+                />
+              </motion.div>
+            </motion.div>
+            
+            {/* Title with typing reveal effect */}
             <motion.h2 
-              initial={{ opacity: 0, y: 15 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-50px" }}
-              transition={{ duration: 0.6, delay: 0.2, ease: "easeOut" }}
+              initial={{ opacity: 0, y: 20, filter: 'blur(10px)' }}
+              whileInView={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+              viewport={{ once: true, margin: "-100px" }}
+              transition={{ duration: 0.6, delay: 0.7, ease: "easeOut" }}
               className="font-display font-bold text-2xl sm:text-3xl text-white mb-4"
             >
               QuantumVault
             </motion.h2>
             
+            {/* Pill with slide up */}
             <motion.span 
-              initial={{ opacity: 0, y: 15 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-50px" }}
-              transition={{ duration: 0.6, delay: 0.4, ease: "easeOut" }}
+              initial={{ opacity: 0, y: 20, scale: 0.9 }}
+              whileInView={{ opacity: 1, y: 0, scale: 1 }}
+              viewport={{ once: true, margin: "-100px" }}
+              transition={{ duration: 0.6, delay: 0.9, ease: [0.16, 1, 0.3, 1] }}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-sm text-white"
             >
-              <Zap className="w-4 h-4 text-primary" />
+              <motion.div
+                animate={{ rotate: [0, 360] }}
+                transition={{ duration: 3, delay: 1.2, repeat: Infinity, ease: "linear" }}
+              >
+                <Zap className="w-4 h-4 text-primary" />
+              </motion.div>
               Powered by Drift Protocol on Solana
             </motion.span>
           </div>
