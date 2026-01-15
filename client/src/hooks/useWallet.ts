@@ -4,12 +4,20 @@ import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 
 export { useConnection };
 
+// Helper to get referral code from URL
+const getReferralCodeFromUrl = (): string | null => {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search);
+  return params.get('ref');
+};
+
 export function useWallet() {
   const wallet = useSolanaWallet();
   const { connection } = useConnection();
   const [balance, setBalance] = useState<number | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [sessionConnected, setSessionConnected] = useState(false);
+  const [referralCode, setReferralCode] = useState<string | null>(null);
   const lastConnectedWallet = useRef<string | null>(null);
 
   const publicKeyString = wallet.publicKey?.toBase58() || null;
@@ -23,15 +31,21 @@ export function useWallet() {
     const registerWallet = async () => {
       if (publicKeyString && publicKeyString !== lastConnectedWallet.current) {
         try {
+          const referredByCode = getReferralCodeFromUrl();
           const res = await fetch('/api/wallet/connect', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
-            body: JSON.stringify({ walletAddress: publicKeyString }),
+            body: JSON.stringify({ 
+              walletAddress: publicKeyString,
+              referredByCode: referredByCode || undefined,
+            }),
           });
           if (res.ok) {
+            const data = await res.json();
             lastConnectedWallet.current = publicKeyString;
             setSessionConnected(true);
+            setReferralCode(data.referralCode || null);
           }
         } catch (error) {
           console.error('Failed to register wallet with session:', error);
@@ -39,6 +53,7 @@ export function useWallet() {
       } else if (!publicKeyString) {
         lastConnectedWallet.current = null;
         setSessionConnected(false);
+        setReferralCode(null);
       }
     };
     
@@ -84,5 +99,6 @@ export function useWallet() {
     balanceLoading,
     fetchBalance,
     sessionConnected,
+    referralCode,
   };
 }

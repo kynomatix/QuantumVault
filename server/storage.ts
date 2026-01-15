@@ -62,6 +62,7 @@ export interface IStorage {
 
   getWallet(address: string): Promise<Wallet | undefined>;
   getWalletByWebhookSecret(secret: string): Promise<Wallet | undefined>;
+  getWalletByReferralCode(referralCode: string): Promise<Wallet | undefined>;
   createWallet(wallet: InsertWallet): Promise<Wallet>;
   updateWalletLastSeen(address: string): Promise<void>;
   getOrCreateWallet(address: string): Promise<Wallet>;
@@ -188,6 +189,11 @@ export class DatabaseStorage implements IStorage {
 
   async getWalletByWebhookSecret(secret: string): Promise<Wallet | undefined> {
     const result = await db.select().from(wallets).where(eq(wallets.userWebhookSecret, secret)).limit(1);
+    return result[0];
+  }
+
+  async getWalletByReferralCode(referralCode: string): Promise<Wallet | undefined> {
+    const result = await db.select().from(wallets).where(eq(wallets.referralCode, referralCode)).limit(1);
     return result[0];
   }
 

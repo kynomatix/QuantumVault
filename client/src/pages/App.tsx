@@ -94,7 +94,7 @@ type MarketplaceSortBy = 'pnl7d' | 'pnl30d' | 'pnl90d' | 'pnlAllTime' | 'subscri
 
 export default function AppPage() {
   const [, navigate] = useLocation();
-  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected } = useWallet();
+  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected, referralCode: walletReferralCode } = useWallet();
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
   const { toast } = useToast();
@@ -133,6 +133,8 @@ export default function AppPage() {
   const [resettingDriftAccount, setResettingDriftAccount] = useState(false);
   const [notificationDropdownOpen, setNotificationDropdownOpen] = useState(false);
   const [savingNotifications, setSavingNotifications] = useState(false);
+  const [referralCode, setReferralCode] = useState<string | null>(null);
+  const [referredBy, setReferredBy] = useState<string | null>(null);
   
   // Marketplace state
   const [marketplaceSearch, setMarketplaceSearch] = useState('');
@@ -229,6 +231,8 @@ export default function AppPage() {
           setNotifyTradeFailed(data.notifyTradeFailed ?? true);
           setNotifyPositionClosed(data.notifyPositionClosed ?? true);
           setTelegramConnected(data.telegramConnected ?? false);
+          setReferralCode(data.referralCode || null);
+          setReferredBy(data.referredBy || null);
         }
       } catch (error) {
         console.error('Error loading settings:', error);
@@ -1949,6 +1953,66 @@ export default function AppPage() {
                       </div>
                     )}
 
+                    {referralCode && (
+                      <div className="border-t border-border/50 pt-6">
+                        <h3 className="font-display font-semibold mb-4">Referral Program</h3>
+                        <p className="text-sm text-muted-foreground mb-3">
+                          Share your referral code to invite friends. You'll earn rewards when they sign up and trade!
+                        </p>
+                        <div className="space-y-3">
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1.5 block">Your Referral Code</label>
+                            <div className="flex gap-2">
+                              <Input
+                                value={referralCode}
+                                readOnly
+                                className="bg-muted/30 border-border/50 font-mono font-bold tracking-wider text-lg"
+                                data-testid="input-referral-code"
+                              />
+                              <Button
+                                variant="outline"
+                                size="icon"
+                                onClick={async () => {
+                                  await navigator.clipboard.writeText(referralCode);
+                                  toast({ title: 'Referral code copied!' });
+                                }}
+                                data-testid="button-copy-referral-code"
+                              >
+                                <Copy className="w-4 h-4" />
+                              </Button>
+                            </div>
+                          </div>
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1.5 block">Referral Link</label>
+                            <div className="flex gap-2">
+                              <Input
+                                value={`${window.location.origin}/app?ref=${referralCode}`}
+                                readOnly
+                                className="bg-muted/30 border-border/50 font-mono text-sm"
+                                data-testid="input-referral-link"
+                              />
+                              <Button
+                                variant="outline"
+                                size="icon"
+                                onClick={async () => {
+                                  await navigator.clipboard.writeText(`${window.location.origin}/app?ref=${referralCode}`);
+                                  toast({ title: 'Referral link copied!' });
+                                }}
+                                data-testid="button-copy-referral-link"
+                              >
+                                <Copy className="w-4 h-4" />
+                              </Button>
+                            </div>
+                          </div>
+                          {referredBy && (
+                            <p className="text-xs text-muted-foreground">
+                              You were referred by: <span className="font-mono">{referredBy.slice(0, 6)}...{referredBy.slice(-4)}</span>
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
                     <div className="border-t border-border/50 pt-6">
                       <h3 className="font-display font-semibold mb-4">Notifications</h3>
                       <div className="bg-muted/30 rounded-lg border border-border/50 p-4">
@@ -2398,6 +2462,7 @@ export default function AppPage() {
           setSelectedManagedBot(null);
         }}
         walletAddress={publicKeyString || ''}
+        referralCode={referralCode || walletReferralCode || undefined}
         onBotUpdated={() => {
           refetchBots();
         }}

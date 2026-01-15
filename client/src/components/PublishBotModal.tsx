@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { usePublishBot } from '@/hooks/useApi';
 import { Button } from '@/components/ui/button';
@@ -17,7 +17,11 @@ import {
 import { 
   Loader2, 
   Store,
-  AlertTriangle
+  AlertTriangle,
+  Copy,
+  Check,
+  Share2,
+  ExternalLink
 } from 'lucide-react';
 
 interface PublishBotModalProps {
@@ -28,22 +32,63 @@ interface PublishBotModalProps {
     name: string;
     market: string;
   };
+  walletAddress?: string;
+  referralCode?: string;
   onPublished?: () => void;
 }
 
-export function PublishBotModal({ isOpen, onClose, bot, onPublished }: PublishBotModalProps) {
+export function PublishBotModal({ isOpen, onClose, bot, walletAddress, referralCode, onPublished }: PublishBotModalProps) {
   const { toast } = useToast();
   const publishBot = usePublishBot();
   
   const [name, setName] = useState(bot.name);
   const [description, setDescription] = useState('');
   const [riskAccepted, setRiskAccepted] = useState(false);
+  const [publishedBotId, setPublishedBotId] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setName(bot.name);
+  }, [bot.name]);
 
   const handleClose = () => {
     setName(bot.name);
     setDescription('');
     setRiskAccepted(false);
+    setPublishedBotId(null);
+    setCopied(false);
     onClose();
+  };
+
+  const getShareUrl = (botId: string) => {
+    const baseUrl = typeof window !== 'undefined' 
+      ? `${window.location.protocol}//${window.location.host}`
+      : 'https://myquantumvault.com';
+    
+    let url = `${baseUrl}/app?bot=${botId}`;
+    if (referralCode) {
+      url += `&ref=${referralCode}`;
+    }
+    return url;
+  };
+
+  const handleCopyShareUrl = async () => {
+    if (!publishedBotId) return;
+    
+    const shareUrl = getShareUrl(publishedBotId);
+    await navigator.clipboard.writeText(shareUrl);
+    setCopied(true);
+    toast({ title: 'Share link copied!' });
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleShareToX = () => {
+    if (!publishedBotId) return;
+    
+    const shareUrl = getShareUrl(publishedBotId);
+    const text = `Check out my ${bot.market} trading bot on QuantumVault! 🚀📈`;
+    const xUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(shareUrl)}`;
+    window.open(xUrl, '_blank');
   };
 
   const handlePublish = async () => {
@@ -58,7 +103,7 @@ export function PublishBotModal({ isOpen, onClose, bot, onPublished }: PublishBo
     }
 
     try {
-      await publishBot.mutateAsync({
+      const result = await publishBot.mutateAsync({
         botId: bot.id,
         data: {
           name: name.trim(),
@@ -66,9 +111,9 @@ export function PublishBotModal({ isOpen, onClose, bot, onPublished }: PublishBo
         },
       });
       
+      setPublishedBotId(result.id);
       toast({ title: 'Bot published to marketplace!' });
       onPublished?.();
-      handleClose();
     } catch (error: any) {
       toast({ 
         title: 'Failed to publish bot', 
@@ -77,6 +122,86 @@ export function PublishBotModal({ isOpen, onClose, bot, onPublished }: PublishBo
       });
     }
   };
+
+  if (publishedBotId) {
+    return (
+      <Dialog open={isOpen} onOpenChange={(open) => !open && handleClose()}>
+        <DialogContent className="sm:max-w-[500px] bg-card border-border">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 font-display">
+              <Share2 className="w-5 h-5 text-primary" />
+              Share Your Bot
+            </DialogTitle>
+            <DialogDescription>
+              Your bot is now live on the marketplace! Share it with your community.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-4">
+            <div className="p-4 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-center">
+              <p className="text-emerald-400 font-medium">🎉 Successfully Published!</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                {name} is now available in the marketplace
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Share Link</Label>
+              <div className="flex gap-2">
+                <Input
+                  value={getShareUrl(publishedBotId)}
+                  readOnly
+                  className="font-mono text-sm"
+                  data-testid="input-share-url"
+                />
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={handleCopyShareUrl}
+                  data-testid="button-copy-share-url"
+                >
+                  {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                </Button>
+              </div>
+              {referralCode && (
+                <p className="text-xs text-muted-foreground">
+                  Your referral code ({referralCode}) is included in the link
+                </p>
+              )}
+            </div>
+
+            <div className="flex gap-2">
+              <Button
+                onClick={handleShareToX}
+                className="flex-1 bg-black hover:bg-gray-800"
+                data-testid="button-share-x"
+              >
+                <svg className="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                </svg>
+                Share on X
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleCopyShareUrl}
+                className="flex-1"
+                data-testid="button-copy-link"
+              >
+                <Copy className="w-4 h-4 mr-2" />
+                Copy Link
+              </Button>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button onClick={handleClose} data-testid="button-done">
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && handleClose()}>

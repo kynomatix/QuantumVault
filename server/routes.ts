@@ -347,14 +347,25 @@ export async function registerRoutes(
     next();
   };
 
+  // Helper to generate a unique referral code
+  const generateReferralCode = (): string => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return code;
+  };
+
   // Wallet auth routes
   app.post("/api/wallet/connect", async (req, res) => {
     try {
-      const { walletAddress } = req.body;
+      const { walletAddress, referredByCode } = req.body;
       if (!walletAddress) {
         return res.status(400).json({ error: "Wallet address required" });
       }
 
+      const isNewWallet = !(await storage.getWallet(walletAddress));
       let wallet = await storage.getOrCreateWallet(walletAddress);
       
       // Generate agent wallet if not already set
@@ -376,6 +387,31 @@ export async function registerRoutes(
         wallet = (await storage.getWallet(walletAddress))!;
         console.log(`[Webhook] Generated user webhook secret for ${walletAddress}`);
       }
+
+      // Generate referral code if not already set
+      if (!wallet.referralCode) {
+        let referralCode = generateReferralCode();
+        let attempts = 0;
+        while (attempts < 10) {
+          const existing = await storage.getWalletByReferralCode(referralCode);
+          if (!existing) break;
+          referralCode = generateReferralCode();
+          attempts++;
+        }
+        await storage.updateWallet(walletAddress, { referralCode });
+        wallet = (await storage.getWallet(walletAddress))!;
+        console.log(`[Referral] Generated referral code for ${walletAddress}: ${referralCode}`);
+      }
+
+      // Track referral if this is a new wallet and referral code was provided
+      if (isNewWallet && referredByCode && !wallet.referredBy) {
+        const referrer = await storage.getWalletByReferralCode(referredByCode);
+        if (referrer && referrer.address !== walletAddress) {
+          await storage.updateWallet(walletAddress, { referredBy: referrer.address });
+          wallet = (await storage.getWallet(walletAddress))!;
+          console.log(`[Referral] ${walletAddress} was referred by ${referrer.address} (code: ${referredByCode})`);
+        }
+      }
       
       req.session.walletAddress = walletAddress;
 
@@ -384,6 +420,7 @@ export async function registerRoutes(
         displayName: wallet.displayName,
         driftSubaccount: wallet.driftSubaccount,
         agentPublicKey: wallet.agentPublicKey,
+        referralCode: wallet.referralCode,
       });
     } catch (error) {
       console.error("Wallet connect error:", error);
@@ -420,6 +457,8 @@ export async function registerRoutes(
         notifyTradeFailed: wallet.notifyTradeFailed ?? true,
         notifyPositionClosed: wallet.notifyPositionClosed ?? true,
         telegramConnected: wallet.telegramConnected ?? false,
+        referralCode: wallet.referralCode,
+        referredBy: wallet.referredBy,
       });
     } catch (error) {
       console.error("Get wallet settings error:", error);

@@ -62,6 +62,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+import { PublishBotModal } from './PublishBotModal';
 
 const MARKET_MAX_LEVERAGE: Record<string, number> = {
   'SOL-PERP': 20, 'BTC-PERP': 20, 'ETH-PERP': 20, 'APT-PERP': 20, 'ARB-PERP': 20,
@@ -152,6 +153,7 @@ interface BotManagementDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   walletAddress: string;
+  referralCode?: string;
   onBotUpdated: () => void;
   onShowWalletTab?: () => void;
 }
@@ -161,6 +163,7 @@ export function BotManagementDrawer({
   isOpen,
   onClose,
   walletAddress,
+  referralCode,
   onBotUpdated,
   onShowWalletTab,
 }: BotManagementDrawerProps) {
@@ -199,6 +202,7 @@ export function BotManagementDrawer({
   const [closePositionLoading, setClosePositionLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [publishModalOpen, setPublishModalOpen] = useState(false);
 
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
@@ -742,18 +746,16 @@ export function BotManagementDrawer({
                   </>
                 )}
               </Button>
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button variant="ghost" size="icon" disabled data-testid="button-share">
-                      <Share2 className="w-4 h-4" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    <p>Coming soon</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <Button 
+                variant="default" 
+                size="sm"
+                onClick={() => setPublishModalOpen(true)}
+                className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                data-testid="button-share"
+              >
+                <Share2 className="w-4 h-4 mr-1.5" />
+                Share
+              </Button>
             </div>
           </div>
         </SheetHeader>
@@ -1717,6 +1719,23 @@ export function BotManagementDrawer({
         </>
         )}
       </SheetContent>
+
+      {displayBot && (
+        <PublishBotModal
+          isOpen={publishModalOpen}
+          onClose={() => setPublishModalOpen(false)}
+          bot={{
+            id: displayBot.id,
+            name: displayBot.name,
+            market: displayBot.market,
+          }}
+          walletAddress={walletAddress}
+          referralCode={referralCode}
+          onPublished={() => {
+            onBotUpdated();
+          }}
+        />
+      )}
     </Sheet>
   );
 }

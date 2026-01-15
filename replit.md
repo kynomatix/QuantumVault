@@ -59,6 +59,23 @@ The marketplace allows users to publish their successful trading bots and let ot
 - **Search & Filtering**: Marketplace UI supports searching by bot name, ticker/market, and creator username. Featured bots section shows top performers ranked by PnL percentage with time filters.
 - **Risk Disclaimers**: Both publish and subscribe flows include risk disclaimers informing users about the risks of automated trading and copy trading.
 
+### Referral System (Jan 2026)
+The platform includes a comprehensive referral system for community growth and user acquisition.
+
+- **Referral Code Generation**: Each user automatically receives a unique 6-character alphanumeric referral code upon first wallet connection. Codes are generated using A-Z (excluding I, O) and 2-9 to avoid ambiguity.
+- **Database Schema**: 
+  - `wallets.referralCode`: Unique referral code for each user
+  - `wallets.referredBy`: Stores the wallet address of the referrer (set only on first connection)
+- **Share URL Format**: `{baseUrl}/app?bot={botId}&ref={referralCode}` - used when sharing published bots from the marketplace
+- **Referral Tracking Flow**: 
+  1. User A shares their published bot with their referral code in the URL
+  2. User B opens the link and connects their wallet for the first time
+  3. The `ref` parameter is extracted from URL and sent to `/api/wallet/connect`
+  4. If User B is new, `referredBy` is set to User A's wallet address
+- **Settings Integration**: Users can view and copy their referral code and link from Settings > Referral Program section
+- **PublishBotModal Enhancement**: After publishing a bot, shows a share screen with the bot's shareable URL (including referral code) and options to copy or share to X (Twitter)
+- **Future Use**: Referral data is stored for future token allocation, revenue sharing, and community incentive programs
+
 ## External Dependencies
 
 ### Blockchain & DeFi

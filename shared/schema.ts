@@ -26,6 +26,7 @@ export const wallets = pgTable("wallets", {
   displayName: text("display_name"),
   xUsername: text("x_username"),
   referralCode: text("referral_code").unique(),
+  referredBy: text("referred_by"),
   driftSubaccount: integer("drift_subaccount").default(0),
   defaultLeverage: integer("default_leverage").default(5),
   slippageBps: integer("slippage_bps").default(30),
