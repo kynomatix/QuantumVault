@@ -18,6 +18,11 @@ import { Keypair } from '@solana/web3.js';
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const NONCE_TTL_MS = 5 * 60 * 1000;
+const REVEAL_MNEMONIC_NONCE_TTL_MS = 2 * 60 * 1000;
+
+const PURPOSE_TTL_OVERRIDES: Record<string, number> = {
+  reveal_mnemonic: REVEAL_MNEMONIC_NONCE_TTL_MS,
+};
 
 interface SessionData {
   walletAddress: string;
@@ -137,7 +142,8 @@ export async function createSigningNonce(
 ): Promise<{ nonce: string; message: string }> {
   const nonce = generateNonce();
   const nonceHash = hashNonce(nonce);
-  const expiresAt = new Date(Date.now() + NONCE_TTL_MS);
+  const ttlMs = PURPOSE_TTL_OVERRIDES[purpose] || NONCE_TTL_MS;
+  const expiresAt = new Date(Date.now() + ttlMs);
   
   await storage.createAuthNonce({
     walletAddress,
@@ -146,7 +152,7 @@ export async function createSigningNonce(
     expiresAt,
   });
   
-  const message = formatSignMessage(walletAddress, purpose, nonce, expiresAt);
+  const message = formatSignMessage(walletAddress, purpose, nonce, expiresAt, ttlMs);
   
   return { nonce, message };
 }
@@ -211,7 +217,12 @@ async function validateAndConsumeNonce(
   return true;
 }
 
-function formatSignMessage(walletAddress: string, purpose: string, nonce: string, expiresAt: Date): string {
+function formatTtlText(ttlMs: number): string {
+  const minutes = Math.round(ttlMs / 60000);
+  return minutes === 1 ? '1 minute' : `${minutes} minutes`;
+}
+
+function formatSignMessage(walletAddress: string, purpose: string, nonce: string, expiresAt: Date, ttlMs: number): string {
   const purposeDescriptions: Record<string, string> = {
     unlock_umk: 'Unlock your trading account',
     enable_execution: 'Enable automated trade execution',
@@ -220,6 +231,7 @@ function formatSignMessage(walletAddress: string, purpose: string, nonce: string
   };
   
   const description = purposeDescriptions[purpose] || purpose;
+  const ttlText = formatTtlText(ttlMs);
   
   return [
     'QuantumVault Security Verification',
@@ -229,7 +241,7 @@ function formatSignMessage(walletAddress: string, purpose: string, nonce: string
     `Nonce: ${nonce}`,
     `Expires: ${expiresAt.toISOString()}`,
     '',
-    'This signature request is valid for 5 minutes.',
+    `This signature request is valid for ${ttlText}.`,
     'Do not sign if you did not initiate this action.',
   ].join('\n');
 }
@@ -243,6 +255,8 @@ export function reconstructSignMessage(walletAddress: string, purpose: string, n
   };
   
   const description = purposeDescriptions[purpose] || purpose;
+  const ttlMs = PURPOSE_TTL_OVERRIDES[purpose] || NONCE_TTL_MS;
+  const ttlText = formatTtlText(ttlMs);
   
   return [
     'QuantumVault Security Verification',
@@ -252,7 +266,7 @@ export function reconstructSignMessage(walletAddress: string, purpose: string, n
     `Nonce: ${nonce}`,
     `Expires: ${expiresAt.toISOString()}`,
     '',
-    'This signature request is valid for 5 minutes.',
+    `This signature request is valid for ${ttlText}.`,
     'Do not sign if you did not initiate this action.',
   ].join('\n');
 }
@@ -338,6 +352,93 @@ export async function decryptMnemonic(
     zeroizeBuffer(mnemonicKey);
     return null;
   }
+}
+
+const MNEMONIC_REVEAL_LIMIT = 3;
+const MNEMONIC_REVEAL_WINDOW_MS = 60 * 60 * 1000;
+const MNEMONIC_DISPLAY_TIMEOUT_MS = 60 * 1000;
+
+interface RevealAttempt {
+  timestamp: number;
+}
+
+const revealAttempts = new Map<string, RevealAttempt[]>();
+
+function checkRevealRateLimit(walletAddress: string): { allowed: boolean; retryAfterMs?: number } {
+  const now = Date.now();
+  const windowStart = now - MNEMONIC_REVEAL_WINDOW_MS;
+  
+  const attempts = revealAttempts.get(walletAddress) || [];
+  const recentAttempts = attempts.filter(a => a.timestamp > windowStart);
+  
+  if (recentAttempts.length >= MNEMONIC_REVEAL_LIMIT) {
+    const oldestRecentAttempt = Math.min(...recentAttempts.map(a => a.timestamp));
+    const retryAfterMs = oldestRecentAttempt + MNEMONIC_REVEAL_WINDOW_MS - now;
+    return { allowed: false, retryAfterMs };
+  }
+  
+  return { allowed: true };
+}
+
+function recordRevealAttempt(walletAddress: string): void {
+  const now = Date.now();
+  const windowStart = now - MNEMONIC_REVEAL_WINDOW_MS;
+  
+  const attempts = revealAttempts.get(walletAddress) || [];
+  const recentAttempts = attempts.filter(a => a.timestamp > windowStart);
+  recentAttempts.push({ timestamp: now });
+  revealAttempts.set(walletAddress, recentAttempts);
+}
+
+export type MnemonicRevealResult = {
+  success: false;
+  error: string;
+  retryAfterMs?: number;
+} | {
+  success: true;
+  mnemonic: string;
+  expiresAt: number;
+}
+
+export async function revealMnemonic(
+  walletAddress: string,
+  sessionId: string
+): Promise<MnemonicRevealResult> {
+  const session = getSessionById(sessionId);
+  if (!session || session.walletAddress !== walletAddress) {
+    console.log(`[Security] Mnemonic reveal denied: invalid session for ${walletAddress.slice(0, 8)}...`);
+    return { success: false, error: 'Invalid or expired session' };
+  }
+  
+  const rateCheck = checkRevealRateLimit(walletAddress);
+  if (!rateCheck.allowed) {
+    console.log(`[Security] Mnemonic reveal rate limited for ${walletAddress.slice(0, 8)}...`);
+    return { 
+      success: false, 
+      error: 'Rate limit exceeded. Maximum 3 reveals per hour.',
+      retryAfterMs: rateCheck.retryAfterMs 
+    };
+  }
+  
+  const mnemonicBuffer = await decryptMnemonic(walletAddress, session.umk);
+  if (!mnemonicBuffer) {
+    return { success: false, error: 'No recovery phrase found for this wallet' };
+  }
+  
+  recordRevealAttempt(walletAddress);
+  
+  const mnemonic = mnemonicBuffer.toString('utf8');
+  zeroizeBuffer(mnemonicBuffer);
+  
+  const expiresAt = Date.now() + MNEMONIC_DISPLAY_TIMEOUT_MS;
+  
+  console.log(`[Security] Mnemonic revealed for ${walletAddress.slice(0, 8)}... (expires in 60s)`);
+  
+  return { success: true, mnemonic, expiresAt };
+}
+
+function getSessionById(sessionId: string): SessionData | undefined {
+  return sessions.get(sessionId);
 }
 
 export function cleanupExpiredSessions(): void {

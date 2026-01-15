@@ -15,7 +15,7 @@ import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, invalidateSession, cleanupExpiredNonces } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, invalidateSession, cleanupExpiredNonces, revealMnemonic } from "./session-v3";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
@@ -495,6 +495,49 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Logout error:", error);
       res.status(500).json({ error: "Logout failed" });
+    }
+  });
+
+  app.post("/api/auth/reveal-mnemonic", requireWallet, async (req, res) => {
+    try {
+      const { sessionId, nonce, signature } = req.body;
+      if (!sessionId || !nonce || !signature) {
+        return res.status(400).json({ error: "Session ID, nonce, and signature required" });
+      }
+
+      const signatureBytes = Uint8Array.from(
+        typeof signature === 'string' ? bs58.decode(signature) : signature
+      );
+
+      const sigResult = await verifySignatureAndConsumeNonce(
+        req.walletAddress!,
+        nonce,
+        'reveal_mnemonic',
+        signatureBytes,
+        verifySolanaSignature
+      );
+
+      if (!sigResult.success) {
+        return res.status(401).json({ error: sigResult.error });
+      }
+
+      const result = await revealMnemonic(req.walletAddress!, sessionId);
+      
+      if (!result.success) {
+        const status = 'retryAfterMs' in result && result.retryAfterMs ? 429 : 400;
+        return res.status(status).json({
+          error: result.error,
+          retryAfterMs: 'retryAfterMs' in result ? result.retryAfterMs : undefined,
+        });
+      }
+      
+      res.json({
+        mnemonic: result.mnemonic,
+        expiresAt: result.expiresAt,
+      });
+    } catch (error) {
+      console.error("Mnemonic reveal error:", error);
+      res.status(500).json({ error: "Failed to reveal recovery phrase" });
     }
   });
 
