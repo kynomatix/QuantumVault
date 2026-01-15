@@ -159,7 +159,7 @@ export default function Landing() {
               initial="hidden"
               animate="visible"
               variants={staggerContainer}
-              className="relative max-w-4xl mx-auto text-center px-6 py-12"
+              className="relative max-w-4xl mx-auto text-center px-6 py-12 mt-16 sm:mt-20"
             >
               <motion.h1 
                 variants={fadeInUp}
