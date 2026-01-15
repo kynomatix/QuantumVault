@@ -51,10 +51,11 @@ function generateSignalHash(botId: string, payload: any): string {
 }
 
 function generateWebhookUrl(botId: string, secret: string): string {
-  const baseUrl = process.env.REPLIT_DEV_DOMAIN 
+  // Use production domain for webhooks, falling back to Replit domains for dev
+  const baseUrl = process.env.NODE_ENV === 'production' || process.env.REPLIT_DEPLOYMENT_DOMAIN
+    ? 'https://myquantumvault.com'
+    : process.env.REPLIT_DEV_DOMAIN 
     ? `https://${process.env.REPLIT_DEV_DOMAIN}`
-    : process.env.REPLIT_DEPLOYMENT_DOMAIN 
-    ? `https://${process.env.REPLIT_DEPLOYMENT_DOMAIN}`
     : 'http://localhost:5000';
   return `${baseUrl}/api/webhook/tradingview/${botId}?secret=${secret}`;
 }
@@ -4825,6 +4826,13 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Wallet not found" });
       }
 
+      // Use production domain for webhooks, falling back to Replit domains for dev
+      const baseUrl = process.env.NODE_ENV === 'production' || process.env.REPLIT_DEPLOYMENT_DOMAIN
+        ? 'https://myquantumvault.com'
+        : process.env.REPLIT_DEV_DOMAIN 
+        ? `https://${process.env.REPLIT_DEV_DOMAIN}`
+        : 'http://localhost:5000';
+
       // Generate secret if not exists
       if (!wallet.userWebhookSecret) {
         const userWebhookSecret = generateWebhookSecret();
@@ -4834,22 +4842,10 @@ export async function registerRoutes(
           return res.status(500).json({ error: "Failed to generate webhook secret" });
         }
         
-        const baseUrl = process.env.REPLIT_DEV_DOMAIN 
-          ? `https://${process.env.REPLIT_DEV_DOMAIN}`
-          : process.env.REPLIT_DEPLOYMENT_DOMAIN 
-          ? `https://${process.env.REPLIT_DEPLOYMENT_DOMAIN}`
-          : 'http://localhost:5000';
-        
         return res.json({
           webhookUrl: `${baseUrl}/api/webhook/user/${req.walletAddress}?secret=${updatedWallet.userWebhookSecret}`,
         });
       }
-
-      const baseUrl = process.env.REPLIT_DEV_DOMAIN 
-        ? `https://${process.env.REPLIT_DEV_DOMAIN}`
-        : process.env.REPLIT_DEPLOYMENT_DOMAIN 
-        ? `https://${process.env.REPLIT_DEPLOYMENT_DOMAIN}`
-        : 'http://localhost:5000';
 
       res.json({
         webhookUrl: `${baseUrl}/api/webhook/user/${req.walletAddress}?secret=${wallet.userWebhookSecret}`,
