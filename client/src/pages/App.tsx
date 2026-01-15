@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, type HealthMetrics, type PublishedBot } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, type HealthMetrics, type PublishedBot } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
@@ -38,7 +38,9 @@ import {
   XCircle,
   ExternalLink,
   X,
-  Check
+  Check,
+  Share2,
+  ChevronUp
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -143,6 +145,9 @@ export default function AppPage() {
   const [botToPublish, setBotToPublish] = useState<{ id: string; name: string; market: string } | null>(null);
   const [subscribeModalOpen, setSubscribeModalOpen] = useState(false);
   const [botToSubscribe, setBotToSubscribe] = useState<PublishedBot | null>(null);
+  const [myPublishedBotsExpanded, setMyPublishedBotsExpanded] = useState(true);
+  const [unpublishConfirmOpen, setUnpublishConfirmOpen] = useState(false);
+  const [botToUnpublish, setBotToUnpublish] = useState<{ id: string; name: string } | null>(null);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -165,6 +170,8 @@ export default function AppPage() {
     sortBy: marketplaceSortBy,
   });
   const { data: mySubscriptions } = useMyMarketplaceSubscriptions();
+  const { data: myPublishedBots, refetch: refetchMyPublishedBots } = useMyPublishedBots();
+  const unpublishBotMutation = useUnpublishBot();
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [driftBalance, setDriftBalance] = useState<number | null>(null);
@@ -1586,6 +1593,156 @@ export default function AppPage() {
                   ))}
                 </div>
 
+                {myPublishedBots && myPublishedBots.length > 0 && (
+                  <div className="gradient-border p-6 noise">
+                    <div 
+                      className="flex items-center justify-between cursor-pointer"
+                      onClick={() => setMyPublishedBotsExpanded(!myPublishedBotsExpanded)}
+                      data-testid="toggle-my-published-bots"
+                    >
+                      <div className="flex items-center gap-3">
+                        <Store className="w-5 h-5 text-primary" />
+                        <h2 className="font-display font-semibold">My Published Bots</h2>
+                        <span className="text-sm text-muted-foreground">({myPublishedBots.length})</span>
+                      </div>
+                      {myPublishedBotsExpanded ? (
+                        <ChevronUp className="w-5 h-5 text-muted-foreground" />
+                      ) : (
+                        <ChevronDown className="w-5 h-5 text-muted-foreground" />
+                      )}
+                    </div>
+                    
+                    {myPublishedBotsExpanded && (
+                      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+                        {myPublishedBots.map((bot: PublishedBot) => {
+                          const pnlValue = bot.pnlPercentAllTime ? parseFloat(bot.pnlPercentAllTime) : null;
+                          const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
+                          const shareUrl = `${baseUrl}/app?bot=${bot.id}&ref=${walletReferralCode || ''}`;
+                          
+                          return (
+                            <div 
+                              key={bot.id} 
+                              className={`p-5 rounded-xl border transition-all ${
+                                bot.isActive 
+                                  ? 'bg-gradient-to-br from-primary/10 to-accent/5 border-primary/30' 
+                                  : 'bg-muted/30 border-muted-foreground/20 opacity-75'
+                              }`}
+                              data-testid={`my-published-bot-${bot.id}`}
+                            >
+                              <div className="flex items-start justify-between mb-3">
+                                <div className="flex items-center gap-3">
+                                  <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                                    bot.isActive 
+                                      ? 'bg-gradient-to-br from-primary to-accent' 
+                                      : 'bg-muted-foreground/30'
+                                  }`}>
+                                    <Bot className="w-5 h-5 text-white" />
+                                  </div>
+                                  <div>
+                                    <h3 className="font-semibold text-sm">{bot.name}</h3>
+                                    <p className="text-xs text-muted-foreground">{bot.market}</p>
+                                  </div>
+                                </div>
+                                {!bot.isActive && (
+                                  <span className="px-2 py-0.5 rounded text-xs bg-muted-foreground/20 text-muted-foreground">
+                                    Inactive
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-2 mb-3">
+                                <div className="text-center p-2 rounded-lg bg-muted/30">
+                                  {pnlValue !== null ? (
+                                    <p className={`text-sm font-bold ${pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                      {pnlValue >= 0 ? '+' : ''}{pnlValue.toFixed(1)}%
+                                    </p>
+                                  ) : (
+                                    <p className="text-sm font-bold text-muted-foreground">--</p>
+                                  )}
+                                  <p className="text-xs text-muted-foreground">All Time</p>
+                                </div>
+                                <div className="text-center p-2 rounded-lg bg-muted/30">
+                                  <p className="text-sm font-bold">{bot.subscriberCount}</p>
+                                  <p className="text-xs text-muted-foreground">Subscribers</p>
+                                </div>
+                              </div>
+
+                              <div className="flex gap-2">
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          navigator.clipboard.writeText(shareUrl);
+                                          toast({
+                                            title: "Link copied!",
+                                            description: "Share URL copied to clipboard",
+                                          });
+                                        }}
+                                        data-testid={`button-copy-url-${bot.id}`}
+                                      >
+                                        <Copy className="w-4 h-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Copy Share URL</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          const tweetText = encodeURIComponent(`Check out my trading bot "${bot.name}" on QuantumVault! 🤖📈`);
+                                          const tweetUrl = encodeURIComponent(shareUrl);
+                                          window.open(`https://twitter.com/intent/tweet?text=${tweetText}&url=${tweetUrl}`, '_blank');
+                                        }}
+                                        data-testid={`button-share-x-${bot.id}`}
+                                      >
+                                        <Share2 className="w-4 h-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Share to X</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="flex-1 text-red-400 hover:text-red-300 hover:bg-red-500/10 hover:border-red-500/30"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setBotToUnpublish({ id: bot.id, name: bot.name });
+                                          setUnpublishConfirmOpen(true);
+                                        }}
+                                        data-testid={`button-unpublish-${bot.id}`}
+                                      >
+                                        <Trash2 className="w-4 h-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Unpublish Bot</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {marketplaceData && marketplaceData.filter((b: PublishedBot) => b.isFeatured).length > 0 && (
                   <div className="gradient-border p-6 noise">
                     <div className="flex items-center gap-3 mb-4">
@@ -2448,6 +2605,78 @@ export default function AppPage() {
                 data-testid="button-confirm-delete"
               >
                 {botToDelete.isLegacy ? 'Delete Anyway' : 'Withdraw & Delete'}
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {unpublishConfirmOpen && botToUnpublish && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="gradient-border p-6 noise max-w-md w-full mx-4"
+            data-testid="modal-unpublish-bot"
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center">
+                <Store className="w-6 h-6 text-red-400" />
+              </div>
+              <div>
+                <h3 className="font-display font-semibold text-lg">Unpublish Bot</h3>
+                <p className="text-sm text-muted-foreground">{botToUnpublish.name}</p>
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <p className="text-sm text-muted-foreground">
+                Are you sure you want to unpublish this bot from the marketplace? 
+                Existing subscribers will no longer receive signals from this bot.
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <Button 
+                variant="outline" 
+                className="flex-1" 
+                onClick={() => { setUnpublishConfirmOpen(false); setBotToUnpublish(null); }}
+                disabled={unpublishBotMutation.isPending}
+                data-testid="button-cancel-unpublish"
+              >
+                Cancel
+              </Button>
+              <Button 
+                className="flex-1 bg-red-500 hover:bg-red-600 text-white"
+                onClick={async () => {
+                  try {
+                    await unpublishBotMutation.mutateAsync(botToUnpublish.id);
+                    toast({
+                      title: "Bot unpublished",
+                      description: `${botToUnpublish.name} has been removed from the marketplace`,
+                    });
+                    setUnpublishConfirmOpen(false);
+                    setBotToUnpublish(null);
+                    refetchMyPublishedBots();
+                  } catch (error) {
+                    toast({
+                      title: "Failed to unpublish",
+                      description: error instanceof Error ? error.message : "An error occurred",
+                      variant: "destructive",
+                    });
+                  }
+                }}
+                disabled={unpublishBotMutation.isPending}
+                data-testid="button-confirm-unpublish"
+              >
+                {unpublishBotMutation.isPending ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Unpublishing...
+                  </>
+                ) : (
+                  'Unpublish'
+                )}
               </Button>
             </div>
           </motion.div>

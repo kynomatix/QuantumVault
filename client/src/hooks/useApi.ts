@@ -449,6 +449,7 @@ export function usePublishBot() {
       publishBot(botId, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["marketplace"] });
+      queryClient.invalidateQueries({ queryKey: ["myPublishedBots"] });
       queryClient.invalidateQueries({ queryKey: ["botPublished"] });
       queryClient.invalidateQueries({ queryKey: ["tradingBots"] });
     },
@@ -461,6 +462,7 @@ export function useUnpublishBot() {
     mutationFn: (publishedBotId: string) => unpublishBot(publishedBotId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["marketplace"] });
+      queryClient.invalidateQueries({ queryKey: ["myPublishedBots"] });
       queryClient.invalidateQueries({ queryKey: ["botPublished"] });
       queryClient.invalidateQueries({ queryKey: ["tradingBots"] });
     },
@@ -489,5 +491,21 @@ export function useUnsubscribeFromBot() {
       queryClient.invalidateQueries({ queryKey: ["myMarketplaceSubscriptions"] });
       queryClient.invalidateQueries({ queryKey: ["tradingBots"] });
     },
+  });
+}
+
+async function fetchMyPublishedBots(): Promise<PublishedBot[]> {
+  const res = await fetch("/api/marketplace/my-published", { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch my published bots");
+  return res.json();
+}
+
+export function useMyPublishedBots() {
+  const { publicKeyString, sessionConnected } = useWallet();
+  return useQuery({
+    queryKey: ["myPublishedBots", publicKeyString],
+    queryFn: fetchMyPublishedBots,
+    enabled: !!publicKeyString && sessionConnected,
+    staleTime: 10000,
   });
 }

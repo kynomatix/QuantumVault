@@ -5429,6 +5429,17 @@ export async function registerRoutes(
     }
   });
 
+  // Get user's own published bots (must be before :id route)
+  app.get("/api/marketplace/my-published", requireWallet, async (req, res) => {
+    try {
+      const bots = await storage.getPublishedBotsByCreator(req.walletAddress!);
+      res.json(bots);
+    } catch (error) {
+      console.error("Get my published bots error:", error);
+      res.status(500).json({ error: "Failed to fetch published bots" });
+    }
+  });
+
   // Get single published bot details
   app.get("/api/marketplace/:id", async (req, res) => {
     try {

@@ -143,6 +143,7 @@ export interface IStorage {
 
   // Marketplace: Published Bots
   getPublishedBots(options?: { search?: string; market?: string; sortBy?: string; limit?: number }): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } })[]>;
+  getPublishedBotsByCreator(walletAddress: string): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } })[]>;
   getPublishedBotById(id: string): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } }) | undefined>;
   getPublishedBotByTradingBotId(tradingBotId: string): Promise<PublishedBot | undefined>;
   createPublishedBot(bot: InsertPublishedBot): Promise<PublishedBot>;
@@ -787,6 +788,26 @@ export class DatabaseStorage implements IStorage {
     .where(and(...conditions))
     .orderBy(orderByColumn)
     .limit(options?.limit || 50);
+
+    return results.map(r => ({
+      ...r.publishedBot,
+      creator: {
+        displayName: r.displayName,
+        xUsername: r.xUsername,
+      },
+    }));
+  }
+
+  async getPublishedBotsByCreator(walletAddress: string): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } })[]> {
+    const results = await db.select({
+      publishedBot: publishedBots,
+      displayName: wallets.displayName,
+      xUsername: wallets.xUsername,
+    })
+    .from(publishedBots)
+    .leftJoin(wallets, eq(publishedBots.creatorWalletAddress, wallets.address))
+    .where(eq(publishedBots.creatorWalletAddress, walletAddress))
+    .orderBy(desc(publishedBots.publishedAt));
 
     return results.map(r => ({
       ...r.publishedBot,
