@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { motion, useScroll, useTransform } from 'framer-motion';
+import { motion, useScroll, useTransform, useMotionTemplate } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { 
   Wallet, 
@@ -58,10 +58,32 @@ export default function Landing() {
   const heroRef = useRef<HTMLDivElement>(null);
   
   const { scrollY } = useScroll();
+  
+  // Background parallax - continuous zoom and movement
   const heroY = useTransform(scrollY, [0, 800], [0, 300]);
-  const heroOpacity = useTransform(scrollY, [0, 400], [1, 0]);
-  const heroScale = useTransform(scrollY, [0, 800], [1, 1.1]);
-  const contentY = useTransform(scrollY, [0, 400], [0, 100]);
+  const heroScale = useTransform(scrollY, [0, 800], [1, 1.15]);
+  
+  // Staged reveal: content starts hidden, fades in quickly (0-60), then fades out (200-500)
+  const contentAppearOpacity = useTransform(scrollY, [0, 60], [0, 1]);
+  const contentFadeOpacity = useTransform(scrollY, [200, 500], [1, 0]);
+  const contentY = useTransform(scrollY, [0, 80, 500], [30, 0, 80]);
+  
+  // Glass backdrop - appears with content, fades out gradually
+  const glassOpacity = useTransform(scrollY, [0, 60, 200, 450], [0, 0.9, 0.9, 0]);
+  const glassBlur = useTransform(scrollY, [0, 60], [0, 16]);
+  
+  // Scroll indicator fades out quickly
+  const scrollIndicatorOpacity = useTransform(scrollY, [0, 100], [1, 0]);
+  
+  // Combine appear and fade for smooth content opacity
+  const contentOpacity = useTransform(
+    scrollY,
+    [0, 60, 200, 500],
+    [0, 1, 1, 0]
+  );
+  
+  // Glass blur as template string for backdrop-filter
+  const glassBlurStyle = useMotionTemplate`blur(${glassBlur}px)`;
 
   useEffect(() => {
     if (connected) {
@@ -120,13 +142,26 @@ export default function Landing() {
 
           <motion.div 
             className="absolute inset-0 flex items-center justify-center z-10"
-            style={{ y: contentY, opacity: heroOpacity }}
+            style={{ y: contentY, opacity: contentOpacity }}
           >
+            {/* Glass backdrop for text readability */}
+            <motion.div 
+              className="absolute inset-x-4 sm:inset-x-8 md:inset-x-16 top-1/2 -translate-y-1/2 max-w-5xl mx-auto rounded-3xl border border-white/10 shadow-2xl"
+              style={{ 
+                opacity: glassOpacity,
+                backdropFilter: glassBlurStyle,
+                WebkitBackdropFilter: glassBlurStyle,
+                background: 'linear-gradient(135deg, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.4) 100%)'
+              }}
+            >
+              <div className="h-full w-full rounded-3xl bg-gradient-to-br from-primary/5 via-transparent to-accent/5" />
+            </motion.div>
+            
             <motion.div 
               initial="hidden"
               animate="visible"
               variants={staggerContainer}
-              className="max-w-4xl mx-auto text-center px-6"
+              className="relative max-w-4xl mx-auto text-center px-6 py-12"
             >
               <motion.div 
                 variants={fadeInUp} 
@@ -137,7 +172,7 @@ export default function Landing() {
                   <img 
                     src="/images/QV_Logo_02.png" 
                     alt="QuantumVault" 
-                    className="relative w-24 h-24 sm:w-32 sm:h-32 rounded-3xl shadow-2xl ring-2 ring-white/20 backdrop-blur-sm"
+                    className="relative w-24 h-24 sm:w-32 sm:h-32 rounded-3xl shadow-2xl ring-2 ring-white/20"
                   />
                 </div>
               </motion.div>
@@ -151,7 +186,7 @@ export default function Landing() {
               
               <motion.h1 
                 variants={fadeInUp}
-                className="text-5xl sm:text-6xl lg:text-7xl font-display font-bold mb-6 leading-tight text-white"
+                className="text-4xl sm:text-5xl lg:text-7xl font-display font-bold mb-6 leading-tight text-white drop-shadow-lg"
               >
                 Trade Smarter with{' '}
                 <span className="bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent bg-[length:200%_auto] animate-gradient">
@@ -161,7 +196,7 @@ export default function Landing() {
               
               <motion.p 
                 variants={fadeInUp}
-                className="text-xl text-white/70 max-w-2xl mx-auto mb-10 leading-relaxed"
+                className="text-lg sm:text-xl text-white/80 max-w-2xl mx-auto mb-10 leading-relaxed drop-shadow-md"
               >
                 Deploy algorithmic trading bots on Solana's fastest DEX. 
                 Non-custodial, TradingView-powered, and built for serious traders.
@@ -191,29 +226,30 @@ export default function Landing() {
 
               <motion.div 
                 variants={fadeInUp}
-                className="mt-16 grid grid-cols-3 gap-8 max-w-lg mx-auto"
+                className="mt-12 sm:mt-16 grid grid-cols-3 gap-4 sm:gap-8 max-w-lg mx-auto"
               >
                 <div className="text-center">
-                  <p className="text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-volume">$48M+</p>
-                  <p className="text-sm text-white/50 mt-1">Trading Volume</p>
+                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-volume">$48M+</p>
+                  <p className="text-xs sm:text-sm text-white/60 mt-1">Trading Volume</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-bots">127</p>
-                  <p className="text-sm text-white/50 mt-1">Active Bots</p>
+                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-bots">127</p>
+                  <p className="text-xs sm:text-sm text-white/60 mt-1">Active Bots</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-users">4.2K</p>
-                  <p className="text-sm text-white/50 mt-1">Traders</p>
+                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-users">4.2K</p>
+                  <p className="text-xs sm:text-sm text-white/60 mt-1">Traders</p>
                 </div>
               </motion.div>
             </motion.div>
           </motion.div>
 
           <motion.div 
-            className="absolute bottom-8 left-1/2 -translate-x-1/2 z-20"
+            className="absolute bottom-8 left-1/2 -translate-x-1/2 z-20 hidden sm:block"
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 1.5, duration: 0.5 }}
+            style={{ opacity: scrollIndicatorOpacity }}
           >
             <motion.div
               animate={{ y: [0, 8, 0] }}
@@ -221,8 +257,8 @@ export default function Landing() {
               className="flex flex-col items-center cursor-pointer"
               onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
             >
-              <span className="text-white/50 text-sm mb-2">Scroll to explore</span>
-              <ChevronDown className="w-6 h-6 text-white/50" />
+              <span className="text-white/60 text-sm mb-2">Scroll to explore</span>
+              <ChevronDown className="w-6 h-6 text-white/60" />
             </motion.div>
           </motion.div>
         </section>
