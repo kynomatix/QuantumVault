@@ -53,6 +53,9 @@ import {
   type InsertBotSubscription,
   type PnlSnapshot,
   type InsertPnlSnapshot,
+  authNonces,
+  type AuthNonce,
+  type InsertAuthNonce,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -166,6 +169,23 @@ export interface IStorage {
   createPnlSnapshot(snapshot: InsertPnlSnapshot): Promise<PnlSnapshot>;
   getPnlSnapshots(tradingBotId: string, since?: Date): Promise<PnlSnapshot[]>;
   getLatestPnlSnapshot(tradingBotId: string): Promise<PnlSnapshot | undefined>;
+
+  // Security v3: Wallet security updates
+  updateWalletSecurityV3(address: string, updates: {
+    userSalt?: string;
+    encryptedUserMasterKey?: string;
+    encryptedMnemonicWords?: string;
+    umkVersion?: number;
+    executionEnabled?: boolean;
+    umkEncryptedForExecution?: string;
+    policyHmac?: string;
+  }): Promise<Wallet | undefined>;
+
+  // Security v3: Auth nonces for signature verification
+  createAuthNonce(nonce: InsertAuthNonce): Promise<AuthNonce>;
+  getAuthNonceByHash(nonceHash: string): Promise<AuthNonce | undefined>;
+  markNonceUsed(id: string): Promise<void>;
+  cleanupExpiredNonces(): Promise<number>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1011,6 +1031,44 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(pnlSnapshots.snapshotDate))
       .limit(1);
     return result[0];
+  }
+
+  // Security v3: Wallet security updates
+  async updateWalletSecurityV3(address: string, updates: {
+    userSalt?: string;
+    encryptedUserMasterKey?: string;
+    encryptedMnemonicWords?: string;
+    umkVersion?: number;
+    executionEnabled?: boolean;
+    umkEncryptedForExecution?: string;
+    policyHmac?: string;
+  }): Promise<Wallet | undefined> {
+    const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
+    return result[0];
+  }
+
+  // Security v3: Auth nonces for signature verification
+  async createAuthNonce(nonce: InsertAuthNonce): Promise<AuthNonce> {
+    const result = await db.insert(authNonces).values(nonce).returning();
+    return result[0];
+  }
+
+  async getAuthNonceByHash(nonceHash: string): Promise<AuthNonce | undefined> {
+    const result = await db.select().from(authNonces)
+      .where(eq(authNonces.nonceHash, nonceHash))
+      .limit(1);
+    return result[0];
+  }
+
+  async markNonceUsed(id: string): Promise<void> {
+    await db.update(authNonces).set({ usedAt: sql`NOW()` }).where(eq(authNonces.id, id));
+  }
+
+  async cleanupExpiredNonces(): Promise<number> {
+    const result = await db.delete(authNonces)
+      .where(lte(authNonces.expiresAt, sql`NOW()`))
+      .returning();
+    return result.length;
   }
 }
 
