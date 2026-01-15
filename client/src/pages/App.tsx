@@ -415,6 +415,12 @@ export default function AppPage() {
     }
   };
 
+  // Reset welcome check when wallet changes
+  useEffect(() => {
+    welcomeCheckedRef.current = false;
+    setAgentPublicKey(null);
+  }, [publicKeyString]);
+
   // Check if agent wallet needs SOL for gas and show welcome popup
   // Use sessionConnected (not just connected) to ensure backend session is established first
   useEffect(() => {
@@ -439,7 +445,7 @@ export default function AppPage() {
     };
     
     checkAgentSolBalance();
-  }, [sessionConnected]);
+  }, [sessionConnected, publicKeyString]);
 
   const handleDisconnect = async () => {
     await disconnect();
