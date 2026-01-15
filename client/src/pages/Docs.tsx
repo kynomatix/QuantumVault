@@ -671,10 +671,8 @@ export default function DocsPage() {
               </Link>
               <div className="h-6 w-px bg-white/10" />
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-purple-600 flex items-center justify-center">
-                  <Zap className="w-4 h-4 text-white" />
-                </div>
-                <span className="font-bold text-white">QuantumVault</span>
+                <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-8 h-8 rounded-lg" />
+                <span className="font-display font-bold text-white">QuantumVault</span>
                 <span className="text-white/40 text-sm">Docs</span>
               </div>
             </div>
