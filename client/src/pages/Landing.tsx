@@ -75,6 +75,9 @@ export default function Landing() {
   const heroFrostBlur = useTransform(scrollY, [0, 120], [0, 8]);
   const heroFrostBlurStyle = useMotionTemplate`blur(${heroFrostBlur}px)`;
   
+  // Progressive darkening as page scrolls down
+  const heroDarkenOpacity = useTransform(scrollY, [0, 400, 800], [0, 0.3, 0.6]);
+  
   // Scroll indicator fades out quickly
   const scrollIndicatorOpacity = useTransform(scrollY, [0, 80], [1, 0]);
   
@@ -149,6 +152,12 @@ export default function Landing() {
             />
             <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-black/40 to-black" />
             <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-transparent to-accent/20" />
+            
+            {/* Progressive darkening overlay as page scrolls */}
+            <motion.div 
+              className="absolute inset-0 bg-black"
+              style={{ opacity: heroDarkenOpacity }}
+            />
             
             {/* Frost overlay that appears as text comes in */}
             <motion.div 
