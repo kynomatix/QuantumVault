@@ -12,6 +12,9 @@ import {
   SUBKEY_PURPOSES,
 } from './crypto-v3';
 import { storage } from './storage';
+import * as bip39 from 'bip39';
+import { derivePath } from 'ed25519-hd-key';
+import { Keypair } from '@solana/web3.js';
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const NONCE_TTL_MS = 5 * 60 * 1000;
@@ -252,6 +255,89 @@ export function reconstructSignMessage(walletAddress: string, purpose: string, n
     'This signature request is valid for 5 minutes.',
     'Do not sign if you did not initiate this action.',
   ].join('\n');
+}
+
+const SOLANA_DERIVATION_PATH = "m/44'/501'/0'/0'";
+
+export interface GeneratedWallet {
+  mnemonicBuffer: Buffer;
+  keypair: Keypair;
+  publicKey: string;
+  secretKeyBuffer: Buffer;
+}
+
+export function generateAgentWalletWithMnemonic(): GeneratedWallet {
+  const mnemonicStr = bip39.generateMnemonic(256);
+  const mnemonicBuffer = Buffer.from(mnemonicStr, 'utf8');
+  
+  const seed = bip39.mnemonicToSeedSync(mnemonicStr);
+  const derivedSeed = derivePath(SOLANA_DERIVATION_PATH, seed.toString('hex')).key;
+  
+  if (derivedSeed.length !== 32) {
+    throw new Error('Derived seed must be exactly 32 bytes');
+  }
+  
+  const keypair = Keypair.fromSeed(derivedSeed);
+  const publicKey = keypair.publicKey.toBase58();
+  const secretKeyBuffer = Buffer.from(keypair.secretKey);
+  
+  return { mnemonicBuffer, keypair, publicKey, secretKeyBuffer };
+}
+
+export function deriveKeypairFromMnemonic(mnemonicBuffer: Buffer): Keypair {
+  const mnemonicStr = mnemonicBuffer.toString('utf8');
+  
+  if (!bip39.validateMnemonic(mnemonicStr)) {
+    throw new Error('Invalid mnemonic');
+  }
+  
+  const seed = bip39.mnemonicToSeedSync(mnemonicStr);
+  const derivedSeed = derivePath(SOLANA_DERIVATION_PATH, seed.toString('hex')).key;
+  
+  if (derivedSeed.length !== 32) {
+    throw new Error('Derived seed must be exactly 32 bytes');
+  }
+  
+  return Keypair.fromSeed(derivedSeed);
+}
+
+export async function encryptAndStoreMnemonic(
+  walletAddress: string,
+  mnemonicBuffer: Buffer,
+  umk: Buffer
+): Promise<void> {
+  const mnemonicKey = deriveSubkey(umk, SUBKEY_PURPOSES.MNEMONIC);
+  const aad = buildAAD(walletAddress, 'MNEMONIC');
+  
+  const encryptedMnemonic = encryptToBase64(mnemonicBuffer, mnemonicKey, aad);
+  
+  await storage.updateWallet(walletAddress, {
+    encryptedMnemonicWords: encryptedMnemonic,
+  });
+  
+  zeroizeBuffer(mnemonicKey);
+}
+
+export async function decryptMnemonic(
+  walletAddress: string,
+  umk: Buffer
+): Promise<Buffer | null> {
+  const wallet = await storage.getWallet(walletAddress);
+  if (!wallet?.encryptedMnemonicWords) {
+    return null;
+  }
+  
+  const mnemonicKey = deriveSubkey(umk, SUBKEY_PURPOSES.MNEMONIC);
+  const aad = buildAAD(walletAddress, 'MNEMONIC');
+  
+  try {
+    const mnemonicBuffer = decryptFromBase64(wallet.encryptedMnemonicWords, mnemonicKey, aad);
+    zeroizeBuffer(mnemonicKey);
+    return mnemonicBuffer;
+  } catch {
+    zeroizeBuffer(mnemonicKey);
+    return null;
+  }
 }
 
 export function cleanupExpiredSessions(): void {

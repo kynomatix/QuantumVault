@@ -15,6 +15,10 @@ import {
   computePolicyHmac,
   verifyPolicyHmac,
 } from './crypto-v3';
+import {
+  generateAgentWalletWithMnemonic,
+  deriveKeypairFromMnemonic,
+} from './session-v3';
 
 function assert(condition: boolean, message: string) {
   if (!condition) {
@@ -141,6 +145,41 @@ async function runTests() {
   
   const tamperedPolicy = { ...policy, maxLeverage: 20 };
   assert(!verifyPolicyHmac(tamperedPolicy, policyKey, policyHmac), 'Tampered policy fails verification');
+  
+  console.log('\n11. Testing BIP-39 mnemonic generation');
+  const generatedWallet = generateAgentWalletWithMnemonic();
+  assert(generatedWallet.mnemonicBuffer.length > 0, 'Mnemonic buffer is not empty');
+  const words = generatedWallet.mnemonicBuffer.toString('utf8').split(' ');
+  assert(words.length === 24, 'Mnemonic has 24 words');
+  assert(generatedWallet.publicKey.length === 44, 'Public key is valid Base58');
+  assert(generatedWallet.secretKeyBuffer.length === 64, 'Secret key is 64 bytes');
+  
+  console.log('\n12. Testing mnemonic derivation consistency');
+  const derivedKeypair = deriveKeypairFromMnemonic(generatedWallet.mnemonicBuffer);
+  assert(
+    derivedKeypair.publicKey.toBase58() === generatedWallet.publicKey,
+    'Derived keypair matches generated keypair'
+  );
+  assert(
+    Buffer.from(derivedKeypair.secretKey).equals(generatedWallet.secretKeyBuffer),
+    'Secret keys match'
+  );
+  
+  console.log('\n13. Testing multiple mnemonic generations are unique');
+  const wallet2 = generateAgentWalletWithMnemonic();
+  assert(
+    !generatedWallet.mnemonicBuffer.equals(wallet2.mnemonicBuffer),
+    'Different wallets have different mnemonics'
+  );
+  assert(
+    generatedWallet.publicKey !== wallet2.publicKey,
+    'Different wallets have different public keys'
+  );
+  
+  zeroizeBuffer(generatedWallet.mnemonicBuffer);
+  zeroizeBuffer(generatedWallet.secretKeyBuffer);
+  zeroizeBuffer(wallet2.mnemonicBuffer);
+  zeroizeBuffer(wallet2.secretKeyBuffer);
   
   console.log('\n=== All tests passed! ===');
 }
