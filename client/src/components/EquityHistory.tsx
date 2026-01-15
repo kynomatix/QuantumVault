@@ -54,6 +54,7 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
       case 'drift_deposit': return 'Deposit to Bot';
       case 'drift_withdraw': return 'Withdraw from Bot';
       case 'sol_deposit': return 'SOL Deposit (Gas)';
+      case 'sol_withdraw': return 'SOL Withdraw (Gas)';
       default: return type.replace(/_/g, ' ');
     }
   };
