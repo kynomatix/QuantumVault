@@ -1784,6 +1784,67 @@ export async function registerRoutes(
     }
   });
 
+  // Close a specific market position in a bot's subaccount (for cleaning up dust/misrouted positions)
+  app.post("/api/trading-bots/:id/close-market-position", requireWallet, async (req, res) => {
+    console.log(`[CloseMarketPosition] *** CLOSE MARKET POSITION REQUEST *** botId=${req.params.id}`);
+    try {
+      const { market } = req.body;
+      if (!market || typeof market !== 'string') {
+        return res.status(400).json({ error: "Market parameter required (e.g., SOL-PERP)" });
+      }
+
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const wallet = await storage.getWallet(bot.walletAddress);
+      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not configured" });
+      }
+
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      console.log(`[CloseMarketPosition] Closing ${market} in subaccount ${subAccountId} (bot: ${bot.name})`);
+
+      // Execute close order using closePerpPosition
+      const result = await closePerpPosition(
+        wallet.agentPrivateKeyEncrypted,
+        market,
+        subAccountId
+      );
+
+      if (!result.success) {
+        return res.status(500).json({ 
+          error: "Failed to close position",
+          details: result.error || "Unknown error"
+        });
+      }
+
+      if (result.success && !result.signature) {
+        return res.json({ 
+          success: true,
+          message: "Position was already closed or doesn't exist",
+          market,
+          txSignature: null,
+        });
+      }
+
+      console.log(`[CloseMarketPosition] Position closed: ${result.signature}`);
+      res.json({ 
+        success: true,
+        message: `${market} position closed successfully`,
+        market,
+        txSignature: result.signature,
+      });
+    } catch (error) {
+      console.error("Close market position error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   app.post("/api/agent/confirm-deposit", requireWallet, async (req, res) => {
     try {
       const { amount, txSignature } = req.body;
