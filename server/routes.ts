@@ -204,15 +204,42 @@ async function routeSignalToSubscribers(
           const sourceContracts = parseFloat(signal.contracts);
           const sourcePositionSize = parseFloat(signal.positionSize) || 100;
           const tradePercent = Math.min(sourceContracts / sourcePositionSize, 1);
-          const tradeAmountUsd = maxPos * tradePercent;
+          let tradeAmountUsd = maxPos * tradePercent;
+          
+          // DYNAMIC ORDER SCALING: Scale trade size based on available margin
+          // This allows trades to execute after losses by scaling down proportionally
+          const leverage = Math.max(1, subBot.leverage || 1); // Ensure leverage >= 1
+          try {
+            const accountInfo = await getDriftAccountInfo(subWallet.agentPublicKey!, subAccountId);
+            const freeCollateral = Math.max(0, accountInfo.freeCollateral); // Clamp to >= 0
+            
+            // freeCollateral is margin capacity (USD), multiply by leverage to get max notional position size
+            const maxNotionalCapacity = freeCollateral * leverage;
+            const maxTradeableValue = maxNotionalCapacity * 0.90; // 90% buffer for fees/slippage
+            
+            console.log(`[Subscriber Routing] Bot ${subBot.id}: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x = $${maxNotionalCapacity.toFixed(2)} max notional`);
+            
+            if (maxTradeableValue <= 0) {
+              console.log(`[Subscriber Routing] Bot ${subBot.id}: No margin available, skipping`);
+              continue;
+            } else if (tradeAmountUsd > maxTradeableValue) {
+              const originalAmount = tradeAmountUsd;
+              tradeAmountUsd = maxTradeableValue;
+              const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
+              console.log(`[Subscriber Routing] Bot ${subBot.id} SCALED DOWN: $${originalAmount.toFixed(2)} → $${tradeAmountUsd.toFixed(2)} (${scalePercent}%)`);
+            }
+          } catch (collateralErr: any) {
+            console.warn(`[Subscriber Routing] Could not check collateral for bot ${subBot.id}: ${collateralErr.message}`);
+          }
+          
           const contractSize = tradeAmountUsd / oraclePrice;
 
           if (contractSize < 0.001) {
-            console.log(`[Subscriber Routing] Trade size too small for subscriber bot ${subBot.id}`);
+            console.log(`[Subscriber Routing] Trade size too small for subscriber bot ${subBot.id} ($${tradeAmountUsd.toFixed(2)} = ${contractSize.toFixed(6)} contracts)`);
             continue;
           }
 
-          console.log(`[Subscriber Routing] Executing ${signal.action} for subscriber bot ${subBot.id}: size=${contractSize.toFixed(6)}`);
+          console.log(`[Subscriber Routing] Executing ${signal.action} for subscriber bot ${subBot.id}: $${tradeAmountUsd.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
           const side = signal.action === 'buy' ? 'long' : 'short';
           const orderResult = await executePerpOrder(
@@ -3994,47 +4021,34 @@ export async function registerRoutes(
       
       console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
 
-      // PRE-TRADE COLLATERAL GATE: Cap trade size to actual available margin
-      // This prevents InsufficientCollateral errors when bot has lost equity
-      // IMPORTANT: freeCollateral from Drift already accounts for leverage/margin requirements
-      // We use it directly as the maximum allowable notional value for new positions
-      const leverage = bot.leverage || 1;
+      // DYNAMIC ORDER SCALING: Scale trade size based on available margin
+      // This allows trades to execute after losses by scaling down proportionally
+      // When equity recovers, trades scale back up toward maxPositionSize
+      const leverage = Math.max(1, bot.leverage || 1); // Ensure leverage >= 1
       try {
-        const accountInfo = await getDriftAccountInfo(wallet.agentPrivateKeyEncrypted, subAccountId);
-        const freeCollateral = accountInfo.freeCollateral;
-        // freeCollateral IS the max notional we can add - no leverage multiplication needed
-        // Drift calculates it as: totalCollateral - usedMargin, where usedMargin already includes leverage
-        const maxTradeableValue = freeCollateral;
+        // Use agentPublicKey (not encrypted private key) for account info lookup
+        const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
+        const freeCollateral = Math.max(0, accountInfo.freeCollateral); // Clamp to >= 0
         
-        console.log(`[Webhook] Collateral check: freeCollateral=$${freeCollateral.toFixed(2)} (this is max notional for new positions)`);
+        // freeCollateral is margin capacity (USD), multiply by leverage to get max notional position size
+        // With 10x leverage and $10 free collateral, you can open a $100 notional position
+        const maxNotionalCapacity = freeCollateral * leverage;
+        // Apply 90% buffer for fees, slippage, and price movements
+        const maxTradeableValue = maxNotionalCapacity * 0.90;
         
-        if (freeCollateral <= 1.0) {
-          // No meaningful free collateral available - cannot open new position
-          const errorMsg = `Insufficient margin: Bot only has $${freeCollateral.toFixed(2)} free collateral. Need more funds to open a $${tradeAmountUsd.toFixed(2)} position.`;
-          console.log(`[Webhook] ${errorMsg}`);
-          await storage.updateBotTrade(trade.id, {
-            status: "failed",
-            txSignature: null,
-            errorMessage: errorMsg,
-          });
-          await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
-          
-          sendTradeNotification(wallet.address, {
-            type: 'trade_failed',
-            botName: bot.name,
-            market: bot.market,
-            side: side === 'long' ? 'LONG' : 'SHORT',
-            error: errorMsg,
-          }).catch(err => console.error('[Notifications] Failed to send trade_failed notification:', err));
-          
-          return res.status(400).json({ error: errorMsg });
-        }
+        console.log(`[Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
         
-        if (tradeAmountUsd > maxTradeableValue) {
-          // Cap trade to available margin (with 10% buffer for fees and slippage)
+        if (maxTradeableValue <= 0) {
+          console.log(`[Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
+          // Let minimum order size check determine if trade is possible
+        } else if (tradeAmountUsd > maxTradeableValue) {
+          // Scale down trade to available margin capacity
           const originalAmount = tradeAmountUsd;
-          tradeAmountUsd = maxTradeableValue * 0.90;
-          console.log(`[Webhook] COLLATERAL CAPPED: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (90% of $${freeCollateral.toFixed(2)} free collateral)`);
+          tradeAmountUsd = maxTradeableValue;
+          const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
+          console.log(`[Webhook] SCALED DOWN: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested, will scale back up as equity recovers)`);
+        } else {
+          console.log(`[Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${maxTradeableValue.toFixed(2)} capacity`);
         }
       } catch (collateralErr: any) {
         // If we can't check collateral, log warning but continue with original amount
@@ -4628,48 +4642,35 @@ export async function registerRoutes(
       
       console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
 
-      // PRE-TRADE COLLATERAL GATE: Cap trade size to actual available margin
-      // This prevents InsufficientCollateral errors when bot has lost equity
-      // IMPORTANT: freeCollateral from Drift already accounts for leverage/margin requirements
-      // We use it directly as the maximum allowable notional value for new positions
-      const leverage = bot.leverage || 1;
+      // DYNAMIC ORDER SCALING: Scale trade size based on available margin
+      // This allows trades to execute after losses by scaling down proportionally
+      // When equity recovers, trades scale back up toward maxPositionSize
+      const leverage = Math.max(1, bot.leverage || 1); // Ensure leverage >= 1
       const subAccountId = bot.driftSubaccountId ?? 0;
       try {
-        const accountInfo = await getDriftAccountInfo(userWallet.agentPrivateKeyEncrypted, subAccountId);
-        const freeCollateral = accountInfo.freeCollateral;
-        // freeCollateral IS the max notional we can add - no leverage multiplication needed
-        // Drift calculates it as: totalCollateral - usedMargin, where usedMargin already includes leverage
-        const maxTradeableValue = freeCollateral;
+        // Use agentPublicKey (not encrypted private key) for account info lookup
+        const accountInfo = await getDriftAccountInfo(userWallet.agentPublicKey!, subAccountId);
+        const freeCollateral = Math.max(0, accountInfo.freeCollateral); // Clamp to >= 0
         
-        console.log(`[User Webhook] Collateral check: freeCollateral=$${freeCollateral.toFixed(2)} (this is max notional for new positions)`);
+        // freeCollateral is margin capacity (USD), multiply by leverage to get max notional position size
+        // With 10x leverage and $10 free collateral, you can open a $100 notional position
+        const maxNotionalCapacity = freeCollateral * leverage;
+        // Apply 90% buffer for fees, slippage, and price movements
+        const maxTradeableValue = maxNotionalCapacity * 0.90;
         
-        if (freeCollateral <= 1.0) {
-          // No meaningful free collateral available - cannot open new position
-          const errorMsg = `Insufficient margin: Bot only has $${freeCollateral.toFixed(2)} free collateral. Need more funds to open a $${tradeAmountUsd.toFixed(2)} position.`;
-          console.log(`[User Webhook] ${errorMsg}`);
-          await storage.updateBotTrade(trade.id, {
-            status: "failed",
-            txSignature: null,
-            errorMessage: errorMsg,
-          });
-          await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
-          
-          sendTradeNotification(userWallet.address, {
-            type: 'trade_failed',
-            botName: bot.name,
-            market: bot.market,
-            side: side === 'long' ? 'LONG' : 'SHORT',
-            error: errorMsg,
-          }).catch(err => console.error('[Notifications] Failed to send trade_failed notification:', err));
-          
-          return res.status(400).json({ error: errorMsg });
-        }
+        console.log(`[User Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
         
-        if (tradeAmountUsd > maxTradeableValue) {
-          // Cap trade to available margin (with 10% buffer for fees and slippage)
+        if (maxTradeableValue <= 0) {
+          console.log(`[User Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
+          // Let minimum order size check determine if trade is possible
+        } else if (tradeAmountUsd > maxTradeableValue) {
+          // Scale down trade to available margin capacity
           const originalAmount = tradeAmountUsd;
-          tradeAmountUsd = maxTradeableValue * 0.90;
-          console.log(`[User Webhook] COLLATERAL CAPPED: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (90% of $${freeCollateral.toFixed(2)} free collateral)`);
+          tradeAmountUsd = maxTradeableValue;
+          const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
+          console.log(`[User Webhook] SCALED DOWN: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested, will scale back up as equity recovers)`);
+        } else {
+          console.log(`[User Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${maxTradeableValue.toFixed(2)} capacity`);
         }
       } catch (collateralErr: any) {
         // If we can't check collateral, log warning but continue with original amount
