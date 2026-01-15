@@ -1644,8 +1644,7 @@ export default function AppPage() {
                       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
                         {myPublishedBots.map((bot: PublishedBot) => {
                           const pnlValue = bot.pnlPercentAllTime ? parseFloat(bot.pnlPercentAllTime) : null;
-                          const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
-                          const shareUrl = `${baseUrl}/app?bot=${bot.id}&ref=${walletReferralCode || ''}`;
+                          const shareUrl = `https://myquantumvault.com/app?bot=${bot.id}&ref=${walletReferralCode || ''}`;
                           
                           return (
                             <div 
@@ -2171,7 +2170,7 @@ export default function AppPage() {
                             <label className="text-xs text-muted-foreground mb-1.5 block">Referral Link</label>
                             <div className="flex gap-2">
                               <Input
-                                value={`${window.location.origin}/app?ref=${referralCode}`}
+                                value={`https://myquantumvault.com/app?ref=${referralCode}`}
                                 readOnly
                                 className="bg-muted/30 border-border/50 font-mono text-sm"
                                 data-testid="input-referral-link"
@@ -2180,7 +2179,7 @@ export default function AppPage() {
                                 variant="outline"
                                 size="icon"
                                 onClick={async () => {
-                                  await navigator.clipboard.writeText(`${window.location.origin}/app?ref=${referralCode}`);
+                                  await navigator.clipboard.writeText(`https://myquantumvault.com/app?ref=${referralCode}`);
                                   toast({ title: 'Referral link copied!' });
                                 }}
                                 data-testid="button-copy-referral-link"

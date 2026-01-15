@@ -61,9 +61,7 @@ export function PublishBotModal({ isOpen, onClose, bot, walletAddress, referralC
   };
 
   const getShareUrl = (botId: string) => {
-    const baseUrl = typeof window !== 'undefined' 
-      ? `${window.location.protocol}//${window.location.host}`
-      : 'https://myquantumvault.com';
+    const baseUrl = 'https://myquantumvault.com';
     
     let url = `${baseUrl}/app?bot=${botId}`;
     if (referralCode) {
