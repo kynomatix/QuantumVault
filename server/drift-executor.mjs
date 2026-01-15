@@ -315,6 +315,67 @@ async function closePosition(command) {
   }
 }
 
+async function settlePnl(command) {
+  const { encryptedPrivateKey, subAccountId } = command;
+  
+  console.error(`[Executor] Settling PnL for subaccount ${subAccountId}`);
+  
+  const driftClient = await createDriftClient(encryptedPrivateKey, subAccountId);
+  
+  try {
+    await driftClient.subscribe();
+    
+    const user = driftClient.getUser();
+    const userAccountPublicKey = user.getUserAccountPublicKey();
+    const userAccount = user.getUserAccount();
+    
+    // Get all active perp positions that may have unsettled PnL
+    const perpPositions = user.getActivePerpPositions();
+    
+    // Also check for settled positions that may have unsettled PnL
+    // Common markets to check even if no active position (SOL, BTC, ETH)
+    const marketsToSettle = new Set([0, 1, 2]); // SOL, BTC, ETH by default
+    
+    for (const pos of perpPositions) {
+      marketsToSettle.add(pos.marketIndex);
+    }
+    
+    console.error(`[Executor] Checking ${marketsToSettle.size} markets for unsettled PnL`);
+    
+    const settledMarkets = [];
+    for (const marketIndex of marketsToSettle) {
+      try {
+        // settlePNL will settle any unrealized PnL for the given market
+        const txSig = await driftClient.settlePNL(
+          userAccountPublicKey,
+          userAccount,
+          marketIndex
+        );
+        console.error(`[Executor] Settled PnL for market ${marketIndex}: ${txSig}`);
+        settledMarkets.push({ marketIndex, signature: txSig });
+      } catch (settleErr) {
+        // Common errors: "Nothing to settle" or "No position" - these are fine
+        const errMsg = settleErr.message || String(settleErr);
+        if (errMsg.includes('Nothing') || errMsg.includes('0x0') || errMsg.includes('no position')) {
+          console.error(`[Executor] No PnL to settle for market ${marketIndex}`);
+        } else {
+          console.error(`[Executor] Error settling market ${marketIndex}: ${errMsg}`);
+        }
+      }
+    }
+    
+    console.error(`[Executor] Settled PnL for ${settledMarkets.length} market(s)`);
+    
+    return { 
+      success: true, 
+      settledMarkets,
+      message: `Settled PnL for ${settledMarkets.length} market(s)`
+    };
+  } catch (error) {
+    throw error;
+  }
+}
+
 async function deleteSubaccount(command) {
   const { encryptedPrivateKey, subAccountId } = command;
   
@@ -407,6 +468,8 @@ process.stdin.on('end', async () => {
       result = await closePosition(command);
     } else if (command.action === 'deleteSubaccount') {
       result = await deleteSubaccount(command);
+    } else if (command.action === 'settlePnl') {
+      result = await settlePnl(command);
     } else {
       // Default to trade execution
       result = await executeTrade(command);

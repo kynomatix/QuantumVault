@@ -2442,11 +2442,11 @@ export async function executePerpOrder(
         const baseAssetAmount = new BN(Math.round(sizeInBase * 1e9));
         const direction = side === 'long' ? sdk.PositionDirection.LONG : sdk.PositionDirection.SHORT;
         
-        let price: typeof BN | undefined;
+        let price: BN | undefined;
         try {
           const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
           if (oracleData?.price) {
-            const oraclePrice = oracleData.price.toNumber();
+            const oraclePrice = (oracleData.price as BN).toNumber();
             const slippageMultiplier = slippageBps / 10000;
             if (side === 'long') {
               price = new BN(Math.round(oraclePrice * (1 + slippageMultiplier)));
@@ -2577,11 +2577,11 @@ export async function closePerpPosition(
         
         console.log(`[Drift] Closing ${isLong ? 'long' : 'short'} position of ${closeAmount.toNumber() / 1e9} contracts, slippage: ${slippageBps}bps`);
         
-        let price: typeof BN | undefined;
+        let price: BN | undefined;
         try {
           const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
           if (oracleData?.price) {
-            const oraclePrice = oracleData.price.toNumber();
+            const oraclePrice = (oracleData.price as BN).toNumber();
             const slippageMultiplier = slippageBps / 10000;
             if (isLong) {
               price = new BN(Math.round(oraclePrice * (1 - slippageMultiplier)));
@@ -2887,6 +2887,43 @@ export async function closeDriftSubaccount(
     }
   } catch (error) {
     console.error('[Drift] Close subaccount error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Settle all PnL for a subaccount to convert unrealized PnL to USDC balance.
+ * This should be called after closing positions to ensure all funds are sweepable.
+ * 
+ * @param encryptedPrivateKey - The encrypted agent wallet private key
+ * @param subAccountId - The subaccount ID to settle PnL for
+ * @returns Result with success status and settled markets info
+ */
+export async function settleAllPnl(
+  encryptedPrivateKey: string,
+  subAccountId: number
+): Promise<{ success: boolean; settledMarkets?: any[]; error?: string }> {
+  console.log(`[Drift] Settling all PnL for subaccount ${subAccountId}`);
+  
+  try {
+    const result = await executeDriftCommandViaSubprocess({
+      action: 'settlePnl',
+      encryptedPrivateKey,
+      subAccountId,
+    });
+    
+    if (result.success) {
+      console.log(`[Drift] Settled PnL for subaccount ${subAccountId}: ${result.message}`);
+      return { success: true, settledMarkets: result.settledMarkets };
+    } else {
+      console.error(`[Drift] Failed to settle PnL: ${result.error}`);
+      return { success: false, error: result.error };
+    }
+  } catch (error) {
+    console.error('[Drift] Settle PnL error:', error);
     return {
       success: false,
       error: error instanceof Error ? error.message : String(error),

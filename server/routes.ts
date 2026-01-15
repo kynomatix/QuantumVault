@@ -9,7 +9,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction } from "./agent-wallet";
@@ -963,11 +963,25 @@ export async function registerRoutes(
             await new Promise(resolve => setTimeout(resolve, 3000));
           }
 
-          // 2b. Get balance and sweep to subaccount 0
+          // 2b. Settle any unrealized PnL to make it sweepable
+          log(`Settling PnL for subaccount ${subId}...`);
+          try {
+            const settleResult = await settleAllPnl(agentKey, subId);
+            if (settleResult.success) {
+              log(`Settled PnL for subaccount ${subId}`);
+            } else {
+              log(`No PnL to settle for subaccount ${subId}: ${settleResult.error || 'none'}`);
+            }
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          } catch (settleErr: any) {
+            log(`PnL settlement error (non-fatal): ${settleErr.message}`);
+          }
+
+          // 2c. Get balance and sweep to subaccount 0
           const accountInfo = await getDriftAccountInfo(agentPubKey, subId);
           const balance = accountInfo.usdcBalance;
           
-          if (balance > 0.01) {
+          if (balance > 0.001) {
             log(`Sweeping $${balance.toFixed(2)} from subaccount ${subId} to main account`);
             progress.push(`Sweeping $${balance.toFixed(2)} from subaccount ${subId}...`);
             
@@ -987,15 +1001,15 @@ export async function registerRoutes(
             }
           }
 
-          // 2c. Verify subaccount is empty before deletion
+          // 2d. Verify subaccount is empty before deletion
           const verifyInfo = await getDriftAccountInfo(agentPubKey, subId);
-          if (verifyInfo.hasOpenPositions || verifyInfo.usdcBalance > 0.01 || verifyInfo.totalCollateral > 0.01) {
+          if (verifyInfo.hasOpenPositions || verifyInfo.usdcBalance > 0.001 || verifyInfo.totalCollateral > 0.001) {
             log(`Subaccount ${subId} still has funds or positions, skipping deletion`);
             errors.push(`Subaccount ${subId} still has funds ($${verifyInfo.usdcBalance.toFixed(2)}) or positions - cannot delete`);
             continue; // Skip deletion, move to next subaccount
           }
 
-          // 2d. Delete the subaccount (only if verified empty)
+          // 2e. Delete the subaccount (only if verified empty)
           log(`Deleting subaccount ${subId}...`);
           const deleteResult = await closeDriftSubaccount(agentKey, subId);
           if (deleteResult.success) {
@@ -1043,11 +1057,25 @@ export async function registerRoutes(
             await new Promise(resolve => setTimeout(resolve, 3000));
           }
 
-          // 3b. Withdraw all funds from Drift to agent wallet
+          // 3b. Settle any unrealized PnL for main account
+          log(`Settling PnL for main account...`);
+          try {
+            const settleResult = await settleAllPnl(agentKey, 0);
+            if (settleResult.success) {
+              log(`Settled PnL for main account`);
+            } else {
+              log(`No PnL to settle for main account: ${settleResult.error || 'none'}`);
+            }
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          } catch (settleErr: any) {
+            log(`PnL settlement error (non-fatal): ${settleErr.message}`);
+          }
+
+          // 3c. Withdraw all funds from Drift to agent wallet
           const accountInfo = await getDriftAccountInfo(agentPubKey, 0);
           const balance = accountInfo.usdcBalance;
           
-          if (balance > 0.01) {
+          if (balance > 0.001) {
             log(`Withdrawing $${balance.toFixed(2)} from Drift to agent wallet`);
             progress.push(`Withdrawing $${balance.toFixed(2)} to agent wallet...`);
             
@@ -1066,13 +1094,13 @@ export async function registerRoutes(
             }
           }
 
-          // 3c. Verify subaccount 0 is empty before deletion
+          // 3d. Verify subaccount 0 is empty before deletion
           const verifyInfo = await getDriftAccountInfo(agentPubKey, 0);
-          if (verifyInfo.hasOpenPositions || verifyInfo.usdcBalance > 0.01 || verifyInfo.totalCollateral > 0.01) {
+          if (verifyInfo.hasOpenPositions || verifyInfo.usdcBalance > 0.001 || verifyInfo.totalCollateral > 0.001) {
             log(`Main account still has funds ($${verifyInfo.usdcBalance.toFixed(2)}) or positions, cannot delete`);
             errors.push(`Main account still has funds ($${verifyInfo.usdcBalance.toFixed(2)}) or positions - cannot delete`);
           } else {
-            // 3d. Delete subaccount 0 (and UserStats)
+            // 3e. Delete subaccount 0 (and UserStats)
             log(`Deleting main account (subaccount 0)...`);
             const deleteResult = await closeDriftSubaccount(agentKey, 0);
             if (deleteResult.success) {
