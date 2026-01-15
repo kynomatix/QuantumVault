@@ -129,10 +129,18 @@ export default function Landing() {
             className="absolute inset-0 z-0"
             style={{ y: heroY, scale: heroScale }}
           >
-            <img 
+            <motion.img 
               src="/images/QV_Hero.jpg" 
               alt="QuantumVault Hero"
               className="w-full h-full object-cover"
+              animate={{ 
+                scale: [1, 1.03, 1],
+              }}
+              transition={{
+                duration: 8,
+                repeat: Infinity,
+                ease: "easeInOut"
+              }}
             />
             <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-black/60 to-black" />
             <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-transparent to-accent/20" />
@@ -245,31 +253,43 @@ export default function Landing() {
           <div className="absolute inset-0 backdrop-blur-xl bg-black/80" />
           <div className="absolute inset-0 bg-gradient-to-b from-transparent via-black/50 to-background" />
           
-          <motion.div 
-            initial={{ opacity: 0, y: 30 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.6 }}
-            className="relative z-10 max-w-4xl mx-auto text-center"
-          >
-            <div className="relative inline-block mb-6">
+          <div className="relative z-10 max-w-4xl mx-auto text-center">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.8, y: 20 }}
+              whileInView={{ opacity: 1, scale: 1, y: 0 }}
+              viewport={{ once: true, margin: "-50px" }}
+              transition={{ duration: 0.7, ease: "easeOut" }}
+              className="relative inline-block mb-6"
+            >
               <div className="absolute inset-0 bg-gradient-to-r from-primary/50 to-accent/50 rounded-3xl blur-2xl opacity-60 animate-pulse" />
               <img 
                 src="/images/QV_Logo_02.png" 
                 alt="QuantumVault" 
                 className="relative w-20 h-20 sm:w-24 sm:h-24 rounded-3xl shadow-2xl ring-2 ring-white/20"
               />
-            </div>
+            </motion.div>
             
-            <h2 className="font-display font-bold text-2xl sm:text-3xl text-white mb-4">
+            <motion.h2 
+              initial={{ opacity: 0, y: 15 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-50px" }}
+              transition={{ duration: 0.6, delay: 0.2, ease: "easeOut" }}
+              className="font-display font-bold text-2xl sm:text-3xl text-white mb-4"
+            >
               QuantumVault
-            </h2>
+            </motion.h2>
             
-            <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-sm text-white">
+            <motion.span 
+              initial={{ opacity: 0, y: 15 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-50px" }}
+              transition={{ duration: 0.6, delay: 0.4, ease: "easeOut" }}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-sm text-white"
+            >
               <Zap className="w-4 h-4 text-primary" />
               Powered by Drift Protocol on Solana
-            </span>
-          </motion.div>
+            </motion.span>
+          </div>
         </section>
 
         <section id="features" className="relative py-24 px-6 bg-background">
