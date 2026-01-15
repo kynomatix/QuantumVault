@@ -186,7 +186,7 @@ export default function Landing() {
             >
               <motion.h1 
                 variants={fadeInUp}
-                className="text-4xl sm:text-5xl lg:text-7xl font-display font-bold mb-3 leading-tight text-white drop-shadow-lg"
+                className="text-4xl sm:text-5xl lg:text-7xl font-display font-bold mb-1 leading-tight text-white drop-shadow-lg"
               >
                 Trade Smarter with{' '}
                 <span className="bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent bg-[length:200%_auto] animate-gradient">
