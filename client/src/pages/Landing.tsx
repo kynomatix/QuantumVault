@@ -63,26 +63,24 @@ export default function Landing() {
   const heroY = useTransform(scrollY, [0, 800], [0, 300]);
   const heroScale = useTransform(scrollY, [0, 800], [1, 1.15]);
   
-  // Staged reveal: content starts hidden, fades in quickly (0-60), then fades out (200-500)
-  const contentAppearOpacity = useTransform(scrollY, [0, 60], [0, 1]);
-  const contentFadeOpacity = useTransform(scrollY, [200, 500], [1, 0]);
-  const contentY = useTransform(scrollY, [0, 80, 500], [30, 0, 80]);
+  // Staged reveal: content starts hidden, fades in gradually (0-120), then fades out (300-600)
+  const contentY = useTransform(scrollY, [0, 120, 600], [40, 0, 100]);
   
-  // Glass backdrop - appears with content, fades out gradually
-  const glassOpacity = useTransform(scrollY, [0, 60, 200, 450], [0, 0.9, 0.9, 0]);
-  const glassBlur = useTransform(scrollY, [0, 60], [0, 16]);
+  // Glass backdrop - smooth blur that's always present but fades intensity
+  const glassOpacity = useTransform(scrollY, [0, 120, 300, 550], [0, 0.85, 0.85, 0]);
+  const glassBlur = useTransform(scrollY, [0, 120], [8, 20]);
   
   // Scroll indicator fades out quickly
-  const scrollIndicatorOpacity = useTransform(scrollY, [0, 100], [1, 0]);
+  const scrollIndicatorOpacity = useTransform(scrollY, [0, 80], [1, 0]);
   
-  // Combine appear and fade for smooth content opacity
+  // Combine appear and fade for smooth content opacity - longer fade in
   const contentOpacity = useTransform(
     scrollY,
-    [0, 60, 200, 500],
+    [0, 120, 300, 600],
     [0, 1, 1, 0]
   );
   
-  // Glass blur as template string for backdrop-filter
+  // Glass blur as template string for backdrop-filter - always has some blur
   const glassBlurStyle = useMotionTemplate`blur(${glassBlur}px)`;
 
   useEffect(() => {
@@ -163,27 +161,6 @@ export default function Landing() {
               variants={staggerContainer}
               className="relative max-w-4xl mx-auto text-center px-6 py-12"
             >
-              <motion.div 
-                variants={fadeInUp} 
-                className="mb-8 flex justify-center"
-              >
-                <div className="relative">
-                  <div className="absolute inset-0 bg-gradient-to-r from-primary/50 to-accent/50 rounded-3xl blur-2xl opacity-60 animate-pulse" />
-                  <img 
-                    src="/images/QV_Logo_02.png" 
-                    alt="QuantumVault" 
-                    className="relative w-24 h-24 sm:w-32 sm:h-32 rounded-3xl shadow-2xl ring-2 ring-white/20"
-                  />
-                </div>
-              </motion.div>
-
-              <motion.div variants={fadeInUp} className="mb-6">
-                <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-sm text-white">
-                  <Zap className="w-4 h-4 text-primary" />
-                  Powered by Drift Protocol on Solana
-                </span>
-              </motion.div>
-              
               <motion.h1 
                 variants={fadeInUp}
                 className="text-4xl sm:text-5xl lg:text-7xl font-display font-bold mb-6 leading-tight text-white drop-shadow-lg"
@@ -260,6 +237,38 @@ export default function Landing() {
               <span className="text-white/60 text-sm mb-2">Scroll to explore</span>
               <ChevronDown className="w-6 h-6 text-white/60" />
             </motion.div>
+          </motion.div>
+        </section>
+
+        {/* Brand transition section */}
+        <section className="relative py-20 px-6 bg-black">
+          <div className="absolute inset-0 backdrop-blur-xl bg-black/80" />
+          <div className="absolute inset-0 bg-gradient-to-b from-transparent via-black/50 to-background" />
+          
+          <motion.div 
+            initial={{ opacity: 0, y: 30 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.6 }}
+            className="relative z-10 max-w-4xl mx-auto text-center"
+          >
+            <div className="relative inline-block mb-6">
+              <div className="absolute inset-0 bg-gradient-to-r from-primary/50 to-accent/50 rounded-3xl blur-2xl opacity-60 animate-pulse" />
+              <img 
+                src="/images/QV_Logo_02.png" 
+                alt="QuantumVault" 
+                className="relative w-20 h-20 sm:w-24 sm:h-24 rounded-3xl shadow-2xl ring-2 ring-white/20"
+              />
+            </div>
+            
+            <h2 className="font-display font-bold text-2xl sm:text-3xl text-white mb-4">
+              QuantumVault
+            </h2>
+            
+            <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-sm text-white">
+              <Zap className="w-4 h-4 text-primary" />
+              Powered by Drift Protocol on Solana
+            </span>
           </motion.div>
         </section>
 
