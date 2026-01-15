@@ -15,7 +15,7 @@ import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac } from "./session-v3";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
@@ -643,6 +643,73 @@ export async function registerRoutes(
   setInterval(() => {
     cleanupExpiredNonces().catch(console.error);
   }, 60 * 1000);
+
+  // Update policy HMAC for a bot (requires active session)
+  app.post("/api/trading-bots/:id/update-policy-hmac", requireWallet, async (req, res) => {
+    try {
+      const { sessionId } = req.body;
+      if (!sessionId) {
+        return res.status(400).json({ error: "Active session required" });
+      }
+
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session" });
+      }
+
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const policyHmac = computeBotPolicyHmac(
+        session.umk,
+        { market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize }
+      );
+
+      await storage.updateTradingBot(bot.id, { policyHmac } as any);
+
+      res.json({ success: true, policyHmac });
+    } catch (error) {
+      console.error("Update policy HMAC error:", error);
+      res.status(500).json({ error: "Failed to update policy HMAC" });
+    }
+  });
+
+  // Update policy HMAC for all user's bots (requires active session)
+  app.post("/api/trading-bots/update-all-policy-hmacs", requireWallet, async (req, res) => {
+    try {
+      const { sessionId } = req.body;
+      if (!sessionId) {
+        return res.status(400).json({ error: "Active session required" });
+      }
+
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session" });
+      }
+
+      const bots = await storage.getTradingBots(req.walletAddress!);
+      let updated = 0;
+
+      for (const bot of bots) {
+        const policyHmac = computeBotPolicyHmac(
+          session.umk,
+          { market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize }
+        );
+        await storage.updateTradingBot(bot.id, { policyHmac } as any);
+        updated++;
+      }
+
+      res.json({ success: true, updatedCount: updated });
+    } catch (error) {
+      console.error("Update all policy HMACs error:", error);
+      res.status(500).json({ error: "Failed to update policy HMACs" });
+    }
+  });
 
   // Wallet auth routes
   app.post("/api/wallet/connect", async (req, res) => {
@@ -3658,7 +3725,22 @@ export async function registerRoutes(
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Invalid execution authorization" });
         return res.status(403).json({ error: "Invalid execution authorization. Please re-enable automated trading." });
       }
-      // Cleanup the unwrapped UMK immediately - we only need to verify authorization was valid
+      
+      // Security v3: Verify bot policy HMAC if one exists (detects tampering with critical settings)
+      if (bot.policyHmac) {
+        const policyValid = verifyBotPolicyHmac(
+          umkResult.umk,
+          { market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize },
+          bot.policyHmac
+        );
+        if (!policyValid) {
+          umkResult.cleanup();
+          await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Bot policy tampered" });
+          return res.status(403).json({ error: "Bot configuration has been tampered with. Please reconfigure the bot." });
+        }
+      }
+      
+      // Cleanup the unwrapped UMK after policy verification
       // Future: Use this UMK to derive key_privkey and decrypt agent key via v3 crypto
       umkResult.cleanup();
 
@@ -4742,7 +4824,22 @@ export async function registerRoutes(
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Invalid execution authorization" });
         return res.status(403).json({ error: "Invalid execution authorization. Please re-enable automated trading." });
       }
-      // Cleanup the unwrapped UMK immediately
+      
+      // Security v3: Verify bot policy HMAC if one exists (detects tampering with critical settings)
+      if (bot.policyHmac) {
+        const policyValid = verifyBotPolicyHmac(
+          umkResult.umk,
+          { market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize },
+          bot.policyHmac
+        );
+        if (!policyValid) {
+          umkResult.cleanup();
+          await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Bot policy tampered" });
+          return res.status(403).json({ error: "Bot configuration has been tampered with. Please reconfigure the bot." });
+        }
+      }
+      
+      // Cleanup the unwrapped UMK after policy verification
       umkResult.cleanup();
 
       // Check if bot is active

@@ -10,6 +10,8 @@ import {
   hashNonce,
   generateNonce,
   SUBKEY_PURPOSES,
+  computePolicyHmac,
+  verifyPolicyHmac,
 } from './crypto-v3';
 import { storage } from './storage';
 import * as bip39 from 'bip39';
@@ -601,5 +603,40 @@ export async function cleanupExpiredNonces(): Promise<void> {
 }
 
 setInterval(cleanupExpiredNonces, 5 * 60 * 1000);
+
+export function computeBotPolicyHmac(
+  umk: Buffer,
+  botPolicy: { market: string; leverage: number; maxPositionSize: string | null }
+): string {
+  const policyKey = deriveSubkey(umk, SUBKEY_PURPOSES.POLICY_HMAC);
+  try {
+    const policyObj: Record<string, unknown> = {
+      market: botPolicy.market,
+      leverage: botPolicy.leverage,
+      maxPositionSize: botPolicy.maxPositionSize || '0',
+    };
+    return computePolicyHmac(policyObj, policyKey);
+  } finally {
+    zeroizeBuffer(policyKey);
+  }
+}
+
+export function verifyBotPolicyHmac(
+  umk: Buffer,
+  botPolicy: { market: string; leverage: number; maxPositionSize: string | null },
+  expectedHmac: string
+): boolean {
+  const policyKey = deriveSubkey(umk, SUBKEY_PURPOSES.POLICY_HMAC);
+  try {
+    const policyObj: Record<string, unknown> = {
+      market: botPolicy.market,
+      leverage: botPolicy.leverage,
+      maxPositionSize: botPolicy.maxPositionSize || '0',
+    };
+    return verifyPolicyHmac(policyObj, policyKey, expectedHmac);
+  } finally {
+    zeroizeBuffer(policyKey);
+  }
+}
 
 export { SUBKEY_PURPOSES };
