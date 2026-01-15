@@ -267,7 +267,7 @@ export function cleanupExpiredSessions(): void {
 
 setInterval(cleanupExpiredSessions, 60 * 1000);
 
-async function cleanupExpiredNonces(): Promise<void> {
+export async function cleanupExpiredNonces(): Promise<void> {
   try {
     const count = await storage.cleanupExpiredNonces();
     if (count > 0) {

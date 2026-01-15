@@ -15,6 +15,9 @@ import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, invalidateSession, cleanupExpiredNonces } from "./session-v3";
+import nacl from "tweetnacl";
+import bs58 from "bs58";
 
 declare module "express-session" {
   interface SessionData {
@@ -396,6 +399,108 @@ export async function registerRoutes(
     }
     return code;
   };
+
+  async function verifySolanaSignature(message: string, signature: Uint8Array, publicKey: string): Promise<boolean> {
+    try {
+      const messageBytes = new TextEncoder().encode(message);
+      const pubkeyBytes = bs58.decode(publicKey);
+      return nacl.sign.detached.verify(messageBytes, signature, pubkeyBytes);
+    } catch {
+      return false;
+    }
+  }
+
+  app.post("/api/auth/nonce", async (req, res) => {
+    try {
+      const { walletAddress, purpose } = req.body;
+      if (!walletAddress || !purpose) {
+        return res.status(400).json({ error: "Wallet address and purpose required" });
+      }
+
+      const validPurposes = ['unlock_umk', 'authorize_trade', 'enable_execution', 'reveal_mnemonic'];
+      if (!validPurposes.includes(purpose)) {
+        return res.status(400).json({ error: "Invalid purpose" });
+      }
+
+      const { nonce, message } = await createSigningNonce(walletAddress, purpose);
+      res.json({ nonce, message });
+    } catch (error) {
+      console.error("Nonce creation error:", error);
+      res.status(500).json({ error: "Failed to create nonce" });
+    }
+  });
+
+  app.post("/api/auth/verify", async (req, res) => {
+    try {
+      const { walletAddress, nonce, signature, purpose } = req.body;
+      if (!walletAddress || !nonce || !signature || !purpose) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+
+      const signatureBytes = Uint8Array.from(
+        typeof signature === 'string' ? bs58.decode(signature) : signature
+      );
+
+      const result = await verifySignatureAndConsumeNonce(
+        walletAddress,
+        nonce,
+        purpose,
+        signatureBytes,
+        verifySolanaSignature
+      );
+
+      if (!result.success) {
+        return res.status(401).json({ error: result.error });
+      }
+
+      if (purpose === 'unlock_umk') {
+        const initResult = await initializeWalletSecurity(walletAddress, signatureBytes);
+        req.session.walletAddress = walletAddress;
+        return res.json({ 
+          success: true, 
+          sessionId: initResult.sessionId,
+          isNewWallet: initResult.isNewWallet 
+        });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Signature verification error:", error);
+      res.status(500).json({ error: "Verification failed" });
+    }
+  });
+
+  app.get("/api/auth/session", requireWallet, async (req, res) => {
+    try {
+      const session = getSession(req.walletAddress!);
+      res.json({
+        hasSession: !!session,
+        walletAddress: session?.walletAddress || null,
+      });
+    } catch (error) {
+      console.error("Session check error:", error);
+      res.status(500).json({ error: "Session check failed" });
+    }
+  });
+
+  app.post("/api/auth/logout", requireWallet, async (req, res) => {
+    try {
+      invalidateSession(req.walletAddress!);
+      req.session.destroy((err) => {
+        if (err) {
+          console.error("Session destroy error:", err);
+        }
+        res.json({ success: true });
+      });
+    } catch (error) {
+      console.error("Logout error:", error);
+      res.status(500).json({ error: "Logout failed" });
+    }
+  });
+
+  setInterval(() => {
+    cleanupExpiredNonces().catch(console.error);
+  }, 60 * 1000);
 
   // Wallet auth routes
   app.post("/api/wallet/connect", async (req, res) => {
