@@ -1,4 +1,4 @@
-import { eq, desc, sql, and } from "drizzle-orm";
+import { eq, desc, sql, and, or, ilike, gte, lte } from "drizzle-orm";
 import { db } from "./db";
 import Decimal from "decimal.js";
 import {
@@ -16,6 +16,9 @@ import {
   trades,
   leaderboardStats,
   orphanedSubaccounts,
+  publishedBots,
+  botSubscriptions,
+  pnlSnapshots,
   type User,
   type InsertUser,
   type Wallet,
@@ -44,6 +47,12 @@ import {
   type InsertLeaderboardStats,
   type OrphanedSubaccount,
   type InsertOrphanedSubaccount,
+  type PublishedBot,
+  type InsertPublishedBot,
+  type BotSubscription,
+  type InsertBotSubscription,
+  type PnlSnapshot,
+  type InsertPnlSnapshot,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -130,6 +139,29 @@ export interface IStorage {
   getOrphanedSubaccountsByWallet(walletAddress: string): Promise<OrphanedSubaccount[]>;
   deleteOrphanedSubaccount(id: string): Promise<void>;
   updateOrphanedSubaccountRetry(id: string): Promise<void>;
+
+  // Marketplace: Published Bots
+  getPublishedBots(options?: { search?: string; market?: string; sortBy?: string; limit?: number }): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } })[]>;
+  getPublishedBotById(id: string): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } }) | undefined>;
+  getPublishedBotByTradingBotId(tradingBotId: string): Promise<PublishedBot | undefined>;
+  createPublishedBot(bot: InsertPublishedBot): Promise<PublishedBot>;
+  updatePublishedBot(id: string, updates: Partial<InsertPublishedBot>): Promise<PublishedBot | undefined>;
+  deletePublishedBot(id: string): Promise<void>;
+  incrementPublishedBotSubscribers(id: string, delta: number, capitalDelta: number): Promise<void>;
+  updatePublishedBotStats(id: string, stats: { totalTrades: number; winningTrades: number; pnlPercent7d?: string; pnlPercent30d?: string; pnlPercent90d?: string; pnlPercentAllTime?: string }): Promise<void>;
+
+  // Marketplace: Bot Subscriptions
+  getBotSubscription(publishedBotId: string, subscriberWalletAddress: string): Promise<BotSubscription | undefined>;
+  getBotSubscriptionsByPublishedBot(publishedBotId: string): Promise<BotSubscription[]>;
+  getBotSubscriptionsByWallet(walletAddress: string): Promise<(BotSubscription & { publishedBot: PublishedBot })[]>;
+  createBotSubscription(subscription: InsertBotSubscription): Promise<BotSubscription>;
+  updateBotSubscription(id: string, updates: Partial<InsertBotSubscription>): Promise<BotSubscription | undefined>;
+  cancelBotSubscription(id: string): Promise<void>;
+
+  // Marketplace: PnL Snapshots
+  createPnlSnapshot(snapshot: InsertPnlSnapshot): Promise<PnlSnapshot>;
+  getPnlSnapshots(tradingBotId: string, since?: Date): Promise<PnlSnapshot[]>;
+  getLatestPnlSnapshot(tradingBotId: string): Promise<PnlSnapshot | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -705,6 +737,205 @@ export class DatabaseStorage implements IStorage {
       retryCount: sql`${orphanedSubaccounts.retryCount} + 1`,
       lastRetryAt: sql`NOW()`,
     }).where(eq(orphanedSubaccounts.id, id));
+  }
+
+  // Marketplace: Published Bots
+  async getPublishedBots(options?: { search?: string; market?: string; sortBy?: string; limit?: number }): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } })[]> {
+    const conditions = [eq(publishedBots.isActive, true)];
+    
+    if (options?.market) {
+      conditions.push(eq(publishedBots.market, options.market));
+    }
+    
+    if (options?.search) {
+      const searchTerm = `%${options.search}%`;
+      conditions.push(
+        or(
+          ilike(publishedBots.name, searchTerm),
+          ilike(publishedBots.market, searchTerm)
+        )!
+      );
+    }
+
+    let orderByColumn: any = desc(publishedBots.subscriberCount);
+    if (options?.sortBy === 'pnl7d') {
+      orderByColumn = desc(publishedBots.pnlPercent7d);
+    } else if (options?.sortBy === 'pnl30d') {
+      orderByColumn = desc(publishedBots.pnlPercent30d);
+    } else if (options?.sortBy === 'pnl90d') {
+      orderByColumn = desc(publishedBots.pnlPercent90d);
+    } else if (options?.sortBy === 'pnlAllTime') {
+      orderByColumn = desc(publishedBots.pnlPercentAllTime);
+    } else if (options?.sortBy === 'subscribers') {
+      orderByColumn = desc(publishedBots.subscriberCount);
+    }
+
+    const results = await db.select({
+      publishedBot: publishedBots,
+      displayName: wallets.displayName,
+      xUsername: wallets.xUsername,
+    })
+    .from(publishedBots)
+    .leftJoin(wallets, eq(publishedBots.creatorWalletAddress, wallets.address))
+    .where(and(...conditions))
+    .orderBy(orderByColumn)
+    .limit(options?.limit || 50);
+
+    return results.map(r => ({
+      ...r.publishedBot,
+      creator: {
+        displayName: r.displayName,
+        xUsername: r.xUsername,
+      },
+    }));
+  }
+
+  async getPublishedBotById(id: string): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } }) | undefined> {
+    const results = await db.select({
+      publishedBot: publishedBots,
+      displayName: wallets.displayName,
+      xUsername: wallets.xUsername,
+    })
+    .from(publishedBots)
+    .leftJoin(wallets, eq(publishedBots.creatorWalletAddress, wallets.address))
+    .where(eq(publishedBots.id, id))
+    .limit(1);
+
+    if (results.length === 0) return undefined;
+    
+    return {
+      ...results[0].publishedBot,
+      creator: {
+        displayName: results[0].displayName,
+        xUsername: results[0].xUsername,
+      },
+    };
+  }
+
+  async getPublishedBotByTradingBotId(tradingBotId: string): Promise<PublishedBot | undefined> {
+    const result = await db.select().from(publishedBots).where(eq(publishedBots.tradingBotId, tradingBotId)).limit(1);
+    return result[0];
+  }
+
+  async createPublishedBot(bot: InsertPublishedBot): Promise<PublishedBot> {
+    const result = await db.insert(publishedBots).values(bot).returning();
+    return result[0];
+  }
+
+  async updatePublishedBot(id: string, updates: Partial<InsertPublishedBot>): Promise<PublishedBot | undefined> {
+    const result = await db.update(publishedBots).set({ ...updates, updatedAt: sql`NOW()` }).where(eq(publishedBots.id, id)).returning();
+    return result[0];
+  }
+
+  async deletePublishedBot(id: string): Promise<void> {
+    await db.delete(publishedBots).where(eq(publishedBots.id, id));
+  }
+
+  async incrementPublishedBotSubscribers(id: string, delta: number, capitalDelta: number): Promise<void> {
+    await db.update(publishedBots).set({
+      subscriberCount: sql`${publishedBots.subscriberCount} + ${delta}`,
+      totalCapitalInvested: sql`${publishedBots.totalCapitalInvested} + ${capitalDelta}`,
+      updatedAt: sql`NOW()`,
+    }).where(eq(publishedBots.id, id));
+  }
+
+  async updatePublishedBotStats(id: string, stats: { totalTrades: number; winningTrades: number; pnlPercent7d?: string; pnlPercent30d?: string; pnlPercent90d?: string; pnlPercentAllTime?: string }): Promise<void> {
+    await db.update(publishedBots).set({
+      totalTrades: stats.totalTrades,
+      winningTrades: stats.winningTrades,
+      pnlPercent7d: stats.pnlPercent7d,
+      pnlPercent30d: stats.pnlPercent30d,
+      pnlPercent90d: stats.pnlPercent90d,
+      pnlPercentAllTime: stats.pnlPercentAllTime,
+      updatedAt: sql`NOW()`,
+    }).where(eq(publishedBots.id, id));
+  }
+
+  // Marketplace: Bot Subscriptions
+  async getBotSubscription(publishedBotId: string, subscriberWalletAddress: string): Promise<BotSubscription | undefined> {
+    const result = await db.select().from(botSubscriptions)
+      .where(and(
+        eq(botSubscriptions.publishedBotId, publishedBotId),
+        eq(botSubscriptions.subscriberWalletAddress, subscriberWalletAddress)
+      ))
+      .limit(1);
+    return result[0];
+  }
+
+  async getBotSubscriptionsByPublishedBot(publishedBotId: string): Promise<BotSubscription[]> {
+    return db.select().from(botSubscriptions)
+      .where(and(
+        eq(botSubscriptions.publishedBotId, publishedBotId),
+        eq(botSubscriptions.status, 'active')
+      ))
+      .orderBy(desc(botSubscriptions.subscribedAt));
+  }
+
+  async getBotSubscriptionsByWallet(walletAddress: string): Promise<(BotSubscription & { publishedBot: PublishedBot })[]> {
+    const results = await db.select({
+      subscription: botSubscriptions,
+      publishedBot: publishedBots,
+    })
+    .from(botSubscriptions)
+    .innerJoin(publishedBots, eq(botSubscriptions.publishedBotId, publishedBots.id))
+    .where(eq(botSubscriptions.subscriberWalletAddress, walletAddress))
+    .orderBy(desc(botSubscriptions.subscribedAt));
+
+    return results.map(r => ({
+      ...r.subscription,
+      publishedBot: r.publishedBot,
+    }));
+  }
+
+  async createBotSubscription(subscription: InsertBotSubscription): Promise<BotSubscription> {
+    const result = await db.insert(botSubscriptions).values(subscription).returning();
+    return result[0];
+  }
+
+  async updateBotSubscription(id: string, updates: Partial<InsertBotSubscription>): Promise<BotSubscription | undefined> {
+    const result = await db.update(botSubscriptions).set(updates).where(eq(botSubscriptions.id, id)).returning();
+    return result[0];
+  }
+
+  async cancelBotSubscription(id: string): Promise<void> {
+    await db.update(botSubscriptions).set({
+      status: 'cancelled',
+      unsubscribedAt: sql`NOW()`,
+    }).where(eq(botSubscriptions.id, id));
+  }
+
+  // Marketplace: PnL Snapshots
+  async createPnlSnapshot(snapshot: InsertPnlSnapshot): Promise<PnlSnapshot> {
+    const result = await db.insert(pnlSnapshots).values(snapshot)
+      .onConflictDoUpdate({
+        target: [pnlSnapshots.tradingBotId, pnlSnapshots.snapshotDate],
+        set: {
+          equity: snapshot.equity,
+          realizedPnl: snapshot.realizedPnl,
+          unrealizedPnl: snapshot.unrealizedPnl,
+          totalDeposited: snapshot.totalDeposited,
+        },
+      })
+      .returning();
+    return result[0];
+  }
+
+  async getPnlSnapshots(tradingBotId: string, since?: Date): Promise<PnlSnapshot[]> {
+    const conditions = [eq(pnlSnapshots.tradingBotId, tradingBotId)];
+    if (since) {
+      conditions.push(gte(pnlSnapshots.snapshotDate, since));
+    }
+    return db.select().from(pnlSnapshots)
+      .where(and(...conditions))
+      .orderBy(desc(pnlSnapshots.snapshotDate));
+  }
+
+  async getLatestPnlSnapshot(tradingBotId: string): Promise<PnlSnapshot | undefined> {
+    const result = await db.select().from(pnlSnapshots)
+      .where(eq(pnlSnapshots.tradingBotId, tradingBotId))
+      .orderBy(desc(pnlSnapshots.snapshotDate))
+      .limit(1);
+    return result[0];
   }
 }
 

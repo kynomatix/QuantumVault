@@ -83,6 +83,7 @@ export const tradingBots = pgTable("trading_bots", {
   agentPublicKey: text("agent_public_key"),
   agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),
   isActive: boolean("is_active").default(true).notNull(),
+  botType: text("bot_type").default("signal").notNull(),
   side: text("side").default("both").notNull(),
   totalInvestment: decimal("total_investment", { precision: 20, scale: 2 }).default("100").notNull(),
   maxPositionSize: decimal("max_position_size", { precision: 20, scale: 2 }),
@@ -107,6 +108,7 @@ export const tradingBots = pgTable("trading_bots", {
     totalVolume: number;
     lastTradeAt?: string;
   }>().default({ totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 }),
+  sourcePublishedBotId: varchar("source_published_bot_id"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

@@ -5158,5 +5158,228 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== MARKETPLACE ROUTES ====================
+
+  // Get marketplace listings
+  app.get("/api/marketplace", async (req, res) => {
+    try {
+      const { search, market, sortBy, limit } = req.query;
+      const bots = await storage.getPublishedBots({
+        search: search as string,
+        market: market as string,
+        sortBy: sortBy as string,
+        limit: limit ? parseInt(limit as string) : undefined,
+      });
+      res.json(bots);
+    } catch (error) {
+      console.error("Get marketplace error:", error);
+      res.status(500).json({ error: "Failed to fetch marketplace" });
+    }
+  });
+
+  // Get single published bot details
+  app.get("/api/marketplace/:id", async (req, res) => {
+    try {
+      const bot = await storage.getPublishedBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      res.json(bot);
+    } catch (error) {
+      console.error("Get published bot error:", error);
+      res.status(500).json({ error: "Failed to fetch bot" });
+    }
+  });
+
+  // Publish a bot to marketplace
+  app.post("/api/trading-bots/:id/publish", requireWallet, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { name, description } = req.body;
+
+      const tradingBot = await storage.getTradingBotById(id);
+      if (!tradingBot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (tradingBot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Not your bot" });
+      }
+
+      // Check if already published
+      const existing = await storage.getPublishedBotByTradingBotId(id);
+      if (existing) {
+        return res.status(400).json({ error: "Bot is already published" });
+      }
+
+      // Must be a signal bot (not grid)
+      if (tradingBot.botType !== 'signal') {
+        return res.status(400).json({ error: "Only signal bots can be published to the marketplace" });
+      }
+
+      // Create published bot entry
+      const publishedBot = await storage.createPublishedBot({
+        tradingBotId: id,
+        creatorWalletAddress: req.walletAddress!,
+        name: name || tradingBot.name,
+        description: description || null,
+        market: tradingBot.market,
+        isActive: true,
+        isFeatured: false,
+      });
+
+      console.log(`[Marketplace] Bot ${id} published by ${req.walletAddress}`);
+      res.json(publishedBot);
+    } catch (error) {
+      console.error("Publish bot error:", error);
+      res.status(500).json({ error: "Failed to publish bot" });
+    }
+  });
+
+  // Unpublish a bot from marketplace
+  app.delete("/api/marketplace/:id", requireWallet, async (req, res) => {
+    try {
+      const publishedBot = await storage.getPublishedBotById(req.params.id);
+      if (!publishedBot) {
+        return res.status(404).json({ error: "Published bot not found" });
+      }
+      if (publishedBot.creatorWalletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Not your bot" });
+      }
+
+      // Mark as inactive instead of deleting (preserves subscriber data)
+      await storage.updatePublishedBot(req.params.id, { isActive: false });
+      
+      console.log(`[Marketplace] Bot ${req.params.id} unpublished by ${req.walletAddress}`);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Unpublish bot error:", error);
+      res.status(500).json({ error: "Failed to unpublish bot" });
+    }
+  });
+
+  // Subscribe to a published bot (creates a new trading bot that mirrors signals)
+  app.post("/api/marketplace/:id/subscribe", requireWallet, async (req, res) => {
+    try {
+      const { capitalInvested, leverage } = req.body;
+      
+      if (!capitalInvested || capitalInvested <= 0) {
+        return res.status(400).json({ error: "Capital investment amount required" });
+      }
+
+      const publishedBot = await storage.getPublishedBotById(req.params.id);
+      if (!publishedBot) {
+        return res.status(404).json({ error: "Published bot not found" });
+      }
+      if (!publishedBot.isActive) {
+        return res.status(400).json({ error: "This bot is no longer available" });
+      }
+
+      // Check if already subscribed
+      const existingSub = await storage.getBotSubscription(req.params.id, req.walletAddress!);
+      if (existingSub && existingSub.status === 'active') {
+        return res.status(400).json({ error: "Already subscribed to this bot" });
+      }
+
+      // Get the original trading bot to clone settings
+      const originalBot = await storage.getTradingBotById(publishedBot.tradingBotId);
+      if (!originalBot) {
+        return res.status(404).json({ error: "Original bot not found" });
+      }
+
+      // Create subscriber's bot with same settings but their own capital
+      const webhookSecret = generateWebhookSecret();
+      let subscriberBot = await storage.createTradingBot({
+        name: `${publishedBot.name} (Copy)`,
+        market: originalBot.market,
+        walletAddress: req.walletAddress!,
+        botType: 'signal',
+        maxPositionSize: capitalInvested.toString(),
+        leverage: leverage || originalBot.leverage,
+        webhookSecret,
+        isActive: true,
+        sourcePublishedBotId: publishedBot.id,
+      });
+
+      // Assign subaccount ID (done separately since it's auto-managed)
+      const nextSubaccountId = await storage.getNextSubaccountId(req.walletAddress!);
+      subscriberBot = (await storage.updateTradingBot(subscriberBot.id, { 
+        driftSubaccountId: nextSubaccountId 
+      } as any))!;
+
+      // Create subscription record
+      const subscription = await storage.createBotSubscription({
+        publishedBotId: req.params.id,
+        subscriberWalletAddress: req.walletAddress!,
+        subscriberBotId: subscriberBot.id,
+        capitalInvested: capitalInvested.toString(),
+        status: 'active',
+      });
+
+      // Update published bot stats
+      await storage.incrementPublishedBotSubscribers(req.params.id, 1, capitalInvested);
+
+      console.log(`[Marketplace] ${req.walletAddress} subscribed to ${publishedBot.name} with $${capitalInvested}`);
+      res.json({
+        subscription,
+        tradingBot: subscriberBot,
+        webhookUrl: generateWebhookUrl(subscriberBot.id, webhookSecret),
+      });
+    } catch (error) {
+      console.error("Subscribe error:", error);
+      res.status(500).json({ error: "Failed to subscribe" });
+    }
+  });
+
+  // Unsubscribe from a published bot
+  app.delete("/api/marketplace/:id/unsubscribe", requireWallet, async (req, res) => {
+    try {
+      const subscription = await storage.getBotSubscription(req.params.id, req.walletAddress!);
+      if (!subscription) {
+        return res.status(404).json({ error: "Subscription not found" });
+      }
+      if (subscription.status !== 'active') {
+        return res.status(400).json({ error: "Subscription is not active" });
+      }
+
+      // Cancel subscription
+      await storage.cancelBotSubscription(subscription.id);
+
+      // Update published bot stats
+      const capitalInvested = parseFloat(subscription.capitalInvested);
+      await storage.incrementPublishedBotSubscribers(req.params.id, -1, -capitalInvested);
+
+      console.log(`[Marketplace] ${req.walletAddress} unsubscribed from ${req.params.id}`);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Unsubscribe error:", error);
+      res.status(500).json({ error: "Failed to unsubscribe" });
+    }
+  });
+
+  // Get user's subscriptions
+  app.get("/api/my-subscriptions", requireWallet, async (req, res) => {
+    try {
+      const subscriptions = await storage.getBotSubscriptionsByWallet(req.walletAddress!);
+      res.json(subscriptions);
+    } catch (error) {
+      console.error("Get subscriptions error:", error);
+      res.status(500).json({ error: "Failed to fetch subscriptions" });
+    }
+  });
+
+  // Check if a trading bot is published
+  app.get("/api/trading-bots/:id/published", requireWallet, async (req, res) => {
+    try {
+      const publishedBot = await storage.getPublishedBotByTradingBotId(req.params.id);
+      res.json({ 
+        isPublished: !!publishedBot && publishedBot.isActive,
+        publishedBot: publishedBot || null,
+      });
+    } catch (error) {
+      console.error("Check published error:", error);
+      res.status(500).json({ error: "Failed to check published status" });
+    }
+  });
+
   return httpServer;
 }
