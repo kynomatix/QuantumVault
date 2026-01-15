@@ -2522,7 +2522,7 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive } = req.body;
+      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold } = req.body;
       
       if (leverage !== undefined) {
         const leverageNum = Number(leverage);
@@ -2704,6 +2704,8 @@ export async function registerRoutes(
         ...(signalConfig && { signalConfig }),
         ...(riskConfig && { riskConfig }),
         ...(isActive !== undefined && { isActive }),
+        ...(profitReinvest !== undefined && { profitReinvest }),
+        ...(autoWithdrawThreshold !== undefined && { autoWithdrawThreshold: autoWithdrawThreshold !== null ? String(autoWithdrawThreshold) : null }),
       });
 
       // Include position close info in response
@@ -3709,6 +3711,55 @@ export async function registerRoutes(
               strategyPositionSize,
             }).catch(err => console.error('[Subscriber Routing] Error routing close to subscribers:', err));
             
+            // AUTO-WITHDRAW: Check if equity exceeds threshold and withdraw excess profits
+            let autoWithdrawInfo = null;
+            const autoWithdrawThreshold = parseFloat(bot.autoWithdrawThreshold || "0");
+            if (autoWithdrawThreshold > 0) {
+              try {
+                const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
+                const currentEquity = accountInfo.totalCollateral;
+                
+                if (currentEquity > autoWithdrawThreshold) {
+                  const excessAmount = currentEquity - autoWithdrawThreshold;
+                  // Leave a small buffer to avoid rounding issues
+                  const withdrawAmount = Math.max(0, excessAmount - 0.01);
+                  
+                  if (withdrawAmount > 0.1) { // Minimum $0.10 to avoid dust withdrawals
+                    console.log(`[Webhook] AUTO-WITHDRAW: Equity $${currentEquity.toFixed(2)} exceeds threshold $${autoWithdrawThreshold.toFixed(2)}, withdrawing $${withdrawAmount.toFixed(2)}`);
+                    
+                    const withdrawResult = await executeAgentDriftWithdraw(
+                      wallet.agentPublicKey!,
+                      wallet.agentPrivateKeyEncrypted,
+                      withdrawAmount,
+                      subAccountId
+                    );
+                    
+                    if (withdrawResult.success) {
+                      console.log(`[Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn, tx: ${withdrawResult.signature}`);
+                      autoWithdrawInfo = {
+                        amount: withdrawAmount,
+                        txSignature: withdrawResult.signature,
+                      };
+                      
+                      // Record the withdrawal as an equity event
+                      await storage.createEquityEvent({
+                        walletAddress: bot.walletAddress,
+                        tradingBotId: botId,
+                        eventType: 'auto_withdraw',
+                        amount: String(withdrawAmount),
+                        txSignature: withdrawResult.signature || null,
+                        notes: `Auto-withdraw triggered: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)}`,
+                      });
+                    } else {
+                      console.error(`[Webhook] AUTO-WITHDRAW FAILED: ${withdrawResult.error}`);
+                    }
+                  }
+                }
+              } catch (autoWithdrawErr: any) {
+                console.error(`[Webhook] AUTO-WITHDRAW check error (non-blocking):`, autoWithdrawErr.message);
+              }
+            }
+            
             console.log(`[Webhook] Position closed successfully: ${closeSize} ${bot.market} ${closeSide.toUpperCase()}`);
             return res.json({
               status: "success",
@@ -3717,6 +3768,7 @@ export async function registerRoutes(
               txSignature: finalTxSignature,
               closedSize: closeSize,
               side: closeSide,
+              ...(autoWithdrawInfo && { autoWithdraw: autoWithdrawInfo }),
             });
           } else {
             throw new Error(result.error || "Close order execution failed");
@@ -4006,8 +4058,10 @@ export async function registerRoutes(
       }
 
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
+      const profitReinvestEnabled = bot.profitReinvest === true;
+      const leverage = Math.max(1, bot.leverage || 1); // Ensure leverage >= 1
       
-      if (baseCapital <= 0) {
+      if (baseCapital <= 0 && !profitReinvestEnabled) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
@@ -4016,44 +4070,54 @@ export async function registerRoutes(
         return res.status(400).json({ error: `Bot has no capital configured. Set Max Position Size on the bot.` });
       }
       
-      // Calculate trade amount: signalPercent% of maxPositionSize
-      let tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+      // Calculate trade amount based on profit reinvest setting
+      let tradeAmountUsd: number = 0; // Initialize to 0 for safety
+      let maxTradeableValue = 0;
       
-      console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
-
-      // DYNAMIC ORDER SCALING: Scale trade size based on available margin
-      // This allows trades to execute after losses by scaling down proportionally
-      // When equity recovers, trades scale back up toward maxPositionSize
-      const leverage = Math.max(1, bot.leverage || 1); // Ensure leverage >= 1
+      // First get available collateral (needed for both modes)
       try {
-        // Use agentPublicKey (not encrypted private key) for account info lookup
         const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
-        const freeCollateral = Math.max(0, accountInfo.freeCollateral); // Clamp to >= 0
-        
-        // freeCollateral is margin capacity (USD), multiply by leverage to get max notional position size
-        // With 10x leverage and $10 free collateral, you can open a $100 notional position
+        const freeCollateral = Math.max(0, accountInfo.freeCollateral);
         const maxNotionalCapacity = freeCollateral * leverage;
-        // Apply 90% buffer for fees, slippage, and price movements
-        const maxTradeableValue = maxNotionalCapacity * 0.90;
+        maxTradeableValue = maxNotionalCapacity * 0.90; // 90% buffer for fees/slippage
         
-        console.log(`[Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
-        
-        if (maxTradeableValue <= 0) {
-          console.log(`[Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
-          // Let minimum order size check determine if trade is possible
-        } else if (tradeAmountUsd > maxTradeableValue) {
-          // Scale down trade to available margin capacity
-          const originalAmount = tradeAmountUsd;
-          tradeAmountUsd = maxTradeableValue;
-          const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
-          console.log(`[Webhook] SCALED DOWN: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested, will scale back up as equity recovers)`);
+        if (profitReinvestEnabled) {
+          // PROFIT REINVEST MODE: Use full available margin instead of fixed maxPositionSize
+          // This allows the bot to automatically compound profits by trading with all available equity
+          if (maxTradeableValue <= 0) {
+            await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null });
+            await storage.updateWebhookLog(log.id, { errorMessage: `Profit reinvest: no margin available`, processed: true });
+            return res.status(400).json({ error: `Cannot trade: profit reinvest enabled but no margin available (freeCollateral=$${freeCollateral.toFixed(2)})` });
+          }
+          tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
+          console.log(`[Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
+          console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${maxTradeableValue.toFixed(2)} available margin = $${tradeAmountUsd.toFixed(2)} trade`);
         } else {
-          console.log(`[Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${maxTradeableValue.toFixed(2)} capacity`);
+          // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
+          tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+          console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
+          console.log(`[Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
+          
+          if (maxTradeableValue <= 0) {
+            console.log(`[Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
+          } else if (tradeAmountUsd > maxTradeableValue) {
+            const originalAmount = tradeAmountUsd;
+            tradeAmountUsd = maxTradeableValue;
+            const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
+            console.log(`[Webhook] SCALED DOWN: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested, will scale back up as equity recovers)`);
+          } else {
+            console.log(`[Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${maxTradeableValue.toFixed(2)} capacity`);
+          }
         }
       } catch (collateralErr: any) {
-        // If we can't check collateral, log warning but continue with original amount
-        // The Drift execution will fail if there's truly insufficient collateral
-        console.warn(`[Webhook] Could not check collateral (proceeding with trade): ${collateralErr.message}`);
+        // If we can't check collateral, fall back to baseCapital (only works if profitReinvest is off)
+        console.warn(`[Webhook] Could not check collateral: ${collateralErr.message}`);
+        if (profitReinvestEnabled) {
+          await storage.updateWebhookLog(log.id, { errorMessage: `Profit reinvest requires collateral check`, processed: true });
+          return res.status(500).json({ error: `Cannot execute trade: profit reinvest enabled but collateral check failed` });
+        }
+        tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+        console.log(`[Webhook] Fallback to fixed size: $${tradeAmountUsd.toFixed(2)}`);
       }
       
       console.log(`[Webhook] Final trade amount: $${tradeAmountUsd.toFixed(2)}`);
@@ -4527,6 +4591,53 @@ export async function registerRoutes(
               pnl: closeTradePnl,
             }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
             
+            // AUTO-WITHDRAW: Check if equity exceeds threshold and withdraw excess profits
+            let autoWithdrawInfo = null;
+            const autoWithdrawThreshold = parseFloat(bot.autoWithdrawThreshold || "0");
+            if (autoWithdrawThreshold > 0) {
+              try {
+                const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, subAccountId);
+                const currentEquity = accountInfo.totalCollateral;
+                
+                if (currentEquity > autoWithdrawThreshold) {
+                  const excessAmount = currentEquity - autoWithdrawThreshold;
+                  const withdrawAmount = Math.max(0, excessAmount - 0.01);
+                  
+                  if (withdrawAmount > 0.1) {
+                    console.log(`[User Webhook] AUTO-WITHDRAW: Equity $${currentEquity.toFixed(2)} exceeds threshold $${autoWithdrawThreshold.toFixed(2)}, withdrawing $${withdrawAmount.toFixed(2)}`);
+                    
+                    const withdrawResult = await executeAgentDriftWithdraw(
+                      wallet.agentPublicKey,
+                      wallet.agentPrivateKeyEncrypted!,
+                      withdrawAmount,
+                      subAccountId
+                    );
+                    
+                    if (withdrawResult.success) {
+                      console.log(`[User Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn, tx: ${withdrawResult.signature}`);
+                      autoWithdrawInfo = {
+                        amount: withdrawAmount,
+                        txSignature: withdrawResult.signature,
+                      };
+                      
+                      await storage.createEquityEvent({
+                        walletAddress: bot.walletAddress,
+                        tradingBotId: botId,
+                        eventType: 'auto_withdraw',
+                        amount: String(withdrawAmount),
+                        txSignature: withdrawResult.signature || null,
+                        notes: `Auto-withdraw triggered: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)}`,
+                      });
+                    } else {
+                      console.error(`[User Webhook] AUTO-WITHDRAW FAILED: ${withdrawResult.error}`);
+                    }
+                  }
+                }
+              } catch (autoWithdrawErr: any) {
+                console.error(`[User Webhook] AUTO-WITHDRAW check error (non-blocking):`, autoWithdrawErr.message);
+              }
+            }
+            
             return res.json({
               status: "success",
               type: "close",
@@ -4534,6 +4645,7 @@ export async function registerRoutes(
               txSignature: result.signature,
               closedSize: closeSize,
               pnl: closeTradePnl,
+              ...(autoWithdrawInfo && { autoWithdraw: autoWithdrawInfo }),
             });
           }
           
@@ -4627,8 +4739,11 @@ export async function registerRoutes(
       }
 
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
+      const profitReinvestEnabled = bot.profitReinvest === true;
+      const leverage = Math.max(1, bot.leverage || 1); // Ensure leverage >= 1
+      const subAccountId = bot.driftSubaccountId ?? 0;
       
-      if (baseCapital <= 0) {
+      if (baseCapital <= 0 && !profitReinvestEnabled) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
@@ -4637,45 +4752,51 @@ export async function registerRoutes(
         return res.status(400).json({ error: `Bot has no capital configured. Set Max Position Size on the bot.` });
       }
       
-      // Calculate trade amount: signalPercent% of maxPositionSize
-      let tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+      // Calculate trade amount based on profit reinvest setting
+      let tradeAmountUsd: number = 0; // Initialize to 0 for safety
+      let maxTradeableValue = 0;
       
-      console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
-
-      // DYNAMIC ORDER SCALING: Scale trade size based on available margin
-      // This allows trades to execute after losses by scaling down proportionally
-      // When equity recovers, trades scale back up toward maxPositionSize
-      const leverage = Math.max(1, bot.leverage || 1); // Ensure leverage >= 1
-      const subAccountId = bot.driftSubaccountId ?? 0;
       try {
-        // Use agentPublicKey (not encrypted private key) for account info lookup
         const accountInfo = await getDriftAccountInfo(userWallet.agentPublicKey!, subAccountId);
-        const freeCollateral = Math.max(0, accountInfo.freeCollateral); // Clamp to >= 0
-        
-        // freeCollateral is margin capacity (USD), multiply by leverage to get max notional position size
-        // With 10x leverage and $10 free collateral, you can open a $100 notional position
+        const freeCollateral = Math.max(0, accountInfo.freeCollateral);
         const maxNotionalCapacity = freeCollateral * leverage;
-        // Apply 90% buffer for fees, slippage, and price movements
-        const maxTradeableValue = maxNotionalCapacity * 0.90;
+        maxTradeableValue = maxNotionalCapacity * 0.90;
         
-        console.log(`[User Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
-        
-        if (maxTradeableValue <= 0) {
-          console.log(`[User Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
-          // Let minimum order size check determine if trade is possible
-        } else if (tradeAmountUsd > maxTradeableValue) {
-          // Scale down trade to available margin capacity
-          const originalAmount = tradeAmountUsd;
-          tradeAmountUsd = maxTradeableValue;
-          const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
-          console.log(`[User Webhook] SCALED DOWN: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested, will scale back up as equity recovers)`);
+        if (profitReinvestEnabled) {
+          // PROFIT REINVEST MODE: Use full available margin instead of fixed maxPositionSize
+          if (maxTradeableValue <= 0) {
+            await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null });
+            await storage.updateWebhookLog(log.id, { errorMessage: `Profit reinvest: no margin available`, processed: true });
+            return res.status(400).json({ error: `Cannot trade: profit reinvest enabled but no margin available (freeCollateral=$${freeCollateral.toFixed(2)})` });
+          }
+          tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
+          console.log(`[User Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
+          console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${maxTradeableValue.toFixed(2)} available margin = $${tradeAmountUsd.toFixed(2)} trade`);
         } else {
-          console.log(`[User Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${maxTradeableValue.toFixed(2)} capacity`);
+          // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
+          tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+          console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
+          console.log(`[User Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
+          
+          if (maxTradeableValue <= 0) {
+            console.log(`[User Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
+          } else if (tradeAmountUsd > maxTradeableValue) {
+            const originalAmount = tradeAmountUsd;
+            tradeAmountUsd = maxTradeableValue;
+            const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
+            console.log(`[User Webhook] SCALED DOWN: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested, will scale back up as equity recovers)`);
+          } else {
+            console.log(`[User Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${maxTradeableValue.toFixed(2)} capacity`);
+          }
         }
       } catch (collateralErr: any) {
-        // If we can't check collateral, log warning but continue with original amount
-        // The Drift execution will fail if there's truly insufficient collateral
-        console.warn(`[User Webhook] Could not check collateral (proceeding with trade): ${collateralErr.message}`);
+        console.warn(`[User Webhook] Could not check collateral: ${collateralErr.message}`);
+        if (profitReinvestEnabled) {
+          await storage.updateWebhookLog(log.id, { errorMessage: `Profit reinvest requires collateral check`, processed: true });
+          return res.status(500).json({ error: `Cannot execute trade: profit reinvest enabled but collateral check failed` });
+        }
+        tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+        console.log(`[User Webhook] Fallback to fixed size: $${tradeAmountUsd.toFixed(2)}`);
       }
       
       console.log(`[User Webhook] Final trade amount: $${tradeAmountUsd.toFixed(2)}`);

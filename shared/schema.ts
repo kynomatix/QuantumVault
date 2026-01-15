@@ -89,6 +89,8 @@ export const tradingBots = pgTable("trading_bots", {
   totalInvestment: decimal("total_investment", { precision: 20, scale: 2 }).default("100").notNull(),
   maxPositionSize: decimal("max_position_size", { precision: 20, scale: 2 }),
   leverage: integer("leverage").default(1).notNull(),
+  profitReinvest: boolean("profit_reinvest").default(false).notNull(),
+  autoWithdrawThreshold: decimal("auto_withdraw_threshold", { precision: 20, scale: 2 }),
   signalConfig: jsonb("signal_config").$type<{
     entryKeyword?: string;
     exitKeyword?: string;

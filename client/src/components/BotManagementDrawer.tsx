@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/tooltip';
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
 import {
   Bot,
   Copy,
@@ -95,6 +96,8 @@ interface TradingBot {
   totalInvestment: string;
   maxPositionSize: string | null;
   driftSubaccountId?: number | null;
+  profitReinvest?: boolean;
+  autoWithdrawThreshold?: string | null;
   stats: {
     totalTrades: number;
     winningTrades: number;
@@ -193,6 +196,8 @@ export function BotManagementDrawer({
   const [editName, setEditName] = useState<string>('');
   const [editLeverage, setEditLeverage] = useState<number>(1);
   const [editMaxPositionSize, setEditMaxPositionSize] = useState<string>('');
+  const [editProfitReinvest, setEditProfitReinvest] = useState<boolean>(false);
+  const [editAutoWithdrawThreshold, setEditAutoWithdrawThreshold] = useState<string>('');
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
@@ -222,6 +227,9 @@ export function BotManagementDrawer({
       const storedMaxPos = parseFloat(bot.maxPositionSize || '0');
       const investmentAmount = bot.leverage > 0 ? storedMaxPos / bot.leverage : storedMaxPos;
       setEditMaxPositionSize(investmentAmount > 0 ? investmentAmount.toFixed(2) : '');
+      // Initialize profit reinvest and auto withdraw settings
+      setEditProfitReinvest(bot.profitReinvest ?? false);
+      setEditAutoWithdrawThreshold(bot.autoWithdrawThreshold ?? '');
     }
   }, [bot]);
 
@@ -634,6 +642,8 @@ export function BotManagementDrawer({
           name: editName.trim(),
           leverage: editLeverage,
           maxPositionSize: calculatedMaxPosition > 0 ? calculatedMaxPosition : null,
+          profitReinvest: editProfitReinvest,
+          autoWithdrawThreshold: editAutoWithdrawThreshold ? parseFloat(editAutoWithdrawThreshold) : null,
         }),
       });
 
@@ -670,6 +680,9 @@ export function BotManagementDrawer({
       const storedMaxPos = parseFloat(localBot.maxPositionSize || '0');
       const investmentAmount = localBot.leverage > 0 ? storedMaxPos / localBot.leverage : storedMaxPos;
       setEditMaxPositionSize(investmentAmount > 0 ? investmentAmount.toFixed(2) : '');
+      // Reset profit reinvest and auto withdraw settings
+      setEditProfitReinvest(localBot.profitReinvest ?? false);
+      setEditAutoWithdrawThreshold(localBot.autoWithdrawThreshold ?? '');
     }
   };
 
@@ -684,7 +697,9 @@ export function BotManagementDrawer({
   const hasSettingsChanges = localBot ? (
     editName !== localBot.name || 
     editLeverage !== Math.min(localBot.leverage, MARKET_MAX_LEVERAGE[localBot.market] || 20) || 
-    editMaxPositionSize !== getStoredInvestmentAmount()
+    editMaxPositionSize !== getStoredInvestmentAmount() ||
+    editProfitReinvest !== (localBot.profitReinvest ?? false) ||
+    editAutoWithdrawThreshold !== (localBot.autoWithdrawThreshold ?? '')
   ) : false;
 
   const formatDate = (dateString: string) => {
@@ -1623,6 +1638,49 @@ export function BotManagementDrawer({
                     <Info className="w-3 h-3" />
                     Bot equity: ${botBalance.toFixed(2)}. With {editLeverage}x leverage = ${(botBalance * editLeverage).toFixed(2)} max position.
                   </p>
+                </div>
+
+                {/* Profit Reinvest Toggle */}
+                <div className="flex items-center justify-between py-3 border-t border-border/50">
+                  <div className="space-y-0.5">
+                    <label className="text-sm font-medium">Profit Reinvest</label>
+                    <p className="text-xs text-muted-foreground">
+                      When enabled, bot uses full available margin instead of fixed investment amount
+                    </p>
+                  </div>
+                  <Switch
+                    checked={editProfitReinvest}
+                    onCheckedChange={setEditProfitReinvest}
+                    data-testid="switch-profit-reinvest"
+                  />
+                </div>
+
+                {/* Auto Withdraw Threshold */}
+                <div className="space-y-2 py-3 border-t border-border/50">
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <label className="text-sm font-medium">Auto Withdraw Threshold</label>
+                      <p className="text-xs text-muted-foreground">
+                        Automatically withdraw profits to your agent wallet when equity exceeds this amount
+                      </p>
+                    </div>
+                  </div>
+                  <Input
+                    type="number"
+                    value={editAutoWithdrawThreshold}
+                    onChange={(e) => setEditAutoWithdrawThreshold(e.target.value)}
+                    placeholder="Leave empty to disable"
+                    min="0"
+                    step="1"
+                    className="w-full"
+                    data-testid="input-auto-withdraw-threshold"
+                  />
+                  {editAutoWithdrawThreshold && parseFloat(editAutoWithdrawThreshold) > 0 && (
+                    <p className="text-xs text-emerald-500 flex items-center gap-1">
+                      <Sparkles className="w-3 h-3" />
+                      When equity exceeds ${parseFloat(editAutoWithdrawThreshold).toFixed(2)}, excess profits will be withdrawn automatically
+                    </p>
+                  )}
                 </div>
                 
                 {hasSettingsChanges && (
