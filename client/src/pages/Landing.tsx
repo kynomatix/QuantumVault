@@ -74,7 +74,7 @@ export default function Landing() {
   };
 
   return (
-    <div className="min-h-screen bg-black">
+    <div className="min-h-screen bg-black overflow-x-hidden">
       <nav className="fixed top-0 left-0 right-0 z-50 bg-black/50 backdrop-blur-xl border-b border-white/10">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -89,13 +89,16 @@ export default function Landing() {
           </div>
 
           <Button 
-            className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity"
+            className="bg-gradient-to-r from-primary to-accent hover:opacity-90 transition-opacity w-10 h-10 md:w-auto md:h-auto md:px-4 md:py-2"
             onClick={handleConnectWallet}
             disabled={connecting}
             data-testid="button-connect-wallet"
           >
-            {connecting ? 'Connecting...' : 'Connect Wallet'}
-            <Wallet className="w-4 h-4 ml-2" />
+            <Wallet className="w-5 h-5 md:hidden" />
+            <span className="hidden md:inline-flex items-center">
+              {connecting ? 'Connecting...' : 'Connect Wallet'}
+              <Wallet className="w-4 h-4 ml-2" />
+            </span>
           </Button>
         </div>
       </nav>
