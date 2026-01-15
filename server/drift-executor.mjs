@@ -381,10 +381,8 @@ async function deleteSubaccount(command) {
   
   console.error(`[Executor] Deleting subaccount ${subAccountId} to reclaim rent`);
   
-  // Cannot delete subaccount 0 (main account)
-  if (subAccountId === 0) {
-    throw new Error('Cannot delete subaccount 0 (main account)');
-  }
+  // Note: Subaccount 0 CAN be deleted if it's empty and has no referred status
+  // However, accounts created through referral programs may not be deletable
   
   const driftClient = await createDriftClient(encryptedPrivateKey, subAccountId);
   
@@ -399,33 +397,46 @@ async function deleteSubaccount(command) {
       throw new Error(`Cannot delete subaccount: has ${perpPositions.length} open perp position(s) - close them first`);
     }
     
-    // Check for any spot balances and sweep them to subaccount 0
+    // Check for any spot balances
     const spotPositions = user.getActiveSpotPositions();
     
-    for (const pos of spotPositions) {
-      const marketIndex = pos.marketIndex;
-      // Get the token amount using the SDK's getter for precision
-      const tokenAmount = user.getTokenAmount(marketIndex);
-      
-      if (tokenAmount && !tokenAmount.isZero()) {
-        console.error(`[Executor] Found spot balance at market ${marketIndex}: ${tokenAmount.toString()} (raw BN)`);
+    // For subaccount 0, we can't sweep to another subaccount - must withdraw first
+    // For other subaccounts, sweep to subaccount 0
+    if (subAccountId !== 0) {
+      for (const pos of spotPositions) {
+        const marketIndex = pos.marketIndex;
+        // Get the token amount using the SDK's getter for precision
+        const tokenAmount = user.getTokenAmount(marketIndex);
         
-        // Only sweep if positive (deposit, not borrow)
-        if (tokenAmount.gt(new BN(0))) {
-          console.error(`[Executor] Sweeping ${tokenAmount.toString()} from subaccount ${subAccountId} to 0`);
+        if (tokenAmount && !tokenAmount.isZero()) {
+          console.error(`[Executor] Found spot balance at market ${marketIndex}: ${tokenAmount.toString()} (raw BN)`);
           
-          try {
-            // Transfer the exact BN amount to subaccount 0
-            const txSig = await driftClient.transferDeposit(
-              tokenAmount,
-              marketIndex,
-              subAccountId,
-              0 // to subaccount 0
-            );
-            console.error(`[Executor] Swept dust to subaccount 0: ${txSig}`);
-          } catch (sweepErr) {
-            console.error(`[Executor] Sweep error (may already be zero):`, sweepErr.message);
+          // Only sweep if positive (deposit, not borrow)
+          if (tokenAmount.gt(new BN(0))) {
+            console.error(`[Executor] Sweeping ${tokenAmount.toString()} from subaccount ${subAccountId} to 0`);
+            
+            try {
+              // Transfer the exact BN amount to subaccount 0
+              const txSig = await driftClient.transferDeposit(
+                tokenAmount,
+                marketIndex,
+                subAccountId,
+                0 // to subaccount 0
+              );
+              console.error(`[Executor] Swept dust to subaccount 0: ${txSig}`);
+            } catch (sweepErr) {
+              console.error(`[Executor] Sweep error (may already be zero):`, sweepErr.message);
+            }
           }
+        }
+      }
+    } else {
+      // For subaccount 0, check if there are any remaining balances
+      for (const pos of spotPositions) {
+        const tokenAmount = user.getTokenAmount(pos.marketIndex);
+        if (tokenAmount && tokenAmount.gt(new BN(0))) {
+          console.error(`[Executor] Subaccount 0 still has balance at market ${pos.marketIndex}: ${tokenAmount.toString()}`);
+          throw new Error(`Cannot delete main account: still has ${tokenAmount.toNumber() / 1e6} USDC - withdraw first`);
         }
       }
     }
