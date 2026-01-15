@@ -208,6 +208,26 @@ export function BotManagementDrawer({
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
+  const [usdcApy, setUsdcApy] = useState<number | null>(null);
+
+  // Fetch USDC deposit APY from Drift
+  const fetchUsdcApy = async () => {
+    try {
+      const response = await fetch('/api/drift/usdc-apy');
+      if (response.ok) {
+        const data = await response.json();
+        setUsdcApy(data.apy);
+      }
+    } catch (error) {
+      console.error('Failed to fetch USDC APY:', error);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      fetchUsdcApy();
+    }
+  }, [isOpen]);
 
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
@@ -1087,7 +1107,9 @@ export function BotManagementDrawer({
                 </div>
                 <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
                   <p className="text-xs text-muted-foreground">APY</p>
-                  <p className="text-lg font-semibold text-blue-400 mt-1">~5.3%</p>
+                  <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-usdc-apy">
+                    {usdcApy !== null ? `~${usdcApy.toFixed(1)}%` : '-'}
+                  </p>
                 </div>
                 <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
                   <p className="text-xs text-muted-foreground">Est. Monthly</p>

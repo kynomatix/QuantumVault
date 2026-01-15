@@ -5226,6 +5226,59 @@ export async function registerRoutes(
     }
   });
 
+  // USDC APY cache and shared helper function
+  let usdcApyCache: { apy: number; timestamp: number } | null = null;
+  const USDC_APY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+  const USDC_APY_FALLBACK = 5.3; // Fallback APY percentage if fetch fails
+
+  // Shared helper to get current USDC APY (fetches fresh if cache expired)
+  async function getUsdcApy(): Promise<{ apy: number; cached: boolean; stale?: boolean }> {
+    // Return cached value if still valid
+    if (usdcApyCache && Date.now() - usdcApyCache.timestamp < USDC_APY_CACHE_TTL) {
+      return { apy: usdcApyCache.apy, cached: true };
+    }
+
+    try {
+      // Fetch fresh data from Drift Data API
+      const response = await fetch('https://data.api.drift.trade/rateHistory?marketIndex=0&marketType=spot');
+      if (!response.ok) {
+        throw new Error(`Drift API returned ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (!data.success || !data.data || data.data.length === 0) {
+        throw new Error('Invalid response from Drift API');
+      }
+
+      // Get the latest APY (last entry in array)
+      const latestEntry = data.data[data.data.length - 1];
+      const apy = parseFloat(latestEntry[1]) * 100; // Convert to percentage
+
+      // Cache the result
+      usdcApyCache = { apy, timestamp: Date.now() };
+
+      return { apy, cached: false };
+    } catch (error) {
+      console.error("Get USDC APY error:", error);
+      // Return cached value on error if available, otherwise fallback
+      if (usdcApyCache) {
+        return { apy: usdcApyCache.apy, cached: true, stale: true };
+      }
+      return { apy: USDC_APY_FALLBACK, cached: false, stale: true };
+    }
+  }
+
+  // Get current USDC deposit APY from Drift Data API
+  app.get("/api/drift/usdc-apy", async (req, res) => {
+    try {
+      const result = await getUsdcApy();
+      res.json(result);
+    } catch (error) {
+      console.error("Get USDC APY endpoint error:", error);
+      res.status(500).json({ error: "Failed to fetch USDC APY" });
+    }
+  });
+
   // Force refresh market OI data (admin endpoint)
   app.post("/api/admin/liquidity/refresh", async (req, res) => {
     try {
@@ -5578,10 +5631,10 @@ export async function registerRoutes(
       
       // Interest calculation: Use the current Drift balance to estimate daily interest
       // Note: We don't have per-bot deposit tracking, so we can't calculate exact interest
-      // Drift's current lending APY is ~5.3% for USDC
-      // Daily interest = balance * (APY / 365)
-      const DRIFT_USDC_APY = 0.053; // 5.3% - this varies with market conditions
-      const dailyInterestRate = DRIFT_USDC_APY / 365;
+      // Use dynamic APY from shared helper (fetches fresh if cache expired)
+      const apyResult = await getUsdcApy();
+      const currentApy = apyResult.apy / 100; // Convert percentage to decimal
+      const dailyInterestRate = currentApy / 365;
       const estimatedDailyInterest = balance * dailyInterestRate;
       
       res.json({ 
@@ -5592,7 +5645,8 @@ export async function registerRoutes(
         totalFees,
         tradeCount,
         estimatedDailyInterest: Math.max(0, estimatedDailyInterest),
-        driftApy: DRIFT_USDC_APY,
+        driftApy: currentApy,
+        apyStale: apyResult.stale || false,
       });
     } catch (error) {
       console.error("Bot balance error:", error);
