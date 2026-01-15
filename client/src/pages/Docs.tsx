@@ -3,8 +3,8 @@ import { Link } from 'wouter';
 import { motion } from 'framer-motion';
 import { 
   BookOpen, Wallet, Bot, Webhook, Settings, Users, 
-  ChevronRight, ArrowLeft, Zap, Shield, DollarSign,
-  TrendingUp, Copy, Check, Menu, X, ExternalLink,
+  ChevronRight, ArrowLeft, Zap, DollarSign,
+  Copy, Check, Menu, X,
   AlertTriangle, Info, CheckCircle2, ArrowDown, ArrowUp
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -664,27 +664,13 @@ export default function DocsPage() {
       <header className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/80 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between py-3 md:py-0 md:h-16 gap-3 md:gap-0">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-8 h-8 rounded-lg" />
-                <span className="font-display font-bold text-white">QuantumVault</span>
-                <span className="text-white/40 text-sm">Docs</span>
-              </div>
-              
-              <Link href="/app" data-testid="link-launch-app">
-                <Button variant="outline" size="sm" className="hidden md:flex">
-                  Launch App
-                  <ExternalLink className="w-3 h-3 ml-2" />
-                </Button>
-              </Link>
+            <div className="flex items-center gap-2">
+              <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-8 h-8 rounded-lg" />
+              <span className="font-display font-bold text-white">QuantumVault</span>
+              <span className="text-white/40 text-sm">Docs</span>
             </div>
             
             <div className="flex items-center justify-between md:hidden">
-              <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
-                <ArrowLeft className="w-4 h-4" />
-                <span className="text-sm">Back to Home</span>
-              </Link>
-              
               <Button
                 variant="ghost"
                 size="icon"
@@ -693,6 +679,11 @@ export default function DocsPage() {
               >
                 {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
               </Button>
+              
+              <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
+                <span className="text-sm">Back</span>
+                <ArrowLeft className="w-4 h-4 rotate-180" />
+              </Link>
             </div>
             
             <div className="hidden md:flex items-center gap-4">
