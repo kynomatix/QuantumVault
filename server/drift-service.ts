@@ -1157,16 +1157,84 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
   }
 }
 
-// Market index to name mapping for Drift perpetuals
+// Market index to name mapping for Drift perpetuals (reverse of PERP_MARKET_INDICES)
 const PERP_MARKET_NAMES: Record<number, string> = {
   0: 'SOL-PERP',
   1: 'BTC-PERP',
   2: 'ETH-PERP',
   3: 'APT-PERP',
-  4: 'MATIC-PERP',
-  5: 'ARB-PERP',
-  6: 'DOGE-PERP',
-  7: 'BNB-PERP',
+  4: '1MBONK-PERP',
+  5: 'POL-PERP',
+  6: 'ARB-PERP',
+  7: 'DOGE-PERP',
+  8: 'BNB-PERP',
+  9: 'SUI-PERP',
+  10: '1MPEPE-PERP',
+  11: 'OP-PERP',
+  12: 'RENDER-PERP',
+  13: 'XRP-PERP',
+  14: 'HNT-PERP',
+  15: 'INJ-PERP',
+  16: 'LINK-PERP',
+  17: 'RLB-PERP',
+  18: 'PYTH-PERP',
+  19: 'TIA-PERP',
+  20: 'JTO-PERP',
+  21: 'SEI-PERP',
+  22: 'AVAX-PERP',
+  23: 'WIF-PERP',
+  24: 'JUP-PERP',
+  25: 'DYM-PERP',
+  26: 'TAO-PERP',
+  27: 'W-PERP',
+  28: 'KMNO-PERP',
+  29: 'TNSR-PERP',
+  30: 'DRIFT-PERP',
+  31: 'CLOUD-PERP',
+  32: 'IO-PERP',
+  33: 'ZEX-PERP',
+  34: 'POPCAT-PERP',
+  35: '1KWEN-PERP',
+  42: 'TON-PERP',
+  44: 'MOTHER-PERP',
+  45: 'MOODENG-PERP',
+  46: 'DBR-PERP',
+  47: '1KMEW-PERP',
+  48: 'MICHI-PERP',
+  49: 'GOAT-PERP',
+  50: 'FWOG-PERP',
+  51: 'PNUT-PERP',
+  52: 'RAY-PERP',
+  53: 'HYPE-PERP',
+  54: 'LTC-PERP',
+  55: 'ME-PERP',
+  56: 'PENGU-PERP',
+  57: 'AI16Z-PERP',
+  58: 'TRUMP-PERP',
+  59: 'MELANIA-PERP',
+  60: 'BERA-PERP',
+  61: 'KAITO-PERP',
+  62: 'IP-PERP',
+  63: 'FARTCOIN-PERP',
+  64: 'ADA-PERP',
+  65: 'PAXG-PERP',
+  66: 'LAUNCHCOIN-PERP',
+  67: 'PUMP-PERP',
+  68: 'ASTER-PERP',
+  69: 'XPL-PERP',
+  70: '2Z-PERP',
+  71: 'MNT-PERP',
+  72: '1KPUMP-PERP',
+  73: 'MET-PERP',
+  74: '1KMON-PERP',
+  75: 'LIT-PERP',
+  76: 'WLD-PERP',
+  77: 'NEAR-PERP',
+  78: 'FTM-PERP',
+  79: 'ZEC-PERP',
+  80: 'ATOM-PERP',
+  81: 'DOT-PERP',
+  82: 'BCH-PERP',
 };
 
 export interface PerpPosition {
@@ -1206,18 +1274,24 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
     
     // Fetch current prices for all markets we might have positions in
     const prices: Record<number, number> = {};
+    let priceData: Record<string, number> = {};
     try {
       const priceRes = await fetch(`http://localhost:5000/api/prices`);
       if (priceRes.ok) {
-        const priceData = await priceRes.json();
-        prices[0] = priceData['SOL-PERP'] || 136;
-        prices[1] = priceData['BTC-PERP'] || 90000;
-        prices[2] = priceData['ETH-PERP'] || 3000;
+        priceData = await priceRes.json();
+        // Populate prices for all known markets using PERP_MARKET_NAMES
+        for (const [indexStr, marketName] of Object.entries(PERP_MARKET_NAMES)) {
+          const marketIndex = parseInt(indexStr, 10);
+          if (priceData[marketName]) {
+            prices[marketIndex] = priceData[marketName];
+          }
+        }
       }
     } catch (e) {
-      prices[0] = 136;
-      prices[1] = 90000;
-      prices[2] = 3000;
+      // Fallback prices for common markets
+      prices[0] = 136; // SOL
+      prices[1] = 90000; // BTC
+      prices[2] = 3000; // ETH
     }
     
     const BASE_PRECISION = 1e9;
