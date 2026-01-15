@@ -889,9 +889,19 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getSubscriberBotsBySourceId(publishedBotId: string): Promise<TradingBot[]> {
-    return db.select().from(tradingBots)
+    // Join with bot_subscriptions to only return bots with active subscriptions
+    // This ensures cancelled subscriptions don't receive signals
+    const results = await db.select({ bot: tradingBots })
+      .from(tradingBots)
+      .innerJoin(botSubscriptions, and(
+        eq(botSubscriptions.subscriberBotId, tradingBots.id),
+        eq(botSubscriptions.publishedBotId, publishedBotId),
+        eq(botSubscriptions.status, 'active')
+      ))
       .where(eq(tradingBots.sourcePublishedBotId, publishedBotId))
       .orderBy(desc(tradingBots.createdAt));
+    
+    return results.map(r => r.bot);
   }
 
   async createBotSubscription(subscription: InsertBotSubscription): Promise<BotSubscription> {
