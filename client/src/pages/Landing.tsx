@@ -282,7 +282,7 @@ export default function Landing() {
             initial={{ x: 0 }}
             whileInView={{ x: "-100%" }}
             viewport={{ once: true, amount: 0.7 }}
-            transition={{ duration: 2.5, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: 4, ease: [0.16, 1, 0.3, 1] }}
             className="absolute left-0 top-0 w-1/2 h-full bg-gradient-to-r from-black via-gray-900 to-gray-800 z-20 border-r border-white/5"
           >
             <div className="absolute right-4 top-1/2 -translate-y-1/2 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full" />
@@ -293,7 +293,7 @@ export default function Landing() {
             initial={{ x: 0 }}
             whileInView={{ x: "100%" }}
             viewport={{ once: true, amount: 0.7 }}
-            transition={{ duration: 2.5, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: 4, ease: [0.16, 1, 0.3, 1] }}
             className="absolute right-0 top-0 w-1/2 h-full bg-gradient-to-l from-black via-gray-900 to-gray-800 z-20 border-l border-white/5"
           >
             <div className="absolute left-4 top-1/2 -translate-y-1/2 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full" />
