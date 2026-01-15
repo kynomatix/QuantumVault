@@ -70,6 +70,7 @@ export interface IStorage {
   updateWalletLastSeen(address: string): Promise<void>;
   getOrCreateWallet(address: string): Promise<Wallet>;
   updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void>;
+  updateWalletAgentKeyV3(address: string, agentPrivateKeyEncryptedV3: string): Promise<void>;
   updateWalletWebhookSecret(address: string, userWebhookSecret: string): Promise<void>;
   updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined>;
 
@@ -258,6 +259,12 @@ export class DatabaseStorage implements IStorage {
     await db.update(wallets).set({ 
       agentPublicKey, 
       agentPrivateKeyEncrypted 
+    }).where(eq(wallets.address, address));
+  }
+
+  async updateWalletAgentKeyV3(address: string, agentPrivateKeyEncryptedV3: string): Promise<void> {
+    await db.update(wallets).set({ 
+      agentPrivateKeyEncryptedV3 
     }).where(eq(wallets.address, address));
   }
 

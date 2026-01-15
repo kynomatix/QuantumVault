@@ -15,7 +15,7 @@ import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback } from "./session-v3";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
@@ -3793,8 +3793,32 @@ export async function registerRoutes(
         }
       }
       
-      // Cleanup the unwrapped UMK after policy verification
-      // Future: Use this UMK to derive key_privkey and decrypt agent key via v3 crypto
+      // Security v3: Verify agent key can be decrypted via v3 path (Phase 6.1 migration validation)
+      // This validates the v3 encryption is working; actual key usage will be in Phase 6.2
+      const agentKeyResult = await decryptAgentKeyWithFallback(
+        bot.walletAddress,
+        umkResult.umk,
+        ownerWallet
+      );
+      
+      if (agentKeyResult) {
+        // Log migration status for tracking
+        const usedV3 = ownerWallet.agentPrivateKeyEncryptedV3 ? true : false;
+        if (usedV3) {
+          console.log(`[Webhook] Agent key decryption: v3 path verified for ${bot.walletAddress.slice(0, 8)}...`);
+        } else {
+          console.log(`[Webhook] Agent key decryption: legacy fallback used for ${bot.walletAddress.slice(0, 8)}... (v3 not yet migrated)`);
+        }
+        // Cleanup the decrypted agent key immediately - for now we continue using encrypted key path
+        agentKeyResult.cleanup();
+      } else {
+        // Agent key decryption failed - this is a critical error
+        umkResult.cleanup();
+        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Agent key decryption failed" });
+        return res.status(403).json({ error: "Agent key decryption failed. Please reconfigure your agent wallet." });
+      }
+      
+      // Cleanup the unwrapped UMK after v3 validation
       umkResult.cleanup();
 
       // Parse TradingView strategy signal
@@ -4892,7 +4916,32 @@ export async function registerRoutes(
         }
       }
       
-      // Cleanup the unwrapped UMK after policy verification
+      // Security v3: Verify agent key can be decrypted via v3 path (Phase 6.1 migration validation)
+      // This validates the v3 encryption is working; actual key usage will be in Phase 6.2
+      const agentKeyResult = await decryptAgentKeyWithFallback(
+        walletAddress,
+        umkResult.umk,
+        wallet
+      );
+      
+      if (agentKeyResult) {
+        // Log migration status for tracking
+        const usedV3 = wallet.agentPrivateKeyEncryptedV3 ? true : false;
+        if (usedV3) {
+          console.log(`[User Webhook] Agent key decryption: v3 path verified for ${walletAddress.slice(0, 8)}...`);
+        } else {
+          console.log(`[User Webhook] Agent key decryption: legacy fallback used for ${walletAddress.slice(0, 8)}... (v3 not yet migrated)`);
+        }
+        // Cleanup the decrypted agent key immediately - for now we continue using encrypted key path
+        agentKeyResult.cleanup();
+      } else {
+        // Agent key decryption failed - this is a critical error
+        umkResult.cleanup();
+        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Agent key decryption failed" });
+        return res.status(403).json({ error: "Agent key decryption failed. Please reconfigure your agent wallet." });
+      }
+      
+      // Cleanup the unwrapped UMK after v3 validation
       umkResult.cleanup();
 
       // Check if bot is active

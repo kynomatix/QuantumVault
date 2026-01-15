@@ -31,7 +31,8 @@ export const wallets = pgTable("wallets", {
   defaultLeverage: integer("default_leverage").default(3),
   slippageBps: integer("slippage_bps").default(50),
   agentPublicKey: text("agent_public_key"),
-  agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),
+  agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),            // Legacy: encrypted with AGENT_ENCRYPTION_KEY
+  agentPrivateKeyEncryptedV3: text("agent_private_key_encrypted_v3"),       // V3: encrypted with key_privkey derived from UMK
   userWebhookSecret: text("user_webhook_secret"),
   notificationsEnabled: boolean("notifications_enabled").default(false),
   notifyTradeExecuted: boolean("notify_trade_executed").default(true),

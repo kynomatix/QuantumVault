@@ -6,6 +6,8 @@ import {
   buildAAD,
   encryptToBase64,
   decryptFromBase64,
+  encryptBuffer,
+  decryptBuffer,
   zeroizeBuffer,
   hashNonce,
   generateNonce,
@@ -14,6 +16,7 @@ import {
   verifyPolicyHmac,
 } from './crypto-v3';
 import { storage } from './storage';
+import { decrypt as legacyDecrypt } from './crypto';
 import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
 import { Keypair } from '@solana/web3.js';
@@ -89,6 +92,13 @@ export async function initializeWalletSecurity(
     createdAt: now,
     expiresAt: now + SESSION_TTL_MS,
   });
+  
+  // Migration: If legacy agent key exists but v3 is missing, migrate to v3
+  // Do this asynchronously to not block session creation
+  if (!isNewWallet && wallet?.agentPrivateKeyEncrypted && !wallet?.agentPrivateKeyEncryptedV3) {
+    migrateAgentKeyToV3(walletAddress, umk, wallet.agentPrivateKeyEncrypted)
+      .catch(err => console.error('[Security] Agent key migration failed (non-blocking):', err));
+  }
   
   return { sessionId, isNewWallet };
 }
@@ -637,6 +647,112 @@ export function verifyBotPolicyHmac(
   } finally {
     zeroizeBuffer(policyKey);
   }
+}
+
+// Agent key v3 encryption/decryption
+// Uses key_privkey subkey derived from UMK for encryption
+
+export function encryptAgentKeyV3(
+  umk: Buffer,
+  agentPrivateKey: Buffer,
+  walletAddress: string
+): string {
+  const privkeySubkey = deriveSubkey(umk, SUBKEY_PURPOSES.AGENT_PRIVKEY);
+  try {
+    const aad = buildAAD(walletAddress, 'AGENT_PRIVKEY');
+    const ciphertext = encryptBuffer(agentPrivateKey, privkeySubkey, aad);
+    return ciphertext.toString('base64');
+  } finally {
+    zeroizeBuffer(privkeySubkey);
+  }
+}
+
+export function decryptAgentKeyV3(
+  umk: Buffer,
+  encryptedV3: string,
+  walletAddress: string
+): Buffer {
+  const privkeySubkey = deriveSubkey(umk, SUBKEY_PURPOSES.AGENT_PRIVKEY);
+  try {
+    const aad = buildAAD(walletAddress, 'AGENT_PRIVKEY');
+    const ciphertext = Buffer.from(encryptedV3, 'base64');
+    return decryptBuffer(ciphertext, privkeySubkey, aad);
+  } finally {
+    zeroizeBuffer(privkeySubkey);
+  }
+}
+
+export async function migrateAgentKeyToV3(
+  walletAddress: string,
+  umk: Buffer,
+  legacyEncryptedKey: string
+): Promise<{ encryptedV3: string } | null> {
+  try {
+    // Decrypt the legacy key
+    const legacyKeyJson = legacyDecrypt(legacyEncryptedKey);
+    const legacyKeyBuffer = Buffer.from(JSON.parse(legacyKeyJson));
+    
+    // Re-encrypt with v3 format
+    const encryptedV3 = encryptAgentKeyV3(umk, legacyKeyBuffer, walletAddress);
+    
+    // Zeroize the legacy key buffer
+    zeroizeBuffer(legacyKeyBuffer);
+    
+    // Store the v3 encrypted key
+    await storage.updateWalletAgentKeyV3(walletAddress, encryptedV3);
+    
+    console.log(`[Security] Migrated agent key to v3 for ${walletAddress.slice(0, 8)}...`);
+    
+    return { encryptedV3 };
+  } catch (err) {
+    console.error(`[Security] Failed to migrate agent key to v3 for ${walletAddress.slice(0, 8)}...:`, err);
+    return null;
+  }
+}
+
+export async function decryptAgentKeyWithFallback(
+  walletAddress: string,
+  umk: Buffer | null,
+  wallet: { agentPrivateKeyEncrypted?: string | null; agentPrivateKeyEncryptedV3?: string | null }
+): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> {
+  // Try v3 first if available and UMK is present
+  if (wallet.agentPrivateKeyEncryptedV3 && umk) {
+    try {
+      const keyBuffer = decryptAgentKeyV3(umk, wallet.agentPrivateKeyEncryptedV3, walletAddress);
+      const secretKey = new Uint8Array(keyBuffer);
+      return {
+        secretKey,
+        cleanup: () => {
+          zeroizeBuffer(keyBuffer);
+          secretKey.fill(0);
+        },
+      };
+    } catch (err) {
+      console.warn(`[Security] V3 agent key decryption failed for ${walletAddress.slice(0, 8)}..., trying legacy`);
+    }
+  }
+  
+  // Fall back to legacy if v3 not available or failed
+  if (wallet.agentPrivateKeyEncrypted) {
+    try {
+      const legacyKeyJson = legacyDecrypt(wallet.agentPrivateKeyEncrypted);
+      const secretKey = new Uint8Array(JSON.parse(legacyKeyJson));
+      
+      // Log that we used legacy fallback (for migration tracking)
+      if (wallet.agentPrivateKeyEncryptedV3) {
+        console.warn(`[Security] Using legacy fallback for ${walletAddress.slice(0, 8)}... (v3 failed)`);
+      }
+      
+      return {
+        secretKey,
+        cleanup: () => secretKey.fill(0),
+      };
+    } catch (err) {
+      console.error(`[Security] Legacy agent key decryption failed for ${walletAddress.slice(0, 8)}...`);
+    }
+  }
+  
+  return null;
 }
 
 export { SUBKEY_PURPOSES };
