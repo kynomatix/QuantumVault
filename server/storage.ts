@@ -181,6 +181,23 @@ export interface IStorage {
     policyHmac?: string;
   }): Promise<Wallet | undefined>;
 
+  // Security v3: Execution authorization
+  updateWalletExecution(address: string, updates: {
+    executionEnabled: boolean;
+    umkEncryptedForExecution: string | null;
+    executionExpiresAt: Date | null;
+  }): Promise<Wallet | undefined>;
+
+  // Security v3: Emergency stop
+  updateWalletEmergencyStop(address: string, updates: {
+    executionEnabled: boolean;
+    umkEncryptedForExecution: string | null;
+    executionExpiresAt: Date | null;
+    emergencyStopTriggered: boolean;
+    emergencyStopAt: Date;
+    emergencyStopBy: string;
+  }): Promise<Wallet | undefined>;
+
   // Security v3: Auth nonces for signature verification
   createAuthNonce(nonce: InsertAuthNonce): Promise<AuthNonce>;
   getAuthNonceByHash(nonceHash: string): Promise<AuthNonce | undefined>;
@@ -1042,6 +1059,29 @@ export class DatabaseStorage implements IStorage {
     executionEnabled?: boolean;
     umkEncryptedForExecution?: string;
     policyHmac?: string;
+  }): Promise<Wallet | undefined> {
+    const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
+    return result[0];
+  }
+
+  // Security v3: Execution authorization
+  async updateWalletExecution(address: string, updates: {
+    executionEnabled: boolean;
+    umkEncryptedForExecution: string | null;
+    executionExpiresAt: Date | null;
+  }): Promise<Wallet | undefined> {
+    const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
+    return result[0];
+  }
+
+  // Security v3: Emergency stop
+  async updateWalletEmergencyStop(address: string, updates: {
+    executionEnabled: boolean;
+    umkEncryptedForExecution: string | null;
+    executionExpiresAt: Date | null;
+    emergencyStopTriggered: boolean;
+    emergencyStopAt: Date;
+    emergencyStopBy: string;
   }): Promise<Wallet | undefined> {
     const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
     return result[0];

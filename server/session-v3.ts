@@ -441,6 +441,141 @@ function getSessionById(sessionId: string): SessionData | undefined {
   return sessions.get(sessionId);
 }
 
+const EXECUTION_TTL_MS = 60 * 60 * 1000;
+
+function getServerExecutionKey(): Buffer {
+  const keyHex = process.env.SERVER_EXECUTION_KEY;
+  if (!keyHex || keyHex.length !== 64) {
+    throw new Error('SERVER_EXECUTION_KEY must be a 64-character hex string (32 bytes)');
+  }
+  return Buffer.from(keyHex, 'hex');
+}
+
+export async function enableExecution(
+  sessionId: string,
+  walletAddress: string
+): Promise<{ success: boolean; error?: string; expiresAt?: Date }> {
+  const session = getSession(sessionId);
+  if (!session || session.walletAddress !== walletAddress) {
+    return { success: false, error: 'Invalid session' };
+  }
+  
+  const wallet = await storage.getWallet(walletAddress);
+  if (!wallet) {
+    return { success: false, error: 'Wallet not found' };
+  }
+  
+  if (wallet.emergencyStopTriggered) {
+    return { success: false, error: 'Emergency stop is active. Cannot enable execution.' };
+  }
+  
+  try {
+    const serverKey = getServerExecutionKey();
+    const aad = buildAAD(walletAddress, 'EUMK_EXEC');
+    const umkEncrypted = encryptToBase64(session.umk, serverKey, aad);
+    
+    const expiresAt = new Date(Date.now() + EXECUTION_TTL_MS);
+    
+    await storage.updateWalletExecution(walletAddress, {
+      executionEnabled: true,
+      umkEncryptedForExecution: umkEncrypted,
+      executionExpiresAt: expiresAt,
+    });
+    
+    console.log(`[Security] Execution enabled for ${walletAddress.slice(0, 8)}... (expires: ${expiresAt.toISOString()})`);
+    
+    return { success: true, expiresAt };
+  } catch (err) {
+    console.error('[Security] Failed to enable execution:', err);
+    return { success: false, error: 'Failed to enable execution' };
+  }
+}
+
+export async function revokeExecution(
+  sessionId: string,
+  walletAddress: string
+): Promise<{ success: boolean; error?: string }> {
+  const session = getSession(sessionId);
+  if (!session || session.walletAddress !== walletAddress) {
+    return { success: false, error: 'Invalid session' };
+  }
+  
+  try {
+    await storage.updateWalletExecution(walletAddress, {
+      executionEnabled: false,
+      umkEncryptedForExecution: null,
+      executionExpiresAt: null,
+    });
+    
+    console.log(`[Security] Execution revoked for ${walletAddress.slice(0, 8)}...`);
+    
+    return { success: true };
+  } catch (err) {
+    console.error('[Security] Failed to revoke execution:', err);
+    return { success: false, error: 'Failed to revoke execution' };
+  }
+}
+
+export async function getUmkForWebhook(
+  walletAddress: string
+): Promise<{ umk: Buffer; cleanup: () => void } | null> {
+  const wallet = await storage.getWallet(walletAddress);
+  
+  if (!wallet?.executionEnabled || !wallet.umkEncryptedForExecution) {
+    return null;
+  }
+  
+  if (!wallet.executionExpiresAt || new Date() > wallet.executionExpiresAt) {
+    await storage.updateWalletExecution(walletAddress, {
+      executionEnabled: false,
+      umkEncryptedForExecution: null,
+      executionExpiresAt: null,
+    });
+    return null;
+  }
+  
+  if (wallet.emergencyStopTriggered) {
+    return null;
+  }
+  
+  try {
+    const serverKey = getServerExecutionKey();
+    const aad = buildAAD(walletAddress, 'EUMK_EXEC');
+    const umk = decryptFromBase64(wallet.umkEncryptedForExecution, serverKey, aad);
+    
+    return {
+      umk,
+      cleanup: () => zeroizeBuffer(umk),
+    };
+  } catch (err) {
+    console.error('[Security] Failed to unwrap UMK for webhook:', err);
+    return null;
+  }
+}
+
+export async function emergencyStopWallet(
+  walletAddress: string,
+  adminId: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    await storage.updateWalletEmergencyStop(walletAddress, {
+      executionEnabled: false,
+      umkEncryptedForExecution: null,
+      executionExpiresAt: null,
+      emergencyStopTriggered: true,
+      emergencyStopAt: new Date(),
+      emergencyStopBy: adminId,
+    });
+    
+    console.log(`[Security] EMERGENCY STOP triggered for ${walletAddress.slice(0, 8)}... by admin ${adminId}`);
+    
+    return { success: true };
+  } catch (err) {
+    console.error('[Security] Failed to trigger emergency stop:', err);
+    return { success: false, error: 'Failed to trigger emergency stop' };
+  }
+}
+
 export function cleanupExpiredSessions(): void {
   const now = Date.now();
   const entries = Array.from(sessions.entries());

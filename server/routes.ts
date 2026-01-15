@@ -15,7 +15,7 @@ import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, invalidateSession, cleanupExpiredNonces, revealMnemonic } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook } from "./session-v3";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
@@ -538,6 +538,105 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Mnemonic reveal error:", error);
       res.status(500).json({ error: "Failed to reveal recovery phrase" });
+    }
+  });
+
+  // Enable execution - allows headless trade execution via webhooks
+  app.post("/api/auth/enable-execution", requireWallet, async (req, res) => {
+    try {
+      const { sessionId, nonce, signature } = req.body;
+      if (!sessionId || !nonce || !signature) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+
+      const signatureBytes = typeof signature === 'string' 
+        ? bs58.decode(signature) 
+        : new Uint8Array(Object.values(signature));
+
+      const sigResult = await verifySignatureAndConsumeNonce(
+        req.walletAddress!,
+        nonce,
+        'enable_execution',
+        signatureBytes,
+        verifySignature
+      );
+
+      if (!sigResult.success) {
+        return res.status(401).json({ error: sigResult.error });
+      }
+
+      const result = await enableExecution(sessionId, req.walletAddress!);
+      
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+      
+      res.json({
+        success: true,
+        expiresAt: result.expiresAt,
+      });
+    } catch (error) {
+      console.error("Enable execution error:", error);
+      res.status(500).json({ error: "Failed to enable execution" });
+    }
+  });
+
+  // Revoke execution - disables headless trade execution
+  app.post("/api/auth/revoke-execution", requireWallet, async (req, res) => {
+    try {
+      const { sessionId, nonce, signature } = req.body;
+      if (!sessionId || !nonce || !signature) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+
+      const signatureBytes = typeof signature === 'string' 
+        ? bs58.decode(signature) 
+        : new Uint8Array(Object.values(signature));
+
+      const sigResult = await verifySignatureAndConsumeNonce(
+        req.walletAddress!,
+        nonce,
+        'revoke_execution',
+        signatureBytes,
+        verifySignature
+      );
+
+      if (!sigResult.success) {
+        return res.status(401).json({ error: sigResult.error });
+      }
+
+      const result = await revokeExecution(sessionId, req.walletAddress!);
+      
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Revoke execution error:", error);
+      res.status(500).json({ error: "Failed to revoke execution" });
+    }
+  });
+
+  // Get execution status
+  app.get("/api/auth/execution-status", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+
+      const isExpired = wallet.executionExpiresAt && new Date() > wallet.executionExpiresAt;
+      
+      res.json({
+        executionEnabled: wallet.executionEnabled && !isExpired,
+        executionExpiresAt: wallet.executionExpiresAt,
+        emergencyStopTriggered: wallet.emergencyStopTriggered,
+        emergencyStopAt: wallet.emergencyStopAt,
+      });
+    } catch (error) {
+      console.error("Execution status error:", error);
+      res.status(500).json({ error: "Failed to get execution status" });
     }
   });
 

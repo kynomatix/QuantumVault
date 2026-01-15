@@ -50,7 +50,13 @@ export const wallets = pgTable("wallets", {
   // Security v3: Execution authorization
   executionEnabled: boolean("execution_enabled").default(false).notNull(),
   umkEncryptedForExecution: text("umk_encrypted_for_execution"),    // EUMK_exec: UMK wrapped with SERVER_EXECUTION_KEY
+  executionExpiresAt: timestamp("execution_expires_at"),            // EUMK_exec expiry (1 hour)
   policyHmac: text("policy_hmac"),                                  // HMAC of execution policy for integrity
+  
+  // Security v3: Emergency controls
+  emergencyStopTriggered: boolean("emergency_stop_triggered").default(false).notNull(),
+  emergencyStopAt: timestamp("emergency_stop_at"),
+  emergencyStopBy: text("emergency_stop_by"),                       // Admin ID who triggered
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
   lastSeen: timestamp("last_seen").defaultNow().notNull(),
