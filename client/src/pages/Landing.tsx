@@ -70,9 +70,9 @@ export default function Landing() {
   const glassOpacity = useTransform(scrollY, [0, 120, 300, 550], [0, 0.85, 0.85, 0]);
   const glassBlur = useTransform(scrollY, [0, 120], [8, 20]);
   
-  // Hero frost effect - blur and dim the background as text appears
-  const heroFrostOpacity = useTransform(scrollY, [0, 120, 300, 550], [0, 0.6, 0.6, 0]);
-  const heroFrostBlur = useTransform(scrollY, [0, 120], [0, 8]);
+  // Hero frost effect - blur gets stronger as user scrolls down
+  const heroFrostOpacity = useTransform(scrollY, [0, 80, 800], [0, 0.4, 0.7]);
+  const heroFrostBlur = useTransform(scrollY, [0, 80, 800], [0, 4, 16]);
   const heroFrostBlurStyle = useMotionTemplate`blur(${heroFrostBlur}px)`;
   
   // Progressive darkening as page scrolls down
