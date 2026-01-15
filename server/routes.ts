@@ -159,38 +159,33 @@ async function routeSignalToSubscribers(
           );
 
           if (closeResult.success) {
-            const fillPrice = closeResult.fillPrice ?? parseFloat(signal.price);
-            const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+            const fillPrice = parseFloat(signal.price);
+            const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
             await storage.createBotTrade({
               tradingBotId: subBot.id,
               walletAddress: subBot.walletAddress,
               market: subBot.market,
-              side: 'CLOSE',
+              side: position.side === 'LONG' ? 'SHORT' : 'LONG',
               size: Math.abs(position.size).toFixed(8),
               price: fillPrice.toFixed(6),
               status: 'executed',
-              fee: (closeResult.fee ?? 0).toString(),
-              pnl: (closeResult.realizedPnl ?? 0).toString(),
-              txSignature: closeResult.txSignature || null,
+              fee: '0',
+              txSignature: closeResult.signature || null,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
             });
             
-            if (closeResult.realizedPnl !== undefined) {
-              await storage.updateTradingBotStats(subBot.id, {
-                ...stats,
-                totalTrades: (stats.totalTrades || 0) + 1,
-                winningTrades: closeResult.realizedPnl > 0 ? (stats.winningTrades || 0) + 1 : stats.winningTrades,
-                losingTrades: closeResult.realizedPnl < 0 ? (stats.losingTrades || 0) + 1 : stats.losingTrades,
-                totalPnl: (stats.totalPnl || 0) + closeResult.realizedPnl,
-                lastTradeAt: new Date().toISOString(),
-              });
-            }
+            await storage.updateTradingBotStats(subBot.id, {
+              ...stats,
+              totalTrades: (stats.totalTrades || 0) + 1,
+              totalVolume: (stats.totalVolume || 0) + Math.abs(position.size) * fillPrice,
+              lastTradeAt: new Date().toISOString(),
+            });
 
             sendTradeNotification(subWallet.address, {
               type: 'trade_executed',
               botName: subBot.name,
               market: subBot.market,
-              side: 'CLOSE',
+              side: position.side === 'LONG' ? 'SHORT' : 'LONG',
               size: Math.abs(position.size) * fillPrice,
               price: fillPrice,
             }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
@@ -229,8 +224,7 @@ async function routeSignalToSubscribers(
 
           if (orderResult.success) {
             const fillPrice = orderResult.fillPrice ?? oraclePrice;
-            const tradeFee = orderResult.fee ?? 0;
-            const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+            const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
 
             await storage.createBotTrade({
               tradingBotId: subBot.id,
@@ -240,7 +234,7 @@ async function routeSignalToSubscribers(
               size: contractSize.toFixed(8),
               price: fillPrice.toFixed(6),
               status: 'executed',
-              fee: tradeFee.toString(),
+              fee: '0',
               txSignature: orderResult.txSignature || orderResult.signature || null,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
             });
@@ -248,6 +242,7 @@ async function routeSignalToSubscribers(
             await storage.updateTradingBotStats(subBot.id, {
               ...stats,
               totalTrades: (stats.totalTrades || 0) + 1,
+              totalVolume: (stats.totalVolume || 0) + contractSize * fillPrice,
               lastTradeAt: new Date().toISOString(),
             });
 
