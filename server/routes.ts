@@ -3623,6 +3623,45 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Bot is paused" });
       }
 
+      // Security v3: Check execution authorization
+      const ownerWallet = await storage.getWallet(bot.walletAddress);
+      if (!ownerWallet) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Wallet not found" });
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      
+      if (ownerWallet.emergencyStopTriggered) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Emergency stop active" });
+        return res.status(403).json({ error: "Trade execution blocked: Emergency stop is active for this wallet" });
+      }
+      
+      if (!ownerWallet.executionEnabled) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required" });
+        return res.status(403).json({ error: "Trade execution disabled. Please enable automated trading in the app." });
+      }
+      
+      if (ownerWallet.executionExpiresAt && new Date() > ownerWallet.executionExpiresAt) {
+        // Clear expired execution authorization
+        await storage.updateWalletExecution(bot.walletAddress, {
+          executionEnabled: false,
+          umkEncryptedForExecution: null,
+          executionExpiresAt: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization expired" });
+        return res.status(403).json({ error: "Trade execution authorization expired. Please re-enable automated trading." });
+      }
+
+      // Security v3: Verify execution key can be unwrapped (validates SERVER_EXECUTION_KEY is correct)
+      // This ensures the EUMK_exec is valid and the server has the correct key material
+      const umkResult = await getUmkForWebhook(bot.walletAddress);
+      if (!umkResult) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Invalid execution authorization" });
+        return res.status(403).json({ error: "Invalid execution authorization. Please re-enable automated trading." });
+      }
+      // Cleanup the unwrapped UMK immediately - we only need to verify authorization was valid
+      // Future: Use this UMK to derive key_privkey and decrypt agent key via v3 crypto
+      umkResult.cleanup();
+
       // Parse TradingView strategy signal
       // Expected JSON format:
       // {
@@ -4674,6 +4713,37 @@ export async function registerRoutes(
         await storage.updateWebhookLog(log.id, { errorMessage: "Bot does not belong to this wallet" });
         return res.status(403).json({ error: "Bot does not belong to this wallet" });
       }
+
+      // Security v3: Check execution authorization
+      if (wallet.emergencyStopTriggered) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Emergency stop active" });
+        return res.status(403).json({ error: "Trade execution blocked: Emergency stop is active for this wallet" });
+      }
+      
+      if (!wallet.executionEnabled) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required" });
+        return res.status(403).json({ error: "Trade execution disabled. Please enable automated trading in the app." });
+      }
+      
+      if (wallet.executionExpiresAt && new Date() > wallet.executionExpiresAt) {
+        // Clear expired execution authorization
+        await storage.updateWalletExecution(walletAddress, {
+          executionEnabled: false,
+          umkEncryptedForExecution: null,
+          executionExpiresAt: null,
+        });
+        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization expired" });
+        return res.status(403).json({ error: "Trade execution authorization expired. Please re-enable automated trading." });
+      }
+
+      // Security v3: Verify execution key can be unwrapped (validates SERVER_EXECUTION_KEY is correct)
+      const umkResult = await getUmkForWebhook(walletAddress);
+      if (!umkResult) {
+        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Invalid execution authorization" });
+        return res.status(403).json({ error: "Invalid execution authorization. Please re-enable automated trading." });
+      }
+      // Cleanup the unwrapped UMK immediately
+      umkResult.cleanup();
 
       // Check if bot is active
       if (!bot.isActive) {
