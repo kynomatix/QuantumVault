@@ -644,6 +644,59 @@ export async function registerRoutes(
     cleanupExpiredNonces().catch(console.error);
   }, 60 * 1000);
 
+  // Emergency admin stop - immediately disables all execution for a wallet
+  // Requires ADMIN_SECRET environment variable for authorization
+  app.post("/api/admin/emergency-stop", async (req, res) => {
+    try {
+      const adminSecret = process.env.ADMIN_SECRET;
+      if (!adminSecret) {
+        console.error("[Emergency Stop] ADMIN_SECRET not configured");
+        return res.status(503).json({ error: "Admin operations not configured" });
+      }
+
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Admin authorization required" });
+      }
+
+      const providedSecret = authHeader.slice(7);
+      if (providedSecret !== adminSecret) {
+        console.warn("[Emergency Stop] Invalid admin secret attempted");
+        return res.status(403).json({ error: "Invalid admin authorization" });
+      }
+
+      const { walletAddress } = req.body;
+      if (!walletAddress) {
+        return res.status(400).json({ error: "Wallet address required" });
+      }
+
+      const wallet = await storage.getWallet(walletAddress);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+
+      // Use fixed admin ID for audit trail - adminId is not client-supplied to prevent spoofing
+      const adminId = "platform_admin";
+      const requestIp = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+      
+      const result = await emergencyStopWallet(walletAddress, adminId);
+      
+      if (!result.success) {
+        return res.status(500).json({ error: result.error });
+      }
+
+      console.log(`[Emergency Stop] Admin triggered emergency stop for wallet ${walletAddress.slice(0, 8)}... from IP: ${requestIp}`);
+      
+      res.json({ 
+        success: true, 
+        message: "Emergency stop activated. All execution disabled for this wallet." 
+      });
+    } catch (error) {
+      console.error("Emergency stop error:", error);
+      res.status(500).json({ error: "Failed to trigger emergency stop" });
+    }
+  });
+
   // Update policy HMAC for a bot (requires active session)
   app.post("/api/trading-bots/:id/update-policy-hmac", requireWallet, async (req, res) => {
     try {
