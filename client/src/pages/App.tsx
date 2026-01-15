@@ -134,6 +134,7 @@ export default function AppPage() {
   const [closingAllPositions, setClosingAllPositions] = useState(false);
   const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
   const [resettingDriftAccount, setResettingDriftAccount] = useState(false);
+  const [resetStep, setResetStep] = useState<'idle' | 'closing' | 'settling' | 'sweeping' | 'withdrawing' | 'deleting' | 'complete'>('idle');
   const [notificationDropdownOpen, setNotificationDropdownOpen] = useState(false);
   const [savingNotifications, setSavingNotifications] = useState(false);
   const [referralCode, setReferralCode] = useState<string | null>(null);
@@ -382,6 +383,19 @@ export default function AppPage() {
 
   const handleResetDriftAccount = async () => {
     setResettingDriftAccount(true);
+    setResetStep('closing');
+    
+    // Simulate step progression while the actual request runs
+    const stepTimer = setInterval(() => {
+      setResetStep(prev => {
+        if (prev === 'closing') return 'settling';
+        if (prev === 'settling') return 'sweeping';
+        if (prev === 'sweeping') return 'withdrawing';
+        if (prev === 'withdrawing') return 'deleting';
+        return prev;
+      });
+    }, 3000);
+    
     try {
       const res = await fetch('/api/wallet/reset-drift-account', {
         method: 'POST',
@@ -389,11 +403,17 @@ export default function AppPage() {
         credentials: 'include',
       });
       
+      clearInterval(stepTimer);
+      setResetStep('complete');
+      
       const data = await res.json();
       
       if (res.status === 400 || res.status === 500) {
         throw new Error(data.message || data.error || 'Failed to reset Drift account');
       }
+      
+      // Show completion for a moment before closing
+      await new Promise(resolve => setTimeout(resolve, 1500));
       
       if (res.status === 207 || data.partialSuccess) {
         toast({ 
@@ -411,13 +431,16 @@ export default function AppPage() {
       setResetDriftDialogOpen(false);
       refetchBots();
     } catch (error: any) {
+      clearInterval(stepTimer);
       toast({ 
         title: 'Reset Failed', 
         description: error.message || 'Failed to reset Drift account',
         variant: 'destructive' 
       });
+      setResetDriftDialogOpen(false);
     } finally {
       setResettingDriftAccount(false);
+      setResetStep('idle');
     }
   };
 
@@ -2549,62 +2572,144 @@ export default function AppPage() {
             className="gradient-border p-6 noise max-w-md w-full mx-4"
             data-testid="modal-reset-drift"
           >
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center">
-                <Trash2 className="w-6 h-6 text-red-400" />
-              </div>
-              <div>
-                <h3 className="font-display font-semibold text-lg">Reset Drift Account</h3>
-                <p className="text-sm text-muted-foreground">Close all positions and withdraw funds</p>
-              </div>
-            </div>
-
-            <div className="mb-6">
-              <div className="bg-primary/10 border border-primary/30 rounded-lg p-4 mb-4">
-                <div className="flex items-start gap-3">
-                  <ArrowUpFromLine className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
+            {resettingDriftAccount ? (
+              <>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-12 h-12 rounded-xl bg-primary/20 flex items-center justify-center">
+                    <RefreshCw className="w-6 h-6 text-primary animate-spin" />
+                  </div>
                   <div>
-                    <p className="text-sm font-medium">This will automatically:</p>
-                    <ul className="text-sm text-muted-foreground mt-2 list-disc ml-4 space-y-1">
-                      <li>Close all open trading positions</li>
-                      <li>Withdraw all funds to your agent wallet</li>
-                      <li>Delete all Drift subaccounts</li>
-                      <li>Recover any rent deposits</li>
-                    </ul>
+                    <h3 className="font-display font-semibold text-lg">Resetting Account</h3>
+                    <p className="text-sm text-muted-foreground">Please wait while we reset your Drift account...</p>
                   </div>
                 </div>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                This process may take a minute to complete. Your funds will be returned to your agent wallet.
-              </p>
-            </div>
 
-            <div className="flex gap-3">
-              <Button 
-                variant="outline" 
-                className="flex-1" 
-                onClick={() => setResetDriftDialogOpen(false)}
-                disabled={resettingDriftAccount}
-                data-testid="button-cancel-reset-drift"
-              >
-                Cancel
-              </Button>
-              <Button 
-                className="flex-1 bg-red-500 hover:bg-red-600 text-white"
-                onClick={handleResetDriftAccount}
-                disabled={resettingDriftAccount}
-                data-testid="button-confirm-reset-drift"
-              >
-                {resettingDriftAccount ? (
-                  <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    Resetting...
-                  </>
-                ) : (
-                  'Reset Account'
-                )}
-              </Button>
-            </div>
+                <div className="py-4 space-y-3">
+                  {[
+                    { id: 'closing', label: 'Closing open positions', icon: XCircle },
+                    { id: 'settling', label: 'Settling PnL to USDC', icon: Activity },
+                    { id: 'sweeping', label: 'Sweeping funds to main account', icon: ArrowUpFromLine },
+                    { id: 'withdrawing', label: 'Withdrawing to agent wallet', icon: Wallet },
+                    { id: 'deleting', label: 'Deleting subaccounts & recovering rent', icon: Trash2 },
+                    { id: 'complete', label: 'Reset complete', icon: Check },
+                  ].map((step, index) => {
+                    const stepOrder = ['closing', 'settling', 'sweeping', 'withdrawing', 'deleting', 'complete'];
+                    const currentIndex = stepOrder.indexOf(resetStep);
+                    const stepIndex = stepOrder.indexOf(step.id);
+                    const status = stepIndex < currentIndex ? 'complete' : stepIndex === currentIndex ? 'active' : 'pending';
+                    const Icon = step.icon;
+                    
+                    return (
+                      <motion.div
+                        key={step.id}
+                        initial={{ opacity: 0, x: -20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: index * 0.1 }}
+                        className={`flex items-center gap-3 p-3 rounded-lg transition-colors ${
+                          status === 'active' 
+                            ? 'bg-primary/10 border border-primary/30' 
+                            : status === 'complete'
+                              ? 'bg-green-500/10 border border-green-500/30'
+                              : 'bg-muted/30'
+                        }`}
+                      >
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                          status === 'active'
+                            ? 'bg-primary/20'
+                            : status === 'complete'
+                              ? 'bg-green-500/20'
+                              : 'bg-muted/50'
+                        }`}>
+                          {status === 'active' ? (
+                            <Loader2 className="w-4 h-4 text-primary animate-spin" />
+                          ) : status === 'complete' ? (
+                            <Check className="w-4 h-4 text-green-500" />
+                          ) : (
+                            <Icon className="w-4 h-4 text-muted-foreground" />
+                          )}
+                        </div>
+                        <p className={`text-sm font-medium flex-1 ${
+                          status === 'active' 
+                            ? 'text-primary' 
+                            : status === 'complete'
+                              ? 'text-green-500'
+                              : 'text-muted-foreground'
+                        }`}>
+                          {step.label}
+                        </p>
+                        {status === 'active' && (
+                          <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            className="flex items-center gap-1"
+                          >
+                            <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" />
+                            <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" style={{ animationDelay: '0.2s' }} />
+                            <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" style={{ animationDelay: '0.4s' }} />
+                          </motion.div>
+                        )}
+                      </motion.div>
+                    );
+                  })}
+                </div>
+
+                <p className="text-center text-xs text-muted-foreground mt-2">
+                  This may take up to a minute. Please don't close this window.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center">
+                    <Trash2 className="w-6 h-6 text-red-400" />
+                  </div>
+                  <div>
+                    <h3 className="font-display font-semibold text-lg">Reset Drift Account</h3>
+                    <p className="text-sm text-muted-foreground">Close all positions and withdraw funds</p>
+                  </div>
+                </div>
+
+                <div className="mb-6">
+                  <div className="bg-primary/10 border border-primary/30 rounded-lg p-4 mb-4">
+                    <div className="flex items-start gap-3">
+                      <ArrowUpFromLine className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-sm font-medium">This will automatically:</p>
+                        <ul className="text-sm text-muted-foreground mt-2 list-disc ml-4 space-y-1">
+                          <li>Close all open trading positions</li>
+                          <li>Withdraw all funds to your agent wallet</li>
+                          <li>Delete all Drift subaccounts</li>
+                          <li>Recover any rent deposits</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    This process may take a minute to complete. Your funds will be returned to your agent wallet.
+                  </p>
+                </div>
+
+                <div className="flex gap-3">
+                  <Button 
+                    variant="outline" 
+                    className="flex-1" 
+                    onClick={() => setResetDriftDialogOpen(false)}
+                    disabled={resettingDriftAccount}
+                    data-testid="button-cancel-reset-drift"
+                  >
+                    Cancel
+                  </Button>
+                  <Button 
+                    className="flex-1 bg-red-500 hover:bg-red-600 text-white"
+                    onClick={handleResetDriftAccount}
+                    disabled={resettingDriftAccount}
+                    data-testid="button-confirm-reset-drift"
+                  >
+                    Reset Account
+                  </Button>
+                </div>
+              </>
+            )}
           </motion.div>
         </div>
       )}
