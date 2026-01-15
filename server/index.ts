@@ -5,6 +5,7 @@ import { createServer } from "http";
 import { storage } from "./storage";
 import { startPeriodicReconciliation } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
+import { startPnlSnapshotJob } from "./pnl-snapshot-job";
 
 const app = express();
 const httpServer = createServer(app);
@@ -126,6 +127,9 @@ app.use((req, res, next) => {
       
       // Start orphaned subaccount cleanup (retries closing subaccounts that failed during bot deletion)
       startOrphanedSubaccountCleanup();
+      
+      // Start PnL snapshot job for marketplace time-based metrics (7d/30d/90d)
+      startPnlSnapshotJob();
     },
   );
 })();

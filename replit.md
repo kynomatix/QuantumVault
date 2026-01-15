@@ -44,6 +44,21 @@ Preferred communication style: Simple, everyday language.
 - **Webhook Deduplication**: `webhook_logs` table prevents duplicate processing of TradingView signals.
 - **Equity Event Tracking**: Monitors deposits and withdrawals for transaction history.
 
+### Marketplace Feature (Jan 2026)
+The marketplace allows users to publish their successful trading bots and let others subscribe to copy their signals.
+
+- **Publishing Bots**: Users can publish their signal bots (grid bots excluded) to the marketplace. Published bots display: bot name, market/ticker, win rate, subscriber count, total capital under management, creator username + X handle, and time-filtered PnL (7d/30d/90d/All-time).
+- **Database Schema**: 
+  - `published_bots`: Stores published bot listings with creator info, performance stats, and activity status
+  - `bot_subscriptions`: Tracks active subscriptions linking subscribers to published bots
+  - `pnl_snapshots`: Historical PnL data for calculating time-based performance metrics
+- **Subscription Flow**: When a user subscribes, a new trading bot is created with the same market/leverage settings but the subscriber's capital. The subscriber bot is linked via `sourcePublishedBotId` field.
+- **Signal Routing**: When a source bot receives a TradingView webhook signal, `routeSignalToSubscribers()` forwards the signal to all active subscriber bots. Each subscriber's trade is sized proportionally based on their own capital allocation. Routing is async and non-blocking to not delay source bot responses.
+- **Active Subscription Filtering**: `getSubscriberBotsBySourceId()` joins with `bot_subscriptions` table to only return bots with active subscriptions. Cancelled subscriptions don't receive signals.
+- **PnL Snapshot Job**: Background job runs every 6 hours to capture equity snapshots for all published bots. This data powers the 7d/30d/90d PnL metrics displayed on marketplace cards.
+- **Search & Filtering**: Marketplace UI supports searching by bot name, ticker/market, and creator username. Featured bots section shows top performers ranked by PnL percentage with time filters.
+- **Risk Disclaimers**: Both publish and subscribe flows include risk disclaimers informing users about the risks of automated trading and copy trading.
+
 ## External Dependencies
 
 ### Blockchain & DeFi
