@@ -1094,24 +1094,11 @@ export async function registerRoutes(
             }
           }
 
-          // 3d. Verify subaccount 0 is empty before deletion
-          const verifyInfo = await getDriftAccountInfo(agentPubKey, 0);
-          if (verifyInfo.hasOpenPositions || verifyInfo.usdcBalance > 0.001 || verifyInfo.totalCollateral > 0.001) {
-            log(`Main account still has funds ($${verifyInfo.usdcBalance.toFixed(2)}) or positions, cannot delete`);
-            errors.push(`Main account still has funds ($${verifyInfo.usdcBalance.toFixed(2)}) or positions - cannot delete`);
-          } else {
-            // 3e. Delete subaccount 0 (and UserStats)
-            log(`Deleting main account (subaccount 0)...`);
-            const deleteResult = await closeDriftSubaccount(agentKey, 0);
-            if (deleteResult.success) {
-              deletedSubaccounts.push(0);
-              log(`Deleted subaccount 0: ${deleteResult.signature}`);
-              progress.push(`Deleted main Drift account`);
-            } else {
-              log(`Failed to delete subaccount 0: ${deleteResult.error}`);
-              errors.push(`Failed to delete main account: ${deleteResult.error}`);
-            }
-          }
+          // 3d. Note: Main account (subaccount 0) cannot be deleted because it was created with a referral code.
+          // Drift protocol prevents deletion of referred accounts. The ~0.035 SOL rent is forfeited,
+          // but the account can be reused for future trading without needing to recreate it.
+          log(`Main account (subaccount 0) kept active - referred accounts cannot be deleted by Drift protocol rules`);
+          progress.push(`Main Drift account preserved (can be reused for trading)`);
           
         } catch (e: any) {
           log(`Error processing main account: ${e.message}`);

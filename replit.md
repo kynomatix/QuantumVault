@@ -30,7 +30,7 @@ Preferred communication style: Simple, everyday language.
     -   **Profit Reinvest**: Allows bots to use full available margin for trade sizing, compounding profits.
     -   **Auto Withdraw Threshold**: Automatically withdraws excess profits to the agent wallet when equity exceeds a defined threshold after position closes.
 -   **Dynamic USDC Deposit APY**: Fetches real-time USDC lending APY from Drift Data API (`/rateHistory?marketIndex=0&marketType=spot`) with 5-minute caching. Displayed with `~` prefix in bot management drawer (e.g., `~1.7%`). Used for calculating estimated daily interest earnings.
--   **Reset Drift Account Feature**: A one-click solution to fully reset a user's Drift account, closing positions, sweeping funds, withdrawing to agent wallet, deleting subaccounts, and clearing bot assignments.
+-   **Reset Drift Account Feature**: A one-click solution to fully reset a user's Drift account, closing positions, settling PnL, sweeping funds, withdrawing to agent wallet, deleting bot subaccounts, and clearing bot assignments. Note: The main Drift account (subaccount 0) is preserved because Drift protocol prevents deletion of referred accounts - this is intentional to maintain referral fee benefits. The ~0.035 SOL rent is forfeited but the account can be reused for future trading.
 -   **Single Page Architecture**: All functionality under `/app` with tab-based navigation (Dashboard, Bots, Wallet, Leaderboard, Settings).
 -   **Real-Time Data**: Tracks running positions, PnL, and fees using `PositionService` and SDK's `decodeUser` for reliable, stateless account parsing.
 -   **Account Health Metrics**: Uses SDK `decodeUser` for accurate account health, collateral, and liquidation price estimates.
