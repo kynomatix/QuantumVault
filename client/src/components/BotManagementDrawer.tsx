@@ -731,31 +731,35 @@ export function BotManagementDrawer({
                 onClick={handlePauseResume}
                 disabled={pauseLoading}
                 data-testid="button-pause-resume"
-                className="group w-9 h-9 hover:w-[85px] transition-[width] duration-150 ease-out overflow-hidden flex items-center justify-center"
+                className="group w-9 h-9 hover:w-[85px] transition-[width] duration-150 ease-out overflow-hidden"
               >
-                {pauseLoading ? (
-                  <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
-                ) : (localBot?.isActive ?? displayBot?.isActive) ? (
-                  <>
-                    <Pause className="w-4 h-4 flex-shrink-0" />
-                    <span className="w-0 opacity-0 group-hover:w-[45px] group-hover:opacity-100 group-hover:ml-1.5 transition-[width,opacity] duration-150 ease-out overflow-hidden whitespace-nowrap text-sm">Pause</span>
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-4 h-4 flex-shrink-0" />
-                    <span className="w-0 opacity-0 group-hover:w-[50px] group-hover:opacity-100 group-hover:ml-1.5 transition-[width,opacity] duration-150 ease-out overflow-hidden whitespace-nowrap text-sm">Resume</span>
-                  </>
-                )}
+                <span className="flex items-center justify-center w-full">
+                  {pauseLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (localBot?.isActive ?? displayBot?.isActive) ? (
+                    <>
+                      <Pause className="w-4 h-4 flex-shrink-0" />
+                      <span className="w-0 opacity-0 group-hover:w-[45px] group-hover:opacity-100 group-hover:ml-1.5 transition-[width,opacity] duration-150 ease-out overflow-hidden whitespace-nowrap text-sm">Pause</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4 flex-shrink-0" />
+                      <span className="w-0 opacity-0 group-hover:w-[50px] group-hover:opacity-100 group-hover:ml-1.5 transition-[width,opacity] duration-150 ease-out overflow-hidden whitespace-nowrap text-sm">Resume</span>
+                    </>
+                  )}
+                </span>
               </Button>
               <Button 
                 variant="default" 
                 size="icon"
                 onClick={() => setPublishModalOpen(true)}
-                className="group w-9 h-9 hover:w-[80px] transition-[width] duration-150 ease-out overflow-hidden flex items-center justify-center bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                className="group w-9 h-9 hover:w-[80px] transition-[width] duration-150 ease-out overflow-hidden bg-gradient-to-r from-primary to-accent hover:opacity-90"
                 data-testid="button-share"
               >
-                <Share2 className="w-4 h-4 flex-shrink-0" />
-                <span className="w-0 opacity-0 group-hover:w-[40px] group-hover:opacity-100 group-hover:ml-1.5 transition-[width,opacity] duration-150 ease-out overflow-hidden whitespace-nowrap text-sm">Share</span>
+                <span className="flex items-center justify-center w-full">
+                  <Share2 className="w-4 h-4 flex-shrink-0" />
+                  <span className="w-0 opacity-0 group-hover:w-[40px] group-hover:opacity-100 group-hover:ml-1.5 transition-[width,opacity] duration-150 ease-out overflow-hidden whitespace-nowrap text-sm">Share</span>
+                </span>
               </Button>
             </div>
           </div>
