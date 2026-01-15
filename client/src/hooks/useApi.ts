@@ -289,3 +289,205 @@ export function useBotHealth(botId: string | null, enabled: boolean = false) {
     staleTime: 5000,
   });
 }
+
+// Marketplace types
+export interface PublishedBot {
+  id: string;
+  tradingBotId: string;
+  creatorWalletAddress: string;
+  name: string;
+  description: string | null;
+  market: string;
+  isActive: boolean;
+  isFeatured: boolean;
+  subscriberCount: number;
+  totalCapitalInvested: string;
+  totalTrades: number;
+  winningTrades: number;
+  pnlPercent7d: string | null;
+  pnlPercent30d: string | null;
+  pnlPercent90d: string | null;
+  pnlPercentAllTime: string | null;
+  publishedAt: string;
+  creator: {
+    displayName: string | null;
+    xUsername: string | null;
+  };
+}
+
+export interface MarketplaceSubscription {
+  id: string;
+  publishedBotId: string;
+  capitalInvested: string;
+  leverage: number;
+  isActive: boolean;
+  subscribedAt: string;
+  publishedBot: PublishedBot;
+}
+
+// Marketplace API functions
+async function fetchMarketplace(options?: { search?: string; market?: string; sortBy?: string; limit?: number }): Promise<PublishedBot[]> {
+  const params = new URLSearchParams();
+  if (options?.search) params.set('search', options.search);
+  if (options?.market) params.set('market', options.market);
+  if (options?.sortBy) params.set('sortBy', options.sortBy);
+  if (options?.limit) params.set('limit', options.limit.toString());
+  
+  const url = `/api/marketplace${params.toString() ? '?' + params.toString() : ''}`;
+  const res = await fetch(url, { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch marketplace");
+  return res.json();
+}
+
+async function fetchPublishedBot(id: string): Promise<PublishedBot> {
+  const res = await fetch(`/api/marketplace/${id}`, { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch published bot");
+  return res.json();
+}
+
+async function fetchMySubscriptions(): Promise<MarketplaceSubscription[]> {
+  const res = await fetch("/api/my-subscriptions", { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch subscriptions");
+  return res.json();
+}
+
+async function checkBotPublished(botId: string): Promise<{ published: boolean; publishedBotId?: string }> {
+  const res = await fetch(`/api/trading-bots/${botId}/published`, { credentials: "include" });
+  if (!res.ok) return { published: false };
+  return res.json();
+}
+
+async function publishBot(botId: string, data: { name: string; description?: string }): Promise<PublishedBot> {
+  const res = await fetch(`/api/trading-bots/${botId}/publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.error || "Failed to publish bot");
+  }
+  return res.json();
+}
+
+async function unpublishBot(publishedBotId: string): Promise<void> {
+  const res = await fetch(`/api/marketplace/${publishedBotId}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.error || "Failed to unpublish bot");
+  }
+}
+
+async function subscribeToPublishedBot(publishedBotId: string, data: { capitalInvested: number; leverage: number }): Promise<any> {
+  const res = await fetch(`/api/marketplace/${publishedBotId}/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.error || "Failed to subscribe");
+  }
+  return res.json();
+}
+
+async function unsubscribeFromBot(publishedBotId: string): Promise<void> {
+  const res = await fetch(`/api/marketplace/${publishedBotId}/unsubscribe`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.error || "Failed to unsubscribe");
+  }
+}
+
+// Marketplace hooks
+export function useMarketplace(options?: { search?: string; market?: string; sortBy?: string; limit?: number }) {
+  return useQuery({
+    queryKey: ["marketplace", options?.search, options?.market, options?.sortBy, options?.limit],
+    queryFn: () => fetchMarketplace(options),
+    staleTime: 10000,
+  });
+}
+
+export function usePublishedBot(id: string | null) {
+  return useQuery({
+    queryKey: ["publishedBot", id],
+    queryFn: () => fetchPublishedBot(id!),
+    enabled: !!id,
+  });
+}
+
+export function useMyMarketplaceSubscriptions() {
+  const { publicKeyString, sessionConnected } = useWallet();
+  return useQuery({
+    queryKey: ["myMarketplaceSubscriptions", publicKeyString],
+    queryFn: fetchMySubscriptions,
+    enabled: !!publicKeyString && sessionConnected,
+  });
+}
+
+export function useBotPublishedStatus(botId: string | null) {
+  return useQuery({
+    queryKey: ["botPublished", botId],
+    queryFn: () => checkBotPublished(botId!),
+    enabled: !!botId,
+    staleTime: 30000,
+  });
+}
+
+export function usePublishBot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ botId, data }: { botId: string; data: { name: string; description?: string } }) =>
+      publishBot(botId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["marketplace"] });
+      queryClient.invalidateQueries({ queryKey: ["botPublished"] });
+      queryClient.invalidateQueries({ queryKey: ["tradingBots"] });
+    },
+  });
+}
+
+export function useUnpublishBot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (publishedBotId: string) => unpublishBot(publishedBotId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["marketplace"] });
+      queryClient.invalidateQueries({ queryKey: ["botPublished"] });
+      queryClient.invalidateQueries({ queryKey: ["tradingBots"] });
+    },
+  });
+}
+
+export function useSubscribeToPublishedBot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ publishedBotId, data }: { publishedBotId: string; data: { capitalInvested: number; leverage: number } }) =>
+      subscribeToPublishedBot(publishedBotId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["marketplace"] });
+      queryClient.invalidateQueries({ queryKey: ["myMarketplaceSubscriptions"] });
+      queryClient.invalidateQueries({ queryKey: ["tradingBots"] });
+    },
+  });
+}
+
+export function useUnsubscribeFromBot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (publishedBotId: string) => unsubscribeFromBot(publishedBotId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["marketplace"] });
+      queryClient.invalidateQueries({ queryKey: ["myMarketplaceSubscriptions"] });
+      queryClient.invalidateQueries({ queryKey: ["tradingBots"] });
+    },
+  });
+}

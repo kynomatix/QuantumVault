@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, type HealthMetrics } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, type HealthMetrics, type PublishedBot } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
@@ -60,6 +60,8 @@ import { CreateBotModal } from '@/components/CreateBotModal';
 import { TradeHistoryModal } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
+import { PublishBotModal } from '@/components/PublishBotModal';
+import { SubscribeBotModal } from '@/components/SubscribeBotModal';
 
 interface TradingBot {
   id: string;
@@ -87,22 +89,8 @@ import { Transaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 
-type MarketplaceBot = { 
-  id: string; 
-  name: string; 
-  type: string; 
-  market: string; 
-  apr: number; 
-  subscribers: number; 
-  creator: string; 
-  rating: number; 
-  minDeposit: number; 
-  featured: boolean;
-};
-
-const marketplaceBots: MarketplaceBot[] = [];
-
 type NavItem = 'dashboard' | 'bots' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet';
+type MarketplaceSortBy = 'pnl7d' | 'pnl30d' | 'pnl90d' | 'pnlAllTime' | 'subscribers';
 
 export default function AppPage() {
   const [, navigate] = useLocation();
@@ -145,6 +133,14 @@ export default function AppPage() {
   const [resettingDriftAccount, setResettingDriftAccount] = useState(false);
   const [notificationDropdownOpen, setNotificationDropdownOpen] = useState(false);
   const [savingNotifications, setSavingNotifications] = useState(false);
+  
+  // Marketplace state
+  const [marketplaceSearch, setMarketplaceSearch] = useState('');
+  const [marketplaceSortBy, setMarketplaceSortBy] = useState<MarketplaceSortBy>('pnlAllTime');
+  const [publishModalOpen, setPublishModalOpen] = useState(false);
+  const [botToPublish, setBotToPublish] = useState<{ id: string; name: string; market: string } | null>(null);
+  const [subscribeModalOpen, setSubscribeModalOpen] = useState(false);
+  const [botToSubscribe, setBotToSubscribe] = useState<PublishedBot | null>(null);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -160,6 +156,13 @@ export default function AppPage() {
   const subscribeBot = useSubscribeToBot();
   const updateSub = useUpdateSubscription();
   const reconcilePositions = useReconcilePositions();
+  
+  // Marketplace data
+  const { data: marketplaceData, isLoading: marketplaceLoading } = useMarketplace({
+    search: marketplaceSearch || undefined,
+    sortBy: marketplaceSortBy,
+  });
+  const { data: mySubscriptions } = useMyMarketplaceSubscriptions();
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [driftBalance, setDriftBalance] = useState<number | null>(null);
@@ -1484,6 +1487,29 @@ export default function AppPage() {
                               <p className="text-xs text-muted-foreground">Net P&L</p>
                             </div>
                           </div>
+
+                          {!(bot as any).isPublished && (bot as any).botType !== 'grid' && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="w-full mt-4 border-primary/30 text-primary hover:bg-primary/10"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setBotToPublish({ id: bot.id, name: bot.name, market: bot.market });
+                                setPublishModalOpen(true);
+                              }}
+                              data-testid={`button-publish-${bot.id}`}
+                            >
+                              <Store className="w-4 h-4 mr-2" />
+                              Publish to Marketplace
+                            </Button>
+                          )}
+                          {(bot as any).isPublished && (
+                            <div className="mt-4 px-3 py-2 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center gap-2 text-sm text-primary">
+                              <Store className="w-4 h-4" />
+                              Published
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -1519,113 +1545,217 @@ export default function AppPage() {
                     <h1 className="text-2xl font-display font-bold">Bot Marketplace</h1>
                     <p className="text-muted-foreground">Discover and subscribe to proven trading strategies</p>
                   </div>
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" data-testid="button-filter-all">All</Button>
-                    <Button variant="outline" size="sm" data-testid="button-filter-signal">Signal Bots</Button>
-                    <Button variant="outline" size="sm" data-testid="button-filter-grid">Grid Bots</Button>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-4">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
+                    <Input 
+                      placeholder="Search bots by name, market, or creator..." 
+                      className="pl-12 py-6 bg-card border-border/50 text-lg"
+                      value={marketplaceSearch}
+                      onChange={(e) => setMarketplaceSearch(e.target.value)}
+                      data-testid="input-search-bots"
+                    />
                   </div>
                 </div>
 
-                <div className="gradient-border p-6 noise">
-                  <div className="flex items-center gap-3 mb-4">
-                    <Zap className="w-5 h-5 text-primary" />
-                    <h2 className="font-display font-semibold">Featured Bots</h2>
-                  </div>
-                  <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    {marketplaceBots.filter(b => b.featured).map((bot) => (
-                      <div 
-                        key={bot.id} 
-                        className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/5 border border-primary/20 hover:border-primary/40 transition-all cursor-pointer group"
-                        data-testid={`featured-bot-${bot.id}`}
-                      >
-                        <div className="flex items-center gap-3 mb-3">
-                          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-                            <Bot className="w-5 h-5 text-white" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <h3 className="font-semibold text-sm truncate">{bot.name}</h3>
-                            <p className="text-xs text-muted-foreground">{bot.type}</p>
-                          </div>
-                        </div>
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-emerald-400 font-bold">+{bot.apr}% APR</span>
-                          <span className="text-muted-foreground text-xs">{bot.subscribers.toLocaleString()} users</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="relative">
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
-                  <Input 
-                    placeholder="Search bots by name, market, or creator..." 
-                    className="pl-12 py-6 bg-card border-border/50 text-lg"
-                    data-testid="input-search-bots"
-                  />
-                </div>
-
-                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {marketplaceBots.map((bot) => (
-                    <div 
-                      key={bot.id} 
-                      className="gradient-border p-5 noise hover:scale-[1.02] transition-transform cursor-pointer group"
-                      data-testid={`marketplace-bot-${bot.id}`}
+                <div className="flex flex-wrap gap-2">
+                  <span className="text-sm text-muted-foreground py-2 pr-2">Sort by:</span>
+                  {[
+                    { key: 'pnl7d', label: '7D PnL' },
+                    { key: 'pnl30d', label: '30D PnL' },
+                    { key: 'pnl90d', label: '90D PnL' },
+                    { key: 'pnlAllTime', label: 'All Time' },
+                    { key: 'subscribers', label: 'Subscribers' },
+                  ].map((sortOption) => (
+                    <Button
+                      key={sortOption.key}
+                      variant={marketplaceSortBy === sortOption.key ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => setMarketplaceSortBy(sortOption.key as MarketplaceSortBy)}
+                      className={marketplaceSortBy === sortOption.key ? 'bg-primary' : ''}
+                      data-testid={`button-sort-${sortOption.key}`}
                     >
-                      <div className="flex items-start justify-between mb-4">
-                        <div className="flex items-center gap-3">
-                          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center">
-                            <Bot className="w-6 h-6 text-primary" />
-                          </div>
-                          <div>
-                            <h3 className="font-display font-semibold">{bot.name}</h3>
-                            <p className="text-sm text-muted-foreground">{bot.type} • {bot.market}</p>
-                          </div>
-                        </div>
-                        {bot.featured && (
-                          <span className="px-2 py-1 rounded-full text-xs font-medium bg-primary/20 text-primary flex items-center gap-1">
-                            <Star className="w-3 h-3" /> Featured
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="grid grid-cols-3 gap-3 mb-4">
-                        <div className="text-center p-2 rounded-lg bg-muted/30">
-                          <p className="text-lg font-bold text-emerald-400">+{bot.apr}%</p>
-                          <p className="text-xs text-muted-foreground">Est. APR</p>
-                        </div>
-                        <div className="text-center p-2 rounded-lg bg-muted/30">
-                          <p className="text-lg font-bold">{bot.subscribers.toLocaleString()}</p>
-                          <p className="text-xs text-muted-foreground">Subscribers</p>
-                        </div>
-                        <div className="text-center p-2 rounded-lg bg-muted/30">
-                          <div className="flex items-center justify-center gap-1">
-                            <Star className="w-4 h-4 text-yellow-400 fill-yellow-400" />
-                            <span className="text-lg font-bold">{bot.rating}</span>
-                          </div>
-                          <p className="text-xs text-muted-foreground">Rating</p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between text-sm text-muted-foreground mb-4">
-                        <span>By @{bot.creator}</span>
-                        <span>Min: ${bot.minDeposit} USDC</span>
-                      </div>
-
-                      <div className="flex gap-2">
-                        <Button 
-                          className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                          data-testid={`button-subscribe-${bot.id}`}
-                        >
-                          Subscribe
-                        </Button>
-                        <Button variant="outline" size="icon" data-testid={`button-details-${bot.id}`}>
-                          <ChevronRight className="w-4 h-4" />
-                        </Button>
-                      </div>
-                    </div>
+                      {sortOption.label}
+                    </Button>
                   ))}
                 </div>
+
+                {marketplaceData && marketplaceData.filter((b: PublishedBot) => b.isFeatured).length > 0 && (
+                  <div className="gradient-border p-6 noise">
+                    <div className="flex items-center gap-3 mb-4">
+                      <Zap className="w-5 h-5 text-primary" />
+                      <h2 className="font-display font-semibold">Featured Bots</h2>
+                    </div>
+                    <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+                      {marketplaceData.filter((b: PublishedBot) => b.isFeatured).map((bot: PublishedBot) => {
+                        const pnl = marketplaceSortBy === 'pnl7d' ? bot.pnlPercent7d :
+                                   marketplaceSortBy === 'pnl30d' ? bot.pnlPercent30d :
+                                   marketplaceSortBy === 'pnl90d' ? bot.pnlPercent90d :
+                                   bot.pnlPercentAllTime;
+                        const pnlValue = pnl ? parseFloat(pnl) : null;
+                        return (
+                          <div 
+                            key={bot.id} 
+                            className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/5 border border-primary/20 hover:border-primary/40 transition-all cursor-pointer group"
+                            onClick={() => {
+                              setBotToSubscribe(bot);
+                              setSubscribeModalOpen(true);
+                            }}
+                            data-testid={`featured-bot-${bot.id}`}
+                          >
+                            <div className="flex items-center gap-3 mb-3">
+                              <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+                                <Bot className="w-5 h-5 text-white" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <h3 className="font-semibold text-sm truncate">{bot.name}</h3>
+                                <p className="text-xs text-muted-foreground">{bot.market}</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between text-sm">
+                              {pnlValue !== null ? (
+                                <span className={`font-bold ${pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                  {pnlValue >= 0 ? '+' : ''}{pnlValue.toFixed(2)}%
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground">--</span>
+                              )}
+                              <span className="text-muted-foreground text-xs">{bot.subscriberCount} users</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {marketplaceLoading ? (
+                  <div className="flex items-center justify-center py-12">
+                    <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                    <span className="ml-2 text-muted-foreground">Loading marketplace...</span>
+                  </div>
+                ) : marketplaceData && marketplaceData.length > 0 ? (
+                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {marketplaceData.map((bot: PublishedBot) => {
+                      const winRate = bot.totalTrades > 0 ? ((bot.winningTrades / bot.totalTrades) * 100).toFixed(1) : '0';
+                      const pnl = marketplaceSortBy === 'pnl7d' ? bot.pnlPercent7d :
+                                 marketplaceSortBy === 'pnl30d' ? bot.pnlPercent30d :
+                                 marketplaceSortBy === 'pnl90d' ? bot.pnlPercent90d :
+                                 bot.pnlPercentAllTime;
+                      const pnlValue = pnl ? parseFloat(pnl) : null;
+                      const totalCapital = parseFloat(bot.totalCapitalInvested || '0');
+                      const isSubscribed = mySubscriptions?.some((sub) => sub.publishedBotId === bot.id);
+                      
+                      return (
+                        <div 
+                          key={bot.id} 
+                          className="gradient-border p-5 noise hover:scale-[1.02] transition-transform cursor-pointer group"
+                          data-testid={`marketplace-bot-${bot.id}`}
+                        >
+                          <div className="flex items-start justify-between mb-4">
+                            <div className="flex items-center gap-3">
+                              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center">
+                                <Bot className="w-6 h-6 text-primary" />
+                              </div>
+                              <div>
+                                <h3 className="font-display font-semibold">{bot.name}</h3>
+                                <p className="text-sm text-muted-foreground">{bot.market}</p>
+                              </div>
+                            </div>
+                            {bot.isFeatured && (
+                              <span className="px-2 py-1 rounded-full text-xs font-medium bg-primary/20 text-primary flex items-center gap-1">
+                                <Star className="w-3 h-3" /> Featured
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-3 mb-4">
+                            <div className="text-center p-2 rounded-lg bg-muted/30">
+                              {pnlValue !== null ? (
+                                <p className={`text-lg font-bold ${pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                  {pnlValue >= 0 ? '+' : ''}{pnlValue.toFixed(1)}%
+                                </p>
+                              ) : (
+                                <p className="text-lg font-bold text-muted-foreground">--</p>
+                              )}
+                              <p className="text-xs text-muted-foreground">
+                                {marketplaceSortBy === 'pnl7d' ? '7D' : 
+                                 marketplaceSortBy === 'pnl30d' ? '30D' : 
+                                 marketplaceSortBy === 'pnl90d' ? '90D' : 'All Time'}
+                              </p>
+                            </div>
+                            <div className="text-center p-2 rounded-lg bg-muted/30">
+                              <p className="text-lg font-bold">{winRate}%</p>
+                              <p className="text-xs text-muted-foreground">Win Rate</p>
+                            </div>
+                            <div className="text-center p-2 rounded-lg bg-muted/30">
+                              <p className="text-lg font-bold">{bot.subscriberCount}</p>
+                              <p className="text-xs text-muted-foreground">Subscribers</p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between text-sm text-muted-foreground mb-4">
+                            <span className="flex items-center gap-1">
+                              {bot.creator.displayName || 'Anonymous'}
+                              {bot.creator.xUsername && (
+                                <a
+                                  href={`https://x.com/${bot.creator.xUsername}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-primary hover:underline"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  @{bot.creator.xUsername}
+                                </a>
+                              )}
+                            </span>
+                            <span>${totalCapital.toLocaleString()} TVL</span>
+                          </div>
+
+                          <div className="flex gap-2">
+                            {isSubscribed ? (
+                              <Button 
+                                variant="outline"
+                                className="flex-1"
+                                disabled
+                                data-testid={`button-subscribed-${bot.id}`}
+                              >
+                                <Check className="w-4 h-4 mr-2" />
+                                Subscribed
+                              </Button>
+                            ) : (
+                              <Button 
+                                className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                                onClick={() => {
+                                  setBotToSubscribe(bot);
+                                  setSubscribeModalOpen(true);
+                                }}
+                                data-testid={`button-subscribe-${bot.id}`}
+                              >
+                                Subscribe
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="gradient-border p-12 noise text-center">
+                    <Store className="w-12 h-12 mx-auto mb-4 text-muted-foreground opacity-50" />
+                    <h3 className="text-lg font-display font-semibold mb-2">No Bots Published Yet</h3>
+                    <p className="text-muted-foreground mb-6">Be the first to publish your trading strategy!</p>
+                    <Button 
+                      className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                      onClick={() => setActiveNav('bots')}
+                      data-testid="button-go-to-bots"
+                    >
+                      Go to My Bots
+                    </Button>
+                  </div>
+                )}
 
                 <div className="gradient-border p-6 noise">
                   <div className="flex items-center gap-4">
@@ -1633,12 +1763,16 @@ export default function AppPage() {
                       <Shield className="w-6 h-6 text-primary" />
                     </div>
                     <div className="flex-1">
-                      <h3 className="font-display font-semibold">Create Your Own Bot</h3>
-                      <p className="text-sm text-muted-foreground">Build custom strategies and earn from subscribers</p>
+                      <h3 className="font-display font-semibold">Publish Your Own Bot</h3>
+                      <p className="text-sm text-muted-foreground">Share your strategy and attract subscribers</p>
                     </div>
-                    <Button className="bg-gradient-to-r from-primary to-accent" data-testid="button-create-strategy">
+                    <Button 
+                      className="bg-gradient-to-r from-primary to-accent"
+                      onClick={() => setActiveNav('bots')}
+                      data-testid="button-create-strategy"
+                    >
                       <Plus className="w-4 h-4 mr-2" />
-                      Create Strategy
+                      My Bots
                     </Button>
                   </div>
                 </div>
@@ -2310,6 +2444,34 @@ export default function AppPage() {
             } catch (error) {
               console.error('Error checking agent balance after deposit:', error);
             }
+          }}
+        />
+      )}
+
+      {botToPublish && (
+        <PublishBotModal
+          isOpen={publishModalOpen}
+          onClose={() => {
+            setPublishModalOpen(false);
+            setBotToPublish(null);
+          }}
+          bot={botToPublish}
+          onPublished={() => {
+            refetchBots();
+          }}
+        />
+      )}
+
+      {botToSubscribe && (
+        <SubscribeBotModal
+          isOpen={subscribeModalOpen}
+          onClose={() => {
+            setSubscribeModalOpen(false);
+            setBotToSubscribe(null);
+          }}
+          bot={botToSubscribe}
+          onSubscribed={() => {
+            refetchBots();
           }}
         />
       )}
