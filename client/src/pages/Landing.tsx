@@ -147,7 +147,7 @@ export default function Landing() {
                 ease: "easeInOut"
               }}
             />
-            <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-black/60 to-black" />
+            <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-black/40 to-black" />
             <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-transparent to-accent/20" />
             
             {/* Frost overlay that appears as text comes in */}
@@ -186,7 +186,7 @@ export default function Landing() {
             >
               <motion.h1 
                 variants={fadeInUp}
-                className="text-4xl sm:text-5xl lg:text-7xl font-display font-bold mb-6 leading-tight text-white drop-shadow-lg"
+                className="text-4xl sm:text-5xl lg:text-7xl font-display font-bold mb-3 leading-tight text-white drop-shadow-lg"
               >
                 Trade Smarter with{' '}
                 <span className="bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent bg-[length:200%_auto] animate-gradient">
