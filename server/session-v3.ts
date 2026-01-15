@@ -1,3 +1,4 @@
+import nodeCrypto from 'crypto';
 import {
   generateUserSalt,
   generateUMK,
@@ -52,35 +53,73 @@ export async function initializeWalletSecurity(
   let userSalt: Buffer;
   let umk: Buffer;
   
+  // The UMK is encrypted with a stable key derived from (wallet + salt + server secret)
+  // This allows decryption on any valid session after signature verification
+  // The signature is used for AUTHENTICATION only, not for the encryption key
+  const getStorageKey = (address: string, salt: Buffer): Buffer => {
+    const serverSecret = process.env.AGENT_ENCRYPTION_KEY;
+    if (!serverSecret) {
+      throw new Error('AGENT_ENCRYPTION_KEY is required');
+    }
+    const keyMaterial = Buffer.concat([
+      Buffer.from(address, 'utf8'),
+      salt,
+      Buffer.from(serverSecret, 'hex'),
+    ]);
+    return nodeCrypto.createHash('sha256').update(keyMaterial).digest();
+  };
+  
   if (isNewWallet) {
     userSalt = generateUserSalt();
     umk = generateUMK();
     
-    const sessionKey = deriveSessionKey(walletAddress, signature, userSalt, 'unlock');
+    const storageKey = getStorageKey(walletAddress, userSalt);
     const aad = buildAAD(walletAddress, 'UMK');
-    const encryptedUmk = encryptToBase64(umk, sessionKey, aad);
+    const encryptedUmk = encryptToBase64(umk, storageKey, aad);
     
     await storage.updateWalletSecurityV3(walletAddress, {
       userSalt: userSalt.toString('hex'),
       encryptedUserMasterKey: encryptedUmk,
-      umkVersion: 1,
+      umkVersion: 2, // Version 2 uses stable storage key
     });
     
-    zeroizeBuffer(sessionKey);
+    zeroizeBuffer(storageKey);
   } else {
     userSalt = Buffer.from(wallet!.userSalt!, 'hex');
     
-    const sessionKey = deriveSessionKey(walletAddress, signature, userSalt, 'unlock');
-    const aad = buildAAD(walletAddress, 'UMK');
+    // Check UMK version - version 1 used signature-derived key (broken), version 2 uses stable key
+    const umkVersion = wallet!.umkVersion || 1;
     
-    try {
-      umk = decryptFromBase64(wallet!.encryptedUserMasterKey!, sessionKey, aad);
-    } catch {
-      zeroizeBuffer(sessionKey);
-      throw new Error('Invalid signature - unable to decrypt user master key');
+    if (umkVersion === 1) {
+      // Legacy v1: Re-generate UMK with new stable key (migration)
+      // This is a one-time migration for wallets created with the broken v1 approach
+      console.log(`[Security v3] Migrating wallet ${walletAddress.slice(0, 8)}... from UMK v1 to v2`);
+      umk = generateUMK();
+      
+      const storageKey = getStorageKey(walletAddress, userSalt);
+      const aad = buildAAD(walletAddress, 'UMK');
+      const encryptedUmk = encryptToBase64(umk, storageKey, aad);
+      
+      await storage.updateWalletSecurityV3(walletAddress, {
+        encryptedUserMasterKey: encryptedUmk,
+        umkVersion: 2,
+      });
+      
+      zeroizeBuffer(storageKey);
+    } else {
+      // Version 2: Use stable storage key
+      const storageKey = getStorageKey(walletAddress, userSalt);
+      const aad = buildAAD(walletAddress, 'UMK');
+      
+      try {
+        umk = decryptFromBase64(wallet!.encryptedUserMasterKey!, storageKey, aad);
+      } catch (err) {
+        zeroizeBuffer(storageKey);
+        throw new Error('Unable to decrypt user master key - please contact support');
+      }
+      
+      zeroizeBuffer(storageKey);
     }
-    
-    zeroizeBuffer(sessionKey);
   }
   
   const sessionId = generateSessionId();
