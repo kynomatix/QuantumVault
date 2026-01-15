@@ -281,7 +281,7 @@ export default function Landing() {
           <motion.div
             initial={{ x: 0 }}
             whileInView={{ x: "-100%" }}
-            viewport={{ once: true, margin: "-100px" }}
+            viewport={{ once: true, amount: 0.7 }}
             transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
             className="absolute left-0 top-0 w-1/2 h-full bg-gradient-to-r from-black via-gray-900 to-gray-800 z-20 border-r border-white/5"
           >
@@ -292,7 +292,7 @@ export default function Landing() {
           <motion.div
             initial={{ x: 0 }}
             whileInView={{ x: "100%" }}
-            viewport={{ once: true, margin: "-100px" }}
+            viewport={{ once: true, amount: 0.7 }}
             transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
             className="absolute right-0 top-0 w-1/2 h-full bg-gradient-to-l from-black via-gray-900 to-gray-800 z-20 border-l border-white/5"
           >
@@ -304,7 +304,7 @@ export default function Landing() {
             <motion.div
               initial={{ opacity: 0, scale: 0.5 }}
               whileInView={{ opacity: 1, scale: 1 }}
-              viewport={{ once: true, margin: "-100px" }}
+              viewport={{ once: true, amount: 0.7 }}
               transition={{ duration: 1, delay: 0.3, ease: "easeOut" }}
               className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 sm:w-64 sm:h-64"
             >
@@ -321,7 +321,7 @@ export default function Landing() {
             <motion.div 
               initial={{ opacity: 0, scale: 0.3, rotateY: -90 }}
               whileInView={{ opacity: 1, scale: 1, rotateY: 0 }}
-              viewport={{ once: true, margin: "-100px" }}
+              viewport={{ once: true, amount: 0.7 }}
               transition={{ duration: 0.8, delay: 0.5, ease: [0.16, 1, 0.3, 1] }}
               className="relative inline-block mb-6"
               style={{ perspective: 1000 }}
@@ -343,7 +343,7 @@ export default function Landing() {
             <motion.h2 
               initial={{ opacity: 0, y: 20, filter: 'blur(10px)' }}
               whileInView={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-              viewport={{ once: true, margin: "-100px" }}
+              viewport={{ once: true, amount: 0.7 }}
               transition={{ duration: 0.6, delay: 0.7, ease: "easeOut" }}
               className="font-display font-bold text-2xl sm:text-3xl text-white mb-4"
             >
@@ -354,7 +354,7 @@ export default function Landing() {
             <motion.span 
               initial={{ opacity: 0, y: 20, scale: 0.9 }}
               whileInView={{ opacity: 1, y: 0, scale: 1 }}
-              viewport={{ once: true, margin: "-100px" }}
+              viewport={{ once: true, amount: 0.7 }}
               transition={{ duration: 0.6, delay: 0.9, ease: [0.16, 1, 0.3, 1] }}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-sm text-white"
             >
