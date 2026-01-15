@@ -176,7 +176,7 @@ export default function Landing() {
           >
             {/* Glass backdrop for text readability */}
             <motion.div 
-              className="absolute inset-x-4 sm:inset-x-8 md:inset-x-16 top-1/2 -translate-y-1/2 max-w-5xl mx-auto rounded-3xl border border-white/10 shadow-2xl"
+              className="absolute inset-x-4 sm:inset-x-8 md:inset-x-16 top-1/2 -translate-y-1/2 max-w-5xl mx-auto rounded-3xl shadow-2xl"
               style={{ 
                 opacity: glassOpacity,
                 backdropFilter: glassBlurStyle,
@@ -195,7 +195,7 @@ export default function Landing() {
             >
               <motion.h1 
                 variants={fadeInUp}
-                className="text-4xl sm:text-5xl lg:text-7xl font-display font-bold mb-1 leading-tight text-white drop-shadow-lg"
+                className="text-4xl sm:text-5xl lg:text-7xl font-display font-bold mb-6 leading-tight text-white drop-shadow-lg"
               >
                 Trade Smarter with{' '}
                 <span className="bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent bg-[length:200%_auto] animate-gradient">
