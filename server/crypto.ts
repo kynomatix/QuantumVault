@@ -3,10 +3,10 @@ import crypto from 'crypto';
 function getEncryptionKey(): string {
   const key = process.env.AGENT_ENCRYPTION_KEY;
   if (!key) {
-    if (process.env.NODE_ENV === 'development') {
-      return 'a'.repeat(64);
-    }
     throw new Error('AGENT_ENCRYPTION_KEY environment variable is required');
+  }
+  if (key.length !== 64) {
+    throw new Error('AGENT_ENCRYPTION_KEY must be 32 bytes (64 hex characters)');
   }
   return key;
 }

@@ -40,6 +40,18 @@ export const wallets = pgTable("wallets", {
   telegramConnected: boolean("telegram_connected").default(false),
   dialectAddress: text("dialect_address"),
   dialectBearerToken: text("dialect_bearer_token"),
+  
+  // Security v3: Per-user cryptographic salt and UMK envelope
+  userSalt: text("user_salt"),                                      // 32 bytes hex, generated once per user
+  encryptedUserMasterKey: text("encrypted_user_master_key"),        // EUMK: UMK encrypted with session key
+  encryptedMnemonicWords: text("encrypted_mnemonic_words"),         // BIP-39 mnemonic encrypted with key_mnemonic
+  umkVersion: integer("umk_version").default(0).notNull(),          // Increments on key rotation
+  
+  // Security v3: Execution authorization
+  executionEnabled: boolean("execution_enabled").default(false).notNull(),
+  umkEncryptedForExecution: text("umk_encrypted_for_execution"),    // EUMK_exec: UMK wrapped with SERVER_EXECUTION_KEY
+  policyHmac: text("policy_hmac"),                                  // HMAC of execution policy for integrity
+  
   createdAt: timestamp("created_at").defaultNow().notNull(),
   lastSeen: timestamp("last_seen").defaultNow().notNull(),
 });
@@ -112,6 +124,11 @@ export const tradingBots = pgTable("trading_bots", {
     lastTradeAt?: string;
   }>().default({ totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 }),
   sourcePublishedBotId: varchar("source_published_bot_id"),
+  
+  // Security v3: Execution authorization per bot
+  executionActive: boolean("execution_active").default(false).notNull(), // Whether execution is currently enabled
+  umkEncryptedForBot: text("umk_encrypted_for_bot"),              // Bot-specific encrypted UMK for trade execution
+  
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -401,3 +418,29 @@ export const insertPnlSnapshotSchema = createInsertSchema(pnlSnapshots).omit({
 });
 export type InsertPnlSnapshot = z.infer<typeof insertPnlSnapshotSchema>;
 export type PnlSnapshot = typeof pnlSnapshots.$inferSelect;
+
+// Security v3: Single-use nonces for signature verification
+export const authNonces = pgTable("auth_nonces", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull(),
+  nonceHash: text("nonce_hash").notNull().unique(),              // SHA-256 of nonce, prevents replay
+  purpose: text("purpose").notNull(),                             // unlock_umk, enable_execution, reveal_mnemonic, revoke_execution
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),                                   // NULL until used, single-use enforcement
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertAuthNonceSchema = createInsertSchema(authNonces).omit({
+  id: true,
+  usedAt: true,
+  createdAt: true,
+});
+export type InsertAuthNonce = z.infer<typeof insertAuthNonceSchema>;
+export type AuthNonce = typeof authNonces.$inferSelect;
+
+// Security v3: Signature purpose types
+export type SignaturePurpose = 
+  | "unlock_umk"
+  | "enable_execution"
+  | "reveal_mnemonic"
+  | "revoke_execution";
