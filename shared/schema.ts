@@ -315,3 +315,84 @@ export const insertOrphanedSubaccountSchema = createInsertSchema(orphanedSubacco
 });
 export type InsertOrphanedSubaccount = z.infer<typeof insertOrphanedSubaccountSchema>;
 export type OrphanedSubaccount = typeof orphanedSubaccounts.$inferSelect;
+
+// Marketplace: Published bots that can be subscribed to
+export const publishedBots = pgTable("published_bots", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tradingBotId: varchar("trading_bot_id").notNull().references(() => tradingBots.id, { onDelete: "cascade" }).unique(),
+  creatorWalletAddress: text("creator_wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  description: text("description"),
+  market: text("market").notNull(),
+  isActive: boolean("is_active").default(true).notNull(),
+  isFeatured: boolean("is_featured").default(false).notNull(),
+  subscriberCount: integer("subscriber_count").default(0).notNull(),
+  totalCapitalInvested: decimal("total_capital_invested", { precision: 20, scale: 2 }).default("0").notNull(),
+  totalTrades: integer("total_trades").default(0).notNull(),
+  winningTrades: integer("winning_trades").default(0).notNull(),
+  pnlPercent7d: decimal("pnl_percent_7d", { precision: 10, scale: 4 }),
+  pnlPercent30d: decimal("pnl_percent_30d", { precision: 10, scale: 4 }),
+  pnlPercent90d: decimal("pnl_percent_90d", { precision: 10, scale: 4 }),
+  pnlPercentAllTime: decimal("pnl_percent_all_time", { precision: 10, scale: 4 }),
+  publishedAt: timestamp("published_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertPublishedBotSchema = createInsertSchema(publishedBots).omit({
+  id: true,
+  subscriberCount: true,
+  totalCapitalInvested: true,
+  totalTrades: true,
+  winningTrades: true,
+  pnlPercent7d: true,
+  pnlPercent30d: true,
+  pnlPercent90d: true,
+  pnlPercentAllTime: true,
+  publishedAt: true,
+  updatedAt: true,
+});
+export type InsertPublishedBot = z.infer<typeof insertPublishedBotSchema>;
+export type PublishedBot = typeof publishedBots.$inferSelect;
+
+// Marketplace: Subscriptions to published bots
+export const botSubscriptions = pgTable("bot_subscriptions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  publishedBotId: varchar("published_bot_id").notNull().references(() => publishedBots.id, { onDelete: "cascade" }),
+  subscriberWalletAddress: text("subscriber_wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  subscriberBotId: varchar("subscriber_bot_id").references(() => tradingBots.id, { onDelete: "set null" }),
+  capitalInvested: decimal("capital_invested", { precision: 20, scale: 2 }).notNull(),
+  status: text("status").notNull().default("active"),
+  subscribedAt: timestamp("subscribed_at").defaultNow().notNull(),
+  unsubscribedAt: timestamp("unsubscribed_at"),
+}, (table) => ({
+  uniqueSubscription: unique("bot_subscriptions_unique").on(table.publishedBotId, table.subscriberWalletAddress),
+}));
+
+export const insertBotSubscriptionSchema = createInsertSchema(botSubscriptions).omit({
+  id: true,
+  subscribedAt: true,
+  unsubscribedAt: true,
+});
+export type InsertBotSubscription = z.infer<typeof insertBotSubscriptionSchema>;
+export type BotSubscription = typeof botSubscriptions.$inferSelect;
+
+// Marketplace: Daily PnL snapshots for time-based performance tracking
+export const pnlSnapshots = pgTable("pnl_snapshots", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tradingBotId: varchar("trading_bot_id").notNull().references(() => tradingBots.id, { onDelete: "cascade" }),
+  snapshotDate: timestamp("snapshot_date").notNull(),
+  equity: decimal("equity", { precision: 20, scale: 6 }).notNull(),
+  realizedPnl: decimal("realized_pnl", { precision: 20, scale: 6 }).notNull().default("0"),
+  unrealizedPnl: decimal("unrealized_pnl", { precision: 20, scale: 6 }).notNull().default("0"),
+  totalDeposited: decimal("total_deposited", { precision: 20, scale: 6 }).notNull().default("0"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqueBotDate: unique("pnl_snapshots_bot_date_unique").on(table.tradingBotId, table.snapshotDate),
+}));
+
+export const insertPnlSnapshotSchema = createInsertSchema(pnlSnapshots).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertPnlSnapshot = z.infer<typeof insertPnlSnapshotSchema>;
+export type PnlSnapshot = typeof pnlSnapshots.$inferSelect;
