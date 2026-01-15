@@ -663,36 +663,44 @@ export default function DocsPage() {
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
       <header className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/80 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-4">
-              <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
-                <ArrowLeft className="w-4 h-4" />
-                <span className="text-sm">Back</span>
-              </Link>
-              <div className="h-6 w-px bg-white/10" />
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between py-3 md:py-0 md:h-16 gap-3 md:gap-0">
+            <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-8 h-8 rounded-lg" />
                 <span className="font-display font-bold text-white">QuantumVault</span>
                 <span className="text-white/40 text-sm">Docs</span>
               </div>
+              
+              <Link href="/app" data-testid="link-launch-app">
+                <Button variant="outline" size="sm" className="hidden md:flex">
+                  Launch App
+                  <ExternalLink className="w-3 h-3 ml-2" />
+                </Button>
+              </Link>
             </div>
             
-            <Button
-              variant="ghost"
-              size="icon"
-              className="md:hidden"
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              data-testid="btn-mobile-menu"
-            >
-              {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-            </Button>
-            
-            <Link href="/app" data-testid="link-launch-app">
-              <Button variant="outline" size="sm" className="hidden md:flex">
-                Launch App
-                <ExternalLink className="w-3 h-3 ml-2" />
+            <div className="flex items-center justify-between md:hidden">
+              <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
+                <ArrowLeft className="w-4 h-4" />
+                <span className="text-sm">Back to Home</span>
+              </Link>
+              
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                data-testid="btn-mobile-menu"
+              >
+                {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
               </Button>
-            </Link>
+            </div>
+            
+            <div className="hidden md:flex items-center gap-4">
+              <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home-desktop">
+                <ArrowLeft className="w-4 h-4" />
+                <span className="text-sm">Back</span>
+              </Link>
+            </div>
           </div>
         </div>
       </header>
