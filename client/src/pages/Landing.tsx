@@ -378,7 +378,7 @@ export default function Landing() {
             <motion.div 
               initial="hidden"
               whileInView="visible"
-              viewport={{ once: true }}
+              viewport={{ once: true, amount: 0.3 }}
               variants={staggerContainer}
             >
               <motion.div variants={fadeInUp} className="text-center mb-16">
@@ -435,7 +435,7 @@ export default function Landing() {
             <motion.div 
               initial="hidden"
               whileInView="visible"
-              viewport={{ once: true }}
+              viewport={{ once: true, amount: 0.3 }}
               variants={staggerContainer}
             >
               <motion.div variants={fadeInUp} className="text-center mb-16">
@@ -477,7 +477,7 @@ export default function Landing() {
             <motion.div 
               initial="hidden"
               whileInView="visible"
-              viewport={{ once: true }}
+              viewport={{ once: true, amount: 0.4 }}
               variants={staggerContainer}
               className="relative rounded-3xl bg-gradient-to-br from-card/80 to-card/40 backdrop-blur-xl border border-white/10 p-12 sm:p-16 text-center overflow-hidden"
             >
