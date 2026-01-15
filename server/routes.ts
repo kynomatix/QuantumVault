@@ -322,6 +322,11 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Trust proxy for secure cookies behind Replit's reverse proxy
+  if (process.env.NODE_ENV === "production") {
+    app.set('trust proxy', 1);
+  }
+
   const PgStore = connectPgSimple(session);
   const pgPool = new pg.Pool({
     connectionString: process.env.DATABASE_URL,
@@ -340,6 +345,7 @@ export async function registerRoutes(
       cookie: {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
+        sameSite: process.env.NODE_ENV === "production" ? 'lax' : undefined,
         maxAge: 1000 * 60 * 60 * 24 * 7,
       },
     })
