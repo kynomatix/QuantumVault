@@ -110,7 +110,7 @@ export default function Landing() {
             style={{ y: heroY, scale: heroScale }}
           >
             <img 
-              src="/images/QV_Hero.jpeg" 
+              src="/images/QV_Hero.jpg" 
               alt="QuantumVault Hero"
               className="w-full h-full object-cover"
             />
