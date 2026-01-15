@@ -48,7 +48,7 @@ const PERP_MARKET_INDICES = {
   '1KWEN': 35, '1KWEN-PERP': 35,
   'TON': 36, 'TON-PERP': 36,
   'MOTHER': 37, 'MOTHER-PERP': 37,
-  'ZEC': 38, 'ZEC-PERP': 38,
+  'ZEC': 79, 'ZEC-PERP': 79,
   'MOODENG': 39, 'MOODENG-PERP': 39,
   'DBR': 40, 'DBR-PERP': 40,
   '1KMEW': 41, '1KMEW-PERP': 41,
@@ -143,7 +143,7 @@ function decryptPrivateKey(encryptedKey) {
   return encryptedKey;
 }
 
-async function createDriftClient(encryptedPrivateKey, subAccountId) {
+async function createDriftClient(encryptedPrivateKey, subAccountId, requiredPerpMarketIndex = null) {
   const rpcUrl = process.env.SOLANA_RPC_URL || 
     (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
     'https://api.mainnet-beta.solana.com');
@@ -153,6 +153,19 @@ async function createDriftClient(encryptedPrivateKey, subAccountId) {
   const privateKeyBase58 = decryptPrivateKey(encryptedPrivateKey);
   const keypair = Keypair.fromSecretKey(bs58.decode(privateKeyBase58));
   const wallet = new Wallet(keypair);
+  
+  // Get the default subscription config
+  const defaultSubscription = getMarketsAndOraclesForSubscription('mainnet-beta');
+  
+  // If we need a specific market, ensure it's included in the subscription
+  let perpMarketIndexes = defaultSubscription.perpMarketIndexes || [];
+  let oracleInfos = defaultSubscription.oracleInfos || [];
+  
+  if (requiredPerpMarketIndex !== null && !perpMarketIndexes.includes(requiredPerpMarketIndex)) {
+    console.error(`[Executor] Market index ${requiredPerpMarketIndex} not in default subscription, adding it`);
+    perpMarketIndexes = [...perpMarketIndexes, requiredPerpMarketIndex];
+    // Oracle will be auto-fetched when market is subscribed
+  }
   
   // Use websocket subscription to avoid batch RPC requests (required for free RPC plans)
   const driftClient = new DriftClient({
@@ -164,7 +177,9 @@ async function createDriftClient(encryptedPrivateKey, subAccountId) {
     accountSubscription: {
       type: 'websocket',
     },
-    ...getMarketsAndOraclesForSubscription('mainnet-beta'),
+    perpMarketIndexes,
+    spotMarketIndexes: defaultSubscription.spotMarketIndexes || [0], // At least USDC
+    oracleInfos,
   });
   
   return driftClient;
@@ -182,7 +197,7 @@ async function executeTrade(command) {
   
   console.error(`[Executor] Creating DriftClient for subaccount ${subAccountId}, market ${market} -> index ${marketIndex}`);
   
-  const driftClient = await createDriftClient(encryptedPrivateKey, subAccountId);
+  const driftClient = await createDriftClient(encryptedPrivateKey, subAccountId, marketIndex);
   
   try {
     await driftClient.subscribe();
@@ -190,30 +205,34 @@ async function executeTrade(command) {
     
     // Check market status before placing order
     const perpMarket = driftClient.getPerpMarketAccount(marketIndex);
-    if (perpMarket) {
-      const status = perpMarket.status;
-      const statusNames = ['Initialized', 'Active', 'FundingPaused', 'AMMPaused', 'FillPaused', 'WithdrawPaused', 'ReduceOnly', 'Settlement', 'Delisted'];
-      const statusName = statusNames[status] || `Unknown(${status})`;
-      console.error(`[Executor] Market ${market} status: ${statusName} (${status})`);
-      
-      // Status 1 = Active, others may have restrictions
-      if (status !== 1) {
-        // Status 6 = ReduceOnly - can only close positions
-        if (status === 6 && !reduceOnly) {
-          throw new Error(`Market ${market} is in ReduceOnly mode - can only close existing positions, not open new ones`);
-        }
-        // Status 4 = FillPaused - no orders at all
-        if (status === 4) {
-          throw new Error(`Market ${market} is FillPaused - no orders can be placed. Try again later.`);
-        }
-        // Status 3 = AMMPaused
-        if (status === 3) {
-          throw new Error(`Market ${market} is AMMPaused - trading temporarily suspended. Try again later.`);
-        }
-        // Other paused states
-        if (status !== 1 && status !== 2 && status !== 5) {
-          console.error(`[Executor] Warning: Market status ${statusName} may restrict orders`);
-        }
+    if (!perpMarket) {
+      console.error(`[Executor] ERROR: perpMarket is null for index ${marketIndex}. Market not subscribed!`);
+      throw new Error(`Market ${market} (index ${marketIndex}) is not available. Market data could not be loaded.`);
+    }
+    
+    // Market account is available, check its status
+    const status = perpMarket.status;
+    const statusNames = ['Initialized', 'Active', 'FundingPaused', 'AMMPaused', 'FillPaused', 'WithdrawPaused', 'ReduceOnly', 'Settlement', 'Delisted'];
+    const statusName = statusNames[status] || `Unknown(${status})`;
+    console.error(`[Executor] Market ${market} status: ${statusName} (${status})`);
+    
+    // Status 1 = Active, others may have restrictions
+    if (status !== 1) {
+      // Status 6 = ReduceOnly - can only close positions
+      if (status === 6 && !reduceOnly) {
+        throw new Error(`Market ${market} is in ReduceOnly mode - can only close existing positions, not open new ones`);
+      }
+      // Status 4 = FillPaused - no orders at all
+      if (status === 4) {
+        throw new Error(`Market ${market} is FillPaused - no orders can be placed. Try again later.`);
+      }
+      // Status 3 = AMMPaused
+      if (status === 3) {
+        throw new Error(`Market ${market} is AMMPaused - trading temporarily suspended. Try again later.`);
+      }
+      // Other paused states
+      if (status !== 1 && status !== 2 && status !== 5) {
+        console.error(`[Executor] Warning: Market status ${statusName} may restrict orders`);
       }
     }
     

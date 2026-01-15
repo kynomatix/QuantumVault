@@ -3834,6 +3834,11 @@ export async function registerRoutes(
         console.log(`[User Webhook] Duplicate signal blocked at creation: hash=${signalHash}`);
         return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
       }
+      // Foreign key violation means the bot was deleted
+      if (dbError?.code === '23503') {
+        console.log(`[User Webhook] Bot no longer exists: ${botId}`);
+        return res.status(404).json({ error: "Bot not found - it may have been deleted" });
+      }
       throw dbError;
     }
 
