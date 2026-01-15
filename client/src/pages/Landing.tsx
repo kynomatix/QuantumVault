@@ -70,6 +70,11 @@ export default function Landing() {
   const glassOpacity = useTransform(scrollY, [0, 120, 300, 550], [0, 0.85, 0.85, 0]);
   const glassBlur = useTransform(scrollY, [0, 120], [8, 20]);
   
+  // Hero frost effect - blur and dim the background as text appears
+  const heroFrostOpacity = useTransform(scrollY, [0, 120, 300, 550], [0, 0.6, 0.6, 0]);
+  const heroFrostBlur = useTransform(scrollY, [0, 120], [0, 8]);
+  const heroFrostBlurStyle = useMotionTemplate`blur(${heroFrostBlur}px)`;
+  
   // Scroll indicator fades out quickly
   const scrollIndicatorOpacity = useTransform(scrollY, [0, 80], [1, 0]);
   
@@ -144,6 +149,16 @@ export default function Landing() {
             />
             <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-black/60 to-black" />
             <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-transparent to-accent/20" />
+            
+            {/* Frost overlay that appears as text comes in */}
+            <motion.div 
+              className="absolute inset-0 bg-black/50"
+              style={{ 
+                opacity: heroFrostOpacity,
+                backdropFilter: heroFrostBlurStyle,
+                WebkitBackdropFilter: heroFrostBlurStyle,
+              }}
+            />
           </motion.div>
 
           <motion.div 
