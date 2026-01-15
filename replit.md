@@ -66,6 +66,50 @@ Preferred communication style: Simple, everyday language.
 -   `SOLANA_RPC_URL`
 -   `DRIFT_ENV`
 -   `AGENT_ENCRYPTION_KEY`
+-   `SERVER_EXECUTION_KEY` (required for v3 execution authorization)
+
+## Security Architecture
+
+### Key Management (Phase 6 - v3 Security)
+-   **User Master Key (UMK)**: Derived per-user, encrypts all user-specific secrets
+-   **Session-based decryption**: Keys are only decrypted during authenticated sessions
+-   **HKDF key derivation**: Subkeys derived for mnemonic, agent key, and policy HMAC
+-   **AES-256-GCM encryption**: All secrets encrypted with authenticated encryption and AAD binding
+-   **Buffer zeroization**: Sensitive buffers are cryptographically overwritten after use
+
+### Execution Authorization
+-   **Time-limited execution**: UMK wrapped for server execution expires after 1 hour
+-   **Emergency stop**: Immediately revokes all execution authorization
+-   **Policy HMAC**: Detects tampering with bot configuration (market, leverage, max position)
+
+### Production Deployment Security
+-   **Core dumps**: Disable core dumps in production to prevent key material exposure
+    -   Linux: Set `ulimit -c 0` in process startup
+    -   Systemd: Add `LimitCORE=0` to service file
+    -   Docker: Add `--ulimit core=0:0` to run command
+-   **Environment variable protection**:
+    -   Never log environment variables containing keys
+    -   Use Replit Secrets for all sensitive values
+    -   Rotate `AGENT_ENCRYPTION_KEY` and `SERVER_EXECUTION_KEY` periodically
+-   **Memory security**:
+    -   Use `zeroizeBuffer()` after handling sensitive data
+    -   Avoid string concatenation with key material (use Buffer operations)
+    -   Session keys are invalidated on logout and timeout
+
+### Key Logging Policy
+-   **NEVER log**: privateKey, secretKey, encryptedKey, mnemonic, seed, umk, signature bytes
+-   **Safe to log**: wallet address prefixes (`${address.slice(0, 8)}...`), operation status, error types
+-   **Error handling**: Log error types and messages, not stack traces containing key material
+
+### Security Audit (Phase 6.3 - January 2026)
+Files audited for key logging:
+-   `server/crypto.ts` - ✓ No sensitive logging
+-   `server/crypto-v3.ts` - ✓ No sensitive logging
+-   `server/session-v3.ts` - ✓ Only logs truncated wallet addresses
+-   `server/agent-wallet.ts` - ✓ No sensitive logging
+-   `server/drift-executor.mjs` - ✓ Logs path selection only, not key values
+-   `server/drift-service.ts` - ✓ No sensitive logging
+-   `server/routes.ts` - ✓ Error handlers don't expose key material
 
 ### Frontend Libraries
 -   **shadcn/ui**: Component library.
