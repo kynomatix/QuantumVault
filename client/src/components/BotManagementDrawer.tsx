@@ -64,6 +64,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { PublishBotModal } from './PublishBotModal';
+import { LineChart, Line, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts';
 
 const MARKET_MAX_LEVERAGE: Record<string, number> = {
   'SOL-PERP': 20, 'BTC-PERP': 20, 'ETH-PERP': 20, 'APT-PERP': 20, 'ARB-PERP': 20,
@@ -209,6 +210,11 @@ export function BotManagementDrawer({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [usdcApy, setUsdcApy] = useState<number | null>(null);
+  const [performanceTimeframe, setPerformanceTimeframe] = useState<'7d' | '30d' | '90d' | 'all'>('7d');
+  const [performanceData, setPerformanceData] = useState<{ timestamp: string; pnl: number; cumulativePnl: number }[]>([]);
+  const [performanceLoading, setPerformanceLoading] = useState(false);
+  const [performanceTotalPnl, setPerformanceTotalPnl] = useState<number>(0);
+  const [performanceTradeCount, setPerformanceTradeCount] = useState<number>(0);
 
   // Fetch USDC deposit APY from Drift
   const fetchUsdcApy = async () => {
@@ -228,6 +234,32 @@ export function BotManagementDrawer({
       fetchUsdcApy();
     }
   }, [isOpen]);
+
+  const fetchPerformanceData = async () => {
+    if (!bot) return;
+    setPerformanceLoading(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${bot.id}/performance?timeframe=${performanceTimeframe}&wallet=${walletAddress}`, {
+        credentials: 'include',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPerformanceData(data.series || []);
+        setPerformanceTotalPnl(data.totalPnl || 0);
+        setPerformanceTradeCount(data.tradeCount || 0);
+      }
+    } catch (error) {
+      console.error('Failed to fetch performance data:', error);
+    } finally {
+      setPerformanceLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen && bot) {
+      fetchPerformanceData();
+    }
+  }, [isOpen, bot?.id, performanceTimeframe]);
 
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
@@ -1120,16 +1152,83 @@ export function BotManagementDrawer({
               </div>
             </div>
 
-            <div className="p-4 rounded-xl border bg-muted/20">
+            <div className="p-4 rounded-xl border bg-muted/20" data-testid="performance-chart-container">
               <div className="flex items-center justify-between mb-3">
                 <p className="text-sm font-medium">Performance Chart</p>
-                <Badge variant="outline" className="text-xs">Coming Soon</Badge>
-              </div>
-              <div className="h-32 flex items-center justify-center rounded-lg bg-muted/50 border border-dashed">
-                <div className="text-center text-muted-foreground">
-                  <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                  <p className="text-sm">Performance chart placeholder</p>
+                <div className="flex gap-1">
+                  {(['7d', '30d', '90d', 'all'] as const).map((tf) => (
+                    <Button
+                      key={tf}
+                      variant={performanceTimeframe === tf ? 'default' : 'outline'}
+                      size="sm"
+                      className="h-6 px-2 text-xs"
+                      onClick={() => setPerformanceTimeframe(tf)}
+                      data-testid={`button-timeframe-${tf}`}
+                    >
+                      {tf === 'all' ? 'All' : tf.toUpperCase()}
+                    </Button>
+                  ))}
                 </div>
+              </div>
+              {performanceLoading ? (
+                <div className="h-[130px] flex items-center justify-center">
+                  <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : performanceData.length === 0 ? (
+                <div className="h-[130px] flex items-center justify-center rounded-lg bg-muted/50 border border-dashed">
+                  <div className="text-center text-muted-foreground">
+                    <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                    <p className="text-sm">No executed trades yet</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-[130px]" data-testid="performance-chart">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={performanceData} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+                      <XAxis
+                        dataKey="timestamp"
+                        tick={{ fontSize: 10 }}
+                        tickFormatter={(value) => {
+                          const d = new Date(value);
+                          return `${d.getMonth() + 1}/${d.getDate()}`;
+                        }}
+                        stroke="#888"
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <YAxis
+                        tick={{ fontSize: 10 }}
+                        tickFormatter={(value) => `$${value >= 0 ? '+' : ''}${value.toFixed(0)}`}
+                        stroke="#888"
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <RechartsTooltip
+                        contentStyle={{
+                          backgroundColor: 'hsl(var(--popover))',
+                          border: '1px solid hsl(var(--border))',
+                          borderRadius: '8px',
+                          fontSize: '12px',
+                        }}
+                        labelFormatter={(value) => new Date(value).toLocaleDateString()}
+                        formatter={(value: number) => [`$${value >= 0 ? '+' : ''}${value.toFixed(2)}`, 'Cumulative PnL']}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="cumulativePnl"
+                        stroke={performanceTotalPnl >= 0 ? '#22c55e' : '#ef4444'}
+                        strokeWidth={2}
+                        dot={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+              <div className="flex justify-between text-xs text-muted-foreground mt-2">
+                <span>{performanceTradeCount} trade{performanceTradeCount !== 1 ? 's' : ''}</span>
+                <span className={performanceTotalPnl >= 0 ? 'text-green-500' : 'text-red-500'}>
+                  Total: {performanceTotalPnl >= 0 ? '+' : ''}{performanceTotalPnl.toFixed(2)} USDC
+                </span>
               </div>
             </div>
           </TabsContent>

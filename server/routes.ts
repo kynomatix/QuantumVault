@@ -3195,6 +3195,48 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/trading-bots/:id/performance", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const timeframe = (req.query.timeframe as string) || '7d';
+      let since: Date | undefined;
+      const now = new Date();
+      switch (timeframe) {
+        case '7d':
+          since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+          break;
+        case '30d':
+          since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+          break;
+        case '90d':
+          since = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+          break;
+        case 'all':
+        default:
+          since = undefined;
+          break;
+      }
+
+      const series = await storage.getBotPerformanceSeries(req.params.id, since);
+      const totalPnl = series.length > 0 ? series[series.length - 1].cumulativePnl : 0;
+      res.json({
+        series,
+        totalPnl,
+        tradeCount: series.length,
+      });
+    } catch (error) {
+      console.error("Get bot performance error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   app.get("/api/bot-trades", requireWallet, async (req, res) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;

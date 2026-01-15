@@ -93,6 +93,7 @@ export interface IStorage {
   createBotTrade(trade: InsertBotTrade): Promise<BotTrade>;
   updateBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<void>;
   getOrphanedPendingTrades(maxAgeMinutes?: number): Promise<BotTrade[]>;
+  getBotPerformanceSeries(tradingBotId: string, since?: Date): Promise<{ timestamp: Date; pnl: number; cumulativePnl: number }[]>;
 
   createWebhookLog(log: InsertWebhookLog): Promise<WebhookLog>;
   updateWebhookLog(id: string, updates: Partial<InsertWebhookLog>): Promise<void>;
@@ -331,6 +332,36 @@ export class DatabaseStorage implements IStorage {
   async getBotTradeCount(tradingBotId: string): Promise<number> {
     const result = await db.select({ count: sql<number>`count(*)::int` }).from(botTrades).where(eq(botTrades.tradingBotId, tradingBotId));
     return result[0]?.count || 0;
+  }
+
+  async getBotPerformanceSeries(tradingBotId: string, since?: Date): Promise<{ timestamp: Date; pnl: number; cumulativePnl: number }[]> {
+    const conditions = [
+      eq(botTrades.tradingBotId, tradingBotId),
+      eq(botTrades.status, 'executed'),
+      sql`${botTrades.pnl} IS NOT NULL`,
+    ];
+    if (since) {
+      conditions.push(gte(botTrades.executedAt, since));
+    }
+    const trades = await db
+      .select({
+        executedAt: botTrades.executedAt,
+        pnl: botTrades.pnl,
+      })
+      .from(botTrades)
+      .where(and(...conditions))
+      .orderBy(botTrades.executedAt);
+
+    let cumulativePnl = 0;
+    return trades.map((trade) => {
+      const pnl = parseFloat(trade.pnl || '0');
+      cumulativePnl += pnl;
+      return {
+        timestamp: trade.executedAt,
+        pnl,
+        cumulativePnl,
+      };
+    });
   }
 
   async getWalletBotTrades(walletAddress: string, limit: number = 50): Promise<(BotTrade & { botName?: string })[]> {

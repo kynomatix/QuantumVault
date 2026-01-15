@@ -2133,7 +2133,7 @@ export default function AppPage() {
                       <div className="space-y-4">
                         <div>
                           <label className="text-sm text-muted-foreground mb-1.5 block">Default Leverage</label>
-                          <p className="text-xs text-muted-foreground mb-2">Used when creating new bots. Can be adjusted per bot.</p>
+                          <p className="text-xs text-muted-foreground mb-2">Used when creating new bots. Markets have different max limits (3x-20x) - your value will be capped to each market's maximum.</p>
                           <div className="flex items-center gap-3">
                             <Input 
                               type="number"
