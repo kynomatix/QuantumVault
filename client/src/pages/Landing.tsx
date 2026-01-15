@@ -326,17 +326,17 @@ export default function Landing() {
               className="relative inline-block mb-6"
               style={{ perspective: 1000 }}
             >
+              {/* Glow effect behind logo with matching rounded corners */}
               <motion.div 
-                animate={{ boxShadow: ['0 0 20px rgba(168, 85, 247, 0.4)', '0 0 40px rgba(168, 85, 247, 0.6)', '0 0 20px rgba(168, 85, 247, 0.4)'] }}
+                animate={{ opacity: [0.4, 0.7, 0.4] }}
                 transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-                className="relative"
-              >
-                <img 
-                  src="/images/QV_Logo_02.png" 
-                  alt="QuantumVault" 
-                  className="relative w-20 h-20 sm:w-28 sm:h-28 rounded-3xl shadow-2xl ring-2 ring-white/20"
-                />
-              </motion.div>
+                className="absolute -inset-3 bg-gradient-to-r from-primary to-accent rounded-[2rem] blur-xl"
+              />
+              <img 
+                src="/images/QV_Logo_02.png" 
+                alt="QuantumVault" 
+                className="relative w-20 h-20 sm:w-28 sm:h-28 rounded-3xl shadow-2xl ring-2 ring-white/20"
+              />
             </motion.div>
             
             {/* Title with typing reveal effect */}
