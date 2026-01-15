@@ -97,6 +97,204 @@ function parseDriftError(error: string | undefined): string {
   return error;
 }
 
+async function routeSignalToSubscribers(
+  sourceBotId: string,
+  signal: {
+    action: 'buy' | 'sell';
+    contracts: string;
+    positionSize: string;
+    price: string;
+    isCloseSignal: boolean;
+    strategyPositionSize: string | null;
+  }
+): Promise<void> {
+  try {
+    const publishedBot = await storage.getPublishedBotByTradingBotId(sourceBotId);
+    if (!publishedBot || !publishedBot.isActive) {
+      return;
+    }
+
+    const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
+    if (!subscriberBots || subscriberBots.length === 0) {
+      return;
+    }
+
+    console.log(`[Subscriber Routing] Source bot ${sourceBotId} is published, routing signal to ${subscriberBots.length} subscribers`);
+
+    for (const subBot of subscriberBots) {
+      if (!subBot.isActive) {
+        console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id}`);
+        continue;
+      }
+
+      try {
+        const subWallet = await storage.getWallet(subBot.walletAddress);
+        if (!subWallet?.agentPrivateKeyEncrypted || !subWallet?.agentPublicKey) {
+          console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} has no agent wallet configured`);
+          continue;
+        }
+
+        const subAccountId = subBot.driftSubaccountId ?? 0;
+
+        if (signal.isCloseSignal) {
+          const position = await PositionService.getPositionForExecution(
+            subBot.id,
+            subWallet.agentPublicKey,
+            subAccountId,
+            subBot.market,
+            subWallet.agentPrivateKeyEncrypted
+          );
+
+          if (position.side === 'FLAT' || Math.abs(position.size) < 0.0001) {
+            console.log(`[Subscriber Routing] No position to close for subscriber bot ${subBot.id}`);
+            continue;
+          }
+
+          console.log(`[Subscriber Routing] Closing position for subscriber bot ${subBot.id}: size=${position.size}`);
+          
+          const closeResult = await closePerpPosition(
+            subWallet.agentPrivateKeyEncrypted,
+            subBot.market,
+            subAccountId
+          );
+
+          if (closeResult.success) {
+            const fillPrice = closeResult.fillPrice ?? parseFloat(signal.price);
+            const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+            await storage.createBotTrade({
+              tradingBotId: subBot.id,
+              walletAddress: subBot.walletAddress,
+              market: subBot.market,
+              side: 'CLOSE',
+              size: Math.abs(position.size).toFixed(8),
+              price: fillPrice.toFixed(6),
+              status: 'executed',
+              fee: (closeResult.fee ?? 0).toString(),
+              pnl: (closeResult.realizedPnl ?? 0).toString(),
+              txSignature: closeResult.txSignature || null,
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+            });
+            
+            if (closeResult.realizedPnl !== undefined) {
+              await storage.updateTradingBotStats(subBot.id, {
+                ...stats,
+                totalTrades: (stats.totalTrades || 0) + 1,
+                winningTrades: closeResult.realizedPnl > 0 ? (stats.winningTrades || 0) + 1 : stats.winningTrades,
+                losingTrades: closeResult.realizedPnl < 0 ? (stats.losingTrades || 0) + 1 : stats.losingTrades,
+                totalPnl: (stats.totalPnl || 0) + closeResult.realizedPnl,
+                lastTradeAt: new Date().toISOString(),
+              });
+            }
+
+            sendTradeNotification(subWallet.address, {
+              type: 'trade_executed',
+              botName: subBot.name,
+              market: subBot.market,
+              side: 'CLOSE',
+              size: Math.abs(position.size) * fillPrice,
+              price: fillPrice,
+            }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
+          } else {
+            console.error(`[Subscriber Routing] Close failed for subscriber bot ${subBot.id}:`, closeResult.error);
+          }
+        } else {
+          const oraclePrice = parseFloat(signal.price);
+          const maxPos = parseFloat(subBot.maxPositionSize || '0');
+          if (maxPos <= 0) {
+            console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} has no maxPositionSize configured`);
+            continue;
+          }
+
+          const sourceContracts = parseFloat(signal.contracts);
+          const sourcePositionSize = parseFloat(signal.positionSize) || 100;
+          const tradePercent = Math.min(sourceContracts / sourcePositionSize, 1);
+          const tradeAmountUsd = maxPos * tradePercent;
+          const contractSize = tradeAmountUsd / oraclePrice;
+
+          if (contractSize < 0.001) {
+            console.log(`[Subscriber Routing] Trade size too small for subscriber bot ${subBot.id}`);
+            continue;
+          }
+
+          console.log(`[Subscriber Routing] Executing ${signal.action} for subscriber bot ${subBot.id}: size=${contractSize.toFixed(6)}`);
+
+          const side = signal.action === 'buy' ? 'long' : 'short';
+          const orderResult = await executePerpOrder(
+            subWallet.agentPrivateKeyEncrypted,
+            subBot.market,
+            side,
+            contractSize,
+            subAccountId
+          );
+
+          if (orderResult.success) {
+            const fillPrice = orderResult.fillPrice ?? oraclePrice;
+            const tradeFee = orderResult.fee ?? 0;
+            const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0 };
+
+            await storage.createBotTrade({
+              tradingBotId: subBot.id,
+              walletAddress: subBot.walletAddress,
+              market: subBot.market,
+              side: side === 'long' ? 'LONG' : 'SHORT',
+              size: contractSize.toFixed(8),
+              price: fillPrice.toFixed(6),
+              status: 'executed',
+              fee: tradeFee.toString(),
+              txSignature: orderResult.txSignature || orderResult.signature || null,
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+            });
+
+            await storage.updateTradingBotStats(subBot.id, {
+              ...stats,
+              totalTrades: (stats.totalTrades || 0) + 1,
+              lastTradeAt: new Date().toISOString(),
+            });
+
+            sendTradeNotification(subWallet.address, {
+              type: 'trade_executed',
+              botName: subBot.name,
+              market: subBot.market,
+              side: side === 'long' ? 'LONG' : 'SHORT',
+              size: contractSize * fillPrice,
+              price: fillPrice,
+            }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
+          } else {
+            console.error(`[Subscriber Routing] Order failed for subscriber bot ${subBot.id}:`, orderResult.error);
+            
+            await storage.createBotTrade({
+              tradingBotId: subBot.id,
+              walletAddress: subBot.walletAddress,
+              market: subBot.market,
+              side: side === 'long' ? 'LONG' : 'SHORT',
+              size: contractSize.toFixed(8),
+              price: oraclePrice.toFixed(6),
+              status: 'failed',
+              fee: '0',
+              errorMessage: parseDriftError(orderResult.error),
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+            });
+
+            sendTradeNotification(subWallet.address, {
+              type: 'trade_failed',
+              botName: subBot.name,
+              market: subBot.market,
+              side: side === 'long' ? 'LONG' : 'SHORT',
+              size: contractSize * oraclePrice,
+              price: oraclePrice,
+              error: parseDriftError(orderResult.error),
+            }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
+          }
+        }
+      } catch (subError) {
+        console.error(`[Subscriber Routing] Error processing subscriber bot ${subBot.id}:`, subError);
+      }
+    }
+  } catch (error) {
+    console.error('[Subscriber Routing] Error:', error);
+  }
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -3372,6 +3570,16 @@ export async function registerRoutes(
               pnl: closeTradePnl,
             }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
             
+            // Route close signal to subscriber bots (async, don't block response)
+            routeSignalToSubscribers(botId, {
+              action: action as 'buy' | 'sell',
+              contracts,
+              positionSize,
+              price: signalPrice || closeFillPrice.toString(),
+              isCloseSignal: true,
+              strategyPositionSize,
+            }).catch(err => console.error('[Subscriber Routing] Error routing close to subscribers:', err));
+            
             console.log(`[Webhook] Position closed successfully: ${closeSize} ${bot.market} ${closeSide.toUpperCase()}`);
             return res.json({
               status: "success",
@@ -3842,6 +4050,16 @@ export async function registerRoutes(
         size: tradeNotional,
         price: fillPrice,
       }).catch(err => console.error('[Notifications] Failed to send trade_executed notification:', err));
+
+      // Route signal to subscriber bots (async, don't block response)
+      routeSignalToSubscribers(botId, {
+        action: action as 'buy' | 'sell',
+        contracts,
+        positionSize,
+        price: signalPrice || fillPrice.toString(),
+        isCloseSignal: false,
+        strategyPositionSize,
+      }).catch(err => console.error('[Subscriber Routing] Error routing to subscribers:', err));
 
       // Mark signal as executed (unique index prevents concurrent duplicates)
       try {

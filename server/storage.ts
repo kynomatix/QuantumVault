@@ -154,6 +154,7 @@ export interface IStorage {
   getBotSubscription(publishedBotId: string, subscriberWalletAddress: string): Promise<BotSubscription | undefined>;
   getBotSubscriptionsByPublishedBot(publishedBotId: string): Promise<BotSubscription[]>;
   getBotSubscriptionsByWallet(walletAddress: string): Promise<(BotSubscription & { publishedBot: PublishedBot })[]>;
+  getSubscriberBotsBySourceId(publishedBotId: string): Promise<TradingBot[]>;
   createBotSubscription(subscription: InsertBotSubscription): Promise<BotSubscription>;
   updateBotSubscription(id: string, updates: Partial<InsertBotSubscription>): Promise<BotSubscription | undefined>;
   cancelBotSubscription(id: string): Promise<void>;
@@ -885,6 +886,12 @@ export class DatabaseStorage implements IStorage {
       ...r.subscription,
       publishedBot: r.publishedBot,
     }));
+  }
+
+  async getSubscriberBotsBySourceId(publishedBotId: string): Promise<TradingBot[]> {
+    return db.select().from(tradingBots)
+      .where(eq(tradingBots.sourcePublishedBotId, publishedBotId))
+      .orderBy(desc(tradingBots.createdAt));
   }
 
   async createBotSubscription(subscription: InsertBotSubscription): Promise<BotSubscription> {
