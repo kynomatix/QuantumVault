@@ -92,17 +92,24 @@ const PERP_MARKET_INDICES = {
 function getEncryptionKey() {
   const key = process.env.AGENT_ENCRYPTION_KEY;
   if (!key) {
-    // Development fallback - matches crypto.ts
-    return 'a'.repeat(64);
+    // SECURITY: No dev fallback - AGENT_ENCRYPTION_KEY must be set
+    throw new Error('[Executor] AGENT_ENCRYPTION_KEY environment variable is required');
   }
   return key;
 }
 
-const ENCRYPTION_KEY = getEncryptionKey();
+// Lazy initialization - only called if legacy decryption is needed
+let ENCRYPTION_KEY = null;
+function getLegacyEncryptionKey() {
+  if (ENCRYPTION_KEY === null) {
+    ENCRYPTION_KEY = getEncryptionKey();
+  }
+  return ENCRYPTION_KEY;
+}
 
 function decryptPrivateKey(encryptedKey) {
   const parts = encryptedKey.split(':');
-  const key = Buffer.from(ENCRYPTION_KEY, 'hex');
+  const key = Buffer.from(getLegacyEncryptionKey(), 'hex');
   
   // New format: iv:authTag:encrypted (3 parts) - AES-256-GCM
   if (parts.length === 3) {
@@ -143,16 +150,42 @@ function decryptPrivateKey(encryptedKey) {
   return encryptedKey;
 }
 
-async function createDriftClient(encryptedPrivateKey, subAccountId, requiredPerpMarketIndex = null) {
+// Creates a DriftClient with keypair
+// Supports two modes:
+// 1. Pre-decrypted: privateKeyBase58 provided directly (v3 security path)
+// 2. Legacy: encryptedPrivateKey that needs decryption (backward compatibility)
+async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex = null) {
+  const { privateKeyBase58, encryptedPrivateKey } = keyInput;
+  
   const rpcUrl = process.env.SOLANA_RPC_URL || 
     (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
     'https://api.mainnet-beta.solana.com');
   
   const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
   
-  const privateKeyBase58 = decryptPrivateKey(encryptedPrivateKey);
-  const keypair = Keypair.fromSecretKey(bs58.decode(privateKeyBase58));
+  let keyBase58;
+  if (privateKeyBase58) {
+    // v3 path: key already decrypted by webhook handler
+    console.error('[Executor] Using pre-decrypted key [v3 security path]');
+    keyBase58 = privateKeyBase58;
+  } else if (encryptedPrivateKey) {
+    // Legacy path: decrypt here (backward compatibility during transition)
+    console.error('[Executor] Using legacy encrypted key [legacy decryption path]');
+    keyBase58 = decryptPrivateKey(encryptedPrivateKey);
+  } else {
+    throw new Error('[Executor] No private key provided (neither privateKeyBase58 nor encryptedPrivateKey)');
+  }
+  
+  // Decode the base58 key to bytes
+  const secretKeyBytes = bs58.decode(keyBase58);
+  
+  // Create keypair from secret key bytes
+  const keypair = Keypair.fromSecretKey(secretKeyBytes);
   const wallet = new Wallet(keypair);
+  
+  // SECURITY: Zeroize the secret key bytes after keypair creation
+  // The keypair object holds its own copy internally
+  secretKeyBytes.fill(0);
   
   // Get the default subscription config
   const defaultSubscription = getMarketsAndOraclesForSubscription('mainnet-beta');
@@ -186,7 +219,7 @@ async function createDriftClient(encryptedPrivateKey, subAccountId, requiredPerp
 }
 
 async function executeTrade(command) {
-  const { encryptedPrivateKey, market, side, sizeInBase, subAccountId, reduceOnly } = command;
+  const { privateKeyBase58, encryptedPrivateKey, market, side, sizeInBase, subAccountId, reduceOnly } = command;
   
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
@@ -197,7 +230,7 @@ async function executeTrade(command) {
   
   console.error(`[Executor] Creating DriftClient for subaccount ${subAccountId}, market ${market} -> index ${marketIndex}`);
   
-  const driftClient = await createDriftClient(encryptedPrivateKey, subAccountId, marketIndex);
+  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey }, subAccountId, marketIndex);
   
   try {
     await driftClient.subscribe();
@@ -270,7 +303,7 @@ async function executeTrade(command) {
 }
 
 async function closePosition(command) {
-  const { encryptedPrivateKey, market, subAccountId, positionSizeBase } = command;
+  const { privateKeyBase58, encryptedPrivateKey, market, subAccountId, positionSizeBase } = command;
   
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
@@ -281,7 +314,7 @@ async function closePosition(command) {
   
   console.error(`[Executor] Closing position for ${market} (index ${marketIndex}) subaccount ${subAccountId}`);
   
-  const driftClient = await createDriftClient(encryptedPrivateKey, subAccountId);
+  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey }, subAccountId);
   
   try {
     await driftClient.subscribe();
@@ -316,11 +349,11 @@ async function closePosition(command) {
 }
 
 async function settlePnl(command) {
-  const { encryptedPrivateKey, subAccountId } = command;
+  const { privateKeyBase58, encryptedPrivateKey, subAccountId } = command;
   
   console.error(`[Executor] Settling PnL for subaccount ${subAccountId}`);
   
-  const driftClient = await createDriftClient(encryptedPrivateKey, subAccountId);
+  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey }, subAccountId);
   
   try {
     await driftClient.subscribe();
@@ -377,14 +410,14 @@ async function settlePnl(command) {
 }
 
 async function deleteSubaccount(command) {
-  const { encryptedPrivateKey, subAccountId } = command;
+  const { privateKeyBase58, encryptedPrivateKey, subAccountId } = command;
   
   console.error(`[Executor] Deleting subaccount ${subAccountId} to reclaim rent`);
   
   // Note: Subaccount 0 CAN be deleted if it's empty and has no referred status
   // However, accounts created through referral programs may not be deletable
   
-  const driftClient = await createDriftClient(encryptedPrivateKey, subAccountId);
+  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey }, subAccountId);
   
   try {
     await driftClient.subscribe();

@@ -101,6 +101,12 @@ function parseDriftError(error: string | undefined): string {
   return error;
 }
 
+// PHASE 6.2 SECURITY NOTE: Subscriber Routing uses LEGACY encrypted key path
+// This is INTENTIONAL because subscriber wallets belong to DIFFERENT users who do not have
+// active sessions during webhook processing. The source bot's owner has an active session,
+// but subscriber bot owners are different users whose UMK is not available.
+// Subscriber wallets must use the encrypted agent key stored in the database.
+// Future enhancement: Subscribers could enable their own execution authorization for v3 path.
 async function routeSignalToSubscribers(
   sourceBotId: string,
   signal: {
@@ -156,6 +162,7 @@ async function routeSignalToSubscribers(
 
           console.log(`[Subscriber Routing] Closing position for subscriber bot ${subBot.id}: size=${position.size}`);
           
+          // NOTE: Uses legacy encrypted key - subscriber wallet's UMK not available (see function header comment)
           const subCloseSlippageBps = subWallet.slippageBps ?? 50;
           const closeResult = await closePerpPosition(
             subWallet.agentPrivateKeyEncrypted,
@@ -247,6 +254,7 @@ async function routeSignalToSubscribers(
 
           console.log(`[Subscriber Routing] Executing ${signal.action} for subscriber bot ${subBot.id}: $${tradeAmountUsd.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
+          // NOTE: Uses legacy encrypted key - subscriber wallet's UMK not available (see function header comment)
           const side = signal.action === 'buy' ? 'long' : 'short';
           const subSlippageBps = subWallet.slippageBps ?? 50;
           const orderResult = await executePerpOrder(
@@ -3793,33 +3801,40 @@ export async function registerRoutes(
         }
       }
       
-      // Security v3: Verify agent key can be decrypted via v3 path (Phase 6.1 migration validation)
-      // This validates the v3 encryption is working; actual key usage will be in Phase 6.2
+      // Security v3: Decrypt agent key via v3 path (Phase 6.2 - use pre-decrypted key)
       const agentKeyResult = await decryptAgentKeyWithFallback(
         bot.walletAddress,
         umkResult.umk,
         ownerWallet
       );
       
-      if (agentKeyResult) {
-        // Log migration status for tracking
-        const usedV3 = ownerWallet.agentPrivateKeyEncryptedV3 ? true : false;
-        if (usedV3) {
-          console.log(`[Webhook] Agent key decryption: v3 path verified for ${bot.walletAddress.slice(0, 8)}...`);
-        } else {
-          console.log(`[Webhook] Agent key decryption: legacy fallback used for ${bot.walletAddress.slice(0, 8)}... (v3 not yet migrated)`);
-        }
-        // Cleanup the decrypted agent key immediately - for now we continue using encrypted key path
-        agentKeyResult.cleanup();
-      } else {
+      // Cleanup the unwrapped UMK immediately after deriving agent key
+      umkResult.cleanup();
+      
+      if (!agentKeyResult) {
         // Agent key decryption failed - this is a critical error
-        umkResult.cleanup();
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Agent key decryption failed" });
         return res.status(403).json({ error: "Agent key decryption failed. Please reconfigure your agent wallet." });
       }
       
-      // Cleanup the unwrapped UMK after v3 validation
-      umkResult.cleanup();
+      // Log migration status for tracking
+      const usedV3 = ownerWallet.agentPrivateKeyEncryptedV3 ? true : false;
+      if (usedV3) {
+        console.log(`[Webhook] Agent key decryption: v3 path used for ${bot.walletAddress.slice(0, 8)}...`);
+      } else {
+        console.log(`[Webhook] Agent key decryption: legacy fallback used for ${bot.walletAddress.slice(0, 8)}... (v3 not yet migrated)`);
+      }
+      
+      // Convert secretKey (Uint8Array) to base58 for passing to executor
+      const privateKeyBase58 = bs58.encode(agentKeyResult.secretKey);
+      
+      // Helper to cleanup agent key after use
+      const cleanupAgentKey = () => {
+        agentKeyResult.cleanup();
+      };
+
+      // PHASE 6.2: Wrap execution in try/finally to ensure agent key cleanup
+      try {
 
       // Parse TradingView strategy signal
       // Expected JSON format:
@@ -4025,7 +4040,8 @@ export async function registerRoutes(
             bot.market,
             subAccountId,
             undefined,
-            closeSlippageBps2
+            closeSlippageBps2,
+            privateKeyBase58
           );
           
           // closePerpPosition returns { success, signature, error } - map to expected format
@@ -4117,7 +4133,8 @@ export async function registerRoutes(
                   bot.market,
                   subAccountId,
                   undefined,
-                  webhookDustSlippageBps
+                  webhookDustSlippageBps,
+                  privateKeyBase58
                 );
                 
                 if (retryResult.success && retryResult.signature) {
@@ -4420,7 +4437,8 @@ export async function registerRoutes(
             bot.market,
             subAccountId,
             undefined,
-            flipSlippageBps
+            flipSlippageBps,
+            privateKeyBase58
           );
           
           if (!closeResult.success) {
@@ -4690,7 +4708,8 @@ export async function registerRoutes(
         contractSize,
         subAccountId,
         false,
-        userSlippageBps
+        userSlippageBps,
+        privateKeyBase58
       );
 
       if (!orderResult.success) {
@@ -4797,6 +4816,10 @@ export async function registerRoutes(
         size: positionSize,
         signalHash,
       });
+      } finally {
+        // PHASE 6.2: Ensure agent key is cleaned up after execution
+        cleanupAgentKey();
+      }
     } catch (error) {
       console.error("Webhook processing error:", error);
       await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
@@ -4916,33 +4939,40 @@ export async function registerRoutes(
         }
       }
       
-      // Security v3: Verify agent key can be decrypted via v3 path (Phase 6.1 migration validation)
-      // This validates the v3 encryption is working; actual key usage will be in Phase 6.2
+      // Security v3: Decrypt agent key via v3 path (Phase 6.2 - use pre-decrypted key)
       const agentKeyResult = await decryptAgentKeyWithFallback(
         walletAddress,
         umkResult.umk,
         wallet
       );
       
-      if (agentKeyResult) {
-        // Log migration status for tracking
-        const usedV3 = wallet.agentPrivateKeyEncryptedV3 ? true : false;
-        if (usedV3) {
-          console.log(`[User Webhook] Agent key decryption: v3 path verified for ${walletAddress.slice(0, 8)}...`);
-        } else {
-          console.log(`[User Webhook] Agent key decryption: legacy fallback used for ${walletAddress.slice(0, 8)}... (v3 not yet migrated)`);
-        }
-        // Cleanup the decrypted agent key immediately - for now we continue using encrypted key path
-        agentKeyResult.cleanup();
-      } else {
+      // Cleanup the unwrapped UMK immediately after deriving agent key
+      umkResult.cleanup();
+      
+      if (!agentKeyResult) {
         // Agent key decryption failed - this is a critical error
-        umkResult.cleanup();
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Agent key decryption failed" });
         return res.status(403).json({ error: "Agent key decryption failed. Please reconfigure your agent wallet." });
       }
       
-      // Cleanup the unwrapped UMK after v3 validation
-      umkResult.cleanup();
+      // Log migration status for tracking
+      const usedV3 = wallet.agentPrivateKeyEncryptedV3 ? true : false;
+      if (usedV3) {
+        console.log(`[User Webhook] Agent key decryption: v3 path used for ${walletAddress.slice(0, 8)}...`);
+      } else {
+        console.log(`[User Webhook] Agent key decryption: legacy fallback used for ${walletAddress.slice(0, 8)}... (v3 not yet migrated)`);
+      }
+      
+      // Convert secretKey (Uint8Array) to base58 for passing to executor
+      const privateKeyBase58 = bs58.encode(agentKeyResult.secretKey);
+      
+      // Helper to cleanup agent key after use
+      const cleanupAgentKey = () => {
+        agentKeyResult.cleanup();
+      };
+
+      // PHASE 6.2: Wrap execution in try/finally to ensure agent key cleanup
+      try {
 
       // Check if bot is active
       if (!bot.isActive) {
@@ -5116,7 +5146,8 @@ export async function registerRoutes(
             bot.market,
             subAccountId,
             undefined,
-            userCloseSlippageBps
+            userCloseSlippageBps,
+            privateKeyBase58
           );
           
           if (result.success && !result.signature) {
@@ -5446,7 +5477,8 @@ export async function registerRoutes(
         contractSize,
         subAccountId,
         false,
-        userSlippageBps2
+        userSlippageBps2,
+        privateKeyBase58
       );
 
       if (!orderResult.success) {
@@ -5545,6 +5577,10 @@ export async function registerRoutes(
         txSignature: orderResult.txSignature || orderResult.signature,
         signalHash,
       });
+      } finally {
+        // PHASE 6.2: Ensure agent key is cleaned up after execution
+        cleanupAgentKey();
+      }
     } catch (error) {
       console.error("User webhook processing error:", error);
       await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
