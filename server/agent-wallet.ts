@@ -301,3 +301,46 @@ function createTransferInstruction(
     data,
   });
 }
+
+export async function buildWithdrawSolFromAgentTransaction(
+  agentPublicKey: string,
+  userWalletAddress: string,
+  encryptedPrivateKey: string,
+  amountSol: number,
+): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  const connection = getConnection();
+  const agentPubkey = new PublicKey(agentPublicKey);
+  const userPubkey = new PublicKey(userWalletAddress);
+  const agentKeypair = getAgentKeypair(encryptedPrivateKey);
+  
+  const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
+  if (lamports <= 0) {
+    throw new Error('Invalid withdraw amount');
+  }
+  
+  const transaction = new Transaction();
+  
+  transaction.add(
+    SystemProgram.transfer({
+      fromPubkey: agentPubkey,
+      toPubkey: userPubkey,
+      lamports,
+    })
+  );
+  
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  
+  transaction.feePayer = agentPubkey;
+  transaction.recentBlockhash = blockhash;
+  
+  transaction.sign(agentKeypair);
+  
+  const serializedTx = transaction.serialize().toString('base64');
+  
+  return {
+    transaction: serializedTx,
+    blockhash,
+    lastValidBlockHeight,
+    message: `Withdraw ${amountSol} SOL from agent wallet`,
+  };
+}

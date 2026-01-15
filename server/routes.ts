@@ -12,7 +12,7 @@ import { getMarketPrice, getAllPrices } from "./drift-price";
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction } from "./agent-wallet";
+import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 
@@ -2164,6 +2164,73 @@ export async function registerRoutes(
       res.json({ success: true });
     } catch (error) {
       console.error("Confirm SOL deposit error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/agent/withdraw-sol", requireWallet, async (req, res) => {
+    try {
+      const { amount } = req.body;
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const solBalance = await getAgentSolBalance(wallet.agentPublicKey);
+      const SOL_RESERVE = 0.005;
+      
+      if (amount > (solBalance - SOL_RESERVE)) {
+        return res.status(400).json({ error: "Insufficient SOL balance (must keep 0.005 SOL reserve for gas)" });
+      }
+
+      const txData = await buildWithdrawSolFromAgentTransaction(
+        wallet.agentPublicKey,
+        req.walletAddress!,
+        wallet.agentPrivateKeyEncrypted,
+        amount
+      );
+
+      res.json(txData);
+    } catch (error) {
+      console.error("Build agent SOL withdraw error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/agent/confirm-sol-withdraw", requireWallet, async (req, res) => {
+    try {
+      const { amount, txSignature } = req.body;
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid amount required" });
+      }
+      if (!txSignature || typeof txSignature !== 'string' || txSignature.length < 20) {
+        return res.status(400).json({ error: "Valid transaction signature required" });
+      }
+
+      const existingEvents = await storage.getEquityEvents(req.walletAddress!, 100);
+      if (existingEvents.some(e => e.txSignature === txSignature)) {
+        return res.json({ success: true, duplicate: true });
+      }
+
+      await storage.createEquityEvent({
+        walletAddress: req.walletAddress!,
+        eventType: 'sol_withdraw',
+        amount: String(-amount),
+        assetType: 'SOL',
+        txSignature,
+        notes: 'SOL withdraw from agent wallet',
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Confirm SOL withdraw error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

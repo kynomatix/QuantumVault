@@ -81,6 +81,9 @@ export function WalletContent() {
   const [isDepositingSol, setIsDepositingSol] = useState(false);
   const [userSolBalance, setUserSolBalance] = useState<number | null>(null);
   const [solLoading, setSolLoading] = useState(false);
+  
+  const [solWithdrawAmount, setSolWithdrawAmount] = useState('');
+  const [solWithdrawing, setSolWithdrawing] = useState(false);
 
   const fetchUserSolBalance = async () => {
     if (!solanaWallet.publicKey) return;
@@ -354,6 +357,81 @@ export function WalletContent() {
   const setMaxSolDeposit = () => {
     if (userSolBalance !== null && userSolBalance > 0.01) {
       setSolDepositAmount((userSolBalance - 0.01).toFixed(4));
+    }
+  };
+
+  const setMaxSolWithdraw = () => {
+    if (agentWallet?.solBalance !== undefined && agentWallet.solBalance > 0.005) {
+      setSolWithdrawAmount((agentWallet.solBalance - 0.005).toFixed(4));
+    }
+  };
+
+  const handleSolWithdraw = async () => {
+    const amount = parseFloat(solWithdrawAmount);
+    if (!amount || amount <= 0) {
+      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    if (agentWallet && amount > (agentWallet.solBalance - 0.005)) {
+      toast({ title: 'Insufficient SOL (keep 0.005 SOL for gas)', variant: 'destructive' });
+      return;
+    }
+
+    setSolWithdrawing(true);
+    try {
+      const response = await fetch('/api/agent/withdraw-sol', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'SOL withdrawal failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      
+      const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
+      const signature = await connection.sendRawTransaction(txBytes);
+      
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming SOL withdrawal...'
+      });
+      
+      await confirmTransactionWithFallback(connection, {
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      await fetch('/api/agent/confirm-sol-withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, txSignature: signature }),
+        credentials: 'include',
+      });
+
+      toast({ 
+        title: 'SOL Withdrawal Confirmed!', 
+        description: message || `Withdrew ${amount} SOL to your wallet`
+      });
+      
+      setSolWithdrawAmount('');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      await Promise.all([fetchUserSolBalance(), fetchAgentBalance()]);
+    } catch (error: any) {
+      console.error('SOL withdraw error:', error);
+      toast({ 
+        title: 'SOL Withdrawal Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setSolWithdrawing(false);
     }
   };
 
@@ -1061,6 +1139,64 @@ export function WalletContent() {
                   )}
                 </Button>
               </div>
+
+              <div className="p-4 bg-muted/30 rounded-xl space-y-4 mt-4">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium">Withdraw SOL</label>
+                    <span className="text-xs text-muted-foreground">
+                      Available: {((agentWallet?.solBalance ?? 0) - 0.005).toFixed(4)} SOL
+                    </span>
+                  </div>
+                  <div className="flex gap-2">
+                    <Input
+                      type="number"
+                      placeholder="0.00"
+                      step="0.001"
+                      value={solWithdrawAmount}
+                      onChange={(e) => setSolWithdrawAmount(e.target.value)}
+                      className="flex-1"
+                      data-testid="input-sol-withdraw-amount"
+                    />
+                    <Button 
+                      variant="outline" 
+                      onClick={setMaxSolWithdraw}
+                      data-testid="button-sol-withdraw-max"
+                    >
+                      Max
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Keep at least 0.005 SOL for transaction fees
+                  </p>
+                </div>
+                
+                <div className="flex items-center justify-between text-sm text-muted-foreground">
+                  <span>From: Agent Wallet</span>
+                  <ArrowRight className="w-4 h-4" />
+                  <span>To: Phantom Wallet</span>
+                </div>
+                
+                <Button
+                  variant="outline"
+                  className="w-full border-orange-500/50 text-orange-500 hover:bg-orange-500/10"
+                  onClick={handleSolWithdraw}
+                  disabled={solWithdrawing || !solWithdrawAmount || parseFloat(solWithdrawAmount) <= 0}
+                  data-testid="button-sol-withdraw"
+                >
+                  {solWithdrawing ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      <ArrowUpFromLine className="w-4 h-4 mr-2" />
+                      Withdraw SOL
+                    </>
+                  )}
+                </Button>
+              </div>
             </TabsContent>
           </Tabs>
         </CardContent>
@@ -1106,6 +1242,9 @@ export default function WalletManagement() {
   const [isDepositingSol, setIsDepositingSol] = useState(false);
   const [userSolBalance, setUserSolBalance] = useState<number | null>(null);
   const [solLoading, setSolLoading] = useState(false);
+  
+  const [solWithdrawAmount, setSolWithdrawAmount] = useState('');
+  const [solWithdrawing, setSolWithdrawing] = useState(false);
 
   const fetchUserSolBalance = async () => {
     if (!solanaWallet.publicKey) return;
@@ -1385,6 +1524,81 @@ export default function WalletManagement() {
   const setMaxSolDeposit = () => {
     if (userSolBalance !== null && userSolBalance > 0.01) {
       setSolDepositAmount((userSolBalance - 0.01).toFixed(4));
+    }
+  };
+
+  const setMaxSolWithdraw = () => {
+    if (agentWallet?.solBalance !== undefined && agentWallet.solBalance > 0.005) {
+      setSolWithdrawAmount((agentWallet.solBalance - 0.005).toFixed(4));
+    }
+  };
+
+  const handleSolWithdraw = async () => {
+    const amount = parseFloat(solWithdrawAmount);
+    if (!amount || amount <= 0) {
+      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+      return;
+    }
+
+    if (agentWallet && amount > (agentWallet.solBalance - 0.005)) {
+      toast({ title: 'Insufficient SOL (keep 0.005 SOL for gas)', variant: 'destructive' });
+      return;
+    }
+
+    setSolWithdrawing(true);
+    try {
+      const response = await fetch('/api/agent/withdraw-sol', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'SOL withdrawal failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      
+      const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
+      const signature = await connection.sendRawTransaction(txBytes);
+      
+      toast({ 
+        title: 'Transaction Submitted', 
+        description: 'Confirming SOL withdrawal...'
+      });
+      
+      await confirmTransactionWithFallback(connection, {
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      await fetch('/api/agent/confirm-sol-withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, txSignature: signature }),
+        credentials: 'include',
+      });
+
+      toast({ 
+        title: 'SOL Withdrawal Confirmed!', 
+        description: message || `Withdrew ${amount} SOL to your wallet`
+      });
+      
+      setSolWithdrawAmount('');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      await Promise.all([fetchUserSolBalance(), fetchAgentBalance()]);
+    } catch (error: any) {
+      console.error('SOL withdraw error:', error);
+      toast({ 
+        title: 'SOL Withdrawal Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setSolWithdrawing(false);
     }
   };
 
@@ -2135,6 +2349,64 @@ export default function WalletManagement() {
                           <>
                             <Fuel className="w-4 h-4 mr-2" />
                             Fund Agent Gas
+                          </>
+                        )}
+                      </Button>
+                    </div>
+
+                    <div className="p-4 bg-muted/30 rounded-xl space-y-4 mt-4">
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="text-sm font-medium">Withdraw SOL</label>
+                          <span className="text-xs text-muted-foreground">
+                            Available: {((agentWallet?.solBalance ?? 0) - 0.005).toFixed(4)} SOL
+                          </span>
+                        </div>
+                        <div className="flex gap-2">
+                          <Input
+                            type="number"
+                            placeholder="0.00"
+                            step="0.001"
+                            value={solWithdrawAmount}
+                            onChange={(e) => setSolWithdrawAmount(e.target.value)}
+                            className="flex-1"
+                            data-testid="input-sol-withdraw-amount"
+                          />
+                          <Button 
+                            variant="outline" 
+                            onClick={setMaxSolWithdraw}
+                            data-testid="button-sol-withdraw-max"
+                          >
+                            Max
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Keep at least 0.005 SOL for transaction fees
+                        </p>
+                      </div>
+                      
+                      <div className="flex items-center justify-between text-sm text-muted-foreground">
+                        <span>From: Agent Wallet</span>
+                        <ArrowRight className="w-4 h-4" />
+                        <span>To: Phantom Wallet</span>
+                      </div>
+                      
+                      <Button
+                        variant="outline"
+                        className="w-full border-orange-500/50 text-orange-500 hover:bg-orange-500/10"
+                        onClick={handleSolWithdraw}
+                        disabled={solWithdrawing || !solWithdrawAmount || parseFloat(solWithdrawAmount) <= 0}
+                        data-testid="button-sol-withdraw"
+                      >
+                        {solWithdrawing ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Processing...
+                          </>
+                        ) : (
+                          <>
+                            <ArrowUpFromLine className="w-4 h-4 mr-2" />
+                            Withdraw SOL
                           </>
                         )}
                       </Button>
