@@ -153,10 +153,13 @@ async function routeSignalToSubscribers(
 
           console.log(`[Subscriber Routing] Closing position for subscriber bot ${subBot.id}: size=${position.size}`);
           
+          const subCloseSlippageBps = subWallet.slippageBps ?? 50;
           const closeResult = await closePerpPosition(
             subWallet.agentPrivateKeyEncrypted,
             subBot.market,
-            subAccountId
+            subAccountId,
+            undefined,
+            subCloseSlippageBps
           );
 
           if (closeResult.success) {
@@ -242,12 +245,15 @@ async function routeSignalToSubscribers(
           console.log(`[Subscriber Routing] Executing ${signal.action} for subscriber bot ${subBot.id}: $${tradeAmountUsd.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
           const side = signal.action === 'buy' ? 'long' : 'short';
+          const subSlippageBps = subWallet.slippageBps ?? 50;
           const orderResult = await executePerpOrder(
             subWallet.agentPrivateKeyEncrypted,
             subBot.market,
             side,
             contractSize,
-            subAccountId
+            subAccountId,
+            false,
+            subSlippageBps
           );
 
           if (orderResult.success) {
@@ -1177,10 +1183,13 @@ export async function registerRoutes(
             continue;
           }
 
+          const closeAllSlippageBps = wallet.slippageBps ?? 50;
           const result = await closePerpPosition(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
-            subAccountId
+            subAccountId,
+            undefined,
+            closeAllSlippageBps
           );
 
           if (result.success) {
@@ -1830,11 +1839,13 @@ export async function registerRoutes(
 
       // Execute close order using closePerpPosition for exact BN precision
       // This prevents JavaScript float precision issues (e.g., 0.4374 → 437399999 instead of 437400000)
+      const closeSlippageBps = wallet.slippageBps ?? 50;
       const result = await closePerpPosition(
         wallet.agentPrivateKeyEncrypted,
         bot.market,
-        subAccountId
-        // positionSizeBase intentionally omitted - subprocess queries exact BN from Drift
+        subAccountId,
+        undefined,
+        closeSlippageBps
       );
 
       // Map closePerpPosition result format (signature) to expected format (txSignature)
@@ -1963,10 +1974,13 @@ export async function registerRoutes(
           console.warn(`[ClosePosition] Remaining dust: ${postClosePosition.side} ${Math.abs(postClosePosition.size).toFixed(6)} contracts - attempting cleanup...`);
           
           // Retry closePerpPosition to clean up the dust
+          const dustSlippageBps = wallet.slippageBps ?? 50;
           const retryResult = await closePerpPosition(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
-            subAccountId
+            subAccountId,
+            undefined,
+            dustSlippageBps
           );
           
           if (retryResult.success && retryResult.signature) {
@@ -2076,10 +2090,13 @@ export async function registerRoutes(
       console.log(`[CloseMarketPosition] Closing ${market} in subaccount ${subAccountId} (bot: ${bot.name})`);
 
       // Execute close order using closePerpPosition
+      const marketCloseSlippageBps = wallet.slippageBps ?? 50;
       const result = await closePerpPosition(
         wallet.agentPrivateKeyEncrypted,
         market,
-        subAccountId
+        subAccountId,
+        undefined,
+        marketCloseSlippageBps
       );
 
       if (!result.success) {
@@ -3499,12 +3516,14 @@ export async function registerRoutes(
           // CRITICAL: Do NOT pass closeSize - let the subprocess query exact BN from DriftClient
           // This prevents JavaScript float precision loss (e.g., 0.4374 → 437399999 instead of 437400000)
           const subAccountId = bot.driftSubaccountId ?? 0;
-          console.log(`[Webhook] Using closePerpPosition (exact BN precision) for closeSize=${closeSize}`);
+          const closeSlippageBps2 = wallet.slippageBps ?? 50;
+          console.log(`[Webhook] Using closePerpPosition (exact BN precision) for closeSize=${closeSize}, slippage=${closeSlippageBps2}bps`);
           const result = await closePerpPosition(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
-            subAccountId
-            // positionSizeBase intentionally omitted - subprocess queries exact BN from Drift
+            subAccountId,
+            undefined,
+            closeSlippageBps2
           );
           
           // closePerpPosition returns { success, signature, error } - map to expected format
@@ -3590,10 +3609,13 @@ export async function registerRoutes(
                 console.warn(`[Webhook] Remaining dust: ${postClosePosition.side} ${Math.abs(postClosePosition.size).toFixed(6)} contracts - attempting cleanup...`);
                 
                 // Retry closePerpPosition to clean up the dust
+                const webhookDustSlippageBps = wallet.slippageBps ?? 50;
                 const retryResult = await closePerpPosition(
                   wallet.agentPrivateKeyEncrypted,
                   bot.market,
-                  subAccountId
+                  subAccountId,
+                  undefined,
+                  webhookDustSlippageBps
                 );
                 
                 if (retryResult.success && retryResult.signature) {
@@ -3889,12 +3911,14 @@ export async function registerRoutes(
         
         try {
           // Use closePerpPosition for exact BN precision (prevents float precision dust)
-          console.log(`[Webhook] Using closePerpPosition (exact BN) for position flip close`);
+          const flipSlippageBps = wallet.slippageBps ?? 50;
+          console.log(`[Webhook] Using closePerpPosition (exact BN) for position flip close, slippage=${flipSlippageBps}bps`);
           const closeResult = await closePerpPosition(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
-            subAccountId
-            // positionSizeBase intentionally omitted - subprocess queries exact BN from Drift
+            subAccountId,
+            undefined,
+            flipSlippageBps
           );
           
           if (!closeResult.success) {
@@ -4156,12 +4180,15 @@ export async function registerRoutes(
       }
 
       // Execute on Drift using the subAccountId already declared for position check
+      const userSlippageBps = wallet.slippageBps ?? 50;
       const orderResult = await executePerpOrder(
         wallet.agentPrivateKeyEncrypted,
         bot.market,
         side,
         contractSize,
-        subAccountId
+        subAccountId,
+        false,
+        userSlippageBps
       );
 
       if (!orderResult.success) {
@@ -4510,10 +4537,13 @@ export async function registerRoutes(
           });
           
           // Execute close
+          const userCloseSlippageBps = wallet.slippageBps ?? 50;
           const result = await closePerpPosition(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
-            subAccountId
+            subAccountId,
+            undefined,
+            userCloseSlippageBps
           );
           
           if (result.success && !result.signature) {
@@ -4835,12 +4865,15 @@ export async function registerRoutes(
       }
 
       // Execute on Drift (subAccountId already declared above for collateral check)
+      const userSlippageBps2 = userWallet.slippageBps ?? 50;
       const orderResult = await executePerpOrder(
         userWallet.agentPrivateKeyEncrypted,
         bot.market,
         side,
         contractSize,
-        subAccountId
+        subAccountId,
+        false,
+        userSlippageBps2
       );
 
       if (!orderResult.success) {

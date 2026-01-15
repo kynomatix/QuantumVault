@@ -138,6 +138,8 @@ export default function AppPage() {
   const [savingNotifications, setSavingNotifications] = useState(false);
   const [referralCode, setReferralCode] = useState<string | null>(null);
   const [referredBy, setReferredBy] = useState<string | null>(null);
+  const [defaultLeverage, setDefaultLeverage] = useState(3);
+  const [slippageBps, setSlippageBps] = useState(50);
   
   // Marketplace state
   const [marketplaceSearch, setMarketplaceSearch] = useState('');
@@ -244,6 +246,8 @@ export default function AppPage() {
           setTelegramConnected(data.telegramConnected ?? false);
           setReferralCode(data.referralCode || null);
           setReferredBy(data.referredBy || null);
+          setDefaultLeverage(data.defaultLeverage ?? 3);
+          setSlippageBps(data.slippageBps ?? 50);
         }
       } catch (error) {
         console.error('Error loading settings:', error);
@@ -265,6 +269,8 @@ export default function AppPage() {
         body: JSON.stringify({
           displayName,
           xUsername,
+          defaultLeverage,
+          slippageBps,
         }),
       });
       
@@ -2122,6 +2128,44 @@ export default function AppPage() {
                       </div>
                     </div>
 
+                    <div className="border-t border-border/50 pt-6">
+                      <h3 className="font-display font-semibold mb-4">Trading Preferences</h3>
+                      <div className="space-y-4">
+                        <div>
+                          <label className="text-sm text-muted-foreground mb-1.5 block">Default Leverage</label>
+                          <p className="text-xs text-muted-foreground mb-2">Used when creating new bots. Can be adjusted per bot.</p>
+                          <div className="flex items-center gap-3">
+                            <Input 
+                              type="number"
+                              min={1}
+                              max={20}
+                              value={defaultLeverage} 
+                              onChange={(e) => setDefaultLeverage(Math.min(20, Math.max(1, parseInt(e.target.value) || 1)))}
+                              className="bg-muted/30 border-border/50 w-24" 
+                              data-testid="input-default-leverage" 
+                            />
+                            <span className="text-sm text-muted-foreground">x (1-20)</span>
+                          </div>
+                        </div>
+                        <div>
+                          <label className="text-sm text-muted-foreground mb-1.5 block">Max Slippage</label>
+                          <p className="text-xs text-muted-foreground mb-2">Maximum price slippage tolerance for trades. Higher values help with volatile markets like ZEC.</p>
+                          <div className="flex items-center gap-3">
+                            <Input 
+                              type="number"
+                              min={1}
+                              max={500}
+                              value={slippageBps} 
+                              onChange={(e) => setSlippageBps(Math.min(500, Math.max(1, parseInt(e.target.value) || 50)))}
+                              className="bg-muted/30 border-border/50 w-24" 
+                              data-testid="input-slippage-bps" 
+                            />
+                            <span className="text-sm text-muted-foreground">bps ({(slippageBps / 100).toFixed(2)}%)</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
                     {agentPublicKey && (
                       <div className="border-t border-border/50 pt-6">
                         <h3 className="font-display font-semibold mb-4">Drift Account</h3>
@@ -2735,6 +2779,7 @@ export default function AppPage() {
         isOpen={createBotOpen}
         onClose={() => setCreateBotOpen(false)}
         walletAddress={publicKeyString || ''}
+        defaultLeverage={defaultLeverage}
         onBotCreated={() => {
           refetchBots();
         }}

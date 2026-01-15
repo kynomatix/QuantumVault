@@ -162,9 +162,10 @@ interface CreateBotModalProps {
   onClose: () => void;
   walletAddress: string;
   onBotCreated: () => void;
+  defaultLeverage?: number;
 }
 
-export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }: CreateBotModalProps) {
+export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, defaultLeverage = 3 }: CreateBotModalProps) {
   const { toast } = useToast();
   const [isCreating, setIsCreating] = useState(false);
   const [step, setStep] = useState<'create' | 'success'>('create');
@@ -182,7 +183,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
   const [newBot, setNewBot] = useState({
     name: '',
     market: 'SOL-PERP',
-    leverage: 1,
+    leverage: defaultLeverage,
     investmentAmount: '',
   });
   
@@ -262,7 +263,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated }:
     setNewBot({
       name: '',
       market: 'SOL-PERP',
-      leverage: 1,
+      leverage: defaultLeverage,
       investmentAmount: '',
     });
   };

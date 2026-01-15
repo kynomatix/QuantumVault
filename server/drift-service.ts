@@ -2406,6 +2406,7 @@ export async function executePerpOrder(
   sizeInBase: number,
   subAccountId: number = 0,
   reduceOnly: boolean = false,
+  slippageBps: number = 50,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number }> {
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
@@ -2415,7 +2416,7 @@ export async function executePerpOrder(
     return { success: false, error: `Unknown market: ${market}. Please add this market to PERP_MARKET_INDICES in drift-service.ts.` };
   }
   
-  console.log(`[Drift] *** Executing ${side.toUpperCase()} ${reduceOnly ? 'REDUCE-ONLY ' : ''}order *** for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}`);
+  console.log(`[Drift] *** Executing ${side.toUpperCase()} ${reduceOnly ? 'REDUCE-ONLY ' : ''}order *** for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}, slippage: ${slippageBps}bps`);
   if (reduceOnly) {
     console.log(`[Drift] REDUCE-ONLY flag is SET - this order should only close existing positions, never open new ones`);
   }
@@ -2441,6 +2442,23 @@ export async function executePerpOrder(
         const baseAssetAmount = new BN(Math.round(sizeInBase * 1e9));
         const direction = side === 'long' ? sdk.PositionDirection.LONG : sdk.PositionDirection.SHORT;
         
+        let price: typeof BN | undefined;
+        try {
+          const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
+          if (oracleData?.price) {
+            const oraclePrice = oracleData.price.toNumber();
+            const slippageMultiplier = slippageBps / 10000;
+            if (side === 'long') {
+              price = new BN(Math.round(oraclePrice * (1 + slippageMultiplier)));
+            } else {
+              price = new BN(Math.round(oraclePrice * (1 - slippageMultiplier)));
+            }
+            console.log(`[Drift] Oracle price: ${oraclePrice / 1e6}, limit price: ${price.toNumber() / 1e6} (${side === 'long' ? 'max' : 'min'})`);
+          }
+        } catch (e) {
+          console.warn('[Drift] Could not get oracle price for slippage calc, proceeding without limit');
+        }
+        
         const txSig = await driftClient.placeAndTakePerpOrder({
           direction,
           baseAssetAmount,
@@ -2448,6 +2466,7 @@ export async function executePerpOrder(
           marketType: sdk.MarketType.PERP,
           orderType: sdk.OrderType.MARKET,
           reduceOnly,
+          ...(price && { price }),
         });
         
         console.log(`[Drift] Order executed: ${txSig}`);
@@ -2484,6 +2503,7 @@ export async function executePerpOrder(
       sizeInBase,
       subAccountId,
       reduceOnly,
+      slippageBps,
     });
     
     return result;
@@ -2514,6 +2534,7 @@ export async function closePerpPosition(
   market: string,
   subAccountId: number = 0,
   positionSizeBase?: number,
+  slippageBps: number = 50,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
@@ -2554,7 +2575,24 @@ export async function closePerpPosition(
         const closeDirection = isLong ? sdk.PositionDirection.SHORT : sdk.PositionDirection.LONG;
         const closeAmount = perpPosition.baseAssetAmount.abs();
         
-        console.log(`[Drift] Closing ${isLong ? 'long' : 'short'} position of ${closeAmount.toNumber() / 1e9} contracts`);
+        console.log(`[Drift] Closing ${isLong ? 'long' : 'short'} position of ${closeAmount.toNumber() / 1e9} contracts, slippage: ${slippageBps}bps`);
+        
+        let price: typeof BN | undefined;
+        try {
+          const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
+          if (oracleData?.price) {
+            const oraclePrice = oracleData.price.toNumber();
+            const slippageMultiplier = slippageBps / 10000;
+            if (isLong) {
+              price = new BN(Math.round(oraclePrice * (1 - slippageMultiplier)));
+            } else {
+              price = new BN(Math.round(oraclePrice * (1 + slippageMultiplier)));
+            }
+            console.log(`[Drift] Close limit price: ${price.toNumber() / 1e6} (${isLong ? 'min' : 'max'})`);
+          }
+        } catch (e) {
+          console.warn('[Drift] Could not get oracle price for close slippage calc, proceeding without limit');
+        }
         
         const txSig = await driftClient.placeAndTakePerpOrder({
           direction: closeDirection,
@@ -2563,6 +2601,7 @@ export async function closePerpPosition(
           marketType: sdk.MarketType.PERP,
           orderType: sdk.OrderType.MARKET,
           reduceOnly: true,
+          ...(price && { price }),
         });
         
         console.log(`[Drift] Position closed: ${txSig}`);
@@ -2588,6 +2627,7 @@ export async function closePerpPosition(
       market,
       subAccountId,
       positionSizeBase: positionSizeBase ?? null,
+      slippageBps,
     });
     
     return result;
