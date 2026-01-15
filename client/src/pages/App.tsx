@@ -40,7 +40,8 @@ import {
   X,
   Check,
   Share2,
-  ChevronUp
+  ChevronUp,
+  Fuel
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -176,6 +177,7 @@ export default function AppPage() {
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [driftBalance, setDriftBalance] = useState<number | null>(null);
   const [agentBalance, setAgentBalance] = useState<number | null>(null);
+  const [solBalance, setSolBalance] = useState<number | null>(null);
   const [equityLoading, setEquityLoading] = useState(false);
   const equityInitialLoadDone = useRef(false);
 
@@ -185,6 +187,7 @@ export default function AppPage() {
       setTotalEquity(null);
       setAgentBalance(null);
       setDriftBalance(null);
+      setSolBalance(null);
       equityInitialLoadDone.current = false;
       return;
     }
@@ -200,6 +203,7 @@ export default function AppPage() {
           setTotalEquity(data.totalEquity ?? 0);
           setAgentBalance(data.agentBalance ?? 0);
           setDriftBalance(data.driftBalance ?? 0);
+          setSolBalance(data.solBalance ?? 0);
           equityInitialLoadDone.current = true;
         }
       } catch (error) {
@@ -925,9 +929,11 @@ export default function AppPage() {
               onClick={() => setNotificationDropdownOpen(true)}
             >
               <Bell className="w-5 h-5 text-muted-foreground" />
-              {!telegramConnected && (
+              {(solBalance !== null && solBalance < 0.035) ? (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full" />
+              ) : !telegramConnected ? (
                 <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-amber-500 rounded-full" />
-              )}
+              ) : null}
             </button>
             
             <Sheet open={notificationDropdownOpen} onOpenChange={setNotificationDropdownOpen}>
@@ -942,6 +948,28 @@ export default function AppPage() {
                 </SheetHeader>
                 
                 <div className="mt-6 space-y-6">
+                  {solBalance !== null && solBalance < 0.035 && (
+                    <div className="flex items-center gap-3 p-3 bg-red-500/10 border border-red-500/30 rounded-lg" data-testid="alert-low-gas">
+                      <Fuel className="w-5 h-5 text-red-500 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-red-400">Low Gas Warning</p>
+                        <p className="text-xs text-muted-foreground">
+                          Your agent wallet has only {solBalance.toFixed(4)} SOL. You need at least 0.035 SOL to create new bots.
+                        </p>
+                      </div>
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => {
+                          setNotificationDropdownOpen(false);
+                          setActiveNav('wallet');
+                        }}
+                        data-testid="button-go-to-wallet"
+                      >
+                        Add SOL
+                      </Button>
+                    </div>
+                  )}
                   {!telegramConnected && (
                     <div className="flex items-center gap-3 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
                       <Bell className="w-5 h-5 text-amber-500 flex-shrink-0" />

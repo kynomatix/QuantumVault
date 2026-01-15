@@ -5146,10 +5146,14 @@ export async function registerRoutes(
       const wallet = await storage.getWallet(req.walletAddress!);
       const bots = await storage.getTradingBots(req.walletAddress!);
       
-      // Get agent wallet balance
+      // Get agent wallet balance (USDC and SOL)
       let agentBalance = 0;
+      let solBalance = 0;
       if (wallet?.agentPublicKey) {
-        agentBalance = await getAgentUsdcBalance(wallet.agentPublicKey);
+        [agentBalance, solBalance] = await Promise.all([
+          getAgentUsdcBalance(wallet.agentPublicKey),
+          getAgentSolBalance(wallet.agentPublicKey),
+        ]);
       }
       
       // Sum up totalCollateral from all subaccounts (includes USDC + unrealized PnL)
@@ -5187,6 +5191,7 @@ export async function registerRoutes(
         agentBalance,
         driftBalance,
         totalEquity,
+        solBalance,
         botCount: bots.length,
         subaccountBalances,
       });
