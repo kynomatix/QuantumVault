@@ -20,6 +20,11 @@ Preferred communication style: Simple, everyday language.
 -   **Backend**: Node.js with Express.js (TypeScript, ESM modules), Express-session for cookie-based authentication, RESTful API design, esbuild for compilation.
 -   **Data Storage**: PostgreSQL via Drizzle ORM, with a defined schema for users, wallets, bots, trades, positions. Migrations handled by Drizzle-kit.
 
+### SDK Loading Architecture
+-   **Lazy ESM Import**: DriftClient is loaded lazily via dynamic `import()` to avoid CJS/ESM interop issues. Other SDK components (types, config, Wallet) are loaded synchronously via `createRequire`.
+-   **Trade Execution**: Uses `drift-executor.mjs` subprocess for trade execution (pure ESM environment where SDK loads correctly).
+-   **SDK Version**: `@drift-labs/sdk@2.146.0-beta.7` is the current stable version compatible with the platform.
+
 ### Key Features
 -   **Automated Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol, including logic for converting TradingView `contracts` to a percentage of `bot.maxPositionSize`.
 -   **Robust Position Management**: Includes close signal detection (`strategy.position_size = 0`), position flip detection (two-step close then open), and precise close order execution using `closePerpPosition()` with dust cleanup.

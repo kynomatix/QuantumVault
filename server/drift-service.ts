@@ -32,13 +32,15 @@ if (isBundledCJS) {
   requireSync = createRequire(import.meta.url);
 }
 
-// Load SDK components - try browser build for DriftClient (different bundling)
+// Load SDK components - types, config via requireSync (these work fine)
+// DriftClient loaded lazily via dynamic ESM import() to avoid CJS/ESM interop issues
 let sdkTypes: any = null;
 let sdkConfig: any = null;
 let WalletClass: any = null;
 let DriftClientClass: any = null;
 let driftIdl: any = null;
 let sdkLoadSuccess = false;
+let driftClientLoadPromise: Promise<any> | null = null;
 
 try {
   sdkTypes = requireSync('@drift-labs/sdk/lib/node/types.js');
@@ -50,34 +52,43 @@ try {
   WalletClass = requireSync('@drift-labs/sdk/lib/node/wallet.js').Wallet;
   console.log('[Drift] Wallet loaded successfully');
   
-  // Try loading DriftClient from browser build (different bundling may work)
-  try {
-    DriftClientClass = requireSync('@drift-labs/sdk/lib/browser/driftClient.js').DriftClient;
-    console.log('[Drift] DriftClient loaded from browser build');
-    sdkLoadSuccess = true;
-  } catch (browserErr: any) {
-    console.error('[Drift] Browser DriftClient failed:', browserErr.message);
-    // Try node build as fallback
-    try {
-      DriftClientClass = requireSync('@drift-labs/sdk/lib/node/driftClient.js').DriftClient;
-      console.log('[Drift] DriftClient loaded from node build');
-      sdkLoadSuccess = true;
-    } catch (nodeErr: any) {
-      console.error('[Drift] Node DriftClient also failed:', nodeErr.message);
-    }
-  }
-  
   // Load Drift IDL for reference
   driftIdl = requireSync('@drift-labs/sdk/lib/node/idl/drift.json');
   console.log('[Drift] IDL loaded successfully');
+  
+  // Mark as partially loaded - DriftClient will be loaded lazily via ESM import
+  sdkLoadSuccess = true;
+  console.log('[Drift] SDK components loaded (DriftClient will be loaded lazily via ESM)');
   
 } catch (loadErr: any) {
   console.error('[Drift] SDK component loading failed:', loadErr.message);
 }
 
-// Build SDK object with available components
+// Lazy load DriftClient via dynamic ESM import to avoid CJS/ESM interop issues
+async function loadDriftClient(): Promise<any> {
+  if (DriftClientClass) return DriftClientClass;
+  
+  if (!driftClientLoadPromise) {
+    driftClientLoadPromise = (async () => {
+      try {
+        // Dynamic ESM import works even in CJS-bundled environment
+        const sdkModule = await import('@drift-labs/sdk');
+        DriftClientClass = sdkModule.DriftClient;
+        console.log('[Drift] DriftClient loaded successfully via ESM import');
+        return DriftClientClass;
+      } catch (err: any) {
+        console.error('[Drift] DriftClient ESM import failed:', err.message);
+        throw err;
+      }
+    })();
+  }
+  
+  return driftClientLoadPromise;
+}
+
+// Build SDK object with available components (DriftClient NOT included - use loadDriftClient() instead)
 const cachedDriftSDK = sdkTypes && sdkConfig && WalletClass ? {
-  DriftClient: DriftClientClass, // May be null if loading failed
+  // NOTE: DriftClient must be loaded via loadDriftClient() for ESM compatibility
   Wallet: WalletClass,
   PositionDirection: sdkTypes.PositionDirection,
   OrderType: sdkTypes.OrderType,
@@ -392,9 +403,12 @@ async function getAgentDriftClient(
   encryptedPrivateKey: string,
   subAccountId: number = 0
 ): Promise<{ driftClient: any; cleanup: () => Promise<void> }> {
-  // Use cached SDK to avoid repeated dynamic import issues
+  // Use cached SDK for static components
   const sdk = await getDriftSDK();
-  const { DriftClient, Wallet, initialize } = sdk;
+  const { Wallet, initialize } = sdk;
+  
+  // Load DriftClient via lazy ESM import to avoid CJS/ESM interop issues
+  const DriftClient = await loadDriftClient();
   
   const connection = getConnection();
   const agentKeypair = getAgentKeypair(encryptedPrivateKey);
@@ -2115,7 +2129,10 @@ export async function executeAgentTransferBetweenSubaccounts(
     const subAccountIds = Array.from(new Set([0, fromSubAccountId, toSubAccountId]));
     
     const sdk = await getDriftSDK();
-    const { DriftClient, Wallet, initialize } = sdk;
+    const { Wallet, initialize } = sdk;
+    
+    // Load DriftClient via lazy ESM import to avoid CJS/ESM interop issues
+    const DriftClient = await loadDriftClient();
     
     const agentKeypair = getAgentKeypair(encryptedPrivateKey);
     const wallet = new Wallet(agentKeypair);
