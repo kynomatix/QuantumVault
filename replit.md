@@ -84,6 +84,13 @@ Preferred communication style: Simple, everyday language.
 -   **Emergency stop**: Immediately revokes all execution authorization
 -   **Policy HMAC**: Detects tampering with bot configuration (market, leverage, max position)
 
+### Agent Wallet Backup
+-   **Seed phrase reveal**: Users can reveal their agent wallet's BIP-39 recovery phrase in Settings
+-   **Signature-gated**: Requires wallet signature before revealing sensitive data
+-   **Rate limited**: Maximum 3 reveals per hour to prevent abuse
+-   **Auto-hide timer**: Mnemonic automatically hides after 60 seconds
+-   **Security warnings**: Clear warnings about keeping the phrase safe and never sharing it
+
 ### Production Deployment Security
 -   **Core dumps**: Disable core dumps in production to prevent key material exposure
     -   Linux: Set `ulimit -c 0` in process startup
