@@ -543,15 +543,18 @@ export default function AppPage() {
           const needsGas = data.solBalance === 0 || data.solBalance < 0.035;
           
           if (needsGas) {
-            if (data.isExistingUser) {
-              // Existing user with bots - just show a toast, not full onboarding
+            if (data.solBalance === 0) {
+              // Agent has zero SOL - fresh agent wallet (new or reset), show welcome popup
+              setWelcomePopupOpen(true);
+            } else if (data.isExistingUser) {
+              // Existing user with low (but not zero) balance - just show toast
               toast({
                 title: 'Low Gas Balance',
                 description: 'Your agent wallet is low on SOL for transaction fees. Visit Wallet tab to deposit more.',
                 duration: 8000,
               });
             } else {
-              // New user - show full welcome onboarding
+              // New user with some SOL but still needs more - show welcome popup
               setWelcomePopupOpen(true);
             }
           }
