@@ -5,7 +5,8 @@ import {
   BookOpen, Wallet, Bot, Webhook, Settings, Users, 
   ChevronRight, ArrowLeft, Zap, DollarSign,
   Copy, Check, Menu, X,
-  AlertTriangle, Info, CheckCircle2, ArrowDown, ArrowUp
+  AlertTriangle, Info, CheckCircle2, ArrowDown, ArrowUp,
+  Shield, Lock, Key, RefreshCw
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -19,7 +20,8 @@ type DocSection =
   | 'tradingview'
   | 'bot-management'
   | 'marketplace'
-  | 'settings';
+  | 'settings'
+  | 'security';
 
 interface NavItem {
   id: DocSection;
@@ -36,6 +38,7 @@ const navItems: NavItem[] = [
   { id: 'bot-management', label: 'Bot Management', icon: Settings },
   { id: 'marketplace', label: 'Marketplace', icon: Users },
   { id: 'settings', label: 'Settings & Referrals', icon: Zap },
+  { id: 'security', label: 'Security', icon: Shield },
 ];
 
 function CopyButton({ text }: { text: string }) {
@@ -580,7 +583,7 @@ function SettingsSection() {
     <div>
       <SectionHeading>Settings & Referrals</SectionHeading>
       <Paragraph>
-        Customize your profile and earn rewards by inviting others to the platform.
+        Customize your profile, manage security, and earn rewards by inviting others to the platform.
       </Paragraph>
       
       <SubHeading>Profile Settings</SubHeading>
@@ -600,6 +603,19 @@ function SettingsSection() {
         <li>Trade failed alerts</li>
         <li>Position closed updates</li>
       </ul>
+      
+      <SubHeading>Security Features</SubHeading>
+      <Paragraph>
+        QuantumVault includes robust security controls in the Settings area:
+      </Paragraph>
+      <ul className="list-disc list-inside text-white/70 mb-4 space-y-1 ml-4">
+        <li><strong className="text-white">Execution Authorization</strong> - Enable or revoke automated trading</li>
+        <li><strong className="text-white">Agent Wallet Backup</strong> - View your 24-word recovery phrase</li>
+        <li><strong className="text-white">Reset Agent Wallet</strong> - Generate a new agent wallet if needed</li>
+      </ul>
+      <Alert type="info">
+        For detailed information about how your funds are protected, see the <strong>Security</strong> section.
+      </Alert>
       
       <SubHeading>Referral Program</SubHeading>
       <Paragraph>
@@ -622,11 +638,196 @@ function SettingsSection() {
         </p>
       </div>
       
-      <SubHeading>Reset Drift Account</SubHeading>
+      <SubHeading>Danger Zone</SubHeading>
+      <Paragraph>
+        These actions are irreversible. Use with caution:
+      </Paragraph>
+      <div className="space-y-3 mb-4">
+        <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/30">
+          <h4 className="font-medium text-red-200 mb-1">Reset Drift Account</h4>
+          <p className="text-red-200/70 text-sm">
+            Closes all positions, withdraws funds, and deletes all bot subaccounts. Start fresh.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/30">
+          <h4 className="font-medium text-red-200 mb-1">Reset Agent Wallet</h4>
+          <p className="text-red-200/70 text-sm">
+            Withdraws all funds to your Phantom wallet and creates a completely new agent wallet.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SecuritySection() {
+  return (
+    <div>
+      <SectionHeading>Security</SectionHeading>
+      <Paragraph>
+        QuantumVault is built with institutional-grade security to protect your trading capital. 
+        Your funds are always under your control.
+      </Paragraph>
+      
+      <SubHeading>Your Keys, Your Control</SubHeading>
+      <div className="space-y-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Key className="w-5 h-5 text-primary" />
+            <h4 className="font-medium text-white">You Own Your Agent Wallet</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Each user gets a dedicated Solana wallet for trading. You can back it up with a standard 
+            24-word recovery phrase and restore it in any Solana wallet.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Wallet className="w-5 h-5 text-primary" />
+            <h4 className="font-medium text-white">Phantom Keys Never Shared</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Your main Phantom wallet keys are never stored or transmitted. We only ask you to sign 
+            messages to verify your identity - never transactions that could drain your wallet.
+          </p>
+        </div>
+      </div>
+      
+      <SubHeading>Bank-Grade Encryption</SubHeading>
+      <Paragraph>
+        All sensitive data is protected with AES-256-GCM encryption - the same standard used by 
+        banks and governments worldwide.
+      </Paragraph>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Agent Wallet Key</h4>
+          <p className="text-white/60 text-sm">Encrypted with your personal master key</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Recovery Phrase</h4>
+          <p className="text-white/60 text-sm">Encrypted and only revealed on request</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Session Data</h4>
+          <p className="text-white/60 text-sm">Protected with per-user encryption keys</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Bot Policies</h4>
+          <p className="text-white/60 text-sm">Cryptographically signed to prevent tampering</p>
+        </div>
+      </div>
+      
+      <SubHeading>Your Personal Master Key</SubHeading>
+      <Paragraph>
+        Every user has a unique User Master Key (UMK) that:
+      </Paragraph>
+      <ul className="list-disc list-inside text-white/70 mb-4 space-y-1 ml-4">
+        <li>Is derived from your wallet signature (only you can generate it)</li>
+        <li>Encrypts all your sensitive data</li>
+        <li>Is never stored in plain text</li>
+        <li>Cannot be accessed without your Phantom wallet</li>
+      </ul>
+      
+      <SubHeading>Trade Execution Security</SubHeading>
+      <div className="space-y-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Lock className="w-5 h-5 text-green-400" />
+            <h4 className="font-medium text-white">Signature-Based Authorization</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Before any bot can trade, you must explicitly enable execution by signing a message 
+            with your Phantom wallet. You can revoke this at any time.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Shield className="w-5 h-5 text-green-400" />
+            <h4 className="font-medium text-white">Bot Policy Protection</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Your trading limits (max position size, leverage, markets) are cryptographically 
+            protected. Any tampering is automatically detected and blocked.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <RefreshCw className="w-5 h-5 text-amber-400" />
+            <h4 className="font-medium text-white">Emergency Stop</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            One-click to revoke all execution authorization, close all positions, or reset 
+            your entire agent wallet if needed.
+          </p>
+        </div>
+      </div>
+      
+      <SubHeading>What We Never Do</SubHeading>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">
+        <div className="flex items-center gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
+          <X className="w-5 h-5 text-red-400 flex-shrink-0" />
+          <span className="text-red-200/80 text-sm">Store your Phantom private keys</span>
+        </div>
+        <div className="flex items-center gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
+          <X className="w-5 h-5 text-red-400 flex-shrink-0" />
+          <span className="text-red-200/80 text-sm">Access your main wallet</span>
+        </div>
+        <div className="flex items-center gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
+          <X className="w-5 h-5 text-red-400 flex-shrink-0" />
+          <span className="text-red-200/80 text-sm">Log sensitive data</span>
+        </div>
+        <div className="flex items-center gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
+          <X className="w-5 h-5 text-red-400 flex-shrink-0" />
+          <span className="text-red-200/80 text-sm">Share your encryption keys</span>
+        </div>
+      </div>
+      
+      <SubHeading>Recovery Options</SubHeading>
+      <Paragraph>
+        Your agent wallet includes a 24-word recovery phrase that you can:
+      </Paragraph>
+      <StepList steps={[
+        'Reveal securely in Settings (requires wallet signature)',
+        'Import into any standard Solana wallet (Phantom, Solflare, etc.)',
+        'Use to recover your trading funds independently',
+      ]} />
+      
       <Alert type="warning">
-        The "Reset Drift Account" option in settings will close all positions, withdraw all 
-        funds, and delete all bot subaccounts. Use this only if you want to start completely 
-        fresh. This action cannot be undone.
+        Keep your recovery phrase safe! Write it down on paper and store it securely. 
+        Never share it with anyone - QuantumVault will never ask for your recovery phrase.
+      </Alert>
+      
+      <SubHeading>Best Practices</SubHeading>
+      <div className="space-y-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Keep Your Recovery Phrase Safe</h4>
+          <ul className="list-disc list-inside text-white/60 text-sm space-y-1 ml-2">
+            <li>Write it down on paper - never store digitally</li>
+            <li>Keep in a secure location (fireproof safe recommended)</li>
+            <li>Test recovery before depositing large amounts</li>
+          </ul>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Monitor Your Bots</h4>
+          <ul className="list-disc list-inside text-white/60 text-sm space-y-1 ml-2">
+            <li>Review open positions daily</li>
+            <li>Set conservative limits initially</li>
+            <li>Check trade history for unexpected activity</li>
+          </ul>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Secure Your Phantom Wallet</h4>
+          <ul className="list-disc list-inside text-white/60 text-sm space-y-1 ml-2">
+            <li>Consider using a hardware wallet (Ledger via Phantom)</li>
+            <li>Enable Phantom's auto-lock feature</li>
+            <li>Never sign unknown messages</li>
+          </ul>
+        </div>
+      </div>
+      
+      <Alert type="success">
+        QuantumVault's security has been reviewed by internal architects and AI-assisted 
+        security audits. We continuously update our security practices to protect your funds.
       </Alert>
     </div>
   );
@@ -654,6 +855,8 @@ export default function DocsPage() {
         return <MarketplaceSection />;
       case 'settings':
         return <SettingsSection />;
+      case 'security':
+        return <SecuritySection />;
       default:
         return <GettingStartedSection />;
     }

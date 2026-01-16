@@ -70,6 +70,9 @@ Preferred communication style: Simple, everyday language.
 
 ## Security Architecture
 
+> **User Documentation**: See `docs/SECURITY.md` for user-friendly security documentation.  
+> **Technical Documentation**: See `docs/SECURITY_UPGRADE_PLAN.md` for detailed implementation specs.
+
 ### Key Management (Phase 6 - v3 Security)
 -   **User Master Key (UMK)**: Derived per-user, encrypts all user-specific secrets
 -   **Session-based decryption**: Keys are only decrypted during authenticated sessions
