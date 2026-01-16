@@ -2272,10 +2272,17 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     
     console.log(`[Drift] Spawning subprocess executor for ${command.action || 'trade'}`);
     
+    // Force resolution from top-level node_modules to avoid nested dependency conflicts
+    // The nested @pythnetwork/solana-utils → jito-ts → @solana/web3.js causes ESM/CJS crashes
+    const projectRoot = isBundledCJS ? process.cwd() : join(currentDirname, '..');
+    const topLevelModules = join(projectRoot, 'node_modules');
+    
     const child = spawn('node', [executorPath], {
       env: {
         ...process.env,
         NODE_OPTIONS: '--no-warnings',
+        // Set NODE_PATH to prioritize top-level modules over nested ones
+        NODE_PATH: topLevelModules,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
