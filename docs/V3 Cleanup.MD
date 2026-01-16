@@ -1,4 +1,4 @@
-# QuantumVault Cleanup Plan
+# QuantumVault V3 Security Cleanup Plan
 
 > **Status**: PENDING - Execute after confirming system stability  
 > **Last Updated**: January 16, 2026  
@@ -226,12 +226,13 @@ Legacy columns that can be removed in future schema update:
 
 When ready to clean up, execute in this order:
 
-1. **Test scripts** - Lowest risk, pure dev files
-2. **Unused NPM deps** - Low risk after verification
-3. **Unused frontend pages** - Low risk
-4. **Builder functions** - Low-medium, verify no callers first
-5. **Legacy crypto** - Medium risk, requires wallet audit first
-6. **Database tables** - Do not drop, just document
+1. **Dead endpoint (Section 0)** - Highest priority, security-relevant
+2. **Test scripts** - Lowest risk, pure dev files
+3. **Unused NPM deps** - Low risk after verification
+4. **Unused frontend pages** - Low risk
+5. **Builder functions** - Low-medium, verify no callers first
+6. **Legacy crypto** - Medium risk, requires wallet audit first
+7. **Database tables** - Do not drop, just document
 
 ---
 
