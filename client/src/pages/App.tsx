@@ -46,7 +46,9 @@ import {
   Key,
   Eye,
   EyeOff,
-  Clock
+  Clock,
+  Sliders,
+  User
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -137,6 +139,10 @@ export default function AppPage() {
   const [telegramConnected, setTelegramConnected] = useState(false);
   const [telegramVerifyCode, setTelegramVerifyCode] = useState<string | null>(null);
   const [dangerZoneExpanded, setDangerZoneExpanded] = useState(false);
+  const [accountExpanded, setAccountExpanded] = useState(true);
+  const [tradingPrefsExpanded, setTradingPrefsExpanded] = useState(true);
+  const [notificationsExpanded, setNotificationsExpanded] = useState(true);
+  const [securityExpanded, setSecurityExpanded] = useState(true);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
   const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
@@ -2276,472 +2282,640 @@ export default function AppPage() {
                     <span className="ml-2 text-muted-foreground">Loading settings...</span>
                   </div>
                 ) : (
-                  <div className="gradient-border p-6 noise space-y-6">
-                    <div>
-                      <h3 className="font-display font-semibold mb-4">Profile</h3>
-                      <div className="space-y-4">
-                        <div>
-                          <label className="text-sm text-muted-foreground mb-1.5 block">Username</label>
-                          <Input 
-                            value={displayName} 
-                            onChange={(e) => setDisplayName(e.target.value)}
-                            placeholder="Enter your display name"
-                            className="bg-muted/30 border-border/50" 
-                            data-testid="input-username" 
-                          />
+                  <div className="space-y-4">
+                    {/* Account Section */}
+                    <div className="gradient-border p-0 noise">
+                      <button
+                        onClick={() => setAccountExpanded(!accountExpanded)}
+                        className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
+                        data-testid="button-toggle-account"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-full bg-primary/20">
+                            <User className="w-5 h-5 text-primary" />
+                          </div>
+                          <h3 className="font-display font-semibold">Account</h3>
                         </div>
-                        <div>
-                          <label className="text-sm text-muted-foreground mb-1.5 block">X (Twitter) Username</label>
-                          <div className="relative">
-                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">@</span>
-                            <Input 
-                              value={xUsername} 
-                              onChange={(e) => setXUsername(e.target.value.replace(/^@/, ''))}
-                              placeholder="username"
-                              className="bg-muted/30 border-border/50 pl-8" 
-                              data-testid="input-x-username" 
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="border-t border-border/50 pt-6">
-                      <h3 className="font-display font-semibold mb-4">Trading Preferences</h3>
-                      <div className="space-y-4">
-                        <div>
-                          <label className="text-sm text-muted-foreground mb-1.5 block">Default Leverage</label>
-                          <p className="text-xs text-muted-foreground mb-2">Used when creating new bots. Markets have different max limits (3x-20x) - your value will be capped to each market's maximum.</p>
-                          <div className="flex items-center gap-3">
-                            <Input 
-                              type="number"
-                              min={1}
-                              max={20}
-                              value={defaultLeverage} 
-                              onChange={(e) => setDefaultLeverage(Math.min(20, Math.max(1, parseInt(e.target.value) || 1)))}
-                              className="bg-muted/30 border-border/50 w-24" 
-                              data-testid="input-default-leverage" 
-                            />
-                            <span className="text-sm text-muted-foreground">x (1-20)</span>
-                          </div>
-                        </div>
-                        <div>
-                          <label className="text-sm text-muted-foreground mb-1.5 block">Max Slippage</label>
-                          <p className="text-xs text-muted-foreground mb-2">Maximum price slippage tolerance for trades. Higher values help with volatile markets.</p>
-                          <div className="flex items-center gap-3">
-                            <Input 
-                              type="number"
-                              min={1}
-                              max={500}
-                              value={slippageBps} 
-                              onChange={(e) => setSlippageBps(Math.min(500, Math.max(1, parseInt(e.target.value) || 50)))}
-                              className="bg-muted/30 border-border/50 w-24" 
-                              data-testid="input-slippage-bps" 
-                            />
-                            <span className="text-sm text-muted-foreground">bps ({(slippageBps / 100).toFixed(2)}%)</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {agentPublicKey && (
-                      <div className="border-t border-border/50 pt-6">
-                        <h3 className="font-display font-semibold mb-4">Drift Account</h3>
-                        <p className="text-sm text-muted-foreground mb-3">
-                          View your on-chain Drift trading account and positions directly.
-                        </p>
-                        <Button
-                          variant="outline"
-                          onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentPublicKey}`, '_blank')}
-                          className="w-full sm:w-auto"
-                          data-testid="button-view-drift-settings"
-                        >
-                          <ExternalLink className="w-4 h-4 mr-2" />
-                          View on Drift
-                        </Button>
-                        <p className="text-xs text-muted-foreground mt-2 font-mono break-all">
-                          Agent: {agentPublicKey}
-                        </p>
-                      </div>
-                    )}
-
-                    <div className="border-t border-border/50 pt-6">
-                      <h3 className="font-display font-semibold mb-4">Automated Trading</h3>
-                      <div className="bg-muted/30 rounded-lg border border-border/50 p-4">
-                        <div className="flex items-start gap-3">
-                          <div className={`p-2 rounded-full ${executionEnabled ? 'bg-green-500/20' : 'bg-amber-500/20'}`}>
-                            <Zap className={`w-5 h-5 ${executionEnabled ? 'text-green-500' : 'text-amber-500'}`} />
-                          </div>
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2">
-                              <p className="font-medium">Webhook Execution</p>
-                              {executionEnabled ? (
-                                <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full">Enabled</span>
-                              ) : (
-                                <span className="text-xs px-2 py-0.5 bg-amber-500/20 text-amber-500 rounded-full">Disabled</span>
-                              )}
-                            </div>
-                            <p className="text-sm text-muted-foreground mt-1">
-                              {executionEnabled 
-                                ? 'Your bots can execute trades via TradingView webhooks. Authorization remains active until you revoke it.'
-                                : 'Enable automated trading to allow your bots to execute trades when webhook signals arrive from TradingView.'}
-                            </p>
-                            <div className="mt-3">
-                              {executionEnabled ? (
-                                <Button
-                                  variant="outline"
-                                  onClick={revokeExecution}
-                                  disabled={executionLoading}
-                                  data-testid="button-revoke-execution"
-                                >
-                                  {executionLoading ? (
-                                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Processing...</>
-                                  ) : (
-                                    'Revoke Authorization'
-                                  )}
-                                </Button>
-                              ) : (
-                                <Button
-                                  onClick={enableExecution}
-                                  disabled={executionLoading}
-                                  data-testid="button-enable-execution"
-                                >
-                                  {executionLoading ? (
-                                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Processing...</>
-                                  ) : (
-                                    <><Shield className="w-4 h-4 mr-2" /> Enable Automated Trading</>
-                                  )}
-                                </Button>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="border-t border-border/50 pt-6">
-                      <h3 className="font-display font-semibold mb-4">Agent Wallet Backup</h3>
-                      <div className="bg-muted/30 rounded-lg border border-border/50 p-4">
-                        <div className="flex items-start gap-3">
-                          <div className="p-2 rounded-full bg-amber-500/20">
-                            <Key className="w-5 h-5 text-amber-500" />
-                          </div>
-                          <div className="flex-1">
-                            <p className="font-medium">Recovery Phrase</p>
-                            <p className="text-sm text-muted-foreground mt-1">
-                              Your agent wallet's recovery phrase allows you to restore access if needed. Keep it safe and never share it with anyone.
-                            </p>
-                            
-                            {mnemonic ? (
-                              <div className="mt-4 space-y-3">
-                                <div className="flex items-center gap-2 text-amber-500">
-                                  <Clock className="w-4 h-4" />
-                                  <span className="text-sm font-medium">Auto-hides in {mnemonicCountdown}s</span>
-                                </div>
-                                <div className="bg-background/50 rounded-lg border border-amber-500/30 p-4">
-                                  <p className="font-mono text-sm leading-relaxed break-all select-all" data-testid="text-mnemonic">
-                                    {mnemonic}
-                                  </p>
-                                </div>
-                                <div className="flex gap-2">
-                                  <Button
-                                    variant="outline"
-                                    onClick={handleCopyMnemonic}
-                                    className="flex-1"
-                                    data-testid="button-copy-mnemonic"
-                                  >
-                                    {mnemonicCopied ? (
-                                      <><Check className="w-4 h-4 mr-2 text-green-500" /> Copied</>
-                                    ) : (
-                                      <><Copy className="w-4 h-4 mr-2" /> Copy to Clipboard</>
-                                    )}
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    onClick={() => {
-                                      setMnemonic(null);
-                                      setMnemonicExpiresAt(null);
-                                      setBackupConfirmChecked(false);
-                                    }}
-                                    data-testid="button-hide-mnemonic"
-                                  >
-                                    <EyeOff className="w-4 h-4 mr-2" /> Hide
-                                  </Button>
-                                </div>
-                                <div className="bg-red-500/10 rounded-lg border border-red-500/30 p-3">
-                                  <div className="flex items-start gap-2">
-                                    <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />
-                                    <div className="text-xs text-red-400">
-                                      <p className="font-medium mb-1">Keep this phrase secure!</p>
-                                      <ul className="list-disc ml-4 space-y-0.5">
-                                        <li>Never share it with anyone</li>
-                                        <li>Store it offline in a safe place</li>
-                                        <li>Anyone with this phrase can control your funds</li>
-                                        <li>QuantumVault will never ask for your recovery phrase</li>
-                                      </ul>
-                                    </div>
-                                  </div>
-                                </div>
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${accountExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      <AnimatePresence>
+                        {accountExpanded && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-4 pb-4 space-y-4">
+                              <div>
+                                <label className="text-sm text-muted-foreground mb-1.5 block">Username</label>
+                                <Input 
+                                  value={displayName} 
+                                  onChange={(e) => setDisplayName(e.target.value)}
+                                  placeholder="Enter your display name"
+                                  className="bg-muted/30 border-border/50" 
+                                  data-testid="input-username" 
+                                />
                               </div>
-                            ) : (
-                              <div className="mt-4 space-y-4">
-                                <div className="bg-amber-500/10 rounded-lg border border-amber-500/30 p-3">
-                                  <div className="flex items-start gap-2">
-                                    <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
-                                    <p className="text-xs text-amber-400">
-                                      Only reveal your recovery phrase in a private location. Make sure no one is watching your screen.
-                                    </p>
-                                  </div>
-                                </div>
-                                <div className="flex items-start gap-2">
-                                  <Checkbox
-                                    id="backup-confirm"
-                                    checked={backupConfirmChecked}
-                                    onCheckedChange={(checked) => setBackupConfirmChecked(checked === true)}
-                                    data-testid="checkbox-confirm-backup"
+                              <div>
+                                <label className="text-sm text-muted-foreground mb-1.5 block">X (Twitter) Username</label>
+                                <div className="relative">
+                                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">@</span>
+                                  <Input 
+                                    value={xUsername} 
+                                    onChange={(e) => setXUsername(e.target.value.replace(/^@/, ''))}
+                                    placeholder="username"
+                                    className="bg-muted/30 border-border/50 pl-8" 
+                                    data-testid="input-x-username" 
                                   />
-                                  <label htmlFor="backup-confirm" className="text-sm text-muted-foreground cursor-pointer">
-                                    I understand this phrase controls my agent wallet funds and I'm in a private location
-                                  </label>
                                 </div>
-                                <Button
-                                  onClick={handleRevealMnemonic}
-                                  disabled={!backupConfirmChecked || revealMnemonicLoading}
-                                  data-testid="button-reveal-mnemonic"
-                                >
-                                  {revealMnemonicLoading ? (
-                                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Revealing...</>
-                                  ) : (
-                                    <><Eye className="w-4 h-4 mr-2" /> Reveal Recovery Phrase</>
-                                  )}
-                                </Button>
-                                <p className="text-xs text-muted-foreground">
-                                  Limited to 3 reveals per hour. Phrase auto-hides after 60 seconds.
-                                </p>
                               </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {referralCode && (
-                      <div className="border-t border-border/50 pt-6">
-                        <h3 className="font-display font-semibold mb-4">Referral Program</h3>
-                        <p className="text-sm text-muted-foreground mb-3">
-                          Share your referral code to invite friends. You'll earn rewards when they sign up and trade!
-                        </p>
-                        <div className="space-y-3">
-                          <div>
-                            <label className="text-xs text-muted-foreground mb-1.5 block">Your Referral Code</label>
-                            <div className="flex gap-2">
-                              <Input
-                                value={referralCode}
-                                readOnly
-                                className="bg-muted/30 border-border/50 font-mono font-bold tracking-wider text-lg"
-                                data-testid="input-referral-code"
-                              />
-                              <Button
-                                variant="outline"
-                                size="icon"
-                                onClick={async () => {
-                                  await navigator.clipboard.writeText(referralCode);
-                                  toast({ title: 'Referral code copied!' });
-                                }}
-                                data-testid="button-copy-referral-code"
-                              >
-                                <Copy className="w-4 h-4" />
-                              </Button>
-                            </div>
-                          </div>
-                          <div>
-                            <label className="text-xs text-muted-foreground mb-1.5 block">Referral Link</label>
-                            <div className="flex gap-2">
-                              <Input
-                                value={`https://myquantumvault.com/app?ref=${referralCode}`}
-                                readOnly
-                                className="bg-muted/30 border-border/50 font-mono text-sm"
-                                data-testid="input-referral-link"
-                              />
-                              <Button
-                                variant="outline"
-                                size="icon"
-                                onClick={async () => {
-                                  await navigator.clipboard.writeText(`https://myquantumvault.com/app?ref=${referralCode}`);
-                                  toast({ title: 'Referral link copied!' });
-                                }}
-                                data-testid="button-copy-referral-link"
-                              >
-                                <Copy className="w-4 h-4" />
-                              </Button>
-                            </div>
-                          </div>
-                          {referredBy && (
-                            <p className="text-xs text-muted-foreground">
-                              You were referred by: <span className="font-mono">{referredBy.slice(0, 6)}...{referredBy.slice(-4)}</span>
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="border-t border-border/50 pt-6">
-                      <h3 className="font-display font-semibold mb-4">Notifications</h3>
-                      <div className="bg-muted/30 rounded-lg border border-border/50 p-4">
-                        <div className="flex items-start gap-3">
-                          <div className={`p-2 rounded-full ${telegramConnected ? 'bg-green-500/20' : 'bg-amber-500/20'}`}>
-                            <Bell className={`w-5 h-5 ${telegramConnected ? 'text-green-500' : 'text-amber-500'}`} />
-                          </div>
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2">
-                              <p className="font-medium">Telegram</p>
-                              {telegramConnected ? (
-                                <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full">Connected</span>
-                              ) : (
-                                <span className="text-xs px-2 py-0.5 bg-amber-500/20 text-amber-500 rounded-full">Not Connected</span>
+                              
+                              {referralCode && (
+                                <div className="pt-4 border-t border-border/30">
+                                  <h4 className="font-medium mb-3">Referral Program</h4>
+                                  <p className="text-sm text-muted-foreground mb-3">
+                                    Share your referral code to invite friends. You'll earn rewards when they sign up and trade!
+                                  </p>
+                                  <div className="space-y-3">
+                                    <div>
+                                      <label className="text-xs text-muted-foreground mb-1.5 block">Your Referral Code</label>
+                                      <div className="flex gap-2">
+                                        <Input
+                                          value={referralCode}
+                                          readOnly
+                                          className="bg-muted/30 border-border/50 font-mono font-bold tracking-wider text-lg"
+                                          data-testid="input-referral-code"
+                                        />
+                                        <Button
+                                          variant="outline"
+                                          size="icon"
+                                          onClick={async () => {
+                                            await navigator.clipboard.writeText(referralCode);
+                                            toast({ title: 'Referral code copied!' });
+                                          }}
+                                          data-testid="button-copy-referral-code"
+                                        >
+                                          <Copy className="w-4 h-4" />
+                                        </Button>
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <label className="text-xs text-muted-foreground mb-1.5 block">Referral Link</label>
+                                      <div className="flex gap-2">
+                                        <Input
+                                          value={`https://myquantumvault.com/app?ref=${referralCode}`}
+                                          readOnly
+                                          className="bg-muted/30 border-border/50 font-mono text-sm"
+                                          data-testid="input-referral-link"
+                                        />
+                                        <Button
+                                          variant="outline"
+                                          size="icon"
+                                          onClick={async () => {
+                                            await navigator.clipboard.writeText(`https://myquantumvault.com/app?ref=${referralCode}`);
+                                            toast({ title: 'Referral link copied!' });
+                                          }}
+                                          data-testid="button-copy-referral-link"
+                                        >
+                                          <Copy className="w-4 h-4" />
+                                        </Button>
+                                      </div>
+                                    </div>
+                                    {referredBy && (
+                                      <p className="text-xs text-muted-foreground">
+                                        You were referred by: <span className="font-mono">{referredBy.slice(0, 6)}...{referredBy.slice(-4)}</span>
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
                               )}
-                            </div>
-                            <p className="text-sm text-muted-foreground mt-1">
-                              {telegramConnected 
-                                ? 'You will receive trade alerts via Telegram.'
-                                : 'Connect Telegram to receive instant trade alerts when your bots execute trades.'}
-                            </p>
-                            {!telegramConnected && (
-                              <div className="mt-3 space-y-3">
-                                <div className="flex gap-2 flex-wrap">
+                              
+                              {agentPublicKey && (
+                                <div className="pt-4 border-t border-border/30">
+                                  <h4 className="font-medium mb-3">Drift Account</h4>
+                                  <p className="text-sm text-muted-foreground mb-3">
+                                    View your on-chain Drift trading account and positions directly.
+                                  </p>
                                   <Button
                                     variant="outline"
-                                    onClick={async () => {
-                                      console.log('[Telegram] Connect button clicked');
-                                      try {
-                                        console.log('[Telegram] Calling /api/telegram/connect...');
-                                        const res = await fetch('/api/telegram/connect', { 
-                                          method: 'POST',
-                                          credentials: 'include' 
-                                        });
-                                        console.log('[Telegram] Response status:', res.status);
-                                        const data = await res.json();
-                                        console.log('[Telegram] Response data:', data);
-                                        
-                                        if (res.ok && data.verificationLink) {
-                                          window.open(data.verificationLink, '_blank');
-                                          if (data.verificationCode) {
-                                            setTelegramVerifyCode(`/start ${data.verificationCode}`);
-                                            toast({
-                                              title: "Telegram opened",
-                                              description: "Copy the command below and paste it in the bot chat.",
-                                            });
-                                          } else {
-                                            toast({
-                                              title: "Step 1: Open Telegram",
-                                              description: "Click /start in the bot, then come back and click 'Verify Connection'.",
-                                            });
-                                          }
-                                        } else {
-                                          toast({
-                                            title: "Setup Not Available",
-                                            description: data.message || "Telegram notifications are not yet configured.",
-                                            variant: "destructive",
-                                          });
-                                        }
-                                      } catch (error) {
-                                        toast({
-                                          title: "Error",
-                                          description: "Failed to start Telegram connection",
-                                          variant: "destructive",
-                                        });
-                                      }
-                                    }}
-                                    data-testid="button-connect-telegram"
+                                    onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentPublicKey}`, '_blank')}
+                                    className="w-full sm:w-auto"
+                                    data-testid="button-view-drift-settings"
                                   >
                                     <ExternalLink className="w-4 h-4 mr-2" />
-                                    1. Connect Telegram
+                                    View on Drift
                                   </Button>
-                                  <Button
-                                    variant="default"
-                                    onClick={async () => {
-                                      console.log('[Telegram] Verify button clicked');
-                                      try {
-                                        const res = await fetch('/api/telegram/verify', { 
-                                          method: 'POST',
-                                          credentials: 'include' 
-                                        });
-                                        const data = await res.json();
-                                        console.log('[Telegram] Verify response:', data);
-                                        
-                                        if (data.success && data.verified) {
-                                          setTelegramConnected(true);
-                                          toast({
-                                            title: "Telegram Connected!",
-                                            description: "You'll now receive trade alerts via Telegram.",
-                                          });
-                                        } else {
-                                          toast({
-                                            title: "Not Verified Yet",
-                                            description: data.message || "Please complete the Telegram bot setup first.",
-                                            variant: "destructive",
-                                          });
-                                        }
-                                      } catch (error) {
-                                        toast({
-                                          title: "Error",
-                                          description: "Failed to verify Telegram connection",
-                                          variant: "destructive",
-                                        });
-                                      }
-                                    }}
-                                    data-testid="button-verify-telegram"
-                                  >
-                                    <Check className="w-4 h-4 mr-2" />
-                                    2. Verify Connection
-                                  </Button>
+                                  <p className="text-xs text-muted-foreground mt-2 font-mono break-all">
+                                    Agent: {agentPublicKey}
+                                  </p>
                                 </div>
-                                {telegramVerifyCode && (
-                                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
-                                    <p className="text-xs text-amber-400 mb-2 font-medium">
-                                      Paste this command in @DialectLabsBot:
-                                    </p>
-                                    <div className="flex items-center gap-2">
-                                      <code className="flex-1 bg-background/50 px-3 py-2 rounded text-xs font-mono break-all select-all">
-                                        {telegramVerifyCode}
-                                      </code>
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => {
-                                          navigator.clipboard.writeText(telegramVerifyCode);
-                                          toast({
-                                            title: "Copied!",
-                                            description: "Paste this in the Dialect bot chat.",
-                                          });
-                                        }}
-                                        data-testid="button-copy-telegram-code"
-                                      >
-                                        <Copy className="w-4 h-4" />
-                                      </Button>
-                                    </div>
-                                  </div>
-                                )}
-                                <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 text-xs text-blue-300">
-                                  <p className="font-medium mb-1">Already use Dialect with Drift?</p>
-                                  <p>If your Telegram is linked to another wallet, message @DialectLabsBot with <code className="bg-background/50 px-1 rounded">/unlink</code> first, then reconnect here.</p>
+                              )}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
+                    {/* Trading Preferences Section */}
+                    <div className="gradient-border p-0 noise">
+                      <button
+                        onClick={() => setTradingPrefsExpanded(!tradingPrefsExpanded)}
+                        className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
+                        data-testid="button-toggle-trading-prefs"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-full bg-primary/20">
+                            <Sliders className="w-5 h-5 text-primary" />
+                          </div>
+                          <h3 className="font-display font-semibold">Trading Preferences</h3>
+                        </div>
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${tradingPrefsExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      <AnimatePresence>
+                        {tradingPrefsExpanded && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-4 pb-4 space-y-4">
+                              <div>
+                                <label className="text-sm text-muted-foreground mb-1.5 block">Default Leverage</label>
+                                <p className="text-xs text-muted-foreground mb-2">Used when creating new bots. Markets have different max limits (3x-20x) - your value will be capped to each market's maximum.</p>
+                                <div className="flex items-center gap-3">
+                                  <Input 
+                                    type="number"
+                                    min={1}
+                                    max={20}
+                                    value={defaultLeverage} 
+                                    onChange={(e) => setDefaultLeverage(Math.min(20, Math.max(1, parseInt(e.target.value) || 1)))}
+                                    className="bg-muted/30 border-border/50 w-24" 
+                                    data-testid="input-default-leverage" 
+                                  />
+                                  <span className="text-sm text-muted-foreground">x (1-20)</span>
                                 </div>
-                                <p className="text-xs text-muted-foreground">
-                                  Once connected, you'll receive:
-                                </p>
-                                <ul className="text-xs text-muted-foreground space-y-1 ml-4 list-disc">
-                                  <li>Instant alerts when trades execute</li>
-                                  <li>Notifications on trade failures</li>
-                                  <li>Position close summaries with PnL</li>
-                                </ul>
                               </div>
+                              <div>
+                                <label className="text-sm text-muted-foreground mb-1.5 block">Max Slippage</label>
+                                <p className="text-xs text-muted-foreground mb-2">Maximum price slippage tolerance for trades. Higher values help with volatile markets.</p>
+                                <div className="flex items-center gap-3">
+                                  <Input 
+                                    type="number"
+                                    min={1}
+                                    max={500}
+                                    value={slippageBps} 
+                                    onChange={(e) => setSlippageBps(Math.min(500, Math.max(1, parseInt(e.target.value) || 50)))}
+                                    className="bg-muted/30 border-border/50 w-24" 
+                                    data-testid="input-slippage-bps" 
+                                  />
+                                  <span className="text-sm text-muted-foreground">bps ({(slippageBps / 100).toFixed(2)}%)</span>
+                                </div>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
+                    {/* Notifications Section */}
+                    <div className="gradient-border p-0 noise">
+                      <button
+                        onClick={() => setNotificationsExpanded(!notificationsExpanded)}
+                        className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
+                        data-testid="button-toggle-notifications"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`p-2 rounded-full ${telegramConnected ? 'bg-green-500/20' : 'bg-primary/20'}`}>
+                            <Bell className={`w-5 h-5 ${telegramConnected ? 'text-green-500' : 'text-primary'}`} />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-display font-semibold">Notifications</h3>
+                            {telegramConnected && (
+                              <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full">Connected</span>
                             )}
                           </div>
                         </div>
-                      </div>
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${notificationsExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      <AnimatePresence>
+                        {notificationsExpanded && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-4 pb-4">
+                              <div className="bg-muted/30 rounded-lg border border-border/50 p-4">
+                                <div className="flex items-start gap-3">
+                                  <div className={`p-2 rounded-full ${telegramConnected ? 'bg-green-500/20' : 'bg-amber-500/20'}`}>
+                                    <Bell className={`w-5 h-5 ${telegramConnected ? 'text-green-500' : 'text-amber-500'}`} />
+                                  </div>
+                                  <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                      <p className="font-medium">Telegram</p>
+                                      {telegramConnected ? (
+                                        <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full">Connected</span>
+                                      ) : (
+                                        <span className="text-xs px-2 py-0.5 bg-amber-500/20 text-amber-500 rounded-full">Not Connected</span>
+                                      )}
+                                    </div>
+                                    <p className="text-sm text-muted-foreground mt-1">
+                                      {telegramConnected 
+                                        ? 'You will receive trade alerts via Telegram.'
+                                        : 'Connect Telegram to receive instant trade alerts when your bots execute trades.'}
+                                    </p>
+                                    {!telegramConnected && (
+                                      <div className="mt-3 space-y-3">
+                                        <div className="flex gap-2 flex-wrap">
+                                          <Button
+                                            variant="outline"
+                                            onClick={async () => {
+                                              console.log('[Telegram] Connect button clicked');
+                                              try {
+                                                console.log('[Telegram] Calling /api/telegram/connect...');
+                                                const res = await fetch('/api/telegram/connect', { 
+                                                  method: 'POST',
+                                                  credentials: 'include' 
+                                                });
+                                                console.log('[Telegram] Response status:', res.status);
+                                                const data = await res.json();
+                                                console.log('[Telegram] Response data:', data);
+                                                
+                                                if (res.ok && data.verificationLink) {
+                                                  window.open(data.verificationLink, '_blank');
+                                                  if (data.verificationCode) {
+                                                    setTelegramVerifyCode(`/start ${data.verificationCode}`);
+                                                    toast({
+                                                      title: "Telegram opened",
+                                                      description: "Copy the command below and paste it in the bot chat.",
+                                                    });
+                                                  } else {
+                                                    toast({
+                                                      title: "Step 1: Open Telegram",
+                                                      description: "Click /start in the bot, then come back and click 'Verify Connection'.",
+                                                    });
+                                                  }
+                                                } else {
+                                                  toast({
+                                                    title: "Setup Not Available",
+                                                    description: data.message || "Telegram notifications are not yet configured.",
+                                                    variant: "destructive",
+                                                  });
+                                                }
+                                              } catch (error) {
+                                                toast({
+                                                  title: "Error",
+                                                  description: "Failed to start Telegram connection",
+                                                  variant: "destructive",
+                                                });
+                                              }
+                                            }}
+                                            data-testid="button-connect-telegram"
+                                          >
+                                            <ExternalLink className="w-4 h-4 mr-2" />
+                                            1. Connect Telegram
+                                          </Button>
+                                          <Button
+                                            variant="default"
+                                            onClick={async () => {
+                                              console.log('[Telegram] Verify button clicked');
+                                              try {
+                                                const res = await fetch('/api/telegram/verify', { 
+                                                  method: 'POST',
+                                                  credentials: 'include' 
+                                                });
+                                                const data = await res.json();
+                                                console.log('[Telegram] Verify response:', data);
+                                                
+                                                if (data.success && data.verified) {
+                                                  setTelegramConnected(true);
+                                                  toast({
+                                                    title: "Telegram Connected!",
+                                                    description: "You'll now receive trade alerts via Telegram.",
+                                                  });
+                                                } else {
+                                                  toast({
+                                                    title: "Not Verified Yet",
+                                                    description: data.message || "Please complete the Telegram bot setup first.",
+                                                    variant: "destructive",
+                                                  });
+                                                }
+                                              } catch (error) {
+                                                toast({
+                                                  title: "Error",
+                                                  description: "Failed to verify Telegram connection",
+                                                  variant: "destructive",
+                                                });
+                                              }
+                                            }}
+                                            data-testid="button-verify-telegram"
+                                          >
+                                            <Check className="w-4 h-4 mr-2" />
+                                            2. Verify Connection
+                                          </Button>
+                                        </div>
+                                        {telegramVerifyCode && (
+                                          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+                                            <p className="text-xs text-amber-400 mb-2 font-medium">
+                                              Paste this command in @DialectLabsBot:
+                                            </p>
+                                            <div className="flex items-center gap-2">
+                                              <code className="flex-1 bg-background/50 px-3 py-2 rounded text-xs font-mono break-all select-all">
+                                                {telegramVerifyCode}
+                                              </code>
+                                              <Button
+                                                size="sm"
+                                                variant="outline"
+                                                onClick={() => {
+                                                  navigator.clipboard.writeText(telegramVerifyCode);
+                                                  toast({
+                                                    title: "Copied!",
+                                                    description: "Paste this in the Dialect bot chat.",
+                                                  });
+                                                }}
+                                                data-testid="button-copy-telegram-code"
+                                              >
+                                                <Copy className="w-4 h-4" />
+                                              </Button>
+                                            </div>
+                                          </div>
+                                        )}
+                                        <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 text-xs text-blue-300">
+                                          <p className="font-medium mb-1">Already use Dialect with Drift?</p>
+                                          <p>If your Telegram is linked to another wallet, message @DialectLabsBot with <code className="bg-background/50 px-1 rounded">/unlink</code> first, then reconnect here.</p>
+                                        </div>
+                                        <p className="text-xs text-muted-foreground">
+                                          Once connected, you'll receive:
+                                        </p>
+                                        <ul className="text-xs text-muted-foreground space-y-1 ml-4 list-disc">
+                                          <li>Instant alerts when trades execute</li>
+                                          <li>Notifications on trade failures</li>
+                                          <li>Position close summaries with PnL</li>
+                                        </ul>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
 
-                    <div className="border-t border-border/50 pt-6">
+                    {/* Security Section */}
+                    <div className="gradient-border p-0 noise">
+                      <button
+                        onClick={() => setSecurityExpanded(!securityExpanded)}
+                        className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
+                        data-testid="button-toggle-security"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-full bg-primary/20">
+                            <Shield className="w-5 h-5 text-primary" />
+                          </div>
+                          <h3 className="font-display font-semibold">Security</h3>
+                        </div>
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${securityExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      <AnimatePresence>
+                        {securityExpanded && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-4 pb-4 space-y-4">
+                              {/* Automated Trading */}
+                              <div className="bg-muted/30 rounded-lg border border-border/50 p-4">
+                                <div className="flex items-start gap-3">
+                                  <div className={`p-2 rounded-full ${executionEnabled ? 'bg-green-500/20' : 'bg-amber-500/20'}`}>
+                                    <Zap className={`w-5 h-5 ${executionEnabled ? 'text-green-500' : 'text-amber-500'}`} />
+                                  </div>
+                                  <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                      <p className="font-medium">Webhook Execution</p>
+                                      {executionEnabled ? (
+                                        <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full">Enabled</span>
+                                      ) : (
+                                        <span className="text-xs px-2 py-0.5 bg-amber-500/20 text-amber-500 rounded-full">Disabled</span>
+                                      )}
+                                    </div>
+                                    <p className="text-sm text-muted-foreground mt-1">
+                                      {executionEnabled 
+                                        ? 'Your bots can execute trades via TradingView webhooks. Authorization remains active until you revoke it.'
+                                        : 'Enable automated trading to allow your bots to execute trades when webhook signals arrive from TradingView.'}
+                                    </p>
+                                    <div className="mt-3">
+                                      {executionEnabled ? (
+                                        <Button
+                                          variant="outline"
+                                          onClick={revokeExecution}
+                                          disabled={executionLoading}
+                                          data-testid="button-revoke-execution"
+                                        >
+                                          {executionLoading ? (
+                                            <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Processing...</>
+                                          ) : (
+                                            'Revoke Authorization'
+                                          )}
+                                        </Button>
+                                      ) : (
+                                        <Button
+                                          onClick={enableExecution}
+                                          disabled={executionLoading}
+                                          data-testid="button-enable-execution"
+                                        >
+                                          {executionLoading ? (
+                                            <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Processing...</>
+                                          ) : (
+                                            <><Shield className="w-4 h-4 mr-2" /> Enable Automated Trading</>
+                                          )}
+                                        </Button>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Agent Wallet Backup */}
+                              <div className="bg-muted/30 rounded-lg border border-border/50 p-4">
+                                <div className="flex items-start gap-3">
+                                  <div className="p-2 rounded-full bg-amber-500/20">
+                                    <Key className="w-5 h-5 text-amber-500" />
+                                  </div>
+                                  <div className="flex-1">
+                                    <p className="font-medium">Recovery Phrase</p>
+                                    <p className="text-sm text-muted-foreground mt-1">
+                                      Your agent wallet's recovery phrase allows you to restore access if needed. Keep it safe and never share it with anyone.
+                                    </p>
+                                    
+                                    {mnemonic ? (
+                                      <div className="mt-4 space-y-3">
+                                        <div className="flex items-center gap-2 text-amber-500">
+                                          <Clock className="w-4 h-4" />
+                                          <span className="text-sm font-medium">Auto-hides in {mnemonicCountdown}s</span>
+                                        </div>
+                                        <div className="bg-background/50 rounded-lg border border-amber-500/30 p-4">
+                                          <p className="font-mono text-sm leading-relaxed break-all select-all" data-testid="text-mnemonic">
+                                            {mnemonic}
+                                          </p>
+                                        </div>
+                                        <div className="flex gap-2">
+                                          <Button
+                                            variant="outline"
+                                            onClick={handleCopyMnemonic}
+                                            className="flex-1"
+                                            data-testid="button-copy-mnemonic"
+                                          >
+                                            {mnemonicCopied ? (
+                                              <><Check className="w-4 h-4 mr-2 text-green-500" /> Copied</>
+                                            ) : (
+                                              <><Copy className="w-4 h-4 mr-2" /> Copy to Clipboard</>
+                                            )}
+                                          </Button>
+                                          <Button
+                                            variant="outline"
+                                            onClick={() => {
+                                              setMnemonic(null);
+                                              setMnemonicExpiresAt(null);
+                                              setBackupConfirmChecked(false);
+                                            }}
+                                            data-testid="button-hide-mnemonic"
+                                          >
+                                            <EyeOff className="w-4 h-4 mr-2" /> Hide
+                                          </Button>
+                                        </div>
+                                        <div className="bg-red-500/10 rounded-lg border border-red-500/30 p-3">
+                                          <div className="flex items-start gap-2">
+                                            <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />
+                                            <div className="text-xs text-red-400">
+                                              <p className="font-medium mb-1">Keep this phrase secure!</p>
+                                              <ul className="list-disc ml-4 space-y-0.5">
+                                                <li>Never share it with anyone</li>
+                                                <li>Store it offline in a safe place</li>
+                                                <li>Anyone with this phrase can control your funds</li>
+                                                <li>QuantumVault will never ask for your recovery phrase</li>
+                                              </ul>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="mt-4 space-y-4">
+                                        <div className="bg-amber-500/10 rounded-lg border border-amber-500/30 p-3">
+                                          <div className="flex items-start gap-2">
+                                            <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                                            <p className="text-xs text-amber-400">
+                                              Only reveal your recovery phrase in a private location. Make sure no one is watching your screen.
+                                            </p>
+                                          </div>
+                                        </div>
+                                        <div className="flex items-start gap-2">
+                                          <Checkbox
+                                            id="backup-confirm"
+                                            checked={backupConfirmChecked}
+                                            onCheckedChange={(checked) => setBackupConfirmChecked(checked === true)}
+                                            data-testid="checkbox-confirm-backup"
+                                          />
+                                          <label htmlFor="backup-confirm" className="text-sm text-muted-foreground cursor-pointer">
+                                            I understand this phrase controls my agent wallet funds and I'm in a private location
+                                          </label>
+                                        </div>
+                                        <Button
+                                          onClick={handleRevealMnemonic}
+                                          disabled={!backupConfirmChecked || revealMnemonicLoading}
+                                          data-testid="button-reveal-mnemonic"
+                                        >
+                                          {revealMnemonicLoading ? (
+                                            <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Revealing...</>
+                                          ) : (
+                                            <><Eye className="w-4 h-4 mr-2" /> Reveal Recovery Phrase</>
+                                          )}
+                                        </Button>
+                                        <p className="text-xs text-muted-foreground">
+                                          Limited to 3 reveals per hour. Phrase auto-hides after 60 seconds.
+                                        </p>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
+                    {/* Danger Zone Section */}
+                    <div className="gradient-border p-0 noise border-red-500/30">
+                      <button
+                        onClick={() => setDangerZoneExpanded(!dangerZoneExpanded)}
+                        className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-red-500/5 transition-colors rounded-t-xl"
+                        data-testid="button-toggle-danger-zone"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-full bg-red-500/20">
+                            <AlertTriangle className="w-5 h-5 text-red-400" />
+                          </div>
+                          <h3 className="font-display font-semibold text-red-400">Danger Zone</h3>
+                        </div>
+                        <ChevronDown className={`w-4 h-4 text-red-400 transition-transform ${dangerZoneExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      <AnimatePresence>
+                        {dangerZoneExpanded && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-4 pb-4 space-y-4">
+                              <div>
+                                <p className="text-sm text-muted-foreground mb-2">
+                                  Close all open positions across all your trading bots.
+                                </p>
+                                <Button 
+                                  variant="outline" 
+                                  className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
+                                  onClick={() => setCloseAllDialogOpen(true)}
+                                  data-testid="button-close-positions"
+                                >
+                                  <XCircle className="w-4 h-4 mr-2" />
+                                  Close All Positions
+                                </Button>
+                              </div>
+                              <div>
+                                <p className="text-sm text-muted-foreground mb-2">
+                                  Close all positions, withdraw all funds, and delete your Drift account.
+                                </p>
+                                <Button 
+                                  variant="outline" 
+                                  className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
+                                  onClick={() => setResetDriftDialogOpen(true)}
+                                  data-testid="button-reset-drift"
+                                >
+                                  <Trash2 className="w-4 h-4 mr-2" />
+                                  Reset Drift Account
+                                </Button>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
+                    {/* Save Button */}
+                    <div className="pt-2">
                       <Button 
                         onClick={handleSaveSettings} 
                         disabled={settingsSaving}
@@ -2757,49 +2931,6 @@ export default function AppPage() {
                           'Save Changes'
                         )}
                       </Button>
-                    </div>
-
-                    <div className="border-t border-border/50 pt-6">
-                      <button
-                        onClick={() => setDangerZoneExpanded(!dangerZoneExpanded)}
-                        className="w-full flex items-center justify-between text-left"
-                        data-testid="button-toggle-danger-zone"
-                      >
-                        <h3 className="font-display font-semibold text-red-400">Danger Zone</h3>
-                        <ChevronDown className={`w-4 h-4 text-red-400 transition-transform ${dangerZoneExpanded ? 'rotate-180' : ''}`} />
-                      </button>
-                      {dangerZoneExpanded && (
-                        <div className="space-y-4 mt-4">
-                          <div>
-                            <p className="text-sm text-muted-foreground mb-2">
-                              Close all open positions across all your trading bots.
-                            </p>
-                            <Button 
-                              variant="outline" 
-                              className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
-                              onClick={() => setCloseAllDialogOpen(true)}
-                              data-testid="button-close-positions"
-                            >
-                              <XCircle className="w-4 h-4 mr-2" />
-                              Close All Positions
-                            </Button>
-                          </div>
-                          <div>
-                            <p className="text-sm text-muted-foreground mb-2">
-                              Close all positions, withdraw all funds, and delete your Drift account.
-                            </p>
-                            <Button 
-                              variant="outline" 
-                              className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
-                              onClick={() => setResetDriftDialogOpen(true)}
-                              data-testid="button-reset-drift"
-                            >
-                              <Trash2 className="w-4 h-4 mr-2" />
-                              Reset Drift Account
-                            </Button>
-                          </div>
-                        </div>
-                      )}
                     </div>
                   </div>
                 )}
