@@ -135,6 +135,7 @@ export const tradingBots = pgTable("trading_bots", {
   // Security v3: Execution authorization per bot
   executionActive: boolean("execution_active").default(false).notNull(), // Whether execution is currently enabled
   umkEncryptedForBot: text("umk_encrypted_for_bot"),              // Bot-specific encrypted UMK for trade execution
+  policyHmac: text("policy_hmac"),                                // HMAC of bot policy (market, leverage, maxPositionSize) for integrity
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
