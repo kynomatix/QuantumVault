@@ -600,7 +600,7 @@ export async function registerRoutes(
         nonce,
         'enable_execution',
         signatureBytes,
-        verifySignature
+        verifySolanaSignature
       );
 
       if (!sigResult.success) {
@@ -640,7 +640,7 @@ export async function registerRoutes(
         nonce,
         'revoke_execution',
         signatureBytes,
-        verifySignature
+        verifySolanaSignature
       );
 
       if (!sigResult.success) {
