@@ -497,7 +497,7 @@ function decryptPrivateKey(encryptedKey) {
 // 1. Pre-decrypted: privateKeyBase58 provided directly (v3 security path)
 // 2. Legacy: encryptedPrivateKey that needs decryption (backward compatibility)
 async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex = null) {
-  const { privateKeyBase58, encryptedPrivateKey } = keyInput;
+  const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey } = keyInput;
   
   const rpcUrl = process.env.SOLANA_RPC_URL || 
     (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
@@ -540,13 +540,37 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
     throw new Error('[Executor] Invalid secret key: all zeros');
   }
   
-  // Create keypair from secret key bytes
-  const keypair = Keypair.fromSecretKey(secretKeyBytes);
+  // CRITICAL: Create a fresh copy of secret key bytes before creating keypair
+  // Keypair.fromSecretKey does NOT make its own copy - it uses the same buffer reference
+  // We need to keep the buffer intact until we're done using the keypair
+  const secretKeyCopy = new Uint8Array(secretKeyBytes);
+  
+  // Zero the original decoded bytes immediately (bs58.decode buffer)
+  secretKeyBytes.fill(0);
+  
+  // Create keypair from the copy
+  const keypair = Keypair.fromSecretKey(secretKeyCopy);
   const wallet = new Wallet(keypair);
   
-  // SECURITY: Zeroize the secret key bytes after keypair creation
-  // The keypair object holds its own copy internally
-  secretKeyBytes.fill(0);
+  // NOTE: Do NOT zero secretKeyCopy here! Keypair.fromSecretKey does NOT make its own copy.
+  // The keypair uses the same buffer, so zeroing it breaks all signing operations.
+  // We will zero it in the finally block after all transactions are complete.
+  
+  // CRITICAL VERIFICATION: Check derived pubkey matches expected
+  const derivedPubkey = keypair.publicKey.toBase58();
+  console.error(`[Executor] Derived pubkey: ${derivedPubkey.slice(0, 12)}...`);
+  
+  if (expectedAgentPubkey) {
+    if (derivedPubkey !== expectedAgentPubkey) {
+      console.error(`[Executor] CRITICAL KEY MISMATCH!`);
+      console.error(`[Executor] Expected pubkey: ${expectedAgentPubkey.slice(0, 12)}...`);
+      console.error(`[Executor] Derived pubkey:  ${derivedPubkey.slice(0, 12)}...`);
+      throw new Error(`Key mismatch: decrypted key produces wrong wallet. Expected ${expectedAgentPubkey.slice(0, 12)}..., got ${derivedPubkey.slice(0, 12)}... - This indicates corrupted v3 encryption or migration issue.`);
+    }
+    console.error(`[Executor] Pubkey verification PASSED`);
+  } else {
+    console.error(`[Executor] No expected pubkey provided - skipping verification`);
+  }
   
   // Get the default subscription config
   const defaultSubscription = getMarketsAndOraclesForSubscription('mainnet-beta');
@@ -586,7 +610,7 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
 }
 
 async function executeTrade(command) {
-  const { privateKeyBase58, encryptedPrivateKey, market, side, sizeInBase, subAccountId, reduceOnly } = command;
+  const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey, market, side, sizeInBase, subAccountId, reduceOnly } = command;
   
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
@@ -597,7 +621,7 @@ async function executeTrade(command) {
   
   console.error(`[Executor] Creating DriftClient for subaccount ${subAccountId}, market ${market} -> index ${marketIndex}`);
   
-  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey }, subAccountId, marketIndex);
+  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId, marketIndex);
   
   try {
     // Try to subscribe - SDK has a bug with addAccount that can cause failures
@@ -824,7 +848,7 @@ async function executeTrade(command) {
 }
 
 async function closePosition(command) {
-  const { privateKeyBase58, encryptedPrivateKey, market, subAccountId, positionSizeBase } = command;
+  const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey, market, subAccountId, positionSizeBase } = command;
   
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
@@ -835,7 +859,7 @@ async function closePosition(command) {
   
   console.error(`[Executor] Closing position for ${market} (index ${marketIndex}) subaccount ${subAccountId}`);
   
-  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey }, subAccountId);
+  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId);
   
   try {
     await driftClient.subscribe();
@@ -870,11 +894,11 @@ async function closePosition(command) {
 }
 
 async function settlePnl(command) {
-  const { privateKeyBase58, encryptedPrivateKey, subAccountId } = command;
+  const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey, subAccountId } = command;
   
   console.error(`[Executor] Settling PnL for subaccount ${subAccountId}`);
   
-  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey }, subAccountId);
+  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId);
   
   try {
     await driftClient.subscribe();
@@ -931,14 +955,14 @@ async function settlePnl(command) {
 }
 
 async function deleteSubaccount(command) {
-  const { privateKeyBase58, encryptedPrivateKey, subAccountId } = command;
+  const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey, subAccountId } = command;
   
   console.error(`[Executor] Deleting subaccount ${subAccountId} to reclaim rent`);
   
   // Note: Subaccount 0 CAN be deleted if it's empty and has no referred status
   // However, accounts created through referral programs may not be deletable
   
-  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey }, subAccountId);
+  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId);
   
   try {
     await driftClient.subscribe();

@@ -776,7 +776,8 @@ export async function migrateAgentKeyToV3(
 export async function decryptAgentKeyWithFallback(
   walletAddress: string,
   umk: Buffer | null,
-  wallet: { agentPrivateKeyEncrypted?: string | null; agentPrivateKeyEncryptedV3?: string | null }
+  wallet: { agentPrivateKeyEncrypted?: string | null; agentPrivateKeyEncryptedV3?: string | null; agentPublicKey?: string | null },
+  expectedAgentPubkey?: string | null
 ): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> {
   // Try v3 first if available and UMK is present
   if (wallet.agentPrivateKeyEncryptedV3 && umk) {
@@ -788,6 +789,32 @@ export async function decryptAgentKeyWithFallback(
       const secretKey = Uint8Array.from(keyBuffer);
       // Zero the original buffer immediately after copying
       zeroizeBuffer(keyBuffer);
+      
+      // Verify the derived pubkey matches the expected one (if provided)
+      const storedPubkey = expectedAgentPubkey || wallet.agentPublicKey;
+      if (storedPubkey) {
+        try {
+          const naclModule = await import('tweetnacl');
+          const nacl = naclModule.default || naclModule;
+          const bs58Module = await import('bs58');
+          const bs58 = bs58Module.default || bs58Module;
+          const keypair = nacl.sign.keyPair.fromSecretKey(secretKey);
+          const derivedPubkey = bs58.encode(keypair.publicKey);
+          if (derivedPubkey !== storedPubkey) {
+            console.error(`[Security] CRITICAL: V3 decryption produced wrong key! Derived=${derivedPubkey.slice(0,12)}... Expected=${storedPubkey.slice(0,12)}...`);
+            console.error(`[Security] Falling back to legacy decryption for ${walletAddress.slice(0, 8)}...`);
+            secretKey.fill(0);
+            throw new Error('V3 key mismatch - falling back to legacy');
+          }
+          console.log(`[Security] V3 agent key verified for ${walletAddress.slice(0, 8)}...: ${derivedPubkey.slice(0,12)}...`);
+        } catch (verifyErr: any) {
+          if (verifyErr.message === 'V3 key mismatch - falling back to legacy') {
+            throw verifyErr;
+          }
+          console.warn(`[Security] Could not verify v3 key derivation: ${verifyErr.message}`);
+        }
+      }
+      
       return {
         secretKey,
         cleanup: () => {
@@ -809,6 +836,27 @@ export async function decryptAgentKeyWithFallback(
       // Log that we used legacy fallback (for migration tracking)
       if (wallet.agentPrivateKeyEncryptedV3) {
         console.warn(`[Security] Using legacy fallback for ${walletAddress.slice(0, 8)}... (v3 failed)`);
+      }
+      
+      // Verify the derived pubkey matches the expected one (if provided)
+      const storedPubkey = expectedAgentPubkey || wallet.agentPublicKey;
+      if (storedPubkey) {
+        try {
+          const naclModule = await import('tweetnacl');
+          const nacl = naclModule.default || naclModule;
+          const bs58Module = await import('bs58');
+          const bs58 = bs58Module.default || bs58Module;
+          const keypair = nacl.sign.keyPair.fromSecretKey(secretKey);
+          const derivedPubkey = bs58.encode(keypair.publicKey);
+          if (derivedPubkey !== storedPubkey) {
+            console.error(`[Security] CRITICAL: Legacy decryption produced wrong key! Derived=${derivedPubkey.slice(0,12)}... Expected=${storedPubkey.slice(0,12)}...`);
+            secretKey.fill(0);
+            return null;
+          }
+          console.log(`[Security] Legacy agent key verified for ${walletAddress.slice(0, 8)}...: ${derivedPubkey.slice(0,12)}...`);
+        } catch (verifyErr: any) {
+          console.warn(`[Security] Could not verify legacy key derivation: ${verifyErr.message}`);
+        }
       }
       
       return {

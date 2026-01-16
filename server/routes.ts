@@ -5008,7 +5008,8 @@ export async function registerRoutes(
         subAccountId,
         false,
         userSlippageBps,
-        privateKeyBase58
+        privateKeyBase58,
+        wallet.agentPublicKey || undefined
       );
 
       if (!orderResult.success) {
@@ -5265,6 +5266,31 @@ export async function registerRoutes(
       // Convert secretKey (Uint8Array) to base58 for passing to executor
       const privateKeyBase58 = bs58.encode(agentKeyResult.secretKey);
       
+      // CRITICAL: Verify decrypted key matches stored public key before proceeding
+      // This catches key corruption, wrong UMK, or v3/legacy mismatch issues
+      try {
+        const { Keypair } = await import("@solana/web3.js");
+        const derivedKeypair = Keypair.fromSecretKey(agentKeyResult.secretKey);
+        const derivedPubkey = derivedKeypair.publicKey.toBase58();
+        
+        if (derivedPubkey !== wallet.agentPublicKey) {
+          console.error(`[User Webhook] CRITICAL: Agent key mismatch!`);
+          console.error(`  Derived pubkey: ${derivedPubkey}`);
+          console.error(`  Expected pubkey: ${wallet.agentPublicKey}`);
+          console.error(`  Wallet has v3 key: ${!!wallet.agentPrivateKeyEncryptedV3}`);
+          console.error(`  Wallet has legacy key: ${!!wallet.agentPrivateKeyEncrypted}`);
+          agentKeyResult.cleanup();
+          await storage.updateWebhookLog(log.id, { errorMessage: "Agent key mismatch - security error" });
+          return res.status(500).json({ error: "Agent key verification failed. Please reconfigure your agent wallet in Settings." });
+        }
+        console.log(`[User Webhook] Agent key verified: ${derivedPubkey.slice(0, 8)}... matches stored pubkey`);
+      } catch (verifyErr: any) {
+        console.error(`[User Webhook] Agent key verification failed: ${verifyErr.message}`);
+        agentKeyResult.cleanup();
+        await storage.updateWebhookLog(log.id, { errorMessage: `Agent key verification failed: ${verifyErr.message}` });
+        return res.status(500).json({ error: "Agent key verification failed. Please reconfigure your agent wallet." });
+      }
+      
       // Helper to cleanup agent key after use
       const cleanupAgentKey = () => {
         agentKeyResult.cleanup();
@@ -5446,7 +5472,8 @@ export async function registerRoutes(
             subAccountId,
             undefined,
             userCloseSlippageBps,
-            privateKeyBase58
+            privateKeyBase58,
+            wallet.agentPublicKey || undefined
           );
           
           if (result.success && !result.signature) {
@@ -5777,7 +5804,8 @@ export async function registerRoutes(
         subAccountId,
         false,
         userSlippageBps2,
-        privateKeyBase58
+        privateKeyBase58,
+        userWallet.agentPublicKey || undefined
       );
 
       if (!orderResult.success) {

@@ -2397,6 +2397,7 @@ export async function executePerpOrder(
   reduceOnly: boolean = false,
   slippageBps: number = 50,
   privateKeyBase58?: string,
+  expectedAgentPubkey?: string,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number }> {
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
@@ -2489,6 +2490,7 @@ export async function executePerpOrder(
       action: 'trade',
       encryptedPrivateKey,
       privateKeyBase58,
+      expectedAgentPubkey,
       market,
       side,
       sizeInBase,
@@ -2527,6 +2529,7 @@ export async function closePerpPosition(
   positionSizeBase?: number,
   slippageBps: number = 50,
   privateKeyBase58?: string,
+  expectedAgentPubkey?: string,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
@@ -2617,6 +2620,7 @@ export async function closePerpPosition(
       action: 'close',
       encryptedPrivateKey,
       privateKeyBase58,
+      expectedAgentPubkey,
       market,
       subAccountId,
       positionSizeBase: positionSizeBase ?? null,
