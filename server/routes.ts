@@ -5,6 +5,7 @@ import connectPgSimple from "connect-pg-simple";
 import pg from "pg";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
+import { encrypt as legacyEncrypt } from "./crypto";
 import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
@@ -15,7 +16,7 @@ import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
@@ -464,6 +465,33 @@ export async function registerRoutes(
       if (purpose === 'unlock_umk') {
         const initResult = await initializeWalletSecurity(walletAddress, signatureBytes);
         req.session.walletAddress = walletAddress;
+        
+        // Create agent wallet with mnemonic if one doesn't exist yet
+        let wallet = await storage.getWallet(walletAddress);
+        if (wallet && !wallet.agentPublicKey) {
+          const session = getSession(initResult.sessionId);
+          if (session) {
+            const generatedWallet = generateAgentWalletWithMnemonic();
+            const agentPublicKey = generatedWallet.keypair.publicKey.toString();
+            
+            // Encrypt private key with legacy method for backward compatibility
+            const privateKeyBase58 = bs58.encode(generatedWallet.secretKeyBuffer);
+            const encryptedPrivateKey = legacyEncrypt(privateKeyBase58);
+            
+            // Encrypt the private key with v3 encryption (UMK-based)
+            const encryptedV3 = encryptAgentKeyV3(session.umk, generatedWallet.secretKeyBuffer, walletAddress);
+            
+            // Store the mnemonic encrypted with UMK
+            await encryptAndStoreMnemonic(walletAddress, generatedWallet.mnemonicBuffer, session.umk);
+            
+            // Store both legacy and v3 encrypted keys (same keypair, different encryption methods)
+            await storage.updateWalletAgentKeys(walletAddress, agentPublicKey, encryptedPrivateKey);
+            await storage.updateWalletAgentKeyV3(walletAddress, encryptedV3);
+            
+            console.log(`[Agent] Generated new agent wallet with mnemonic for ${walletAddress}: ${agentPublicKey}`);
+          }
+        }
+        
         return res.json({ 
           success: true, 
           sessionId: initResult.sessionId,
@@ -824,17 +852,8 @@ export async function registerRoutes(
       const isNewWallet = !(await storage.getWallet(walletAddress));
       let wallet = await storage.getOrCreateWallet(walletAddress);
       
-      // Generate agent wallet if not already set
-      if (!wallet.agentPublicKey) {
-        const agentWallet = generateAgentWallet();
-        await storage.updateWalletAgentKeys(
-          walletAddress, 
-          agentWallet.publicKey, 
-          agentWallet.encryptedPrivateKey
-        );
-        wallet = (await storage.getWallet(walletAddress))!;
-        console.log(`[Agent] Generated new agent wallet for ${walletAddress}: ${agentWallet.publicKey}`);
-      }
+      // Agent wallet is now created in /api/auth/verify after security initialization
+      // This ensures the mnemonic can be encrypted with the UMK
 
       // Generate user webhook secret if not already set
       if (!wallet.userWebhookSecret) {
