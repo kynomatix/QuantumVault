@@ -2070,11 +2070,14 @@ export async function registerRoutes(
         return res.status(500).json({ error: "Agent key decryption failed. Please reconfigure your agent wallet." });
       }
       
-      const privateKeyBase58 = bs58.encode(agentKeyResult.secretKey);
+      // CRITICAL: Copy secret key bytes immediately to prevent buffer zeroization issues
+      // The cleanup() function will zero the original buffer, so we must copy before any async operations
+      const secretKeyCopy = Buffer.from(agentKeyResult.secretKey);
+      const privateKeyBase58 = bs58.encode(secretKeyCopy);
       
       // Validate the decrypted key matches stored agentPublicKey before sending to executor
       // This catches key mismatches early with clear error messages
-      const decryptedKeypair = nacl.sign.keyPair.fromSecretKey(agentKeyResult.secretKey);
+      const decryptedKeypair = nacl.sign.keyPair.fromSecretKey(secretKeyCopy);
       const derivedPubkey = bs58.encode(decryptedKeypair.publicKey);
       
       if (derivedPubkey !== wallet.agentPublicKey) {
