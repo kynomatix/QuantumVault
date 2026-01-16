@@ -255,17 +255,24 @@ git checkout HEAD~1 -- <deleted-file>
 
 **Problem:** When creating a new bot and depositing funds, the error "Cannot read properties of undefined (reading 'addAccount')" occurred.
 
-**Root Cause:** When neither the main Drift account nor the target subaccount exists, the DriftClient is created with `subAccountIds: []`. This causes the SDK's internal `userMap` to not be properly initialized. When we later call `addUser()` after creating accounts on-chain, it fails because `userMap` is undefined.
+**Root Cause:** When neither the main Drift account nor the target subaccount exists, the DriftClient is created with `subAccountIds: []` (empty array). When `subscribe()` is called on a DriftClient with an empty subAccountIds, the SDK's internal `userMap` is not properly initialized, causing the "addAccount" error.
 
-**Fix Applied:** Instead of calling `addUser()` on the same DriftClient instance after account creation, we now:
-1. Create accounts on-chain using the initial DriftClient
-2. Unsubscribe from the initial DriftClient
-3. Create a NEW DriftClient with `subAccountIds` set to the now-existing accounts
-4. Subscribe to the new client and proceed with the deposit
+**Previous (incorrect) fix approach:** Call `subscribe()` first, then create accounts, then recreate client.
+
+**Actual fix (v2):** Do NOT call `subscribe()` when `subAccountIds` is empty. Instead:
+1. Check if accounts exist on-chain
+2. If accounts don't exist:
+   - Create accounts on-chain using `initializeUserAccount()` (works without subscribe)
+   - Create a NEW DriftClient with `subAccountIds` set to the now-existing accounts
+   - Subscribe to the new client
+3. If accounts already exist:
+   - Subscribe to the original DriftClient (which has proper subAccountIds)
+   - Switch to target subaccount if needed
+4. Proceed with the deposit
 
 **File Changed:** `server/drift-executor.mjs` - `depositToDrift()` function
 
-**Why This Works:** The SDK properly initializes `userMap` when it knows about subaccounts at construction time. By recreating the client with the correct `subAccountIds` after on-chain account creation, we ensure proper initialization.
+**Why This Works:** The SDK can create accounts on-chain without being subscribed (just sends the transaction). By creating accounts BEFORE calling `subscribe()`, we ensure the DriftClient has valid subAccountIds when it tries to initialize the userMap during subscription.
 
 ---
 

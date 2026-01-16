@@ -724,47 +724,42 @@ async function depositToDrift(command) {
   let activeClient = driftClient;
   
   try {
-    console.error('[Executor] Calling driftClient.subscribe()...');
-    await driftClient.subscribe();
-    console.error('[Executor] subscribe() completed successfully');
     const BN = (await import('bn.js')).default;
     const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
     
     let accountsCreated = false;
     
-    // Initialize main subaccount if it doesn't exist
-    if (!mainExists) {
-      console.error('[Executor] Initializing main user account (subaccount 0) with referral...');
-      const platformReferrer = await getPlatformReferrerInfo(connection);
-      const referrerInfo = {
-        referrer: platformReferrer.user,
-        referrerStats: platformReferrer.userStats
-      };
-      console.error(`[Executor] Using referrer: user=${referrerInfo.referrer.toBase58()}`);
-      const initTx = await driftClient.initializeUserAccount(0, 'QuantumVault', referrerInfo);
-      console.error(`[Executor] Main account initialized with referral: ${initTx}`);
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      accountsCreated = true;
-    }
-    
-    // Initialize target subaccount if needed
-    if (subAccountId > 0 && !targetExists) {
-      console.error(`[Executor] Initializing subaccount ${subAccountId}...`);
-      const initTx = await driftClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
-      console.error(`[Executor] Subaccount ${subAccountId} initialized: ${initTx}`);
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      accountsCreated = true;
-    }
-    
-    // If we created new accounts, we need to create a NEW DriftClient with the proper subAccountIds
-    // This is the proper way to handle SDK userMap initialization
-    if (accountsCreated) {
-      console.error('[Executor] Accounts were created. Recreating DriftClient with new subAccountIds...');
-      try {
-        await driftClient.unsubscribe();
-      } catch (e) {
-        console.error('[Executor] Unsubscribe warning:', e.message);
+    // If no accounts exist, we need to create them BEFORE subscribing
+    // The SDK's subscribe() fails with "addAccount" error when subAccountIds is empty
+    if (!mainExists || !targetExists) {
+      console.error('[Executor] Need to create accounts first (cannot subscribe with empty subAccountIds)');
+      
+      // Initialize main subaccount if it doesn't exist
+      if (!mainExists) {
+        console.error('[Executor] Initializing main user account (subaccount 0) with referral...');
+        const platformReferrer = await getPlatformReferrerInfo(connection);
+        const referrerInfo = {
+          referrer: platformReferrer.user,
+          referrerStats: platformReferrer.userStats
+        };
+        console.error(`[Executor] Using referrer: user=${referrerInfo.referrer.toBase58()}`);
+        const initTx = await driftClient.initializeUserAccount(0, 'QuantumVault', referrerInfo);
+        console.error(`[Executor] Main account initialized with referral: ${initTx}`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        accountsCreated = true;
       }
+      
+      // Initialize target subaccount if needed
+      if (subAccountId > 0 && !targetExists) {
+        console.error(`[Executor] Initializing subaccount ${subAccountId}...`);
+        const initTx = await driftClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
+        console.error(`[Executor] Subaccount ${subAccountId} initialized: ${initTx}`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        accountsCreated = true;
+      }
+      
+      // Now create a NEW DriftClient with the proper subAccountIds after accounts exist
+      console.error('[Executor] Accounts created. Creating fresh DriftClient with proper subAccountIds...');
       
       // Build the list of now-existing subaccounts
       const newSubAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
@@ -790,15 +785,22 @@ async function depositToDrift(command) {
       console.error('[Executor] New DriftClient subscribed successfully');
       
       activeClient = newDriftClient;
-    } else if (subAccountId > 0) {
-      // Accounts existed, just need to switch to target subaccount
-      console.error(`[Executor] Switching active user to subaccount ${subAccountId}...`);
-      await driftClient.switchActiveUser(subAccountId);
+    } else {
+      // Both accounts exist, we can subscribe to the original client
+      console.error('[Executor] Accounts already exist. Subscribing to DriftClient...');
+      await driftClient.subscribe();
+      console.error('[Executor] DriftClient subscribed successfully');
       
-      const activeSubId = driftClient.activeSubAccountId;
-      console.error(`[Executor] Active subaccount after switch: ${activeSubId}`);
-      if (activeSubId !== subAccountId) {
-        throw new Error(`Failed to switch to subaccount ${subAccountId}`);
+      if (subAccountId > 0) {
+        // Need to switch to target subaccount
+        console.error(`[Executor] Switching active user to subaccount ${subAccountId}...`);
+        await driftClient.switchActiveUser(subAccountId);
+        
+        const activeSubId = driftClient.activeSubAccountId;
+        console.error(`[Executor] Active subaccount after switch: ${activeSubId}`);
+        if (activeSubId !== subAccountId) {
+          throw new Error(`Failed to switch to subaccount ${subAccountId}`);
+        }
       }
     }
     
