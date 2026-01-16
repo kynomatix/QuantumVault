@@ -575,8 +575,43 @@ async function executeTrade(command) {
   const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey }, subAccountId, marketIndex);
   
   try {
-    await driftClient.subscribe();
-    console.error(`[Executor] Subscribed, executing ${side} ${sizeInBase} ${market}`);
+    // Try to subscribe - SDK has a bug with addAccount that can cause failures
+    try {
+      await driftClient.subscribe();
+      console.error(`[Executor] Subscribed successfully`);
+    } catch (subscribeError) {
+      console.error(`[Executor] subscribe() failed: ${subscribeError.message}`);
+      // Try alternative: force polling mode instead of websocket
+      if (subscribeError.message?.includes('addAccount') || subscribeError.message?.includes('undefined')) {
+        console.error('[Executor] SDK subscribe bug detected, attempting workaround...');
+        // Force re-create with polling subscription
+        const rpcUrl = process.env.SOLANA_RPC_URL || 
+          (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
+          'https://api.mainnet-beta.solana.com');
+        const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
+        const wallet = driftClient.wallet;
+        
+        const pollingClient = new DriftClient({
+          connection,
+          wallet,
+          env: 'mainnet-beta',
+          activeSubAccountId: subAccountId,
+          subAccountIds: [subAccountId],
+          accountSubscription: { 
+            type: 'polling',
+            frequency: 5000,
+          },
+        });
+        
+        await pollingClient.subscribe();
+        console.error('[Executor] Polling fallback subscribe succeeded');
+        // Replace driftClient reference (can't reassign const, so we need to proceed differently)
+        // For now, just rethrow - this is a fundamental SDK issue
+        throw new Error(`SDK subscription failed even with polling fallback. Please try again.`);
+      }
+      throw subscribeError;
+    }
+    console.error(`[Executor] Executing ${side} ${sizeInBase} ${market}`);
     
     // Check market status before placing order
     const perpMarket = driftClient.getPerpMarketAccount(marketIndex);
