@@ -21,6 +21,29 @@ Before executing any cleanup tasks, verify:
 
 ---
 
+## 0. CRITICAL: Dead Code with Security Implications (HIGH PRIORITY)
+
+Identified during v3 security audit - January 16, 2026.
+
+### `/api/trading-bots/:id/init-wallet` Endpoint (routes.ts ~line 3826)
+
+**Problem:** This endpoint still uses legacy v1 encryption (`generateAgentWallet()` from agent-wallet.ts) instead of v3 (`generateAgentWalletWithMnemonic()`).
+
+**Status:** DEAD CODE - The frontend never calls this endpoint. Verified via grep search.
+
+**Why it exists:** Legacy code from when each bot had its own agent wallet. Current architecture uses a shared agent wallet per user created at connect time.
+
+**Risk if left:** If someone called this API directly, it would create a v1-encrypted wallet, bypassing the v3 security model.
+
+**Action:** Remove or disable this endpoint entirely. It serves no purpose in the current architecture.
+
+```typescript
+// DELETE this entire route block (routes.ts lines ~3826-3852):
+app.post("/api/trading-bots/:id/init-wallet", ...)
+```
+
+---
+
 ## 1. Test/Utility Scripts (LOW RISK)
 
 Development-only test scripts that are not part of production:
