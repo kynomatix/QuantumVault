@@ -499,6 +499,232 @@ async function deleteSubaccount(command) {
   }
 }
 
+// Platform referral code for Drift fee benefits
+const PLATFORM_REFERRAL_CODE = 'kryptolytix';
+const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
+
+// Derive the ReferrerName PDA from the referral code
+function getReferrerNamePDA(referralCode) {
+  const [referrerName] = PublicKey.findProgramAddressSync(
+    [Buffer.from('referrer_name'), Buffer.from(referralCode)],
+    DRIFT_PROGRAM_ID
+  );
+  return referrerName;
+}
+
+// Derive User PDA for a given authority and subaccount
+function getUserAccountPDA(authority, subAccountId) {
+  const [userAccount] = PublicKey.findProgramAddressSync(
+    [
+      Buffer.from('user'),
+      authority.toBuffer(),
+      new Uint8Array(new Uint16Array([subAccountId]).buffer),
+    ],
+    DRIFT_PROGRAM_ID
+  );
+  return userAccount;
+}
+
+// Derive UserStats PDA for a given authority
+function getUserStatsPDA(authority) {
+  const [userStats] = PublicKey.findProgramAddressSync(
+    [Buffer.from('user_stats'), authority.toBuffer()],
+    DRIFT_PROGRAM_ID
+  );
+  return userStats;
+}
+
+// Get referrer info from on-chain ReferrerName account
+// ReferrerName account layout (from Drift IDL):
+// - 8 bytes: discriminator
+// - 32 bytes: authority (the referrer's wallet address)
+// - 32 bytes: user (the referrer's User account for subaccount 0)
+// - 32 bytes: user_stats (the referrer's UserStats account)
+// - 32 bytes: name (the referral code as bytes)
+async function getPlatformReferrerInfo(connection) {
+  const referrerNamePDA = getReferrerNamePDA(PLATFORM_REFERRAL_CODE);
+  const accountInfo = await connection.getAccountInfo(referrerNamePDA);
+  
+  if (!accountInfo || !accountInfo.data) {
+    throw new Error(`Referrer name account not found for code: ${PLATFORM_REFERRAL_CODE}`);
+  }
+  
+  const AUTHORITY_OFFSET = 8;
+  const USER_OFFSET = 8 + 32;
+  const USER_STATS_OFFSET = 8 + 32 + 32;
+  
+  if (accountInfo.data.length < USER_STATS_OFFSET + 32) {
+    throw new Error(`ReferrerName account data too short: ${accountInfo.data.length} bytes`);
+  }
+  
+  const data = accountInfo.data;
+  const authority = new PublicKey(data.slice(AUTHORITY_OFFSET, AUTHORITY_OFFSET + 32));
+  const user = new PublicKey(data.slice(USER_OFFSET, USER_OFFSET + 32));
+  const userStats = new PublicKey(data.slice(USER_STATS_OFFSET, USER_STATS_OFFSET + 32));
+  
+  console.error(`[Executor] Platform referrer (${PLATFORM_REFERRAL_CODE}) fetched:`);
+  console.error(`[Executor]   Authority: ${authority.toBase58()}`);
+  console.error(`[Executor]   User: ${user.toBase58()}`);
+  console.error(`[Executor]   UserStats: ${userStats.toBase58()}`);
+  
+  return { authority, userStats, user };
+}
+
+// USDC token mint on mainnet
+const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+
+// Get associated token address
+function getAssociatedTokenAddress(mint, owner) {
+  const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+  const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+  
+  const [ata] = PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  return ata;
+}
+
+async function depositToDrift(command) {
+  const { privateKeyBase58, encryptedPrivateKey, amountUsdc, subAccountId, agentPublicKey } = command;
+  
+  console.error(`[Executor] Deposit ${amountUsdc} USDC to subaccount ${subAccountId}`);
+  
+  const rpcUrl = process.env.SOLANA_RPC_URL || 
+    (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
+    'https://api.mainnet-beta.solana.com');
+  
+  const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
+  
+  // Decode the private key
+  let keyBase58;
+  if (privateKeyBase58) {
+    console.error('[Executor] Using pre-decrypted key [v3 security path]');
+    keyBase58 = privateKeyBase58;
+  } else if (encryptedPrivateKey) {
+    console.error('[Executor] Using legacy encrypted key [legacy decryption path]');
+    keyBase58 = decryptPrivateKey(encryptedPrivateKey);
+  } else {
+    throw new Error('[Executor] No private key provided');
+  }
+  
+  const secretKeyBytes = bs58.decode(keyBase58);
+  const keypair = Keypair.fromSecretKey(secretKeyBytes);
+  secretKeyBytes.fill(0);
+  
+  const agentPubkey = keypair.publicKey;
+  
+  // Validate that the keypair matches the expected agentPublicKey if provided
+  if (agentPublicKey && agentPubkey.toBase58() !== agentPublicKey) {
+    throw new Error(`Keypair mismatch: expected ${agentPublicKey}, got ${agentPubkey.toBase58()}`);
+  }
+  
+  const agentAta = getAssociatedTokenAddress(USDC_MINT, agentPubkey);
+  
+  // Check agent USDC balance
+  let agentBalance = 0;
+  try {
+    const accountInfo = await connection.getTokenAccountBalance(agentAta);
+    agentBalance = accountInfo.value.uiAmount || 0;
+  } catch {
+    throw new Error('Agent wallet has no USDC token account. Please deposit USDC to your agent wallet first.');
+  }
+  
+  if (agentBalance < amountUsdc) {
+    throw new Error(`Insufficient USDC in agent wallet. Available: $${agentBalance.toFixed(2)}, Requested: $${amountUsdc.toFixed(2)}`);
+  }
+  
+  // Check if main subaccount (0) exists on-chain
+  const mainAccountPDA = getUserAccountPDA(agentPubkey, 0);
+  const mainAccountInfo = await connection.getAccountInfo(mainAccountPDA);
+  const mainExists = mainAccountInfo !== null && mainAccountInfo.data.length > 0;
+  console.error(`[Executor] Main subaccount 0 exists on-chain: ${mainExists}`);
+  
+  // Check if target subaccount exists on-chain
+  let targetExists = mainExists;
+  if (subAccountId > 0) {
+    const targetAccountPDA = getUserAccountPDA(agentPubkey, subAccountId);
+    const targetAccountInfo = await connection.getAccountInfo(targetAccountPDA);
+    targetExists = targetAccountInfo !== null && targetAccountInfo.data.length > 0;
+    console.error(`[Executor] Target subaccount ${subAccountId} exists on-chain: ${targetExists}`);
+  }
+  
+  // Create DriftClient with proper subaccounts to initialize
+  const wallet = new Wallet(keypair);
+  const subAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
+  
+  const defaultSubscription = getMarketsAndOraclesForSubscription('mainnet-beta');
+  
+  const driftClient = new DriftClient({
+    connection,
+    wallet,
+    env: 'mainnet-beta',
+    activeSubAccountId: subAccountId,
+    subAccountIds,
+    accountSubscription: { type: 'websocket' },
+    perpMarketIndexes: defaultSubscription.perpMarketIndexes || [],
+    spotMarketIndexes: defaultSubscription.spotMarketIndexes || [0],
+    oracleInfos: defaultSubscription.oracleInfos || [],
+  });
+  
+  try {
+    await driftClient.subscribe();
+    const BN = (await import('bn.js')).default;
+    const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
+    
+    // Initialize main subaccount if it doesn't exist
+    if (!mainExists) {
+      console.error('[Executor] Initializing main user account (subaccount 0) with referral...');
+      const platformReferrer = await getPlatformReferrerInfo(connection);
+      const referrerInfo = {
+        referrer: platformReferrer.user,
+        referrerStats: platformReferrer.userStats
+      };
+      console.error(`[Executor] Using referrer: user=${referrerInfo.referrer.toBase58()}`);
+      const initTx = await driftClient.initializeUserAccount(0, 'QuantumVault', referrerInfo);
+      console.error(`[Executor] Main account initialized with referral: ${initTx}`);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    
+    // Initialize target subaccount if needed
+    if (subAccountId > 0 && !targetExists) {
+      console.error(`[Executor] Initializing subaccount ${subAccountId}...`);
+      const initTx = await driftClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
+      console.error(`[Executor] Subaccount ${subAccountId} initialized: ${initTx}`);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      await driftClient.unsubscribe();
+      await driftClient.subscribe();
+    }
+    
+    // Switch to target subaccount before deposit
+    if (subAccountId > 0) {
+      console.error(`[Executor] Switching active user to subaccount ${subAccountId}...`);
+      await driftClient.switchActiveUser(subAccountId);
+      
+      const activeSubId = driftClient.activeSubAccountId;
+      if (activeSubId !== subAccountId) {
+        throw new Error(`Failed to switch to subaccount ${subAccountId}`);
+      }
+    }
+    
+    console.error(`[Executor] Calling SDK deposit to subaccount ${subAccountId}...`);
+    const txSig = await driftClient.deposit(
+      amountBN,
+      0, // USDC market index
+      agentAta
+    );
+    
+    console.error(`[Executor] Deposit successful: ${txSig}`);
+    
+    return { success: true, signature: txSig };
+  } finally {
+    try {
+      await driftClient.unsubscribe();
+    } catch {}
+  }
+}
+
 // Read command from stdin
 let inputData = '';
 process.stdin.setEncoding('utf8');
@@ -514,6 +740,8 @@ process.stdin.on('end', async () => {
       result = await deleteSubaccount(command);
     } else if (command.action === 'settlePnl') {
       result = await settlePnl(command);
+    } else if (command.action === 'deposit') {
+      result = await depositToDrift(command);
     } else {
       // Default to trade execution
       result = await executeTrade(command);

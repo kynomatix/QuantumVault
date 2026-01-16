@@ -1917,102 +1917,28 @@ export async function executeAgentDriftDeposit(
       };
     }
     
-    console.log(`[Drift] Using SDK deposit method: ${amountUsdc} USDC to subaccount ${subAccountId}`);
+    console.log(`[Drift] Using subprocess executor for deposit: ${amountUsdc} USDC to subaccount ${subAccountId}`);
     
-    // Try SDK approach first (handles oracles automatically)
-    try {
-      // First, check on-chain if the target subaccount exists BEFORE creating DriftClient
-      // This uses the actual on-chain state, not the SDK's internal cache
-      const agentKeypair = getAgentKeypair(encryptedPrivateKey);
-      
-      // Check if main subaccount (0) exists on-chain
-      const mainAccountPDA = getUserAccountPDA(agentKeypair.publicKey, 0);
-      const mainAccountInfo = await connection.getAccountInfo(mainAccountPDA);
-      const mainExists = mainAccountInfo !== null && mainAccountInfo.data.length > 0;
-      console.log(`[Drift] Main subaccount 0 exists on-chain: ${mainExists}`);
-      
-      // Check if target subaccount exists on-chain (if not subaccount 0)
-      let targetExists = mainExists; // If target is 0, use mainExists
-      if (subAccountId > 0) {
-        const targetAccountPDA = getUserAccountPDA(agentKeypair.publicKey, subAccountId);
-        const targetAccountInfo = await connection.getAccountInfo(targetAccountPDA);
-        targetExists = targetAccountInfo !== null && targetAccountInfo.data.length > 0;
-        console.log(`[Drift] Target subaccount ${subAccountId} exists on-chain: ${targetExists}`);
-      }
-      
-      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
-      
-      try {
-        // Convert amount to precision (USDC has 6 decimals)
-        const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
-        
-        // Initialize the main subaccount if it doesn't exist on-chain
-        if (!mainExists) {
-          console.log('[Drift] Initializing main user account (subaccount 0) via SDK with referral...');
-          // CRITICAL: Fetch platform referrer (kryptolytix) and pass to SDK for referral attribution
-          const platformReferrer = await getPlatformReferrerInfo();
-          const referrerInfo = {
-            referrer: platformReferrer.user,         // referrer's User account (subaccount 0)
-            referrerStats: platformReferrer.userStats // referrer's UserStats account
-          };
-          console.log(`[Drift] Using referrer: user=${referrerInfo.referrer.toBase58()}, stats=${referrerInfo.referrerStats.toBase58()}`);
-          const initTx = await driftClient.initializeUserAccount(0, 'QuantumVault', referrerInfo);
-          console.log(`[Drift] Main account initialized with referral: ${initTx}`);
-          // Wait for confirmation
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-        
-        // If depositing to a non-zero subaccount, initialize it if needed
-        if (subAccountId > 0) {
-          if (!targetExists) {
-            console.log(`[Drift] Initializing subaccount ${subAccountId} via SDK...`);
-            const initTx = await driftClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
-            console.log(`[Drift] Subaccount ${subAccountId} initialized: ${initTx}`);
-            // Wait for confirmation
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            // Need to re-subscribe after creating new subaccount so SDK knows about it
-            console.log(`[Drift] Re-subscribing DriftClient after subaccount creation...`);
-            await driftClient.unsubscribe();
-            await driftClient.subscribe();
-          }
-          
-          // CRITICAL: Switch active user to target subaccount before deposit
-          // The DriftClient's deposit() method uses the active user, not a parameter
-          console.log(`[Drift] Switching active user to subaccount ${subAccountId}...`);
-          await driftClient.switchActiveUser(subAccountId);
-          
-          // Verify the switch worked
-          const activeSubId = driftClient.activeSubAccountId;
-          console.log(`[Drift] Active subaccount after switch: ${activeSubId}`);
-          if (activeSubId !== subAccountId) {
-            console.error(`[Drift] Failed to switch to subaccount ${subAccountId}, still on ${activeSubId}`);
-            throw new Error(`Failed to switch to subaccount ${subAccountId}`);
-          }
-        }
-        
-        console.log(`[Drift] Calling SDK deposit to subaccount ${subAccountId} (activeSubAccountId: ${driftClient.activeSubAccountId})...`);
-        const txSig = await driftClient.deposit(
-          amountBN,
-          0, // USDC market index
-          agentAta
-        );
-        
-        console.log(`[Drift] SDK deposit successful: ${txSig}`);
-        await cleanup();
-        return { success: true, signature: txSig };
-      } catch (sdkError) {
-        await cleanup();
-        throw sdkError;
-      }
-    } catch (sdkError) {
-      // CRITICAL: Do NOT fall back to manual approach - it only supports subaccount 0
-      // The SDK path is the only one that supports depositing to specific subaccounts
-      console.error('[Drift] SDK deposit failed:', sdkError);
-      const errorMessage = sdkError instanceof Error ? sdkError.message : String(sdkError);
+    // Use subprocess executor to avoid ESM/CJS DriftClient loading issues
+    // The drift-executor.mjs runs in pure ESM mode where DriftClient loads correctly
+    const command = {
+      action: 'deposit',
+      encryptedPrivateKey,
+      amountUsdc,
+      subAccountId,
+      agentPublicKey,
+    };
+    
+    const result = await executeDriftCommandViaSubprocess(command);
+    
+    if (result.success) {
+      console.log(`[Drift] Subprocess deposit successful: ${result.signature}`);
+      return { success: true, signature: result.signature };
+    } else {
+      console.error('[Drift] Subprocess deposit failed:', result.error);
       return {
         success: false,
-        error: `Drift deposit failed: ${errorMessage}. Please try again or contact support.`,
+        error: `Drift deposit failed: ${result.error}. Please try again or contact support.`,
       };
     }
   } catch (error) {
