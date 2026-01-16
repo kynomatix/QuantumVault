@@ -2329,6 +2329,10 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
       });
     });
     
+    // Log command details for debugging (but not actual key values)
+    if (command.action === 'deposit' && command.privateKeyBase58) {
+      console.log(`[Drift] Deposit command: keyLen=${command.privateKeyBase58.length}, firstChars=${command.privateKeyBase58.slice(0, 8)}...`);
+    }
     child.stdin.write(JSON.stringify(command));
     child.stdin.end();
     
