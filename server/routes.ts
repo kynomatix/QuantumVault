@@ -585,9 +585,11 @@ export async function registerRoutes(
 
   // Enable execution - allows headless trade execution via webhooks
   app.post("/api/auth/enable-execution", requireWallet, async (req, res) => {
+    console.log(`[Enable Execution] Request received for wallet ${req.walletAddress?.slice(0, 8)}...`);
     try {
       const { sessionId, nonce, signature } = req.body;
       if (!sessionId || !nonce || !signature) {
+        console.log(`[Enable Execution] Missing fields - sessionId: ${!!sessionId}, nonce: ${!!nonce}, signature: ${!!signature}`);
         return res.status(400).json({ error: "Missing required fields" });
       }
 
@@ -595,6 +597,7 @@ export async function registerRoutes(
         ? bs58.decode(signature) 
         : new Uint8Array(Object.values(signature));
 
+      console.log(`[Enable Execution] Verifying signature for nonce: ${nonce.slice(0, 8)}...`);
       const sigResult = await verifySignatureAndConsumeNonce(
         req.walletAddress!,
         nonce,
@@ -604,21 +607,25 @@ export async function registerRoutes(
       );
 
       if (!sigResult.success) {
+        console.log(`[Enable Execution] Signature verification failed: ${sigResult.error}`);
         return res.status(401).json({ error: sigResult.error });
       }
 
+      console.log(`[Enable Execution] Signature verified, calling enableExecution with sessionId: ${sessionId.slice(0, 8)}...`);
       const result = await enableExecution(sessionId, req.walletAddress!);
       
       if (!result.success) {
+        console.log(`[Enable Execution] enableExecution failed: ${result.error}`);
         return res.status(400).json({ error: result.error });
       }
       
+      console.log(`[Enable Execution] Success for wallet ${req.walletAddress?.slice(0, 8)}...`);
       res.json({
         success: true,
         expiresAt: result.expiresAt,
       });
     } catch (error) {
-      console.error("Enable execution error:", error);
+      console.error("[Enable Execution] Error:", error);
       res.status(500).json({ error: "Failed to enable execution" });
     }
   });
