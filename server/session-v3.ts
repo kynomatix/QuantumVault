@@ -782,11 +782,16 @@ export async function decryptAgentKeyWithFallback(
   if (wallet.agentPrivateKeyEncryptedV3 && umk) {
     try {
       const keyBuffer = decryptAgentKeyV3(umk, wallet.agentPrivateKeyEncryptedV3, walletAddress);
-      const secretKey = new Uint8Array(keyBuffer);
+      // CRITICAL: Create a COPY of the decrypted key, not a view
+      // Using Uint8Array.from() ensures we own the bytes and cleanup() won't corrupt the data
+      // if the caller uses the key after cleanup (which shouldn't happen but provides defense-in-depth)
+      const secretKey = Uint8Array.from(keyBuffer);
+      // Zero the original buffer immediately after copying
+      zeroizeBuffer(keyBuffer);
       return {
         secretKey,
         cleanup: () => {
-          zeroizeBuffer(keyBuffer);
+          // Only need to zero the copy now
           secretKey.fill(0);
         },
       };
