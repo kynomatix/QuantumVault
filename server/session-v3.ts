@@ -506,7 +506,7 @@ function getSessionById(sessionId: string): SessionData | undefined {
   return sessions.get(sessionId);
 }
 
-const EXECUTION_TTL_MS = 60 * 60 * 1000;
+// Execution no longer expires - stays enabled until manually revoked
 
 function getServerExecutionKey(): Buffer {
   const keyHex = process.env.SERVER_EXECUTION_KEY;
@@ -539,17 +539,15 @@ export async function enableExecution(
     const aad = buildAAD(walletAddress, 'EUMK_EXEC');
     const umkEncrypted = encryptToBase64(session.umk, serverKey, aad);
     
-    const expiresAt = new Date(Date.now() + EXECUTION_TTL_MS);
-    
     await storage.updateWalletExecution(walletAddress, {
       executionEnabled: true,
       umkEncryptedForExecution: umkEncrypted,
-      executionExpiresAt: expiresAt,
+      executionExpiresAt: null, // No expiry - stays enabled until revoked
     });
     
-    console.log(`[Security] Execution enabled for ${walletAddress.slice(0, 8)}... (expires: ${expiresAt.toISOString()})`);
+    console.log(`[Security] Execution enabled for ${walletAddress.slice(0, 8)}... (permanent until revoked)`);
     
-    return { success: true, expiresAt };
+    return { success: true };
   } catch (err) {
     console.error('[Security] Failed to enable execution:', err);
     return { success: false, error: 'Failed to enable execution' };
@@ -590,14 +588,7 @@ export async function getUmkForWebhook(
     return null;
   }
   
-  if (!wallet.executionExpiresAt || new Date() > wallet.executionExpiresAt) {
-    await storage.updateWalletExecution(walletAddress, {
-      executionEnabled: false,
-      umkEncryptedForExecution: null,
-      executionExpiresAt: null,
-    });
-    return null;
-  }
+  // No expiry check - execution stays enabled until manually revoked
   
   if (wallet.emergencyStopTriggered) {
     return null;

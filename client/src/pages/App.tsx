@@ -66,6 +66,7 @@ import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
 import { PublishBotModal } from '@/components/PublishBotModal';
 import { SubscribeBotModal } from '@/components/SubscribeBotModal';
+import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
 
 interface TradingBot {
   id: string;
@@ -131,9 +132,6 @@ export default function AppPage() {
   const [telegramConnected, setTelegramConnected] = useState(false);
   const [telegramVerifyCode, setTelegramVerifyCode] = useState<string | null>(null);
   const [dangerZoneExpanded, setDangerZoneExpanded] = useState(false);
-  const [executionEnabled, setExecutionEnabled] = useState(false);
-  const [executionExpiresAt, setExecutionExpiresAt] = useState<Date | null>(null);
-  const [executionLoading, setExecutionLoading] = useState(false);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
   const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
@@ -171,6 +169,7 @@ export default function AppPage() {
   const subscribeBot = useSubscribeToBot();
   const updateSub = useUpdateSubscription();
   const reconcilePositions = useReconcilePositions();
+  const { executionEnabled, executionLoading, enableExecution, revokeExecution } = useExecutionAuthorization();
   
   // Marketplace data
   const { data: marketplaceData, isLoading: marketplaceLoading } = useMarketplace({
@@ -255,12 +254,6 @@ export default function AppPage() {
           setSlippageBps(data.slippageBps ?? 50);
         }
         
-        const execRes = await fetch('/api/auth/execution-status', { credentials: 'include' });
-        if (execRes.ok) {
-          const execData = await execRes.json();
-          setExecutionEnabled(execData.executionEnabled ?? false);
-          setExecutionExpiresAt(execData.executionExpiresAt ? new Date(execData.executionExpiresAt) : null);
-        }
       } catch (error) {
         console.error('Error loading settings:', error);
       } finally {
@@ -300,133 +293,6 @@ export default function AppPage() {
       });
     } finally {
       setSettingsSaving(false);
-    }
-  };
-
-  const handleEnableExecution = async () => {
-    if (!solanaWallet.publicKey || !solanaWallet.signMessage) {
-      toast({ title: 'Wallet not connected', variant: 'destructive' });
-      return;
-    }
-    
-    setExecutionLoading(true);
-    try {
-      const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
-      if (!sessionRes.ok) {
-        throw new Error('Session check failed');
-      }
-      const sessionData = await sessionRes.json();
-      if (!sessionData.hasSession || !sessionData.sessionId) {
-        throw new Error('No active session. Please reconnect your wallet.');
-      }
-      
-      const nonceRes = await fetch('/api/auth/nonce', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ walletAddress: solanaWallet.publicKey.toBase58(), purpose: 'enable_execution' }),
-      });
-      if (!nonceRes.ok) {
-        throw new Error('Failed to get signing nonce');
-      }
-      const { nonce, message } = await nonceRes.json();
-      
-      const messageBytes = new TextEncoder().encode(message);
-      const signatureBytes = await solanaWallet.signMessage(messageBytes);
-      const signatureBase58 = bs58.encode(signatureBytes);
-      
-      const enableRes = await fetch('/api/auth/enable-execution', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          sessionId: sessionData.sessionId,
-          nonce,
-          signature: signatureBase58,
-        }),
-      });
-      
-      if (!enableRes.ok) {
-        const err = await enableRes.json();
-        throw new Error(err.error || 'Failed to enable execution');
-      }
-      
-      const result = await enableRes.json();
-      setExecutionEnabled(true);
-      setExecutionExpiresAt(result.expiresAt ? new Date(result.expiresAt) : null);
-      toast({ title: 'Execution enabled', description: 'Your bots can now execute trades via webhooks' });
-    } catch (error: any) {
-      console.error('Enable execution error:', error);
-      toast({ 
-        title: 'Failed to enable execution', 
-        description: error.message || 'Please try again',
-        variant: 'destructive' 
-      });
-    } finally {
-      setExecutionLoading(false);
-    }
-  };
-
-  const handleRevokeExecution = async () => {
-    if (!solanaWallet.publicKey || !solanaWallet.signMessage) {
-      toast({ title: 'Wallet not connected', variant: 'destructive' });
-      return;
-    }
-    
-    setExecutionLoading(true);
-    try {
-      const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
-      if (!sessionRes.ok) {
-        throw new Error('Session check failed');
-      }
-      const sessionData = await sessionRes.json();
-      if (!sessionData.hasSession || !sessionData.sessionId) {
-        throw new Error('No active session. Please reconnect your wallet.');
-      }
-      
-      const nonceRes = await fetch('/api/auth/nonce', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ walletAddress: solanaWallet.publicKey.toBase58(), purpose: 'revoke_execution' }),
-      });
-      if (!nonceRes.ok) {
-        throw new Error('Failed to get signing nonce');
-      }
-      const { nonce, message } = await nonceRes.json();
-      
-      const messageBytes = new TextEncoder().encode(message);
-      const signatureBytes = await solanaWallet.signMessage(messageBytes);
-      const signatureBase58 = bs58.encode(signatureBytes);
-      
-      const revokeRes = await fetch('/api/auth/revoke-execution', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          sessionId: sessionData.sessionId,
-          nonce,
-          signature: signatureBase58,
-        }),
-      });
-      
-      if (!revokeRes.ok) {
-        const err = await revokeRes.json();
-        throw new Error(err.error || 'Failed to revoke execution');
-      }
-      
-      setExecutionEnabled(false);
-      setExecutionExpiresAt(null);
-      toast({ title: 'Execution revoked', description: 'Webhook trading is now disabled' });
-    } catch (error: any) {
-      console.error('Revoke execution error:', error);
-      toast({ 
-        title: 'Failed to revoke execution', 
-        description: error.message || 'Please try again',
-        variant: 'destructive' 
-      });
-    } finally {
-      setExecutionLoading(false);
     }
   };
 
@@ -2366,14 +2232,14 @@ export default function AppPage() {
                             </div>
                             <p className="text-sm text-muted-foreground mt-1">
                               {executionEnabled 
-                                ? `Your bots can execute trades via TradingView webhooks. ${executionExpiresAt ? `Authorization expires ${executionExpiresAt.toLocaleDateString()} at ${executionExpiresAt.toLocaleTimeString()}.` : ''}`
+                                ? 'Your bots can execute trades via TradingView webhooks. Authorization remains active until you revoke it.'
                                 : 'Enable automated trading to allow your bots to execute trades when webhook signals arrive from TradingView.'}
                             </p>
                             <div className="mt-3">
                               {executionEnabled ? (
                                 <Button
                                   variant="outline"
-                                  onClick={handleRevokeExecution}
+                                  onClick={revokeExecution}
                                   disabled={executionLoading}
                                   data-testid="button-revoke-execution"
                                 >
@@ -2385,7 +2251,7 @@ export default function AppPage() {
                                 </Button>
                               ) : (
                                 <Button
-                                  onClick={handleEnableExecution}
+                                  onClick={enableExecution}
                                   disabled={executionLoading}
                                   data-testid="button-enable-execution"
                                 >

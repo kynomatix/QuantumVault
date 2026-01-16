@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
+import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -45,7 +46,8 @@ import {
   AlertTriangle,
   ShieldCheck,
   ShieldAlert,
-  HelpCircle
+  HelpCircle,
+  Shield
 } from 'lucide-react';
 
 interface MarketInfo {
@@ -167,8 +169,9 @@ interface CreateBotModalProps {
 
 export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, defaultLeverage = 3 }: CreateBotModalProps) {
   const { toast } = useToast();
+  const { executionEnabled, executionLoading, enableExecution } = useExecutionAuthorization();
   const [isCreating, setIsCreating] = useState(false);
-  const [step, setStep] = useState<'create' | 'success'>('create');
+  const [step, setStep] = useState<'create' | 'success' | 'enable_execution'>('create');
   const [createdBot, setCreatedBot] = useState<TradingBot | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [agentBalance, setAgentBalance] = useState<string | null>(null);
@@ -863,7 +866,13 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
             <Button
               variant="secondary"
               className="flex-1"
-              onClick={handleClose}
+              onClick={() => {
+                if (!executionEnabled) {
+                  setStep('enable_execution');
+                } else {
+                  handleClose();
+                }
+              }}
               data-testid="button-done-setup"
             >
               Done
@@ -874,11 +883,103 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     );
   };
 
+  const renderEnableExecutionStep = () => {
+    if (!createdBot) return null;
+
+    const handleEnableNow = async () => {
+      const success = await enableExecution();
+      if (success) {
+        handleClose();
+      }
+    };
+
+    const handleSkip = () => {
+      handleClose();
+    };
+
+    return (
+      <>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-xl">
+            <Shield className="w-6 h-6 text-primary" />
+            Enable Automated Trading
+          </DialogTitle>
+          <DialogDescription>
+            Your bot <span className="font-medium">{createdBot.name}</span> has been created successfully
+          </DialogDescription>
+        </DialogHeader>
+        
+        <div className="space-y-4 py-4">
+          <div className="p-4 rounded-xl bg-gradient-to-br from-amber-500/10 to-orange-500/10 border border-amber-500/20">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-amber-500 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="font-semibold text-amber-500">Automated Trading Not Enabled</p>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Your bot is configured, but it cannot execute trades until you enable automated trading authorization. 
+                  This requires signing a message with your wallet.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-muted/50 border">
+            <h4 className="font-medium mb-2">What happens when you enable?</h4>
+            <ul className="text-sm text-muted-foreground space-y-1.5">
+              <li className="flex items-start gap-2">
+                <Check className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+                <span>Your bots can automatically execute trades from TradingView signals</span>
+              </li>
+              <li className="flex items-start gap-2">
+                <Check className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+                <span>You maintain full control and can revoke anytime</span>
+              </li>
+              <li className="flex items-start gap-2">
+                <Check className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+                <span>No funds are transferred - just authorization to trade</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <DialogFooter className="flex gap-3 sm:gap-3">
+          <Button
+            variant="outline"
+            onClick={handleSkip}
+            disabled={executionLoading}
+            data-testid="button-skip-enable"
+          >
+            Skip for now
+          </Button>
+          <Button
+            onClick={handleEnableNow}
+            disabled={executionLoading}
+            className="bg-gradient-to-r from-primary to-accent"
+            data-testid="button-enable-execution"
+          >
+            {executionLoading ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Enabling...
+              </>
+            ) : (
+              <>
+                <ShieldCheck className="w-4 h-4 mr-2" />
+                Enable Now
+              </>
+            )}
+          </Button>
+        </DialogFooter>
+      </>
+    );
+  };
+
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogContent className={step === 'success' ? "sm:max-w-[600px]" : "sm:max-w-[450px]"}>
         {step === 'create' && renderCreateStep()}
         {step === 'success' && renderSuccessStep()}
+        {step === 'enable_execution' && renderEnableExecutionStep()}
       </DialogContent>
     </Dialog>
   );

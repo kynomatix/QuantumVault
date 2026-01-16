@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import { useTokenBalance } from '@/hooks/useTokenBalance';
+import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
 
 interface WelcomePopupProps {
   isOpen: boolean;
@@ -31,6 +32,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
   const { connection } = useConnection();
   const { toast } = useToast();
   const { usdcBalance, usdcLoading, fetchUsdcBalance } = useTokenBalance();
+  const { executionEnabled, executionLoading, enableExecution, refetchStatus } = useExecutionAuthorization();
 
   const [displayName, setDisplayName] = useState('');
   const [solDepositAmount, setSolDepositAmount] = useState('0.1');
@@ -41,8 +43,8 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [processingStep, setProcessingStep] = useState<'idle' | 'preparing' | 'signing' | 'confirming' | 'finalizing'>('idle');
   
-  // Step 2: USDC deposit
-  const [currentStep, setCurrentStep] = useState<'sol' | 'usdc' | 'complete'>('sol');
+  // Step 2: USDC deposit, Step 3: Execution authorization
+  const [currentStep, setCurrentStep] = useState<'sol' | 'usdc' | 'execution' | 'complete'>('sol');
   const [usdcDepositAmount, setUsdcDepositAmount] = useState('');
   const [isDepositingUsdc, setIsDepositingUsdc] = useState(false);
   const [usdcProcessingStep, setUsdcProcessingStep] = useState<'idle' | 'preparing' | 'signing' | 'confirming' | 'finalizing'>('idle');
@@ -70,7 +72,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
   }, [isOpen, wallet.publicKey]);
 
   const handleOpenChange = (open: boolean) => {
-    if (!open && !isDepositing && !isDepositingUsdc) {
+    if (!open && !isDepositing && !isDepositingUsdc && !executionLoading) {
       onClose();
     }
   };
@@ -274,8 +276,13 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
       });
       
       setUsdcFunded(true);
-      setCurrentStep('complete');
-      setDepositSuccess(true);
+      const status = await refetchStatus();
+      if (!status?.executionEnabled) {
+        setCurrentStep('execution');
+      } else {
+        setCurrentStep('complete');
+        setDepositSuccess(true);
+      }
     } catch (error: any) {
       console.error('USDC deposit error:', error);
       toast({ 
@@ -289,7 +296,27 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
     }
   };
 
-  const handleSkipUsdc = () => {
+  const handleSkipUsdc = async () => {
+    const status = await refetchStatus();
+    if (!status?.executionEnabled) {
+      setCurrentStep('execution');
+    } else {
+      setCurrentStep('complete');
+      setDepositSuccess(true);
+      onDepositComplete();
+    }
+  };
+
+  const handleEnableExecution = async () => {
+    const success = await enableExecution();
+    if (success) {
+      setCurrentStep('complete');
+      setDepositSuccess(true);
+      onDepositComplete();
+    }
+  };
+
+  const handleSkipExecution = () => {
     setCurrentStep('complete');
     setDepositSuccess(true);
     onDepositComplete();
@@ -585,6 +612,86 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
               disabled={isDepositingUsdc}
               className="w-full"
               data-testid="button-skip-usdc"
+            >
+              Skip for now
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
+  if (currentStep === 'execution') {
+    return (
+      <Dialog open={isOpen} onOpenChange={handleOpenChange}>
+        <DialogContent className="sm:max-w-md" data-testid="dialog-execution-auth">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Zap className="w-5 h-5 text-primary" />
+              Enable Automated Trading
+            </DialogTitle>
+            <DialogDescription>
+              One final step: authorize your trading agent to execute trades on your behalf.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <Card className="border-green-500/30 bg-green-500/10">
+              <CardContent className="pt-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 bg-green-500/20 rounded-full flex items-center justify-center">
+                    <Check className="w-4 h-4 text-green-500" />
+                  </div>
+                  <div className="text-sm">
+                    <p className="font-medium text-green-500">Deposits Complete</p>
+                    <p className="text-muted-foreground text-xs">
+                      {usdcFunded ? 'SOL and USDC funded' : 'SOL funded for transaction fees'}
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border-primary/30 bg-primary/5">
+              <CardContent className="pt-4">
+                <div className="flex items-start gap-3">
+                  <Shield className="w-5 h-5 text-primary mt-0.5" />
+                  <div className="text-sm">
+                    <p className="font-medium text-primary mb-1">Why Enable Execution?</p>
+                    <p className="text-muted-foreground">
+                      Enabling execution authorization allows your trading bots to automatically execute trades based on webhook signals. This requires signing a message with your wallet.
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <DialogFooter className="flex-col gap-2 sm:flex-col">
+            <Button
+              onClick={handleEnableExecution}
+              disabled={executionLoading}
+              className="w-full bg-gradient-to-r from-primary to-accent"
+              data-testid="button-enable-execution"
+            >
+              {executionLoading ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Enabling...
+                </>
+              ) : (
+                <>
+                  <Zap className="w-4 h-4 mr-2" />
+                  Enable Automated Trading
+                </>
+              )}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={handleSkipExecution}
+              disabled={executionLoading}
+              className="w-full"
+              data-testid="button-skip-execution"
             >
               Skip for now
             </Button>
