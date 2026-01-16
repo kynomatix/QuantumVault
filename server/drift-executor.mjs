@@ -3,9 +3,238 @@
 // This script receives trade commands via stdin and executes them via Drift SDK
 
 import { DriftClient, Wallet, PositionDirection, OrderType, MarketType, getMarketsAndOraclesForSubscription, initialize } from '@drift-labs/sdk';
-import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
 import bs58 from 'bs58';
 import crypto from 'crypto';
+
+// Drift Program constants for raw transaction building
+const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
+
+function getDriftStatePDA() {
+  const [state] = PublicKey.findProgramAddressSync(
+    [Buffer.from('drift_state')],
+    DRIFT_PROGRAM_ID
+  );
+  return state;
+}
+const DRIFT_STATE_PUBKEY = getDriftStatePDA();
+
+// Platform referral code
+const PLATFORM_REFERRAL_CODE = 'kryptolytix';
+
+// Generate Anchor discriminator for raw instruction building
+function getAnchorDiscriminator(instructionName) {
+  const hash = crypto.createHash('sha256').update(`global:${instructionName}`).digest();
+  return Buffer.from(hash.slice(0, 8));
+}
+
+// Encode name to 32-byte buffer (matches Drift SDK's encodeName)
+function encodeName(name) {
+  const buffer = Buffer.alloc(32);
+  Buffer.from(name.slice(0, 32)).copy(buffer);
+  return buffer;
+}
+
+// Get UserStats PDA
+function getUserStatsPDA(authority) {
+  const [userStats] = PublicKey.findProgramAddressSync(
+    [Buffer.from('user_stats'), authority.toBuffer()],
+    DRIFT_PROGRAM_ID
+  );
+  return userStats;
+}
+
+// Get ReferrerName PDA
+function getReferrerNamePDA(referralCode) {
+  const nameBuffer = encodeName(referralCode);
+  const [referrerName] = PublicKey.findProgramAddressSync(
+    [Buffer.from('referrer_name'), nameBuffer],
+    DRIFT_PROGRAM_ID
+  );
+  return referrerName;
+}
+
+// Raw instruction to initialize user stats
+function createInitializeUserStatsInstruction(userPubkey, userStats) {
+  const discriminator = getAnchorDiscriminator('initialize_user_stats');
+  
+  const keys = [
+    { pubkey: userStats, isSigner: false, isWritable: true },
+    { pubkey: DRIFT_STATE_PUBKEY, isSigner: false, isWritable: true },
+    { pubkey: userPubkey, isSigner: false, isWritable: false },
+    { pubkey: userPubkey, isSigner: true, isWritable: true },
+    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+  ];
+
+  return new TransactionInstruction({
+    keys,
+    programId: DRIFT_PROGRAM_ID,
+    data: discriminator,
+  });
+}
+
+// Raw instruction to initialize user account
+function createInitializeUserInstruction(userPubkey, userAccount, userStats, subAccountId, name, referrerInfo) {
+  const discriminator = getAnchorDiscriminator('initialize_user');
+  
+  const nameBuffer = Buffer.alloc(32);
+  Buffer.from(name.slice(0, 32)).copy(nameBuffer);
+  
+  const data = Buffer.alloc(8 + 2 + 32);
+  discriminator.copy(data, 0);
+  data.writeUInt16LE(subAccountId, 8);
+  nameBuffer.copy(data, 10);
+
+  const keys = [
+    { pubkey: userAccount, isSigner: false, isWritable: true },
+    { pubkey: userStats, isSigner: false, isWritable: true },
+    { pubkey: DRIFT_STATE_PUBKEY, isSigner: false, isWritable: true },
+    { pubkey: userPubkey, isSigner: false, isWritable: false },
+    { pubkey: userPubkey, isSigner: true, isWritable: true },
+    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+  ];
+  
+  // Add referrer accounts if provided (for referral attribution on first account creation)
+  if (referrerInfo && subAccountId === 0) {
+    keys.push(
+      { pubkey: referrerInfo.user, isSigner: false, isWritable: true },
+      { pubkey: referrerInfo.userStats, isSigner: false, isWritable: true },
+    );
+    console.error(`[Executor] Adding referrer to initialize_user: user=${referrerInfo.user.toBase58()}`);
+  }
+
+  return new TransactionInstruction({
+    keys,
+    programId: DRIFT_PROGRAM_ID,
+    data,
+  });
+}
+
+// Initialize Drift accounts using RAW SOLANA TRANSACTIONS (bypasses DriftClient entirely)
+// This is the fix for the SDK subscribe() bug with empty subAccountIds
+async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
+  const userPubkey = keypair.publicKey;
+  const userStats = getUserStatsPDA(userPubkey);
+  const mainAccountPDA = getUserAccountPDA(userPubkey, 0);
+  const targetAccountPDA = subAccountId > 0 ? getUserAccountPDA(userPubkey, subAccountId) : mainAccountPDA;
+  
+  const initInstructions = [];
+  
+  // Check if user stats exists
+  const userStatsInfo = await connection.getAccountInfo(userStats);
+  if (!userStatsInfo) {
+    console.error('[Executor] User stats not found, adding raw initialization instruction');
+    initInstructions.push(createInitializeUserStatsInstruction(userPubkey, userStats));
+  }
+
+  // Check if main account (subaccount 0) exists
+  const mainAccountInfo = await connection.getAccountInfo(mainAccountPDA);
+  if (!mainAccountInfo) {
+    console.error('[Executor] Main account (subaccount 0) not found, adding raw initialization instruction');
+    // Fetch referrer info for subaccount 0
+    const referrerInfo = await fetchPlatformReferrerRaw(connection);
+    initInstructions.push(
+      createInitializeUserInstruction(userPubkey, mainAccountPDA, userStats, 0, 'QuantumVault', referrerInfo)
+    );
+  }
+
+  // Check if target subaccount exists (if different from main)
+  if (subAccountId > 0) {
+    const targetAccountInfo = await connection.getAccountInfo(targetAccountPDA);
+    if (!targetAccountInfo) {
+      console.error(`[Executor] Target subaccount ${subAccountId} not found, adding raw initialization instruction`);
+      // No referrer for non-zero subaccounts
+      initInstructions.push(
+        createInitializeUserInstruction(userPubkey, targetAccountPDA, userStats, subAccountId, `Bot-${subAccountId}`, null)
+      );
+    }
+  }
+
+  if (initInstructions.length === 0) {
+    console.error('[Executor] All Drift accounts already exist, no initialization needed');
+    return true;
+  }
+
+  console.error(`[Executor] Initializing ${initInstructions.length} Drift account(s) via raw transaction (bypassing DriftClient)`);
+
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  
+  const tx = new Transaction({
+    feePayer: userPubkey,
+    blockhash,
+    lastValidBlockHeight,
+  });
+
+  for (const ix of initInstructions) {
+    tx.add(ix);
+  }
+
+  tx.sign(keypair);
+
+  const signature = await connection.sendRawTransaction(tx.serialize(), {
+    skipPreflight: true,
+    preflightCommitment: 'confirmed',
+  });
+
+  console.error(`[Executor] Raw account init tx sent: ${signature}`);
+
+  const confirmation = await connection.confirmTransaction({
+    signature,
+    blockhash,
+    lastValidBlockHeight,
+  }, 'confirmed');
+
+  if (confirmation.value.err) {
+    console.error('[Executor] Raw account initialization failed:', confirmation.value.err);
+    throw new Error(`Drift account initialization failed: ${JSON.stringify(confirmation.value.err)}`);
+  }
+
+  console.error('[Executor] Drift accounts initialized successfully via raw transaction');
+  
+  // Wait for accounts to be queryable
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  
+  return true;
+}
+
+// Fetch platform referrer info using raw RPC (no DriftClient needed)
+async function fetchPlatformReferrerRaw(connection) {
+  try {
+    const referrerNamePDA = getReferrerNamePDA(PLATFORM_REFERRAL_CODE);
+    console.error(`[Executor] Fetching referrer info for: ${PLATFORM_REFERRAL_CODE}`);
+    
+    const accountInfo = await connection.getAccountInfo(referrerNamePDA);
+    if (!accountInfo) {
+      console.error('[Executor] Referrer account not found, proceeding without referral');
+      return null;
+    }
+    
+    // ReferrerName account layout:
+    // - 8 bytes: discriminator
+    // - 32 bytes: authority
+    // - 32 bytes: user
+    // - 32 bytes: user_stats
+    const AUTHORITY_OFFSET = 8;
+    const USER_OFFSET = 8 + 32;
+    const USER_STATS_OFFSET = 8 + 32 + 32;
+    
+    if (accountInfo.data.length < USER_STATS_OFFSET + 32) {
+      console.error('[Executor] Referrer account data too short');
+      return null;
+    }
+    
+    const user = new PublicKey(accountInfo.data.slice(USER_OFFSET, USER_OFFSET + 32));
+    const userStats = new PublicKey(accountInfo.data.slice(USER_STATS_OFFSET, USER_STATS_OFFSET + 32));
+    
+    console.error(`[Executor] Platform referrer found: user=${user.toBase58()}`);
+    return { user, userStats };
+  } catch (error) {
+    console.error('[Executor] Error fetching referrer:', error.message);
+    return null;
+  }
+}
 
 // Complete Drift Protocol perp market indices (mainnet-beta)
 // Source: https://drift-labs.github.io/v2-teacher/#market-indexes-names
@@ -691,7 +920,15 @@ async function depositToDrift(command) {
     console.error(`[Executor] Target subaccount ${subAccountId} exists on-chain: ${targetExists}`);
   }
   
-  // Create DriftClient - matches working pattern from b976564 commit
+  // FIX: If accounts don't exist, use RAW TRANSACTION initialization (bypasses DriftClient subscribe bug)
+  // The SDK's subscribe() fails with "addAccount" error when subAccountIds=[] in newer versions
+  if (!mainExists || !targetExists) {
+    console.error('[Executor] Accounts missing - using RAW TRANSACTION initialization to bypass SDK subscribe() bug');
+    await initializeDriftAccountsRaw(connection, keypair, subAccountId);
+    console.error('[Executor] Raw initialization complete, accounts now exist on-chain');
+  }
+  
+  // Now create DriftClient with the actual subAccountIds (accounts now exist)
   const wallet = new Wallet(keypair);
   const subAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
   
@@ -700,17 +937,14 @@ async function depositToDrift(command) {
   // Always use polling for deposits - it's more reliable for one-off operations
   const subscriptionType = 'polling';
   
-  // KEY: Pass empty array [] when accounts don't exist, so subscribe() won't try to load them
-  const initialSubAccountIds = (mainExists && targetExists) ? subAccountIds : [];
-  
-  console.error(`[Executor] Creating DriftClient: subscriptionType=${subscriptionType}, subAccountIds=[${initialSubAccountIds.join(', ')}], mainExists=${mainExists}, targetExists=${targetExists}`);
+  console.error(`[Executor] Creating DriftClient with existing accounts: subscriptionType=${subscriptionType}, subAccountIds=[${subAccountIds.join(', ')}]`);
   
   const driftClient = new DriftClient({
     connection,
     wallet,
     env: 'mainnet-beta',
-    activeSubAccountId: 0, // Will switch later if needed
-    subAccountIds: initialSubAccountIds, // Empty array if accounts don't exist
+    activeSubAccountId: subAccountId, // Set target directly
+    subAccountIds: subAccountIds, // All required accounts now exist
     accountSubscription: { 
       type: subscriptionType,
       frequency: 5000
@@ -727,38 +961,8 @@ async function depositToDrift(command) {
     const BN = (await import('bn.js')).default;
     const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
     
-    // Initialize main subaccount if it doesn't exist
-    if (!mainExists) {
-      console.error('[Executor] Initializing main user account (subaccount 0) with referral...');
-      const platformReferrer = await getPlatformReferrerInfo(connection);
-      const referrerInfo = {
-        referrer: platformReferrer.user,
-        referrerStats: platformReferrer.userStats
-      };
-      console.error(`[Executor] Using referrer: user=${referrerInfo.referrer.toBase58()}`);
-      const initTx = await driftClient.initializeUserAccount(0, 'QuantumVault', referrerInfo);
-      console.error(`[Executor] Main account initialized with referral: ${initTx}`);
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      // Add the newly created subaccount 0 to subscription
-      console.error('[Executor] Adding subaccount 0 to subscription...');
-      await driftClient.addUser(0);
-    }
-    
-    // Initialize target subaccount if needed
-    if (subAccountId > 0 && !targetExists) {
-      console.error(`[Executor] Initializing subaccount ${subAccountId}...`);
-      const initTx = await driftClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
-      console.error(`[Executor] Subaccount ${subAccountId} initialized: ${initTx}`);
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      // Add the newly created subaccount to subscription
-      console.error(`[Executor] Adding subaccount ${subAccountId} to subscription...`);
-      await driftClient.addUser(subAccountId);
-    }
-    
-    // Switch to target subaccount before deposit
-    if (subAccountId > 0) {
+    // Switch to target subaccount before deposit (if needed)
+    if (subAccountId > 0 && driftClient.activeSubAccountId !== subAccountId) {
       console.error(`[Executor] Switching active user to subaccount ${subAccountId}...`);
       await driftClient.switchActiveUser(subAccountId);
       
