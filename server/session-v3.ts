@@ -520,9 +520,21 @@ export async function enableExecution(
   sessionId: string,
   walletAddress: string
 ): Promise<{ success: boolean; error?: string; expiresAt?: Date }> {
+  console.log(`[enableExecution] Looking for session ${sessionId.slice(0, 8)}... for wallet ${walletAddress.slice(0, 8)}...`);
+  console.log(`[enableExecution] Total sessions in memory: ${sessions.size}`);
+  
   const session = getSession(sessionId);
-  if (!session || session.walletAddress !== walletAddress) {
-    return { success: false, error: 'Invalid session' };
+  if (!session) {
+    console.log(`[enableExecution] Session not found for id ${sessionId.slice(0, 8)}...`);
+    // Log all session IDs for debugging
+    const allSessionIds = Array.from(sessions.keys()).map(id => id.slice(0, 8));
+    console.log(`[enableExecution] Available session IDs: ${allSessionIds.join(', ') || 'none'}`);
+    return { success: false, error: 'Session not found - please reconnect your wallet' };
+  }
+  
+  if (session.walletAddress !== walletAddress) {
+    console.log(`[enableExecution] Wallet mismatch: session has ${session.walletAddress.slice(0, 8)}..., request has ${walletAddress.slice(0, 8)}...`);
+    return { success: false, error: 'Session wallet mismatch' };
   }
   
   const wallet = await storage.getWallet(walletAddress);
