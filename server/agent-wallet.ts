@@ -344,3 +344,83 @@ export async function buildWithdrawSolFromAgentTransaction(
     message: `Withdraw ${amountSol} SOL from agent wallet`,
   };
 }
+
+// Execute agent USDC withdrawal (server-side, no user signature needed)
+export async function executeAgentWithdraw(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  userWalletAddress: string,
+  amountUsdc: number,
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    const connection = getConnection();
+    
+    const txData = await buildWithdrawFromAgentTransaction(
+      userWalletAddress,
+      agentPublicKey,
+      encryptedPrivateKey,
+      amountUsdc
+    );
+    
+    const txBuffer = Buffer.from(txData.transaction, 'base64');
+    const signature = await connection.sendRawTransaction(txBuffer, {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+    
+    // Wait for confirmation
+    const confirmation = await connection.confirmTransaction({
+      signature,
+      blockhash: txData.blockhash,
+      lastValidBlockHeight: txData.lastValidBlockHeight,
+    }, 'confirmed');
+    
+    if (confirmation.value.err) {
+      return { success: false, error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}` };
+    }
+    
+    return { success: true, signature };
+  } catch (error: any) {
+    return { success: false, error: error.message || 'Unknown error' };
+  }
+}
+
+// Execute agent SOL withdrawal (server-side, no user signature needed)
+export async function executeAgentSolWithdraw(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  userWalletAddress: string,
+  amountSol: number,
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    const connection = getConnection();
+    
+    const txData = await buildWithdrawSolFromAgentTransaction(
+      agentPublicKey,
+      userWalletAddress,
+      encryptedPrivateKey,
+      amountSol
+    );
+    
+    const txBuffer = Buffer.from(txData.transaction, 'base64');
+    const signature = await connection.sendRawTransaction(txBuffer, {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+    
+    // Wait for confirmation
+    const confirmation = await connection.confirmTransaction({
+      signature,
+      blockhash: txData.blockhash,
+      lastValidBlockHeight: txData.lastValidBlockHeight,
+    }, 'confirmed');
+    
+    if (confirmation.value.err) {
+      return { success: false, error: `Transaction failed: ${JSON.stringify(confirmation.value.err)}` };
+    }
+    
+    return { success: true, signature };
+  } catch (error: any) {
+    return { success: false, error: error.message || 'Unknown error' };
+  }
+}

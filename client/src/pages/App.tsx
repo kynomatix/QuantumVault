@@ -144,6 +144,9 @@ export default function AppPage() {
   const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
   const [resettingDriftAccount, setResettingDriftAccount] = useState(false);
   const [resetStep, setResetStep] = useState<'idle' | 'closing' | 'settling' | 'sweeping' | 'withdrawing' | 'deleting' | 'complete'>('idle');
+  const [resetAgentDialogOpen, setResetAgentDialogOpen] = useState(false);
+  const [resettingAgentWallet, setResettingAgentWallet] = useState(false);
+  const [resetAgentProgress, setResetAgentProgress] = useState<string[]>([]);
   const [notificationDropdownOpen, setNotificationDropdownOpen] = useState(false);
   const [savingNotifications, setSavingNotifications] = useState(false);
   const [referralCode, setReferralCode] = useState<string | null>(null);
@@ -460,6 +463,49 @@ export default function AppPage() {
     } finally {
       setResettingDriftAccount(false);
       setResetStep('idle');
+    }
+  };
+
+  const handleResetAgentWallet = async () => {
+    setResettingAgentWallet(true);
+    setResetAgentProgress(['Starting agent wallet reset...']);
+    
+    try {
+      const res = await fetch('/api/wallet/reset-agent-wallet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+        credentials: 'include',
+      });
+      
+      const data = await res.json();
+      
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to reset agent wallet');
+      }
+      
+      setResetAgentProgress(data.progress || ['Reset complete']);
+      
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      toast({ 
+        title: 'Agent Wallet Reset', 
+        description: `New agent wallet created: ${data.newAgentWallet?.slice(0, 8)}...`
+      });
+      
+      setResetAgentDialogOpen(false);
+      setAgentPublicKey(data.newAgentWallet);
+      refetchBots();
+    } catch (error: any) {
+      toast({ 
+        title: 'Reset Failed', 
+        description: error.message || 'Failed to reset agent wallet',
+        variant: 'destructive' 
+      });
+      setResetAgentDialogOpen(false);
+    } finally {
+      setResettingAgentWallet(false);
+      setResetAgentProgress([]);
     }
   };
 
@@ -2904,6 +2950,20 @@ export default function AppPage() {
                                   Reset Drift Account
                                 </Button>
                               </div>
+                              <div>
+                                <p className="text-sm text-muted-foreground mb-2">
+                                  Withdraw all funds to your wallet and generate a new agent wallet address.
+                                </p>
+                                <Button 
+                                  variant="outline" 
+                                  className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
+                                  onClick={() => setResetAgentDialogOpen(true)}
+                                  data-testid="button-reset-agent"
+                                >
+                                  <RefreshCw className="w-4 h-4 mr-2" />
+                                  Reset Agent Wallet
+                                </Button>
+                              </div>
                             </div>
                           </motion.div>
                         )}
@@ -3148,6 +3208,99 @@ export default function AppPage() {
                     data-testid="button-confirm-reset-drift"
                   >
                     Reset Account
+                  </Button>
+                </div>
+              </>
+            )}
+          </motion.div>
+        </div>
+      )}
+
+      {resetAgentDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="gradient-border p-6 noise max-w-md w-full mx-4"
+            data-testid="modal-reset-agent"
+          >
+            {resettingAgentWallet ? (
+              <div className="space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center">
+                    <Loader2 className="w-6 h-6 text-red-400 animate-spin" />
+                  </div>
+                  <div>
+                    <h3 className="font-display font-semibold text-lg">Resetting Agent Wallet</h3>
+                    <p className="text-sm text-muted-foreground">Please wait...</p>
+                  </div>
+                </div>
+                <div className="space-y-2 text-sm">
+                  {resetAgentProgress.map((step, idx) => (
+                    <p key={idx} className="flex items-center gap-2 text-muted-foreground">
+                      <span className="text-primary">•</span> {step}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-12 h-12 rounded-xl bg-red-500/20 flex items-center justify-center">
+                    <RefreshCw className="w-6 h-6 text-red-400" />
+                  </div>
+                  <div>
+                    <h3 className="font-display font-semibold text-lg">Reset Agent Wallet</h3>
+                    <p className="text-sm text-muted-foreground">This will generate a new wallet</p>
+                  </div>
+                </div>
+
+                <div className="mb-6">
+                  <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-4">
+                    <div className="flex items-start gap-3">
+                      <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-sm font-medium text-red-400">Warning</p>
+                        <p className="text-sm text-muted-foreground mt-1">
+                          This action will withdraw all funds from your agent wallet to your connected wallet 
+                          and create a new agent wallet. All existing Drift subaccounts will no longer be accessible.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="bg-primary/10 border border-primary/30 rounded-lg p-4 mb-4">
+                    <div className="flex items-start gap-3">
+                      <ArrowUpFromLine className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-sm font-medium">Requirements</p>
+                        <ul className="text-sm text-muted-foreground mt-2 list-disc ml-4 space-y-1">
+                          <li>No open positions on Drift</li>
+                          <li>No funds remaining in Drift subaccounts</li>
+                          <li>Use "Reset Drift Account" first if needed</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    USDC and SOL in your agent wallet will be automatically transferred to your connected wallet.
+                  </p>
+                </div>
+
+                <div className="flex gap-3">
+                  <Button 
+                    variant="outline" 
+                    className="flex-1" 
+                    onClick={() => setResetAgentDialogOpen(false)}
+                    data-testid="button-cancel-reset-agent"
+                  >
+                    Cancel
+                  </Button>
+                  <Button 
+                    className="flex-1 bg-red-500 hover:bg-red-600 text-white"
+                    onClick={handleResetAgentWallet}
+                    data-testid="button-confirm-reset-agent"
+                  >
+                    Reset Agent Wallet
                   </Button>
                 </div>
               </>

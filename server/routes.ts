@@ -13,7 +13,7 @@ import { getMarketPrice, getAllPrices } from "./drift-price";
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction } from "./agent-wallet";
+import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
@@ -1597,6 +1597,173 @@ export async function registerRoutes(
     } catch (error: any) {
       console.error("Reset Drift account error:", error);
       res.status(500).json({ error: error.message || "Failed to reset Drift account" });
+    }
+  });
+
+  // Reset Agent Wallet - Withdraw all funds to user wallet and generate a new agent wallet
+  app.post("/api/wallet/reset-agent-wallet", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const { sessionId } = req.body;
+      if (!sessionId) {
+        return res.status(400).json({ error: "Session ID required for security verification" });
+      }
+
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session" });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      const agentPubKey = wallet.agentPublicKey;
+      const agentKey = wallet.agentPrivateKeyEncrypted;
+      const userWallet = req.walletAddress!;
+      const log = (msg: string) => console.log(`[Reset Agent] ${msg}`);
+      const progress: string[] = [];
+
+      log(`Starting agent wallet reset for ${agentPubKey.slice(0, 8)}...`);
+      progress.push("Checking Drift account status...");
+
+      // Step 1: Check if there are any Drift subaccounts with positions or funds
+      const existingSubaccounts = await discoverOnChainSubaccounts(agentPubKey);
+      
+      for (const subId of existingSubaccounts) {
+        const positions = await getPerpPositions(agentPubKey, subId);
+        const openPositions = positions.filter(p => Math.abs(p.baseAssetAmount) > 0.0001);
+        
+        if (openPositions.length > 0) {
+          return res.status(400).json({ 
+            error: "Cannot reset: You have open positions on Drift. Please close all positions first using 'Close All Positions' or 'Reset Drift Account'.",
+            hasOpenPositions: true 
+          });
+        }
+
+        const accountInfo = await getDriftAccountInfo(agentPubKey, subId);
+        if (accountInfo.usdcBalance > 0.01) {
+          return res.status(400).json({ 
+            error: `Cannot reset: You have $${accountInfo.usdcBalance.toFixed(2)} in Drift subaccount ${subId}. Please use 'Reset Drift Account' to withdraw funds first.`,
+            hasDriftFunds: true 
+          });
+        }
+      }
+
+      progress.push("Drift account verified clean");
+      log("Drift account is clean, proceeding with agent wallet reset");
+
+      // Step 2: Check agent wallet balances
+      const usdcBalance = await getAgentUsdcBalance(agentPubKey);
+      const solBalance = await getAgentSolBalance(agentPubKey);
+      
+      log(`Agent wallet balances: ${usdcBalance} USDC, ${solBalance} SOL`);
+      progress.push(`Found ${usdcBalance.toFixed(2)} USDC, ${solBalance.toFixed(4)} SOL in agent wallet`);
+
+      // Step 3: Withdraw USDC to user wallet
+      if (usdcBalance > 0.001) {
+        progress.push(`Withdrawing ${usdcBalance.toFixed(2)} USDC to your wallet...`);
+        log(`Withdrawing ${usdcBalance} USDC to ${userWallet.slice(0, 8)}...`);
+        
+        try {
+          const usdcWithdrawResult = await executeAgentWithdraw(agentPubKey, agentKey, userWallet, usdcBalance);
+          if (!usdcWithdrawResult.success) {
+            return res.status(400).json({ 
+              error: `USDC withdrawal failed: ${usdcWithdrawResult.error}. Your funds are safe, please try again.`,
+              step: 'usdc_withdrawal' 
+            });
+          }
+          log(`USDC withdrawal successful: ${usdcWithdrawResult.signature}`);
+          progress.push(`USDC withdrawn successfully`);
+          
+          // Wait for confirmation
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        } catch (e: any) {
+          return res.status(400).json({ 
+            error: `USDC withdrawal error: ${e.message}. Your funds are safe, please try again.`,
+            step: 'usdc_withdrawal' 
+          });
+        }
+      }
+
+      // Step 4: Withdraw SOL to user wallet (leave minimum for rent-exempt)
+      const solToWithdraw = solBalance - 0.002; // Leave 0.002 SOL for final transaction fees
+      if (solToWithdraw > 0.001) {
+        progress.push(`Withdrawing ${solToWithdraw.toFixed(4)} SOL to your wallet...`);
+        log(`Withdrawing ${solToWithdraw} SOL to ${userWallet.slice(0, 8)}...`);
+        
+        try {
+          const solWithdrawResult = await executeAgentSolWithdraw(agentPubKey, agentKey, userWallet, solToWithdraw);
+          if (!solWithdrawResult.success) {
+            log(`SOL withdrawal failed (non-critical): ${solWithdrawResult.error}`);
+            progress.push(`SOL withdrawal failed (non-critical): Small amount may remain`);
+          } else {
+            log(`SOL withdrawal successful: ${solWithdrawResult.signature}`);
+            progress.push(`SOL withdrawn successfully`);
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        } catch (e: any) {
+          log(`SOL withdrawal error (non-critical): ${e.message}`);
+          progress.push(`SOL withdrawal error (non-critical): Small amount may remain`);
+        }
+      }
+
+      // Step 5: Generate new agent wallet with mnemonic
+      progress.push("Generating new agent wallet...");
+      log("Generating new agent wallet with mnemonic");
+
+      const generatedWallet = generateAgentWalletWithMnemonic();
+      const newAgentPublicKey = generatedWallet.keypair.publicKey.toString();
+      
+      // Encrypt private key with legacy method for backward compatibility
+      const privateKeyBase58 = bs58.encode(generatedWallet.secretKeyBuffer);
+      const encryptedPrivateKey = legacyEncrypt(privateKeyBase58);
+      
+      // Encrypt with v3 encryption (UMK-based)
+      const encryptedV3 = encryptAgentKeyV3(session.umk, generatedWallet.secretKeyBuffer, userWallet);
+      
+      // Store mnemonic encrypted with UMK
+      await encryptAndStoreMnemonic(userWallet, generatedWallet.mnemonicBuffer, session.umk);
+      
+      // Update database with new agent wallet
+      await storage.updateWalletAgentKeys(userWallet, newAgentPublicKey, encryptedPrivateKey);
+      await storage.updateWalletAgentKeyV3(userWallet, encryptedV3);
+      
+      log(`New agent wallet generated: ${newAgentPublicKey.slice(0, 8)}...`);
+      progress.push(`New agent wallet created: ${newAgentPublicKey.slice(0, 8)}...`);
+
+      // Step 6: Clear all bot subaccount assignments (they're linked to old wallet)
+      const bots = await storage.getTradingBots(userWallet);
+      for (const bot of bots) {
+        if (bot.driftSubaccountId !== null) {
+          await storage.clearTradingBotSubaccount(bot.id);
+          log(`Cleared driftSubaccountId for bot ${bot.id}`);
+        }
+      }
+
+      progress.push("Agent wallet reset complete!");
+      log(`Successfully reset agent wallet. Old: ${agentPubKey.slice(0, 8)}..., New: ${newAgentPublicKey.slice(0, 8)}...`);
+
+      res.json({
+        success: true,
+        message: "Agent wallet has been reset. A new wallet has been generated.",
+        oldAgentWallet: agentPubKey,
+        newAgentWallet: newAgentPublicKey,
+        progress,
+        withdrawnUsdc: usdcBalance,
+        withdrawnSol: solToWithdraw > 0.001 ? solToWithdraw : 0
+      });
+
+    } catch (error: any) {
+      console.error("Reset agent wallet error:", error);
+      res.status(500).json({ error: error.message || "Failed to reset agent wallet" });
     }
   });
 
