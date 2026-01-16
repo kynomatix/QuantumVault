@@ -42,9 +42,14 @@ import {
   Check,
   Share2,
   ChevronUp,
-  Fuel
+  Fuel,
+  Key,
+  Eye,
+  EyeOff,
+  Clock
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import {
   Tooltip,
@@ -143,6 +148,14 @@ export default function AppPage() {
   const [referredBy, setReferredBy] = useState<string | null>(null);
   const [defaultLeverage, setDefaultLeverage] = useState(3);
   const [slippageBps, setSlippageBps] = useState(50);
+  
+  // Seed phrase backup state
+  const [revealMnemonicLoading, setRevealMnemonicLoading] = useState(false);
+  const [mnemonic, setMnemonic] = useState<string | null>(null);
+  const [mnemonicExpiresAt, setMnemonicExpiresAt] = useState<Date | null>(null);
+  const [mnemonicCountdown, setMnemonicCountdown] = useState<number>(0);
+  const [backupConfirmChecked, setBackupConfirmChecked] = useState(false);
+  const [mnemonicCopied, setMnemonicCopied] = useState(false);
   
   // Marketplace state
   const [marketplaceSearch, setMarketplaceSearch] = useState('');
@@ -508,6 +521,144 @@ export default function AppPage() {
     
     fetchBalances();
   }, [connected, botsData]);
+
+  // Mnemonic countdown timer effect
+  useEffect(() => {
+    if (!mnemonic || !mnemonicExpiresAt) return;
+    
+    const updateCountdown = () => {
+      const remaining = Math.max(0, Math.ceil((mnemonicExpiresAt.getTime() - Date.now()) / 1000));
+      setMnemonicCountdown(remaining);
+      
+      if (remaining <= 0) {
+        setMnemonic(null);
+        setMnemonicExpiresAt(null);
+        setBackupConfirmChecked(false);
+        setMnemonicCopied(false);
+      }
+    };
+    
+    updateCountdown();
+    const timer = setInterval(updateCountdown, 1000);
+    return () => clearInterval(timer);
+  }, [mnemonic, mnemonicExpiresAt]);
+
+  const handleRevealMnemonic = async () => {
+    if (!solanaWallet.publicKey || !solanaWallet.signMessage) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+    
+    setRevealMnemonicLoading(true);
+    try {
+      // Step 1: Check session status
+      const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
+      if (!sessionRes.ok) throw new Error('Session check failed');
+      let sessionData = await sessionRes.json();
+      
+      // Step 2: Unlock session if missing
+      if (sessionData.sessionMissing) {
+        const nonceRes = await fetch('/api/auth/nonce', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ walletAddress: solanaWallet.publicKey.toBase58(), purpose: 'unlock_umk' }),
+        });
+        if (!nonceRes.ok) throw new Error('Failed to get signing nonce');
+        const { nonce: unlockNonce, message: unlockMessage } = await nonceRes.json();
+        
+        toast({ title: 'Session expired', description: 'Please sign to reconnect.' });
+        
+        const unlockMsgBytes = new TextEncoder().encode(unlockMessage);
+        const unlockSigBytes = await solanaWallet.signMessage(unlockMsgBytes);
+        const unlockSigBase58 = bs58.encode(unlockSigBytes);
+        
+        const verifyRes = await fetch('/api/auth/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            walletAddress: solanaWallet.publicKey.toBase58(),
+            nonce: unlockNonce,
+            signature: unlockSigBase58,
+            purpose: 'unlock_umk',
+          }),
+        });
+        if (!verifyRes.ok) throw new Error('Failed to reconnect session');
+        
+        // Re-fetch session
+        const refreshRes = await fetch('/api/auth/session', { credentials: 'include' });
+        if (!refreshRes.ok) throw new Error('Failed to refresh session');
+        sessionData = await refreshRes.json();
+      }
+      
+      if (!sessionData.hasSession || !sessionData.sessionId) {
+        throw new Error('No active session. Please reconnect your wallet.');
+      }
+      
+      // Step 3: Get nonce for reveal_mnemonic
+      const nonceRes = await fetch('/api/auth/nonce', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ walletAddress: solanaWallet.publicKey.toBase58(), purpose: 'reveal_mnemonic' }),
+      });
+      if (!nonceRes.ok) throw new Error('Failed to get signing nonce');
+      const { nonce, message } = await nonceRes.json();
+      
+      // Step 4: Sign the message
+      const msgBytes = new TextEncoder().encode(message);
+      const sigBytes = await solanaWallet.signMessage(msgBytes);
+      const sigBase58 = bs58.encode(sigBytes);
+      
+      // Step 5: Call reveal-mnemonic endpoint
+      const revealRes = await fetch('/api/auth/reveal-mnemonic', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          sessionId: sessionData.sessionId,
+          nonce,
+          signature: sigBase58,
+        }),
+      });
+      
+      if (!revealRes.ok) {
+        const errData = await revealRes.json();
+        if (errData.retryAfterMs) {
+          const retryMinutes = Math.ceil(errData.retryAfterMs / 60000);
+          throw new Error(`Rate limited. Please wait ${retryMinutes} minute(s) before trying again.`);
+        }
+        throw new Error(errData.error || 'Failed to reveal recovery phrase');
+      }
+      
+      const { mnemonic: revealedMnemonic, expiresAt } = await revealRes.json();
+      setMnemonic(revealedMnemonic);
+      setMnemonicExpiresAt(new Date(expiresAt));
+      toast({ title: 'Recovery phrase revealed', description: 'Write it down and store securely. It will auto-hide in 60 seconds.' });
+    } catch (err: unknown) {
+      const error = err as Error;
+      if (error.message?.includes('User rejected')) {
+        toast({ title: 'Signature cancelled', variant: 'destructive' });
+      } else {
+        toast({ title: 'Failed to reveal recovery phrase', description: error.message, variant: 'destructive' });
+      }
+    } finally {
+      setRevealMnemonicLoading(false);
+    }
+  };
+
+  const handleCopyMnemonic = async () => {
+    if (!mnemonic) return;
+    try {
+      await navigator.clipboard.writeText(mnemonic);
+      setMnemonicCopied(true);
+      toast({ title: 'Recovery phrase copied to clipboard' });
+      setTimeout(() => setMnemonicCopied(false), 3000);
+    } catch (err) {
+      toast({ title: 'Failed to copy', variant: 'destructive' });
+    }
+  };
 
   const handleWithdrawAll = async (botId: string, subaccountId: number) => {
     const botBalance = botBalances[botId];
@@ -2263,6 +2414,112 @@ export default function AppPage() {
                                 </Button>
                               )}
                             </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-border/50 pt-6">
+                      <h3 className="font-display font-semibold mb-4">Agent Wallet Backup</h3>
+                      <div className="bg-muted/30 rounded-lg border border-border/50 p-4">
+                        <div className="flex items-start gap-3">
+                          <div className="p-2 rounded-full bg-amber-500/20">
+                            <Key className="w-5 h-5 text-amber-500" />
+                          </div>
+                          <div className="flex-1">
+                            <p className="font-medium">Recovery Phrase</p>
+                            <p className="text-sm text-muted-foreground mt-1">
+                              Your agent wallet's recovery phrase allows you to restore access if needed. Keep it safe and never share it with anyone.
+                            </p>
+                            
+                            {mnemonic ? (
+                              <div className="mt-4 space-y-3">
+                                <div className="flex items-center gap-2 text-amber-500">
+                                  <Clock className="w-4 h-4" />
+                                  <span className="text-sm font-medium">Auto-hides in {mnemonicCountdown}s</span>
+                                </div>
+                                <div className="bg-background/50 rounded-lg border border-amber-500/30 p-4">
+                                  <p className="font-mono text-sm leading-relaxed break-all select-all" data-testid="text-mnemonic">
+                                    {mnemonic}
+                                  </p>
+                                </div>
+                                <div className="flex gap-2">
+                                  <Button
+                                    variant="outline"
+                                    onClick={handleCopyMnemonic}
+                                    className="flex-1"
+                                    data-testid="button-copy-mnemonic"
+                                  >
+                                    {mnemonicCopied ? (
+                                      <><Check className="w-4 h-4 mr-2 text-green-500" /> Copied</>
+                                    ) : (
+                                      <><Copy className="w-4 h-4 mr-2" /> Copy to Clipboard</>
+                                    )}
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    onClick={() => {
+                                      setMnemonic(null);
+                                      setMnemonicExpiresAt(null);
+                                      setBackupConfirmChecked(false);
+                                    }}
+                                    data-testid="button-hide-mnemonic"
+                                  >
+                                    <EyeOff className="w-4 h-4 mr-2" /> Hide
+                                  </Button>
+                                </div>
+                                <div className="bg-red-500/10 rounded-lg border border-red-500/30 p-3">
+                                  <div className="flex items-start gap-2">
+                                    <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />
+                                    <div className="text-xs text-red-400">
+                                      <p className="font-medium mb-1">Keep this phrase secure!</p>
+                                      <ul className="list-disc ml-4 space-y-0.5">
+                                        <li>Never share it with anyone</li>
+                                        <li>Store it offline in a safe place</li>
+                                        <li>Anyone with this phrase can control your funds</li>
+                                        <li>QuantumVault will never ask for your recovery phrase</li>
+                                      </ul>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="mt-4 space-y-4">
+                                <div className="bg-amber-500/10 rounded-lg border border-amber-500/30 p-3">
+                                  <div className="flex items-start gap-2">
+                                    <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                                    <p className="text-xs text-amber-400">
+                                      Only reveal your recovery phrase in a private location. Make sure no one is watching your screen.
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="flex items-start gap-2">
+                                  <Checkbox
+                                    id="backup-confirm"
+                                    checked={backupConfirmChecked}
+                                    onCheckedChange={(checked) => setBackupConfirmChecked(checked === true)}
+                                    data-testid="checkbox-confirm-backup"
+                                  />
+                                  <label htmlFor="backup-confirm" className="text-sm text-muted-foreground cursor-pointer">
+                                    I understand this phrase controls my agent wallet funds and I'm in a private location
+                                  </label>
+                                </div>
+                                <Button
+                                  onClick={handleRevealMnemonic}
+                                  disabled={!backupConfirmChecked || revealMnemonicLoading}
+                                  data-testid="button-reveal-mnemonic"
+                                >
+                                  {revealMnemonicLoading ? (
+                                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Revealing...</>
+                                  ) : (
+                                    <><Eye className="w-4 h-4 mr-2" /> Reveal Recovery Phrase</>
+                                  )}
+                                </Button>
+                                <p className="text-xs text-muted-foreground">
+                                  Limited to 3 reveals per hour. Phrase auto-hides after 60 seconds.
+                                </p>
+                              </div>
+                            )}
                           </div>
                         </div>
                       </div>
