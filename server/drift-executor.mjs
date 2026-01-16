@@ -340,6 +340,63 @@ async function fetchPlatformReferrerRaw(connection) {
   }
 }
 
+// Fetch the user's actual referrer from their on-chain UserStats account
+// This is needed because if a user has a referrer set in their UserStats,
+// the Drift protocol expects the referrer accounts to be passed in transactions
+async function fetchUserReferrerFromStats(connection, userPubkey) {
+  try {
+    const userStatsPDA = getUserStatsPDA(userPubkey);
+    console.error(`[Executor] Fetching user's referrer from UserStats: ${userStatsPDA.toBase58()}`);
+    
+    const accountInfo = await connection.getAccountInfo(userStatsPDA);
+    if (!accountInfo) {
+      console.error('[Executor] UserStats account not found');
+      return null;
+    }
+    
+    // UserStats account layout:
+    // - 8 bytes: discriminator
+    // - 32 bytes: authority
+    // - 32 bytes: referrer (the referrer's wallet address, or system program if none)
+    const AUTHORITY_OFFSET = 8;
+    const REFERRER_OFFSET = 8 + 32;
+    
+    if (accountInfo.data.length < REFERRER_OFFSET + 32) {
+      console.error('[Executor] UserStats data too short');
+      return null;
+    }
+    
+    const referrerWallet = new PublicKey(accountInfo.data.slice(REFERRER_OFFSET, REFERRER_OFFSET + 32));
+    
+    // Check if referrer is system program (meaning no referrer set)
+    if (referrerWallet.equals(PublicKey.default)) {
+      console.error('[Executor] No referrer set in UserStats');
+      return null;
+    }
+    
+    // Derive the referrer's Drift accounts from their wallet
+    const referrerUser = getUserAccountPDA(referrerWallet, 0);
+    const referrerUserStats = getUserStatsPDA(referrerWallet);
+    
+    console.error(`[Executor] User has referrer: wallet=${referrerWallet.toBase58().slice(0, 8)}...`);
+    console.error(`[Executor] Referrer User PDA: ${referrerUser.toBase58()}`);
+    console.error(`[Executor] Referrer UserStats PDA: ${referrerUserStats.toBase58()}`);
+    
+    // Verify the referrer accounts exist on-chain
+    const [refUserInfo, refStatsInfo] = await connection.getMultipleAccountsInfo([referrerUser, referrerUserStats]);
+    
+    if (!refUserInfo || !refStatsInfo) {
+      console.error('[Executor] Referrer accounts not found on-chain, skipping referrer');
+      return null;
+    }
+    
+    return { user: referrerUser, userStats: referrerUserStats };
+  } catch (error) {
+    console.error('[Executor] Error fetching user referrer:', error.message);
+    return null;
+  }
+}
+
 // Complete Drift Protocol perp market indices (mainnet-beta)
 // Source: https://drift-labs.github.io/v2-teacher/#market-indexes-names
 const PERP_MARKET_INDICES = {
@@ -807,6 +864,22 @@ async function executeTrade(command) {
     
     console.error(`[Executor] Placing order: direction=${side}, baseAssetAmount=${baseAssetAmount.toString()}, marketIndex=${marketIndex}`);
     
+    // Fetch user's on-chain referrer to pass to SDK (fixes ReferrerNotFound error)
+    let referrerInfo = null;
+    try {
+      const rpcUrl = process.env.SOLANA_RPC_URL || 
+        (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
+        'https://api.mainnet-beta.solana.com');
+      const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
+      const userPubkey = driftClient.wallet.publicKey;
+      referrerInfo = await fetchUserReferrerFromStats(connection, userPubkey);
+      if (referrerInfo) {
+        console.error(`[Executor] Will include referrer accounts in order`);
+      }
+    } catch (refErr) {
+      console.error(`[Executor] Could not fetch referrer info: ${refErr.message}`);
+    }
+    
     let txSig;
     try {
       txSig = await driftClient.placeAndTakePerpOrder({
@@ -816,6 +889,7 @@ async function executeTrade(command) {
         marketType: MarketType.PERP,
         orderType: OrderType.MARKET,
         reduceOnly: reduceOnly ?? false,
+        referrerInfo: referrerInfo || undefined,
       });
     } catch (orderError) {
       console.error(`[Executor] Order failed:`, orderError.message);

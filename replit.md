@@ -24,6 +24,7 @@ Preferred communication style: Simple, everyday language.
 -   **Lazy ESM Import**: DriftClient is loaded lazily via dynamic `import()` to avoid CJS/ESM interop issues. Other SDK components (types, config, Wallet) are loaded synchronously via `createRequire`.
 -   **Trade Execution**: Uses `drift-executor.mjs` subprocess for trade execution (pure ESM environment where SDK loads correctly).
 -   **SDK Version**: `@drift-labs/sdk@2.146.0-beta.7` is the current stable version compatible with the platform.
+-   **Referrer Account Handling**: When placing orders, the executor fetches the user's referrer from their on-chain UserStats account and passes it to the SDK. This ensures Drift protocol receives the expected referrer accounts, fixing "ReferrerNotFound" errors on non-zero subaccounts.
 
 ### Key Features
 -   **Automated Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol, including logic for converting TradingView `contracts` to a percentage of `bot.maxPositionSize`.
