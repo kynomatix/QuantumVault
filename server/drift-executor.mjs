@@ -958,13 +958,44 @@ async function closePosition(command) {
     const positionSize = perpPosition.baseAssetAmount.abs().toNumber() / 1e9;
     console.error(`[Executor] Found position: ${positionSize} ${isLong ? 'long' : 'short'}`);
     
-    // Use the SDK's closePosition method - this handles reduce-only correctly
-    // and prevents overshooting that can create dust positions in opposite direction
-    console.error(`[Executor] Using driftClient.closePosition(${marketIndex}) for clean close`);
+    // Use placeAndTakePerpOrder with reduceOnly to close position
+    // We use this instead of driftClient.closePosition() so we can pass referrerInfo
+    const closeDirection = isLong ? PositionDirection.SHORT : PositionDirection.LONG;
+    const closeAmount = perpPosition.baseAssetAmount.abs();
     
-    const txSig = await driftClient.closePosition(marketIndex);
+    console.error(`[Executor] Closing ${isLong ? 'long' : 'short'} position with placeAndTakePerpOrder (reduceOnly=true)`);
     
-    console.error(`[Executor] Position closed via SDK closePosition: ${txSig}`);
+    // Fetch referrer info (same as trade execution)
+    let referrerInfo = null;
+    try {
+      const rpcUrl = process.env.SOLANA_RPC_URL || 
+        (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
+        'https://api.mainnet-beta.solana.com');
+      const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
+      const userPubkey = driftClient.wallet.publicKey;
+      referrerInfo = await fetchUserReferrerFromStats(connection, userPubkey);
+      if (referrerInfo) {
+        console.error(`[Executor] Will include referrer accounts in close order`);
+      }
+    } catch (refErr) {
+      console.error(`[Executor] Could not fetch referrer info for close: ${refErr.message}`);
+    }
+    
+    // placeAndTakePerpOrder signature: (orderParams, makerInfo, referrerInfo, ...)
+    const txSig = await driftClient.placeAndTakePerpOrder(
+      {
+        direction: closeDirection,
+        baseAssetAmount: closeAmount,
+        marketIndex,
+        marketType: MarketType.PERP,
+        orderType: OrderType.MARKET,
+        reduceOnly: true,
+      },
+      undefined, // makerInfo
+      referrerInfo || undefined // referrerInfo
+    );
+    
+    console.error(`[Executor] Position closed: ${txSig}`);
     
     return { success: true, signature: txSig };
   } catch (error) {
