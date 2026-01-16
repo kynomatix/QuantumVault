@@ -15,7 +15,7 @@ import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback } from "./session-v3";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
@@ -425,7 +425,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Wallet address and purpose required" });
       }
 
-      const validPurposes = ['unlock_umk', 'authorize_trade', 'enable_execution', 'reveal_mnemonic'];
+      const validPurposes = ['unlock_umk', 'authorize_trade', 'enable_execution', 'revoke_execution', 'reveal_mnemonic'];
       if (!validPurposes.includes(purpose)) {
         return res.status(400).json({ error: "Invalid purpose" });
       }
@@ -480,10 +480,11 @@ export async function registerRoutes(
 
   app.get("/api/auth/session", requireWallet, async (req, res) => {
     try {
-      const session = getSession(req.walletAddress!);
+      const result = getSessionByWalletAddress(req.walletAddress!);
       res.json({
-        hasSession: !!session,
-        walletAddress: session?.walletAddress || null,
+        hasSession: !!result,
+        sessionId: result?.sessionId || null,
+        walletAddress: result?.session.walletAddress || null,
       });
     } catch (error) {
       console.error("Session check error:", error);

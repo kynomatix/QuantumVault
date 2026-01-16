@@ -177,6 +177,20 @@ export function invalidateAllSessionsForWallet(walletAddress: string): void {
   }
 }
 
+export function getSessionByWalletAddress(walletAddress: string): { sessionId: string; session: SessionData } | null {
+  const entries = Array.from(sessions.entries());
+  for (const [sessionId, session] of entries) {
+    if (session.walletAddress === walletAddress) {
+      if (Date.now() > session.expiresAt) {
+        invalidateSession(sessionId);
+        continue;
+      }
+      return { sessionId, session };
+    }
+  }
+  return null;
+}
+
 export function deriveSubkeyFromSession(
   sessionId: string,
   purpose: typeof SUBKEY_PURPOSES[keyof typeof SUBKEY_PURPOSES]

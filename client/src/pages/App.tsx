@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
+import bs58 from 'bs58';
 import { useWallet } from '@/hooks/useWallet';
 import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, type HealthMetrics, type PublishedBot } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
@@ -130,6 +131,9 @@ export default function AppPage() {
   const [telegramConnected, setTelegramConnected] = useState(false);
   const [telegramVerifyCode, setTelegramVerifyCode] = useState<string | null>(null);
   const [dangerZoneExpanded, setDangerZoneExpanded] = useState(false);
+  const [executionEnabled, setExecutionEnabled] = useState(false);
+  const [executionExpiresAt, setExecutionExpiresAt] = useState<Date | null>(null);
+  const [executionLoading, setExecutionLoading] = useState(false);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
   const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
@@ -250,6 +254,13 @@ export default function AppPage() {
           setDefaultLeverage(data.defaultLeverage ?? 3);
           setSlippageBps(data.slippageBps ?? 50);
         }
+        
+        const execRes = await fetch('/api/auth/execution-status', { credentials: 'include' });
+        if (execRes.ok) {
+          const execData = await execRes.json();
+          setExecutionEnabled(execData.executionEnabled ?? false);
+          setExecutionExpiresAt(execData.executionExpiresAt ? new Date(execData.executionExpiresAt) : null);
+        }
       } catch (error) {
         console.error('Error loading settings:', error);
       } finally {
@@ -289,6 +300,133 @@ export default function AppPage() {
       });
     } finally {
       setSettingsSaving(false);
+    }
+  };
+
+  const handleEnableExecution = async () => {
+    if (!solanaWallet.publicKey || !solanaWallet.signMessage) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+    
+    setExecutionLoading(true);
+    try {
+      const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
+      if (!sessionRes.ok) {
+        throw new Error('Session check failed');
+      }
+      const sessionData = await sessionRes.json();
+      if (!sessionData.hasSession || !sessionData.sessionId) {
+        throw new Error('No active session. Please reconnect your wallet.');
+      }
+      
+      const nonceRes = await fetch('/api/auth/nonce', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ walletAddress: solanaWallet.publicKey.toBase58(), purpose: 'enable_execution' }),
+      });
+      if (!nonceRes.ok) {
+        throw new Error('Failed to get signing nonce');
+      }
+      const { nonce, message } = await nonceRes.json();
+      
+      const messageBytes = new TextEncoder().encode(message);
+      const signatureBytes = await solanaWallet.signMessage(messageBytes);
+      const signatureBase58 = bs58.encode(signatureBytes);
+      
+      const enableRes = await fetch('/api/auth/enable-execution', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          sessionId: sessionData.sessionId,
+          nonce,
+          signature: signatureBase58,
+        }),
+      });
+      
+      if (!enableRes.ok) {
+        const err = await enableRes.json();
+        throw new Error(err.error || 'Failed to enable execution');
+      }
+      
+      const result = await enableRes.json();
+      setExecutionEnabled(true);
+      setExecutionExpiresAt(result.expiresAt ? new Date(result.expiresAt) : null);
+      toast({ title: 'Execution enabled', description: 'Your bots can now execute trades via webhooks' });
+    } catch (error: any) {
+      console.error('Enable execution error:', error);
+      toast({ 
+        title: 'Failed to enable execution', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setExecutionLoading(false);
+    }
+  };
+
+  const handleRevokeExecution = async () => {
+    if (!solanaWallet.publicKey || !solanaWallet.signMessage) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+    
+    setExecutionLoading(true);
+    try {
+      const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
+      if (!sessionRes.ok) {
+        throw new Error('Session check failed');
+      }
+      const sessionData = await sessionRes.json();
+      if (!sessionData.hasSession || !sessionData.sessionId) {
+        throw new Error('No active session. Please reconnect your wallet.');
+      }
+      
+      const nonceRes = await fetch('/api/auth/nonce', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ walletAddress: solanaWallet.publicKey.toBase58(), purpose: 'revoke_execution' }),
+      });
+      if (!nonceRes.ok) {
+        throw new Error('Failed to get signing nonce');
+      }
+      const { nonce, message } = await nonceRes.json();
+      
+      const messageBytes = new TextEncoder().encode(message);
+      const signatureBytes = await solanaWallet.signMessage(messageBytes);
+      const signatureBase58 = bs58.encode(signatureBytes);
+      
+      const revokeRes = await fetch('/api/auth/revoke-execution', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          sessionId: sessionData.sessionId,
+          nonce,
+          signature: signatureBase58,
+        }),
+      });
+      
+      if (!revokeRes.ok) {
+        const err = await revokeRes.json();
+        throw new Error(err.error || 'Failed to revoke execution');
+      }
+      
+      setExecutionEnabled(false);
+      setExecutionExpiresAt(null);
+      toast({ title: 'Execution revoked', description: 'Webhook trading is now disabled' });
+    } catch (error: any) {
+      console.error('Revoke execution error:', error);
+      toast({ 
+        title: 'Failed to revoke execution', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setExecutionLoading(false);
     }
   };
 
@@ -2209,6 +2347,60 @@ export default function AppPage() {
                         </p>
                       </div>
                     )}
+
+                    <div className="border-t border-border/50 pt-6">
+                      <h3 className="font-display font-semibold mb-4">Automated Trading</h3>
+                      <div className="bg-muted/30 rounded-lg border border-border/50 p-4">
+                        <div className="flex items-start gap-3">
+                          <div className={`p-2 rounded-full ${executionEnabled ? 'bg-green-500/20' : 'bg-amber-500/20'}`}>
+                            <Zap className={`w-5 h-5 ${executionEnabled ? 'text-green-500' : 'text-amber-500'}`} />
+                          </div>
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2">
+                              <p className="font-medium">Webhook Execution</p>
+                              {executionEnabled ? (
+                                <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full">Enabled</span>
+                              ) : (
+                                <span className="text-xs px-2 py-0.5 bg-amber-500/20 text-amber-500 rounded-full">Disabled</span>
+                              )}
+                            </div>
+                            <p className="text-sm text-muted-foreground mt-1">
+                              {executionEnabled 
+                                ? `Your bots can execute trades via TradingView webhooks. ${executionExpiresAt ? `Authorization expires ${executionExpiresAt.toLocaleDateString()} at ${executionExpiresAt.toLocaleTimeString()}.` : ''}`
+                                : 'Enable automated trading to allow your bots to execute trades when webhook signals arrive from TradingView.'}
+                            </p>
+                            <div className="mt-3">
+                              {executionEnabled ? (
+                                <Button
+                                  variant="outline"
+                                  onClick={handleRevokeExecution}
+                                  disabled={executionLoading}
+                                  data-testid="button-revoke-execution"
+                                >
+                                  {executionLoading ? (
+                                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Processing...</>
+                                  ) : (
+                                    'Revoke Authorization'
+                                  )}
+                                </Button>
+                              ) : (
+                                <Button
+                                  onClick={handleEnableExecution}
+                                  disabled={executionLoading}
+                                  data-testid="button-enable-execution"
+                                >
+                                  {executionLoading ? (
+                                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Processing...</>
+                                  ) : (
+                                    <><Shield className="w-4 h-4 mr-2" /> Enable Automated Trading</>
+                                  )}
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
 
                     {referralCode && (
                       <div className="border-t border-border/50 pt-6">
