@@ -21,10 +21,15 @@ app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", timestamp: Date.now() });
 });
 
-// Early request logging for debugging (before body parsing)
+// UNIVERSAL early request logging - captures ALL requests before any processing
 app.use((req, res, next) => {
+  // Log ALL POST requests to /api/ routes
+  if (req.method === 'POST' && req.path.startsWith('/api/')) {
+    console.log(`[UNIVERSAL-LOG] ${req.method} ${req.path} - Origin: ${req.headers.origin} - Content-Type: ${req.headers['content-type']}`);
+  }
+  // Extra verbose for execution endpoints
   if (req.path.includes('enable-execution') || req.path.includes('revoke-execution')) {
-    console.log(`[early-log] ${req.method} ${req.path} - Content-Type: ${req.headers['content-type']}`);
+    console.log(`[early-log] ${req.method} ${req.path} - Content-Type: ${req.headers['content-type']} - Cookie: ${req.headers.cookie?.slice(0, 50)}...`);
   }
   next();
 });
