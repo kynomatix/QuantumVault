@@ -390,7 +390,8 @@ async function fetchUserReferrerFromStats(connection, userPubkey) {
       return null;
     }
     
-    return { user: referrerUser, userStats: referrerUserStats };
+    // SDK expects { referrer, referrerStats } field names
+    return { referrer: referrerUser, referrerStats: referrerUserStats };
   } catch (error) {
     console.error('[Executor] Error fetching user referrer:', error.message);
     return null;
@@ -882,15 +883,19 @@ async function executeTrade(command) {
     
     let txSig;
     try {
-      txSig = await driftClient.placeAndTakePerpOrder({
-        direction,
-        baseAssetAmount,
-        marketIndex,
-        marketType: MarketType.PERP,
-        orderType: OrderType.MARKET,
-        reduceOnly: reduceOnly ?? false,
-        referrerInfo: referrerInfo || undefined,
-      });
+      // placeAndTakePerpOrder signature: (orderParams, makerInfo, referrerInfo, successCondition, auctionDurationPercentage, txParams, subAccountId)
+      txSig = await driftClient.placeAndTakePerpOrder(
+        {
+          direction,
+          baseAssetAmount,
+          marketIndex,
+          marketType: MarketType.PERP,
+          orderType: OrderType.MARKET,
+          reduceOnly: reduceOnly ?? false,
+        },
+        undefined, // makerInfo
+        referrerInfo || undefined // referrerInfo - passed as separate param, not inside orderParams
+      );
     } catch (orderError) {
       console.error(`[Executor] Order failed:`, orderError.message);
       console.error(`[Executor] Order error stack:`, orderError.stack);
