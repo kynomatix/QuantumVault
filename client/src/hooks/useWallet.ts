@@ -12,6 +12,10 @@ const getReferralCodeFromUrl = (): string | null => {
   return params.get('ref');
 };
 
+// Per-wallet auth promise map for single-flight pattern
+// This ensures only one auth attempt per wallet address at a time
+const authPromiseMap = new Map<string, Promise<boolean>>();
+
 export function useWallet() {
   const wallet = useSolanaWallet();
   const { connection } = useConnection();
@@ -24,6 +28,10 @@ export function useWallet() {
   const authAttempted = useRef<Set<string>>(new Set());
   const authSucceeded = useRef<Set<string>>(new Set());
   const authInProgress = useRef<Set<string>>(new Set());
+  
+  // Stable ref for signMessage to avoid useCallback recreation
+  const signMessageRef = useRef(wallet.signMessage);
+  signMessageRef.current = wallet.signMessage;
 
   const publicKeyString = wallet.publicKey?.toBase58() || null;
 
@@ -32,8 +40,10 @@ export function useWallet() {
     : null;
 
   // Secure wallet connection with signature verification
+  // Using empty dependency array with ref to prevent useCallback recreation
   const authenticateWallet = useCallback(async (walletAddress: string): Promise<boolean> => {
-    if (!wallet.signMessage) {
+    const signMessage = signMessageRef.current;
+    if (!signMessage) {
       console.error('Wallet does not support message signing');
       return false;
     }
@@ -55,9 +65,9 @@ export function useWallet() {
       
       const { nonce, message } = await nonceRes.json();
       
-      // Step 2: Sign message with wallet
+      // Step 2: Sign message with wallet (use ref to avoid stale closure)
       const messageBytes = new TextEncoder().encode(message);
-      const signatureBytes = await wallet.signMessage(messageBytes);
+      const signatureBytes = await signMessage(messageBytes);
       const signatureBase58 = bs58.encode(signatureBytes);
       
       // Step 3: Verify signature and complete authentication
@@ -102,7 +112,7 @@ export function useWallet() {
     } finally {
       setSigningInProgress(false);
     }
-  }, [wallet.signMessage]);
+  }, []); // Empty deps - uses ref for signMessage
 
   // Register wallet with backend session when connected
   useEffect(() => {
@@ -115,63 +125,85 @@ export function useWallet() {
           return;
         }
         
-        // Prevent duplicate authentication attempts (already in progress or attempted)
+        // Prevent duplicate authentication attempts using multiple guards
+        // 1. Check refs (per-wallet tracking)
         if (authAttempted.current.has(publicKeyString) || authInProgress.current.has(publicKeyString)) {
           return;
         }
         
-        authInProgress.current.add(publicKeyString);
-        authAttempted.current.add(publicKeyString);
-        
-        try {
-          // First, check if server already has a valid session for this wallet
-          // This avoids prompting for signature if already authenticated
-          const statusRes = await fetch('/api/auth/status', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ walletAddress: publicKeyString }),
-          });
-          
-          if (statusRes.ok) {
-            const statusData = await statusRes.json();
-            if (statusData.authenticated) {
-              // Session already exists - skip signature, just connect
-              const referredByCode = getReferralCodeFromUrl();
-              const connectRes = await fetch('/api/wallet/connect', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
-                body: JSON.stringify({ 
-                  walletAddress: publicKeyString,
-                  referredByCode: referredByCode || undefined,
-                }),
-              });
-              
-              if (connectRes.ok) {
-                const data = await connectRes.json();
-                setReferralCode(data.referralCode || null);
-              }
-              
-              authSucceeded.current.add(publicKeyString);
-              lastConnectedWallet.current = publicKeyString;
-              setSessionConnected(true);
-              return;
-            }
-          }
-          
-          // No existing session - need to authenticate with signature
-          const success = await authenticateWallet(publicKeyString);
+        // 2. Check if auth is already in flight for this wallet (single-flight pattern)
+        const existingPromise = authPromiseMap.get(publicKeyString);
+        if (existingPromise) {
+          // Wait for existing auth to complete instead of starting new one
+          const success = await existingPromise;
           if (success) {
             authSucceeded.current.add(publicKeyString);
             lastConnectedWallet.current = publicKeyString;
             setSessionConnected(true);
           }
-        } catch (error) {
-          console.error('Failed to register wallet with session:', error);
-          // Don't clear authAttempted - prevent infinite retries on failure
-        } finally {
-          authInProgress.current.delete(publicKeyString);
+          return;
+        }
+        
+        // Set locks SYNCHRONOUSLY before any async work
+        authInProgress.current.add(publicKeyString);
+        authAttempted.current.add(publicKeyString);
+        
+        // Create and store the auth promise for single-flight pattern
+        const walletToAuth = publicKeyString;
+        const authPromise = (async (): Promise<boolean> => {
+          try {
+            // First, check if server already has a valid session for this wallet
+            // This avoids prompting for signature if already authenticated
+            const statusRes = await fetch('/api/auth/status', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'include',
+              body: JSON.stringify({ walletAddress: walletToAuth }),
+            });
+            
+            if (statusRes.ok) {
+              const statusData = await statusRes.json();
+              if (statusData.authenticated) {
+                // Session already exists - skip signature, just connect
+                const referredByCode = getReferralCodeFromUrl();
+                const connectRes = await fetch('/api/wallet/connect', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  credentials: 'include',
+                  body: JSON.stringify({ 
+                    walletAddress: walletToAuth,
+                    referredByCode: referredByCode || undefined,
+                  }),
+                });
+                
+                if (connectRes.ok) {
+                  const data = await connectRes.json();
+                  setReferralCode(data.referralCode || null);
+                }
+                
+                return true;
+              }
+            }
+            
+            // No existing session - need to authenticate with signature
+            return await authenticateWallet(walletToAuth);
+          } catch (error) {
+            console.error('Failed to register wallet with session:', error);
+            return false;
+          } finally {
+            authInProgress.current.delete(walletToAuth);
+            authPromiseMap.delete(walletToAuth);
+          }
+        })();
+        
+        // Store the promise BEFORE awaiting so concurrent calls can find it
+        authPromiseMap.set(walletToAuth, authPromise);
+        
+        const success = await authPromise;
+        if (success) {
+          authSucceeded.current.add(walletToAuth);
+          lastConnectedWallet.current = walletToAuth;
+          setSessionConnected(true);
         }
       } else if (!publicKeyString) {
         lastConnectedWallet.current = null;
@@ -181,6 +213,7 @@ export function useWallet() {
         authAttempted.current.clear();
         authSucceeded.current.clear();
         authInProgress.current.clear();
+        authPromiseMap.clear();
       }
     };
     
