@@ -622,12 +622,22 @@ async function depositToDrift(command) {
   const secretKeyBytes = bs58.decode(keyBase58);
   const nonZeroCount = secretKeyBytes.filter(b => b !== 0).length;
   console.error(`[Executor] Decoded key: length=${secretKeyBytes.length}, nonZeroBytes=${nonZeroCount}`);
+  console.error(`[Executor] Decoded type: ${Object.prototype.toString.call(secretKeyBytes)}`);
+  console.error(`[Executor] First 8 bytes: [${Array.from(secretKeyBytes.slice(0, 8)).join(', ')}]`);
+  console.error(`[Executor] Last 8 bytes (pubkey tail): [${Array.from(secretKeyBytes.slice(56, 64)).join(', ')}]`);
   
   if (nonZeroCount === 0) {
     throw new Error('Received corrupted key data (all zeros after decode)');
   }
   
-  const keypair = Keypair.fromSecretKey(secretKeyBytes);
+  // CRITICAL FIX: Create a fresh Uint8Array copy to avoid potential buffer view issues
+  // bs58.decode may return a view into a shared buffer pool with non-zero byteOffset
+  const secretKeyCopy = new Uint8Array(secretKeyBytes);
+  console.error(`[Executor] Copied to fresh Uint8Array: length=${secretKeyCopy.length}, byteOffset=${secretKeyCopy.byteOffset}`);
+  
+  const keypair = Keypair.fromSecretKey(secretKeyCopy);
+  console.error(`[Executor] Keypair created, pubkey: ${keypair.publicKey.toBase58()}`);
+  secretKeyCopy.fill(0);
   secretKeyBytes.fill(0);
   
   const agentPubkey = keypair.publicKey;
