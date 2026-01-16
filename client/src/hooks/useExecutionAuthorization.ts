@@ -149,22 +149,35 @@ export function useExecutionAuthorization() {
       const signatureBase58 = bs58.encode(signatureBytes);
       console.log('[EnableExecution] Signature obtained, calling enable-execution API...');
       
-      // Step 5: Call enable-execution endpoint
-      const enableRes = await fetch('/api/auth/enable-execution', {
+      // Step 5: Call enable-execution endpoint with cache-busting
+      const requestBody = JSON.stringify({
+        sessionId: sessionData.sessionId,
+        nonce,
+        signature: signatureBase58,
+      });
+      console.log('[EnableExecution] Request body length:', requestBody.length, 'sessionId prefix:', sessionData.sessionId.slice(0, 8));
+      
+      const enableRes = await fetch(`/api/auth/enable-execution?_t=${Date.now()}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache',
+        },
         credentials: 'include',
-        body: JSON.stringify({
-          sessionId: sessionData.sessionId,
-          nonce,
-          signature: signatureBase58,
-        }),
+        body: requestBody,
       });
       
-      console.log('[EnableExecution] API response status:', enableRes.status);
+      console.log('[EnableExecution] API response status:', enableRes.status, 'headers:', Object.fromEntries(enableRes.headers.entries()));
       
       if (!enableRes.ok) {
-        const errorData = await enableRes.json();
+        const errorText = await enableRes.text();
+        console.log('[EnableExecution] Error response body:', errorText);
+        let errorData;
+        try {
+          errorData = JSON.parse(errorText);
+        } catch {
+          errorData = { error: errorText };
+        }
         throw new Error(errorData.error || 'Failed to enable execution');
       }
       
