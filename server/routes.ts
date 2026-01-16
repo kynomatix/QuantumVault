@@ -2050,13 +2050,34 @@ export async function registerRoutes(
         console.log(`[Drift Deposit] No botId provided, depositing to main account (subaccount 0)`);
       }
 
+      // Security v3: Try to get session for UMK-based decryption
+      const sessionResult = getSessionByWalletAddress(req.walletAddress!);
+      let privateKeyBase58: string | null = null;
+      let cleanupFn: (() => void) | null = null;
+
+      if (sessionResult && sessionResult.session) {
+        // v3 path: decrypt agent key using session UMK
+        const agentKeyResult = await decryptAgentKeyWithFallback(
+          req.walletAddress!,
+          sessionResult.session.umk,
+          wallet
+        );
+        if (agentKeyResult) {
+          privateKeyBase58 = bs58.encode(agentKeyResult.secretKey);
+          cleanupFn = agentKeyResult.cleanup;
+          console.log(`[Drift Deposit] Using v3 security path for ${req.walletAddress!.slice(0, 8)}...`);
+        }
+      }
+
       console.log(`[Drift Deposit] Executing deposit: amount=${amount}, subAccountId=${subAccountId}`);
-      const result = await executeAgentDriftDeposit(
-        wallet.agentPublicKey,
-        wallet.agentPrivateKeyEncrypted,
-        amount,
-        subAccountId
-      );
+      
+      // Call executor with either pre-decrypted key (v3) or encrypted key (legacy fallback)
+      const result = privateKeyBase58 
+        ? await executeAgentDriftDeposit(wallet.agentPublicKey, privateKeyBase58, amount, subAccountId, true)
+        : await executeAgentDriftDeposit(wallet.agentPublicKey, wallet.agentPrivateKeyEncrypted, amount, subAccountId, false);
+      
+      // Cleanup decrypted key material
+      if (cleanupFn) cleanupFn();
 
       if (!result.success) {
         return res.status(400).json({ error: result.error || "Deposit failed" });
