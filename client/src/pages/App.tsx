@@ -538,8 +538,8 @@ export default function AppPage() {
           const data = await res.json();
           setAgentPublicKey(data.agentPublicKey);
           
-          // Check if agent wallet is low on SOL for gas
-          const needsGas = data.solBalance === 0 || data.solBalance < 0.01;
+          // Check if agent wallet is low on SOL for gas (0.035 SOL needed for bot creation)
+          const needsGas = data.solBalance === 0 || data.solBalance < 0.035;
           
           if (needsGas) {
             if (data.isExistingUser) {
