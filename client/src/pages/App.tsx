@@ -2903,15 +2903,8 @@ export default function AppPage() {
           agentPublicKey={agentPublicKey}
           onDepositComplete={async () => {
             try {
-              // Check agent balance
-              const res = await fetch('/api/agent/balance', { credentials: 'include' });
-              if (res.ok) {
-                const data = await res.json();
-                if (data.solBalance >= 0.01) {
-                  setWelcomePopupOpen(false);
-                }
-              }
               // Refresh settings to get the displayName saved in WelcomePopup
+              // Note: Don't close popup here - let user complete USDC deposit step or skip
               const settingsRes = await fetch('/api/wallet/settings', { credentials: 'include' });
               if (settingsRes.ok) {
                 const settingsData = await settingsRes.json();
@@ -2919,7 +2912,7 @@ export default function AppPage() {
                 setXUsername(settingsData.xUsername || '');
               }
             } catch (error) {
-              console.error('Error checking agent balance after deposit:', error);
+              console.error('Error refreshing settings after deposit:', error);
             }
           }}
         />
