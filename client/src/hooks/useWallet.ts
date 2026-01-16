@@ -22,6 +22,8 @@ export function useWallet() {
   const [signingInProgress, setSigningInProgress] = useState(false);
   const lastConnectedWallet = useRef<string | null>(null);
   const authAttempted = useRef<Set<string>>(new Set());
+  const authSucceeded = useRef<Set<string>>(new Set());
+  const authInProgress = useRef<Set<string>>(new Set());
 
   const publicKeyString = wallet.publicKey?.toBase58() || null;
 
@@ -106,27 +108,42 @@ export function useWallet() {
   useEffect(() => {
     const registerWallet = async () => {
       if (publicKeyString && publicKeyString !== lastConnectedWallet.current) {
-        // Prevent duplicate authentication attempts
-        if (authAttempted.current.has(publicKeyString)) {
+        // Already authenticated successfully - just restore state
+        if (authSucceeded.current.has(publicKeyString)) {
+          lastConnectedWallet.current = publicKeyString;
+          setSessionConnected(true);
           return;
         }
+        
+        // Prevent duplicate authentication attempts (already in progress or attempted)
+        if (authAttempted.current.has(publicKeyString) || authInProgress.current.has(publicKeyString)) {
+          return;
+        }
+        
+        authInProgress.current.add(publicKeyString);
         authAttempted.current.add(publicKeyString);
         
         try {
           const success = await authenticateWallet(publicKeyString);
           if (success) {
+            authSucceeded.current.add(publicKeyString);
             lastConnectedWallet.current = publicKeyString;
             setSessionConnected(true);
           }
         } catch (error) {
           console.error('Failed to register wallet with session:', error);
-          authAttempted.current.delete(publicKeyString);
+          // Don't clear authAttempted - prevent infinite retries on failure
+        } finally {
+          authInProgress.current.delete(publicKeyString);
         }
       } else if (!publicKeyString) {
         lastConnectedWallet.current = null;
         setSessionConnected(false);
         setReferralCode(null);
+        // Only clear on explicit disconnect
         authAttempted.current.clear();
+        authSucceeded.current.clear();
+        authInProgress.current.clear();
       }
     };
     
