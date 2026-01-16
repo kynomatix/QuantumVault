@@ -162,3 +162,38 @@ async function main() {
 }
 
 main().catch(console.error);
+
+// Also check the third wallet
+async function checkThirdWallet() {
+  const rpcUrl = process.env.SOLANA_RPC_URL || 
+    (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
+    'https://api.mainnet-beta.solana.com');
+  
+  const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
+  const platformReferrerAuthority = await fetchPlatformReferrerAuthority(connection);
+  
+  const thirdAgent = {
+    name: 'Agent 3 (9XWC...WVM)',
+    agentWallet: '9XWCEvFrYGSxp59XXMJ257ZXMZDG4WgFKrThmQJteWVM',
+    userWallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+  };
+  
+  console.log(`\n${thirdAgent.name}`);
+  console.log(`  Agent wallet: ${thirdAgent.agentWallet}`);
+  
+  const result = await checkAgentReferrer(connection, thirdAgent.agentWallet, platformReferrerAuthority);
+  
+  if (!result.exists) {
+    console.log(`  Status: UserStats account DOES NOT EXIST`);
+  } else if (!result.hasReferrer) {
+    console.log(`  Status: NO REFERRER SET`);
+  } else if (result.isKryptolytix) {
+    console.log(`  Status: CORRECTLY ATTRIBUTED to kryptolytix`);
+  } else {
+    console.log(`  Status: Has referrer but NOT kryptolytix: ${result.referrer}`);
+  }
+}
+
+if (process.argv[2] === '--third') {
+  checkThirdWallet().catch(console.error);
+}
