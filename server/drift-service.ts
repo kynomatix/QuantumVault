@@ -2104,6 +2104,7 @@ export async function executeAgentTransferBetweenSubaccounts(
   try {
     const connection = getConnection();
     const agentPubkey = new PublicKey(agentPublicKey);
+    const agentKeypair = getAgentKeypair(encryptedPrivateKey);
     
     // Ensure agent has SOL for transaction fees
     const solCheck = await ensureAgentHasSolForFees(agentPubkey);
@@ -2113,6 +2114,11 @@ export async function executeAgentTransferBetweenSubaccounts(
         error: solCheck.error || 'Agent wallet needs SOL for transaction fees',
       };
     }
+    
+    // CRITICAL: Ensure Drift accounts are initialized with referrer BEFORE using SDK
+    // SDK's initializeUserAccount() doesn't support referrer - use raw transactions
+    console.log(`[Drift Transfer] Ensuring accounts are initialized with platform referrer...`);
+    await initializeDriftAccountsIfNeeded(connection, agentPubkey, agentKeypair);
     
     // Check source subaccount balance
     const sourceBalance = await getDriftBalance(agentPublicKey, fromSubAccountId);
@@ -2134,7 +2140,6 @@ export async function executeAgentTransferBetweenSubaccounts(
     // Load DriftClient via lazy ESM import to avoid CJS/ESM interop issues
     const DriftClient = await loadDriftClient();
     
-    const agentKeypair = getAgentKeypair(encryptedPrivateKey);
     const wallet = new Wallet(agentKeypair);
     
     const sdkEnv = IS_MAINNET ? 'mainnet-beta' : 'devnet';
