@@ -44,6 +44,21 @@ function getUserStatsPDA(authority) {
   return userStats;
 }
 
+// Get User Account PDA for a given authority and subaccount
+function getUserAccountPDA(authority, subAccountId = 0) {
+  const subAccountBuffer = Buffer.alloc(2);
+  subAccountBuffer.writeUInt16LE(subAccountId, 0);
+  const [userAccount] = PublicKey.findProgramAddressSync(
+    [
+      Buffer.from('user'),
+      authority.toBuffer(),
+      subAccountBuffer,
+    ],
+    DRIFT_PROGRAM_ID
+  );
+  return userAccount;
+}
+
 // Get ReferrerName PDA
 function getReferrerNamePDA(referralCode) {
   const nameBuffer = encodeName(referralCode);
