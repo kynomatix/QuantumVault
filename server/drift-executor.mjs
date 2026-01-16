@@ -697,8 +697,9 @@ async function depositToDrift(command) {
   
   const defaultSubscription = getMarketsAndOraclesForSubscription('mainnet-beta');
   
-  // Use polling subscription when accounts don't exist to avoid websocket hanging on non-existent accounts
-  const subscriptionType = (mainExists && targetExists) ? 'websocket' : 'polling';
+  // Always use polling for deposits - it's more reliable for one-off operations
+  // Websocket can fail with stale connections if operations happen in quick succession
+  const subscriptionType = 'polling';
   const initialSubAccountIds = (mainExists && targetExists) ? subAccountIds : [];
   
   console.error(`[Executor] Creating DriftClient: subscriptionType=${subscriptionType}, subAccountIds=[${initialSubAccountIds.join(', ')}], mainExists=${mainExists}, targetExists=${targetExists}`);
