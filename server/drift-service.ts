@@ -2359,8 +2359,20 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     });
     
     // Log command details for debugging (but not actual key values)
-    if (command.action === 'deposit' && command.privateKeyBase58) {
-      console.log(`[Drift] Deposit command: keyLen=${command.privateKeyBase58.length}, firstChars=${command.privateKeyBase58.slice(0, 8)}...`);
+    if (command.privateKeyBase58) {
+      const keyLen = command.privateKeyBase58.length;
+      console.log(`[Drift] Subprocess command ${command.action}: keyLen=${keyLen}, firstChars=${command.privateKeyBase58.slice(0, 4)}...`);
+      
+      // VALIDATION: A base58-encoded 64-byte key should be approximately 87-88 characters
+      if (keyLen < 80 || keyLen > 95) {
+        console.error(`[Drift] CRITICAL: Invalid key length ${keyLen} - key may be corrupted or empty`);
+        resolve({ success: false, error: `Invalid key length: ${keyLen} (expected 87-88 chars)` });
+        return;
+      }
+    } else if (command.encryptedPrivateKey) {
+      console.log(`[Drift] Subprocess command ${command.action}: using encrypted key (legacy path)`);
+    } else {
+      console.log(`[Drift] Subprocess command ${command.action}: WARNING - no key provided!`);
     }
     child.stdin.write(JSON.stringify(command));
     child.stdin.end();

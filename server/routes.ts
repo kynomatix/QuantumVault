@@ -4112,13 +4112,25 @@ export async function registerRoutes(
         console.log(`[Webhook] Agent key decryption: legacy fallback used for ${bot.walletAddress.slice(0, 8)}... (v3 not yet migrated)`);
       }
       
-      // Convert secretKey (Uint8Array) to base58 for passing to executor
-      const privateKeyBase58 = bs58.encode(agentKeyResult.secretKey);
-      
-      // Helper to cleanup agent key after use
+      // Helper to cleanup agent key after use (defined early for use in error paths)
       const cleanupAgentKey = () => {
         agentKeyResult.cleanup();
       };
+      
+      // DEBUG: Validate secret key bytes before encoding
+      const nonZeroBytes = Array.from(agentKeyResult.secretKey).filter(b => b !== 0).length;
+      console.log(`[Webhook] Secret key validation: length=${agentKeyResult.secretKey.length}, nonZeroBytes=${nonZeroBytes}`);
+      if (nonZeroBytes === 0) {
+        cleanupAgentKey();
+        await storage.updateWebhookLog(log.id, { errorMessage: "Agent key is all zeros - possible encryption/decryption issue" });
+        return res.status(500).json({ error: "Agent key decryption produced invalid key (all zeros). Please reconfigure your agent wallet." });
+      }
+      
+      // Convert secretKey (Uint8Array) to base58 for passing to executor
+      const privateKeyBase58 = bs58.encode(agentKeyResult.secretKey);
+      
+      // DEBUG: Log base58 key length and first few chars (not the full key for security)
+      console.log(`[Webhook] Base58 key: length=${privateKeyBase58.length}, starts=${privateKeyBase58.slice(0, 4)}...`);
 
       // PHASE 6.2: Wrap execution in try/finally to ensure agent key cleanup
       try {

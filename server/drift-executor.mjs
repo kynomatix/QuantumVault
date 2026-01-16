@@ -509,6 +509,13 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
   if (privateKeyBase58) {
     // v3 path: key already decrypted by webhook handler
     console.error('[Executor] Using pre-decrypted key [v3 security path]');
+    console.error(`[Executor] Key length: ${privateKeyBase58.length} chars, first4: ${privateKeyBase58.slice(0, 4)}...`);
+    
+    // VALIDATION: A base58-encoded 64-byte key should be approximately 87-88 characters
+    if (privateKeyBase58.length < 80 || privateKeyBase58.length > 95) {
+      throw new Error(`[Executor] Invalid base58 key length: ${privateKeyBase58.length} (expected 87-88 chars for 64-byte key)`);
+    }
+    
     keyBase58 = privateKeyBase58;
   } else if (encryptedPrivateKey) {
     // Legacy path: decrypt here (backward compatibility during transition)
@@ -520,6 +527,18 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
   
   // Decode the base58 key to bytes
   const secretKeyBytes = bs58.decode(keyBase58);
+  
+  // VALIDATION: Secret key must be exactly 64 bytes
+  if (secretKeyBytes.length !== 64) {
+    throw new Error(`[Executor] Invalid secret key length: ${secretKeyBytes.length} bytes (expected 64)`);
+  }
+  
+  // VALIDATION: Secret key must not be all zeros
+  const nonZeroBytes = Array.from(secretKeyBytes).filter(b => b !== 0).length;
+  console.error(`[Executor] Secret key validation: ${nonZeroBytes}/64 non-zero bytes`);
+  if (nonZeroBytes === 0) {
+    throw new Error('[Executor] Invalid secret key: all zeros');
+  }
   
   // Create keypair from secret key bytes
   const keypair = Keypair.fromSecretKey(secretKeyBytes);
@@ -542,13 +561,16 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
     // Oracle will be auto-fetched when market is subscribed
   }
   
-  // Use websocket subscription to avoid batch RPC requests (required for free RPC plans)
+  // Use websocket subscription - polling requires external accountLoader which SDK doesn't auto-create
+  // Include subaccount 0 (main account) to ensure SDK can resolve account hierarchy
+  const subAccountIdsToSubscribe = subAccountId === 0 ? [0] : [0, subAccountId];
+  
   const driftClient = new DriftClient({
     connection,
     wallet,
     env: 'mainnet-beta',
     activeSubAccountId: subAccountId,
-    subAccountIds: [subAccountId],
+    subAccountIds: subAccountIdsToSubscribe,
     accountSubscription: {
       type: 'websocket',
     },
@@ -556,6 +578,9 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
     spotMarketIndexes: defaultSubscription.spotMarketIndexes || [0], // At least USDC
     oracleInfos,
   });
+  
+  console.error(`[Executor] DriftClient configured for subaccounts: [${subAccountIdsToSubscribe.join(', ')}], active: ${subAccountId}`);
+  console.error(`[Executor] Wallet pubkey: ${wallet.publicKey.toBase58()}`);
   
   return driftClient;
 }
@@ -579,6 +604,95 @@ async function executeTrade(command) {
     try {
       await driftClient.subscribe();
       console.error(`[Executor] Subscribed successfully`);
+      
+      // For non-zero subaccounts, the SDK's websocket subscription has a bug
+      // where it doesn't properly populate the User account data.
+      // WORKAROUND: Fetch the user account directly via RPC and inject it into the SDK
+      if (subAccountId > 0) {
+        console.error(`[Executor] Subaccount ${subAccountId} requires direct RPC fetch (SDK bug workaround)`);
+        try {
+          const userAccountPubKey = await driftClient.getUserAccountPublicKey(subAccountId);
+          console.error(`[Executor] User PDA for subaccount ${subAccountId}: ${userAccountPubKey.toBase58().slice(0,8)}...`);
+          
+          // Fetch user account data using the existing connection (to avoid rate limits)
+          const conn = driftClient.connection;
+          let accountInfo = null;
+          
+          // Retry logic for rate limiting
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              accountInfo = await conn.getAccountInfo(userAccountPubKey);
+              if (accountInfo) break;
+            } catch (fetchErr) {
+              if (fetchErr.message?.includes('429') && attempt < 3) {
+                console.error(`[Executor] RPC rate limited, retrying in ${attempt * 500}ms...`);
+                await new Promise(r => setTimeout(r, attempt * 500));
+              } else {
+                throw fetchErr;
+              }
+            }
+          }
+          
+          if (accountInfo && accountInfo.data) {
+            console.error(`[Executor] Direct RPC fetch succeeded: ${accountInfo.data.length} bytes`);
+            
+            // Get the User object - it should exist after subscribe
+            const user = driftClient.getUser(subAccountId) || driftClient.users.get(subAccountId);
+            if (user && user.accountSubscriber) {
+              // Try to decode and cache the user account
+              try {
+                // Use SDK's Anchor coder to properly decode the User account
+                const decoded = driftClient.program.account.user.coder.accounts.decode('User', accountInfo.data);
+                console.error(`[Executor] Decoded user account: authority=${decoded.authority?.toBase58().slice(0,8)}..., subAccountId=${decoded.subAccountId}`);
+                
+                // CRITICAL: The SDK's User.getUserAccount() calls this.accountSubscriber.getUserAccountAndSlot()
+                // which returns this.accountSubscriber.userDataAccountPublicKey
+                // We need to set this to a valid structure
+                if (!user.accountSubscriber.userDataAccountPublicKey) {
+                  user.accountSubscriber.userDataAccountPublicKey = {};
+                }
+                user.accountSubscriber.userDataAccountPublicKey.data = accountInfo.data;
+                user.accountSubscriber.userDataAccountPublicKey.slot = 0; // SDK expects this
+                
+                // The SDK's User class also caches the decoded account - set it directly
+                // getUserAccount() eventually returns program.coder.accounts.decode(...data...)
+                // so we can monkey-patch getUserAccountAndSlot to return our data
+                const originalGetUserAccountAndSlot = user.accountSubscriber.getUserAccountAndSlot?.bind(user.accountSubscriber);
+                user.accountSubscriber.getUserAccountAndSlot = () => {
+                  return {
+                    data: decoded,
+                    slot: 0
+                  };
+                };
+                console.error(`[Executor] Monkey-patched getUserAccountAndSlot() for subaccount ${subAccountId}`);
+                
+              } catch (decodeErr) {
+                console.error(`[Executor] Warning: Could not decode user account: ${decodeErr.message}`);
+              }
+            } else {
+              console.error(`[Executor] Warning: No user or accountSubscriber found to inject data`);
+            }
+          } else {
+            console.error(`[Executor] WARNING: Direct RPC fetch returned no data for subaccount ${subAccountId}`);
+          }
+        } catch (userInitErr) {
+          console.error(`[Executor] Direct RPC fetch failed: ${userInitErr.message}`);
+        }
+      }
+      
+      // Verify user account is available before proceeding
+      try {
+        const user = driftClient.getUser();
+        const userAccount = user?.getUserAccount();
+        if (userAccount) {
+          console.error(`[Executor] User account verified: authority=${userAccount.authority?.toBase58().slice(0,8)}..., subAccountId=${userAccount.subAccountId}`);
+        } else {
+          console.error(`[Executor] WARNING: User account not available`);
+        }
+      } catch (verifyErr) {
+        console.error(`[Executor] User verification still failed: ${verifyErr.message}`);
+        // We'll proceed anyway - the trade might still work if we patched getUserAccountAndSlot
+      }
     } catch (subscribeError) {
       console.error(`[Executor] subscribe() failed: ${subscribeError.message}`);
       // Try alternative: force polling mode instead of websocket
@@ -621,43 +735,73 @@ async function executeTrade(command) {
     }
     
     // Market account is available, check its status
-    const status = perpMarket.status;
-    const statusNames = ['Initialized', 'Active', 'FundingPaused', 'AMMPaused', 'FillPaused', 'WithdrawPaused', 'ReduceOnly', 'Settlement', 'Delisted'];
-    const statusName = statusNames[status] || `Unknown(${status})`;
-    console.error(`[Executor] Market ${market} status: ${statusName} (${status})`);
+    // SDK may return status as a number (old) or an object like {active: {}} (new)
+    const rawStatus = perpMarket.status;
+    let statusName = 'Unknown';
+    let isActive = false;
+    let isReduceOnly = false;
+    let isFillPaused = false;
+    let isAmmPaused = false;
     
-    // Status 1 = Active, others may have restrictions
-    if (status !== 1) {
-      // Status 6 = ReduceOnly - can only close positions
-      if (status === 6 && !reduceOnly) {
-        throw new Error(`Market ${market} is in ReduceOnly mode - can only close existing positions, not open new ones`);
-      }
-      // Status 4 = FillPaused - no orders at all
-      if (status === 4) {
-        throw new Error(`Market ${market} is FillPaused - no orders can be placed. Try again later.`);
-      }
-      // Status 3 = AMMPaused
-      if (status === 3) {
-        throw new Error(`Market ${market} is AMMPaused - trading temporarily suspended. Try again later.`);
-      }
-      // Other paused states
-      if (status !== 1 && status !== 2 && status !== 5) {
-        console.error(`[Executor] Warning: Market status ${statusName} may restrict orders`);
-      }
+    if (typeof rawStatus === 'number') {
+      // Old numeric format
+      const statusNames = ['Initialized', 'Active', 'FundingPaused', 'AMMPaused', 'FillPaused', 'WithdrawPaused', 'ReduceOnly', 'Settlement', 'Delisted'];
+      statusName = statusNames[rawStatus] || `Unknown(${rawStatus})`;
+      isActive = rawStatus === 1;
+      isReduceOnly = rawStatus === 6;
+      isFillPaused = rawStatus === 4;
+      isAmmPaused = rawStatus === 3;
+    } else if (typeof rawStatus === 'object' && rawStatus !== null) {
+      // New object format: {active: {}}, {reduceOnly: {}}, etc.
+      const keys = Object.keys(rawStatus);
+      statusName = keys[0] || 'unknown';
+      isActive = 'active' in rawStatus;
+      isReduceOnly = 'reduceOnly' in rawStatus;
+      isFillPaused = 'fillPaused' in rawStatus;
+      isAmmPaused = 'ammPaused' in rawStatus;
+    }
+    
+    console.error(`[Executor] Market ${market} status: ${statusName}`);
+    
+    // Check for restricted market states
+    if (isReduceOnly && !reduceOnly) {
+      throw new Error(`Market ${market} is in ReduceOnly mode - can only close existing positions, not open new ones`);
+    }
+    if (isFillPaused) {
+      throw new Error(`Market ${market} is FillPaused - no orders can be placed. Try again later.`);
+    }
+    if (isAmmPaused) {
+      throw new Error(`Market ${market} is AMMPaused - trading temporarily suspended. Try again later.`);
+    }
+    if (!isActive && !isReduceOnly) {
+      console.error(`[Executor] Warning: Market status ${statusName} may restrict orders`);
     }
     
     const BN = (await import('bn.js')).default;
     const baseAssetAmount = new BN(Math.round(sizeInBase * 1e9));
     const direction = side === 'long' ? PositionDirection.LONG : PositionDirection.SHORT;
     
-    const txSig = await driftClient.placeAndTakePerpOrder({
-      direction,
-      baseAssetAmount,
-      marketIndex,
-      marketType: MarketType.PERP,
-      orderType: OrderType.MARKET,
-      reduceOnly: reduceOnly ?? false,
-    });
+    console.error(`[Executor] Placing order: direction=${side}, baseAssetAmount=${baseAssetAmount.toString()}, marketIndex=${marketIndex}`);
+    
+    let txSig;
+    try {
+      txSig = await driftClient.placeAndTakePerpOrder({
+        direction,
+        baseAssetAmount,
+        marketIndex,
+        marketType: MarketType.PERP,
+        orderType: OrderType.MARKET,
+        reduceOnly: reduceOnly ?? false,
+      });
+    } catch (orderError) {
+      console.error(`[Executor] Order failed:`, orderError.message);
+      console.error(`[Executor] Order error stack:`, orderError.stack);
+      // Check if this is a simulation error with logs
+      if (orderError.logs) {
+        console.error(`[Executor] Transaction logs:`, orderError.logs.join('\n'));
+      }
+      throw orderError;
+    }
     
     console.error(`[Executor] Trade executed: ${txSig}`);
     
@@ -1000,7 +1144,8 @@ async function depositToDrift(command) {
   // Check if main subaccount (0) exists on-chain
   const mainAccountPDA = getUserAccountPDA(agentPubkey, 0);
   const mainAccountInfo = await connection.getAccountInfo(mainAccountPDA);
-  const mainExists = mainAccountInfo !== null && mainAccountInfo.data.length > 0;
+  // FIX: Use explicit truthiness check (null, undefined, or empty data all treated as non-existent)
+  const mainExists = !!(mainAccountInfo && mainAccountInfo.data && mainAccountInfo.data.length > 0);
   console.error(`[Executor] Main subaccount 0 exists on-chain: ${mainExists}`);
   
   // Check if target subaccount exists on-chain
@@ -1008,7 +1153,8 @@ async function depositToDrift(command) {
   if (subAccountId > 0) {
     const targetAccountPDA = getUserAccountPDA(agentPubkey, subAccountId);
     const targetAccountInfo = await connection.getAccountInfo(targetAccountPDA);
-    targetExists = targetAccountInfo !== null && targetAccountInfo.data.length > 0;
+    // FIX: Use explicit truthiness check
+    targetExists = !!(targetAccountInfo && targetAccountInfo.data && targetAccountInfo.data.length > 0);
     console.error(`[Executor] Target subaccount ${subAccountId} exists on-chain: ${targetExists}`);
   }
   
