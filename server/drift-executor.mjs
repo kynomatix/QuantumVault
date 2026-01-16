@@ -710,14 +710,15 @@ async function depositToDrift(command) {
       console.error('[Executor] Accounts need to be created. Using initialization flow...');
       
       // Step 1: Create a DriftClient WITHOUT specifying subAccountIds
-      // This allows subscribe() to work without trying to load non-existent user accounts
-      console.error('[Executor] Creating DriftClient without subAccountIds for initialization...');
+      // IMPORTANT: Do NOT call subscribe() - initializeUserAccount() doesn't require it
+      // The SDK only needs RPC connection and signer for account initialization
+      console.error('[Executor] Creating DriftClient for initialization (skipping subscribe)...');
       
       const initClient = new DriftClient({
         connection,
         wallet,
         env: 'mainnet-beta',
-        // Do NOT specify subAccountIds - let SDK subscribe to program state only
+        // Do NOT specify subAccountIds
         accountSubscription: { 
           type: subscriptionType,
           ...(subscriptionType === 'polling' ? { frequency: 5000 } : {})
@@ -727,9 +728,10 @@ async function depositToDrift(command) {
         oracleInfos: defaultSubscription.oracleInfos || [],
       });
       
-      console.error('[Executor] Subscribing initClient (no user accounts)...');
-      await initClient.subscribe();
-      console.error('[Executor] initClient subscribed successfully');
+      // NOTE: We intentionally skip subscribe() here because:
+      // 1. initializeUserAccount() does NOT require subscription
+      // 2. subscribe() would fail with "addAccount" error for non-existent accounts
+      console.error('[Executor] Skipping subscribe - initializing accounts directly...');
       
       // Step 2: Initialize accounts that don't exist
       if (!mainExists) {
@@ -750,13 +752,6 @@ async function depositToDrift(command) {
         const initTx = await initClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
         console.error(`[Executor] Subaccount ${subAccountId} initialized: ${initTx}`);
         await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-      
-      // Step 3: Unsubscribe the init client
-      try {
-        await initClient.unsubscribe();
-      } catch (e) {
-        console.error('[Executor] initClient unsubscribe warning:', e.message);
       }
       
       // Step 4: Create the real client with the now-existing accounts
