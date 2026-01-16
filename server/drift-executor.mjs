@@ -111,6 +111,8 @@ function decryptPrivateKey(encryptedKey) {
   const parts = encryptedKey.split(':');
   const key = Buffer.from(getLegacyEncryptionKey(), 'hex');
   
+  console.error(`[Executor] Attempting decryption: ${parts.length} parts, key length: ${key.length} bytes`);
+  
   // New format: iv:authTag:encrypted (3 parts) - AES-256-GCM
   if (parts.length === 3) {
     try {
@@ -118,14 +120,19 @@ function decryptPrivateKey(encryptedKey) {
       const authTag = Buffer.from(parts[1], 'hex');
       const encrypted = parts[2];
       
+      console.error(`[Executor] GCM params: iv=${iv.length}bytes, authTag=${authTag.length}bytes, encrypted=${encrypted.length}chars`);
+      
       const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
       decipher.setAuthTag(authTag);
       
       let decrypted = decipher.update(encrypted, 'hex', 'utf8');
       decrypted += decipher.final('utf8');
+      console.error(`[Executor] GCM decryption successful, result length: ${decrypted.length}`);
       return decrypted;
     } catch (e) {
-      console.error('[Executor] GCM decryption failed, trying legacy format:', e.message);
+      console.error('[Executor] GCM decryption failed:', e.message);
+      // Don't fall through - throw an error so we don't silently use wrong data
+      throw new Error(`GCM decryption failed: ${e.message}. Check AGENT_ENCRYPTION_KEY matches the key used during encryption.`);
     }
   }
   
@@ -143,10 +150,12 @@ function decryptPrivateKey(encryptedKey) {
       return decrypted;
     } catch (e) {
       console.error('[Executor] CBC decryption failed:', e.message);
+      throw new Error(`CBC decryption failed: ${e.message}. Check AGENT_ENCRYPTION_KEY matches the key used during encryption.`);
     }
   }
   
-  // If not encrypted or all decryption failed, return as-is
+  // Unknown format - could be already base58
+  console.error(`[Executor] Unknown format (${parts.length} parts), assuming unencrypted base58`);
   return encryptedKey;
 }
 
