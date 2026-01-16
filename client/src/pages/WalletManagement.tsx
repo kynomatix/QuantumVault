@@ -47,7 +47,11 @@ interface AgentWallet {
   solBalance: number;
 }
 
-export function WalletContent() {
+interface WalletContentProps {
+  initialTab?: 'deposit' | 'withdraw' | 'gas';
+}
+
+export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   const { connected, connecting, shortenedAddress, publicKeyString } = useWallet();
   const { usdcBalance, usdcLoading, fetchUsdcBalance } = useTokenBalance();
   const solanaWallet = useSolanaWallet();
@@ -912,7 +916,7 @@ export function WalletContent() {
 
       <Card className="border-border/50 bg-card/50 backdrop-blur-sm">
         <CardContent className="pt-6">
-          <Tabs defaultValue="deposit" className="w-full">
+          <Tabs defaultValue={initialTab} className="w-full">
             <TabsList className="grid w-full grid-cols-3 mb-6">
               <TabsTrigger value="deposit" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-deposit">
                 <ArrowDownToLine className="w-3 h-3 sm:w-4 sm:h-4" />

@@ -111,6 +111,7 @@ export default function AppPage() {
   const { connection } = useConnection();
   const { toast } = useToast();
   const [activeNav, setActiveNav] = useState<NavItem>('dashboard');
+  const [walletInitialTab, setWalletInitialTab] = useState<'deposit' | 'withdraw' | 'gas'>('deposit');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [withdrawingBotId, setWithdrawingBotId] = useState<string | null>(null);
@@ -1022,6 +1023,7 @@ export default function AppPage() {
                 key={item.id}
                 onClick={() => { 
                   setActiveNav(item.id);
+                  setWalletInitialTab('deposit'); // Reset to default when clicking nav
                   setSidebarOpen(false); 
                 }}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${sidebarCollapsed ? 'lg:justify-center lg:px-3' : ''} ${
@@ -1223,6 +1225,7 @@ export default function AppPage() {
                         size="sm"
                         onClick={() => {
                           setNotificationDropdownOpen(false);
+                          setWalletInitialTab('gas');
                           setActiveNav('wallet');
                         }}
                         data-testid="button-go-to-wallet"
@@ -3017,7 +3020,7 @@ export default function AppPage() {
             )}
 
             {activeNav === 'wallet' && (
-              <WalletContent />
+              <WalletContent initialTab={walletInitialTab} />
             )}
           </AnimatePresence>
         </main>
