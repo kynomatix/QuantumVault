@@ -2073,7 +2073,21 @@ export async function registerRoutes(
       // CRITICAL: Copy secret key bytes immediately to prevent buffer zeroization issues
       // The cleanup() function will zero the original buffer, so we must copy before any async operations
       const secretKeyCopy = Buffer.from(agentKeyResult.secretKey);
+      
+      // DEBUG: Check if secretKey has valid data
+      const nonZeroBytes = secretKeyCopy.filter(b => b !== 0).length;
+      console.log(`[Drift Deposit] Secret key stats: length=${secretKeyCopy.length}, nonZeroBytes=${nonZeroBytes}`);
+      
+      if (nonZeroBytes === 0) {
+        console.error(`[Drift Deposit] CRITICAL: Decrypted key is all zeros! This indicates a decryption failure.`);
+        agentKeyResult.cleanup();
+        return res.status(500).json({ 
+          error: "Decryption failed - key data is corrupted. Please reconfigure your agent wallet in Settings." 
+        });
+      }
+      
       const privateKeyBase58 = bs58.encode(secretKeyCopy);
+      console.log(`[Drift Deposit] Base58 key length: ${privateKeyBase58.length} chars`);
       
       // Validate the decrypted key matches stored agentPublicKey before sending to executor
       // This catches key mismatches early with clear error messages
