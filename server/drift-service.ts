@@ -215,10 +215,22 @@ const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xW
 // This is used to fund platform operations - referrer earns 15% of taker fees, users get 5% discount
 const PLATFORM_REFERRAL_CODE = 'kryptolytix';
 
+// Encode name to 32-byte buffer padded with spaces (matches Drift SDK's encodeName)
+function encodeName(name: string): Buffer {
+  if (name.length > 32) {
+    throw new Error(`Name (${name}) longer than 32 characters`);
+  }
+  const buffer = Buffer.alloc(32);
+  buffer.fill(name);
+  buffer.fill(' ', name.length); // Pad with spaces, not zeros
+  return buffer;
+}
+
 // Derive the ReferrerName PDA from the referral code
 function getReferrerNamePDA(referralCode: string): PublicKey {
+  const nameBuffer = encodeName(referralCode);
   const [referrerName] = PublicKey.findProgramAddressSync(
-    [Buffer.from('referrer_name'), Buffer.from(referralCode)],
+    [Buffer.from('referrer_name'), nameBuffer],
     DRIFT_PROGRAM_ID
   );
   return referrerName;

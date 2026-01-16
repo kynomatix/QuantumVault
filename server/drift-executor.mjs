@@ -512,10 +512,22 @@ async function deleteSubaccount(command) {
 const PLATFORM_REFERRAL_CODE = 'kryptolytix';
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 
+// Encode name to 32-byte buffer padded with spaces (matches Drift SDK's encodeName)
+function encodeName(name) {
+  if (name.length > 32) {
+    throw new Error(`Name (${name}) longer than 32 characters`);
+  }
+  const buffer = Buffer.alloc(32);
+  buffer.fill(name);
+  buffer.fill(' ', name.length); // Pad with spaces, not zeros
+  return buffer;
+}
+
 // Derive the ReferrerName PDA from the referral code
 function getReferrerNamePDA(referralCode) {
+  const nameBuffer = encodeName(referralCode);
   const [referrerName] = PublicKey.findProgramAddressSync(
-    [Buffer.from('referrer_name'), Buffer.from(referralCode)],
+    [Buffer.from('referrer_name'), nameBuffer],
     DRIFT_PROGRAM_ID
   );
   return referrerName;
