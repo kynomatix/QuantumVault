@@ -609,6 +609,7 @@ async function depositToDrift(command) {
   let keyBase58;
   if (privateKeyBase58) {
     console.error('[Executor] Using pre-decrypted key [v3 security path]');
+    console.error(`[Executor] Received privateKeyBase58: length=${privateKeyBase58?.length || 0}, type=${typeof privateKeyBase58}`);
     keyBase58 = privateKeyBase58;
   } else if (encryptedPrivateKey) {
     console.error('[Executor] Using legacy encrypted key [legacy decryption path]');
@@ -617,7 +618,15 @@ async function depositToDrift(command) {
     throw new Error('[Executor] No private key provided');
   }
   
+  // Decode and validate
   const secretKeyBytes = bs58.decode(keyBase58);
+  const nonZeroCount = secretKeyBytes.filter(b => b !== 0).length;
+  console.error(`[Executor] Decoded key: length=${secretKeyBytes.length}, nonZeroBytes=${nonZeroCount}`);
+  
+  if (nonZeroCount === 0) {
+    throw new Error('Received corrupted key data (all zeros after decode)');
+  }
+  
   const keypair = Keypair.fromSecretKey(secretKeyBytes);
   secretKeyBytes.fill(0);
   
