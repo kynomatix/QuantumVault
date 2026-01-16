@@ -737,54 +737,7 @@ async function deleteSubaccount(command) {
   }
 }
 
-// Platform referral code for Drift fee benefits
-const PLATFORM_REFERRAL_CODE = 'kryptolytix';
-const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
-
-// Encode name to 32-byte buffer padded with spaces (matches Drift SDK's encodeName)
-function encodeName(name) {
-  if (name.length > 32) {
-    throw new Error(`Name (${name}) longer than 32 characters`);
-  }
-  const buffer = Buffer.alloc(32);
-  buffer.fill(name);
-  buffer.fill(' ', name.length); // Pad with spaces, not zeros
-  return buffer;
-}
-
-// Derive the ReferrerName PDA from the referral code
-function getReferrerNamePDA(referralCode) {
-  const nameBuffer = encodeName(referralCode);
-  const [referrerName] = PublicKey.findProgramAddressSync(
-    [Buffer.from('referrer_name'), nameBuffer],
-    DRIFT_PROGRAM_ID
-  );
-  return referrerName;
-}
-
-// Derive User PDA for a given authority and subaccount
-function getUserAccountPDA(authority, subAccountId) {
-  const [userAccount] = PublicKey.findProgramAddressSync(
-    [
-      Buffer.from('user'),
-      authority.toBuffer(),
-      new Uint8Array(new Uint16Array([subAccountId]).buffer),
-    ],
-    DRIFT_PROGRAM_ID
-  );
-  return userAccount;
-}
-
-// Derive UserStats PDA for a given authority
-function getUserStatsPDA(authority) {
-  const [userStats] = PublicKey.findProgramAddressSync(
-    [Buffer.from('user_stats'), authority.toBuffer()],
-    DRIFT_PROGRAM_ID
-  );
-  return userStats;
-}
-
-// Get referrer info from on-chain ReferrerName account
+// Get referrer info from on-chain ReferrerName account (legacy function using shared helpers)
 // ReferrerName account layout (from Drift IDL):
 // - 8 bytes: discriminator
 // - 32 bytes: authority (the referrer's wallet address)
