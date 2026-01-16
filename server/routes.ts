@@ -1919,15 +1919,20 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const [balance, solBalance] = await Promise.all([
+      const [balance, solBalance, bots] = await Promise.all([
         getAgentUsdcBalance(wallet.agentPublicKey),
         getAgentSolBalance(wallet.agentPublicKey),
+        storage.getTradingBots(req.walletAddress!),
       ]);
+      
+      // Existing user = has at least one bot (they've completed onboarding before)
+      const isExistingUser = bots.length > 0;
       
       res.json({
         agentPublicKey: wallet.agentPublicKey,
         balance,
         solBalance,
+        isExistingUser,
       });
     } catch (error) {
       console.error("Get agent balance error:", error);

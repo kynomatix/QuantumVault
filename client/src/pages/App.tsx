@@ -538,9 +538,21 @@ export default function AppPage() {
           const data = await res.json();
           setAgentPublicKey(data.agentPublicKey);
           
-          // Show welcome popup if agent has no SOL (can't pay for gas)
-          if (data.solBalance === 0 || data.solBalance < 0.01) {
-            setWelcomePopupOpen(true);
+          // Check if agent wallet is low on SOL for gas
+          const needsGas = data.solBalance === 0 || data.solBalance < 0.01;
+          
+          if (needsGas) {
+            if (data.isExistingUser) {
+              // Existing user with bots - just show a toast, not full onboarding
+              toast({
+                title: 'Low Gas Balance',
+                description: 'Your agent wallet is low on SOL for transaction fees. Visit Wallet tab to deposit more.',
+                duration: 8000,
+              });
+            } else {
+              // New user - show full welcome onboarding
+              setWelcomePopupOpen(true);
+            }
           }
           welcomeCheckedRef.current = true;
         }
