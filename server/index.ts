@@ -113,6 +113,21 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
+  // Validate SERVER_EXECUTION_KEY format on startup
+  const serverKey = process.env.SERVER_EXECUTION_KEY;
+  if (!serverKey) {
+    console.error('[SECURITY] SERVER_EXECUTION_KEY is not set! Execution authorization will fail.');
+  } else {
+    console.log(`[SECURITY] SERVER_EXECUTION_KEY: length=${serverKey.length} (expected 64 hex chars)`);
+    if (serverKey.length !== 64) {
+      console.error(`[SECURITY] SERVER_EXECUTION_KEY has wrong length! Got ${serverKey.length}, expected 64`);
+    } else if (!/^[0-9a-fA-F]+$/.test(serverKey)) {
+      console.error('[SECURITY] SERVER_EXECUTION_KEY contains non-hex characters!');
+    } else {
+      console.log('[SECURITY] SERVER_EXECUTION_KEY format is valid');
+    }
+  }
+
   httpServer.listen(
     {
       port,

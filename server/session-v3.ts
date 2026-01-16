@@ -547,9 +547,13 @@ export async function enableExecution(
   }
   
   try {
+    console.log(`[enableExecution] About to get server key...`);
     const serverKey = getServerExecutionKey();
+    console.log(`[enableExecution] Got server key, building AAD...`);
     const aad = buildAAD(walletAddress, 'EUMK_EXEC');
+    console.log(`[enableExecution] Built AAD, encrypting UMK (length: ${session.umk.length})...`);
     const umkEncrypted = encryptToBase64(session.umk, serverKey, aad);
+    console.log(`[enableExecution] Encrypted UMK, updating DB...`);
     
     await storage.updateWalletExecution(walletAddress, {
       executionEnabled: true,
@@ -561,8 +565,11 @@ export async function enableExecution(
     
     return { success: true };
   } catch (err) {
-    console.error('[Security] Failed to enable execution:', err);
-    return { success: false, error: 'Failed to enable execution' };
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const errStack = err instanceof Error ? err.stack : '';
+    console.error('[Security] Failed to enable execution:', errMsg);
+    console.error('[Security] Stack trace:', errStack);
+    return { success: false, error: `Failed to enable execution: ${errMsg}` };
   }
 }
 
