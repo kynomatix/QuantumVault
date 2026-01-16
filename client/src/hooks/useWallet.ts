@@ -108,7 +108,7 @@ export function useWallet() {
   useEffect(() => {
     const registerWallet = async () => {
       if (publicKeyString && publicKeyString !== lastConnectedWallet.current) {
-        // Already authenticated successfully - just restore state
+        // Already authenticated successfully in this session - just restore state
         if (authSucceeded.current.has(publicKeyString)) {
           lastConnectedWallet.current = publicKeyString;
           setSessionConnected(true);
@@ -124,6 +124,43 @@ export function useWallet() {
         authAttempted.current.add(publicKeyString);
         
         try {
+          // First, check if server already has a valid session for this wallet
+          // This avoids prompting for signature if already authenticated
+          const statusRes = await fetch('/api/auth/status', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ walletAddress: publicKeyString }),
+          });
+          
+          if (statusRes.ok) {
+            const statusData = await statusRes.json();
+            if (statusData.authenticated) {
+              // Session already exists - skip signature, just connect
+              const referredByCode = getReferralCodeFromUrl();
+              const connectRes = await fetch('/api/wallet/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ 
+                  walletAddress: publicKeyString,
+                  referredByCode: referredByCode || undefined,
+                }),
+              });
+              
+              if (connectRes.ok) {
+                const data = await connectRes.json();
+                setReferralCode(data.referralCode || null);
+              }
+              
+              authSucceeded.current.add(publicKeyString);
+              lastConnectedWallet.current = publicKeyString;
+              setSessionConnected(true);
+              return;
+            }
+          }
+          
+          // No existing session - need to authenticate with signature
           const success = await authenticateWallet(publicKeyString);
           if (success) {
             authSucceeded.current.add(publicKeyString);

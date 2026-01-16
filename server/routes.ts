@@ -491,6 +491,29 @@ export async function registerRoutes(
     }
   });
 
+  // Public endpoint to check if a wallet has an active session (no auth required)
+  // Used by frontend to skip signature prompt if already authenticated
+  app.post("/api/auth/status", async (req, res) => {
+    try {
+      const { walletAddress } = req.body;
+      if (!walletAddress) {
+        return res.status(400).json({ error: "Wallet address required" });
+      }
+      
+      // Check if this wallet has an active session in express-session
+      const sessionWallet = req.session?.walletAddress;
+      const hasSession = sessionWallet === walletAddress;
+      
+      res.json({
+        authenticated: hasSession,
+        walletAddress: hasSession ? sessionWallet : null,
+      });
+    } catch (error) {
+      console.error("Auth status check error:", error);
+      res.status(500).json({ error: "Status check failed" });
+    }
+  });
+
   app.post("/api/auth/logout", requireWallet, async (req, res) => {
     try {
       invalidateSession(req.walletAddress!);
