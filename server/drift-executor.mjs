@@ -69,6 +69,95 @@ function getReferrerNamePDA(referralCode) {
   return referrerName;
 }
 
+// Token Program ID
+const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+
+// Get Spot Market Vault PDA
+function getSpotMarketVaultPDA(marketIndex) {
+  const marketBuffer = Buffer.alloc(2);
+  marketBuffer.writeUInt16LE(marketIndex, 0);
+  const [vault] = PublicKey.findProgramAddressSync(
+    [Buffer.from('spot_market_vault'), marketBuffer],
+    DRIFT_PROGRAM_ID
+  );
+  return vault;
+}
+
+// Get Spot Market PDA
+function getSpotMarketPDA(marketIndex) {
+  const marketBuffer = Buffer.alloc(2);
+  marketBuffer.writeUInt16LE(marketIndex, 0);
+  const [market] = PublicKey.findProgramAddressSync(
+    [Buffer.from('spot_market'), marketBuffer],
+    DRIFT_PROGRAM_ID
+  );
+  return market;
+}
+
+// Mainnet USDC Oracle (fallback)
+const DRIFT_MAINNET_USDC_ORACLE = new PublicKey('En8hkHLkRe9d9DraYmBTrus518BvmVH448YcvmrFM6Ce');
+
+// Get oracle from spot market account on-chain
+async function getSpotMarketOracle(connection, marketIndex = 0) {
+  try {
+    const spotMarketPda = getSpotMarketPDA(marketIndex);
+    const spotMarketAccount = await connection.getAccountInfo(spotMarketPda);
+    
+    if (!spotMarketAccount) {
+      console.error('[Executor] SpotMarket account not found, using fallback oracle');
+      return DRIFT_MAINNET_USDC_ORACLE;
+    }
+    
+    // Oracle is at offset 40 in the SpotMarket struct
+    const ORACLE_OFFSET = 40;
+    if (spotMarketAccount.data.length < ORACLE_OFFSET + 32) {
+      console.error('[Executor] SpotMarket data too short, using fallback oracle');
+      return DRIFT_MAINNET_USDC_ORACLE;
+    }
+    
+    const oracleBytes = spotMarketAccount.data.slice(ORACLE_OFFSET, ORACLE_OFFSET + 32);
+    const oracle = new PublicKey(oracleBytes);
+    console.error(`[Executor] Fetched oracle from SpotMarket: ${oracle.toBase58()}`);
+    return oracle;
+  } catch (error) {
+    console.error('[Executor] Error fetching oracle:', error.message);
+    return DRIFT_MAINNET_USDC_ORACLE;
+  }
+}
+
+// Raw deposit instruction (bypasses DriftClient entirely)
+function createDepositInstruction(userPubkey, userAccount, userStats, userTokenAccount, spotMarketVault, spotMarket, oracle, amount, marketIndex = 0) {
+  const discriminator = getAnchorDiscriminator('deposit');
+  
+  const data = Buffer.alloc(8 + 2 + 8 + 1);
+  discriminator.copy(data, 0);
+  data.writeUInt16LE(marketIndex, 8);
+  // Write amount as 8-byte little-endian
+  const amountBuffer = Buffer.alloc(8);
+  const amountBigInt = BigInt(amount.toString());
+  amountBuffer.writeBigUInt64LE(amountBigInt, 0);
+  amountBuffer.copy(data, 10);
+  data.writeUInt8(0, 18); // reduceOnly = false
+
+  const keys = [
+    { pubkey: DRIFT_STATE_PUBKEY, isSigner: false, isWritable: false },
+    { pubkey: userAccount, isSigner: false, isWritable: true },
+    { pubkey: userStats, isSigner: false, isWritable: true },
+    { pubkey: userPubkey, isSigner: true, isWritable: false },
+    { pubkey: spotMarketVault, isSigner: false, isWritable: true },
+    { pubkey: userTokenAccount, isSigner: false, isWritable: true },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: oracle, isSigner: false, isWritable: false },
+    { pubkey: spotMarket, isSigner: false, isWritable: true },
+  ];
+
+  return new TransactionInstruction({
+    keys,
+    programId: DRIFT_PROGRAM_ID,
+    data,
+  });
+}
+
 // Raw instruction to initialize user stats
 function createInitializeUserStatsInstruction(userPubkey, userStats) {
   const discriminator = getAnchorDiscriminator('initialize_user_stats');
@@ -889,74 +978,78 @@ async function depositToDrift(command) {
   }
   
   // FIX: If accounts don't exist, use RAW TRANSACTION initialization (bypasses DriftClient subscribe bug)
-  // The SDK's subscribe() fails with "addAccount" error when subAccountIds=[] in newer versions
+  // The SDK's subscribe() fails with "addAccount" error - we bypass DriftClient ENTIRELY
   if (!mainExists || !targetExists) {
-    console.error('[Executor] Accounts missing - using RAW TRANSACTION initialization to bypass SDK subscribe() bug');
+    console.error('[Executor] Accounts missing - using RAW TRANSACTION initialization');
     await initializeDriftAccountsRaw(connection, keypair, subAccountId);
     console.error('[Executor] Raw initialization complete, accounts now exist on-chain');
   }
   
-  // Now create DriftClient with the actual subAccountIds (accounts now exist)
-  const wallet = new Wallet(keypair);
-  const subAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
-  
-  const defaultSubscription = getMarketsAndOraclesForSubscription('mainnet-beta');
-  
-  // Always use polling for deposits - it's more reliable for one-off operations
-  const subscriptionType = 'polling';
-  
-  console.error(`[Executor] Creating DriftClient with existing accounts: subscriptionType=${subscriptionType}, subAccountIds=[${subAccountIds.join(', ')}]`);
-  
-  const driftClient = new DriftClient({
-    connection,
-    wallet,
-    env: 'mainnet-beta',
-    activeSubAccountId: subAccountId, // Set target directly
-    subAccountIds: subAccountIds, // All required accounts now exist
-    accountSubscription: { 
-      type: subscriptionType,
-      frequency: 5000
-    },
-    perpMarketIndexes: defaultSubscription.perpMarketIndexes || [],
-    spotMarketIndexes: defaultSubscription.spotMarketIndexes || [0],
-    oracleInfos: defaultSubscription.oracleInfos || [],
-  });
+  // COMPLETE SDK BYPASS: Use raw transactions for deposit too (SDK subscribe is broken)
+  console.error('[Executor] Using RAW TRANSACTION deposit (bypassing DriftClient entirely)');
   
   try {
-    console.error('[Executor] Calling driftClient.subscribe()...');
-    await driftClient.subscribe();
-    console.error('[Executor] subscribe() completed successfully');
-    const BN = (await import('bn.js')).default;
-    const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
+    const userStats = getUserStatsPDA(agentPubkey);
+    const targetAccountPDA = getUserAccountPDA(agentPubkey, subAccountId);
+    const spotMarketVault = getSpotMarketVaultPDA(0); // USDC = market 0
+    const spotMarket = getSpotMarketPDA(0);
+    const oracle = await getSpotMarketOracle(connection, 0);
     
-    // Switch to target subaccount before deposit (if needed)
-    if (subAccountId > 0 && driftClient.activeSubAccountId !== subAccountId) {
-      console.error(`[Executor] Switching active user to subaccount ${subAccountId}...`);
-      await driftClient.switchActiveUser(subAccountId);
-      
-      const activeSubId = driftClient.activeSubAccountId;
-      console.error(`[Executor] Active subaccount after switch: ${activeSubId}`);
-      if (activeSubId !== subAccountId) {
-        throw new Error(`Failed to switch to subaccount ${subAccountId}`);
-      }
-    }
+    const amountLamports = Math.round(amountUsdc * 1_000_000);
+    console.error(`[Executor] Deposit amount: ${amountUsdc} USDC = ${amountLamports} lamports`);
+    console.error(`[Executor] Target account: ${targetAccountPDA.toBase58()}`);
+    console.error(`[Executor] Spot market vault: ${spotMarketVault.toBase58()}`);
     
-    console.error(`[Executor] Calling SDK deposit to subaccount ${subAccountId}...`);
-    const txSig = await driftClient.deposit(
-      amountBN,
-      0, // USDC market index
-      agentAta
+    const depositIx = createDepositInstruction(
+      agentPubkey,
+      targetAccountPDA,
+      userStats,
+      agentAta,
+      spotMarketVault,
+      spotMarket,
+      oracle,
+      amountLamports,
+      0 // USDC market index
     );
+    
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    
+    const tx = new Transaction({
+      feePayer: agentPubkey,
+      blockhash,
+      lastValidBlockHeight,
+    });
+    
+    tx.add(depositIx);
+    tx.sign(keypair);
+    
+    console.error('[Executor] Sending raw deposit transaction...');
+    const txSig = await connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: true,
+      preflightCommitment: 'confirmed',
+    });
+    
+    console.error(`[Executor] Raw deposit tx sent: ${txSig}`);
+    
+    const confirmation = await connection.confirmTransaction({
+      signature: txSig,
+      blockhash,
+      lastValidBlockHeight,
+    }, 'confirmed');
+    
+    if (confirmation.value.err) {
+      console.error('[Executor] Deposit transaction failed:', confirmation.value.err);
+      throw new Error(`Deposit failed: ${JSON.stringify(confirmation.value.err)}`);
+    }
     
     console.error(`[Executor] Deposit successful: ${txSig}`);
     
     return { success: true, signature: txSig };
+  } catch (error) {
+    console.error('[Executor] Deposit error:', error.message);
+    throw error;
   } finally {
-    try {
-      await driftClient.unsubscribe();
-    } catch {}
     // SECURITY: Zero the keypair's secret key bytes after all operations are complete
-    // This must be done in finally to ensure cleanup even on error
     try {
       secretKeyCopy.fill(0);
     } catch {}
