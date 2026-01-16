@@ -249,6 +249,26 @@ git checkout HEAD~1 -- <deleted-file>
 
 ---
 
+## 8. Bug Fixes - January 16, 2026
+
+### Fixed: DriftClient userMap Initialization During Bot Funding
+
+**Problem:** When creating a new bot and depositing funds, the error "Cannot read properties of undefined (reading 'addAccount')" occurred.
+
+**Root Cause:** When neither the main Drift account nor the target subaccount exists, the DriftClient is created with `subAccountIds: []`. This causes the SDK's internal `userMap` to not be properly initialized. When we later call `addUser()` after creating accounts on-chain, it fails because `userMap` is undefined.
+
+**Fix Applied:** Instead of calling `addUser()` on the same DriftClient instance after account creation, we now:
+1. Create accounts on-chain using the initial DriftClient
+2. Unsubscribe from the initial DriftClient
+3. Create a NEW DriftClient with `subAccountIds` set to the now-existing accounts
+4. Subscribe to the new client and proceed with the deposit
+
+**File Changed:** `server/drift-executor.mjs` - `depositToDrift()` function
+
+**Why This Works:** The SDK properly initializes `userMap` when it knows about subaccounts at construction time. By recreating the client with the correct `subAccountIds` after on-chain account creation, we ensure proper initialization.
+
+---
+
 ## Notes
 
 - The `AGENT_ENCRYPTION_KEY` environment variable is still needed by v3 security
