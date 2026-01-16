@@ -471,10 +471,21 @@ export default function AppPage() {
     setResetAgentProgress(['Starting agent wallet reset...']);
     
     try {
+      // Step 1: Get current session
+      const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
+      if (!sessionRes.ok) throw new Error('Failed to check session');
+      const sessionData = await sessionRes.json();
+      
+      if (!sessionData.hasSession || !sessionData.sessionId) {
+        throw new Error('No active session. Please reconnect your wallet.');
+      }
+      
+      setResetAgentProgress(['Session verified', 'Initiating reset...']);
+      
       const res = await fetch('/api/wallet/reset-agent-wallet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify({ sessionId: sessionData.sessionId }),
         credentials: 'include',
       });
       
