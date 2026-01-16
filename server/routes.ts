@@ -2050,15 +2050,39 @@ export async function registerRoutes(
         console.log(`[Drift Deposit] No botId provided, depositing to main account (subaccount 0)`);
       }
 
-      console.log(`[Drift Deposit] Executing deposit: amount=${amount}, subAccountId=${subAccountId}`);
+      // Security v3: Get UMK and decrypt agent key (same path as webhooks)
+      const umkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!umkResult) {
+        return res.status(403).json({ 
+          error: "Execution not enabled. Please enable execution authorization in Settings first." 
+        });
+      }
       
-      // Pass encrypted key to executor - it handles decryption internally
+      const agentKeyResult = await decryptAgentKeyWithFallback(
+        req.walletAddress!,
+        umkResult.umk,
+        wallet
+      );
+      
+      umkResult.cleanup();
+      
+      if (!agentKeyResult) {
+        return res.status(500).json({ error: "Agent key decryption failed. Please reconfigure your agent wallet." });
+      }
+      
+      const privateKeyBase58 = bs58.encode(agentKeyResult.secretKey);
+      
+      console.log(`[Drift Deposit] Executing deposit: amount=${amount}, subAccountId=${subAccountId} (v3 security)`);
+      
       const result = await executeAgentDriftDeposit(
         wallet.agentPublicKey,
-        wallet.agentPrivateKeyEncrypted,
+        privateKeyBase58,
         amount,
-        subAccountId
+        subAccountId,
+        true // isPreDecrypted
       );
+      
+      agentKeyResult.cleanup();
 
       if (!result.success) {
         return res.status(400).json({ error: result.error || "Deposit failed" });

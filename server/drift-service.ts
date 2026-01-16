@@ -1879,9 +1879,10 @@ export async function buildAgentDriftWithdrawTransaction(
 
 export async function executeAgentDriftDeposit(
   agentPublicKey: string,
-  encryptedPrivateKey: string,
+  privateKeyOrEncrypted: string,
   amountUsdc: number,
   subAccountId: number = 0,
+  isPreDecrypted: boolean = false,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const connection = getConnection();
@@ -1917,17 +1918,27 @@ export async function executeAgentDriftDeposit(
       };
     }
     
-    console.log(`[Drift] Using subprocess executor for deposit: ${amountUsdc} USDC to subaccount ${subAccountId}`);
+    console.log(`[Drift] Using subprocess executor for deposit: ${amountUsdc} USDC to subaccount ${subAccountId} (v3=${isPreDecrypted})`);
     
     // Use subprocess executor to avoid ESM/CJS DriftClient loading issues
     // The drift-executor.mjs runs in pure ESM mode where DriftClient loads correctly
-    const command = {
-      action: 'deposit',
-      encryptedPrivateKey,
-      amountUsdc,
-      subAccountId,
-      agentPublicKey,
-    };
+    // v3 path: pass pre-decrypted base58 key directly
+    // Legacy path: pass encrypted key for executor to decrypt
+    const command = isPreDecrypted 
+      ? {
+          action: 'deposit',
+          privateKeyBase58: privateKeyOrEncrypted,
+          amountUsdc,
+          subAccountId,
+          agentPublicKey,
+        }
+      : {
+          action: 'deposit',
+          encryptedPrivateKey: privateKeyOrEncrypted,
+          amountUsdc,
+          subAccountId,
+          agentPublicKey,
+        };
     
     const result = await executeDriftCommandViaSubprocess(command);
     
