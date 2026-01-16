@@ -2072,7 +2072,24 @@ export async function registerRoutes(
       
       const privateKeyBase58 = bs58.encode(agentKeyResult.secretKey);
       
-      console.log(`[Drift Deposit] Executing deposit: amount=${amount}, subAccountId=${subAccountId} (v3 security)`);
+      // Validate the decrypted key matches stored agentPublicKey before sending to executor
+      // This catches key mismatches early with clear error messages
+      const decryptedKeypair = nacl.sign.keyPair.fromSecretKey(agentKeyResult.secretKey);
+      const derivedPubkey = bs58.encode(decryptedKeypair.publicKey);
+      
+      if (derivedPubkey !== wallet.agentPublicKey) {
+        console.error(`[Drift Deposit] CRITICAL: Keypair mismatch detected!`);
+        console.error(`  Stored agentPublicKey: ${wallet.agentPublicKey}`);
+        console.error(`  Derived from decrypted key: ${derivedPubkey}`);
+        console.error(`  Wallet has v3 key: ${!!wallet.agentPrivateKeyEncryptedV3}`);
+        console.error(`  Wallet has legacy key: ${!!wallet.agentPrivateKeyEncrypted}`);
+        agentKeyResult.cleanup();
+        return res.status(500).json({ 
+          error: "Agent key mismatch detected. Your agent wallet security may be corrupted. Please reconfigure your agent wallet in Settings." 
+        });
+      }
+      
+      console.log(`[Drift Deposit] Key validation passed. Executing deposit: amount=${amount}, subAccountId=${subAccountId} (v3 security)`);
       
       const result = await executeAgentDriftDeposit(
         wallet.agentPublicKey,
