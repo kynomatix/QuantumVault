@@ -649,8 +649,10 @@ async function depositToDrift(command) {
   
   const keypair = Keypair.fromSecretKey(secretKeyCopy);
   console.error(`[Executor] Keypair created, pubkey: ${keypair.publicKey.toBase58()}`);
-  secretKeyCopy.fill(0);
-  secretKeyBytes.fill(0);
+  // NOTE: Do NOT zero secretKeyCopy here! Keypair.fromSecretKey does NOT make its own copy.
+  // The keypair uses the same buffer, so zeroing it breaks all signing operations.
+  // We will zero it in the finally block after all transactions are complete.
+  secretKeyBytes.fill(0); // Safe to zero the bs58 decoded bytes (not used by keypair)
   
   const agentPubkey = keypair.publicKey;
   
@@ -761,6 +763,11 @@ async function depositToDrift(command) {
   } finally {
     try {
       await driftClient.unsubscribe();
+    } catch {}
+    // SECURITY: Zero the keypair's secret key bytes after all operations are complete
+    // This must be done in finally to ensure cleanup even on error
+    try {
+      secretKeyCopy.fill(0);
     } catch {}
   }
 }
