@@ -78,7 +78,9 @@ Preferred communication style: Simple, everyday language.
 -   **Buffer zeroization**: Sensitive buffers are cryptographically overwritten after use
 
 ### Execution Authorization
--   **Time-limited execution**: UMK wrapped for server execution expires after 1 hour
+-   **Permanent execution**: Once enabled via wallet signature, execution authorization persists until manually revoked (no time expiry)
+-   **Integrated UX**: Execution authorization prompts appear naturally in bot creation and deposit flows
+-   **Shared hook**: `useExecutionAuthorization` hook provides reusable enable/revoke/status logic across all components
 -   **Emergency stop**: Immediately revokes all execution authorization
 -   **Policy HMAC**: Detects tampering with bot configuration (market, leverage, max position)
 
