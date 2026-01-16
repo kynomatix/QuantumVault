@@ -692,27 +692,26 @@ async function depositToDrift(command) {
   }
   
   // Create DriftClient with proper subaccounts to initialize
+  // IMPORTANT: Always include the intended subAccountIds even if accounts don't exist yet
+  // The SDK can subscribe and then initializeUserAccount for non-existent accounts
   const wallet = new Wallet(keypair);
   const subAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
   
   const defaultSubscription = getMarketsAndOraclesForSubscription('mainnet-beta');
   
   // Always use polling for deposits - it's more reliable for one-off operations
-  // Websocket can fail with stale connections if operations happen in quick succession
   const subscriptionType = 'polling';
-  const initialSubAccountIds = (mainExists && targetExists) ? subAccountIds : [];
   
-  console.error(`[Executor] Creating DriftClient: subscriptionType=${subscriptionType}, subAccountIds=[${initialSubAccountIds.join(', ')}], mainExists=${mainExists}, targetExists=${targetExists}`);
+  console.error(`[Executor] Creating DriftClient: subscriptionType=${subscriptionType}, subAccountIds=[${subAccountIds.join(', ')}], mainExists=${mainExists}, targetExists=${targetExists}`);
   
   const driftClient = new DriftClient({
     connection,
     wallet,
     env: 'mainnet-beta',
-    activeSubAccountId: 0, // Will switch later if needed
-    subAccountIds: initialSubAccountIds,
+    activeSubAccountId: 0,
+    subAccountIds: subAccountIds, // Always pass intended subAccountIds
     accountSubscription: { 
       type: subscriptionType,
-      // For polling, use 5 second interval
       ...(subscriptionType === 'polling' ? { frequency: 5000 } : {})
     },
     perpMarketIndexes: defaultSubscription.perpMarketIndexes || [],
@@ -727,12 +726,16 @@ async function depositToDrift(command) {
     const BN = (await import('bn.js')).default;
     const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
     
+    // Subscribe first - SDK requires this before any operations
+    console.error('[Executor] Subscribing to DriftClient...');
+    await driftClient.subscribe();
+    console.error('[Executor] DriftClient subscribed');
+    
     let accountsCreated = false;
     
-    // If no accounts exist, we need to create them BEFORE subscribing
-    // The SDK's subscribe() fails with "addAccount" error when subAccountIds is empty
+    // Initialize accounts if they don't exist
     if (!mainExists || !targetExists) {
-      console.error('[Executor] Need to create accounts first (cannot subscribe with empty subAccountIds)');
+      console.error('[Executor] Need to create accounts...');
       
       // Initialize main subaccount if it doesn't exist
       if (!mainExists) {
@@ -757,9 +760,16 @@ async function depositToDrift(command) {
         await new Promise(resolve => setTimeout(resolve, 2000));
         accountsCreated = true;
       }
-      
-      // Now create a NEW DriftClient with the proper subAccountIds after accounts exist
-      console.error('[Executor] Accounts created. Creating fresh DriftClient with proper subAccountIds...');
+    }
+    
+    // If accounts were created, we need to recreate the client to properly load them
+    if (accountsCreated) {
+      console.error('[Executor] Accounts were created. Recreating DriftClient to reload accounts...');
+      try {
+        await driftClient.unsubscribe();
+      } catch (e) {
+        console.error('[Executor] Unsubscribe warning:', e.message);
+      }
       
       // Build the list of now-existing subaccounts
       const newSubAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
@@ -785,22 +795,15 @@ async function depositToDrift(command) {
       console.error('[Executor] New DriftClient subscribed successfully');
       
       activeClient = newDriftClient;
-    } else {
-      // Both accounts exist, we can subscribe to the original client
-      console.error('[Executor] Accounts already exist. Subscribing to DriftClient...');
-      await driftClient.subscribe();
-      console.error('[Executor] DriftClient subscribed successfully');
+    } else if (subAccountId > 0) {
+      // No accounts were created, but we need to switch to target subaccount
+      console.error(`[Executor] Switching active user to subaccount ${subAccountId}...`);
+      await driftClient.switchActiveUser(subAccountId);
       
-      if (subAccountId > 0) {
-        // Need to switch to target subaccount
-        console.error(`[Executor] Switching active user to subaccount ${subAccountId}...`);
-        await driftClient.switchActiveUser(subAccountId);
-        
-        const activeSubId = driftClient.activeSubAccountId;
-        console.error(`[Executor] Active subaccount after switch: ${activeSubId}`);
-        if (activeSubId !== subAccountId) {
-          throw new Error(`Failed to switch to subaccount ${subAccountId}`);
-        }
+      const activeSubId = driftClient.activeSubAccountId;
+      console.error(`[Executor] Active subaccount after switch: ${activeSubId}`);
+      if (activeSubId !== subAccountId) {
+        throw new Error(`Failed to switch to subaccount ${subAccountId}`);
       }
     }
     
