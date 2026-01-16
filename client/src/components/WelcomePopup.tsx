@@ -149,6 +149,18 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
 
       setProcessingStep('finalizing');
       
+      // Record SOL deposit in transaction history
+      try {
+        await fetch('/api/agent/confirm-sol-deposit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount, txSignature: signature }),
+          credentials: 'include',
+        });
+      } catch (err) {
+        console.error('Failed to record SOL deposit:', err);
+      }
+      
       if (displayName.trim()) {
         try {
           await fetch('/api/wallet/settings', {
