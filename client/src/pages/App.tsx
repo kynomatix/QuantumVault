@@ -138,11 +138,7 @@ export default function AppPage() {
   const [notifyPositionClosed, setNotifyPositionClosed] = useState(true);
   const [telegramConnected, setTelegramConnected] = useState(false);
   const [telegramVerifyCode, setTelegramVerifyCode] = useState<string | null>(null);
-  const [dangerZoneExpanded, setDangerZoneExpanded] = useState(false);
-  const [accountExpanded, setAccountExpanded] = useState(true);
-  const [tradingPrefsExpanded, setTradingPrefsExpanded] = useState(true);
-  const [notificationsExpanded, setNotificationsExpanded] = useState(true);
-  const [securityExpanded, setSecurityExpanded] = useState(true);
+  const [expandedSection, setExpandedSection] = useState<'account' | 'trading' | 'notifications' | 'security' | 'danger' | null>(null);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
   const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
@@ -2286,7 +2282,7 @@ export default function AppPage() {
                     {/* Account Section */}
                     <div className="gradient-border p-0 noise">
                       <button
-                        onClick={() => setAccountExpanded(!accountExpanded)}
+                        onClick={() => setExpandedSection(expandedSection === 'account' ? null : 'account')}
                         className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
                         data-testid="button-toggle-account"
                       >
@@ -2296,10 +2292,10 @@ export default function AppPage() {
                           </div>
                           <h3 className="font-display font-semibold">Account</h3>
                         </div>
-                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${accountExpanded ? 'rotate-180' : ''}`} />
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedSection === 'account' ? 'rotate-180' : ''}`} />
                       </button>
                       <AnimatePresence>
-                        {accountExpanded && (
+                        {expandedSection === 'account' && (
                           <motion.div
                             initial={{ height: 0, opacity: 0 }}
                             animate={{ height: 'auto', opacity: 1 }}
@@ -2421,7 +2417,7 @@ export default function AppPage() {
                     {/* Trading Preferences Section */}
                     <div className="gradient-border p-0 noise">
                       <button
-                        onClick={() => setTradingPrefsExpanded(!tradingPrefsExpanded)}
+                        onClick={() => setExpandedSection(expandedSection === 'trading' ? null : 'trading')}
                         className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
                         data-testid="button-toggle-trading-prefs"
                       >
@@ -2431,10 +2427,10 @@ export default function AppPage() {
                           </div>
                           <h3 className="font-display font-semibold">Trading Preferences</h3>
                         </div>
-                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${tradingPrefsExpanded ? 'rotate-180' : ''}`} />
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedSection === 'trading' ? 'rotate-180' : ''}`} />
                       </button>
                       <AnimatePresence>
-                        {tradingPrefsExpanded && (
+                        {expandedSection === 'trading' && (
                           <motion.div
                             initial={{ height: 0, opacity: 0 }}
                             animate={{ height: 'auto', opacity: 1 }}
@@ -2484,7 +2480,7 @@ export default function AppPage() {
                     {/* Notifications Section */}
                     <div className="gradient-border p-0 noise">
                       <button
-                        onClick={() => setNotificationsExpanded(!notificationsExpanded)}
+                        onClick={() => setExpandedSection(expandedSection === 'notifications' ? null : 'notifications')}
                         className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
                         data-testid="button-toggle-notifications"
                       >
@@ -2499,10 +2495,10 @@ export default function AppPage() {
                             )}
                           </div>
                         </div>
-                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${notificationsExpanded ? 'rotate-180' : ''}`} />
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedSection === 'notifications' ? 'rotate-180' : ''}`} />
                       </button>
                       <AnimatePresence>
-                        {notificationsExpanded && (
+                        {expandedSection === 'notifications' && (
                           <motion.div
                             initial={{ height: 0, opacity: 0 }}
                             animate={{ height: 'auto', opacity: 1 }}
@@ -2672,7 +2668,7 @@ export default function AppPage() {
                     {/* Security Section */}
                     <div className="gradient-border p-0 noise">
                       <button
-                        onClick={() => setSecurityExpanded(!securityExpanded)}
+                        onClick={() => setExpandedSection(expandedSection === 'security' ? null : 'security')}
                         className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
                         data-testid="button-toggle-security"
                       >
@@ -2682,10 +2678,10 @@ export default function AppPage() {
                           </div>
                           <h3 className="font-display font-semibold">Security</h3>
                         </div>
-                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${securityExpanded ? 'rotate-180' : ''}`} />
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedSection === 'security' ? 'rotate-180' : ''}`} />
                       </button>
                       <AnimatePresence>
-                        {securityExpanded && (
+                        {expandedSection === 'security' && (
                           <motion.div
                             initial={{ height: 0, opacity: 0 }}
                             animate={{ height: 'auto', opacity: 1 }}
@@ -2858,7 +2854,7 @@ export default function AppPage() {
                     {/* Danger Zone Section */}
                     <div className="gradient-border p-0 noise border-red-500/30">
                       <button
-                        onClick={() => setDangerZoneExpanded(!dangerZoneExpanded)}
+                        onClick={() => setExpandedSection(expandedSection === 'danger' ? null : 'danger')}
                         className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-red-500/5 transition-colors rounded-t-xl"
                         data-testid="button-toggle-danger-zone"
                       >
@@ -2868,10 +2864,10 @@ export default function AppPage() {
                           </div>
                           <h3 className="font-display font-semibold text-red-400">Danger Zone</h3>
                         </div>
-                        <ChevronDown className={`w-4 h-4 text-red-400 transition-transform ${dangerZoneExpanded ? 'rotate-180' : ''}`} />
+                        <ChevronDown className={`w-4 h-4 text-red-400 transition-transform ${expandedSection === 'danger' ? 'rotate-180' : ''}`} />
                       </button>
                       <AnimatePresence>
-                        {dangerZoneExpanded && (
+                        {expandedSection === 'danger' && (
                           <motion.div
                             initial={{ height: 0, opacity: 0 }}
                             animate={{ height: 'auto', opacity: 1 }}
