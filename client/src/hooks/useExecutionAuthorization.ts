@@ -41,6 +41,53 @@ export function useExecutionAuthorization() {
     fetchExecutionStatus();
   }, [fetchExecutionStatus]);
 
+  const unlockSession = useCallback(async (): Promise<string | null> => {
+    if (!wallet.publicKey || !wallet.signMessage) {
+      return null;
+    }
+    
+    try {
+      const nonceRes = await fetch('/api/auth/nonce', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ walletAddress: wallet.publicKey.toBase58(), purpose: 'unlock_umk' }),
+      });
+      if (!nonceRes.ok) {
+        throw new Error('Failed to get signing nonce');
+      }
+      const { nonce, message } = await nonceRes.json();
+      
+      toast({ title: 'Session expired', description: 'Please sign to reconnect your wallet.' });
+      
+      const messageBytes = new TextEncoder().encode(message);
+      const signatureBytes = await wallet.signMessage(messageBytes);
+      const signatureBase58 = bs58.encode(signatureBytes);
+      
+      const verifyRes = await fetch('/api/auth/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          walletAddress: wallet.publicKey.toBase58(),
+          nonce,
+          signature: signatureBase58,
+          purpose: 'unlock_umk',
+        }),
+      });
+      
+      if (!verifyRes.ok) {
+        throw new Error('Failed to reconnect session');
+      }
+      
+      const verifyData = await verifyRes.json();
+      return verifyData.sessionId || null;
+    } catch (err) {
+      console.error('Failed to unlock session:', err);
+      return null;
+    }
+  }, [wallet, toast]);
+
   const enableExecution = useCallback(async (): Promise<boolean> => {
     if (!wallet.publicKey || !wallet.signMessage) {
       toast({ title: 'Wallet not connected', variant: 'destructive' });
@@ -53,7 +100,16 @@ export function useExecutionAuthorization() {
       if (!sessionRes.ok) {
         throw new Error('Session check failed');
       }
-      const sessionData = await sessionRes.json();
+      let sessionData = await sessionRes.json();
+      
+      if (sessionData.sessionMissing) {
+        const newSessionId = await unlockSession();
+        if (!newSessionId) {
+          throw new Error('Failed to reconnect session. Please try again.');
+        }
+        sessionData = { hasSession: true, sessionId: newSessionId };
+      }
+      
       if (!sessionData.hasSession || !sessionData.sessionId) {
         throw new Error('No active session. Please reconnect your wallet.');
       }
@@ -103,7 +159,7 @@ export function useExecutionAuthorization() {
     } finally {
       setExecutionLoading(false);
     }
-  }, [wallet, toast]);
+  }, [wallet, toast, unlockSession]);
 
   const revokeExecution = useCallback(async (): Promise<boolean> => {
     if (!wallet.publicKey || !wallet.signMessage) {
@@ -117,7 +173,16 @@ export function useExecutionAuthorization() {
       if (!sessionRes.ok) {
         throw new Error('Session check failed');
       }
-      const sessionData = await sessionRes.json();
+      let sessionData = await sessionRes.json();
+      
+      if (sessionData.sessionMissing) {
+        const newSessionId = await unlockSession();
+        if (!newSessionId) {
+          throw new Error('Failed to reconnect session. Please try again.');
+        }
+        sessionData = { hasSession: true, sessionId: newSessionId };
+      }
+      
       if (!sessionData.hasSession || !sessionData.sessionId) {
         throw new Error('No active session. Please reconnect your wallet.');
       }
@@ -167,7 +232,7 @@ export function useExecutionAuthorization() {
     } finally {
       setExecutionLoading(false);
     }
-  }, [wallet, toast]);
+  }, [wallet, toast, unlockSession]);
 
   return {
     executionEnabled,

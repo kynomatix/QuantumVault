@@ -481,10 +481,20 @@ export async function registerRoutes(
   app.get("/api/auth/session", requireWallet, async (req, res) => {
     try {
       const result = getSessionByWalletAddress(req.walletAddress!);
+      if (!result) {
+        return res.json({
+          hasSession: false,
+          sessionMissing: true,
+          sessionId: null,
+          walletAddress: req.walletAddress,
+          message: 'Session expired. Please reconnect your wallet.',
+        });
+      }
       res.json({
-        hasSession: !!result,
-        sessionId: result?.sessionId || null,
-        walletAddress: result?.session.walletAddress || null,
+        hasSession: true,
+        sessionMissing: false,
+        sessionId: result.sessionId,
+        walletAddress: result.session.walletAddress,
       });
     } catch (error) {
       console.error("Session check error:", error);
