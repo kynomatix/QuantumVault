@@ -96,24 +96,40 @@ export function useExecutionAuthorization() {
     
     setExecutionLoading(true);
     try {
+      console.log('[EnableExecution] Starting...');
+      
+      // Step 1: Check session status
       const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
       if (!sessionRes.ok) {
         throw new Error('Session check failed');
       }
       let sessionData = await sessionRes.json();
+      console.log('[EnableExecution] Session check:', { hasSession: sessionData.hasSession, sessionMissing: sessionData.sessionMissing });
       
+      // Step 2: Unlock session if missing (user signs first message)
       if (sessionData.sessionMissing) {
+        console.log('[EnableExecution] Session missing, unlocking...');
         const newSessionId = await unlockSession();
         if (!newSessionId) {
           throw new Error('Failed to reconnect session. Please try again.');
         }
-        sessionData = { hasSession: true, sessionId: newSessionId };
+        console.log('[EnableExecution] Session unlocked, refreshing session data...');
+        
+        // Re-fetch session from server to ensure cookie and server state are aligned
+        const refreshRes = await fetch('/api/auth/session', { credentials: 'include' });
+        if (!refreshRes.ok) {
+          throw new Error('Failed to refresh session after unlock');
+        }
+        sessionData = await refreshRes.json();
+        console.log('[EnableExecution] Refreshed session:', { hasSession: sessionData.hasSession, sessionId: sessionData.sessionId?.slice(0, 8) });
       }
       
       if (!sessionData.hasSession || !sessionData.sessionId) {
         throw new Error('No active session. Please reconnect your wallet.');
       }
       
+      // Step 3: Get nonce for enable_execution
+      console.log('[EnableExecution] Getting nonce for enable_execution...');
       const nonceRes = await fetch('/api/auth/nonce', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -121,14 +137,19 @@ export function useExecutionAuthorization() {
         body: JSON.stringify({ walletAddress: wallet.publicKey.toBase58(), purpose: 'enable_execution' }),
       });
       if (!nonceRes.ok) {
-        throw new Error('Failed to get signing nonce');
+        const errText = await nonceRes.text();
+        throw new Error(`Failed to get signing nonce: ${errText}`);
       }
       const { nonce, message } = await nonceRes.json();
+      console.log('[EnableExecution] Got nonce, requesting signature...');
       
+      // Step 4: Sign message (user signs second message)
       const messageBytes = new TextEncoder().encode(message);
       const signatureBytes = await wallet.signMessage(messageBytes);
       const signatureBase58 = bs58.encode(signatureBytes);
+      console.log('[EnableExecution] Signature obtained, calling enable-execution API...');
       
+      // Step 5: Call enable-execution endpoint
       const enableRes = await fetch('/api/auth/enable-execution', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -140,16 +161,20 @@ export function useExecutionAuthorization() {
         }),
       });
       
+      console.log('[EnableExecution] API response status:', enableRes.status);
+      
       if (!enableRes.ok) {
         const errorData = await enableRes.json();
         throw new Error(errorData.error || 'Failed to enable execution');
       }
       
+      console.log('[EnableExecution] Success!');
       setExecutionEnabled(true);
       toast({ title: 'Automated trading enabled', description: 'Your bots can now execute trades via webhooks.' });
       return true;
     } catch (err: unknown) {
       const error = err as Error;
+      console.error('[EnableExecution] Error:', error.message, error.stack);
       if (error.message?.includes('User rejected')) {
         toast({ title: 'Signature cancelled', variant: 'destructive' });
       } else {
@@ -180,7 +205,12 @@ export function useExecutionAuthorization() {
         if (!newSessionId) {
           throw new Error('Failed to reconnect session. Please try again.');
         }
-        sessionData = { hasSession: true, sessionId: newSessionId };
+        // Re-fetch session from server to ensure cookie and server state are aligned
+        const refreshRes = await fetch('/api/auth/session', { credentials: 'include' });
+        if (!refreshRes.ok) {
+          throw new Error('Failed to refresh session after unlock');
+        }
+        sessionData = await refreshRes.json();
       }
       
       if (!sessionData.hasSession || !sessionData.sessionId) {
