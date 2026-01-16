@@ -697,20 +697,32 @@ async function depositToDrift(command) {
   
   const defaultSubscription = getMarketsAndOraclesForSubscription('mainnet-beta');
   
+  // Use polling subscription when accounts don't exist to avoid websocket hanging on non-existent accounts
+  const subscriptionType = (mainExists && targetExists) ? 'websocket' : 'polling';
+  const initialSubAccountIds = (mainExists && targetExists) ? subAccountIds : [];
+  
+  console.error(`[Executor] Creating DriftClient: subscriptionType=${subscriptionType}, subAccountIds=[${initialSubAccountIds.join(', ')}], mainExists=${mainExists}, targetExists=${targetExists}`);
+  
   const driftClient = new DriftClient({
     connection,
     wallet,
     env: 'mainnet-beta',
-    activeSubAccountId: subAccountId,
-    subAccountIds,
-    accountSubscription: { type: 'websocket' },
+    activeSubAccountId: 0, // Will switch later if needed
+    subAccountIds: initialSubAccountIds,
+    accountSubscription: { 
+      type: subscriptionType,
+      // For polling, use 5 second interval
+      ...(subscriptionType === 'polling' ? { frequency: 5000 } : {})
+    },
     perpMarketIndexes: defaultSubscription.perpMarketIndexes || [],
     spotMarketIndexes: defaultSubscription.spotMarketIndexes || [0],
     oracleInfos: defaultSubscription.oracleInfos || [],
   });
   
   try {
+    console.error('[Executor] Calling driftClient.subscribe()...');
     await driftClient.subscribe();
+    console.error('[Executor] subscribe() completed successfully');
     const BN = (await import('bn.js')).default;
     const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
     
@@ -726,6 +738,10 @@ async function depositToDrift(command) {
       const initTx = await driftClient.initializeUserAccount(0, 'QuantumVault', referrerInfo);
       console.error(`[Executor] Main account initialized with referral: ${initTx}`);
       await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Add the newly created subaccount 0 to subscription
+      console.error('[Executor] Adding subaccount 0 to subscription...');
+      await driftClient.addUser(0);
     }
     
     // Initialize target subaccount if needed
@@ -735,8 +751,9 @@ async function depositToDrift(command) {
       console.error(`[Executor] Subaccount ${subAccountId} initialized: ${initTx}`);
       await new Promise(resolve => setTimeout(resolve, 2000));
       
-      await driftClient.unsubscribe();
-      await driftClient.subscribe();
+      // Add the newly created subaccount to subscription
+      console.error(`[Executor] Adding subaccount ${subAccountId} to subscription...`);
+      await driftClient.addUser(subAccountId);
     }
     
     // Switch to target subaccount before deposit
@@ -745,6 +762,7 @@ async function depositToDrift(command) {
       await driftClient.switchActiveUser(subAccountId);
       
       const activeSubId = driftClient.activeSubAccountId;
+      console.error(`[Executor] Active subaccount after switch: ${activeSubId}`);
       if (activeSubId !== subAccountId) {
         throw new Error(`Failed to switch to subaccount ${subAccountId}`);
       }
