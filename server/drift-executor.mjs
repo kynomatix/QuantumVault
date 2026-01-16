@@ -691,53 +691,47 @@ async function depositToDrift(command) {
     console.error(`[Executor] Target subaccount ${subAccountId} exists on-chain: ${targetExists}`);
   }
   
-  // Create DriftClient with proper subaccounts to initialize
-  // IMPORTANT: Always include the intended subAccountIds even if accounts don't exist yet
-  // The SDK can subscribe and then initializeUserAccount for non-existent accounts
+  // Create DriftClient - configuration depends on whether accounts exist
   const wallet = new Wallet(keypair);
-  const subAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
+  const targetSubAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
   
   const defaultSubscription = getMarketsAndOraclesForSubscription('mainnet-beta');
-  
-  // Always use polling for deposits - it's more reliable for one-off operations
   const subscriptionType = 'polling';
   
-  console.error(`[Executor] Creating DriftClient: subscriptionType=${subscriptionType}, subAccountIds=[${subAccountIds.join(', ')}], mainExists=${mainExists}, targetExists=${targetExists}`);
-  
-  const driftClient = new DriftClient({
-    connection,
-    wallet,
-    env: 'mainnet-beta',
-    activeSubAccountId: 0,
-    subAccountIds: subAccountIds, // Always pass intended subAccountIds
-    accountSubscription: { 
-      type: subscriptionType,
-      ...(subscriptionType === 'polling' ? { frequency: 5000 } : {})
-    },
-    perpMarketIndexes: defaultSubscription.perpMarketIndexes || [],
-    spotMarketIndexes: defaultSubscription.spotMarketIndexes || [0],
-    oracleInfos: defaultSubscription.oracleInfos || [],
-  });
-  
   // Track which client we're using (may need to recreate after account init)
-  let activeClient = driftClient;
+  let activeClient = null;
   
   try {
     const BN = (await import('bn.js')).default;
     const amountBN = new BN(Math.round(amountUsdc * 1_000_000));
     
-    // Subscribe first - SDK requires this before any operations
-    console.error('[Executor] Subscribing to DriftClient...');
-    await driftClient.subscribe();
-    console.error('[Executor] DriftClient subscribed');
-    
-    let accountsCreated = false;
-    
-    // Initialize accounts if they don't exist
+    // If accounts don't exist, we need a special initialization flow
     if (!mainExists || !targetExists) {
-      console.error('[Executor] Need to create accounts...');
+      console.error('[Executor] Accounts need to be created. Using initialization flow...');
       
-      // Initialize main subaccount if it doesn't exist
+      // Step 1: Create a DriftClient WITHOUT specifying subAccountIds
+      // This allows subscribe() to work without trying to load non-existent user accounts
+      console.error('[Executor] Creating DriftClient without subAccountIds for initialization...');
+      
+      const initClient = new DriftClient({
+        connection,
+        wallet,
+        env: 'mainnet-beta',
+        // Do NOT specify subAccountIds - let SDK subscribe to program state only
+        accountSubscription: { 
+          type: subscriptionType,
+          ...(subscriptionType === 'polling' ? { frequency: 5000 } : {})
+        },
+        perpMarketIndexes: defaultSubscription.perpMarketIndexes || [],
+        spotMarketIndexes: defaultSubscription.spotMarketIndexes || [0],
+        oracleInfos: defaultSubscription.oracleInfos || [],
+      });
+      
+      console.error('[Executor] Subscribing initClient (no user accounts)...');
+      await initClient.subscribe();
+      console.error('[Executor] initClient subscribed successfully');
+      
+      // Step 2: Initialize accounts that don't exist
       if (!mainExists) {
         console.error('[Executor] Initializing main user account (subaccount 0) with referral...');
         const platformReferrer = await getPlatformReferrerInfo(connection);
@@ -746,30 +740,27 @@ async function depositToDrift(command) {
           referrerStats: platformReferrer.userStats
         };
         console.error(`[Executor] Using referrer: user=${referrerInfo.referrer.toBase58()}`);
-        const initTx = await driftClient.initializeUserAccount(0, 'QuantumVault', referrerInfo);
+        const initTx = await initClient.initializeUserAccount(0, 'QuantumVault', referrerInfo);
         console.error(`[Executor] Main account initialized with referral: ${initTx}`);
         await new Promise(resolve => setTimeout(resolve, 2000));
-        accountsCreated = true;
       }
       
-      // Initialize target subaccount if needed
       if (subAccountId > 0 && !targetExists) {
         console.error(`[Executor] Initializing subaccount ${subAccountId}...`);
-        const initTx = await driftClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
+        const initTx = await initClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
         console.error(`[Executor] Subaccount ${subAccountId} initialized: ${initTx}`);
         await new Promise(resolve => setTimeout(resolve, 2000));
-        accountsCreated = true;
       }
-    }
-    
-    // If accounts were created, we need to recreate the client to properly load them
-    if (accountsCreated) {
-      console.error('[Executor] Accounts were created. Recreating DriftClient to reload accounts...');
+      
+      // Step 3: Unsubscribe the init client
       try {
-        await driftClient.unsubscribe();
+        await initClient.unsubscribe();
       } catch (e) {
-        console.error('[Executor] Unsubscribe warning:', e.message);
+        console.error('[Executor] initClient unsubscribe warning:', e.message);
       }
+      
+      // Step 4: Create the real client with the now-existing accounts
+      console.error(`[Executor] Creating main DriftClient with subAccountIds: [${targetSubAccountIds.join(', ')}]...`);
       
       // Build the list of now-existing subaccounts
       const newSubAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
@@ -795,16 +786,30 @@ async function depositToDrift(command) {
       console.error('[Executor] New DriftClient subscribed successfully');
       
       activeClient = newDriftClient;
-    } else if (subAccountId > 0) {
-      // No accounts were created, but we need to switch to target subaccount
-      console.error(`[Executor] Switching active user to subaccount ${subAccountId}...`);
-      await driftClient.switchActiveUser(subAccountId);
+    } else {
+      // All accounts already exist - create client with proper subAccountIds
+      console.error(`[Executor] All accounts exist. Creating DriftClient with subAccountIds: [${targetSubAccountIds.join(', ')}]...`);
       
-      const activeSubId = driftClient.activeSubAccountId;
-      console.error(`[Executor] Active subaccount after switch: ${activeSubId}`);
-      if (activeSubId !== subAccountId) {
-        throw new Error(`Failed to switch to subaccount ${subAccountId}`);
-      }
+      const driftClient = new DriftClient({
+        connection,
+        wallet,
+        env: 'mainnet-beta',
+        activeSubAccountId: subAccountId,
+        subAccountIds: targetSubAccountIds,
+        accountSubscription: { 
+          type: subscriptionType,
+          ...(subscriptionType === 'polling' ? { frequency: 5000 } : {})
+        },
+        perpMarketIndexes: defaultSubscription.perpMarketIndexes || [],
+        spotMarketIndexes: defaultSubscription.spotMarketIndexes || [0],
+        oracleInfos: defaultSubscription.oracleInfos || [],
+      });
+      
+      console.error('[Executor] Subscribing DriftClient...');
+      await driftClient.subscribe();
+      console.error('[Executor] DriftClient subscribed successfully');
+      
+      activeClient = driftClient;
     }
     
     console.error(`[Executor] Calling SDK deposit to subaccount ${activeClient.activeSubAccountId}...`);
@@ -818,13 +823,10 @@ async function depositToDrift(command) {
     
     return { success: true, signature: txSig };
   } finally {
-    try {
-      await activeClient.unsubscribe();
-    } catch {}
-    // Also clean up original client if we created a new one
-    if (activeClient !== driftClient) {
+    // Clean up the active client
+    if (activeClient) {
       try {
-        await driftClient.unsubscribe();
+        await activeClient.unsubscribe();
       } catch {}
     }
     // SECURITY: Zero the keypair's secret key bytes after all operations are complete
