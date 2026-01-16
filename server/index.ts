@@ -21,6 +21,14 @@ app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", timestamp: Date.now() });
 });
 
+// Early request logging for debugging (before body parsing)
+app.use((req, res, next) => {
+  if (req.path.includes('enable-execution') || req.path.includes('revoke-execution')) {
+    console.log(`[early-log] ${req.method} ${req.path} - Content-Type: ${req.headers['content-type']}`);
+  }
+  next();
+});
+
 app.use(
   express.json({
     verify: (req, _res, buf) => {
@@ -71,12 +79,18 @@ app.use((req, res, next) => {
 (async () => {
   await registerRoutes(httpServer, app);
 
-  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
+    // Log body-parser errors to help debug JSON parsing issues
+    if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+      console.log(`[body-parser error] ${req.method} ${req.path} - ${err.message}`);
+      return res.status(400).json({ error: 'Invalid JSON body', details: err.message });
+    }
+    
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
-
+    
+    console.log(`[express error] ${req.method} ${req.path} - ${status} ${message}`);
     res.status(status).json({ message });
-    throw err;
   });
 
   // importantly only setup vite in development and after
