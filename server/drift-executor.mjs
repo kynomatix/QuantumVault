@@ -3,7 +3,7 @@
 // This script receives trade commands via stdin and executes them via Drift SDK
 
 import { DriftClient, Wallet, PositionDirection, OrderType, MarketType, getMarketsAndOraclesForSubscription, initialize } from '@drift-labs/sdk';
-import { Connection, Keypair } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
 import crypto from 'crypto';
 
