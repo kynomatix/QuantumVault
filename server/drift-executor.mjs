@@ -728,10 +728,11 @@ async function depositToDrift(command) {
         oracleInfos: defaultSubscription.oracleInfos || [],
       });
       
-      // NOTE: We intentionally skip subscribe() here because:
-      // 1. initializeUserAccount() does NOT require subscription
-      // 2. subscribe() would fail with "addAccount" error for non-existent accounts
-      console.error('[Executor] Skipping subscribe - initializing accounts directly...');
+      // With NO subAccountIds specified, subscribe() will work because it won't try
+      // to load non-existent user accounts. Then initializeUserAccount() can be called.
+      console.error('[Executor] Subscribing initClient (no user accounts to track)...');
+      await initClient.subscribe();
+      console.error('[Executor] initClient subscribed successfully - can now create accounts');
       
       // Step 2: Initialize accounts that don't exist
       if (!mainExists) {
@@ -752,6 +753,14 @@ async function depositToDrift(command) {
         const initTx = await initClient.initializeUserAccount(subAccountId, `Bot-${subAccountId}`);
         console.error(`[Executor] Subaccount ${subAccountId} initialized: ${initTx}`);
         await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+      
+      // Step 3: Unsubscribe initClient before creating new client
+      try {
+        await initClient.unsubscribe();
+        console.error('[Executor] initClient unsubscribed');
+      } catch (e) {
+        console.error('[Executor] initClient unsubscribe warning:', e.message);
       }
       
       // Step 4: Create the real client with the now-existing accounts
