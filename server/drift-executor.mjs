@@ -303,7 +303,12 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
   return true;
 }
 
+// Known platform referrer wallet address (kryptolytix owner)
+// Used as fallback when ReferrerName account lookup fails
+const PLATFORM_REFERRER_WALLET = 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41';
+
 // Fetch platform referrer info using raw RPC (no DriftClient needed)
+// Falls back to known wallet address if ReferrerName account not found
 async function fetchPlatformReferrerRaw(connection) {
   try {
     const referrerNamePDA = getReferrerNamePDA(PLATFORM_REFERRAL_CODE);
@@ -311,8 +316,8 @@ async function fetchPlatformReferrerRaw(connection) {
     
     const accountInfo = await connection.getAccountInfo(referrerNamePDA);
     if (!accountInfo) {
-      console.error('[Executor] Referrer account not found, proceeding without referral');
-      return null;
+      console.error('[Executor] ReferrerName account not found, using wallet fallback');
+      return getReferrerFromWalletAddress(connection);
     }
     
     // ReferrerName account layout:
@@ -325,8 +330,8 @@ async function fetchPlatformReferrerRaw(connection) {
     const USER_STATS_OFFSET = 8 + 32 + 32;
     
     if (accountInfo.data.length < USER_STATS_OFFSET + 32) {
-      console.error('[Executor] Referrer account data too short');
-      return null;
+      console.error('[Executor] Referrer account data too short, using wallet fallback');
+      return getReferrerFromWalletAddress(connection);
     }
     
     const user = new PublicKey(accountInfo.data.slice(USER_OFFSET, USER_OFFSET + 32));
@@ -335,7 +340,31 @@ async function fetchPlatformReferrerRaw(connection) {
     console.error(`[Executor] Platform referrer found: user=${user.toBase58()}`);
     return { user, userStats };
   } catch (error) {
-    console.error('[Executor] Error fetching referrer:', error.message);
+    console.error('[Executor] Error fetching referrer by name:', error.message);
+    console.error('[Executor] Attempting wallet address fallback...');
+    return getReferrerFromWalletAddress(connection);
+  }
+}
+
+// Derive referrer PDAs from the known wallet address
+async function getReferrerFromWalletAddress(connection) {
+  try {
+    const referrerWallet = new PublicKey(PLATFORM_REFERRER_WALLET);
+    const user = getUserAccountPDA(referrerWallet, 0);
+    const userStats = getUserStatsPDA(referrerWallet);
+    
+    // Verify the accounts exist on-chain
+    const [userInfo, statsInfo] = await connection.getMultipleAccountsInfo([user, userStats]);
+    
+    if (!userInfo || !statsInfo) {
+      console.error('[Executor] Referrer wallet accounts not found on-chain');
+      return null;
+    }
+    
+    console.error(`[Executor] Platform referrer from wallet fallback: user=${user.toBase58()}`);
+    return { user, userStats };
+  } catch (error) {
+    console.error('[Executor] Wallet fallback failed:', error.message);
     return null;
   }
 }

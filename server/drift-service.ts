@@ -256,6 +256,10 @@ function getUserStatsPDA(authority: PublicKey): PublicKey {
   return userStats;
 }
 
+// Known platform referrer wallet address (kryptolytix owner)
+// Used as fallback when ReferrerName account lookup fails
+const PLATFORM_REFERRER_WALLET = 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41';
+
 // Cached referrer info - fetched once on first use
 let cachedReferrerInfo: { authority: PublicKey; userStats: PublicKey; user: PublicKey } | null = null;
 
@@ -263,67 +267,60 @@ let cachedReferrerInfo: { authority: PublicKey; userStats: PublicKey; user: Publ
  * Fetch the kryptolytix referrer's wallet address from the on-chain ReferrerName account
  * and derive the required PDAs for referral attribution.
  * 
- * MANDATORY: This must succeed for all new account creations to ensure platform
- * referral attribution. Will retry up to 3 times before throwing an error.
+ * Falls back to deriving PDAs from known wallet address if ReferrerName lookup fails.
  */
 async function getPlatformReferrerInfo(): Promise<{ authority: PublicKey; userStats: PublicKey; user: PublicKey }> {
   if (cachedReferrerInfo) {
     return cachedReferrerInfo;
   }
   
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY_MS = 1000;
+  const connection = getConnection();
   
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const connection = getConnection();
-      const referrerNamePDA = getReferrerNamePDA(PLATFORM_REFERRAL_CODE);
-      
-      console.log(`[Drift] Fetching referrer info for code: ${PLATFORM_REFERRAL_CODE} (attempt ${attempt}/${MAX_RETRIES})`);
-      console.log(`[Drift] ReferrerName PDA: ${referrerNamePDA.toBase58()}`);
-      
-      const accountInfo = await connection.getAccountInfo(referrerNamePDA);
-      if (!accountInfo) {
-        throw new Error(`ReferrerName account not found for code: ${PLATFORM_REFERRAL_CODE}`);
-      }
-      
-      // ReferrerName account layout (from Drift IDL):
-      // - 8 bytes: discriminator
-      // - 32 bytes: authority (the referrer's wallet address)
-      // - 32 bytes: user (the referrer's User account for subaccount 0)
-      // - 32 bytes: user_stats (the referrer's UserStats account)
-      // - 32 bytes: name (the referral code as bytes)
+  // First, try to fetch from ReferrerName account
+  try {
+    const referrerNamePDA = getReferrerNamePDA(PLATFORM_REFERRAL_CODE);
+    console.log(`[Drift] Fetching referrer info for code: ${PLATFORM_REFERRAL_CODE}`);
+    
+    const accountInfo = await connection.getAccountInfo(referrerNamePDA);
+    if (accountInfo && accountInfo.data.length >= 8 + 32 + 32 + 32) {
       const AUTHORITY_OFFSET = 8;
       const USER_OFFSET = 8 + 32;
       const USER_STATS_OFFSET = 8 + 32 + 32;
-      
-      if (accountInfo.data.length < USER_STATS_OFFSET + 32) {
-        throw new Error(`ReferrerName account data too short: ${accountInfo.data.length} bytes`);
-      }
       
       const authority = new PublicKey(accountInfo.data.slice(AUTHORITY_OFFSET, AUTHORITY_OFFSET + 32));
       const user = new PublicKey(accountInfo.data.slice(USER_OFFSET, USER_OFFSET + 32));
       const userStats = new PublicKey(accountInfo.data.slice(USER_STATS_OFFSET, USER_STATS_OFFSET + 32));
       
-      console.log(`[Drift] Platform referrer (${PLATFORM_REFERRAL_CODE}) fetched successfully:`);
-      console.log(`[Drift]   Authority: ${authority.toBase58()}`);
-      console.log(`[Drift]   User: ${user.toBase58()}`);
-      console.log(`[Drift]   UserStats: ${userStats.toBase58()}`);
+      console.log(`[Drift] Platform referrer from ReferrerName: authority=${authority.toBase58()}`);
       
       cachedReferrerInfo = { authority, userStats, user };
       return cachedReferrerInfo;
-    } catch (error) {
-      console.error(`[Drift] Failed to fetch referrer info (attempt ${attempt}/${MAX_RETRIES}):`, error);
-      
-      if (attempt < MAX_RETRIES) {
-        console.log(`[Drift] Retrying in ${RETRY_DELAY_MS}ms...`);
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
-      }
     }
+  } catch (error) {
+    console.log(`[Drift] ReferrerName lookup failed, using wallet fallback`);
   }
   
-  // All retries exhausted - this is a critical failure
-  throw new Error(`CRITICAL: Failed to fetch platform referrer info after ${MAX_RETRIES} attempts. Cannot create Drift account without referral attribution.`);
+  // Fallback: derive PDAs from known wallet address
+  console.log(`[Drift] Using wallet address fallback: ${PLATFORM_REFERRER_WALLET}`);
+  
+  const authority = new PublicKey(PLATFORM_REFERRER_WALLET);
+  const user = getUserAccountPDA(authority, 0);
+  const userStats = getUserStatsPDA(authority);
+  
+  // Verify the accounts exist on-chain
+  const [userInfo, statsInfo] = await connection.getMultipleAccountsInfo([user, userStats]);
+  
+  if (!userInfo || !statsInfo) {
+    throw new Error(`CRITICAL: Platform referrer accounts not found on-chain for wallet ${PLATFORM_REFERRER_WALLET}`);
+  }
+  
+  console.log(`[Drift] Platform referrer from wallet fallback:`);
+  console.log(`[Drift]   Authority: ${authority.toBase58()}`);
+  console.log(`[Drift]   User: ${user.toBase58()}`);
+  console.log(`[Drift]   UserStats: ${userStats.toBase58()}`);
+  
+  cachedReferrerInfo = { authority, userStats, user };
+  return cachedReferrerInfo;
 }
 
 function getSolanaRpcUrl(): string {

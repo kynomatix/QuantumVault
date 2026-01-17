@@ -25,6 +25,7 @@ Preferred communication style: Simple, everyday language.
 -   **Trade Execution**: Uses `drift-executor.mjs` subprocess for trade execution (pure ESM environment where SDK loads correctly).
 -   **SDK Version**: `@drift-labs/sdk@2.146.0-beta.7` is the current stable version compatible with the platform.
 -   **Referrer Account Handling**: When placing orders, the executor fetches the user's referrer from their on-chain UserStats account and passes it to the SDK. This ensures Drift protocol receives the expected referrer accounts, fixing "ReferrerNotFound" errors on non-zero subaccounts.
+-   **Referrer Attribution Fix (Jan 2026)**: The "kryptolytix" ReferrerName account doesn't exist on-chain, so both `drift-executor.mjs` and `drift-service.ts` now fall back to deriving referrer PDAs directly from the known wallet address (`BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41`). This ensures all new Drift accounts are attributed to kryptolytix. Note: Existing accounts without referrer cannot be retroactively fixed (Drift referrals are immutable).
 
 ### Key Features
 -   **Automated Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol, including logic for converting TradingView `contracts` to a percentage of `bot.maxPositionSize`.
