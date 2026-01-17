@@ -518,6 +518,15 @@ export default function Landing() {
                         </div>
                       </div>
                     </div>
+                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-green-500/30 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <TrendingUp className="w-5 h-5 text-green-400 mt-0.5" />
+                        <div>
+                          <h4 className="font-semibold text-sm mb-1">PnL & Trade Analytics</h4>
+                          <p className="text-xs text-muted-foreground">Track net PnL, win rate, best trades, and performance metrics in real-time.</p>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </motion.div>
 
