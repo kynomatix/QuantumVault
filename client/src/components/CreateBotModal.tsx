@@ -1,6 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
+import { useWallet } from '@solana/wallet-adapter-react';
+import { useConnection } from '@solana/wallet-adapter-react';
+import { Transaction } from '@solana/web3.js';
+import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -47,7 +51,8 @@ import {
   ShieldCheck,
   ShieldAlert,
   HelpCircle,
-  Shield
+  Shield,
+  Fuel
 } from 'lucide-react';
 
 interface MarketInfo {
@@ -169,8 +174,11 @@ interface CreateBotModalProps {
 
 export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, defaultLeverage = 3 }: CreateBotModalProps) {
   const { toast } = useToast();
+  const wallet = useWallet();
+  const { connection } = useConnection();
   const { executionEnabled, executionLoading, enableExecution } = useExecutionAuthorization();
   const [isCreating, setIsCreating] = useState(false);
+  const [isDepositingSol, setIsDepositingSol] = useState(false);
   const [step, setStep] = useState<'create' | 'success' | 'enable_execution'>('create');
   const [createdBot, setCreatedBot] = useState<TradingBot | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
@@ -282,6 +290,62 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       leverage: defaultLeverage,
       investmentAmount: '',
     });
+  };
+
+  const handleSolDeposit = async () => {
+    if (!solRequirement || solRequirement.canCreate) return;
+    
+    if (!wallet.publicKey || !wallet.signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    const amount = Math.max(solRequirement.deficit + 0.01, 0.05);
+    
+    setIsDepositingSol(true);
+    try {
+      const response = await fetch('/api/agent/deposit-sol', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'SOL deposit failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await response.json();
+      
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      const signedTx = await wallet.signTransaction(transaction);
+      
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      await confirmTransactionWithFallback(connection, {
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ title: `Deposited ${amount.toFixed(3)} SOL successfully` });
+      
+      // Refresh balance to check if we can now create bot
+      setAgentBalance(null);
+      setAgentSolBalance(null);
+      setSolRequirement(null);
+      
+    } catch (error: any) {
+      console.error('SOL deposit failed:', error);
+      toast({ 
+        title: 'SOL Deposit Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsDepositingSol(false);
+    }
   };
 
   const createBot = async () => {
@@ -732,26 +796,45 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       </div>
 
       <DialogFooter>
-        <Button variant="outline" onClick={handleClose} disabled={isCreating}>
+        <Button variant="outline" onClick={handleClose} disabled={isCreating || isDepositingSol}>
           Cancel
         </Button>
-        <Button 
-          onClick={createBot} 
-          disabled={isCreating || !newBot.name || (solRequirement !== null && !solRequirement.canCreate)}
-          className="bg-gradient-to-r from-primary to-accent"
-          data-testid="button-confirm-create-bot"
-        >
-          {isCreating ? (
-            <>
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Creating...
-            </>
-          ) : solRequirement && !solRequirement.canCreate ? (
-            'Deposit SOL First'
-          ) : (
-            'Create Bot'
-          )}
-        </Button>
+        {solRequirement && !solRequirement.canCreate ? (
+          <Button 
+            onClick={handleSolDeposit} 
+            disabled={isDepositingSol}
+            className="bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600"
+            data-testid="button-deposit-sol-for-bot"
+          >
+            {isDepositingSol ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Depositing...
+              </>
+            ) : (
+              <>
+                <Fuel className="w-4 h-4 mr-2" />
+                Deposit {(solRequirement.deficit + 0.01).toFixed(3)} SOL
+              </>
+            )}
+          </Button>
+        ) : (
+          <Button 
+            onClick={createBot} 
+            disabled={isCreating || !newBot.name}
+            className="bg-gradient-to-r from-primary to-accent"
+            data-testid="button-confirm-create-bot"
+          >
+            {isCreating ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Creating...
+              </>
+            ) : (
+              'Create Bot'
+            )}
+          </Button>
+        )}
       </DialogFooter>
     </>
   );
