@@ -83,9 +83,8 @@ export default function Landing() {
   // Vault doors open based on scroll position through the section
   const vaultLeftX = useTransform(vaultScrollProgress, [0.2, 0.5], ["0%", "-100%"]);
   const vaultRightX = useTransform(vaultScrollProgress, [0.2, 0.5], ["0%", "100%"]);
-  const vaultLogoScale = useTransform(vaultScrollProgress, [0.2, 0.5], [0.3, 1]);
+  const vaultLogoScale = useTransform(vaultScrollProgress, [0.2, 0.5], [0.5, 1]);
   const vaultLogoOpacity = useTransform(vaultScrollProgress, [0.2, 0.45], [0, 1]);
-  const vaultLogoRotateY = useTransform(vaultScrollProgress, [0.2, 0.5], [-90, 0]);
   const vaultTitleOpacity = useTransform(vaultScrollProgress, [0.35, 0.5], [0, 1]);
   const vaultTitleY = useTransform(vaultScrollProgress, [0.35, 0.5], [20, 0]);
   const vaultPillOpacity = useTransform(vaultScrollProgress, [0.4, 0.55], [0, 1]);
@@ -346,9 +345,7 @@ export default function Landing() {
             <motion.div 
               style={{ 
                 opacity: vaultLogoOpacity, 
-                scale: vaultLogoScale, 
-                rotateY: vaultLogoRotateY,
-                perspective: 1000 
+                scale: vaultLogoScale
               }}
               className="relative inline-block mb-6"
             >
