@@ -175,6 +175,13 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   const [createdBot, setCreatedBot] = useState<TradingBot | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [agentBalance, setAgentBalance] = useState<string | null>(null);
+  const [agentSolBalance, setAgentSolBalance] = useState<number | null>(null);
+  const [solRequirement, setSolRequirement] = useState<{
+    required: number;
+    current: number;
+    deficit: number;
+    canCreate: boolean;
+  } | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [isLoadingWebhookUrl, setIsLoadingWebhookUrl] = useState(false);
@@ -243,6 +250,10 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       if (res.ok) {
         const data = await res.json();
         setAgentBalance(data.balance?.toString() || '0');
+        setAgentSolBalance(data.solBalance ?? null);
+        if (data.botCreationSolRequirement) {
+          setSolRequirement(data.botCreationSolRequirement);
+        }
       }
     } catch (error) {
       console.error('Failed to fetch balance:', error);
@@ -261,6 +272,8 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     setCreatedBot(null);
     setCopiedField(null);
     setAgentBalance(null);
+    setAgentSolBalance(null);
+    setSolRequirement(null);
     setUserWebhookUrl(null);
     setInfoOpen(false);
     setNewBot({
@@ -425,6 +438,27 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
           Set up a new TradingView signal bot for automated trading
         </DialogDescription>
       </DialogHeader>
+      
+      {/* SOL Balance Warning */}
+      {solRequirement && !solRequirement.canCreate && (
+        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mt-2" data-testid="warning-sol-insufficient">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-yellow-400" data-testid="text-sol-warning-title">
+                Insufficient SOL for Bot Setup
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Creating a bot requires {solRequirement.required.toFixed(3)} SOL for subaccount rent and transaction fees. 
+                Your agent wallet has {solRequirement.current.toFixed(4)} SOL.
+              </p>
+              <p className="text-xs text-yellow-400/80" data-testid="text-sol-deficit">
+                Please deposit at least <span className="font-semibold">{solRequirement.deficit.toFixed(3)} SOL</span> to your agent wallet before creating a bot.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       
       <div className="grid gap-4 py-4">
         <div className="space-y-2">
@@ -703,7 +737,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
         </Button>
         <Button 
           onClick={createBot} 
-          disabled={isCreating || !newBot.name}
+          disabled={isCreating || !newBot.name || (solRequirement !== null && !solRequirement.canCreate)}
           className="bg-gradient-to-r from-primary to-accent"
           data-testid="button-confirm-create-bot"
         >
@@ -712,6 +746,8 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
               <Loader2 className="w-4 h-4 mr-2 animate-spin" />
               Creating...
             </>
+          ) : solRequirement && !solRequirement.canCreate ? (
+            'Deposit SOL First'
           ) : (
             'Create Bot'
           )}

@@ -1919,20 +1919,42 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const [balance, solBalance, bots] = await Promise.all([
+      const [balance, solBalance, bots, driftAccountExists] = await Promise.all([
         getAgentUsdcBalance(wallet.agentPublicKey),
         getAgentSolBalance(wallet.agentPublicKey),
         storage.getTradingBots(req.walletAddress!),
+        subaccountExists(wallet.agentPublicKey, 0),
       ]);
       
       // Existing user = has at least one bot (they've completed onboarding before)
       const isExistingUser = bots.length > 0;
+      
+      // SOL requirements for bot creation:
+      // - 0.035 SOL per subaccount rent
+      // - 0.005 SOL for trading gas
+      // If no Drift account exists: need 2x rent (subaccount 0 + bot subaccount) = 0.075 SOL
+      // If Drift account exists: need 1x rent (just bot subaccount) = 0.04 SOL
+      const SUBACCOUNT_RENT = 0.035;
+      const TRADING_GAS = 0.005;
+      const requiredSolForBot = driftAccountExists 
+        ? SUBACCOUNT_RENT + TRADING_GAS  // 0.04 SOL
+        : (SUBACCOUNT_RENT * 2) + TRADING_GAS; // 0.075 SOL
+      
+      const solDeficit = Math.max(0, requiredSolForBot - solBalance);
+      const canCreateBot = solBalance >= requiredSolForBot;
       
       res.json({
         agentPublicKey: wallet.agentPublicKey,
         balance,
         solBalance,
         isExistingUser,
+        driftAccountExists,
+        botCreationSolRequirement: {
+          required: requiredSolForBot,
+          current: solBalance,
+          deficit: solDeficit,
+          canCreate: canCreateBot,
+        },
       });
     } catch (error) {
       console.error("Get agent balance error:", error);
@@ -3162,6 +3184,28 @@ export async function registerRoutes(
 
       // Ensure wallet exists before creating bot
       const wallet = await storage.getOrCreateWallet(req.walletAddress!);
+      
+      // Server-side SOL balance check for bot creation
+      if (wallet.agentPublicKey) {
+        const [solBalance, driftAccountExists] = await Promise.all([
+          getAgentSolBalance(wallet.agentPublicKey),
+          subaccountExists(wallet.agentPublicKey, 0),
+        ]);
+        
+        // 0.035 SOL per subaccount rent + 0.005 SOL for trading gas
+        const SUBACCOUNT_RENT = 0.035;
+        const TRADING_GAS = 0.005;
+        const requiredSol = driftAccountExists 
+          ? SUBACCOUNT_RENT + TRADING_GAS  // 0.04 SOL
+          : (SUBACCOUNT_RENT * 2) + TRADING_GAS; // 0.075 SOL (need to create subaccount 0 + bot subaccount)
+        
+        if (solBalance < requiredSol) {
+          const deficit = requiredSol - solBalance;
+          return res.status(400).json({ 
+            error: `Insufficient SOL for bot creation. Need ${requiredSol.toFixed(3)} SOL, have ${solBalance.toFixed(4)} SOL. Please deposit at least ${deficit.toFixed(3)} SOL to your agent wallet.` 
+          });
+        }
+      }
 
       const webhookSecret = generateWebhookSecret();
       
