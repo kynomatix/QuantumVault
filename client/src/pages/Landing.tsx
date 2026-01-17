@@ -418,8 +418,8 @@ export default function Landing() {
                 />
                 <FeatureCard
                   icon={<Shield className="w-6 h-6" />}
-                  title="Non-Custodial"
-                  description="Your funds stay in your wallet. We never hold your private keys. Trading via delegated authority only."
+                  title="Dedicated Trading Wallet"
+                  description="A secure agent wallet handles automated trades. Your main wallet stays safe - you only sign deposits and withdrawals."
                 />
                 <FeatureCard
                   icon={<Zap className="w-6 h-6" />}
@@ -478,7 +478,7 @@ export default function Landing() {
               <div className="grid md:grid-cols-3 gap-8">
                 {[
                   { step: '01', title: 'Connect Wallet', description: 'Connect your Phantom wallet securely. No signup, no email, just pure crypto.' },
-                  { step: '02', title: 'Deposit Collateral', description: 'Deposit SOL or USDC to your Drift subaccount. Full control remains with you.' },
+                  { step: '02', title: 'Fund Your Agent', description: 'Transfer USDC to your agent wallet for trading, plus SOL for gas fees.' },
                   { step: '03', title: 'Deploy Bots', description: 'Create signal bots connected to TradingView alerts. Start automating 24/7.' },
                 ].map((item, i) => (
                   <motion.div key={i} variants={fadeInUp} className="text-center group">
