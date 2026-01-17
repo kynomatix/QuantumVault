@@ -523,7 +523,7 @@ export default function Landing() {
                         <TrendingUp className="w-5 h-5 text-green-400 mt-0.5" />
                         <div>
                           <h4 className="font-semibold text-sm mb-1">PnL & Trade Analytics</h4>
-                          <p className="text-xs text-muted-foreground">Track net PnL, win rate, best trades, and performance metrics in real-time.</p>
+                          <p className="text-xs text-muted-foreground">Track net PnL, win rate, trade history, and equity curve in real-time.</p>
                         </div>
                       </div>
                     </div>
