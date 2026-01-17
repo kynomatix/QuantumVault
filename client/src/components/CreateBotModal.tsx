@@ -176,7 +176,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   const { toast } = useToast();
   const wallet = useWallet();
   const { connection } = useConnection();
-  const { executionEnabled, executionLoading, enableExecution } = useExecutionAuthorization();
+  const { executionEnabled, executionLoading, enableExecution, refetchStatus } = useExecutionAuthorization();
   const [isCreating, setIsCreating] = useState(false);
   const [isDepositingSol, setIsDepositingSol] = useState(false);
   const [step, setStep] = useState<'create' | 'success' | 'enable_execution'>('create');
@@ -985,8 +985,10 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
             <Button
               variant="secondary"
               className="flex-1"
-              onClick={() => {
-                if (!executionEnabled) {
+              onClick={async () => {
+                // Always refetch to get latest status (user may have enabled in welcome popup)
+                const status = await refetchStatus();
+                if (status && !status.executionEnabled) {
                   setStep('enable_execution');
                 } else {
                   handleClose();
