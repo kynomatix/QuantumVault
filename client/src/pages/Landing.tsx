@@ -430,17 +430,17 @@ export default function Landing() {
                   <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-primary/30 transition-colors">
                     <Shield className="w-5 h-5 text-primary mb-3" />
                     <h4 className="font-semibold text-sm mb-1">Dedicated Trading Wallet</h4>
-                    <p className="text-xs text-muted-foreground">Agent wallet handles trades. Your main wallet stays safe.</p>
+                    <p className="text-xs text-muted-foreground">A secure agent wallet handles automated trades. Your main wallet stays safe - you only sign deposits and withdrawals.</p>
                   </div>
                   <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-primary/30 transition-colors">
                     <Lock className="w-5 h-5 text-primary mb-3" />
-                    <h4 className="font-semibold text-sm mb-1">AES-256 Encryption</h4>
-                    <p className="text-xs text-muted-foreground">Institutional-grade key encryption with buffer zeroization.</p>
+                    <h4 className="font-semibold text-sm mb-1">Institutional-Grade Security</h4>
+                    <p className="text-xs text-muted-foreground">AES-256-GCM encryption, session-based key derivation, and cryptographic buffer zeroization. Your keys are never exposed.</p>
                   </div>
                   <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-primary/30 transition-colors">
                     <KeyRound className="w-5 h-5 text-primary mb-3" />
                     <h4 className="font-semibold text-sm mb-1">Seed Phrase Backup</h4>
-                    <p className="text-xs text-muted-foreground">Export your recovery phrase. Full portability.</p>
+                    <p className="text-xs text-muted-foreground">Export your agent wallet's recovery phrase anytime. Your keys, your backup, full portability.</p>
                   </div>
                 </div>
               </motion.div>
