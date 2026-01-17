@@ -1097,7 +1097,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent className={step === 'success' ? "sm:max-w-[600px]" : "sm:max-w-[450px]"}>
+      <DialogContent className={`max-h-[85vh] overflow-y-auto ${step === 'success' ? "sm:max-w-[600px]" : "sm:max-w-[450px]"}`}>
         {step === 'create' && renderCreateStep()}
         {step === 'success' && renderSuccessStep()}
         {step === 'enable_execution' && renderEnableExecutionStep()}
