@@ -12,7 +12,12 @@ import {
   Lock,
   Globe,
   ChevronDown,
-  ShieldCheck
+  ShieldCheck,
+  Store,
+  Layers,
+  KeyRound,
+  PiggyBank,
+  Percent
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useWallet } from '@/hooks/useWallet';
@@ -445,6 +450,31 @@ export default function Landing() {
                   icon={<Globe className="w-6 h-6" />}
                   title="All Markets"
                   description="Auto-discovery of all Drift markets. New listings available immediately without updates."
+                />
+                <FeatureCard
+                  icon={<Store className="w-6 h-6" />}
+                  title="Bot Marketplace"
+                  description="Publish successful bots and subscribe to others' trading signals. Community-driven strategies."
+                />
+                <FeatureCard
+                  icon={<Layers className="w-6 h-6" />}
+                  title="Multi-Bot Isolation"
+                  description="Each bot runs on its own Drift subaccount. Losses are contained, strategies stay separated."
+                />
+                <FeatureCard
+                  icon={<KeyRound className="w-6 h-6" />}
+                  title="Seed Phrase Backup"
+                  description="Export your agent wallet's recovery phrase anytime. Your keys, your backup, full portability."
+                />
+                <FeatureCard
+                  icon={<PiggyBank className="w-6 h-6" />}
+                  title="Profit Auto-Withdraw"
+                  description="Automatically sweep profits back to your wallet when equity exceeds your set threshold."
+                />
+                <FeatureCard
+                  icon={<Percent className="w-6 h-6" />}
+                  title="USDC Yield"
+                  description="Earn lending interest on idle deposits through Drift. Yield on profits while you wait for the next signal."
                 />
               </div>
             </motion.div>
