@@ -392,89 +392,181 @@ export default function Landing() {
           <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] bg-accent/10 rounded-full blur-[120px]" />
           
           <div className="max-w-7xl mx-auto relative z-10">
+            {/* Section Header */}
             <motion.div 
-              initial="hidden"
-              whileInView="visible"
-              viewport={{ once: true, amount: 0.3 }}
-              variants={staggerContainer}
+              initial={{ opacity: 0, y: 30 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: false, amount: 0.3 }}
+              transition={{ duration: 0.6 }}
+              className="text-center mb-16"
             >
-              <motion.div 
-                variants={fadeInUp}
-                className="text-center mb-16"
+              <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary mb-6">
+                <Sparkles className="w-4 h-4" />
+                Platform Features
+              </span>
+              <h2 className="text-4xl sm:text-5xl font-display font-bold mb-4">Why QuantumVault?</h2>
+              <p className="text-muted-foreground max-w-2xl mx-auto text-lg">
+                Built for traders who demand performance, security, and transparency.
+              </p>
+            </motion.div>
+
+            {/* Bento Grid Layout - Grouped by Category */}
+            <div className="space-y-8">
+              {/* Security & Control */}
+              <motion.div
+                initial={{ opacity: 0, y: 40 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: false, amount: 0.2 }}
+                transition={{ duration: 0.5 }}
+                className="rounded-3xl bg-gradient-to-br from-card/80 to-card/40 border border-border/50 p-6 sm:p-8"
               >
-                <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary mb-6">
-                  <Sparkles className="w-4 h-4" />
-                  Platform Features
-                </span>
-                <h2 className="text-4xl sm:text-5xl font-display font-bold mb-4">Why QuantumVault?</h2>
-                <p className="text-muted-foreground max-w-2xl mx-auto text-lg">
-                  Built for traders who demand performance, security, and transparency.
-                </p>
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center">
+                    <ShieldCheck className="w-5 h-5 text-primary" />
+                  </div>
+                  <h3 className="font-display font-semibold text-xl">Security & Control</h3>
+                </div>
+                <div className="grid sm:grid-cols-3 gap-4">
+                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-primary/30 transition-colors">
+                    <Shield className="w-5 h-5 text-primary mb-3" />
+                    <h4 className="font-semibold text-sm mb-1">Dedicated Trading Wallet</h4>
+                    <p className="text-xs text-muted-foreground">Agent wallet handles trades. Your main wallet stays safe.</p>
+                  </div>
+                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-primary/30 transition-colors">
+                    <Lock className="w-5 h-5 text-primary mb-3" />
+                    <h4 className="font-semibold text-sm mb-1">AES-256 Encryption</h4>
+                    <p className="text-xs text-muted-foreground">Institutional-grade key encryption with buffer zeroization.</p>
+                  </div>
+                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-primary/30 transition-colors">
+                    <KeyRound className="w-5 h-5 text-primary mb-3" />
+                    <h4 className="font-semibold text-sm mb-1">Seed Phrase Backup</h4>
+                    <p className="text-xs text-muted-foreground">Export your recovery phrase. Full portability.</p>
+                  </div>
+                </div>
               </motion.div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                <FeatureCard
-                  icon={<ShieldCheck className="w-6 h-6" />}
-                  title="Institutional-Grade Security"
-                  description="AES-256-GCM encryption, session-based key derivation, and cryptographic buffer zeroization. Your keys are never exposed."
-                />
-                <FeatureCard
-                  icon={<Shield className="w-6 h-6" />}
-                  title="Dedicated Trading Wallet"
-                  description="A secure agent wallet handles automated trades. Your main wallet stays safe - you only sign deposits and withdrawals."
-                />
-                <FeatureCard
-                  icon={<Zap className="w-6 h-6" />}
-                  title="Lightning Fast"
-                  description="Built on Solana and Drift Protocol for sub-second execution and minimal slippage."
-                />
-                <FeatureCard
-                  icon={<Activity className="w-6 h-6" />}
-                  title="TradingView Signals"
-                  description="Connect your TradingView alerts directly. Webhook ingestion with idempotent execution."
-                />
-                <FeatureCard
-                  icon={<TrendingUp className="w-6 h-6" />}
-                  title="Advanced Strategies"
-                  description="Signal bots with profit reinvestment, auto-withdraw thresholds, and dynamic position scaling."
-                />
-                <FeatureCard
-                  icon={<Lock className="w-6 h-6" />}
-                  title="Risk Controls"
-                  description="Per-bot sizing limits, margin-based scaling, and emergency stop functionality to protect your capital."
-                />
-                <FeatureCard
-                  icon={<Globe className="w-6 h-6" />}
-                  title="All Markets"
-                  description="Auto-discovery of all Drift markets. New listings available immediately without updates."
-                />
-                <FeatureCard
-                  icon={<Store className="w-6 h-6" />}
-                  title="Bot Marketplace"
-                  description="Publish successful bots and subscribe to others' trading signals. Community-driven strategies."
-                />
-                <FeatureCard
-                  icon={<Layers className="w-6 h-6" />}
-                  title="Multi-Bot Isolation"
-                  description="Each bot runs on its own Drift subaccount. Losses are contained, strategies stay separated."
-                />
-                <FeatureCard
-                  icon={<KeyRound className="w-6 h-6" />}
-                  title="Seed Phrase Backup"
-                  description="Export your agent wallet's recovery phrase anytime. Your keys, your backup, full portability."
-                />
-                <FeatureCard
-                  icon={<PiggyBank className="w-6 h-6" />}
-                  title="Profit Auto-Withdraw"
-                  description="Automatically sweep profits back to your wallet when equity exceeds your set threshold."
-                />
-                <FeatureCard
-                  icon={<Percent className="w-6 h-6" />}
-                  title="USDC Yield"
-                  description="Earn lending interest on idle deposits through Drift. Yield on profits while you wait for the next signal."
-                />
+              {/* Automation & Execution */}
+              <motion.div
+                initial={{ opacity: 0, y: 40 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: false, amount: 0.2 }}
+                transition={{ duration: 0.5 }}
+                className="rounded-3xl bg-gradient-to-br from-card/80 to-card/40 border border-border/50 p-6 sm:p-8"
+              >
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent/20 to-primary/20 flex items-center justify-center">
+                    <Zap className="w-5 h-5 text-accent" />
+                  </div>
+                  <h3 className="font-display font-semibold text-xl">Automation & Execution</h3>
+                </div>
+                <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
+                    <Activity className="w-5 h-5 text-accent mb-3" />
+                    <h4 className="font-semibold text-sm mb-1">TradingView Signals</h4>
+                    <p className="text-xs text-muted-foreground">Direct webhook integration with idempotent execution.</p>
+                  </div>
+                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
+                    <TrendingUp className="w-5 h-5 text-accent mb-3" />
+                    <h4 className="font-semibold text-sm mb-1">Advanced Strategies</h4>
+                    <p className="text-xs text-muted-foreground">Profit reinvestment and dynamic position scaling.</p>
+                  </div>
+                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
+                    <Zap className="w-5 h-5 text-accent mb-3" />
+                    <h4 className="font-semibold text-sm mb-1">Lightning Fast</h4>
+                    <p className="text-xs text-muted-foreground">Sub-second execution on Solana and Drift.</p>
+                  </div>
+                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
+                    <Lock className="w-5 h-5 text-accent mb-3" />
+                    <h4 className="font-semibold text-sm mb-1">Risk Controls</h4>
+                    <p className="text-xs text-muted-foreground">Per-bot limits and emergency stop functionality.</p>
+                  </div>
+                </div>
+              </motion.div>
+
+              {/* Two-column layout for smaller groups */}
+              <div className="grid lg:grid-cols-2 gap-8">
+                {/* Portfolio & Yield */}
+                <motion.div
+                  initial={{ opacity: 0, y: 40 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: false, amount: 0.2 }}
+                  transition={{ duration: 0.5 }}
+                  className="rounded-3xl bg-gradient-to-br from-card/80 to-card/40 border border-border/50 p-6 sm:p-8"
+                >
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-green-500/20 to-emerald-500/20 flex items-center justify-center">
+                      <PiggyBank className="w-5 h-5 text-green-400" />
+                    </div>
+                    <h3 className="font-display font-semibold text-xl">Portfolio & Yield</h3>
+                  </div>
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-green-500/30 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <PiggyBank className="w-5 h-5 text-green-400 mt-0.5" />
+                        <div>
+                          <h4 className="font-semibold text-sm mb-1">Profit Auto-Withdraw</h4>
+                          <p className="text-xs text-muted-foreground">Automatically sweep profits when equity exceeds your threshold.</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-green-500/30 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <Percent className="w-5 h-5 text-green-400 mt-0.5" />
+                        <div>
+                          <h4 className="font-semibold text-sm mb-1">USDC Yield</h4>
+                          <p className="text-xs text-muted-foreground">Earn lending interest on idle deposits while waiting for signals.</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+
+                {/* Scale & Ecosystem */}
+                <motion.div
+                  initial={{ opacity: 0, y: 40 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: false, amount: 0.2 }}
+                  transition={{ duration: 0.5 }}
+                  className="rounded-3xl bg-gradient-to-br from-card/80 to-card/40 border border-border/50 p-6 sm:p-8"
+                >
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500/20 to-cyan-500/20 flex items-center justify-center">
+                      <Globe className="w-5 h-5 text-blue-400" />
+                    </div>
+                    <h3 className="font-display font-semibold text-xl">Scale & Ecosystem</h3>
+                  </div>
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-blue-500/30 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <Globe className="w-5 h-5 text-blue-400 mt-0.5" />
+                        <div>
+                          <h4 className="font-semibold text-sm mb-1">All Markets</h4>
+                          <p className="text-xs text-muted-foreground">Auto-discovery of all Drift markets. New listings available instantly.</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-blue-500/30 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <Layers className="w-5 h-5 text-blue-400 mt-0.5" />
+                        <div>
+                          <h4 className="font-semibold text-sm mb-1">Multi-Bot Isolation</h4>
+                          <p className="text-xs text-muted-foreground">Each bot runs on its own subaccount. Losses contained.</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-blue-500/30 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <Store className="w-5 h-5 text-blue-400 mt-0.5" />
+                        <div>
+                          <h4 className="font-semibold text-sm mb-1">Bot Marketplace</h4>
+                          <p className="text-xs text-muted-foreground">Publish bots and subscribe to community signals.</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
               </div>
-            </motion.div>
+            </div>
           </div>
         </section>
 
@@ -482,42 +574,45 @@ export default function Landing() {
           <div className="absolute inset-0 bg-gradient-to-b from-background via-card/20 to-background" />
           
           <div className="max-w-5xl mx-auto relative z-10">
-            <motion.div 
-              initial="hidden"
-              whileInView="visible"
-              viewport={{ once: true, amount: 0.3 }}
-              variants={staggerContainer}
+            <motion.div
+              initial={{ opacity: 0, y: 30 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: false, amount: 0.3 }}
+              transition={{ duration: 0.6 }}
+              className="text-center mb-16"
             >
-              <motion.div 
-                variants={fadeInUp}
-                className="text-center mb-16"
-              >
-                <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-accent/10 border border-accent/20 text-sm text-accent mb-6">
-                  <ArrowRight className="w-4 h-4" />
-                  Getting Started
-                </span>
-                <h2 className="text-4xl sm:text-5xl font-display font-bold mb-4">How It Works</h2>
-                <p className="text-muted-foreground max-w-2xl mx-auto text-lg">
-                  Get started in three simple steps
-                </p>
-              </motion.div>
-
-              <div className="grid md:grid-cols-3 gap-8">
-                {[
-                  { step: '01', title: 'Connect Wallet', description: 'Connect your Phantom wallet securely. No signup, no email, just pure crypto.' },
-                  { step: '02', title: 'Fund Your Agent', description: 'Transfer USDC to your agent wallet for trading, plus SOL for gas fees.' },
-                  { step: '03', title: 'Deploy Bots', description: 'Create signal bots connected to TradingView alerts. Start automating 24/7.' },
-                ].map((item, i) => (
-                  <motion.div key={i} variants={fadeInUp} className="text-center group">
-                    <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg shadow-primary/25 group-hover:scale-110 transition-transform duration-300">
-                      <span className="text-2xl font-display font-bold text-white">{item.step}</span>
-                    </div>
-                    <h3 className="font-display font-semibold text-xl mb-3">{item.title}</h3>
-                    <p className="text-muted-foreground leading-relaxed">{item.description}</p>
-                  </motion.div>
-                ))}
-              </div>
+              <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-accent/10 border border-accent/20 text-sm text-accent mb-6">
+                <ArrowRight className="w-4 h-4" />
+                Getting Started
+              </span>
+              <h2 className="text-4xl sm:text-5xl font-display font-bold mb-4">How It Works</h2>
+              <p className="text-muted-foreground max-w-2xl mx-auto text-lg">
+                Get started in three simple steps
+              </p>
             </motion.div>
+
+            <div className="grid md:grid-cols-3 gap-8">
+              {[
+                { step: '01', title: 'Connect Wallet', description: 'Connect your Phantom wallet securely. No signup, no email, just pure crypto.' },
+                { step: '02', title: 'Fund Your Agent', description: 'Transfer USDC to your agent wallet for trading, plus SOL for gas fees.' },
+                { step: '03', title: 'Deploy Bots', description: 'Create signal bots connected to TradingView alerts. Start automating 24/7.' },
+              ].map((item, i) => (
+                <motion.div 
+                  key={i} 
+                  initial={{ opacity: 0, y: 30 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: false, amount: 0.3 }}
+                  transition={{ duration: 0.5, delay: i * 0.1 }}
+                  className="text-center group"
+                >
+                  <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg shadow-primary/25 group-hover:scale-110 transition-transform duration-300">
+                    <span className="text-2xl font-display font-bold text-white">{item.step}</span>
+                  </div>
+                  <h3 className="font-display font-semibold text-xl mb-3">{item.title}</h3>
+                  <p className="text-muted-foreground leading-relaxed">{item.description}</p>
+                </motion.div>
+              ))}
+            </div>
           </div>
         </section>
 
