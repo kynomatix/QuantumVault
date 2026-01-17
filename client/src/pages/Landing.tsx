@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { motion, useScroll, useTransform, useMotionTemplate } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { 
@@ -7,11 +7,12 @@ import {
   Zap, 
   ArrowRight,
   Activity,
-  BarChart3,
+  TrendingUp,
   Sparkles,
   Lock,
   Globe,
-  ChevronDown
+  ChevronDown,
+  ShieldCheck
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useWallet } from '@/hooks/useWallet';
@@ -56,8 +57,36 @@ export default function Landing() {
   const { connected, connecting } = useWallet();
   const { setVisible } = useWalletModal();
   const heroRef = useRef<HTMLDivElement>(null);
+  const vaultSectionRef = useRef<HTMLDivElement>(null);
+  const [isMounted, setIsMounted] = useState(false);
+  
+  // Track when component is mounted to safely use scroll-based animations
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
   
   const { scrollY } = useScroll();
+  
+  // Scroll-based vault door animation (opens when scrolling down, closes when scrolling up)
+  // Only enable target-based scroll after mount to avoid hydration errors
+  const { scrollYProgress: vaultScrollProgress } = useScroll(
+    isMounted && vaultSectionRef.current 
+      ? { target: vaultSectionRef, offset: ["start end", "end start"] }
+      : undefined
+  );
+  
+  // Vault doors open based on scroll position through the section
+  const vaultLeftX = useTransform(vaultScrollProgress, [0.2, 0.5], ["0%", "-100%"]);
+  const vaultRightX = useTransform(vaultScrollProgress, [0.2, 0.5], ["0%", "100%"]);
+  const vaultLogoScale = useTransform(vaultScrollProgress, [0.2, 0.5], [0.3, 1]);
+  const vaultLogoOpacity = useTransform(vaultScrollProgress, [0.2, 0.45], [0, 1]);
+  const vaultLogoRotateY = useTransform(vaultScrollProgress, [0.2, 0.5], [-90, 0]);
+  const vaultTitleOpacity = useTransform(vaultScrollProgress, [0.35, 0.5], [0, 1]);
+  const vaultTitleY = useTransform(vaultScrollProgress, [0.35, 0.5], [20, 0]);
+  const vaultPillOpacity = useTransform(vaultScrollProgress, [0.4, 0.55], [0, 1]);
+  const vaultPillY = useTransform(vaultScrollProgress, [0.4, 0.55], [20, 0]);
+  const vaultGlowOpacity = useTransform(vaultScrollProgress, [0.2, 0.5], [0, 1]);
+  const vaultGlowScale = useTransform(vaultScrollProgress, [0.2, 0.5], [0.5, 1]);
   
   // Background parallax - continuous zoom and movement
   const heroY = useTransform(scrollY, [0, 800], [0, 300]);
@@ -238,16 +267,16 @@ export default function Landing() {
                 className="mt-12 sm:mt-16 grid grid-cols-3 gap-4 sm:gap-8 max-w-lg mx-auto"
               >
                 <div className="text-center">
-                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-volume">$48M+</p>
-                  <p className="text-xs sm:text-sm text-white/60 mt-1">Trading Volume</p>
+                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-markets">50+</p>
+                  <p className="text-xs sm:text-sm text-white/60 mt-1">Perp Markets</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-bots">127</p>
-                  <p className="text-xs sm:text-sm text-white/60 mt-1">Active Bots</p>
+                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-leverage">50x</p>
+                  <p className="text-xs sm:text-sm text-white/60 mt-1">Max Leverage</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-users">4.2K</p>
-                  <p className="text-xs sm:text-sm text-white/60 mt-1">Traders</p>
+                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-speed">&lt;1s</p>
+                  <p className="text-xs sm:text-sm text-white/60 mt-1">Execution Time</p>
                 </div>
               </motion.div>
             </motion.div>
@@ -272,40 +301,31 @@ export default function Landing() {
           </motion.div>
         </section>
 
-        {/* Brand transition section - Vault reveal */}
-        <section className="relative py-24 px-6 bg-black overflow-hidden">
+        {/* Brand transition section - Vault reveal (scroll-based reversible animation) */}
+        <section ref={vaultSectionRef} className="relative py-24 px-6 bg-black overflow-hidden">
           <div className="absolute inset-0 backdrop-blur-xl bg-black/80" />
           <div className="absolute inset-0 bg-gradient-to-b from-transparent via-black/50 to-background" />
           
-          {/* Vault door left */}
+          {/* Vault door left - scroll-based */}
           <motion.div
-            initial={{ x: 0 }}
-            whileInView={{ x: "-100%" }}
-            viewport={{ once: true, amount: 0.7 }}
-            transition={{ duration: 4, ease: [0.16, 1, 0.3, 1] }}
+            style={{ x: vaultLeftX }}
             className="absolute left-0 top-0 w-1/2 h-full bg-gradient-to-r from-black via-gray-900 to-gray-800 z-20 border-r border-white/5"
           >
             <div className="absolute right-4 top-1/2 -translate-y-1/2 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full" />
           </motion.div>
           
-          {/* Vault door right */}
+          {/* Vault door right - scroll-based */}
           <motion.div
-            initial={{ x: 0 }}
-            whileInView={{ x: "100%" }}
-            viewport={{ once: true, amount: 0.7 }}
-            transition={{ duration: 4, ease: [0.16, 1, 0.3, 1] }}
+            style={{ x: vaultRightX }}
             className="absolute right-0 top-0 w-1/2 h-full bg-gradient-to-l from-black via-gray-900 to-gray-800 z-20 border-l border-white/5"
           >
             <div className="absolute left-4 top-1/2 -translate-y-1/2 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full" />
           </motion.div>
           
           <div className="relative z-10 max-w-4xl mx-auto text-center">
-            {/* Glow ring effect */}
+            {/* Glow ring effect - scroll-based */}
             <motion.div
-              initial={{ opacity: 0, scale: 0.5 }}
-              whileInView={{ opacity: 1, scale: 1 }}
-              viewport={{ once: true, amount: 0.7 }}
-              transition={{ duration: 1, delay: 0.3, ease: "easeOut" }}
+              style={{ opacity: vaultGlowOpacity, scale: vaultGlowScale }}
               className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 sm:w-64 sm:h-64"
             >
               <div className="absolute inset-0 rounded-full bg-gradient-to-r from-primary/30 to-accent/30 blur-3xl animate-pulse" />
@@ -317,14 +337,15 @@ export default function Landing() {
               />
             </motion.div>
             
-            {/* Logo with reveal */}
+            {/* Logo with scroll-based reveal */}
             <motion.div 
-              initial={{ opacity: 0, scale: 0.3, rotateY: -90 }}
-              whileInView={{ opacity: 1, scale: 1, rotateY: 0 }}
-              viewport={{ once: true, amount: 0.7 }}
-              transition={{ duration: 0.8, delay: 0.5, ease: [0.16, 1, 0.3, 1] }}
+              style={{ 
+                opacity: vaultLogoOpacity, 
+                scale: vaultLogoScale, 
+                rotateY: vaultLogoRotateY,
+                perspective: 1000 
+              }}
               className="relative inline-block mb-6"
-              style={{ perspective: 1000 }}
             >
               {/* Glow effect behind logo with matching rounded corners */}
               <motion.div 
@@ -339,28 +360,22 @@ export default function Landing() {
               />
             </motion.div>
             
-            {/* Title with typing reveal effect */}
+            {/* Title with scroll-based reveal */}
             <motion.h2 
-              initial={{ opacity: 0, y: 20, filter: 'blur(10px)' }}
-              whileInView={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-              viewport={{ once: true, amount: 0.7 }}
-              transition={{ duration: 0.6, delay: 0.7, ease: "easeOut" }}
+              style={{ opacity: vaultTitleOpacity, y: vaultTitleY }}
               className="font-display font-bold text-2xl sm:text-3xl text-white mb-4"
             >
               QuantumVault
             </motion.h2>
             
-            {/* Pill with slide up */}
+            {/* Pill with scroll-based reveal */}
             <motion.span 
-              initial={{ opacity: 0, y: 20, scale: 0.9 }}
-              whileInView={{ opacity: 1, y: 0, scale: 1 }}
-              viewport={{ once: true, amount: 0.7 }}
-              transition={{ duration: 0.6, delay: 0.9, ease: [0.16, 1, 0.3, 1] }}
+              style={{ opacity: vaultPillOpacity, y: vaultPillY }}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-sm text-white"
             >
               <motion.div
                 animate={{ rotate: [0, 360] }}
-                transition={{ duration: 3, delay: 1.2, repeat: Infinity, ease: "linear" }}
+                transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
               >
                 <Zap className="w-4 h-4 text-primary" />
               </motion.div>
@@ -381,7 +396,10 @@ export default function Landing() {
               viewport={{ once: true, amount: 0.3 }}
               variants={staggerContainer}
             >
-              <motion.div variants={fadeInUp} className="text-center mb-16">
+              <motion.div 
+                variants={fadeInUp}
+                className="text-center mb-16"
+              >
                 <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary mb-6">
                   <Sparkles className="w-4 h-4" />
                   Platform Features
@@ -393,6 +411,11 @@ export default function Landing() {
               </motion.div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <FeatureCard
+                  icon={<ShieldCheck className="w-6 h-6" />}
+                  title="Institutional-Grade Security"
+                  description="AES-256-GCM encryption, session-based key derivation, and cryptographic buffer zeroization. Your keys are never exposed."
+                />
                 <FeatureCard
                   icon={<Shield className="w-6 h-6" />}
                   title="Non-Custodial"
@@ -409,14 +432,14 @@ export default function Landing() {
                   description="Connect your TradingView alerts directly. Webhook ingestion with idempotent execution."
                 />
                 <FeatureCard
-                  icon={<BarChart3 className="w-6 h-6" />}
-                  title="Grid Strategies"
-                  description="Deploy grid bots with automatic rebalancing. Supports all Drift perpetual markets."
+                  icon={<TrendingUp className="w-6 h-6" />}
+                  title="Advanced Strategies"
+                  description="Signal bots with profit reinvestment, auto-withdraw thresholds, and dynamic position scaling."
                 />
                 <FeatureCard
                   icon={<Lock className="w-6 h-6" />}
                   title="Risk Controls"
-                  description="Per-bot sizing limits, slippage guards, and circuit breakers to protect your capital."
+                  description="Per-bot sizing limits, margin-based scaling, and emergency stop functionality to protect your capital."
                 />
                 <FeatureCard
                   icon={<Globe className="w-6 h-6" />}
@@ -438,7 +461,10 @@ export default function Landing() {
               viewport={{ once: true, amount: 0.3 }}
               variants={staggerContainer}
             >
-              <motion.div variants={fadeInUp} className="text-center mb-16">
+              <motion.div 
+                variants={fadeInUp}
+                className="text-center mb-16"
+              >
                 <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-accent/10 border border-accent/20 text-sm text-accent mb-6">
                   <ArrowRight className="w-4 h-4" />
                   Getting Started
@@ -453,7 +479,7 @@ export default function Landing() {
                 {[
                   { step: '01', title: 'Connect Wallet', description: 'Connect your Phantom wallet securely. No signup, no email, just pure crypto.' },
                   { step: '02', title: 'Deposit Collateral', description: 'Deposit SOL or USDC to your Drift subaccount. Full control remains with you.' },
-                  { step: '03', title: 'Deploy Bots', description: 'Subscribe to signal bots or create grid strategies. Start earning 24/7.' },
+                  { step: '03', title: 'Deploy Bots', description: 'Create signal bots connected to TradingView alerts. Start automating 24/7.' },
                 ].map((item, i) => (
                   <motion.div key={i} variants={fadeInUp} className="text-center group">
                     <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg shadow-primary/25 group-hover:scale-110 transition-transform duration-300">
