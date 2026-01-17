@@ -1728,6 +1728,17 @@ async function initializeDriftAccountsIfNeeded(
   }, 'confirmed');
   
   if (confirmation.value.err) {
+    // Check for error 6214 = "Account Already Initialized"
+    // This can happen if RPC returned stale data saying account doesn't exist when it actually does
+    // In this case, we should proceed since the account exists (which is what we wanted)
+    const errStr = JSON.stringify(confirmation.value.err);
+    if (errStr.includes('6214') || errStr.includes('AccountAlreadyInitialized')) {
+      console.log('[Drift] Account already initialized (6214) - this is OK, proceeding with existing accounts');
+      console.log('[Drift] Note: RPC may have returned stale data. Accounts exist on-chain, continuing...');
+      // Don't throw - the accounts exist, which is what we need
+      return true;
+    }
+    
     console.error('[Drift] Account initialization failed:', confirmation.value.err);
     throw new Error(`Drift account initialization failed: ${JSON.stringify(confirmation.value.err)}`);
   }
