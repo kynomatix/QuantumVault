@@ -291,12 +291,14 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
   }, 'confirmed');
 
   if (confirmation.value.err) {
-    // Check for error 6214 = "Account Already Initialized"
-    // This can happen if RPC returned stale data saying account doesn't exist when it actually does
-    // In this case, we should proceed since the account exists (which is what we wanted)
+    // Check for errors that indicate account already exists (RPC returned stale data)
+    // 6214 = "Account Already Initialized" (Drift custom error)
+    // 3007 = "AccountOwnedByWrongProgram" (Anchor error - account exists and is owned by Drift, not System)
+    // Both can happen if RPC returned stale data saying account doesn't exist when it actually does
     const errStr = JSON.stringify(confirmation.value.err);
-    if (errStr.includes('6214') || errStr.includes('AccountAlreadyInitialized')) {
-      console.error('[Executor] Account already initialized (6214) - this is OK, proceeding with existing accounts');
+    if (errStr.includes('6214') || errStr.includes('AccountAlreadyInitialized') ||
+        errStr.includes('3007') || errStr.includes('AccountOwnedByWrongProgram')) {
+      console.error('[Executor] Account already exists (6214/3007) - this is OK, proceeding with existing accounts');
       console.error('[Executor] Note: RPC may have returned stale data. Accounts exist on-chain, continuing...');
       // Don't throw - the accounts exist, which is what we need
       return true;
