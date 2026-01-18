@@ -216,10 +216,27 @@ function createInitializeUserInstruction(userPubkey, userAccount, userStats, sub
   });
 }
 
+// Minimum SOL required to create a Drift subaccount (~0.035 SOL rent + tx fees)
+const MIN_SOL_FOR_SUBACCOUNT = 0.04;
+
 // Initialize Drift accounts using RAW SOLANA TRANSACTIONS (bypasses DriftClient entirely)
 // This is the fix for the SDK subscribe() bug with empty subAccountIds
 async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
   const userPubkey = keypair.publicKey;
+  
+  // Check SOL balance before attempting to create accounts
+  const solBalance = await connection.getBalance(userPubkey);
+  const solBalanceInSol = solBalance / 1e9;
+  console.error(`[Executor] Agent wallet SOL balance: ${solBalanceInSol.toFixed(4)} SOL`);
+  
+  if (solBalanceInSol < MIN_SOL_FOR_SUBACCOUNT) {
+    throw new Error(
+      `Insufficient SOL for Drift account creation. ` +
+      `Required: ~${MIN_SOL_FOR_SUBACCOUNT} SOL for rent, Available: ${solBalanceInSol.toFixed(4)} SOL. ` +
+      `Please deposit more SOL to your agent wallet.`
+    );
+  }
+  
   const userStats = getUserStatsPDA(userPubkey);
   const mainAccountPDA = getUserAccountPDA(userPubkey, 0);
   const targetAccountPDA = subAccountId > 0 ? getUserAccountPDA(userPubkey, subAccountId) : mainAccountPDA;
