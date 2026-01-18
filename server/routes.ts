@@ -4304,6 +4304,22 @@ export async function registerRoutes(
               strategyPositionSize,
             }).catch(err => console.error('[Subscriber Routing] Error routing close to subscribers:', err));
             
+            // SETTLE PNL: Convert realized PnL to usable USDC balance for profit reinvest
+            // This must happen after close so profits can be used as margin for the next trade
+            if (bot.profitReinvest) {
+              try {
+                console.log(`[Webhook] Settling PnL for subaccount ${subAccountId} (profit reinvest enabled)`);
+                const settleResult = await settleAllPnl(wallet.agentPublicKey!, subAccountId);
+                if (settleResult.success) {
+                  console.log(`[Webhook] PnL settled for ${settleResult.settledMarkets?.length || 0} market(s)`);
+                } else {
+                  console.warn(`[Webhook] PnL settlement failed (non-blocking): ${settleResult.error}`);
+                }
+              } catch (settleErr: any) {
+                console.warn(`[Webhook] PnL settlement error (non-blocking): ${settleErr.message}`);
+              }
+            }
+            
             // AUTO-WITHDRAW: Check if equity exceeds threshold and withdraw excess profits
             let autoWithdrawInfo = null;
             const autoWithdrawThreshold = parseFloat(bot.autoWithdrawThreshold || "0");
@@ -4571,6 +4587,21 @@ export async function registerRoutes(
             );
           
             console.log(`[Webhook] Position closed successfully. Now proceeding to open ${side.toUpperCase()} position.`);
+            
+            // SETTLE PNL after flip close to make profits available for the new position
+            if (bot.profitReinvest) {
+              try {
+                console.log(`[Webhook] Settling PnL for subaccount ${subAccountId} after flip close (profit reinvest enabled)`);
+                const settleResult = await settleAllPnl(wallet.agentPublicKey!, subAccountId);
+                if (settleResult.success) {
+                  console.log(`[Webhook] PnL settled for ${settleResult.settledMarkets?.length || 0} market(s)`);
+                } else {
+                  console.warn(`[Webhook] PnL settlement failed (non-blocking): ${settleResult.error}`);
+                }
+              } catch (settleErr: any) {
+                console.warn(`[Webhook] PnL settlement error (non-blocking): ${settleErr.message}`);
+              }
+            }
           
             // Update stats for close trade (including volume for FUEL tracking)
             const flipCloseVolume = closeSize * closeFillPrice;
@@ -5303,6 +5334,21 @@ export async function registerRoutes(
               market: bot.market,
               pnl: closeTradePnl,
             }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
+            
+            // SETTLE PNL: Convert realized PnL to usable USDC balance for profit reinvest
+            if (bot.profitReinvest) {
+              try {
+                console.log(`[User Webhook] Settling PnL for subaccount ${subAccountId} (profit reinvest enabled)`);
+                const settleResult = await settleAllPnl(wallet.agentPublicKey, subAccountId);
+                if (settleResult.success) {
+                  console.log(`[User Webhook] PnL settled for ${settleResult.settledMarkets?.length || 0} market(s)`);
+                } else {
+                  console.warn(`[User Webhook] PnL settlement failed (non-blocking): ${settleResult.error}`);
+                }
+              } catch (settleErr: any) {
+                console.warn(`[User Webhook] PnL settlement error (non-blocking): ${settleErr.message}`);
+              }
+            }
             
             // AUTO-WITHDRAW: Check if equity exceeds threshold and withdraw excess profits
             let autoWithdrawInfo = null;

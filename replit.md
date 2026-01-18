@@ -34,7 +34,7 @@ Preferred communication style: Simple, everyday language.
 -   **Robust Position Management**: Includes close signal detection, position flip detection, and precise close order execution with dust cleanup.
 -   **Bot Lifecycle Management**: Bots can be paused (closes open positions) and deleted (includes safety checks, auto-sweep, and subaccount closure).
 -   **Dynamic Order Scaling**: Trades are automatically scaled down based on available margin and scaled up with equity recovery.
--   **Profit Management**: Supports profit reinvestment and automatic withdrawal of excess profits.
+-   **Profit Management**: Supports profit reinvestment (with automatic PnL settlement after position closes) and automatic withdrawal of excess profits.
 -   **Dynamic USDC Deposit APY**: Fetches real-time USDC lending APY from Drift Data API.
 -   **Reset Drift Account Feature**: A one-click solution to fully reset a user's Drift account, preserving the main Drift account (subaccount 0).
 -   **Single Page Architecture**: All functionality under `/app` with tab-based navigation.
