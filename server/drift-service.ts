@@ -1651,16 +1651,17 @@ export async function getPerpPositionsSDK(
         const marketIndex = pos.marketIndex;
         const marketName = PERP_MARKET_NAMES[marketIndex] || `PERP-${marketIndex}`;
         
-        const baseAssetAmount = pos.baseAssetAmount.toNumber() / BASE_PRECISION.toNumber();
-        const quoteAssetAmount = Math.abs(pos.quoteAssetAmount.toNumber()) / QUOTE_PRECISION.toNumber();
-        const quoteEntryAmount = Math.abs(pos.quoteEntryAmount?.toNumber() || 0) / QUOTE_PRECISION.toNumber();
+        // Use toString() + parseFloat() to preserve precision for large blockchain integers
+        const baseAssetAmount = parseFloat(pos.baseAssetAmount.toString()) / BASE_PRECISION.toNumber();
+        const quoteAssetAmount = Math.abs(parseFloat(pos.quoteAssetAmount.toString())) / QUOTE_PRECISION.toNumber();
+        const quoteEntryAmount = Math.abs(parseFloat(pos.quoteEntryAmount?.toString() || '0')) / QUOTE_PRECISION.toNumber();
         
         const side: 'LONG' | 'SHORT' = baseAssetAmount > 0 ? 'LONG' : 'SHORT';
         const markPrice = prices[marketIndex] || 0;
         
-        // Calculate entry price
+        // Calculate entry price: use quoteEntryAmount (not quoteAssetAmount) for accurate entry price
         const entryPrice = Math.abs(baseAssetAmount) > 0 
-          ? Math.abs(quoteAssetAmount / baseAssetAmount) 
+          ? Math.abs(quoteEntryAmount / baseAssetAmount) 
           : 0;
         
         const sizeUsd = Math.abs(baseAssetAmount) * markPrice;
@@ -3012,13 +3013,15 @@ export async function getAccountHealthMetrics(
           const marketIndex = pos.marketIndex;
           const marketName = Object.entries(PERP_MARKET_INDICES).find(([_, idx]) => idx === marketIndex)?.[0] || `PERP-${marketIndex}`;
           
-          const baseSize = pos.baseAssetAmount.toNumber() / BASE_PRECISION.toNumber();
-          const quoteValue = Math.abs(pos.quoteAssetAmount.toNumber()) / QUOTE_PRECISION.toNumber();
+          // Use toString() + parseFloat() to preserve precision for large blockchain integers
+          const baseSize = parseFloat(pos.baseAssetAmount.toString()) / BASE_PRECISION.toNumber();
+          const quoteValue = Math.abs(parseFloat(pos.quoteAssetAmount.toString())) / QUOTE_PRECISION.toNumber();
+          const quoteEntryValue = Math.abs(parseFloat(pos.quoteEntryAmount?.toString() || '0')) / QUOTE_PRECISION.toNumber();
           
-          // Calculate entry price from quote/base
+          // Calculate entry price using quoteEntryAmount for accurate average entry
           let entryPrice = 0;
           if (baseSize !== 0) {
-            entryPrice = Math.abs(quoteValue / baseSize);
+            entryPrice = Math.abs(quoteEntryValue / baseSize);
           }
           
           // Get unrealized PnL for this position
