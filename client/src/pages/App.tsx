@@ -138,7 +138,6 @@ export default function AppPage() {
   const [notifyTradeFailed, setNotifyTradeFailed] = useState(true);
   const [notifyPositionClosed, setNotifyPositionClosed] = useState(true);
   const [telegramConnected, setTelegramConnected] = useState(false);
-  const [telegramVerifyCode, setTelegramVerifyCode] = useState<string | null>(null);
   const [expandedSection, setExpandedSection] = useState<'account' | 'trading' | 'notifications' | 'security' | 'danger' | null>(null);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
@@ -2601,125 +2600,116 @@ export default function AppPage() {
                                         ? 'You will receive trade alerts via Telegram.'
                                         : 'Connect Telegram to receive instant trade alerts when your bots execute trades.'}
                                     </p>
+                                    {telegramConnected && (
+                                      <div className="mt-3">
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          onClick={async () => {
+                                            try {
+                                              const res = await fetch('/api/telegram/disconnect', { 
+                                                method: 'POST',
+                                                credentials: 'include' 
+                                              });
+                                              if (res.ok) {
+                                                setTelegramConnected(false);
+                                                toast({
+                                                  title: "Telegram Disconnected",
+                                                  description: "You will no longer receive alerts via Telegram.",
+                                                });
+                                              }
+                                            } catch (error) {
+                                              toast({
+                                                title: "Error",
+                                                description: "Failed to disconnect Telegram",
+                                                variant: "destructive",
+                                              });
+                                            }
+                                          }}
+                                          data-testid="button-disconnect-telegram"
+                                        >
+                                          Disconnect Telegram
+                                        </Button>
+                                      </div>
+                                    )}
                                     {!telegramConnected && (
                                       <div className="mt-3 space-y-3">
-                                        <div className="flex gap-2 flex-wrap">
-                                          <Button
-                                            variant="outline"
-                                            onClick={async () => {
-                                              console.log('[Telegram] Connect button clicked');
-                                              try {
-                                                console.log('[Telegram] Calling /api/telegram/connect...');
-                                                const res = await fetch('/api/telegram/connect', { 
-                                                  method: 'POST',
-                                                  credentials: 'include' 
-                                                });
-                                                console.log('[Telegram] Response status:', res.status);
-                                                const data = await res.json();
-                                                console.log('[Telegram] Response data:', data);
-                                                
-                                                if (res.ok && data.verificationLink) {
-                                                  window.open(data.verificationLink, '_blank');
-                                                  if (data.verificationCode) {
-                                                    setTelegramVerifyCode(`/start ${data.verificationCode}`);
-                                                    toast({
-                                                      title: "Telegram opened",
-                                                      description: "Copy the command below and paste it in the bot chat.",
-                                                    });
-                                                  } else {
-                                                    toast({
-                                                      title: "Step 1: Open Telegram",
-                                                      description: "Click /start in the bot, then come back and click 'Verify Connection'.",
-                                                    });
-                                                  }
-                                                } else {
-                                                  toast({
-                                                    title: "Setup Not Available",
-                                                    description: data.message || "Telegram notifications are not yet configured.",
-                                                    variant: "destructive",
-                                                  });
-                                                }
-                                              } catch (error) {
+                                        <Button
+                                          variant="default"
+                                          onClick={async () => {
+                                            try {
+                                              const res = await fetch('/api/telegram/connect', { 
+                                                method: 'POST',
+                                                credentials: 'include' 
+                                              });
+                                              const data = await res.json();
+                                              
+                                              if (res.ok && data.deepLink) {
+                                                window.open(data.deepLink, '_blank');
                                                 toast({
-                                                  title: "Error",
-                                                  description: "Failed to start Telegram connection",
+                                                  title: "Telegram Opened",
+                                                  description: "Click 'Start' in the bot to connect. Return here when done.",
+                                                });
+                                              } else {
+                                                toast({
+                                                  title: "Setup Not Available",
+                                                  description: data.error || "Telegram notifications are not yet configured.",
                                                   variant: "destructive",
                                                 });
                                               }
-                                            }}
-                                            data-testid="button-connect-telegram"
-                                          >
-                                            <ExternalLink className="w-4 h-4 mr-2" />
-                                            1. Connect Telegram
-                                          </Button>
-                                          <Button
-                                            variant="default"
-                                            onClick={async () => {
-                                              console.log('[Telegram] Verify button clicked');
-                                              try {
-                                                const res = await fetch('/api/telegram/verify', { 
-                                                  method: 'POST',
-                                                  credentials: 'include' 
-                                                });
-                                                const data = await res.json();
-                                                console.log('[Telegram] Verify response:', data);
-                                                
-                                                if (data.success && data.verified) {
-                                                  setTelegramConnected(true);
-                                                  toast({
-                                                    title: "Telegram Connected!",
-                                                    description: "You'll now receive trade alerts via Telegram.",
-                                                  });
-                                                } else {
-                                                  toast({
-                                                    title: "Not Verified Yet",
-                                                    description: data.message || "Please complete the Telegram bot setup first.",
-                                                    variant: "destructive",
-                                                  });
-                                                }
-                                              } catch (error) {
+                                            } catch (error) {
+                                              toast({
+                                                title: "Error",
+                                                description: "Failed to generate Telegram link",
+                                                variant: "destructive",
+                                              });
+                                            }
+                                          }}
+                                          data-testid="button-connect-telegram"
+                                        >
+                                          <ExternalLink className="w-4 h-4 mr-2" />
+                                          Connect Telegram
+                                        </Button>
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          onClick={async () => {
+                                            try {
+                                              const res = await fetch('/api/telegram/status', { 
+                                                method: 'GET',
+                                                credentials: 'include' 
+                                              });
+                                              const data = await res.json();
+                                              
+                                              if (data.connected) {
+                                                setTelegramConnected(true);
                                                 toast({
-                                                  title: "Error",
-                                                  description: "Failed to verify Telegram connection",
+                                                  title: "Telegram Connected!",
+                                                  description: "You'll now receive trade alerts via Telegram.",
+                                                });
+                                              } else {
+                                                toast({
+                                                  title: "Not Connected Yet",
+                                                  description: "Click 'Connect Telegram' and press Start in the bot.",
                                                   variant: "destructive",
                                                 });
                                               }
-                                            }}
-                                            data-testid="button-verify-telegram"
-                                          >
-                                            <Check className="w-4 h-4 mr-2" />
-                                            2. Verify Connection
-                                          </Button>
-                                        </div>
-                                        {telegramVerifyCode && (
-                                          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
-                                            <p className="text-xs text-amber-400 mb-2 font-medium">
-                                              Paste this command in @DialectLabsBot:
-                                            </p>
-                                            <div className="flex items-center gap-2">
-                                              <code className="flex-1 bg-background/50 px-3 py-2 rounded text-xs font-mono break-all select-all">
-                                                {telegramVerifyCode}
-                                              </code>
-                                              <Button
-                                                size="sm"
-                                                variant="outline"
-                                                onClick={() => {
-                                                  navigator.clipboard.writeText(telegramVerifyCode);
-                                                  toast({
-                                                    title: "Copied!",
-                                                    description: "Paste this in the Dialect bot chat.",
-                                                  });
-                                                }}
-                                                data-testid="button-copy-telegram-code"
-                                              >
-                                                <Copy className="w-4 h-4" />
-                                              </Button>
-                                            </div>
-                                          </div>
-                                        )}
+                                            } catch (error) {
+                                              toast({
+                                                title: "Error",
+                                                description: "Failed to check connection status",
+                                                variant: "destructive",
+                                              });
+                                            }
+                                          }}
+                                          data-testid="button-check-telegram-status"
+                                        >
+                                          <Check className="w-4 h-4 mr-2" />
+                                          Check Connection
+                                        </Button>
                                         <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 text-xs text-blue-300">
-                                          <p className="font-medium mb-1">Already use Dialect with Drift?</p>
-                                          <p>If your Telegram is linked to another wallet, message @DialectLabsBot with <code className="bg-background/50 px-1 rounded">/unlink</code> first, then reconnect here.</p>
+                                          <p className="font-medium mb-1">Quick Setup</p>
+                                          <p>Click "Connect Telegram", then press "Start" in our bot. You can link multiple wallets to the same Telegram account.</p>
                                         </div>
                                         <p className="text-xs text-muted-foreground">
                                           Once connected, you'll receive:

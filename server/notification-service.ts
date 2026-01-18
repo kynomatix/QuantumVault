@@ -175,7 +175,6 @@ export async function getNotificationSettings(walletAddress: string) {
         notifyPositionClosed: wallets.notifyPositionClosed,
         telegramConnected: wallets.telegramConnected,
         telegramChatId: wallets.telegramChatId,
-        dialectAddress: wallets.dialectAddress,
       })
       .from(wallets)
       .where(eq(wallets.address, walletAddress))
