@@ -37,17 +37,16 @@ const MAX_ATTEMPTS_CRITICAL = 10;
 
 export function isRateLimitError(error: string | Error | unknown): boolean {
   const errorStr = error instanceof Error ? error.message : String(error);
+  const lowerError = errorStr.toLowerCase();
   return (
-    errorStr.includes('-32429') ||
-    errorStr.includes('rate limited') ||
-    errorStr.includes('Rate limited') ||
-    errorStr.includes('429') ||
-    errorStr.includes('Too Many Requests') ||
-    errorStr.includes('timeout') ||
-    errorStr.includes('Timeout') ||
-    errorStr.includes('Please wait') ||
-    errorStr.includes('credit') ||
-    errorStr.includes('Credit')
+    lowerError.includes('-32429') ||
+    lowerError.includes('rate limit') ||
+    lowerError.includes('429') ||
+    lowerError.includes('too many requests') ||
+    lowerError.includes('timeout') ||
+    lowerError.includes('timed out') ||
+    lowerError.includes('please wait') ||
+    lowerError.includes('credit')
   );
 }
 
