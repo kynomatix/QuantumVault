@@ -4784,9 +4784,15 @@ export async function registerRoutes(
             await storage.updateWebhookLog(log.id, { errorMessage: `Profit reinvest: no margin available`, processed: true });
             return res.status(400).json({ error: `Cannot trade: profit reinvest enabled but no margin available (freeCollateral=$${freeCollateral.toFixed(2)})` });
           }
-          tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
+          // Calculate requested trade size, then cap to available margin
+          const requestedAmount = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
+          tradeAmountUsd = Math.min(requestedAmount, maxTradeableValue); // CRITICAL: Never exceed available margin
           console.log(`[Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
-          console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${maxTradeableValue.toFixed(2)} available margin = $${tradeAmountUsd.toFixed(2)} trade`);
+          if (requestedAmount > maxTradeableValue) {
+            console.log(`[Webhook] Requested $${requestedAmount.toFixed(2)} exceeds available, capped to $${tradeAmountUsd.toFixed(2)}`);
+          } else {
+            console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${maxTradeableValue.toFixed(2)} available margin = $${tradeAmountUsd.toFixed(2)} trade`);
+          }
         } else {
           // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
           tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
@@ -5629,9 +5635,15 @@ export async function registerRoutes(
             await storage.updateWebhookLog(log.id, { errorMessage: `Profit reinvest: no margin available`, processed: true });
             return res.status(400).json({ error: `Cannot trade: profit reinvest enabled but no margin available (freeCollateral=$${freeCollateral.toFixed(2)})` });
           }
-          tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
+          // Calculate requested trade size, then cap to available margin
+          const requestedAmount = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
+          tradeAmountUsd = Math.min(requestedAmount, maxTradeableValue); // CRITICAL: Never exceed available margin
           console.log(`[User Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
-          console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${maxTradeableValue.toFixed(2)} available margin = $${tradeAmountUsd.toFixed(2)} trade`);
+          if (requestedAmount > maxTradeableValue) {
+            console.log(`[User Webhook] Requested $${requestedAmount.toFixed(2)} exceeds available, capped to $${tradeAmountUsd.toFixed(2)}`);
+          } else {
+            console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${maxTradeableValue.toFixed(2)} available margin = $${tradeAmountUsd.toFixed(2)} trade`);
+          }
         } else {
           // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
           tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
