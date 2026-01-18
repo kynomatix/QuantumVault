@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import bs58 from 'bs58';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, type HealthMetrics, type PublishedBot } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, useUnsubscribeFromBot, type HealthMetrics, type PublishedBot } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
@@ -194,9 +194,10 @@ export default function AppPage() {
     search: marketplaceSearch || undefined,
     sortBy: marketplaceSortBy,
   });
-  const { data: mySubscriptions } = useMyMarketplaceSubscriptions();
+  const { data: mySubscriptions, refetch: refetchMySubscriptions } = useMyMarketplaceSubscriptions();
   const { data: myPublishedBots, refetch: refetchMyPublishedBots } = useMyPublishedBots();
   const unpublishBotMutation = useUnpublishBot();
+  const unsubscribeMutation = useUnsubscribeFromBot();
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [driftBalance, setDriftBalance] = useState<number | null>(null);
@@ -2231,11 +2232,26 @@ export default function AppPage() {
                             {isSubscribed ? (
                               <Button 
                                 variant="outline"
-                                className="flex-1"
-                                disabled
+                                className="flex-1 hover:bg-destructive/10 hover:text-destructive hover:border-destructive/50"
+                                onClick={async () => {
+                                  if (confirm('Are you sure you want to unsubscribe? This will stop copying trades from this bot. Any funds in your copy bot will remain in your account.')) {
+                                    try {
+                                      await unsubscribeMutation.mutateAsync(bot.id);
+                                      toast({ title: 'Unsubscribed successfully' });
+                                      refetchMySubscriptions();
+                                    } catch (error: any) {
+                                      toast({ title: 'Failed to unsubscribe', description: error.message, variant: 'destructive' });
+                                    }
+                                  }
+                                }}
+                                disabled={unsubscribeMutation.isPending}
                                 data-testid={`button-subscribed-${bot.id}`}
                               >
-                                <Check className="w-4 h-4 mr-2" />
+                                {unsubscribeMutation.isPending ? (
+                                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                ) : (
+                                  <Check className="w-4 h-4 mr-2" />
+                                )}
                                 Subscribed
                               </Button>
                             ) : (
