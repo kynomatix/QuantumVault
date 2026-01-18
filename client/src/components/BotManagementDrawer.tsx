@@ -215,6 +215,7 @@ export function BotManagementDrawer({
   const [performanceLoading, setPerformanceLoading] = useState(false);
   const [performanceTotalPnl, setPerformanceTotalPnl] = useState<number>(0);
   const [performanceTradeCount, setPerformanceTradeCount] = useState<number>(0);
+  const [manualTradeLoading, setManualTradeLoading] = useState<'long' | 'short' | null>(null);
 
   // Fetch USDC deposit APY from Drift
   const fetchUsdcApy = async () => {
@@ -654,6 +655,46 @@ export function BotManagementDrawer({
     }
   };
 
+  const handleManualTrade = async (side: 'long' | 'short') => {
+    if (!localBot) return;
+    setManualTradeLoading(side);
+    try {
+      const res = await fetch(`/api/trading-bots/${localBot.id}/manual-trade?wallet=${walletAddress}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ side }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to execute trade');
+      }
+
+      toast({
+        title: `${side.toUpperCase()} opened`,
+        description: `${data.size?.toFixed(4)} ${localBot.market} @ $${data.price?.toFixed(2)}`,
+      });
+      
+      // Refresh position and balance data
+      setTimeout(() => {
+        fetchBotPosition();
+        fetchBotBalance();
+      }, 1500);
+      
+      onBotUpdated();
+    } catch (error) {
+      toast({
+        title: 'Trade failed',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setManualTradeLoading(null);
+    }
+  };
+
   const handleSaveSettings = async () => {
     if (!localBot) return;
     
@@ -994,9 +1035,50 @@ export function BotManagementDrawer({
             
             {/* Current Position Section */}
             <div className="p-4 rounded-xl border bg-muted/20">
-              <div className="flex items-center gap-2 mb-3">
-                <BarChart3 className="w-4 h-4 text-primary" />
-                <h3 className="font-semibold text-sm">Current Position</h3>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-primary" />
+                  <h3 className="font-semibold text-sm">Current Position</h3>
+                </div>
+                {/* Manual Trade Buttons */}
+                {localBot?.isActive && !botPosition?.hasPosition && (
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-xs bg-emerald-500/10 border-emerald-500/30 hover:bg-emerald-500/20 text-emerald-500"
+                      onClick={() => handleManualTrade('long')}
+                      disabled={manualTradeLoading !== null}
+                      data-testid="button-manual-long"
+                    >
+                      {manualTradeLoading === 'long' ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <>
+                          <ArrowUp className="w-3 h-3 mr-1" />
+                          Long
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-xs bg-red-500/10 border-red-500/30 hover:bg-red-500/20 text-red-500"
+                      onClick={() => handleManualTrade('short')}
+                      disabled={manualTradeLoading !== null}
+                      data-testid="button-manual-short"
+                    >
+                      {manualTradeLoading === 'short' ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <>
+                          <ArrowDown className="w-3 h-3 mr-1" />
+                          Short
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                )}
               </div>
               
               {positionLoading ? (

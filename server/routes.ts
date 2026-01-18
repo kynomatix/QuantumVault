@@ -2527,6 +2527,183 @@ export async function registerRoutes(
     }
   });
 
+  // Manual trade - trigger a trade without webhook (uses bot's config)
+  app.post("/api/trading-bots/:id/manual-trade", requireWallet, async (req, res) => {
+    console.log(`[ManualTrade] *** MANUAL TRADE REQUEST *** botId=${req.params.id}`);
+    try {
+      const { side } = req.body;
+      if (!side || !['long', 'short'].includes(side)) {
+        return res.status(400).json({ error: "Side must be 'long' or 'short'" });
+      }
+
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (!bot.isActive) {
+        return res.status(400).json({ error: "Bot is paused. Activate it first." });
+      }
+
+      const wallet = await storage.getWallet(bot.walletAddress);
+      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not configured" });
+      }
+
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      const leverage = Math.max(1, bot.leverage || 1);
+      const baseCapital = parseFloat(bot.maxPositionSize || "0");
+      const profitReinvestEnabled = bot.profitReinvest === true;
+
+      // Get oracle price
+      const oraclePrice = await getMarketPrice(bot.market);
+      if (!oraclePrice || oraclePrice <= 0) {
+        return res.status(500).json({ error: "Could not get market price" });
+      }
+
+      // Calculate trade amount (100% of available capacity)
+      let tradeAmountUsd = 0;
+      let maxTradeableValue = 0;
+      let freeCollateral = 0;
+
+      try {
+        const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, subAccountId);
+        freeCollateral = Math.max(0, accountInfo.freeCollateral);
+        const maxNotionalCapacity = freeCollateral * leverage;
+        maxTradeableValue = maxNotionalCapacity * 0.90;
+
+        if (profitReinvestEnabled) {
+          if (maxTradeableValue <= 0) {
+            return res.status(400).json({ error: `No margin available (freeCollateral=$${freeCollateral.toFixed(2)})` });
+          }
+          tradeAmountUsd = maxTradeableValue;
+          console.log(`[ManualTrade] PROFIT REINVEST: $${tradeAmountUsd.toFixed(2)} (100% of available margin)`);
+        } else {
+          if (baseCapital <= 0) {
+            return res.status(400).json({ error: "Bot has no capital configured. Set Max Position Size." });
+          }
+          tradeAmountUsd = Math.min(baseCapital, maxTradeableValue);
+          console.log(`[ManualTrade] Using ${tradeAmountUsd === baseCapital ? 'full' : 'scaled'} position: $${tradeAmountUsd.toFixed(2)}`);
+        }
+      } catch (collateralErr: any) {
+        console.warn(`[ManualTrade] Could not check collateral: ${collateralErr.message}`);
+        if (profitReinvestEnabled) {
+          return res.status(500).json({ error: "Profit reinvest requires collateral check" });
+        }
+        tradeAmountUsd = baseCapital;
+      }
+
+      // Calculate contract size
+      let contractSize = tradeAmountUsd / oraclePrice;
+      const minOrderSize = getMinOrderSize(bot.market);
+
+      // Bump up to minimum if needed
+      if (contractSize < minOrderSize) {
+        const minCapitalNeeded = minOrderSize * oraclePrice;
+        const maxCapacity = (freeCollateral || baseCapital / leverage) * leverage * 0.9;
+        
+        if (minCapitalNeeded <= maxCapacity) {
+          contractSize = minOrderSize;
+          console.log(`[ManualTrade] BUMPED UP to minimum: ${minOrderSize} contracts`);
+        } else {
+          return res.status(400).json({ 
+            error: `Order too small. Minimum ${minOrderSize} contracts ($${minCapitalNeeded.toFixed(2)}) required, but only $${maxCapacity.toFixed(2)} capacity available.` 
+          });
+        }
+      }
+
+      console.log(`[ManualTrade] Executing ${side.toUpperCase()} ${contractSize.toFixed(4)} contracts @ $${oraclePrice.toFixed(2)}`);
+
+      // Create trade record
+      const trade = await storage.createBotTrade({
+        tradingBotId: bot.id,
+        walletAddress: bot.walletAddress,
+        market: bot.market,
+        side: side,
+        size: contractSize.toFixed(8),
+        price: oraclePrice.toString(),
+        status: "pending",
+        webhookPayload: { manual: true, action: side === 'long' ? 'buy' : 'sell' },
+      });
+
+      // Execute trade
+      const userSlippageBps = wallet.slippageBps ?? 50;
+      const orderResult = await executePerpOrder(
+        wallet.agentPrivateKeyEncrypted,
+        bot.market,
+        side,
+        contractSize,
+        subAccountId,
+        false,
+        userSlippageBps,
+        undefined,
+        wallet.agentPublicKey
+      );
+
+      if (!orderResult.success) {
+        const userFriendlyError = parseDriftError(orderResult.error);
+        await storage.updateBotTrade(trade.id, {
+          status: "failed",
+          txSignature: null,
+          errorMessage: userFriendlyError,
+        });
+        return res.status(500).json({ error: userFriendlyError });
+      }
+
+      const fillPrice = orderResult.fillPrice || oraclePrice;
+      const tradeNotional = contractSize * fillPrice;
+      const tradeFee = tradeNotional * 0.0005;
+
+      await storage.updateBotTrade(trade.id, {
+        status: "executed",
+        price: fillPrice.toString(),
+        fee: tradeFee.toString(),
+        txSignature: orderResult.txSignature || orderResult.signature || null,
+        size: contractSize.toFixed(8),
+      });
+
+      // Sync position
+      await syncPositionFromOnChain(
+        bot.id,
+        bot.walletAddress,
+        wallet.agentPublicKey,
+        subAccountId,
+        bot.market,
+        trade.id,
+        tradeFee,
+        fillPrice,
+        side,
+        contractSize
+      );
+
+      // Update stats
+      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
+      await storage.updateTradingBotStats(bot.id, {
+        ...stats,
+        totalTrades: (stats.totalTrades || 0) + 1,
+        totalVolume: (stats.totalVolume || 0) + tradeNotional,
+        lastTradeAt: new Date().toISOString(),
+      });
+
+      console.log(`[ManualTrade] Trade executed: ${side.toUpperCase()} ${contractSize.toFixed(4)} @ $${fillPrice.toFixed(2)}`);
+      res.json({
+        success: true,
+        side,
+        size: contractSize,
+        price: fillPrice,
+        notional: tradeNotional,
+        fee: tradeFee,
+        txSignature: orderResult.txSignature || orderResult.signature,
+        tradeId: trade.id,
+      });
+    } catch (error) {
+      console.error("Manual trade error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   app.post("/api/agent/confirm-deposit", requireWallet, async (req, res) => {
     try {
       const { amount, txSignature } = req.body;
@@ -4769,11 +4946,12 @@ export async function registerRoutes(
       // Calculate trade amount based on profit reinvest setting
       let tradeAmountUsd: number = 0; // Initialize to 0 for safety
       let maxTradeableValue = 0;
+      let freeCollateral = 0; // Declare outside try block so it's accessible for min order size check
       
       // First get available collateral (needed for both modes)
       try {
         const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
-        const freeCollateral = Math.max(0, accountInfo.freeCollateral);
+        freeCollateral = Math.max(0, accountInfo.freeCollateral);
         const maxNotionalCapacity = freeCollateral * leverage;
         maxTradeableValue = maxNotionalCapacity * 0.90; // 90% buffer for fees/slippage
         
