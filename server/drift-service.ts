@@ -1017,28 +1017,53 @@ export async function subaccountExists(walletAddress: string, subAccountId: numb
  * Discover which subaccounts actually exist on-chain for an agent wallet.
  * Returns an array of existing subaccount IDs (0-7) that have been initialized on Drift.
  * This is the source of truth for sequential subaccount creation.
+ * 
+ * Uses batch fetching (getMultipleAccountsInfo) for more reliable results and
+ * includes retry logic to handle RPC staleness issues.
  */
 export async function discoverOnChainSubaccounts(walletAddress: string): Promise<number[]> {
   const connection = getConnection();
   const userPubkey = new PublicKey(walletAddress);
-  const existingSubaccounts: number[] = [];
   
-  // Check subaccounts 0-7 (Drift max is typically 8)
+  // Build array of all subaccount PDAs (0-7)
+  const subaccountPDAs: PublicKey[] = [];
   for (let subId = 0; subId <= 7; subId++) {
-    try {
-      const userAccount = getUserAccountPDA(userPubkey, subId);
-      const accountInfo = await connection.getAccountInfo(userAccount);
-      if (accountInfo !== null) {
-        existingSubaccounts.push(subId);
-        console.log(`[Drift Discovery] Subaccount ${subId} EXISTS on-chain for ${walletAddress.slice(0, 8)}...`);
-      }
-    } catch (error) {
-      // Error checking this subaccount, skip
-    }
+    subaccountPDAs.push(getUserAccountPDA(userPubkey, subId));
   }
   
-  console.log(`[Drift Discovery] Found ${existingSubaccounts.length} subaccounts on-chain: [${existingSubaccounts.join(', ')}]`);
-  return existingSubaccounts;
+  // Use batch fetch for more reliable results
+  const discoverWithRetry = async (attempt: number): Promise<number[]> => {
+    try {
+      const accountInfos = await connection.getMultipleAccountsInfo(subaccountPDAs);
+      const existingSubaccounts: number[] = [];
+      
+      for (let subId = 0; subId <= 7; subId++) {
+        if (accountInfos[subId] !== null) {
+          existingSubaccounts.push(subId);
+          console.log(`[Drift Discovery] Subaccount ${subId} EXISTS on-chain for ${walletAddress.slice(0, 8)}...`);
+        }
+      }
+      
+      console.log(`[Drift Discovery] Found ${existingSubaccounts.length} subaccounts on-chain: [${existingSubaccounts.join(', ')}] (attempt ${attempt})`);
+      return existingSubaccounts;
+    } catch (error) {
+      console.error(`[Drift Discovery] Error in batch fetch (attempt ${attempt}):`, error);
+      return [];
+    }
+  };
+  
+  // First attempt
+  let result = await discoverWithRetry(1);
+  
+  // If we found nothing but this wallet might have accounts, retry after a delay
+  // This helps with RPC staleness
+  if (result.length === 0) {
+    console.log(`[Drift Discovery] No subaccounts found, retrying after delay...`);
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    result = await discoverWithRetry(2);
+  }
+  
+  return result;
 }
 
 /**
