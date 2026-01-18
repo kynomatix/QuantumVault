@@ -243,16 +243,30 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
   
   const initInstructions = [];
   
+  // CRITICAL FIX: Use batch fetch to reduce RPC inconsistency
+  // Individual getAccountInfo calls can return stale/inconsistent data
+  console.error(`[Executor] Batch fetching account states for: userStats, SA0, SA${subAccountId}`);
+  const [userStatsInfo, mainAccountInfo, targetAccountInfo] = await connection.getMultipleAccountsInfo([
+    userStats, mainAccountPDA, targetAccountPDA
+  ]);
+  
+  // Also verify ownership - not just existence
+  const driftProgramStr = DRIFT_PROGRAM_ID.toBase58();
+  
+  const userStatsExists = userStatsInfo && userStatsInfo.owner?.toBase58() === driftProgramStr;
+  const mainAccountExists = mainAccountInfo && mainAccountInfo.owner?.toBase58() === driftProgramStr;
+  const targetAccountExists = targetAccountInfo && targetAccountInfo.owner?.toBase58() === driftProgramStr;
+  
+  console.error(`[Executor] Account states: userStats=${userStatsExists}, SA0=${mainAccountExists}, SA${subAccountId}=${targetAccountExists}`);
+  
   // Check if user stats exists
-  const userStatsInfo = await connection.getAccountInfo(userStats);
-  if (!userStatsInfo) {
+  if (!userStatsExists) {
     console.error('[Executor] User stats not found, adding raw initialization instruction');
     initInstructions.push(createInitializeUserStatsInstruction(userPubkey, userStats));
   }
 
   // Check if main account (subaccount 0) exists
-  const mainAccountInfo = await connection.getAccountInfo(mainAccountPDA);
-  if (!mainAccountInfo) {
+  if (!mainAccountExists) {
     console.error('[Executor] Main account (subaccount 0) not found, adding raw initialization instruction');
     // Fetch referrer info for subaccount 0
     const referrerInfo = await fetchPlatformReferrerRaw(connection);
@@ -262,15 +276,12 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
   }
 
   // Check if target subaccount exists (if different from main)
-  if (subAccountId > 0) {
-    const targetAccountInfo = await connection.getAccountInfo(targetAccountPDA);
-    if (!targetAccountInfo) {
-      console.error(`[Executor] Target subaccount ${subAccountId} not found, adding raw initialization instruction`);
-      // No referrer for non-zero subaccounts
-      initInstructions.push(
-        createInitializeUserInstruction(userPubkey, targetAccountPDA, userStats, subAccountId, `Bot-${subAccountId}`, null)
-      );
-    }
+  if (subAccountId > 0 && !targetAccountExists) {
+    console.error(`[Executor] Target subaccount ${subAccountId} not found, adding raw initialization instruction`);
+    // No referrer for non-zero subaccounts
+    initInstructions.push(
+      createInitializeUserInstruction(userPubkey, targetAccountPDA, userStats, subAccountId, `Bot-${subAccountId}`, null)
+    );
   }
 
   if (initInstructions.length === 0) {
@@ -298,6 +309,15 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
     }
   }
 
+  // Log which instructions are being added for debugging
+  if (initInstructions.length > 0) {
+    const ixLabels = initInstructions.map((ix, i) => {
+      // Try to identify instruction by examining accounts
+      const accounts = ix.keys.map(k => k.pubkey.toBase58().slice(0, 8)).join(',');
+      return `[${i}]: ${accounts}...`;
+    });
+    console.error(`[Executor] Init instructions being sent: ${ixLabels.join(' | ')}`);
+  }
   console.error(`[Executor] Initializing ${initInstructions.length} Drift account(s) via raw transaction (bypassing DriftClient)`);
 
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
@@ -343,27 +363,32 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
       // Wait a bit for RPC to catch up
       await new Promise(resolve => setTimeout(resolve, 2000));
       
-      // Re-verify ALL account states after error
+      // Re-verify ALL account states after error with ownership checks
       const [freshUserStats, freshMainAccount, freshTargetAccount] = await connection.getMultipleAccountsInfo([
         userStats, mainAccountPDA, targetAccountPDA
       ]);
       
-      console.error(`[Executor] Fresh account check: userStats=${!!freshUserStats}, SA0=${!!freshMainAccount}, SA${subAccountId}=${!!freshTargetAccount}`);
+      const driftProgramStr = DRIFT_PROGRAM_ID.toBase58();
+      const freshUserStatsExists = freshUserStats && freshUserStats.owner?.toBase58() === driftProgramStr;
+      const freshMainAccountExists = freshMainAccount && freshMainAccount.owner?.toBase58() === driftProgramStr;
+      const freshTargetAccountExists = freshTargetAccount && freshTargetAccount.owner?.toBase58() === driftProgramStr;
       
-      // If target already exists, we're good
-      if (freshTargetAccount) {
-        console.error(`[Executor] Target subaccount ${subAccountId} EXISTS on-chain, proceeding...`);
+      console.error(`[Executor] Fresh account check (with owner verification): userStats=${freshUserStatsExists}, SA0=${freshMainAccountExists}, SA${subAccountId}=${freshTargetAccountExists}`);
+      
+      // If target already exists and owned by Drift, we're good
+      if (freshTargetAccountExists) {
+        console.error(`[Executor] Target subaccount ${subAccountId} EXISTS on-chain (owner=Drift), proceeding...`);
         return true;
       }
       
-      // Verify prerequisites exist - if not, we have a bigger problem
-      if (!freshUserStats) {
-        console.error('[Executor] CRITICAL: userStats still missing after 6214/3007 - cannot proceed');
-        throw new Error(`Drift account initialization failed: userStats account does not exist. ${errStr}`);
+      // Verify prerequisites exist and owned by Drift - if not, we have a bigger problem
+      if (!freshUserStatsExists) {
+        console.error('[Executor] CRITICAL: userStats still missing/wrong owner after 6214/3007 - cannot proceed');
+        throw new Error(`Drift account initialization failed: userStats account does not exist or wrong owner. ${errStr}`);
       }
-      if (!freshMainAccount) {
-        console.error('[Executor] CRITICAL: Main account (SA0) still missing after 6214/3007 - cannot proceed');
-        throw new Error(`Drift account initialization failed: Main account (SA0) does not exist. ${errStr}`);
+      if (!freshMainAccountExists) {
+        console.error('[Executor] CRITICAL: Main account (SA0) still missing/wrong owner after 6214/3007 - cannot proceed');
+        throw new Error(`Drift account initialization failed: Main account (SA0) does not exist or wrong owner. ${errStr}`);
       }
       
       // Prerequisites exist, target doesn't - need to create ONLY the target subaccount
