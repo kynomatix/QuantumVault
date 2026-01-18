@@ -66,6 +66,15 @@ import {
 import { PublishBotModal } from './PublishBotModal';
 import { LineChart, Line, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts';
 
+// Smart price formatting: more decimals for prices under $1
+function formatPrice(price: number | undefined): string {
+  if (price === undefined || price === null) return '--';
+  if (price < 0.01) return price.toFixed(6);
+  if (price < 1) return price.toFixed(4);
+  if (price < 10) return price.toFixed(3);
+  return price.toFixed(2);
+}
+
 const MARKET_MAX_LEVERAGE: Record<string, number> = {
   'SOL-PERP': 20, 'BTC-PERP': 20, 'ETH-PERP': 20, 'APT-PERP': 20, 'ARB-PERP': 20,
   'AVAX-PERP': 20, 'BNB-PERP': 20, 'DOGE-PERP': 20, 'LINK-PERP': 20, 'OP-PERP': 20,
@@ -1111,13 +1120,13 @@ export function BotManagementDrawer({
                     <div className="p-2 rounded-lg bg-background/50">
                       <p className="text-xs text-muted-foreground">Entry Price</p>
                       <p className="font-mono font-semibold" data-testid="text-entry-price">
-                        ${botPosition.avgEntryPrice?.toFixed(2)}
+                        ${formatPrice(botPosition.avgEntryPrice)}
                       </p>
                     </div>
                     <div className="p-2 rounded-lg bg-background/50">
                       <p className="text-xs text-muted-foreground">Current Price</p>
                       <p className="font-mono font-semibold" data-testid="text-current-price">
-                        ${botPosition.currentPrice?.toFixed(2)}
+                        ${formatPrice(botPosition.currentPrice)}
                       </p>
                     </div>
                   </div>
@@ -1159,7 +1168,7 @@ export function BotManagementDrawer({
                     <div className="p-2 rounded-lg bg-background/50">
                       <p className="text-xs text-muted-foreground">Liq. Price</p>
                       <p className="font-mono font-semibold text-amber-500" data-testid="text-liq-price">
-                        {botPosition.liquidationPrice ? `$${botPosition.liquidationPrice.toFixed(2)}` : '--'}
+                        {botPosition.liquidationPrice ? `$${formatPrice(botPosition.liquidationPrice)}` : '--'}
                       </p>
                     </div>
                   </div>
