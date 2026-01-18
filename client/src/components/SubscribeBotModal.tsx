@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { useSubscribeToPublishedBot, type PublishedBot } from '@/hooks/useApi';
 import { Button } from '@/components/ui/button';
@@ -21,7 +21,8 @@ import {
   TrendingUp,
   Users,
   DollarSign,
-  Info
+  Info,
+  Wallet
 } from 'lucide-react';
 
 const MARKET_MAX_LEVERAGE: Record<string, number> = {
@@ -120,8 +121,27 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const [capitalInvested, setCapitalInvested] = useState('');
   const [leverage, setLeverage] = useState(1);
   const [riskAccepted, setRiskAccepted] = useState(false);
+  const [availableBalance, setAvailableBalance] = useState<number | null>(null);
+  const [balanceLoading, setBalanceLoading] = useState(false);
 
   const maxLeverage = MARKET_MAX_LEVERAGE[bot.market] || 20;
+  
+  useEffect(() => {
+    if (isOpen) {
+      setBalanceLoading(true);
+      fetch('/api/total-equity', { credentials: 'include' })
+        .then(res => res.ok ? res.json() : Promise.reject())
+        .then(data => setAvailableBalance(data.agentBalance ?? 0))
+        .catch(() => setAvailableBalance(null))
+        .finally(() => setBalanceLoading(false));
+    }
+  }, [isOpen]);
+  
+  const handleMax = () => {
+    if (availableBalance !== null && availableBalance > 0) {
+      setCapitalInvested(availableBalance.toFixed(2));
+    }
+  };
 
   const handleClose = () => {
     setCapitalInvested('');
@@ -254,7 +274,31 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="capital">Capital Investment (USDC)</Label>
+            <div className="flex justify-between items-center">
+              <Label htmlFor="capital">Capital Investment (USDC)</Label>
+              <div className="flex items-center gap-2 text-xs">
+                <Wallet className="w-3 h-3 text-muted-foreground" />
+                <span className="text-muted-foreground">Available:</span>
+                {balanceLoading ? (
+                  <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                ) : (
+                  <span className="font-mono text-primary">
+                    ${availableBalance?.toFixed(2) ?? '0.00'}
+                  </span>
+                )}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-5 px-2 text-xs"
+                  onClick={handleMax}
+                  disabled={!availableBalance || availableBalance <= 0}
+                  data-testid="button-max"
+                >
+                  MAX
+                </Button>
+              </div>
+            </div>
             <div className="relative">
               <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
               <Input
