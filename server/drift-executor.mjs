@@ -1407,8 +1407,55 @@ async function depositToDrift(command) {
   if (!mainExists || !targetExists) {
     console.error('[Executor] Accounts missing - using RAW TRANSACTION initialization');
     await initializeDriftAccountsRaw(connection, keypair, subAccountId);
-    console.error('[Executor] Raw initialization complete, accounts now exist on-chain');
+    console.error('[Executor] Raw initialization complete, waiting for RPC sync...');
+    
+    // Wait for RPC to catch up
+    await new Promise(resolve => setTimeout(resolve, 2500));
   }
+  
+  // CRITICAL: Verify account ownership BEFORE deposit
+  // This catches RPC staleness issues where getAccountInfo returned stale data
+  const userStats = getUserStatsPDA(agentPubkey);
+  const targetAccountPDA = getUserAccountPDA(agentPubkey, subAccountId);
+  
+  const [userStatsInfo, mainAccountVerify, targetAccountVerify] = await connection.getMultipleAccountsInfo([
+    userStats, mainAccountPDA, targetAccountPDA
+  ]);
+  
+  console.error(`[Executor] Pre-deposit ownership check:`);
+  console.error(`  - userStats: exists=${!!userStatsInfo}, owner=${userStatsInfo?.owner?.toBase58()?.slice(0,8) || 'N/A'}...`);
+  console.error(`  - SA0: exists=${!!mainAccountVerify}, owner=${mainAccountVerify?.owner?.toBase58()?.slice(0,8) || 'N/A'}...`);
+  console.error(`  - SA${subAccountId}: exists=${!!targetAccountVerify}, owner=${targetAccountVerify?.owner?.toBase58()?.slice(0,8) || 'N/A'}...`);
+  
+  // Verify all accounts exist and are owned by Drift program
+  const driftProgramStr = DRIFT_PROGRAM_ID.toBase58();
+  
+  if (!userStatsInfo || userStatsInfo.owner?.toBase58() !== driftProgramStr) {
+    console.error('[Executor] CRITICAL: userStats missing or wrong owner');
+    throw new Error(`Cannot deposit: userStats account not owned by Drift. Owner: ${userStatsInfo?.owner?.toBase58() || 'missing'}`);
+  }
+  
+  if (!mainAccountVerify || mainAccountVerify.owner?.toBase58() !== driftProgramStr) {
+    console.error('[Executor] CRITICAL: Main account (SA0) missing or wrong owner');
+    throw new Error(`Cannot deposit: Main account (SA0) not owned by Drift. Owner: ${mainAccountVerify?.owner?.toBase58() || 'missing'}`);
+  }
+  
+  if (!targetAccountVerify || targetAccountVerify.owner?.toBase58() !== driftProgramStr) {
+    console.error('[Executor] CRITICAL: Target account missing or wrong owner - retrying init');
+    
+    // One more attempt to initialize the target account
+    await initializeDriftAccountsRaw(connection, keypair, subAccountId);
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    // Final check
+    const finalCheck = await connection.getAccountInfo(targetAccountPDA);
+    if (!finalCheck || finalCheck.owner?.toBase58() !== driftProgramStr) {
+      throw new Error(`Cannot deposit: Target account (SA${subAccountId}) not owned by Drift after retry. Owner: ${finalCheck?.owner?.toBase58() || 'missing'}`);
+    }
+    console.error('[Executor] Target account verified after retry');
+  }
+  
+  console.error('[Executor] All accounts verified - proceeding with deposit');
   
   // COMPLETE SDK BYPASS: Use raw transactions for deposit too (SDK subscribe is broken)
   console.error('[Executor] Using RAW TRANSACTION deposit (bypassing DriftClient entirely)');
