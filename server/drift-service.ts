@@ -1735,10 +1735,24 @@ async function initializeDriftAccountsIfNeeded(
     const errStr = JSON.stringify(confirmation.value.err);
     if (errStr.includes('6214') || errStr.includes('AccountAlreadyInitialized') ||
         errStr.includes('3007') || errStr.includes('AccountOwnedByWrongProgram')) {
-      console.log('[Drift] Account already exists (6214/3007) - this is OK, proceeding with existing accounts');
-      console.log('[Drift] Note: RPC may have returned stale data. Accounts exist on-chain, continuing...');
-      // Don't throw - the accounts exist, which is what we need
-      return true;
+      console.log('[Drift] Init tx failed with 6214/3007 - likely RPC stale data');
+      
+      // Wait a bit for RPC to catch up
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Re-verify BOTH userStats and SA0 states
+      const [freshUserStats, freshUserAccount] = await connection.getMultipleAccountsInfo([userStats, userAccount]);
+      console.log(`[Drift] Fresh account check: userStats=${!!freshUserStats}, SA0=${!!freshUserAccount}`);
+      
+      // Both must exist for us to proceed
+      if (freshUserStats && freshUserAccount) {
+        console.log('[Drift] Both userStats and SA0 exist on-chain, proceeding...');
+        return true;
+      }
+      
+      // One or both is missing - throw with details
+      console.error(`[Drift] Accounts still missing after 6214/3007: userStats=${!!freshUserStats}, SA0=${!!freshUserAccount}`);
+      throw new Error(`Drift account initialization failed: userStats=${!!freshUserStats}, SA0=${!!freshUserAccount}. ${errStr}`);
     }
     
     console.error('[Drift] Account initialization failed:', confirmation.value.err);

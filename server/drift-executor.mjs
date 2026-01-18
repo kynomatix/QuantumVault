@@ -298,9 +298,77 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
     const errStr = JSON.stringify(confirmation.value.err);
     if (errStr.includes('6214') || errStr.includes('AccountAlreadyInitialized') ||
         errStr.includes('3007') || errStr.includes('AccountOwnedByWrongProgram')) {
-      console.error('[Executor] Account already exists (6214/3007) - this is OK, proceeding with existing accounts');
-      console.error('[Executor] Note: RPC may have returned stale data. Accounts exist on-chain, continuing...');
-      // Don't throw - the accounts exist, which is what we need
+      console.error('[Executor] Init tx failed with 6214/3007 - likely RPC stale data');
+      
+      // Wait a bit for RPC to catch up
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Re-verify ALL account states after error
+      const [freshUserStats, freshMainAccount, freshTargetAccount] = await connection.getMultipleAccountsInfo([
+        userStats, mainAccountPDA, targetAccountPDA
+      ]);
+      
+      console.error(`[Executor] Fresh account check: userStats=${!!freshUserStats}, SA0=${!!freshMainAccount}, SA${subAccountId}=${!!freshTargetAccount}`);
+      
+      // If target already exists, we're good
+      if (freshTargetAccount) {
+        console.error(`[Executor] Target subaccount ${subAccountId} EXISTS on-chain, proceeding...`);
+        return true;
+      }
+      
+      // Verify prerequisites exist - if not, we have a bigger problem
+      if (!freshUserStats) {
+        console.error('[Executor] CRITICAL: userStats still missing after 6214/3007 - cannot proceed');
+        throw new Error(`Drift account initialization failed: userStats account does not exist. ${errStr}`);
+      }
+      if (!freshMainAccount) {
+        console.error('[Executor] CRITICAL: Main account (SA0) still missing after 6214/3007 - cannot proceed');
+        throw new Error(`Drift account initialization failed: Main account (SA0) does not exist. ${errStr}`);
+      }
+      
+      // Prerequisites exist, target doesn't - need to create ONLY the target subaccount
+      console.error(`[Executor] Prerequisites verified (userStats, SA0 exist). Creating SA${subAccountId} separately...`);
+      
+      const retryIx = createInitializeUserInstruction(userPubkey, targetAccountPDA, userStats, subAccountId, `Bot-${subAccountId}`, null);
+      
+      const { blockhash: retryBlockhash, lastValidBlockHeight: retryLastValidBlockHeight } = await connection.getLatestBlockhash();
+      const retryTx = new Transaction({
+        feePayer: userPubkey,
+        blockhash: retryBlockhash,
+        lastValidBlockHeight: retryLastValidBlockHeight,
+      });
+      retryTx.add(retryIx);
+      retryTx.sign(keypair);
+      
+      const retrySig = await connection.sendRawTransaction(retryTx.serialize(), {
+        skipPreflight: true,
+        preflightCommitment: 'confirmed',
+      });
+      
+      console.error(`[Executor] Retry init tx for SA${subAccountId}: ${retrySig}`);
+      
+      const retryConfirmation = await connection.confirmTransaction({
+        signature: retrySig,
+        blockhash: retryBlockhash,
+        lastValidBlockHeight: retryLastValidBlockHeight,
+      }, 'confirmed');
+      
+      if (retryConfirmation.value.err) {
+        const retryErrStr = JSON.stringify(retryConfirmation.value.err);
+        if (retryErrStr.includes('6214') || retryErrStr.includes('3007')) {
+          // Even the retry says it exists - check one more time
+          const finalCheck = await connection.getAccountInfo(targetAccountPDA);
+          if (finalCheck) {
+            console.error(`[Executor] Retry also got 6214/3007 but SA${subAccountId} now exists, proceeding...`);
+            return true;
+          }
+        }
+        console.error('[Executor] Retry initialization failed:', retryConfirmation.value.err);
+        throw new Error(`Drift account initialization failed on retry: ${retryErrStr}`);
+      }
+      
+      console.error(`[Executor] SA${subAccountId} created successfully on retry`);
+      await new Promise(resolve => setTimeout(resolve, 2000));
       return true;
     }
     
