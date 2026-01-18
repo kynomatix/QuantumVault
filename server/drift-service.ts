@@ -1538,17 +1538,27 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
       
       const marketIndex = perpPos.marketIndex;
       
-      // Convert BN to number with precision
-      const baseAssetReal = perpPos.baseAssetAmount.toNumber() / BASE_PRECISION;
-      const quoteAssetReal = Math.abs(perpPos.quoteAssetAmount.toNumber()) / QUOTE_PRECISION;
-      const quoteEntryReal = perpPos.quoteEntryAmount.toNumber() / QUOTE_PRECISION;
+      // Use string conversion to avoid precision loss on large BN values
+      // BN.toNumber() loses precision for values > Number.MAX_SAFE_INTEGER
+      const baseAssetRaw = perpPos.baseAssetAmount.toString();
+      const quoteAssetRaw = perpPos.quoteAssetAmount.toString();
+      const quoteEntryRaw = perpPos.quoteEntryAmount.toString();
+      
+      // Convert to number with precision using string parsing
+      const baseAssetReal = parseFloat(baseAssetRaw) / BASE_PRECISION;
+      const quoteAssetReal = Math.abs(parseFloat(quoteAssetRaw)) / QUOTE_PRECISION;
+      const quoteEntryReal = parseFloat(quoteEntryRaw) / QUOTE_PRECISION;
+      
+      // Debug logging for entry price investigation
+      console.log(`[Drift decodeUser] Raw BN values: base=${baseAssetRaw}, quoteEntry=${quoteEntryRaw}, market=${marketIndex}`);
       
       const side: 'LONG' | 'SHORT' = baseAssetReal > 0 ? 'LONG' : 'SHORT';
       const marketName = PERP_MARKET_NAMES[marketIndex] || `PERP-${marketIndex}`;
       const markPrice = prices[marketIndex] || 0;
       
-      // Calculate entry price: quoteEntryAmount / baseAssetAmount
-      const entryPrice = Math.abs(baseAssetReal) > 0 ? Math.abs(quoteEntryReal / baseAssetReal) : 0;
+      // Calculate entry price: |quoteEntryAmount| / |baseAssetAmount|
+      // Use absolute values since entry price should always be positive
+      const entryPrice = Math.abs(baseAssetReal) > 0 ? Math.abs(quoteEntryReal) / Math.abs(baseAssetReal) : 0;
       
       // Position size in USD
       const sizeUsd = Math.abs(baseAssetReal) * markPrice;
