@@ -22,8 +22,14 @@ import {
   Users,
   DollarSign,
   Info,
-  Wallet
+  Wallet,
+  ChevronDown
 } from 'lucide-react';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 
 const MARKET_MAX_LEVERAGE: Record<string, number> = {
   'SOL-PERP': 20,
@@ -123,6 +129,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const [riskAccepted, setRiskAccepted] = useState(false);
   const [availableBalance, setAvailableBalance] = useState<number | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
+  const [disclaimerOpen, setDisclaimerOpen] = useState(false);
 
   const maxLeverage = MARKET_MAX_LEVERAGE[bot.market] || 20;
   
@@ -271,6 +278,12 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                 </span>
               </div>
             )}
+            
+            {bot.description && (
+              <div className="mt-3 pt-3 border-t border-border/50">
+                <p className="text-sm text-muted-foreground">{bot.description}</p>
+              </div>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -353,23 +366,30 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             )}
           </div>
 
-          <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/20">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-amber-400 mt-0.5 shrink-0" />
-              <div className="space-y-2">
-                <p className="text-sm font-medium text-amber-400">Risk Disclaimer</p>
-                <p className="text-xs text-muted-foreground">
-                  By subscribing to this bot, you acknowledge that:
-                </p>
-                <ul className="text-xs text-muted-foreground list-disc list-inside space-y-1">
+          <Collapsible open={disclaimerOpen} onOpenChange={setDisclaimerOpen}>
+            <CollapsibleTrigger asChild>
+              <button className="w-full p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 hover:bg-amber-500/15 transition-colors">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    <span className="text-sm font-medium text-amber-400">Risk Disclaimer</span>
+                  </div>
+                  <ChevronDown className={`w-4 h-4 text-amber-400 transition-transform ${disclaimerOpen ? 'rotate-180' : ''}`} />
+                </div>
+              </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-2 px-3 py-2 rounded-lg bg-amber-500/5 border border-amber-500/10">
+              <div className="space-y-2 text-xs text-muted-foreground">
+                <p>By subscribing to this signal bot, you acknowledge that:</p>
+                <ul className="list-disc list-inside space-y-1">
                   <li>Past performance does not guarantee future results</li>
                   <li>You may lose some or all of your invested capital</li>
-                  <li>Trading involves substantial risk</li>
-                  <li>You are making your own investment decisions</li>
+                  <li>Signal bots depend on the creator's TradingView setup — if their signals stop or have issues, your trades will be affected</li>
+                  <li>You are solely responsible for your investment decisions</li>
                 </ul>
               </div>
-            </div>
-          </div>
+            </CollapsibleContent>
+          </Collapsible>
 
           <div className="flex items-center space-x-2">
             <Checkbox
