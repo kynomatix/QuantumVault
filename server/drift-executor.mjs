@@ -275,7 +275,27 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
 
   if (initInstructions.length === 0) {
     console.error('[Executor] All Drift accounts already exist, no initialization needed');
-    return true;
+    // Double-check: verify the target account REALLY exists with ownership
+    if (subAccountId > 0) {
+      const verifyTarget = await connection.getAccountInfo(targetAccountPDA);
+      const driftProgramStr = DRIFT_PROGRAM_ID.toBase58();
+      if (!verifyTarget) {
+        console.error(`[Executor] WARNING: RPC inconsistency - SA${subAccountId} reported as existing but verification returned null`);
+        // Fall through to create it
+      } else if (verifyTarget.owner?.toBase58() !== driftProgramStr) {
+        console.error(`[Executor] WARNING: SA${subAccountId} exists but wrong owner: ${verifyTarget.owner?.toBase58()}`);
+      } else {
+        console.error(`[Executor] Verified SA${subAccountId} exists and is owned by Drift`);
+        return true;
+      }
+      // If we get here, we need to try creating the target account
+      console.error(`[Executor] Re-adding init instruction for SA${subAccountId} after verification failed`);
+      initInstructions.push(
+        createInitializeUserInstruction(userPubkey, targetAccountPDA, userStats, subAccountId, `Bot-${subAccountId}`, null)
+      );
+    } else {
+      return true;
+    }
   }
 
   console.error(`[Executor] Initializing ${initInstructions.length} Drift account(s) via raw transaction (bypassing DriftClient)`);
@@ -300,12 +320,15 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
   });
 
   console.error(`[Executor] Raw account init tx sent: ${signature}`);
+  console.error(`[Executor] Waiting for confirmation (blockhash: ${blockhash.slice(0,8)}..., lastValidBlockHeight: ${lastValidBlockHeight})`);
 
   const confirmation = await connection.confirmTransaction({
     signature,
     blockhash,
     lastValidBlockHeight,
   }, 'confirmed');
+
+  console.error(`[Executor] Transaction confirmation received: err=${JSON.stringify(confirmation.value.err)}`);
 
   if (confirmation.value.err) {
     // Check for errors that indicate account already exists (RPC returned stale data)
