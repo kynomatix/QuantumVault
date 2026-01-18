@@ -177,7 +177,7 @@ export default function AppPage() {
   const { data: portfolioData } = usePortfolio();
   const { data: positionsData } = usePositions();
   const { data: subscriptionsData } = useSubscriptions();
-  const { data: tradesData } = useTrades(10);
+  const { data: tradesData, refetch: refetchTrades } = useTrades(10);
   const { data: allTradesData } = useTrades();
   const { data: botsData, refetch: refetchBots } = useTradingBots();
   const { data: leaderboardData } = useLeaderboard(100);
@@ -1647,25 +1647,79 @@ export default function AppPage() {
                                 <td className="py-3 text-right font-mono">{trade.size}</td>
                                 <td className="py-3 text-right font-mono">${Number(trade.price).toLocaleString()}</td>
                                 <td className="py-3 text-right">
-                                  {isFailed && trade.errorMessage ? (
-                                    <TooltipProvider>
-                                      <Tooltip>
-                                        <TooltipTrigger asChild>
-                                          <span className={`px-2 py-0.5 rounded text-xs cursor-help ${getStatusStyle()}`}>
-                                            {trade.status}
-                                          </span>
-                                        </TooltipTrigger>
-                                        <TooltipContent side="left" className="max-w-[250px] bg-popover border border-border">
-                                          <p className="text-sm font-medium text-red-400 mb-1">Trade Failed</p>
-                                          <p className="text-xs">{getErrorExplanation(trade.errorMessage)}</p>
-                                        </TooltipContent>
-                                      </Tooltip>
-                                    </TooltipProvider>
-                                  ) : (
-                                    <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle()}`}>
-                                      {trade.status}
-                                    </span>
-                                  )}
+                                  <div className="flex items-center justify-end gap-1">
+                                    {isFailed && trade.errorMessage ? (
+                                      <TooltipProvider>
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <span className={`px-2 py-0.5 rounded text-xs cursor-help ${getStatusStyle()}`}>
+                                              {trade.status}
+                                            </span>
+                                          </TooltipTrigger>
+                                          <TooltipContent side="left" className="max-w-[250px] bg-popover border border-border">
+                                            <p className="text-sm font-medium text-red-400 mb-1">Trade Failed</p>
+                                            <p className="text-xs">{getErrorExplanation(trade.errorMessage)}</p>
+                                          </TooltipContent>
+                                        </Tooltip>
+                                      </TooltipProvider>
+                                    ) : (
+                                      <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle()}`}>
+                                        {trade.status}
+                                      </span>
+                                    )}
+                                    {isFailed && trade.side?.toUpperCase() !== 'CLOSE' && (
+                                      <TooltipProvider>
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <button
+                                              className="p-1 rounded hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors"
+                                              data-testid={`button-retry-trade-${i}`}
+                                              onClick={async (e) => {
+                                                e.stopPropagation();
+                                                const btn = e.currentTarget;
+                                                btn.disabled = true;
+                                                btn.classList.add('opacity-50');
+                                                try {
+                                                  const res = await fetch(`/api/trades/${trade.id}/retry`, {
+                                                    method: 'POST',
+                                                    credentials: 'include',
+                                                  });
+                                                  const data = await res.json();
+                                                  if (res.ok && data.success) {
+                                                    toast({
+                                                      title: "Trade Executed",
+                                                      description: `${trade.side} ${trade.market} executed at $${data.fillPrice?.toFixed(2) || 'market'}`,
+                                                    });
+                                                    refetchTrades();
+                                                  } else {
+                                                    toast({
+                                                      title: "Retry Failed",
+                                                      description: data.error || "Could not execute trade",
+                                                      variant: "destructive",
+                                                    });
+                                                  }
+                                                } catch (err) {
+                                                  toast({
+                                                    title: "Retry Failed",
+                                                    description: "Network error",
+                                                    variant: "destructive",
+                                                  });
+                                                } finally {
+                                                  btn.disabled = false;
+                                                  btn.classList.remove('opacity-50');
+                                                }
+                                              }}
+                                            >
+                                              <RefreshCw className="w-3 h-3" />
+                                            </button>
+                                          </TooltipTrigger>
+                                          <TooltipContent side="top">
+                                            <p className="text-xs">Retry trade at current price</p>
+                                          </TooltipContent>
+                                        </Tooltip>
+                                      </TooltipProvider>
+                                    )}
+                                  </div>
                                 </td>
                               </tr>
                             );

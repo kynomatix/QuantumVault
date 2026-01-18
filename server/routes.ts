@@ -6741,6 +6741,132 @@ export async function registerRoutes(
     }
   });
 
+  // Retry a failed trade
+  app.post("/api/trades/:tradeId/retry", requireWallet, async (req, res) => {
+    try {
+      const { tradeId } = req.params;
+      const walletAddress = req.walletAddress!;
+      
+      // Get the failed trade
+      const trade = await storage.getBotTrade(tradeId);
+      
+      if (!trade) {
+        return res.status(404).json({ error: "Trade not found" });
+      }
+      
+      if (trade.walletAddress !== walletAddress) {
+        return res.status(403).json({ error: "Unauthorized" });
+      }
+      
+      if (trade.status !== 'failed') {
+        return res.status(400).json({ error: "Only failed trades can be retried" });
+      }
+      
+      // Get the bot and wallet
+      const bots = await storage.getTradingBots(walletAddress);
+      const bot = bots.find(b => b.id === trade.tradingBotId);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      
+      // Additional validations
+      if (!bot.isActive) {
+        return res.status(400).json({ error: "Cannot retry - bot is paused" });
+      }
+      
+      // Check trade is not too old (24 hours max)
+      const tradeAge = Date.now() - new Date(trade.executedAt).getTime();
+      const MAX_RETRY_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+      if (tradeAge > MAX_RETRY_AGE_MS) {
+        return res.status(400).json({ error: "Cannot retry trades older than 24 hours" });
+      }
+      
+      // Verify trade market matches bot's configured market
+      if (trade.market && bot.market && trade.market !== bot.market) {
+        return res.status(400).json({ error: "Trade market doesn't match bot configuration" });
+      }
+      
+      const wallet = await storage.getWallet(walletAddress);
+      if (!wallet || !wallet.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+      
+      // Check execution authorization
+      if (!wallet.executionEnabled || wallet.emergencyStopTriggered) {
+        return res.status(403).json({ error: "Execution not authorized. Please enable execution first." });
+      }
+      
+      // Determine the side from the original trade
+      const side = trade.side?.toUpperCase();
+      if (!side || side === 'CLOSE') {
+        return res.status(400).json({ error: "Cannot retry close orders - position may have changed" });
+      }
+      
+      const isLong = side === 'LONG';
+      const market = trade.market;
+      const size = parseFloat(trade.size?.toString() || '0');
+      
+      if (size <= 0) {
+        return res.status(400).json({ error: "Invalid trade size" });
+      }
+      
+      console.log(`[Retry Trade] Retrying ${side} ${market} x${size} for bot ${bot.name}`);
+      
+      // Get private key
+      const { getAgentKeypair } = await import('./agent-wallet');
+      const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+      const bs58 = await import('bs58');
+      const privateKeyBase58 = bs58.default.encode(agentKeypair.secretKey);
+      
+      // Execute the trade
+      const result = await executePerpOrder(
+        wallet.agentPrivateKeyEncrypted,
+        market,
+        isLong ? 'long' : 'short',
+        size,
+        bot.driftSubaccountId ?? 0,
+        false, // not reduce only
+        wallet.slippageBps ?? 50,
+        privateKeyBase58,
+        wallet.agentPublicKey ?? undefined
+      );
+      
+      if (result.success) {
+        // Create a new trade record for the retry
+        const newTrade = await storage.createBotTrade({
+          tradingBotId: bot.id,
+          walletAddress,
+          market,
+          side,
+          size: size.toString(),
+          price: result.fillPrice?.toString() || trade.price?.toString() || '0',
+          status: 'executed',
+          txSignature: result.signature || result.txSignature,
+          webhookPayload: { retryOf: tradeId },
+        });
+        
+        console.log(`[Retry Trade] Success! New trade ID: ${newTrade.id}, tx: ${result.signature || result.txSignature}`);
+        
+        res.json({
+          success: true,
+          message: "Trade executed successfully",
+          tradeId: newTrade.id,
+          txSignature: result.signature || result.txSignature,
+          fillPrice: result.fillPrice,
+        });
+      } else {
+        console.error(`[Retry Trade] Failed:`, result.error);
+        res.status(500).json({
+          success: false,
+          error: result.error || "Trade execution failed",
+        });
+      }
+    } catch (error) {
+      console.error("[Retry Trade] Error:", error);
+      res.status(500).json({ error: error instanceof Error ? error.message : "Failed to retry trade" });
+    }
+  });
+
   // Disconnect Telegram
   app.post("/api/telegram/disconnect", requireWallet, async (req, res) => {
     try {
