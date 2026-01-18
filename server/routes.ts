@@ -10,7 +10,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, getBatchDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw } from "./agent-wallet";
@@ -6631,32 +6631,42 @@ export async function registerRoutes(
   });
 
   // Get total equity across all bot subaccounts and agent wallet
+  // OPTIMIZED: Uses batch RPC call instead of N sequential calls
   app.get("/api/total-equity", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
       const bots = await storage.getTradingBots(req.walletAddress!);
-      
-      // Get agent wallet balance (USDC and SOL)
-      let agentBalance = 0;
-      let solBalance = 0;
-      if (wallet?.agentPublicKey) {
-        [agentBalance, solBalance] = await Promise.all([
-          getAgentUsdcBalance(wallet.agentPublicKey),
-          getAgentSolBalance(wallet.agentPublicKey),
-        ]);
-      }
-      
-      // Sum up totalCollateral from all subaccounts (includes USDC + unrealized PnL)
-      let driftBalance = 0;
-      const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
       const agentAddress = wallet?.agentPublicKey;
       
+      // Collect all subaccount IDs that need to be fetched
+      const subAccountIds: number[] = [];
+      const botBySubaccount = new Map<number, typeof bots[0]>();
       for (const bot of bots) {
-        if (bot.driftSubaccountId !== null && agentAddress) {
-          const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
-          if (exists) {
-            // Use getDriftAccountInfo for totalCollateral (USDC + unrealized PnL)
-            const accountInfo = await getDriftAccountInfo(agentAddress, bot.driftSubaccountId);
+        if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
+          subAccountIds.push(bot.driftSubaccountId);
+          botBySubaccount.set(bot.driftSubaccountId, bot);
+        }
+      }
+      
+      // BATCH OPTIMIZATION: Fetch all data in parallel
+      // Previously: N bots × 3 RPC calls = 3N RPC calls
+      // Now: 2 RPC for agent balances + 2 RPC for all subaccounts = 4 RPC total
+      const [agentBalance, solBalance, batchAccountInfo] = await Promise.all([
+        agentAddress ? getAgentUsdcBalance(agentAddress) : Promise.resolve(0),
+        agentAddress ? getAgentSolBalance(agentAddress) : Promise.resolve(0),
+        agentAddress && subAccountIds.length > 0 
+          ? getBatchDriftAccountInfo(agentAddress, subAccountIds)
+          : Promise.resolve(new Map()),
+      ]);
+      
+      // Build subaccount balances from batch result
+      let driftBalance = 0;
+      const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
+      
+      for (const bot of bots) {
+        if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
+          const accountInfo = batchAccountInfo.get(bot.driftSubaccountId);
+          if (accountInfo) {
             driftBalance += accountInfo.totalCollateral;
             subaccountBalances.push({
               botId: bot.id,
@@ -6665,6 +6675,7 @@ export async function registerRoutes(
               balance: accountInfo.totalCollateral,
             });
           } else {
+            // Subaccount doesn't exist or failed to fetch
             subaccountBalances.push({
               botId: bot.id,
               botName: bot.name,

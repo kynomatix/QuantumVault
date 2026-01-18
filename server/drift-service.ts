@@ -1472,6 +1472,116 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
   }
 }
 
+/**
+ * BATCH OPTIMIZED: Fetch account info for multiple subaccounts in minimal RPC calls.
+ * Uses getMultipleAccountsInfo to fetch all accounts at once.
+ * 
+ * Before: N subaccounts × 3 RPC calls = 3N RPC calls
+ * Now: 1 batch RPC for all accounts + 1 RPC for spot market = 2 RPC calls total
+ * 
+ * @param walletAddress - Agent wallet address
+ * @param subAccountIds - Array of subaccount IDs to fetch
+ * @returns Map of subAccountId -> DriftAccountInfo (only includes existing accounts)
+ */
+export async function getBatchDriftAccountInfo(
+  walletAddress: string, 
+  subAccountIds: number[]
+): Promise<Map<number, DriftAccountInfo>> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  const results = new Map<number, DriftAccountInfo>();
+  
+  if (subAccountIds.length === 0) {
+    return results;
+  }
+  
+  try {
+    // Build array of all subaccount PDAs
+    const subaccountPDAs: PublicKey[] = subAccountIds.map(subId => 
+      getUserAccountPDA(userPubkey, subId)
+    );
+    
+    // BATCH OPTIMIZATION: Fetch all accounts + interest + prices in parallel
+    // This replaces N×3 sequential RPC calls with just 2-3 parallel calls
+    const [accountInfos, cumulativeDepositInterest, prices] = await Promise.all([
+      connection.getMultipleAccountsInfo(subaccountPDAs, { commitment: 'confirmed' }),
+      fetchCumulativeDepositInterest(),
+      fetchPerpPrices(),
+    ]);
+    
+    console.log(`[Drift Batch] Fetched ${subAccountIds.length} subaccounts in single batch RPC`);
+    
+    const MARKET_MAINTENANCE_MARGINS: Record<string, number> = {
+      'SOL-PERP': 0.033,
+      'BTC-PERP': 0.025,
+      'ETH-PERP': 0.025,
+      'DEFAULT': 0.05,
+    };
+    
+    // Process each account
+    for (let i = 0; i < subAccountIds.length; i++) {
+      const subId = subAccountIds[i];
+      const accountInfo = accountInfos[i];
+      
+      if (!accountInfo || !accountInfo.data) {
+        // Subaccount doesn't exist, skip it
+        continue;
+      }
+      
+      try {
+        const buffer = Buffer.from(accountInfo.data);
+        const decodedUser = decodeUser(buffer);
+        
+        const usdcBalance = parseUsdcBalanceFromDecodedUser(decodedUser, cumulativeDepositInterest);
+        const positions = parsePerpPositionsFromDecodedUser(decodedUser, prices);
+        
+        let hasOpenPositions = false;
+        let totalUnrealizedPnl = 0;
+        let totalPositionNotional = 0;
+        
+        for (const pos of positions) {
+          if (Math.abs(pos.baseAssetAmount) > 0.0001) {
+            hasOpenPositions = true;
+            totalUnrealizedPnl += pos.unrealizedPnl;
+            totalPositionNotional += pos.sizeUsd;
+          }
+        }
+        
+        const totalCollateral = usdcBalance + totalUnrealizedPnl;
+        
+        let marginRequired = 0;
+        for (const pos of positions) {
+          if (Math.abs(pos.baseAssetAmount) > 0.0001) {
+            const marketMargin = MARKET_MAINTENANCE_MARGINS[pos.market] || MARKET_MAINTENANCE_MARGINS['DEFAULT'];
+            marginRequired += pos.sizeUsd * marketMargin;
+          }
+        }
+        const marginUsed = hasOpenPositions ? marginRequired : 0;
+        const bufferAmount = hasOpenPositions ? 0.0001 : 0;
+        const freeCollateral = Math.max(0, totalCollateral - marginUsed - bufferAmount);
+        
+        results.set(subId, {
+          usdcBalance,
+          totalCollateral,
+          freeCollateral,
+          hasOpenPositions,
+          marginUsed,
+          unrealizedPnl: totalUnrealizedPnl,
+          totalPositionNotional,
+        });
+      } catch (decodeError) {
+        console.error(`[Drift Batch] Failed to decode subaccount ${subId}:`, decodeError);
+      }
+    }
+    
+    console.log(`[Drift Batch] Successfully parsed ${results.size}/${subAccountIds.length} subaccounts`);
+    return results;
+  } catch (error) {
+    console.error(`[Drift Batch] Error in batch fetch:`, error);
+    return results;
+  }
+}
+
 // Market index to name mapping for Drift perpetuals - SOURCED FROM OFFICIAL DRIFT SDK
 // https://github.com/drift-labs/protocol-v2/blob/master/sdk/src/constants/perpMarkets.ts
 // Last synced: 2025-01-18 via: node -e "require('@drift-labs/sdk').PerpMarkets['mainnet-beta'].forEach(m => console.log(m.marketIndex + ': ' + m.symbol))"
