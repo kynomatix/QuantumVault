@@ -531,7 +531,11 @@ export default function AppPage() {
   useEffect(() => {
     if (!sessionConnected || welcomeCheckedRef.current) return;
     
-    const checkAgentSolBalance = async () => {
+    // Delay the check to allow balance to be fetched and avoid showing during disconnect
+    const timeoutId = setTimeout(async () => {
+      // Double-check we're still connected after the delay
+      if (!sessionConnected) return;
+      
       try {
         const res = await fetch('/api/agent/balance', { credentials: 'include' });
         if (res.ok) {
@@ -545,14 +549,15 @@ export default function AppPage() {
             if (data.solBalance === 0) {
               // Agent has zero SOL - fresh agent wallet (new or reset), show welcome popup
               setWelcomePopupOpen(true);
-            } else if (data.isExistingUser) {
-              // Existing user with low (but not zero) balance - just show toast
+            } else if (data.isExistingUser && data.driftAccountExists) {
+              // Only show low gas toast for existing users who have an active Drift account
+              // This avoids showing it during initial setup or when user is just browsing
               toast({
                 title: 'Low Gas Balance',
                 description: 'Your agent wallet is low on SOL for transaction fees. Visit Wallet tab to deposit more.',
                 duration: 8000,
               });
-            } else {
+            } else if (!data.isExistingUser) {
               // New user with some SOL but still needs more - show welcome popup
               setWelcomePopupOpen(true);
             }
@@ -562,9 +567,9 @@ export default function AppPage() {
       } catch (error) {
         console.error('Error checking agent balance:', error);
       }
-    };
+    }, 1500); // Wait 1.5 seconds to allow initial data to load
     
-    checkAgentSolBalance();
+    return () => clearTimeout(timeoutId);
   }, [sessionConnected, publicKeyString]);
 
   const handleDisconnect = async () => {
