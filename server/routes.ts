@@ -2708,7 +2708,7 @@ export async function registerRoutes(
   app.post("/api/trading-bots/:id/refresh-position", requireWallet, async (req, res) => {
     console.log(`[RefreshPosition] Force refresh request for botId=${req.params.id}`);
     try {
-      const bot = await storage.getTradingBot(req.params.id);
+      const bot = await storage.getTradingBotById(req.params.id);
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
