@@ -24,6 +24,7 @@ Preferred communication style: Simple, everyday language.
 -   **Lazy ESM Import**: DriftClient is loaded lazily via dynamic `import()`.
 -   **Trade Execution**: Uses `drift-executor.mjs` subprocess for trade execution.
 -   **SDK Version**: `@drift-labs/sdk@2.146.0-beta.7` is the current stable version.
+-   **Market Index Mapping**: CRITICAL - `PERP_MARKET_INDICES` and `PERP_MARKET_NAMES` must be sourced from the official Drift SDK (`PerpMarkets['mainnet-beta']`). Drift adds prediction market BETs between regular PERPs (indices 36-41, 43, 46, 48-50, 57-58, 67-68), causing non-sequential indexing. Run `node -e "require('@drift-labs/sdk').PerpMarkets['mainnet-beta'].forEach(m => console.log(m.marketIndex + ': ' + m.symbol))"` to get authoritative values.
 -   **Referrer Account Handling**: The executor fetches the user's referrer from their on-chain UserStats account and passes it to the SDK. Fallback to deriving referrer PDAs directly from the known wallet address is implemented for "kryptolytix".
 -   **Idempotent Account Initialization**: Gracefully handles Drift errors 6214 ("Account Already Initialized") and Anchor error 3007 ("AccountOwnedByWrongProgram") by logging warnings and proceeding, preventing blocking of deposits/bot creation due to RPC staleness.
 -   **Batch Account Verification**: Replaced individual `getAccountInfo` calls with `getMultipleAccountsInfo` for atomic account state checking and verifies account ownership to prevent false negatives from corrupted account data.
