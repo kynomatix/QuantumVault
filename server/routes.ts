@@ -4745,9 +4745,10 @@ export async function registerRoutes(
         : oraclePrice;
       
       const usdtValue = contractsFromTV * priceForReversal; // Reverse TradingView's calculation
-      const signalPercent = usdtValue; // Treat USDT value as percentage
+      const rawSignalPercent = usdtValue; // Treat USDT value as percentage
+      const signalPercent = Math.min(rawSignalPercent, 100); // Cap at 100% to prevent accidental oversized orders
       
-      console.log(`[Webhook] TradingView sent ${contractsFromTV} contracts × $${priceForReversal.toFixed(2)} (TV price) = ${usdtValue.toFixed(2)} USDT → treating as ${signalPercent.toFixed(2)}%`);
+      console.log(`[Webhook] TradingView sent ${contractsFromTV} contracts × $${priceForReversal.toFixed(2)} (TV price) = ${usdtValue.toFixed(2)} USDT → ${rawSignalPercent > 100 ? `capped from ${rawSignalPercent.toFixed(2)}% to ` : ''}${signalPercent.toFixed(2)}%`);
       if (Math.abs(tvPrice - oraclePrice) > 0.01) {
         console.log(`[Webhook] Price comparison: TradingView=$${tvPrice.toFixed(2)}, Oracle=$${oraclePrice.toFixed(2)}, using ${tvPrice === priceForReversal ? 'TradingView' : 'Oracle'}`);
       }
@@ -5597,9 +5598,10 @@ export async function registerRoutes(
         : oraclePrice;
       
       const usdtValue = contractsFromTV * priceForReversal; // Reverse TradingView's calculation
-      const signalPercent = usdtValue; // Treat USDT value as percentage
+      const rawSignalPercent = usdtValue; // Treat USDT value as percentage
+      const signalPercent = Math.min(rawSignalPercent, 100); // Cap at 100% to prevent accidental oversized orders
       
-      console.log(`[User Webhook] TradingView sent ${contractsFromTV} contracts × $${priceForReversal.toFixed(2)} (TV price) = ${usdtValue.toFixed(2)} USDT → treating as ${signalPercent.toFixed(2)}%`);
+      console.log(`[User Webhook] TradingView sent ${contractsFromTV} contracts × $${priceForReversal.toFixed(2)} (TV price) = ${usdtValue.toFixed(2)} USDT → ${rawSignalPercent > 100 ? `capped from ${rawSignalPercent.toFixed(2)}% to ` : ''}${signalPercent.toFixed(2)}%`);
       if (Math.abs(tvPrice - oraclePrice) > 0.01) {
         console.log(`[User Webhook] Price comparison: TradingView=$${tvPrice.toFixed(2)}, Oracle=$${oraclePrice.toFixed(2)}, using ${tvPrice === priceForReversal ? 'TradingView' : 'Oracle'}`);
       }
