@@ -41,6 +41,7 @@ Preferred communication style: Simple, everyday language.
 -   **Real-Time Data**: Tracks running positions, PnL, and fees using `PositionService` and SDK's `decodeUser`.
 -   **Account Health Metrics**: Uses SDK `decodeUser` for accurate account health, collateral, and liquidation price estimates.
 -   **Webhook Deduplication**: `webhook_logs` table prevents duplicate processing of TradingView signals.
+-   **Automatic Trade Retry**: Failed trades due to rate limiting are automatically queued for retry with exponential backoff. CLOSE orders get critical priority (10 attempts, shorter backoff) to prevent losses from failed position closures. On-chain position verification prevents duplicate closes.
 -   **Equity Event Tracking**: Monitors deposits and withdrawals for transaction history.
 -   **Marketplace Feature**: Users can publish signal bots and subscribe to others' trading signals, with proportional trade sizing and PnL snapshots.
 -   **Referral System**: Unique 6-character alphanumeric referral codes for each user, tracked via `ref` parameter in share URLs.
