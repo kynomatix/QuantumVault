@@ -44,7 +44,10 @@ export function isRateLimitError(error: string | Error | unknown): boolean {
     errorStr.includes('429') ||
     errorStr.includes('Too Many Requests') ||
     errorStr.includes('timeout') ||
-    errorStr.includes('Timeout')
+    errorStr.includes('Timeout') ||
+    errorStr.includes('Please wait') ||
+    errorStr.includes('credit') ||
+    errorStr.includes('Credit')
   );
 }
 
