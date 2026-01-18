@@ -1582,6 +1582,65 @@ export async function getBatchDriftAccountInfo(
   }
 }
 
+/**
+ * BATCH OPTIMIZED: Fetch perp positions for multiple subaccounts in minimal RPC calls.
+ * Uses getMultipleAccountsInfo to fetch all accounts at once.
+ * 
+ * @param walletAddress - Agent wallet address
+ * @param subAccountIds - Array of subaccount IDs to fetch
+ * @returns Map of subAccountId -> PerpPosition[] (only includes existing accounts with positions)
+ */
+export async function getBatchPerpPositions(
+  walletAddress: string, 
+  subAccountIds: number[]
+): Promise<Map<number, PerpPosition[]>> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  const results = new Map<number, PerpPosition[]>();
+  
+  if (subAccountIds.length === 0) {
+    return results;
+  }
+  
+  try {
+    const subaccountPDAs: PublicKey[] = subAccountIds.map(subId => 
+      getUserAccountPDA(userPubkey, subId)
+    );
+    
+    // Batch fetch all accounts + prices in parallel
+    const [accountInfos, prices] = await Promise.all([
+      connection.getMultipleAccountsInfo(subaccountPDAs, { commitment: 'confirmed' }),
+      fetchPerpPrices(),
+    ]);
+    
+    console.log(`[Drift Batch] Fetched positions for ${subAccountIds.length} subaccounts in single batch RPC`);
+    
+    for (let i = 0; i < subAccountIds.length; i++) {
+      const subId = subAccountIds[i];
+      const accountInfo = accountInfos[i];
+      
+      if (!accountInfo || !accountInfo.data) {
+        continue;
+      }
+      
+      try {
+        const buffer = Buffer.from(accountInfo.data);
+        const decodedUser = decodeUser(buffer);
+        const positions = parsePerpPositionsFromDecodedUser(decodedUser, prices);
+        results.set(subId, positions);
+      } catch (decodeError) {
+        console.error(`[Drift Batch] Failed to decode positions for subaccount ${subId}:`, decodeError);
+      }
+    }
+    
+    console.log(`[Drift Batch] Successfully parsed positions for ${results.size}/${subAccountIds.length} subaccounts`);
+    return results;
+  } catch (error) {
+    console.error(`[Drift Batch] Error in batch positions fetch:`, error);
+    return results;
+  }
+}
+
 // Market index to name mapping for Drift perpetuals - SOURCED FROM OFFICIAL DRIFT SDK
 // https://github.com/drift-labs/protocol-v2/blob/master/sdk/src/constants/perpMarkets.ts
 // Last synced: 2025-01-18 via: node -e "require('@drift-labs/sdk').PerpMarkets['mainnet-beta'].forEach(m => console.log(m.marketIndex + ': ' + m.symbol))"

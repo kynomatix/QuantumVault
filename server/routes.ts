@@ -10,7 +10,7 @@ import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, getBatchDriftAccountInfo, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
+import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, getBatchDriftAccountInfo, getBatchPerpPositions, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw } from "./agent-wallet";
@@ -1981,6 +1981,7 @@ export async function registerRoutes(
   });
 
   // Reconcile endpoint - sync database with on-chain Drift positions
+  // OPTIMIZED: Uses batch RPC call instead of N sequential calls
   app.post("/api/positions/reconcile", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
@@ -1994,10 +1995,14 @@ export async function registerRoutes(
       const discrepancies: any[] = [];
       let totalOnChainPositions = 0;
 
-      // Query each bot's specific subaccount for on-chain positions
+      // BATCH OPTIMIZATION: Fetch all positions in single RPC call (deduplicated)
+      const subAccountIds = Array.from(new Set(bots.map(b => b.driftSubaccountId ?? 0)));
+      const batchPositions = await getBatchPerpPositions(wallet.agentPublicKey, subAccountIds);
+
+      // Process each bot using batch-fetched positions
       for (const bot of bots) {
         const subAccountId = bot.driftSubaccountId ?? 0;
-        const onChainPositions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
+        const onChainPositions = batchPositions.get(subAccountId) || [];
         totalOnChainPositions += onChainPositions.length;
         console.log(`[Reconcile] Bot ${bot.name} (subaccount ${subAccountId}): Found ${onChainPositions.length} on-chain positions`);
 
@@ -6638,15 +6643,14 @@ export async function registerRoutes(
       const bots = await storage.getTradingBots(req.walletAddress!);
       const agentAddress = wallet?.agentPublicKey;
       
-      // Collect all subaccount IDs that need to be fetched
-      const subAccountIds: number[] = [];
-      const botBySubaccount = new Map<number, typeof bots[0]>();
+      // Collect all subaccount IDs that need to be fetched (deduplicated)
+      const subAccountIdSet = new Set<number>();
       for (const bot of bots) {
         if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
-          subAccountIds.push(bot.driftSubaccountId);
-          botBySubaccount.set(bot.driftSubaccountId, bot);
+          subAccountIdSet.add(bot.driftSubaccountId);
         }
       }
+      const subAccountIds = Array.from(subAccountIdSet);
       
       // BATCH OPTIMIZATION: Fetch all data in parallel
       // Previously: N bots × 3 RPC calls = 3N RPC calls
