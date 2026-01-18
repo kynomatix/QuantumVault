@@ -7363,6 +7363,64 @@ export async function registerRoutes(
     }
   });
 
+  // Debug endpoint to close positions by subaccount directly (for dust cleanup)
+  // This is useful when a bot is deleted but positions remain on-chain
+  app.post("/api/debug/close-subaccount-position", requireWallet, async (req, res) => {
+    console.log(`[Debug] *** CLOSE SUBACCOUNT POSITION REQUEST ***`);
+    try {
+      const { subAccountId, market } = req.body;
+      
+      if (typeof subAccountId !== 'number' || !market) {
+        return res.status(400).json({ error: "Missing required fields: subAccountId (number), market (string)" });
+      }
+      
+      if (!req.walletAddress) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+      
+      const wallet = await storage.getWallet(req.walletAddress);
+      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not configured" });
+      }
+      
+      console.log(`[Debug] Closing position on ${market} in subaccount ${subAccountId} for wallet ${wallet.agentPublicKey}`);
+      
+      // Use closePerpPosition to close the position
+      const { closePerpPosition } = await import("./drift-service.js");
+      const slippageBps = wallet.slippageBps ?? 100; // Higher slippage for dust
+      
+      const result = await closePerpPosition(
+        wallet.agentPrivateKeyEncrypted,
+        market,
+        subAccountId,
+        undefined, // Let SDK determine position size from on-chain
+        slippageBps
+      );
+      
+      console.log(`[Debug] Close result:`, result);
+      
+      if (result.success) {
+        res.json({
+          success: true,
+          message: result.signature ? `Position closed successfully` : "Position was already closed",
+          signature: result.signature || null,
+          subAccountId,
+          market
+        });
+      } else {
+        res.status(500).json({
+          success: false,
+          error: result.error || "Failed to close position",
+          subAccountId,
+          market
+        });
+      }
+    } catch (error) {
+      console.error("[Debug] Close subaccount position error:", error);
+      res.status(500).json({ error: error instanceof Error ? error.message : "Internal server error" });
+    }
+  });
+
   return httpServer;
 }
 
