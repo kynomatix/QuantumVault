@@ -211,6 +211,7 @@ export function BotManagementDrawer({
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
+  const [dataPartial, setDataPartial] = useState(false);
   const [botPosition, setBotPosition] = useState<BotPosition | null>(null);
   const [positionLoading, setPositionLoading] = useState(false);
   const [netDeposited, setNetDeposited] = useState<number>(0);
@@ -274,7 +275,7 @@ export function BotManagementDrawer({
 
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
-    await Promise.all([fetchBotBalance(), fetchBotPosition()]);
+    await fetchBotOverview();
     setLastUpdated(new Date());
     setIsRefreshing(false);
   };
@@ -309,6 +310,56 @@ export function BotManagementDrawer({
     }
   };
 
+  // Consolidated fetch - uses single /api/bots/:id/overview endpoint
+  // Reduces 6 API calls (7-8 RPC) to 1 API call (2-3 RPC)
+  const fetchBotOverview = async () => {
+    if (!bot) return;
+    setBalanceLoading(true);
+    setPositionLoading(true);
+    setWebhookUrlLoading(true);
+    setDataPartial(false); // Reset before fetching new data
+    try {
+      const cacheBust = Date.now();
+      const res = await fetchWithTimeout(
+        `/api/bots/${bot.id}/overview?wallet=${walletAddress}&_=${cacheBust}`, 
+        { credentials: 'include', cache: 'no-store' }
+      );
+      
+      if (res?.ok) {
+        const data = await res.json();
+        
+        // Balance data
+        setBotBalance(data.usdcBalance ?? 0);
+        setInterestEarned(data.estimatedDailyInterest ?? 0);
+        setMainAccountBalance(data.mainAccountBalance ?? 0);
+        setDriftBalance(data.totalCollateral ?? 0);
+        setDriftFreeCollateral(data.freeCollateral ?? 0);
+        setHasOpenPositions(data.hasOpenPositions ?? false);
+        setNetDeposited(data.netDeposited ?? 0);
+        
+        // Position data
+        if (data.position) {
+          setBotPosition(data.position);
+        }
+        
+        // Webhook URL
+        if (data.webhookUrl) {
+          setUserWebhookUrl(data.webhookUrl);
+        }
+        
+        // Track partial data status (some RPC calls may have failed)
+        setDataPartial(data.partialData ?? false);
+      }
+    } catch (error) {
+      console.error('Failed to fetch bot overview:', error);
+    } finally {
+      setBalanceLoading(false);
+      setPositionLoading(false);
+      setWebhookUrlLoading(false);
+    }
+  };
+
+  // Legacy individual fetches kept for backwards compatibility and specific use cases
   const fetchUserWebhookUrl = async () => {
     setWebhookUrlLoading(true);
     try {
@@ -342,32 +393,6 @@ export function BotManagementDrawer({
     }
   };
 
-  useEffect(() => {
-    if (isOpen && bot) {
-      fetchBotBalance();
-      fetchBotPosition();
-      fetchUserWebhookUrl();
-      setActiveTab('overview');
-      
-      // Auto-refresh every 15 seconds when drawer is open
-      setLastUpdated(new Date());
-      const refreshInterval = setInterval(() => {
-        fetchBotBalance();
-        fetchBotPosition();
-        setLastUpdated(new Date());
-      }, 15000);
-      
-      return () => clearInterval(refreshInterval);
-    }
-  }, [isOpen, bot?.id]);
-
-  useEffect(() => {
-    if (isOpen && bot && activeTab === 'history') {
-      fetchTrades();
-      fetchEquityEvents();
-    }
-  }, [isOpen, bot?.id, activeTab]);
-
   const fetchBotBalance = async () => {
     if (!bot) return;
     setBalanceLoading(true);
@@ -391,10 +416,8 @@ export function BotManagementDrawer({
         setMainAccountBalance(data.balance ?? 0);
       }
 
-      // Use bot-specific drift balance from its subaccount
       if (botDriftRes?.ok) {
         const data = await botDriftRes.json();
-        // Bot Equity = Total Collateral from Drift (what the bot is worth now)
         setDriftBalance(data.totalCollateral ?? data.balance ?? 0);
         setDriftFreeCollateral(data.freeCollateral ?? 0);
         setHasOpenPositions(data.hasOpenPositions ?? false);
@@ -410,6 +433,30 @@ export function BotManagementDrawer({
       setBalanceLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (isOpen && bot) {
+      // Use consolidated endpoint for initial load and refreshes
+      fetchBotOverview();
+      setActiveTab('overview');
+      
+      // Auto-refresh every 15 seconds when drawer is open
+      setLastUpdated(new Date());
+      const refreshInterval = setInterval(() => {
+        fetchBotOverview();
+        setLastUpdated(new Date());
+      }, 15000);
+      
+      return () => clearInterval(refreshInterval);
+    }
+  }, [isOpen, bot?.id]);
+
+  useEffect(() => {
+    if (isOpen && bot && activeTab === 'history') {
+      fetchTrades();
+      fetchEquityEvents();
+    }
+  }, [isOpen, bot?.id, activeTab]);
 
   const handleAddEquity = async () => {
     const amount = parseFloat(addEquityAmount);
@@ -435,7 +482,7 @@ export function BotManagementDrawer({
 
       toast({ title: `Successfully added $${amount} to bot`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
       setAddEquityAmount('');
-      setTimeout(() => fetchBotBalance(), 1500);
+      setTimeout(() => fetchBotOverview(), 1500);
     } catch (error) {
       toast({ title: 'Failed to add to Drift', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
     } finally {
@@ -484,7 +531,7 @@ export function BotManagementDrawer({
 
       toast({ title: `Successfully removed $${amount} from bot`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
       setRemoveEquityAmount('');
-      setTimeout(() => fetchBotBalance(), 1500);
+      setTimeout(() => fetchBotOverview(), 1500);
     } catch (error) {
       toast({ title: 'Withdrawal failed', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
     } finally {
@@ -648,10 +695,7 @@ export function BotManagementDrawer({
       });
       
       // Refresh position and balance data
-      setTimeout(() => {
-        fetchBotPosition();
-        fetchBotBalance();
-      }, 1500);
+      setTimeout(() => fetchBotOverview(), 1500);
       
       onBotUpdated();
     } catch (error) {
@@ -688,10 +732,7 @@ export function BotManagementDrawer({
       });
       
       // Refresh position and balance data
-      setTimeout(() => {
-        fetchBotPosition();
-        fetchBotBalance();
-      }, 1500);
+      setTimeout(() => fetchBotOverview(), 1500);
       
       onBotUpdated();
     } catch (error) {
@@ -726,7 +767,7 @@ export function BotManagementDrawer({
       });
       
       // Refresh position data
-      fetchBotPosition();
+      fetchBotOverview();
     } catch (error) {
       toast({
         title: 'Refresh failed',
@@ -942,9 +983,23 @@ export function BotManagementDrawer({
 
           <TabsContent value="overview" className="space-y-4 mt-4">
             <div className="flex items-center justify-between mb-2">
-              <p className="text-xs text-muted-foreground">
-                {lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : 'Auto-updates every 15s'}
-              </p>
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-muted-foreground">
+                  {lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : 'Auto-updates every 15s'}
+                </p>
+                {dataPartial && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <span className="text-xs text-amber-500">Partial data</span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>Some data may be delayed due to network issues</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+              </div>
               <Button
                 variant="ghost"
                 size="sm"

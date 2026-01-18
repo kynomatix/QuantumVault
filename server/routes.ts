@@ -3023,6 +3023,145 @@ export async function registerRoutes(
     }
   });
 
+  // Consolidated bot overview endpoint - reduces RPC calls from 7-8 to 2-3
+  // Combines: /api/bot/:id/balance, /api/bots/:id/drift-balance, /api/bots/:id/net-deposited,
+  //           /api/agent/balance, /api/trading-bots/:id/position, /api/user/webhook-url
+  app.get("/api/bots/:botId/overview", requireWallet, async (req, res) => {
+    try {
+      const { botId } = req.params;
+      const bot = await storage.getTradingBotById(botId);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet?.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      
+      // Parallel fetch with graceful degradation using Promise.allSettled
+      // This allows partial data if some calls fail (e.g., RPC rate limits)
+      const results = await Promise.allSettled([
+        getDriftAccountInfo(wallet.agentPublicKey, subAccountId),
+        getAgentUsdcBalance(wallet.agentPublicKey),
+        PositionService.getPosition(
+          bot.id,
+          bot.walletAddress,
+          wallet.agentPublicKey,
+          subAccountId,
+          bot.market,
+          wallet.agentPrivateKeyEncrypted ?? undefined
+        ),
+        storage.getBotNetDeposited(botId),
+        storage.getBotTradeCount(botId),
+        storage.getBotPosition(botId, bot.market),
+        getUsdcApy(),
+      ]);
+      
+      // Extract results with defaults for failed calls
+      const accountInfo = results[0].status === 'fulfilled' ? results[0].value : { 
+        usdcBalance: 0, totalCollateral: 0, freeCollateral: 0, hasOpenPositions: false 
+      };
+      const mainAccountBalance = results[1].status === 'fulfilled' ? results[1].value : 0;
+      const posData = results[2].status === 'fulfilled' ? results[2].value : { 
+        position: null, 
+        source: 'error', 
+        driftDetected: false,
+        staleWarning: false,
+        driftDetails: null,
+        healthMetrics: null,
+      };
+      const netDeposited = results[3].status === 'fulfilled' ? results[3].value : 0;
+      const tradeCount = results[4].status === 'fulfilled' ? results[4].value : 0;
+      const dbPosition = results[5].status === 'fulfilled' ? results[5].value : null;
+      const apyResult = results[6].status === 'fulfilled' ? results[6].value : { apy: 5.3, stale: true };
+      
+      // Log any failures for debugging
+      const failures = results.filter(r => r.status === 'rejected');
+      if (failures.length > 0) {
+        console.warn(`[Bot Overview] ${failures.length} calls failed:`, 
+          failures.map((f, i) => `[${i}]: ${(f as PromiseRejectedResult).reason}`).join(', '));
+      }
+      
+      // Calculate interest
+      const currentApy = apyResult.apy / 100;
+      const dailyInterestRate = currentApy / 365;
+      const estimatedDailyInterest = accountInfo.usdcBalance * dailyInterestRate;
+      
+      // Build position response
+      const position = posData.position?.hasPosition ? {
+        hasPosition: true,
+        side: posData.position.side,
+        size: posData.position.size,
+        avgEntryPrice: posData.position.avgEntryPrice,
+        currentPrice: posData.position.currentPrice,
+        unrealizedPnl: posData.position.unrealizedPnl,
+        realizedPnl: posData.position.realizedPnl,
+        market: posData.position.market,
+        source: posData.source,
+        staleWarning: posData.staleWarning,
+        driftDetected: posData.driftDetected,
+        driftDetails: posData.driftDetails,
+        healthFactor: posData.healthMetrics?.healthFactor,
+        liquidationPrice: posData.healthMetrics?.liquidationPrice,
+      } : {
+        hasPosition: false,
+        source: posData.source,
+        driftDetected: posData.driftDetected,
+      };
+      
+      // Construct webhook URL dynamically
+      const baseUrl = process.env.NODE_ENV === 'production' || process.env.REPLIT_DEPLOYMENT_DOMAIN
+        ? 'https://myquantumvault.com'
+        : process.env.REPLIT_DEV_DOMAIN 
+        ? `https://${process.env.REPLIT_DEV_DOMAIN}`
+        : 'http://localhost:5000';
+      const webhookUrl = wallet.userWebhookSecret 
+        ? `${baseUrl}/api/webhook/user/${req.walletAddress}?secret=${wallet.userWebhookSecret}`
+        : null;
+      
+      res.json({
+        // From getDriftAccountInfo (1 RPC)
+        usdcBalance: accountInfo.usdcBalance,
+        totalCollateral: accountInfo.totalCollateral,
+        freeCollateral: accountInfo.freeCollateral,
+        hasOpenPositions: accountInfo.hasOpenPositions,
+        subAccountId,
+        
+        // From getAgentUsdcBalance (1 RPC)
+        mainAccountBalance,
+        
+        // From PositionService (reuses on-chain data, may add 1 RPC for oracle price)
+        position,
+        
+        // From database (no RPC)
+        netDeposited,
+        tradeCount,
+        realizedPnl: parseFloat(dbPosition?.realizedPnl || "0"),
+        totalFees: parseFloat(dbPosition?.totalFees || "0"),
+        
+        // Calculated
+        estimatedDailyInterest: Math.max(0, estimatedDailyInterest),
+        driftApy: currentApy,
+        apyStale: apyResult.stale || false,
+        
+        // Webhook URL (constructed dynamically)
+        webhookUrl,
+        
+        // Indicates if some data may be stale due to failed calls
+        partialData: failures.length > 0,
+      });
+    } catch (error) {
+      console.error("Get bot overview error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Trading bot CRUD routes
   app.get("/api/trading-bots", requireWallet, async (req, res) => {
     try {
