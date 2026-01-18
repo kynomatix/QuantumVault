@@ -930,6 +930,68 @@ export async function getUsdcBalance(walletAddress: string): Promise<number> {
   }
 }
 
+/**
+ * INTERNAL: Parse USDC balance from a pre-decoded user account.
+ * Used by getDriftAccountInfo to avoid duplicate RPC calls.
+ * @param decodedUser - Already decoded user account from decodeUser(buffer)
+ * @param cumulativeDepositInterest - Interest multiplier from SpotMarket (optional, defaults to 1.0)
+ */
+function parseUsdcBalanceFromDecodedUser(decodedUser: any, cumulativeDepositInterest?: BN): number {
+  const USDC_MARKET_INDEX = 0;
+  const L = DRIFT_LAYOUTS;
+  const interest = cumulativeDepositInterest ?? L.PRECISION.SPOT_CUMULATIVE_INTEREST;
+  
+  for (const spotPos of decodedUser.spotPositions) {
+    if (spotPos.marketIndex === USDC_MARKET_INDEX) {
+      const isDeposit = spotPos.balanceType && 'deposit' in spotPos.balanceType;
+      if (!isDeposit) continue;
+      
+      const scaledBalance = spotPos.scaledBalance;
+      if (scaledBalance.isZero()) continue;
+      
+      const numerator = scaledBalance.mul(interest);
+      const afterBalanceDiv = numerator.div(L.PRECISION.SPOT_BALANCE);
+      const wholePart = afterBalanceDiv.div(L.PRECISION.SPOT_CUMULATIVE_INTEREST);
+      const remainder = afterBalanceDiv.mod(L.PRECISION.SPOT_CUMULATIVE_INTEREST);
+      const actualUsdc = wholePart.toNumber() + remainder.toNumber() / 1e10;
+      
+      if (actualUsdc > 0.001) {
+        return actualUsdc;
+      }
+    }
+  }
+  
+  return 0;
+}
+
+/**
+ * Fetch the USDC SpotMarket cumulative deposit interest.
+ * Separated out so it can be called once and shared.
+ */
+async function fetchCumulativeDepositInterest(): Promise<BN> {
+  const connection = getConnection();
+  const L = DRIFT_LAYOUTS;
+  const USDC_MARKET_INDEX = 0;
+  
+  try {
+    const spotMarketPDA = getSpotMarketPDA(USDC_MARKET_INDEX);
+    const spotMarketInfo = await connection.getAccountInfo(spotMarketPDA, { commitment: 'confirmed' });
+    if (spotMarketInfo && spotMarketInfo.data) {
+      const marketData = spotMarketInfo.data;
+      const offset = L.SPOT_MARKET.CUMULATIVE_DEPOSIT_INTEREST_OFFSET;
+      const lowBits = marketData.readBigUInt64LE(offset);
+      const highBits = marketData.readBigUInt64LE(offset + 8);
+      if (highBits === BigInt(0)) {
+        return new BN(lowBits.toString());
+      }
+    }
+  } catch (marketError) {
+    console.log(`[Drift] Could not read SpotMarket, using default interest`);
+  }
+  
+  return L.PRECISION.SPOT_CUMULATIVE_INTEREST; // Default 1.0x
+}
+
 export async function getDriftBalance(walletAddress: string, subAccountId: number = 0): Promise<number> {
   const connection = getConnection();
   const userPubkey = new PublicKey(walletAddress);
@@ -1305,10 +1367,17 @@ export interface DriftAccountInfo {
   totalPositionNotional: number;
 }
 
+/**
+ * OPTIMIZED: Fetches all Drift account info in minimal RPC calls.
+ * Previous: 4 RPC calls (userAccount x3 + spotMarket)
+ * Now: 2 RPC calls (userAccount x1 + spotMarket x1) + 1 local HTTP for prices
+ * 
+ * This is a ~50% reduction in RPC calls per invocation.
+ */
 export async function getDriftAccountInfo(walletAddress: string, subAccountId: number = 0): Promise<DriftAccountInfo> {
   const connection = getConnection();
   const userPubkey = new PublicKey(walletAddress);
-  const userAccount = getUserAccountPDA(userPubkey, subAccountId);
+  const userAccountPDA = getUserAccountPDA(userPubkey, subAccountId);
   
   const defaultResult: DriftAccountInfo = {
     usdcBalance: 0,
@@ -1321,17 +1390,33 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
   };
   
   try {
-    const accountInfo = await connection.getAccountInfo(userAccount);
+    // OPTIMIZATION: Fetch userAccount, spotMarket interest, and prices in parallel
+    // This replaces 4 sequential RPC calls with 2 parallel RPC + 1 local HTTP
+    const [accountInfo, cumulativeDepositInterest, prices] = await Promise.all([
+      connection.getAccountInfo(userAccountPDA, { commitment: 'confirmed' }),
+      fetchCumulativeDepositInterest(),
+      fetchPerpPrices(),
+    ]);
     
     if (!accountInfo || !accountInfo.data) {
+      console.log(`[Drift] No account data found for ${walletAddress} subaccount ${subAccountId}`);
       return defaultResult;
     }
     
-    // Get USDC balance using existing logic
-    const usdcBalance = await getDriftBalance(walletAddress, subAccountId);
+    // Decode user account ONCE (previously decoded 3 times: here, in getDriftBalance, in getPerpPositions)
+    const buffer = Buffer.from(accountInfo.data);
+    let decodedUser: any;
+    try {
+      decodedUser = decodeUser(buffer);
+      console.log(`[Drift SDK decodeUser] Single decode for account info (subaccount ${subAccountId}), length=${buffer.length} bytes`);
+    } catch (decodeError) {
+      console.error(`[Drift] Failed to decode user account for ${walletAddress} subaccount ${subAccountId}:`, decodeError);
+      return defaultResult;
+    }
     
-    // Get positions with unrealized PnL for accurate health calculation
-    const positions = await getPerpPositions(walletAddress, subAccountId);
+    // Use internal parsing functions that operate on the already-decoded user
+    const usdcBalance = parseUsdcBalanceFromDecodedUser(decodedUser, cumulativeDepositInterest);
+    const positions = parsePerpPositionsFromDecodedUser(decodedUser, prices);
     
     let hasOpenPositions = false;
     let totalUnrealizedPnl = 0;
@@ -1349,8 +1434,6 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
     const totalCollateral = usdcBalance + totalUnrealizedPnl;
     
     // Calculate margin requirement based on position notional value
-    // Use per-market maintenance margin weights to better match Drift's actual requirements
-    // Source: Drift Protocol docs - maintenance margins vary by market volatility
     const MARKET_MAINTENANCE_MARGINS: Record<string, number> = {
       'SOL-PERP': 0.033,  // ~3.3% maintenance margin
       'BTC-PERP': 0.025,  // ~2.5% maintenance margin  
@@ -1369,10 +1452,10 @@ export async function getDriftAccountInfo(walletAddress: string, subAccountId: n
     const marginUsed = hasOpenPositions ? marginRequired : 0;
     
     // Free collateral = total collateral - margin requirement
-    const buffer = hasOpenPositions ? 0.0001 : 0;
-    const freeCollateral = Math.max(0, totalCollateral - marginUsed - buffer);
+    const bufferAmount = hasOpenPositions ? 0.0001 : 0;
+    const freeCollateral = Math.max(0, totalCollateral - marginUsed - bufferAmount);
     
-    console.log(`[Drift] Account info: balance=${usdcBalance.toFixed(4)}, unrealizedPnl=${totalUnrealizedPnl.toFixed(4)}, totalCollateral=${totalCollateral.toFixed(4)}, positionNotional=${totalPositionNotional.toFixed(2)}, marginUsed=${marginUsed.toFixed(4)}, free=${freeCollateral.toFixed(4)}, hasPositions=${hasOpenPositions}`);
+    console.log(`[Drift] Account info (optimized): balance=${usdcBalance.toFixed(4)}, pnl=${totalUnrealizedPnl.toFixed(4)}, collateral=${totalCollateral.toFixed(4)}, notional=${totalPositionNotional.toFixed(2)}, margin=${marginUsed.toFixed(4)}, free=${freeCollateral.toFixed(4)}`);
     
     return {
       usdcBalance,
@@ -1492,6 +1575,94 @@ export interface PerpPosition {
   markPrice: number; // Current mark price
   unrealizedPnl: number; // Unrealized profit/loss
   unrealizedPnlPercent: number; // Unrealized PnL as percentage
+}
+
+/**
+ * INTERNAL: Parse perp positions from a pre-decoded user account.
+ * Used by getDriftAccountInfo to avoid duplicate RPC calls.
+ * @param decodedUser - Already decoded user account from decodeUser(buffer)
+ * @param prices - Price map by market index
+ */
+function parsePerpPositionsFromDecodedUser(decodedUser: any, prices: Record<number, number>): PerpPosition[] {
+  const positions: PerpPosition[] = [];
+  const BASE_PRECISION = 1e9;
+  const QUOTE_PRECISION = 1e6;
+  
+  for (const perpPos of decodedUser.perpPositions) {
+    if (perpPos.baseAssetAmount.isZero()) {
+      continue;
+    }
+    
+    const marketIndex = perpPos.marketIndex;
+    const baseAssetRaw = perpPos.baseAssetAmount.toString();
+    const quoteAssetRaw = perpPos.quoteAssetAmount.toString();
+    const quoteEntryRaw = perpPos.quoteEntryAmount.toString();
+    
+    const baseAssetReal = parseFloat(baseAssetRaw) / BASE_PRECISION;
+    const quoteAssetReal = Math.abs(parseFloat(quoteAssetRaw)) / QUOTE_PRECISION;
+    const quoteEntryReal = parseFloat(quoteEntryRaw) / QUOTE_PRECISION;
+    
+    const side: 'LONG' | 'SHORT' = baseAssetReal > 0 ? 'LONG' : 'SHORT';
+    const marketName = PERP_MARKET_NAMES[marketIndex] || `PERP-${marketIndex}`;
+    const markPrice = prices[marketIndex] || 0;
+    const entryPrice = Math.abs(baseAssetReal) > 0 ? Math.abs(quoteEntryReal) / Math.abs(baseAssetReal) : 0;
+    const sizeUsd = Math.abs(baseAssetReal) * markPrice;
+    
+    const unrealizedPnl = side === 'LONG' 
+      ? (markPrice - entryPrice) * Math.abs(baseAssetReal)
+      : (entryPrice - markPrice) * Math.abs(baseAssetReal);
+    
+    const unrealizedPnlPercent = Math.abs(quoteEntryReal) > 0 
+      ? (unrealizedPnl / Math.abs(quoteEntryReal)) * 100 
+      : 0;
+    
+    positions.push({
+      marketIndex,
+      market: marketName,
+      baseAssetAmount: baseAssetReal,
+      quoteAssetAmount: quoteAssetReal,
+      quoteEntryAmount: quoteEntryReal,
+      side,
+      sizeUsd,
+      entryPrice,
+      markPrice,
+      unrealizedPnl,
+      unrealizedPnlPercent,
+    });
+  }
+  
+  return positions;
+}
+
+/**
+ * Fetch current prices for all known perp markets.
+ * Separated out so it can be called once and shared.
+ * Always returns fallback prices for common markets to match original getPerpPositions behavior.
+ */
+async function fetchPerpPrices(): Promise<Record<number, number>> {
+  // Start with fallback prices for common markets (same as original getPerpPositions)
+  const prices: Record<number, number> = {
+    0: 136,    // SOL fallback
+    1: 90000,  // BTC fallback
+    2: 3000,   // ETH fallback
+  };
+  
+  try {
+    const priceRes = await fetch(`http://localhost:5000/api/prices`);
+    if (priceRes.ok) {
+      const priceData = await priceRes.json();
+      for (const [indexStr, marketName] of Object.entries(PERP_MARKET_NAMES)) {
+        const marketIndex = parseInt(indexStr, 10);
+        if (priceData[marketName as string]) {
+          prices[marketIndex] = priceData[marketName as string];
+        }
+      }
+    }
+  } catch (e) {
+    console.log(`[Drift] Could not fetch prices, using fallbacks`);
+  }
+  
+  return prices;
 }
 
 export async function getPerpPositions(walletAddress: string, subAccountId: number = 0): Promise<PerpPosition[]> {
