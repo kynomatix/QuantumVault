@@ -14,7 +14,7 @@ import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getD
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw } from "./agent-wallet";
-import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
+import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, getQueueStatus } from "./trade-retry-service";
@@ -4823,13 +4823,8 @@ export async function registerRoutes(
       
       console.log(`[Webhook] $${tradeAmountUsd.toFixed(2)} / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
-      // Minimum order sizes per market (from Drift Protocol)
-      const MIN_ORDER_SIZES: Record<string, number> = {
-        "SOL-PERP": 0.01,
-        "BTC-PERP": 0.0001,
-        "ETH-PERP": 0.001,
-      };
-      const minOrderSize = MIN_ORDER_SIZES[bot.market] || 0.01;
+      // Get minimum order size for this market from market metadata
+      const minOrderSize = getMinOrderSize(bot.market);
       
       if (contractSize < minOrderSize) {
         const minCapitalNeeded = minOrderSize * oraclePrice;
@@ -5672,13 +5667,8 @@ export async function registerRoutes(
       
       console.log(`[User Webhook] $${tradeAmountUsd.toFixed(2)} / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
-      // Minimum order sizes per market (from Drift Protocol)
-      const MIN_ORDER_SIZES: Record<string, number> = {
-        "SOL-PERP": 0.01,
-        "BTC-PERP": 0.0001,
-        "ETH-PERP": 0.001,
-      };
-      const minOrderSize = MIN_ORDER_SIZES[bot.market] || 0.01;
+      // Get minimum order size for this market from market metadata
+      const minOrderSize = getMinOrderSize(bot.market);
       
       if (contractSize < minOrderSize) {
         const minCapitalNeeded = minOrderSize * oraclePrice;
