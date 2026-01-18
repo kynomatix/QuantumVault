@@ -6924,6 +6924,13 @@ export async function registerRoutes(
       );
       
       if (result.success) {
+        // Get fill price for trade record
+        const fillPrice = result.fillPrice || 0;
+        
+        // Estimate fee (0.05% taker fee)
+        const notionalValue = size * fillPrice;
+        const estimatedFee = notionalValue * 0.0005;
+        
         // Create a new trade record for the retry
         const newTrade = await storage.createBotTrade({
           tradingBotId: bot.id,
@@ -6931,7 +6938,8 @@ export async function registerRoutes(
           market,
           side,
           size: size.toString(),
-          price: result.fillPrice?.toString() || trade.price?.toString() || '0',
+          price: fillPrice.toString(),
+          fee: estimatedFee.toString(),
           status: 'executed',
           txSignature: result.signature || result.txSignature,
           webhookPayload: { retryOf: tradeId },
@@ -6939,12 +6947,32 @@ export async function registerRoutes(
         
         console.log(`[Retry Trade] Success! New trade ID: ${newTrade.id}, tx: ${result.signature || result.txSignature}`);
         
+        // CRITICAL: Sync position from on-chain to update entry price in database
+        // This ensures PnL calculations use the actual on-chain entry price, not stale data
+        try {
+          await syncPositionFromOnChain(
+            bot.id,
+            walletAddress,
+            wallet.agentPublicKey!,
+            bot.driftSubaccountId ?? 0,
+            market,
+            newTrade.id,
+            estimatedFee,
+            fillPrice,
+            side.toLowerCase() as 'long' | 'short',
+            size
+          );
+          console.log(`[Retry Trade] Position synced from on-chain with correct entry price`);
+        } catch (syncErr) {
+          console.warn(`[Retry Trade] Position sync failed (non-critical):`, syncErr);
+        }
+        
         res.json({
           success: true,
           message: "Trade executed successfully",
           tradeId: newTrade.id,
           txSignature: result.signature || result.txSignature,
-          fillPrice: result.fillPrice,
+          fillPrice,
         });
       } else {
         console.error(`[Retry Trade] Failed:`, result.error);
