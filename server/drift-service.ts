@@ -1476,6 +1476,8 @@ const PERP_MARKET_NAMES: Record<number, string> = {
   80: 'MNT-PERP',
   81: '1KPUMP-PERP',
   82: 'MET-PERP',
+  83: '1KMON-PERP',
+  84: 'LIT-PERP',
 };
 
 export interface PerpPosition {
@@ -2541,6 +2543,8 @@ const PERP_MARKET_INDICES: Record<string, number> = {
   'MNT': 80, 'MNT-PERP': 80, 'MNTUSD': 80,
   '1KPUMP': 81, '1KPUMP-PERP': 81, '1KPUMPUSD': 81,
   'MET': 82, 'MET-PERP': 82, 'METUSD': 82,
+  '1KMON': 83, '1KMON-PERP': 83, '1KMONUSD': 83,
+  'LIT': 84, 'LIT-PERP': 84, 'LITUSD': 84,
 };
 
 // Execute trade/close via subprocess to avoid ESM/CJS issues with Drift SDK

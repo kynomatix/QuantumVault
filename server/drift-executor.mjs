@@ -647,6 +647,8 @@ const PERP_MARKET_INDICES = {
   'MNT': 80, 'MNT-PERP': 80,
   '1KPUMP': 81, '1KPUMP-PERP': 81,
   'MET': 82, 'MET-PERP': 82,
+  '1KMON': 83, '1KMON-PERP': 83,
+  'LIT': 84, 'LIT-PERP': 84,
 };
 
 // Must match server/crypto.ts encryption exactly
