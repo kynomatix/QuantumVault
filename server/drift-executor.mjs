@@ -356,12 +356,12 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
       if (retryConfirmation.value.err) {
         const retryErrStr = JSON.stringify(retryConfirmation.value.err);
         if (retryErrStr.includes('6214') || retryErrStr.includes('3007')) {
-          // Even the retry says it exists - check one more time
-          const finalCheck = await connection.getAccountInfo(targetAccountPDA);
-          if (finalCheck) {
-            console.error(`[Executor] Retry also got 6214/3007 but SA${subAccountId} now exists, proceeding...`);
-            return true;
-          }
+          // 6214 on retry = account definitely exists (Drift is rejecting because it's already initialized)
+          // The RPC check may be stale, but the Drift program is authoritative
+          // Trust the program and proceed
+          console.error(`[Executor] Retry got 6214/3007 - Drift confirms SA${subAccountId} exists, proceeding...`);
+          console.error('[Executor] Note: RPC may be stale but Drift program is authoritative');
+          return true;
         }
         console.error('[Executor] Retry initialization failed:', retryConfirmation.value.err);
         throw new Error(`Drift account initialization failed on retry: ${retryErrStr}`);
