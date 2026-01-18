@@ -145,7 +145,7 @@ const MARKET_MAX_LEVERAGE: Record<string, number> = {
   '1KWEN-PERP': 5,
   'DBR-PERP': 5,
   'WLD-PERP': 5,
-  'ASTER-PERP': 5,
+  'ASTER-PERP': 10,
   'XPL-PERP': 5,
   '2Z-PERP': 5,
   'MNT-PERP': 5,
