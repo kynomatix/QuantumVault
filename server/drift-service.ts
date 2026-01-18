@@ -1067,48 +1067,193 @@ export async function discoverOnChainSubaccounts(walletAddress: string): Promise
 }
 
 /**
+ * Read the numberOfSubAccountsCreated counter from UserStats account.
+ * This is authoritative - Drift requires new subaccounts to use this value as their ID.
+ * The counter only increments, never decrements (even if subaccounts are closed/deleted).
+ * 
+ * UserStats struct layout (from Drift IDL):
+ * - 8 bytes: anchor discriminator
+ * - 32 bytes: authority (publicKey)
+ * - 32 bytes: referrer (publicKey)
+ * - 48 bytes: fees (UserFees = 6 x u64)
+ * - 8 bytes: nextEpochTs (i64)
+ * - 8 bytes: makerVolume30d (u64)
+ * - 8 bytes: takerVolume30d (u64)
+ * - 8 bytes: fillerVolume30d (u64)
+ * - 8 bytes: lastMakerVolume30dTs (i64)
+ * - 8 bytes: lastTakerVolume30dTs (i64)
+ * - 8 bytes: lastFillerVolume30dTs (i64)
+ * - 8 bytes: ifStakedQuoteAssetAmount (u64)
+ * - 2 bytes: numberOfSubAccounts (u16) <- current active count
+ * - 2 bytes: numberOfSubAccountsCreated (u16) <- total ever created (AUTHORITATIVE)
+ * 
+ * @returns The numberOfSubAccountsCreated (>=0), or -1 if parsing failed (triggers fallback)
+ */
+export async function getNumberOfSubAccountsFromUserStats(walletAddress: string): Promise<number> {
+  const connection = getConnection();
+  const userPubkey = new PublicKey(walletAddress);
+  const userStats = getUserStatsPDA(userPubkey);
+  
+  try {
+    const accountInfo = await connection.getAccountInfo(userStats);
+    
+    // UserStats doesn't exist = new user with no Drift account yet
+    // Return 0 which means first subaccount should be SA0
+    if (!accountInfo) {
+      console.log(`[Drift Discovery] UserStats not found for ${walletAddress.slice(0, 8)}... - new user, counter=0`);
+      return 0;
+    }
+    
+    // Account exists but data is null/empty = RPC error, fallback to on-chain discovery
+    if (!accountInfo.data || accountInfo.data.length < 190) {
+      console.log(`[Drift Discovery] UserStats has invalid data length for ${walletAddress.slice(0, 8)}... - fallback to discovery`);
+      return -1;
+    }
+    
+    // Verify ownership - must be owned by Drift program
+    if (accountInfo.owner.toBase58() !== DRIFT_PROGRAM_ID.toBase58()) {
+      console.log(`[Drift Discovery] UserStats owned by wrong program: ${accountInfo.owner.toBase58()}`);
+      return -1;
+    }
+    
+    const data = accountInfo.data;
+    
+    // Based on Drift IDL UserStats struct layout:
+    // - Offset 184: numberOfSubAccounts (u16) - current active count
+    // - Offset 186: numberOfSubAccountsCreated (u16) - total ever created (authoritative)
+    const OFFSET_NUMBER_OF_SUBACCOUNTS = 184;
+    const OFFSET_NUMBER_OF_SUBACCOUNTS_CREATED = 186;
+    
+    const currentCount = data.readUInt16LE(OFFSET_NUMBER_OF_SUBACCOUNTS);
+    const totalCreated = data.readUInt16LE(OFFSET_NUMBER_OF_SUBACCOUNTS_CREATED);
+    
+    // Sanity checks:
+    // 1. Both values should be reasonable (0-255)
+    // 2. totalCreated should be >= currentCount (you can't have more active than ever created)
+    if (totalCreated > 255 || currentCount > 255) {
+      console.log(`[Drift Discovery] Invalid counts: current=${currentCount}, created=${totalCreated}, fallback to discovery`);
+      return -1;
+    }
+    
+    if (totalCreated < currentCount) {
+      console.log(`[Drift Discovery] WARNING: totalCreated (${totalCreated}) < currentCount (${currentCount}), possible offset issue`);
+      // Use the higher value to be safe
+      return Math.max(currentCount, totalCreated);
+    }
+    
+    console.log(`[Drift Discovery] UserStats: currentSubaccounts=${currentCount}, totalCreated=${totalCreated} (using totalCreated for next ID)`);
+    return totalCreated;
+    
+  } catch (error) {
+    // RPC error - fallback to on-chain discovery
+    console.error(`[Drift Discovery] Error reading UserStats:`, error);
+    return -1;
+  }
+}
+
+/**
  * Get the next valid sequential subaccount ID based on BOTH on-chain state AND database allocations.
  * Drift requires subaccounts to be created sequentially (0, then 1, then 2, etc.)
+ * CRITICAL: Uses numberOfSubAccountsCreated from UserStats as the authoritative source.
+ * 
+ * The numberOfSubAccountsCreated counter in Drift only increments (never decrements when subaccounts are closed).
+ * This means if a user had SA0-SA3, deleted SA3, the counter is still 4 and next must be SA4.
  * 
  * @param walletAddress - The agent wallet address to check
  * @param dbAllocatedIds - IDs already allocated in the database (may not exist on-chain yet)
  */
 export async function getNextOnChainSubaccountId(walletAddress: string, dbAllocatedIds: number[] = []): Promise<number> {
+  // First, check the authoritative numberOfSubAccountsCreated counter from UserStats
+  // This is critical because Drift requires: next subaccount ID = numberOfSubAccountsCreated
+  const numberOfSubAccountsCreated = await getNumberOfSubAccountsFromUserStats(walletAddress);
+  
   const existingOnChain = await discoverOnChainSubaccounts(walletAddress);
   
   // Merge on-chain and database allocations to avoid conflicts
   const allAllocatedIds = new Set([...existingOnChain, ...dbAllocatedIds]);
   
-  console.log(`[Drift Discovery] On-chain IDs: [${existingOnChain.join(', ')}], DB IDs: [${dbAllocatedIds.join(', ')}]`);
+  console.log(`[Drift Discovery] On-chain IDs: [${existingOnChain.join(', ')}], DB IDs: [${dbAllocatedIds.join(', ')}], numberOfSubAccountsCreated from UserStats: ${numberOfSubAccountsCreated}`);
+  
+  // If we successfully read numberOfSubAccountsCreated, use it as the authoritative next ID
+  // The next subaccount MUST be numberOfSubAccountsCreated (not +1)
+  // because IDs are 0-indexed: if numberOfSubAccountsCreated=4, existing are 0,1,2,3 and next is 4
+  if (numberOfSubAccountsCreated >= 0) {
+    // Validate: SA0 should exist if counter > 0 (sanity check for RPC consistency)
+    if (numberOfSubAccountsCreated > 0 && !existingOnChain.includes(0)) {
+      console.log(`[Drift Discovery] WARNING: UserStats says ${numberOfSubAccountsCreated} subaccounts created but SA0 not found on-chain (RPC issue?)`);
+      // Still trust the counter - SA0 might exist but RPC is stale
+    }
+    
+    // For bots we use SA1+ (SA0 is main account)
+    // If counter is 0, user has no Drift account yet - init will create SA0 and bot will use SA1
+    // If counter > 0, next bot subaccount ID is the counter value
+    let nextId = numberOfSubAccountsCreated > 0 ? numberOfSubAccountsCreated : 1;
+    
+    // Skip any ID already in DB (pending creation) or already on-chain
+    while (allAllocatedIds.has(nextId) && nextId <= 8) {
+      nextId++;
+    }
+    
+    // Cross-validate with on-chain count (detect severe mismatches)
+    if (numberOfSubAccountsCreated > 0 && existingOnChain.length > 0) {
+      const maxOnChain = Math.max(...existingOnChain);
+      if (maxOnChain >= numberOfSubAccountsCreated) {
+        // On-chain has IDs >= counter, which shouldn't happen unless counter is wrong
+        console.log(`[Drift Discovery] WARNING: max on-chain ID ${maxOnChain} >= numberOfSubAccountsCreated ${numberOfSubAccountsCreated}`);
+        // Use the higher value + 1 to be safe
+        nextId = Math.max(nextId, maxOnChain + 1);
+      }
+    }
+    
+    console.log(`[Drift Discovery] Next available subaccount ID (from UserStats counter): ${nextId}`);
+    return nextId;
+  }
+  
+  // Fallback: use on-chain discovery if UserStats parsing failed
+  // This is less reliable but better than nothing
+  console.log(`[Drift Discovery] Using on-chain discovery fallback (UserStats parsing failed)`);
   
   // Subaccount 0 is the main account
   // For bots, we use subaccounts 1+
-  // Find the next sequential ID that can be created
-  // Must be the smallest missing from on-chain (not just from combined set)
+  // Drift requires sequential creation, so we must find the first gap
   
-  // Drift requires: to create subaccount N, subaccounts 0..N-1 must exist on-chain
-  // So find the first ID not on-chain
-  let nextId = 1;
-  while (existingOnChain.includes(nextId)) {
-    nextId++;
-  }
-  
-  // But also skip any ID that's already allocated in DB (pending creation)
-  while (allAllocatedIds.has(nextId) && nextId <= 8) {
-    nextId++;
-  }
-  
-  // Verify we can actually create this ID (all previous must exist on-chain)
-  for (let prevId = 1; prevId < nextId; prevId++) {
-    if (!existingOnChain.includes(prevId)) {
-      // There's a gap on-chain - we must fill it first
-      console.log(`[Drift Discovery] Must fill gap first - next subaccount ID: ${prevId}`);
-      return prevId;
+  if (existingOnChain.length > 0) {
+    // Find the first missing ID starting from 1 (skip SA0 which is main account)
+    // Use max+1 as fallback if no gaps found
+    const maxOnChain = Math.max(...existingOnChain);
+    let nextId = 1;
+    
+    // Find first gap in the sequence (for sequential requirement)
+    while (existingOnChain.includes(nextId) && nextId <= maxOnChain) {
+      nextId++;
     }
+    
+    // If no gap found, use max + 1
+    if (nextId > maxOnChain) {
+      nextId = maxOnChain + 1;
+    }
+    
+    // Skip any ID already in DB (pending creation)
+    while (allAllocatedIds.has(nextId) && nextId <= 8) {
+      nextId++;
+    }
+    
+    // Verify gap-filling is valid (all prior IDs must exist)
+    for (let prevId = 1; prevId < nextId; prevId++) {
+      if (!existingOnChain.includes(prevId) && !dbAllocatedIds.includes(prevId)) {
+        // There's a gap - fill it first
+        console.log(`[Drift Discovery] Gap detected at ${prevId}, using that first (fallback)`);
+        return prevId;
+      }
+    }
+    
+    console.log(`[Drift Discovery] Next available subaccount ID (fallback): ${nextId}`);
+    return nextId;
   }
   
-  console.log(`[Drift Discovery] Next available subaccount ID: ${nextId}`);
-  return nextId;
+  // No subaccounts found on-chain, start with 1 for bots (SA0 will be created by init)
+  console.log(`[Drift Discovery] Next available subaccount ID (fallback, no existing): 1`);
+  return 1;
 }
 
 /**
