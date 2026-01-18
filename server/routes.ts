@@ -2704,6 +2704,55 @@ export async function registerRoutes(
     }
   });
 
+  // Force refresh position from blockchain - updates cached database entry price
+  app.post("/api/trading-bots/:id/refresh-position", requireWallet, async (req, res) => {
+    console.log(`[RefreshPosition] Force refresh request for botId=${req.params.id}`);
+    try {
+      const bot = await storage.getTradingBot(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Unauthorized" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet?.agentPublicKey) {
+        return res.status(400).json({ error: "No agent wallet" });
+      }
+
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      
+      // Force sync from on-chain with zero trade params - this just updates entry price
+      const syncResult = await syncPositionFromOnChain(
+        bot.id,
+        bot.walletAddress,
+        wallet.agentPublicKey,
+        subAccountId,
+        bot.market,
+        `refresh-${Date.now()}`,
+        0, // no fee
+        0, // no fill price
+        '', // no side
+        0  // no size
+      );
+
+      if (syncResult.success) {
+        console.log(`[RefreshPosition] Successfully refreshed position from blockchain`);
+        res.json({ 
+          success: true, 
+          message: "Position refreshed from blockchain",
+          position: syncResult.position
+        });
+      } else {
+        res.status(500).json({ error: syncResult.error || "Failed to refresh" });
+      }
+    } catch (error) {
+      console.error("Refresh position error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   app.post("/api/agent/confirm-deposit", requireWallet, async (req, res) => {
     try {
       const { amount, txSignature } = req.body;

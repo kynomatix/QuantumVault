@@ -217,6 +217,7 @@ export function BotManagementDrawer({
   const [closePositionLoading, setClosePositionLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshPositionLoading, setRefreshPositionLoading] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [usdcApy, setUsdcApy] = useState<number | null>(null);
   const [performanceTimeframe, setPerformanceTimeframe] = useState<'7d' | '30d' | '90d' | 'all'>('7d');
@@ -704,6 +705,39 @@ export function BotManagementDrawer({
     }
   };
 
+  const handleRefreshPosition = async () => {
+    if (!localBot) return;
+    setRefreshPositionLoading(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${localBot.id}/refresh-position?wallet=${walletAddress}`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to refresh position');
+      }
+
+      toast({
+        title: 'Position refreshed',
+        description: 'Entry price updated from blockchain',
+      });
+      
+      // Refresh position data
+      fetchBotPosition();
+    } catch (error) {
+      toast({
+        title: 'Refresh failed',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setRefreshPositionLoading(false);
+    }
+  };
+
   const handleSaveSettings = async () => {
     if (!localBot) return;
     
@@ -1118,7 +1152,20 @@ export function BotManagementDrawer({
                   
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div className="p-2 rounded-lg bg-background/50">
-                      <p className="text-xs text-muted-foreground">Entry Price</p>
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs text-muted-foreground">Entry Price</p>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-4 w-4 p-0 hover:bg-transparent"
+                          onClick={handleRefreshPosition}
+                          disabled={refreshPositionLoading}
+                          title="Refresh from blockchain"
+                          data-testid="button-refresh-position"
+                        >
+                          <RefreshCw className={`w-3 h-3 text-muted-foreground hover:text-foreground ${refreshPositionLoading ? 'animate-spin' : ''}`} />
+                        </Button>
+                      </div>
                       <p className="font-mono font-semibold" data-testid="text-entry-price">
                         ${formatPrice(botPosition.avgEntryPrice)}
                       </p>
