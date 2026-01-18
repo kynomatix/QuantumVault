@@ -1111,6 +1111,45 @@ export async function getNextOnChainSubaccountId(walletAddress: string, dbAlloca
   return nextId;
 }
 
+/**
+ * Sync on-chain subaccounts with database.
+ * Creates placeholder bot entries for any subaccounts that exist on-chain but not in DB.
+ * This ensures DB and on-chain state stay in sync.
+ * 
+ * @returns Array of orphaned subaccount IDs that were synced
+ */
+export async function syncOnChainSubaccounts(
+  agentWalletAddress: string,
+  userWalletAddress: string,
+  dbAllocatedIds: number[],
+  createOrphanedBot: (subaccountId: number) => Promise<void>
+): Promise<number[]> {
+  const existingOnChain = await discoverOnChainSubaccounts(agentWalletAddress);
+  const dbSet = new Set(dbAllocatedIds);
+  const orphanedIds: number[] = [];
+  
+  // Find subaccounts that exist on-chain but not in DB (excluding SA0 which is the main account)
+  for (const subId of existingOnChain) {
+    if (subId > 0 && !dbSet.has(subId)) {
+      console.log(`[Drift Sync] Found orphaned subaccount ${subId} on-chain for ${agentWalletAddress.slice(0, 8)}...`);
+      orphanedIds.push(subId);
+      
+      try {
+        await createOrphanedBot(subId);
+        console.log(`[Drift Sync] Created placeholder bot for orphaned subaccount ${subId}`);
+      } catch (error) {
+        console.error(`[Drift Sync] Failed to create placeholder bot for subaccount ${subId}:`, error);
+      }
+    }
+  }
+  
+  if (orphanedIds.length > 0) {
+    console.log(`[Drift Sync] Synced ${orphanedIds.length} orphaned subaccounts: [${orphanedIds.join(', ')}]`);
+  }
+  
+  return orphanedIds;
+}
+
 export interface DriftAccountInfo {
   usdcBalance: number;
   totalCollateral: number;

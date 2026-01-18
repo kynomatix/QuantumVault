@@ -3217,7 +3217,38 @@ export async function registerRoutes(
         const dbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
         
         if (wallet.agentPublicKey) {
-          nextSubaccountId = await getNextOnChainSubaccountId(wallet.agentPublicKey, dbAllocatedIds);
+          // SYNC: Create placeholder bots for any orphaned on-chain subaccounts
+          // This keeps DB in sync with on-chain state and prevents ID conflicts
+          const { syncOnChainSubaccounts } = await import('./drift-service');
+          await syncOnChainSubaccounts(
+            wallet.agentPublicKey,
+            req.walletAddress!,
+            dbAllocatedIds,
+            async (orphanedSubaccountId: number) => {
+              // Create a placeholder bot for the orphaned subaccount
+              const orphanedWebhookSecret = generateWebhookSecret();
+              const orphanedBot = await storage.createTradingBot({
+                walletAddress: req.walletAddress!,
+                name: `Recovered Bot (SA${orphanedSubaccountId})`,
+                market: 'SOL-PERP',
+                webhookSecret: orphanedWebhookSecret,
+                driftSubaccountId: orphanedSubaccountId,
+                isActive: false, // Paused by default - user can configure
+                side: 'both',
+                leverage: 1,
+                totalInvestment: '0',
+                maxPositionSize: null,
+                signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
+                riskConfig: {},
+              } as any);
+              console.log(`[Bot Creation] Created recovered bot ${orphanedBot.id} for orphaned subaccount ${orphanedSubaccountId}`);
+            }
+          );
+          
+          // Re-fetch allocated IDs after sync (may have added orphaned bots)
+          const updatedDbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
+          
+          nextSubaccountId = await getNextOnChainSubaccountId(wallet.agentPublicKey, updatedDbAllocatedIds);
           console.log(`[Bot Creation] On-chain discovery returned subaccount ID: ${nextSubaccountId}`);
         } else {
           // No agent wallet yet - find next ID not in database
