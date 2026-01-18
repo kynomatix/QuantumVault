@@ -13,6 +13,40 @@ export interface TradeNotification {
   error?: string;
 }
 
+async function sendTelegramMessage(chatId: string, text: string): Promise<boolean> {
+  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  
+  if (!TELEGRAM_BOT_TOKEN) {
+    console.log('[Telegram] Bot token not configured');
+    return false;
+  }
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      console.error(`[Telegram] API error ${response.status}:`, errorData);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error('[Telegram] Error sending message:', error);
+    return false;
+  }
+}
+
 export async function sendTradeNotification(
   walletAddress: string | undefined | null,
   notification: TradeNotification
@@ -20,14 +54,6 @@ export async function sendTradeNotification(
   try {
     if (!walletAddress) {
       console.log('[Notifications] Skipping notification - no wallet address provided');
-      return false;
-    }
-
-    const DIALECT_API_KEY = process.env.DIALECT_API_KEY;
-    const DIALECT_APP_ID = process.env.DIALECT_APP_ID;
-
-    if (!DIALECT_API_KEY || !DIALECT_APP_ID) {
-      console.log('[Notifications] Dialect credentials not configured');
       return false;
     }
 
@@ -57,37 +83,23 @@ export async function sendTradeNotification(
       return false;
     }
 
-    const { title, body } = formatNotificationMessage(notification);
-    
-    console.log(`[Notifications] Sending to ${walletAddress}: ${title} - ${body}`);
-
-    const response = await fetch(`https://alerts-api.dial.to/v2/${DIALECT_APP_ID}/send`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-dialect-api-key': DIALECT_API_KEY,
-      },
-      body: JSON.stringify({
-        channels: ['TELEGRAM'],
-        message: {
-          title,
-          body,
-        },
-        recipient: {
-          type: 'subscriber',
-          walletAddress: walletAddress,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[Notifications] Dialect API error ${response.status}:`, errorText);
+    if (!wallet.telegramChatId) {
+      console.log(`[Notifications] No Telegram chat ID for ${walletAddress}`);
       return false;
     }
 
-    console.log(`[Notifications] Successfully sent notification to ${walletAddress}`);
-    return true;
+    const { title, body } = formatNotificationMessage(notification);
+    const message = `<b>${title}</b>\n${body}`;
+    
+    console.log(`[Notifications] Sending Telegram to ${walletAddress}: ${title} - ${body}`);
+
+    const success = await sendTelegramMessage(wallet.telegramChatId, message);
+    
+    if (success) {
+      console.log(`[Notifications] Successfully sent Telegram notification to ${walletAddress}`);
+    }
+    
+    return success;
   } catch (error) {
     console.error('[Notifications] Error sending notification:', error);
     return false;
@@ -102,14 +114,14 @@ function formatNotificationMessage(notification: TradeNotification): { title: st
       const sizeStr = size ? `$${size.toFixed(2)}` : '';
       const priceStr = price ? `@ $${price.toFixed(2)}` : '';
       return {
-        title: `Trade Executed`,
+        title: `✅ Trade Executed`,
         body: `${botName}: ${side} ${market} ${sizeStr} ${priceStr}`.trim()
       };
     }
     
     case 'trade_failed':
       return {
-        title: `Trade Failed`,
+        title: `❌ Trade Failed`,
         body: `${botName}: ${market} - ${error || 'Unknown error'}`
       };
     
@@ -119,7 +131,7 @@ function formatNotificationMessage(notification: TradeNotification): { title: st
         : '';
       const emoji = pnl !== undefined ? (pnl >= 0 ? '🟢' : '🔴') : '';
       return {
-        title: `Position Closed`,
+        title: `📊 Position Closed`,
         body: `${emoji} ${botName}: ${market} ${pnlStr}`.trim()
       };
     }
@@ -137,6 +149,7 @@ export async function updateNotificationSettings(
     notifyTradeFailed?: boolean;
     notifyPositionClosed?: boolean;
     telegramConnected?: boolean;
+    telegramChatId?: string | null;
   }
 ): Promise<boolean> {
   try {
@@ -161,6 +174,7 @@ export async function getNotificationSettings(walletAddress: string) {
         notifyTradeFailed: wallets.notifyTradeFailed,
         notifyPositionClosed: wallets.notifyPositionClosed,
         telegramConnected: wallets.telegramConnected,
+        telegramChatId: wallets.telegramChatId,
         dialectAddress: wallets.dialectAddress,
       })
       .from(wallets)

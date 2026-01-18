@@ -19,6 +19,7 @@ import {
   publishedBots,
   botSubscriptions,
   pnlSnapshots,
+  telegramConnectionTokens,
   type User,
   type InsertUser,
   type Wallet,
@@ -56,6 +57,8 @@ import {
   authNonces,
   type AuthNonce,
   type InsertAuthNonce,
+  type TelegramConnectionToken,
+  type InsertTelegramConnectionToken,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -204,6 +207,13 @@ export interface IStorage {
   getAuthNonceByHash(nonceHash: string): Promise<AuthNonce | undefined>;
   markNonceUsed(id: string): Promise<void>;
   cleanupExpiredNonces(): Promise<number>;
+
+  // Telegram connection tokens
+  createTelegramConnectionToken(token: InsertTelegramConnectionToken): Promise<TelegramConnectionToken>;
+  getTelegramConnectionTokenByToken(token: string): Promise<TelegramConnectionToken | undefined>;
+  deleteTelegramConnectionToken(id: string): Promise<void>;
+  deleteExpiredTelegramTokens(): Promise<number>;
+  getWalletByTelegramChatId(chatId: string): Promise<Wallet | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1116,6 +1126,37 @@ export class DatabaseStorage implements IStorage {
       .where(lte(authNonces.expiresAt, sql`NOW()`))
       .returning();
     return result.length;
+  }
+
+  // Telegram connection tokens
+  async createTelegramConnectionToken(token: InsertTelegramConnectionToken): Promise<TelegramConnectionToken> {
+    const result = await db.insert(telegramConnectionTokens).values(token).returning();
+    return result[0];
+  }
+
+  async getTelegramConnectionTokenByToken(token: string): Promise<TelegramConnectionToken | undefined> {
+    const result = await db.select().from(telegramConnectionTokens)
+      .where(eq(telegramConnectionTokens.token, token))
+      .limit(1);
+    return result[0];
+  }
+
+  async deleteTelegramConnectionToken(id: string): Promise<void> {
+    await db.delete(telegramConnectionTokens).where(eq(telegramConnectionTokens.id, id));
+  }
+
+  async deleteExpiredTelegramTokens(): Promise<number> {
+    const result = await db.delete(telegramConnectionTokens)
+      .where(lte(telegramConnectionTokens.expiresAt, sql`NOW()`))
+      .returning();
+    return result.length;
+  }
+
+  async getWalletByTelegramChatId(chatId: string): Promise<Wallet | undefined> {
+    const result = await db.select().from(wallets)
+      .where(eq(wallets.telegramChatId, chatId))
+      .limit(1);
+    return result[0];
   }
 }
 

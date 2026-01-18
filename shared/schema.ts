@@ -39,6 +39,7 @@ export const wallets = pgTable("wallets", {
   notifyTradeFailed: boolean("notify_trade_failed").default(true),
   notifyPositionClosed: boolean("notify_position_closed").default(true),
   telegramConnected: boolean("telegram_connected").default(false),
+  telegramChatId: text("telegram_chat_id"),
   dialectAddress: text("dialect_address"),
   dialectBearerToken: text("dialect_bearer_token"),
   
@@ -452,3 +453,19 @@ export type SignaturePurpose =
   | "enable_execution"
   | "reveal_mnemonic"
   | "revoke_execution";
+
+// Telegram connection tokens for linking Telegram to wallets
+export const telegramConnectionTokens = pgTable("telegram_connection_tokens", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  token: text("token").notNull().unique(),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertTelegramConnectionTokenSchema = createInsertSchema(telegramConnectionTokens).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertTelegramConnectionToken = z.infer<typeof insertTelegramConnectionTokenSchema>;
+export type TelegramConnectionToken = typeof telegramConnectionTokens.$inferSelect;

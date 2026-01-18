@@ -6943,5 +6943,191 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== TELEGRAM INTEGRATION ====================
+
+  // Generate a connection token and return deep link for Telegram
+  app.post("/api/telegram/connect", requireWallet, async (req, res) => {
+    try {
+      const walletAddress = req.walletAddress!;
+      
+      // Generate a random 32-character token
+      const token = crypto.randomBytes(16).toString('hex');
+      
+      // Set expiry to 15 minutes from now
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+      
+      // Delete any existing tokens for this wallet
+      await storage.deleteExpiredTelegramTokens();
+      
+      // Create new token
+      await storage.createTelegramConnectionToken({
+        walletAddress,
+        token,
+        expiresAt,
+      });
+      
+      // Get bot username from environment (fallback to a default)
+      const botUsername = process.env.TELEGRAM_BOT_USERNAME || 'QuantumVaultBot';
+      
+      // Generate deep link
+      const deepLink = `https://t.me/${botUsername}?start=${token}`;
+      
+      console.log(`[Telegram] Generated connection token for ${walletAddress}, expires at ${expiresAt.toISOString()}`);
+      
+      res.json({
+        success: true,
+        deepLink,
+        expiresAt: expiresAt.toISOString(),
+      });
+    } catch (error) {
+      console.error("[Telegram] Connect error:", error);
+      res.status(500).json({ error: "Failed to generate Telegram connection link" });
+    }
+  });
+
+  // Webhook endpoint for Telegram bot updates
+  app.post("/api/telegram/webhook", async (req, res) => {
+    try {
+      const update = req.body;
+      
+      // Handle /start command with token
+      if (update.message?.text?.startsWith('/start')) {
+        const chatId = update.message.chat.id.toString();
+        const text = update.message.text;
+        const parts = text.split(' ');
+        
+        if (parts.length >= 2) {
+          const token = parts[1];
+          
+          console.log(`[Telegram] Received /start with token ${token.substring(0, 8)}... from chat ${chatId}`);
+          
+          // Look up the token
+          const connectionToken = await storage.getTelegramConnectionTokenByToken(token);
+          
+          if (!connectionToken) {
+            console.log(`[Telegram] Token not found: ${token.substring(0, 8)}...`);
+            await sendTelegramResponse(chatId, "❌ Invalid or expired connection link. Please generate a new one from QuantumVault.");
+            return res.json({ ok: true });
+          }
+          
+          // Check if token is expired
+          if (new Date() > connectionToken.expiresAt) {
+            console.log(`[Telegram] Token expired for wallet ${connectionToken.walletAddress}`);
+            await storage.deleteTelegramConnectionToken(connectionToken.id);
+            await sendTelegramResponse(chatId, "❌ This connection link has expired. Please generate a new one from QuantumVault.");
+            return res.json({ ok: true });
+          }
+          
+          // Link the Telegram chat to the wallet
+          await storage.updateWallet(connectionToken.walletAddress, {
+            telegramConnected: true,
+            telegramChatId: chatId,
+            notificationsEnabled: true,
+          });
+          
+          // Delete the used token
+          await storage.deleteTelegramConnectionToken(connectionToken.id);
+          
+          console.log(`[Telegram] Successfully linked chat ${chatId} to wallet ${connectionToken.walletAddress}`);
+          
+          await sendTelegramResponse(chatId, 
+            "✅ <b>Successfully connected to QuantumVault!</b>\n\n" +
+            "You will now receive trading notifications:\n" +
+            "• Trade executions\n" +
+            "• Failed trades\n" +
+            "• Position closures\n\n" +
+            "To disconnect, use the settings in QuantumVault."
+          );
+        } else {
+          // /start without token
+          await sendTelegramResponse(chatId,
+            "👋 <b>Welcome to QuantumVault Bot!</b>\n\n" +
+            "To connect your wallet, please use the connection link from the QuantumVault settings page."
+          );
+        }
+      }
+      
+      res.json({ ok: true });
+    } catch (error) {
+      console.error("[Telegram] Webhook error:", error);
+      res.json({ ok: true }); // Always return ok to Telegram
+    }
+  });
+
+  // Check Telegram connection status
+  app.get("/api/telegram/status", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      
+      res.json({
+        connected: wallet.telegramConnected || false,
+        hasChatId: !!wallet.telegramChatId,
+        notificationsEnabled: wallet.notificationsEnabled || false,
+      });
+    } catch (error) {
+      console.error("[Telegram] Status check error:", error);
+      res.status(500).json({ error: "Failed to check Telegram status" });
+    }
+  });
+
+  // Disconnect Telegram
+  app.post("/api/telegram/disconnect", requireWallet, async (req, res) => {
+    try {
+      const walletAddress = req.walletAddress!;
+      
+      await storage.updateWallet(walletAddress, {
+        telegramConnected: false,
+        telegramChatId: null,
+        notificationsEnabled: false,
+      });
+      
+      console.log(`[Telegram] Disconnected for wallet ${walletAddress}`);
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("[Telegram] Disconnect error:", error);
+      res.status(500).json({ error: "Failed to disconnect Telegram" });
+    }
+  });
+
   return httpServer;
+}
+
+// Helper function to send Telegram messages (for webhook responses)
+async function sendTelegramResponse(chatId: string, text: string): Promise<boolean> {
+  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  
+  if (!TELEGRAM_BOT_TOKEN) {
+    console.log('[Telegram] Bot token not configured');
+    return false;
+  }
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      console.error(`[Telegram] API error ${response.status}:`, errorData);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error('[Telegram] Error sending message:', error);
+    return false;
+  }
 }
