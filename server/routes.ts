@@ -4832,18 +4832,26 @@ export async function registerRoutes(
 
       // Get minimum order size for this market from market metadata
       const minOrderSize = getMinOrderSize(bot.market);
+      let finalContractSize = contractSize;
       
       if (contractSize < minOrderSize) {
         const minCapitalNeeded = minOrderSize * oraclePrice;
-        const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. At $${oraclePrice.toFixed(2)}, you need at least $${minCapitalNeeded.toFixed(2)} Max Position Size. Increase your investment or reduce pyramid entries.`;
-        console.log(`[Webhook] ${errorMsg}`);
-        await storage.updateBotTrade(trade.id, {
-          status: "failed",
-          txSignature: null,
-          size: contractSize.toFixed(8),
-        });
-        await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
-        return res.status(400).json({ error: errorMsg });
+        const maxCapacity = (freeCollateral ?? baseCapital) * leverage * 0.9;
+        
+        if (minCapitalNeeded <= maxCapacity) {
+          finalContractSize = minOrderSize;
+          console.log(`[Webhook] BUMPED UP: ${contractSize.toFixed(4)} contracts → ${minOrderSize} minimum (requires $${minCapitalNeeded.toFixed(2)}, you have $${maxCapacity.toFixed(2)} capacity)`);
+        } else {
+          const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. At $${oraclePrice.toFixed(2)}, minimum requires $${minCapitalNeeded.toFixed(2)} but you only have $${maxCapacity.toFixed(2)} capacity. Increase your investment or choose a different market.`;
+          console.log(`[Webhook] ${errorMsg}`);
+          await storage.updateBotTrade(trade.id, {
+            status: "failed",
+            txSignature: null,
+            size: contractSize.toFixed(8),
+          });
+          await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
+          return res.status(400).json({ error: errorMsg });
+        }
       }
 
       // Execute on Drift using the subAccountId already declared for position check
@@ -4852,7 +4860,7 @@ export async function registerRoutes(
         wallet.agentPrivateKeyEncrypted,
         bot.market,
         side,
-        contractSize,
+        finalContractSize,
         subAccountId,
         false,
         userSlippageBps,
@@ -4875,7 +4883,7 @@ export async function registerRoutes(
             agentPublicKey: wallet.agentPublicKey!,
             market: bot.market,
             side: side,
-            size: contractSize,
+            size: finalContractSize,
             subAccountId,
             reduceOnly: false,
             slippageBps: userSlippageBps,
@@ -4889,7 +4897,7 @@ export async function registerRoutes(
           await storage.updateBotTrade(trade.id, {
             status: "pending",
             txSignature: null,
-            size: contractSize.toFixed(8),
+            size: finalContractSize.toFixed(8),
             errorMessage: `Rate limited - auto-retry queued (job: ${retryJobId})`,
           });
           await storage.updateWebhookLog(log.id, { errorMessage: `Rate limited - retry queued: ${retryJobId}`, processed: true });
@@ -4904,7 +4912,7 @@ export async function registerRoutes(
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
-          size: contractSize.toFixed(8),
+          size: finalContractSize.toFixed(8),
           errorMessage: userFriendlyError,
         });
         await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
@@ -4924,7 +4932,7 @@ export async function registerRoutes(
       const fillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
       
       // Calculate fee (0.05% taker fee on notional value)
-      const tradeNotional = contractSize * fillPrice;
+      const tradeNotional = finalContractSize * fillPrice;
       const tradeFee = tradeNotional * 0.0005;
       
       await storage.updateBotTrade(trade.id, {
@@ -4932,7 +4940,7 @@ export async function registerRoutes(
         price: fillPrice.toString(),
         fee: tradeFee.toString(),
         txSignature: orderResult.txSignature || orderResult.signature || null,
-        size: contractSize.toFixed(8), // Store calculated size, not raw TradingView value
+        size: finalContractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
 
       // Sync position from on-chain (replaces client-side math with actual Drift state)
@@ -4946,7 +4954,7 @@ export async function registerRoutes(
         tradeFee,
         fillPrice,
         side,
-        contractSize
+        finalContractSize
       );
 
       // Update bot stats (including volume for FUEL tracking)
