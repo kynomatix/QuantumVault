@@ -17,6 +17,7 @@ import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTran
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
+import { queueTradeRetry, isRateLimitError, getQueueStatus } from "./trade-retry-service";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
@@ -2224,6 +2225,33 @@ export async function registerRoutes(
 
       // Handle error case
       if (!result.success) {
+        // Check if this is a rate limit error - queue for CRITICAL automatic retry
+        if (isRateLimitError(result.error || '')) {
+          console.log(`[ClosePosition] CRITICAL: Rate limit on close order, queueing for priority retry`);
+          
+          const retryJobId = queueTradeRetry({
+            botId: bot.id,
+            walletAddress: wallet.address,
+            agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
+            agentPublicKey: wallet.agentPublicKey!,
+            market: bot.market,
+            side: 'close',
+            size: closeSize,
+            subAccountId,
+            reduceOnly: true,
+            slippageBps: closeSlippageBps,
+            priority: 'critical', // CLOSE orders get highest priority
+            lastError: result.error,
+          });
+          
+          return res.status(202).json({ 
+            status: "queued_for_retry",
+            retryJobId,
+            message: "Close order rate limited - CRITICAL auto-retry scheduled (priority queue)",
+            warning: "Position may remain open until retry succeeds"
+          });
+        }
+        
         return res.status(500).json({ 
           error: "Failed to execute close order",
           details: result.error || "Unknown error"
@@ -4384,6 +4412,46 @@ export async function registerRoutes(
           }
         } catch (closeError: any) {
           console.error(`[Webhook] Close order failed:`, closeError);
+          
+          // Check if this is a rate limit error - queue for CRITICAL automatic retry
+          if (isRateLimitError(closeError.message || String(closeError))) {
+            console.log(`[Webhook] CRITICAL: Rate limit on close order, queueing for priority retry`);
+            
+            const retryJobId = queueTradeRetry({
+              botId: bot.id,
+              walletAddress: wallet.address,
+              agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
+              agentPublicKey: wallet.agentPublicKey!,
+              market: bot.market,
+              side: 'close',
+              size: closeSize,
+              subAccountId,
+              reduceOnly: true,
+              slippageBps: wallet.slippageBps ?? 50,
+              priority: 'critical', // CLOSE orders get highest priority
+              lastError: closeError.message,
+              originalTradeId: closeTrade.id,
+            });
+            
+            await storage.updateBotTrade(closeTrade.id, {
+              status: "pending",
+              txSignature: null,
+              errorMessage: `Rate limited - CRITICAL auto-retry queued (job: ${retryJobId})`,
+            });
+            await storage.updateWebhookLog(log.id, { 
+              errorMessage: `Rate limited on close - CRITICAL retry queued: ${retryJobId}`, 
+              processed: true 
+            });
+            
+            return res.status(202).json({ 
+              status: "queued_for_retry",
+              retryJobId,
+              type: "close",
+              message: "CRITICAL: Close order rate limited - auto-retry scheduled with highest priority",
+              warning: "Position may remain open until retry succeeds"
+            });
+          }
+          
           await storage.updateBotTrade(closeTrade.id, {
             status: "failed",
             txSignature: null,
@@ -4793,6 +4861,44 @@ export async function registerRoutes(
       if (!orderResult.success) {
         const userFriendlyError = parseDriftError(orderResult.error);
         console.log(`[Webhook] Trade failed: ${orderResult.error}`);
+        
+        // Check if this is a rate limit error - queue for automatic retry
+        if (isRateLimitError(orderResult.error || '')) {
+          console.log(`[Webhook] Rate limit detected, queueing trade for automatic retry`);
+          
+          const retryJobId = queueTradeRetry({
+            botId: bot.id,
+            walletAddress: wallet.address,
+            agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
+            agentPublicKey: wallet.agentPublicKey!,
+            market: bot.market,
+            side: side,
+            size: contractSize,
+            subAccountId,
+            reduceOnly: false,
+            slippageBps: userSlippageBps,
+            privateKeyBase58,
+            priority: 'normal',
+            lastError: orderResult.error,
+            originalTradeId: trade.id,
+            webhookPayload: { action, contracts, market: bot.market },
+          });
+          
+          await storage.updateBotTrade(trade.id, {
+            status: "pending",
+            txSignature: null,
+            size: contractSize.toFixed(8),
+            errorMessage: `Rate limited - auto-retry queued (job: ${retryJobId})`,
+          });
+          await storage.updateWebhookLog(log.id, { errorMessage: `Rate limited - retry queued: ${retryJobId}`, processed: true });
+          
+          return res.status(202).json({ 
+            status: "queued_for_retry",
+            retryJobId,
+            message: "Trade rate limited - automatic retry scheduled"
+          });
+        }
+        
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
@@ -6810,6 +6916,17 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[Telegram] Webhook error:", error);
       res.json({ ok: true }); // Always return ok to Telegram
+    }
+  });
+
+  // Get retry queue status (for monitoring rate-limited trade retries)
+  app.get("/api/retry-queue/status", requireWallet, async (req, res) => {
+    try {
+      const status = getQueueStatus();
+      res.json(status);
+    } catch (error) {
+      console.error("[RetryQueue] Status check error:", error);
+      res.status(500).json({ error: "Failed to check retry queue status" });
     }
   });
 

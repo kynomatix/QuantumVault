@@ -6,6 +6,7 @@ import { storage } from "./storage";
 import { startPeriodicReconciliation } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
+import { startRetryWorker } from "./trade-retry-service";
 
 const app = express();
 const httpServer = createServer(app);
@@ -164,6 +165,9 @@ app.use((req, res, next) => {
       
       // Start PnL snapshot job for marketplace time-based metrics (7d/30d/90d)
       startPnlSnapshotJob();
+      
+      // Start trade retry worker for rate-limited trade recovery
+      startRetryWorker();
     },
   );
 })();
