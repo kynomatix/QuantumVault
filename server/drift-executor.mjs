@@ -10,6 +10,61 @@ import crypto from 'crypto';
 // Drift Program constants for raw transaction building
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 
+// RPC URL helpers - Primary (Helius) with Triton fallback
+function getPrimaryRpcUrl() {
+  if (process.env.SOLANA_RPC_URL) {
+    return process.env.SOLANA_RPC_URL;
+  }
+  if (process.env.HELIUS_API_KEY) {
+    return `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
+  }
+  return 'https://api.mainnet-beta.solana.com';
+}
+
+function getBackupRpcUrl() {
+  return process.env.TRITON_ONE_RPC || null;
+}
+
+// Try to get a working connection, falling back to backup RPC if primary fails health check
+async function getWorkingConnection() {
+  const primaryUrl = getPrimaryRpcUrl();
+  const backupUrl = getBackupRpcUrl();
+  
+  // Try primary first
+  try {
+    const conn = new Connection(primaryUrl, { commitment: 'confirmed' });
+    // Quick health check - getSlot is fast
+    await Promise.race([
+      conn.getSlot(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), 5000))
+    ]);
+    console.error('[Executor] Primary RPC healthy');
+    return { connection: conn, rpcUrl: primaryUrl, usingBackup: false };
+  } catch (primaryErr) {
+    console.error(`[Executor] Primary RPC failed: ${primaryErr.message}`);
+    
+    // Try backup if available
+    if (backupUrl) {
+      try {
+        console.error('[Executor] Trying backup RPC (Triton)...');
+        const backupConn = new Connection(backupUrl, { commitment: 'confirmed' });
+        await Promise.race([
+          backupConn.getSlot(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Backup RPC timeout')), 5000))
+        ]);
+        console.error('[Executor] Backup RPC healthy - using Triton');
+        return { connection: backupConn, rpcUrl: backupUrl, usingBackup: true };
+      } catch (backupErr) {
+        console.error(`[Executor] Backup RPC also failed: ${backupErr.message}`);
+      }
+    }
+    
+    // If both fail, still return primary and let the actual operation fail with a better error
+    console.error('[Executor] All RPCs failed health check, using primary anyway');
+    return { connection: new Connection(primaryUrl, { commitment: 'confirmed' }), rpcUrl: primaryUrl, usingBackup: false };
+  }
+}
+
 function getDriftStatePDA() {
   const [state] = PublicKey.findProgramAddressSync(
     [Buffer.from('drift_state')],
@@ -729,11 +784,11 @@ function decryptPrivateKey(encryptedKey) {
 async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex = null) {
   const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey } = keyInput;
   
-  const rpcUrl = process.env.SOLANA_RPC_URL || 
-    (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
-    'https://api.mainnet-beta.solana.com');
-  
-  const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
+  // Use RPC with automatic failover to backup
+  const { connection, rpcUrl, usingBackup } = await getWorkingConnection();
+  if (usingBackup) {
+    console.error('[Executor] Using backup RPC for this trade');
+  }
   
   let keyBase58;
   if (privateKeyBase58) {
