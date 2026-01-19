@@ -136,6 +136,16 @@ async function fetchCoinGeckoPrices(): Promise<Record<string, number>> {
   }
 }
 
+/**
+ * Force refresh prices, bypassing cache
+ */
+export async function forceRefreshPrices(): Promise<Record<string, number>> {
+  console.log('[DriftPrice] Force refreshing prices...');
+  lastFetch = 0;
+  lastDriftFetch = 0;
+  return getAllPrices();
+}
+
 export async function getAllPrices(): Promise<Record<string, number>> {
   const now = Date.now();
   

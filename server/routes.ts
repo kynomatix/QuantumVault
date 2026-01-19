@@ -9,7 +9,7 @@ import { encrypt as legacyEncrypt } from "./crypto";
 import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
 import { ZodError } from "zod";
-import { getMarketPrice, getAllPrices } from "./drift-price";
+import { getMarketPrice, getAllPrices, forceRefreshPrices } from "./drift-price";
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, getBatchDriftAccountInfo, getBatchPerpPositions, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
@@ -2755,7 +2755,7 @@ export async function registerRoutes(
     }
   });
 
-  // Force refresh position from blockchain - updates cached database entry price
+  // Force refresh position from blockchain - updates cached database entry price AND oracle prices
   app.post("/api/trading-bots/:id/refresh-position", requireWallet, async (req, res) => {
     console.log(`[RefreshPosition] Force refresh request for botId=${req.params.id}`);
     try {
@@ -2773,6 +2773,10 @@ export async function registerRoutes(
       }
 
       const subAccountId = bot.driftSubaccountId ?? 0;
+      
+      // Also force refresh oracle prices while we're at it
+      const freshPrices = await forceRefreshPrices();
+      console.log(`[RefreshPosition] Refreshed ${Object.keys(freshPrices).length} oracle prices`);
       
       // Force sync from on-chain with zero trade params - this just updates entry price
       const syncResult = await syncPositionFromOnChain(
