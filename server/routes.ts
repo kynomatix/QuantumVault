@@ -13,8 +13,8 @@ import { getMarketPrice, getAllPrices, forceRefreshPrices } from "./drift-price"
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, getBatchDriftAccountInfo, getBatchPerpPositions, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw } from "./agent-wallet";
-import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize } from "./market-liquidity-service";
+import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw } from "./agent-wallet";
+import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMarketMaxLeverage } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, getQueueStatus } from "./trade-retry-service";
@@ -269,16 +269,22 @@ async function routeSignalToSubscribers(
           
           // DYNAMIC ORDER SCALING: Scale trade size based on available margin
           // This allows trades to execute after losses by scaling down proportionally
-          const leverage = Math.max(1, subBot.leverage || 1); // Ensure leverage >= 1
+          const botLeverage = Math.max(1, subBot.leverage || 1); // Ensure leverage >= 1
+          const marketMaxLeverage = getMarketMaxLeverage(subBot.market);
+          const effectiveLeverage = Math.min(botLeverage, marketMaxLeverage); // Use the lower of bot's setting or market's limit
           try {
             const accountInfo = await getDriftAccountInfo(subWallet.agentPublicKey!, subAccountId);
             const freeCollateral = Math.max(0, accountInfo.freeCollateral); // Clamp to >= 0
             
             // freeCollateral is margin capacity (USD), multiply by leverage to get max notional position size
-            const maxNotionalCapacity = freeCollateral * leverage;
+            // CRITICAL: Use effectiveLeverage (capped by market's max) to avoid InsufficientCollateral errors
+            const maxNotionalCapacity = freeCollateral * effectiveLeverage;
             const maxTradeableValue = maxNotionalCapacity * 0.90; // 90% buffer for fees/slippage
             
-            console.log(`[Subscriber Routing] Bot ${subBot.id}: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x = $${maxNotionalCapacity.toFixed(2)} max notional`);
+            if (botLeverage > marketMaxLeverage) {
+              console.log(`[Subscriber Routing] Bot ${subBot.id}: Leverage capped ${botLeverage}x → ${marketMaxLeverage}x (${subBot.market} max)`);
+            }
+            console.log(`[Subscriber Routing] Bot ${subBot.id}: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x = $${maxNotionalCapacity.toFixed(2)} max notional`);
             
             if (maxTradeableValue <= 0) {
               console.log(`[Subscriber Routing] Bot ${subBot.id}: No margin available, skipping`);
@@ -2604,9 +2610,15 @@ export async function registerRoutes(
       }
 
       const subAccountId = bot.driftSubaccountId ?? 0;
-      const leverage = Math.max(1, bot.leverage || 1);
+      const botLeverage = Math.max(1, bot.leverage || 1);
+      const marketMaxLeverage = getMarketMaxLeverage(bot.market);
+      const effectiveLeverage = Math.min(botLeverage, marketMaxLeverage); // Use the lower of bot's setting or market's limit
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
       const profitReinvestEnabled = bot.profitReinvest === true;
+
+      if (botLeverage > marketMaxLeverage) {
+        console.log(`[ManualTrade] Leverage capped: ${botLeverage}x → ${marketMaxLeverage}x (${bot.market} max)`);
+      }
 
       // Get oracle price
       const oraclePrice = await getMarketPrice(bot.market);
@@ -2622,7 +2634,8 @@ export async function registerRoutes(
       try {
         const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, subAccountId);
         freeCollateral = Math.max(0, accountInfo.freeCollateral);
-        const maxNotionalCapacity = freeCollateral * leverage;
+        // CRITICAL: Use effectiveLeverage (capped by market's max) to avoid InsufficientCollateral errors
+        const maxNotionalCapacity = freeCollateral * effectiveLeverage;
         maxTradeableValue = maxNotionalCapacity * 0.90;
 
         if (profitReinvestEnabled) {
@@ -2653,7 +2666,7 @@ export async function registerRoutes(
       // Bump up to minimum if needed
       if (contractSize < minOrderSize) {
         const minCapitalNeeded = minOrderSize * oraclePrice;
-        const maxCapacity = (freeCollateral || baseCapital / leverage) * leverage * 0.9;
+        const maxCapacity = (freeCollateral || baseCapital / effectiveLeverage) * effectiveLeverage * 0.9;
         
         if (minCapitalNeeded <= maxCapacity) {
           contractSize = minOrderSize;
@@ -4018,35 +4031,6 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/trading-bots/:id/init-wallet", requireWallet, async (req, res) => {
-    try {
-      const bot = await storage.getTradingBotById(req.params.id);
-      if (!bot) {
-        return res.status(404).json({ error: "Bot not found" });
-      }
-      if (bot.walletAddress !== req.walletAddress) {
-        return res.status(403).json({ error: "Forbidden" });
-      }
-      if (bot.agentPublicKey) {
-        return res.status(400).json({ error: "Bot already has an agent wallet", agentPublicKey: bot.agentPublicKey });
-      }
-
-      const agentWallet = generateAgentWallet();
-      await storage.updateTradingBot(req.params.id, {
-        agentPublicKey: agentWallet.publicKey,
-        agentPrivateKeyEncrypted: agentWallet.encryptedPrivateKey,
-      } as any);
-
-      res.json({ 
-        success: true, 
-        agentPublicKey: agentWallet.publicKey 
-      });
-    } catch (error) {
-      console.error("Init agent wallet error:", error);
-      res.status(500).json({ error: "Failed to initialize agent wallet" });
-    }
-  });
-
   // Bot trades routes
   app.get("/api/trading-bots/:id/trades", requireWallet, async (req, res) => {
     try {
@@ -5175,7 +5159,13 @@ export async function registerRoutes(
 
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
       const profitReinvestEnabled = bot.profitReinvest === true;
-      const leverage = Math.max(1, bot.leverage || 1); // Ensure leverage >= 1
+      const botLeverage = Math.max(1, bot.leverage || 1); // Ensure leverage >= 1
+      const marketMaxLeverage = getMarketMaxLeverage(bot.market);
+      const effectiveLeverage = Math.min(botLeverage, marketMaxLeverage); // Use the lower of bot's setting or market's limit
+      
+      if (botLeverage > marketMaxLeverage) {
+        console.log(`[Webhook] Leverage capped: ${botLeverage}x → ${marketMaxLeverage}x (${bot.market} max)`);
+      }
       
       if (baseCapital <= 0 && !profitReinvestEnabled) {
         await storage.updateBotTrade(trade.id, {
@@ -5195,7 +5185,8 @@ export async function registerRoutes(
       try {
         const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
         freeCollateral = Math.max(0, accountInfo.freeCollateral);
-        const maxNotionalCapacity = freeCollateral * leverage;
+        // CRITICAL: Use effectiveLeverage (capped by market's max) to avoid InsufficientCollateral errors
+        const maxNotionalCapacity = freeCollateral * effectiveLeverage;
         maxTradeableValue = maxNotionalCapacity * 0.90; // 90% buffer for fees/slippage
         
         if (profitReinvestEnabled) {
@@ -5209,7 +5200,7 @@ export async function registerRoutes(
           // Calculate requested trade size, then cap to available margin
           const requestedAmount = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
           tradeAmountUsd = Math.min(requestedAmount, maxTradeableValue); // CRITICAL: Never exceed available margin
-          console.log(`[Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
+          console.log(`[Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
           if (requestedAmount > maxTradeableValue) {
             console.log(`[Webhook] Requested $${requestedAmount.toFixed(2)} exceeds available, capped to $${tradeAmountUsd.toFixed(2)}`);
           } else {
@@ -5219,7 +5210,7 @@ export async function registerRoutes(
           // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
           tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
           console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
-          console.log(`[Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
+          console.log(`[Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
           
           if (maxTradeableValue <= 0) {
             console.log(`[Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
@@ -5257,7 +5248,7 @@ export async function registerRoutes(
       
       if (contractSize < minOrderSize) {
         const minCapitalNeeded = minOrderSize * oraclePrice;
-        const maxCapacity = (freeCollateral ?? baseCapital) * leverage * 0.9;
+        const maxCapacity = (freeCollateral ?? baseCapital) * effectiveLeverage * 0.9;
         
         if (minCapitalNeeded <= maxCapacity) {
           finalContractSize = minOrderSize;
@@ -6045,8 +6036,14 @@ export async function registerRoutes(
 
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
       const profitReinvestEnabled = bot.profitReinvest === true;
-      const leverage = Math.max(1, bot.leverage || 1); // Ensure leverage >= 1
+      const botLeverage = Math.max(1, bot.leverage || 1); // Ensure leverage >= 1
+      const marketMaxLeverage = getMarketMaxLeverage(bot.market);
+      const effectiveLeverage = Math.min(botLeverage, marketMaxLeverage); // Use the lower of bot's setting or market's limit
       const subAccountId = bot.driftSubaccountId ?? 0;
+      
+      if (botLeverage > marketMaxLeverage) {
+        console.log(`[User Webhook] Leverage capped: ${botLeverage}x → ${marketMaxLeverage}x (${bot.market} max)`);
+      }
       
       if (baseCapital <= 0 && !profitReinvestEnabled) {
         await storage.updateBotTrade(trade.id, {
@@ -6064,7 +6061,8 @@ export async function registerRoutes(
       try {
         const accountInfo = await getDriftAccountInfo(userWallet.agentPublicKey!, subAccountId);
         const freeCollateral = Math.max(0, accountInfo.freeCollateral);
-        const maxNotionalCapacity = freeCollateral * leverage;
+        // CRITICAL: Use effectiveLeverage (capped by market's max) to avoid InsufficientCollateral errors
+        const maxNotionalCapacity = freeCollateral * effectiveLeverage;
         maxTradeableValue = maxNotionalCapacity * 0.90;
         
         if (profitReinvestEnabled) {
@@ -6077,7 +6075,7 @@ export async function registerRoutes(
           // Calculate requested trade size, then cap to available margin
           const requestedAmount = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
           tradeAmountUsd = Math.min(requestedAmount, maxTradeableValue); // CRITICAL: Never exceed available margin
-          console.log(`[User Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
+          console.log(`[User Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
           if (requestedAmount > maxTradeableValue) {
             console.log(`[User Webhook] Requested $${requestedAmount.toFixed(2)} exceeds available, capped to $${tradeAmountUsd.toFixed(2)}`);
           } else {
@@ -6087,7 +6085,7 @@ export async function registerRoutes(
           // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
           tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
           console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
-          console.log(`[User Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${leverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
+          console.log(`[User Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
           
           if (maxTradeableValue <= 0) {
             console.log(`[User Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
@@ -6827,6 +6825,87 @@ export async function registerRoutes(
     } catch (error: any) {
       console.error("Bot withdraw error:", error);
       res.status(500).json({ error: error.message || "Failed to build withdraw transaction" });
+    }
+  });
+
+  // RPC Status endpoint - check health of primary and backup RPC providers
+  app.get("/api/rpc-status", async (req, res) => {
+    try {
+      const IS_MAINNET = process.env.DRIFT_ENV !== 'devnet';
+      
+      // Determine RPC URLs
+      let primaryUrl: string;
+      let primaryName: string;
+      
+      if (process.env.SOLANA_RPC_URL) {
+        primaryUrl = process.env.SOLANA_RPC_URL;
+        primaryName = 'Custom RPC';
+      } else if (IS_MAINNET && process.env.HELIUS_API_KEY) {
+        primaryUrl = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
+        primaryName = 'Helius';
+      } else {
+        primaryUrl = IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
+        primaryName = 'Solana Public';
+      }
+      
+      let backupUrl = process.env.TRITON_ONE_RPC || null;
+      // Ensure backup URL has protocol prefix
+      if (backupUrl && !backupUrl.startsWith('http://') && !backupUrl.startsWith('https://')) {
+        backupUrl = `https://${backupUrl}`;
+      }
+      const backupName = backupUrl ? 'Triton One' : null;
+      
+      // Helper to check RPC health
+      const checkRpcHealth = async (url: string): Promise<{ healthy: boolean; latency: number | null; slot: number | null; error?: string }> => {
+        const start = Date.now();
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSlot' }),
+            signal: AbortSignal.timeout(5000),
+          });
+          const data = await response.json() as any;
+          const latency = Date.now() - start;
+          
+          if (data.result) {
+            return { healthy: true, latency, slot: data.result };
+          } else {
+            return { healthy: false, latency: null, slot: null, error: data.error?.message || 'Unknown error' };
+          }
+        } catch (err: any) {
+          return { healthy: false, latency: null, slot: null, error: err.message || 'Connection failed' };
+        }
+      };
+      
+      // Check both RPCs in parallel
+      const [primaryStatus, backupStatus] = await Promise.all([
+        checkRpcHealth(primaryUrl),
+        backupUrl ? checkRpcHealth(backupUrl) : Promise.resolve(null),
+      ]);
+      
+      res.json({
+        primary: {
+          name: primaryName,
+          configured: true,
+          ...primaryStatus,
+        },
+        backup: backupUrl ? {
+          name: backupName,
+          configured: true,
+          ...backupStatus,
+        } : {
+          name: null,
+          configured: false,
+          healthy: false,
+          latency: null,
+          slot: null,
+        },
+        network: IS_MAINNET ? 'mainnet-beta' : 'devnet',
+      });
+    } catch (error: any) {
+      console.error("RPC status error:", error);
+      res.status(500).json({ error: "Failed to check RPC status" });
     }
   });
 

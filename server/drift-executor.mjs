@@ -10,6 +10,152 @@ import crypto from 'crypto';
 // Drift Program constants for raw transaction building
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 
+// RPC URL helpers - Primary (Helius) with Triton fallback
+function getPrimaryRpcUrl() {
+  if (process.env.SOLANA_RPC_URL) {
+    return process.env.SOLANA_RPC_URL;
+  }
+  if (process.env.HELIUS_API_KEY) {
+    return `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
+  }
+  return 'https://api.mainnet-beta.solana.com';
+}
+
+function getBackupRpcUrl() {
+  let url = process.env.TRITON_ONE_RPC || null;
+  // Ensure URL has protocol prefix
+  if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
+    url = `https://${url}`;
+  }
+  return url;
+}
+
+// ============================================================================
+// SIMPLE FAILOVER: Only switch to backup when primary actually fails
+// This is the safest approach - no extra RPC calls, no complex state machine
+// Switch to backup on failure, try primary again after cooldown
+// ============================================================================
+
+// Feature flag - set to false to disable failover entirely (use only primary)
+const ENABLE_FAILOVER = process.env.DISABLE_RPC_FAILOVER !== 'true';
+
+const FAILOVER_STATE = {
+  // Current active RPC ('primary' or 'backup')
+  activeRpc: 'primary',
+  
+  // Timestamp when we switched to backup
+  switchedToBackupAt: null,
+  
+  // Count of consecutive primary failures
+  consecutivePrimaryFailures: 0,
+  
+  // Cooldown: 3 minutes before trying primary again
+  cooldownMs: 3 * 60 * 1000,
+};
+
+// Try to get a working connection - simple failover on actual failure only
+async function getWorkingConnection() {
+  const primaryUrl = getPrimaryRpcUrl();
+  const backupUrl = getBackupRpcUrl();
+  
+  // If failover is disabled, always use primary
+  if (!ENABLE_FAILOVER) {
+    console.error('[Executor] Failover disabled - using primary RPC only');
+    return { 
+      connection: new Connection(primaryUrl, { commitment: 'confirmed' }), 
+      rpcUrl: primaryUrl, 
+      usingBackup: false 
+    };
+  }
+  
+  // If we're on backup, check if cooldown has elapsed to try primary again
+  if (FAILOVER_STATE.activeRpc === 'backup' && FAILOVER_STATE.switchedToBackupAt) {
+    const elapsed = Date.now() - FAILOVER_STATE.switchedToBackupAt;
+    if (elapsed >= FAILOVER_STATE.cooldownMs) {
+      console.error(`[Executor] Cooldown elapsed (${(elapsed / 1000).toFixed(0)}s) - trying primary again`);
+      FAILOVER_STATE.activeRpc = 'primary';
+      FAILOVER_STATE.switchedToBackupAt = null;
+      FAILOVER_STATE.consecutivePrimaryFailures = 0;
+    }
+  }
+  
+  // Try the active RPC first
+  const activeUrl = FAILOVER_STATE.activeRpc === 'primary' ? primaryUrl : backupUrl;
+  const activeName = FAILOVER_STATE.activeRpc === 'primary' ? 'Helius' : 'Triton';
+  
+  try {
+    const conn = new Connection(activeUrl, { commitment: 'confirmed' });
+    // Quick health check - getSlot is fast
+    const start = Date.now();
+    await Promise.race([
+      conn.getSlot(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), 5000))
+    ]);
+    const latency = Date.now() - start;
+    
+    // Success - reset failure counter if primary
+    if (FAILOVER_STATE.activeRpc === 'primary') {
+      FAILOVER_STATE.consecutivePrimaryFailures = 0;
+    }
+    
+    console.error(`[Executor] ${activeName} RPC healthy (${latency}ms)`);
+    return { connection: conn, rpcUrl: activeUrl, usingBackup: FAILOVER_STATE.activeRpc === 'backup' };
+  } catch (err) {
+    console.error(`[Executor] ${activeName} RPC failed: ${err.message}`);
+    
+    // If primary failed, try backup
+    if (FAILOVER_STATE.activeRpc === 'primary' && backupUrl) {
+      FAILOVER_STATE.consecutivePrimaryFailures++;
+      console.error(`[Executor] Primary failure #${FAILOVER_STATE.consecutivePrimaryFailures} - trying backup (Triton)...`);
+      
+      try {
+        const backupConn = new Connection(backupUrl, { commitment: 'confirmed' });
+        const start = Date.now();
+        await Promise.race([
+          backupConn.getSlot(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Backup RPC timeout')), 5000))
+        ]);
+        const latency = Date.now() - start;
+        
+        // Switch to backup
+        FAILOVER_STATE.activeRpc = 'backup';
+        FAILOVER_STATE.switchedToBackupAt = Date.now();
+        console.error(`[Executor] Switched to backup RPC (Triton) - ${latency}ms. Will try primary again in ${FAILOVER_STATE.cooldownMs / 1000}s`);
+        return { connection: backupConn, rpcUrl: backupUrl, usingBackup: true };
+      } catch (backupErr) {
+        console.error(`[Executor] Backup RPC also failed: ${backupErr.message}`);
+      }
+    }
+    
+    // If backup failed, try primary as fallback
+    if (FAILOVER_STATE.activeRpc === 'backup') {
+      console.error('[Executor] Backup failed - trying primary as fallback...');
+      try {
+        const primaryConn = new Connection(primaryUrl, { commitment: 'confirmed' });
+        const start = Date.now();
+        await Promise.race([
+          primaryConn.getSlot(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Primary RPC timeout')), 5000))
+        ]);
+        const latency = Date.now() - start;
+        
+        // Primary recovered - switch back
+        FAILOVER_STATE.activeRpc = 'primary';
+        FAILOVER_STATE.switchedToBackupAt = null;
+        FAILOVER_STATE.consecutivePrimaryFailures = 0;
+        console.error(`[Executor] Primary RPC recovered (${latency}ms) - switching back`);
+        return { connection: primaryConn, rpcUrl: primaryUrl, usingBackup: false };
+      } catch (primaryErr) {
+        console.error(`[Executor] Primary RPC also failed: ${primaryErr.message}`);
+      }
+    }
+    
+    // Both failed - return primary anyway and let the operation fail with a clear error
+    console.error('[Executor] All RPCs failed - using primary as last resort');
+    return { connection: new Connection(primaryUrl, { commitment: 'confirmed' }), rpcUrl: primaryUrl, usingBackup: false };
+  }
+}
+
 function getDriftStatePDA() {
   const [state] = PublicKey.findProgramAddressSync(
     [Buffer.from('drift_state')],
@@ -729,11 +875,11 @@ function decryptPrivateKey(encryptedKey) {
 async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex = null) {
   const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey } = keyInput;
   
-  const rpcUrl = process.env.SOLANA_RPC_URL || 
-    (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
-    'https://api.mainnet-beta.solana.com');
-  
-  const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
+  // Use RPC with automatic failover to backup
+  const { connection, rpcUrl, usingBackup } = await getWorkingConnection();
+  if (usingBackup) {
+    console.error('[Executor] Using backup RPC for this trade');
+  }
   
   let keyBase58;
   if (privateKeyBase58) {
@@ -1581,6 +1727,10 @@ process.stdin.on('data', (chunk) => { inputData += chunk; });
 process.stdin.on('end', async () => {
   try {
     const command = JSON.parse(inputData);
+    
+    // Log failover configuration at startup
+    console.error(`[Executor] RPC Failover: ${ENABLE_FAILOVER ? 'ENABLED' : 'DISABLED'} (set DISABLE_RPC_FAILOVER=true to disable)`);
+    
     let result;
     
     if (command.action === 'close') {

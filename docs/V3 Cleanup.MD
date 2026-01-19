@@ -1,7 +1,7 @@
 # QuantumVault V3 Security Cleanup Plan
 
-> **Status**: PENDING - Execute after confirming system stability  
-> **Last Updated**: January 16, 2026  
+> **Status**: PARTIALLY COMPLETED - January 19, 2026  
+> **Last Updated**: January 19, 2026  
 > **Risk Level**: LOW to MEDIUM (documented, reversible via git)
 
 This document outlines legacy code, unused dependencies, and dead code that can be safely removed once the v3 security upgrade is fully verified in production.
@@ -12,11 +12,11 @@ This document outlines legacy code, unused dependencies, and dead code that can 
 
 Before executing any cleanup tasks, verify:
 
-- [ ] Deposits working reliably (test with small amount)
-- [ ] Withdrawals working reliably  
-- [ ] Trade execution working (webhook → Drift order)
-- [ ] Position tracking accurate (PnL, equity)
-- [ ] Referral attribution working (check drift.trade referrals)
+- [x] Deposits working reliably (test with small amount)
+- [x] Withdrawals working reliably  
+- [x] Trade execution working (webhook → Drift order)
+- [x] Position tracking accurate (PnL, equity)
+- [x] Referral attribution working (check drift.trade referrals)
 - [ ] No wallets using legacy encryption (run audit query below)
 
 ---
@@ -25,32 +25,23 @@ Before executing any cleanup tasks, verify:
 
 Identified during v3 security audit - January 16, 2026.
 
-### `/api/trading-bots/:id/init-wallet` Endpoint (routes.ts ~line 3826)
+### `/api/trading-bots/:id/init-wallet` Endpoint
 
-**Problem:** This endpoint still uses legacy v1 encryption (`generateAgentWallet()` from agent-wallet.ts) instead of v3 (`generateAgentWalletWithMnemonic()`).
+**Status:** ✅ COMPLETED - Removed January 19, 2026
 
-**Status:** DEAD CODE - The frontend never calls this endpoint. Verified via grep search.
+**Problem:** This endpoint used legacy v1 encryption (`generateAgentWallet()` from agent-wallet.ts) instead of v3 (`generateAgentWalletWithMnemonic()`).
 
-**Why it exists:** Legacy code from when each bot had its own agent wallet. Current architecture uses a shared agent wallet per user created at connect time.
-
-**Risk if left:** If someone called this API directly, it would create a v1-encrypted wallet, bypassing the v3 security model.
-
-**Action:** Remove or disable this endpoint entirely. It serves no purpose in the current architecture.
-
-```typescript
-// DELETE this entire route block (routes.ts lines ~3826-3852):
-app.post("/api/trading-bots/:id/init-wallet", ...)
-```
+**Action Taken:** Removed the entire endpoint from routes.ts and removed unused `generateAgentWallet` import.
 
 ---
 
 ## 1. Test/Utility Scripts (LOW RISK)
 
-Development-only test scripts that are not part of production:
+**Status:** ✅ COMPLETED - Removed January 19, 2026
 
-### Server Test Scripts
+### Server Test Scripts (REMOVED)
 ```bash
-# Files to remove:
+# Files removed:
 server/test-crypto-v3.ts
 server/test-security-v3-integration.ts
 server/test-security-v3-real.ts
@@ -59,81 +50,46 @@ server/test-referrer-lookup.mjs
 server/test-deposit-ipc.mjs
 ```
 
-### Root Directory Scripts
+### Root Directory Scripts (REMOVED)
 ```bash
-# Files to remove:
+# Files removed:
 check-balance.mjs
-check-balance-1.mjs
-fetch-oracle-data.mjs
-fetch-oracle-data-1.mjs
-fetch-oracle-prices.mjs
+check-balance2.mjs
+check-balance3.mjs
+fetch-oracle.mjs
+fetch-oracle2.mjs
 recover-funds.mjs
 recover-funds.ts
-```
-
-### Verification
-```bash
-# Ensure not referenced in package.json scripts
-grep -r "test-crypto-v3\|test-security-v3\|check-balance\|fetch-oracle\|recover-funds" package.json
-```
-
-### Cleanup Command
-```bash
-rm -f server/test-crypto-v3.ts server/test-security-v3-integration.ts server/test-security-v3-real.ts
-rm -f server/test-keypair-derivation.mjs server/test-referrer-lookup.mjs server/test-deposit-ipc.mjs
-rm -f check-balance.mjs check-balance-1.mjs fetch-oracle-data.mjs fetch-oracle-data-1.mjs fetch-oracle-prices.mjs
-rm -f recover-funds.mjs recover-funds.ts
 ```
 
 ---
 
 ## 2. Legacy Crypto Module (MEDIUM RISK)
 
-The v1 encryption in `server/crypto.ts` has been replaced by v3 encryption in `server/crypto-v3.ts`.
+**Status:** ⚠️ CANNOT REMOVE - Still actively used
 
-### Before Removal - Audit Required
+### Verification Performed January 19, 2026
 
-**Step 1: Check for wallets still using legacy encryption**
-```sql
--- Run this query to find any wallets with ONLY legacy encryption
-SELECT id, wallet_address 
-FROM wallets 
-WHERE agent_private_key_encrypted IS NOT NULL 
-  AND agent_private_key_encrypted_v3 IS NULL;
-```
+The legacy crypto.ts is still imported and used by:
+- `server/agent-wallet.ts` - encrypt/decrypt for wallet generation
+- `server/routes.ts` - `legacyEncrypt` for backward compatibility during wallet creation (lines 526, 1441)
+- `server/session-v3.ts` - `legacyDecrypt` for session handling
 
-If any rows returned → those wallets need migration before removing legacy support.
+**Reason:** The system still creates dual-encrypted wallets (v1 + v3) for backward compatibility. Cannot remove until all wallet creation paths use only v3.
 
-**Step 2: Check executor fallback usage**
-```bash
-# Check if drift-executor.mjs still has legacy fallback
-grep -n "encryptedPrivateKey\|crypto\.ts" server/drift-executor.mjs
-```
-
-### Files to Remove (after verification)
-```
-server/crypto.ts  # v1 AES-GCM encryption (replaced by crypto-v3.ts)
-```
-
-### Code to Remove in drift-executor.mjs
-Look for and remove the legacy decryption path that handles `encryptedPrivateKey` (the v1 format).
-The executor should only use `encryptedPrivateKeyV3` path.
+**Future Action Required:**
+1. Audit all wallet creation paths to use only v3 encryption
+2. Migrate existing wallets to v3-only
+3. Then remove crypto.ts
 
 ---
 
 ## 3. Unused Database Tables (MEDIUM RISK)
 
+**Status:** ⏸️ DEFERRED - Do not drop without explicit user approval
+
 ### `trades` Table
-The original `trades` table appears unused - runtime uses `bot_trades` instead.
-
-**Verification Query:**
-```bash
-# Check if trades table is referenced anywhere in storage or routes
-grep -rn "\.trades\|'trades'\|\"trades\"" server/storage.ts server/routes.ts
-grep -rn "from trades\|into trades\|update trades" server/
-```
-
-**Action:** If truly unused, document for future removal. Do NOT drop table without explicit user approval - may contain historical data.
+The original `trades` table may contain historical data. Do NOT drop without explicit user approval.
 
 ### `webhook_logs` Table
 This table IS used for webhook deduplication - DO NOT REMOVE.
@@ -142,71 +98,51 @@ This table IS used for webhook deduplication - DO NOT REMOVE.
 
 ## 4. Unused Builder Functions (LOW-MEDIUM RISK)
 
-Functions in `drift-service.ts` that may be unused now that we use executor-based operations:
+**Status:** ⚠️ CANNOT REMOVE - Still actively used
 
-### Candidates for Removal
+### Verification Performed January 19, 2026
+
 ```typescript
-buildDepositTransaction()   // May be unused - deposits go through executor
-buildWithdrawTransaction()  // May be unused - withdrawals go through executor
+buildDepositTransaction()   // USED in routes.ts line 6654
+buildWithdrawTransaction()  // USED in routes.ts line 6671
 ```
 
-### Verification
-```bash
-# Check if these functions are called anywhere
-grep -rn "buildDepositTransaction\|buildWithdrawTransaction" server/routes.ts client/
-```
-
-If no matches found in routes or client code, they can be safely removed.
+These functions are still called for user-initiated deposits/withdrawals (as opposed to agent-executed ones).
 
 ---
 
 ## 5. Unused NPM Dependencies (LOW RISK)
 
-Packages that may no longer be used:
+**Status:** ✅ COMPLETED - Uninstalled January 19, 2026
 
-| Package | Purpose | Likely Status |
-|---------|---------|---------------|
-| `passport` | Auth middleware | Replaced by wallet auth |
-| `passport-local` | Username/password auth | Replaced by wallet auth |
-| `memorystore` | Session store | May be replaced by pg store |
-| `xlsx` | Excel parsing | Check if still needed |
-| `next-themes` | Theme switching | Check client usage |
-| `vaul` | Drawer component | Check if used |
-
-### Verification Commands
-```bash
-# Check each package for imports
-grep -rn "from 'passport'\|require('passport')" server/ client/
-grep -rn "from 'xlsx'\|require('xlsx')" server/ client/
-grep -rn "from 'next-themes'" client/
-grep -rn "from 'vaul'" client/
-```
-
-### Removal (after verification)
-```bash
-npm uninstall passport passport-local memorystore xlsx next-themes vaul
-```
+Packages removed:
+- `passport` - Not imported anywhere
+- `passport-local` - Not imported anywhere
+- `@types/passport` - Type definitions for removed package
+- `@types/passport-local` - Type definitions for removed package
+- `memorystore` - Not imported anywhere
+- `xlsx` - Not imported in code
+- `next-themes` - Not imported in client/
+- `vaul` - Not imported in client/
 
 ---
 
 ## 6. Unused Frontend Pages (LOW RISK)
 
-Check for page components not registered in App.tsx routes:
+**Status:** ⚠️ CANNOT REMOVE - Still in use
 
-### Verification
-```bash
-# List all page files
-ls client/src/pages/
+### Verification Performed January 19, 2026
 
-# Check which are registered in App.tsx
-grep -o "component={[^}]*}" client/src/App.tsx
-```
+- `WalletManagement.tsx` - Imported as `WalletContent` in App.tsx (line 72)
+- All other pages are registered in routes
 
-Compare lists - any pages not in App.tsx routes can be removed.
+No unused pages found.
 
 ---
 
 ## 7. Database Column Cleanup (FUTURE)
+
+**Status:** ⏸️ DEFERRED - Requires full v3 migration first
 
 Legacy columns that can be removed in future schema update:
 
@@ -222,17 +158,18 @@ Legacy columns that can be removed in future schema update:
 
 ---
 
-## Execution Order
+## Execution Summary
 
-When ready to clean up, execute in this order:
-
-1. **Dead endpoint (Section 0)** - Highest priority, security-relevant
-2. **Test scripts** - Lowest risk, pure dev files
-3. **Unused NPM deps** - Low risk after verification
-4. **Unused frontend pages** - Low risk
-5. **Builder functions** - Low-medium, verify no callers first
-6. **Legacy crypto** - Medium risk, requires wallet audit first
-7. **Database tables** - Do not drop, just document
+| Section | Status | Notes |
+|---------|--------|-------|
+| 0. Dead init-wallet endpoint | ✅ COMPLETED | Removed from routes.ts |
+| 1. Test/Utility scripts | ✅ COMPLETED | 13 files deleted |
+| 2. Legacy crypto.ts | ⚠️ STILL USED | Required for backward compatibility |
+| 3. Database tables | ⏸️ DEFERRED | Do not drop without approval |
+| 4. Builder functions | ⚠️ STILL USED | Called in routes.ts |
+| 5. NPM dependencies | ✅ COMPLETED | 8 packages uninstalled |
+| 6. Frontend pages | ⚠️ STILL USED | All pages in use |
+| 7. Database columns | ⏸️ DEFERRED | Requires full v3 migration |
 
 ---
 
@@ -273,6 +210,22 @@ git checkout HEAD~1 -- <deleted-file>
 **File Changed:** `server/drift-executor.mjs` - `depositToDrift()` function
 
 **Why This Works:** The SDK can create accounts on-chain without being subscribed (just sends the transaction). By creating accounts BEFORE calling `subscribe()`, we ensure the DriftClient has valid subAccountIds when it tries to initialize the userMap during subscription.
+
+---
+
+## 9. Bug Fixes - January 19, 2026
+
+### Fixed: PollingUserAccountSubscriber "addAccount undefined" Error
+
+**Problem:** Trade execution failing with "Cannot read properties of undefined (reading 'addAccount')" at PollingUserAccountSubscriber.
+
+**Root Cause:** When using Drift SDK's polling subscription mode, the `BulkAccountLoader` must be explicitly passed to the DriftClient's `accountSubscription` config. The SDK doesn't create one internally.
+
+**Fix Applied:** Added BulkAccountLoader to all 3 DriftClient instances:
+- `drift-executor.mjs` - 2 instances (main execution and WebSocket fallback)
+- `drift-service.ts` - 1 instance
+
+**Result:** Trade execution now works reliably.
 
 ---
 

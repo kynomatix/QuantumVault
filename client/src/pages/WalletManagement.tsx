@@ -210,7 +210,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      // Show immediate feedback - transaction is on chain
       toast({ 
         title: 'Transaction Submitted', 
         description: 'Confirming deposit...'
@@ -236,7 +235,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       
       setDepositAmount('');
       
-      // Wait for blockchain state to propagate before fetching updated balances
       await new Promise(resolve => setTimeout(resolve, 2000));
       await Promise.all([fetchUsdcBalance(), fetchAgentBalance()]);
     } catch (error: any) {
@@ -290,7 +288,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      // Show immediate feedback
       toast({ 
         title: 'Transaction Submitted', 
         description: 'Confirming withdrawal...'
@@ -487,7 +484,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       const signedTx = await solanaWallet.signTransaction(transaction);
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       
-      // Show immediate feedback
       toast({ 
         title: 'Transaction Submitted', 
         description: 'Confirming SOL deposit...'
@@ -499,7 +495,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
         lastValidBlockHeight,
       });
 
-      // Record SOL deposit in transaction history
       await fetch('/api/agent/confirm-sol-deposit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -514,7 +509,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       
       setSolDepositAmount('');
       
-      // Wait for blockchain state to propagate before fetching updated balances
       await new Promise(resolve => setTimeout(resolve, 2000));
       await Promise.all([fetchUserSolBalance(), fetchAgentBalance()]);
     } catch (error: any) {
@@ -562,7 +556,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
-      // Show immediate feedback
       toast({ 
         title: 'Transaction Submitted', 
         description: 'Confirming Drift deposit...'
@@ -626,7 +619,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
-      // Show immediate feedback
       toast({ 
         title: 'Transaction Submitted', 
         description: 'Confirming Drift withdrawal...'
@@ -690,7 +682,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
       
-      // Show immediate feedback
       toast({ 
         title: 'Transaction Submitted', 
         description: 'Confirming withdrawal...'
@@ -732,6 +723,8 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     return null;
   }
 
+  const isLoading = usdcLoading || capitalLoading || agentLoading || solLoading;
+
   return (
     <motion.div
       key="wallet"
@@ -743,197 +736,152 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-display font-bold">Wallet Management</h1>
-          <p className="text-muted-foreground">Manage your funds for your trading agent</p>
+          <p className="text-muted-foreground">Manage your trading funds</p>
         </div>
         <Button 
           variant="outline" 
           size="sm" 
           onClick={handleRefresh}
-          disabled={usdcLoading || capitalLoading || agentLoading}
+          disabled={isLoading}
           data-testid="button-refresh"
         >
-          <RefreshCw className={`w-4 h-4 mr-2 ${(usdcLoading || capitalLoading || agentLoading) ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
       </div>
 
-      <Card className="border-border/50 bg-card/50 backdrop-blur-sm">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Wallet className="w-5 h-5 text-primary" />
-            Connected Wallet
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center justify-between p-4 bg-muted/30 rounded-xl">
-            <div>
-              <p className="text-sm text-muted-foreground">Address</p>
-              <p className="font-mono text-lg" data-testid="text-wallet-address">{shortenedAddress}</p>
+      <Card className="border-border/50 bg-gradient-to-br from-card/80 to-card/40 backdrop-blur-sm overflow-hidden">
+        <CardContent className="p-0">
+          <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-border/50">
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2 rounded-lg bg-muted/50">
+                  <Wallet className="w-5 h-5 text-muted-foreground" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">Your Wallet</p>
+                  <div className="flex items-center gap-2">
+                    <p className="font-mono text-sm" data-testid="text-wallet-address">{shortenedAddress}</p>
+                    <Button 
+                      variant="ghost" 
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={copyAddress}
+                      data-testid="button-copy-address"
+                    >
+                      {copiedAddress ? <Check className="w-3 h-3 text-green-500" /> : <Copy className="w-3 h-3" />}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-3 rounded-lg bg-muted/30">
+                  <p className="text-xs text-muted-foreground mb-1">USDC</p>
+                  <p className="text-xl font-mono font-semibold" data-testid="text-wallet-usdc">
+                    {usdcLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : `$${(usdcBalance ?? 0).toFixed(2)}`}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-muted/30">
+                  <p className="text-xs text-muted-foreground mb-1">SOL</p>
+                  <p className="text-xl font-mono font-semibold" data-testid="text-user-sol-balance">
+                    {solLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : `${(userSolBalance ?? 0).toFixed(4)}`}
+                  </p>
+                </div>
+              </div>
             </div>
-            <Button 
-              variant="ghost" 
-              size="icon"
-              onClick={copyAddress}
-              data-testid="button-copy-address"
-            >
-              {copiedAddress ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
-            </Button>
+            
+            <div className="p-6 bg-primary/5">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-primary/20">
+                    <Bot className="w-5 h-5 text-primary" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium text-primary">Trading Agent</p>
+                    <div className="flex items-center gap-2">
+                      <p className="font-mono text-sm" data-testid="text-agent-wallet-address">
+                        {agentWallet?.agentPublicKey ? shortenAddress(agentWallet.agentPublicKey) : '...'}
+                      </p>
+                      <Button 
+                        variant="ghost" 
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={copyAgentAddress}
+                        disabled={!agentWallet?.agentPublicKey}
+                        data-testid="button-copy-agent-address"
+                      >
+                        {copiedAgentAddress ? <Check className="w-3 h-3 text-green-500" /> : <Copy className="w-3 h-3" />}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentWallet?.agentPublicKey}`, '_blank')}
+                        disabled={!agentWallet?.agentPublicKey}
+                        title="View on Drift"
+                        data-testid="button-view-on-drift"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-3 rounded-lg bg-primary/10 border border-primary/20">
+                  <p className="text-xs text-primary/70 mb-1">USDC Balance</p>
+                  <p className="text-xl font-mono font-semibold text-primary" data-testid="text-agent-balance">
+                    {agentLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : `$${(agentWallet?.balance ?? 0).toFixed(2)}`}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-orange-500/10 border border-orange-500/20">
+                  <p className="text-xs text-orange-500/70 mb-1 flex items-center gap-1">
+                    <Fuel className="w-3 h-3" /> Gas (SOL)
+                  </p>
+                  <p className="text-xl font-mono font-semibold text-orange-500" data-testid="text-agent-sol-balance">
+                    {agentLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : `${(agentWallet?.solBalance ?? 0).toFixed(4)}`}
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>
-
-      <Card className="border-primary/30 bg-card/50 backdrop-blur-sm border-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Bot className="w-5 h-5 text-primary" />
-            Agent Wallet (Trading Account)
-          </CardTitle>
-          <CardDescription>Server-managed wallet for automated trading operations</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 bg-muted/30 rounded-xl">
-            <div className="flex-1">
-              <p className="text-sm text-muted-foreground">Agent Address</p>
-              <div className="flex items-center gap-2">
-                <p className="font-mono text-lg" data-testid="text-agent-wallet-address">
-                  {agentWallet?.agentPublicKey ? shortenAddress(agentWallet.agentPublicKey) : 'Loading...'}
-                </p>
-                <Button 
-                  variant="ghost" 
-                  size="icon"
-                  onClick={copyAgentAddress}
-                  disabled={!agentWallet?.agentPublicKey}
-                  data-testid="button-copy-agent-address"
-                >
-                  {copiedAgentAddress ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentWallet?.agentPublicKey}`, '_blank')}
-                  disabled={!agentWallet?.agentPublicKey}
-                  title="View on Drift"
-                  data-testid="button-view-on-drift"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                </Button>
-              </div>
-            </div>
-            <div className="text-right space-y-1">
-              <div>
-                <p className="text-sm text-muted-foreground">USDC Balance</p>
-                <p className="font-mono text-lg font-semibold text-primary" data-testid="text-agent-wallet-balance">
-                  {agentLoading ? (
-                    <Loader2 className="w-4 h-4 animate-spin inline" />
-                  ) : (
-                    `$${(agentWallet?.balance ?? 0).toFixed(2)} USDC`
-                  )}
-                </p>
-              </div>
-              <div>
-                <p className="text-sm text-muted-foreground flex items-center gap-1">
-                  <Fuel className="w-3 h-3" /> SOL (Gas)
-                </p>
-                <p className="font-mono text-lg font-semibold text-orange-500" data-testid="text-agent-sol-balance">
-                  {agentLoading ? (
-                    <Loader2 className="w-4 h-4 animate-spin inline" />
-                  ) : (
-                    `${(agentWallet?.solBalance ?? 0).toFixed(4)} SOL`
-                  )}
-                </p>
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card className="border-border/50 bg-card/50 backdrop-blur-sm h-full">
-          <CardHeader className="pb-2">
-            <CardDescription className="flex items-center gap-2">
-              <Wallet className="w-4 h-4" />
-              Phantom Wallet
-            </CardDescription>
-            <CardTitle className="text-2xl font-mono" data-testid="text-wallet-usdc">
-              {usdcLoading ? (
-                <Loader2 className="w-5 h-5 animate-spin" />
-              ) : (
-                `$${(usdcBalance ?? 0).toFixed(2)}`
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-muted-foreground">Your personal USDC balance</p>
-          </CardContent>
-        </Card>
-
-        <Card className="border-primary/30 bg-card/50 backdrop-blur-sm h-full border-2">
-          <CardHeader className="pb-2">
-            <CardDescription className="flex items-center gap-2">
-              <Bot className="w-4 h-4 text-primary" />
-              Agent Wallet
-            </CardDescription>
-            <CardTitle className="text-2xl font-mono" data-testid="text-agent-balance">
-              {agentLoading ? (
-                <Loader2 className="w-5 h-5 animate-spin" />
-              ) : (
-                `$${(agentWallet?.balance ?? 0).toFixed(2)}`
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-muted-foreground">
-              Server-managed trading wallet
-              {agentWallet?.agentPublicKey && (
-                <span className="block font-mono text-primary/70 mt-1">
-                  {shortenAddress(agentWallet.agentPublicKey)}
-                </span>
-              )}
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card className="border-orange-500/30 bg-card/50 backdrop-blur-sm h-full border-2">
-          <CardHeader className="pb-2">
-            <CardDescription className="flex items-center gap-2">
-              <Fuel className="w-4 h-4 text-orange-500" />
-              SOL (Gas Fees)
-            </CardDescription>
-            <CardTitle className="text-2xl font-mono text-orange-500" data-testid="text-user-sol-balance">
-              {solLoading ? (
-                <Loader2 className="w-5 h-5 animate-spin" />
-              ) : (
-                `${(userSolBalance ?? 0).toFixed(4)} SOL`
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-muted-foreground">Your Phantom wallet SOL balance</p>
-          </CardContent>
-        </Card>
-
-      </div>
 
       <Card className="border-border/50 bg-card/50 backdrop-blur-sm">
         <CardContent className="pt-6">
           <Tabs defaultValue={initialTab} className="w-full">
             <TabsList className="grid w-full grid-cols-3 mb-6">
-              <TabsTrigger value="deposit" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-deposit">
-                <ArrowDownToLine className="w-3 h-3 sm:w-4 sm:h-4" />
-                Deposit
+              <TabsTrigger value="deposit" className="flex items-center gap-2" data-testid="tab-deposit">
+                <ArrowDownToLine className="w-4 h-4" />
+                <span className="hidden sm:inline">Deposit</span>
               </TabsTrigger>
-              <TabsTrigger value="withdraw" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-withdraw">
-                <ArrowUpFromLine className="w-3 h-3 sm:w-4 sm:h-4" />
-                Withdraw
+              <TabsTrigger value="withdraw" className="flex items-center gap-2" data-testid="tab-withdraw">
+                <ArrowUpFromLine className="w-4 h-4" />
+                <span className="hidden sm:inline">Withdraw</span>
               </TabsTrigger>
-              <TabsTrigger value="gas" className="flex items-center gap-1 text-xs sm:text-sm" data-testid="tab-gas">
-                <Fuel className="w-3 h-3 sm:w-4 sm:h-4" />
-                Gas (SOL)
+              <TabsTrigger value="gas" className="flex items-center gap-2" data-testid="tab-gas">
+                <Fuel className="w-4 h-4" />
+                <span className="hidden sm:inline">Gas (SOL)</span>
               </TabsTrigger>
             </TabsList>
             
             <TabsContent value="deposit" className="space-y-4">
-              <div className="p-4 bg-muted/30 rounded-xl space-y-4">
+              <div className="p-5 bg-muted/30 rounded-xl space-y-5">
+                <div className="flex items-center justify-center gap-4 py-2">
+                  <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-lg">
+                    <Wallet className="w-4 h-4 text-muted-foreground" />
+                    <span className="text-sm font-medium">Your Wallet</span>
+                  </div>
+                  <div className="flex items-center gap-1 text-muted-foreground">
+                    <ArrowRight className="w-5 h-5" />
+                  </div>
+                  <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 border border-primary/20 rounded-lg">
+                    <Bot className="w-4 h-4 text-primary" />
+                    <span className="text-sm font-medium text-primary">Trading Agent</span>
+                  </div>
+                </div>
+
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-sm font-medium">Amount (USDC)</label>
@@ -947,7 +895,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                       placeholder="0.00"
                       value={depositAmount}
                       onChange={(e) => setDepositAmount(e.target.value)}
-                      className="flex-1"
+                      className="flex-1 text-lg"
                       data-testid="input-deposit-amount"
                     />
                     <Button 
@@ -959,32 +907,27 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                     </Button>
                   </div>
                 </div>
-                
-                <div className="flex items-center justify-between text-sm text-muted-foreground">
-                  <span>From: Phantom Wallet</span>
-                  <ArrowRight className="w-4 h-4" />
-                  <span>To: Agent Wallet</span>
-                </div>
 
-                <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2">
-                  Note: You need SOL in your Phantom wallet for transaction fees (~0.005 SOL)
+                <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-3 flex items-start gap-2">
+                  <Fuel className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>You'll need SOL in your wallet for the transaction fee (~0.005 SOL)</span>
                 </div>
                 
                 <Button
-                  className="w-full bg-gradient-to-r from-primary to-accent"
+                  className="w-full bg-gradient-to-r from-primary to-accent h-12 text-base"
                   onClick={handleDepositToAgent}
                   disabled={isDepositing || !depositAmount || parseFloat(depositAmount) <= 0}
                   data-testid="button-deposit"
                 >
                   {isDepositing ? (
                     <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
                       Processing...
                     </>
                   ) : (
                     <>
-                      <ArrowDownToLine className="w-4 h-4 mr-2" />
-                      Deposit to Agent
+                      <ArrowDownToLine className="w-5 h-5 mr-2" />
+                      Deposit USDC
                     </>
                   )}
                 </Button>
@@ -992,7 +935,21 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
             </TabsContent>
             
             <TabsContent value="withdraw" className="space-y-4">
-              <div className="p-4 bg-muted/30 rounded-xl space-y-4">
+              <div className="p-5 bg-muted/30 rounded-xl space-y-5">
+                <div className="flex items-center justify-center gap-4 py-2">
+                  <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 border border-primary/20 rounded-lg">
+                    <Bot className="w-4 h-4 text-primary" />
+                    <span className="text-sm font-medium text-primary">Trading Agent</span>
+                  </div>
+                  <div className="flex items-center gap-1 text-muted-foreground">
+                    <ArrowRight className="w-5 h-5" />
+                  </div>
+                  <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-lg">
+                    <Wallet className="w-4 h-4 text-muted-foreground" />
+                    <span className="text-sm font-medium">Your Wallet</span>
+                  </div>
+                </div>
+
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-sm font-medium">Amount (USDC)</label>
@@ -1006,7 +963,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                       placeholder="0.00"
                       value={withdrawToWalletAmount}
                       onChange={(e) => setWithdrawToWalletAmount(e.target.value)}
-                      className="flex-1"
+                      className="flex-1 text-lg"
                       data-testid="input-withdraw-wallet-amount"
                     />
                     <Button 
@@ -1019,27 +976,21 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   </div>
                 </div>
                 
-                <div className="flex items-center justify-between text-sm text-muted-foreground">
-                  <span>From: Agent Wallet</span>
-                  <ArrowRight className="w-4 h-4" />
-                  <span>To: Phantom Wallet</span>
-                </div>
-                
                 <Button
-                  className="w-full bg-gradient-to-r from-primary to-accent"
+                  className="w-full bg-gradient-to-r from-primary to-accent h-12 text-base"
                   onClick={handleWithdrawToWallet}
                   disabled={isWithdrawingToWallet || !withdrawToWalletAmount || parseFloat(withdrawToWalletAmount) <= 0}
                   data-testid="button-withdraw-wallet"
                 >
                   {isWithdrawingToWallet ? (
                     <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
                       Processing...
                     </>
                   ) : (
                     <>
-                      <ArrowUpFromLine className="w-4 h-4 mr-2" />
-                      Withdraw to Wallet
+                      <ArrowUpFromLine className="w-5 h-5 mr-2" />
+                      Withdraw USDC
                     </>
                   )}
                 </Button>
@@ -1047,50 +998,52 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
             </TabsContent>
 
             <TabsContent value="gas" className="space-y-4">
-              <div className="p-4 bg-orange-500/10 border border-orange-500/30 rounded-xl space-y-3 mb-4">
+              <div className="p-4 bg-orange-500/10 border border-orange-500/20 rounded-xl space-y-3">
                 <div className="flex items-center gap-2 text-orange-500">
                   <Fuel className="w-5 h-5" />
-                  <h3 className="font-semibold">Why SOL for Gas?</h3>
+                  <h3 className="font-semibold">About Gas Fees</h3>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  SOL is required to pay transaction fees (gas) on the Solana blockchain. 
-                  The trading agent needs SOL to execute trades, deposits, and withdrawals on Drift Protocol.
+                  SOL is required to pay transaction fees on Solana. Your trading agent needs SOL to execute trades, deposits, and withdrawals.
                 </p>
-                <p className="text-sm text-muted-foreground">
-                  Each bot also requires ~0.035 SOL for Solana account rent when created. This rent is automatically reclaimed when you delete the bot.
-                </p>
-                <p className="text-sm text-muted-foreground font-medium">
-                  We recommend keeping at least 0.1 SOL for smooth operations.
+                <p className="text-sm font-medium text-orange-500/90">
+                  Recommended: Keep at least 0.1 SOL for smooth operations
                 </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                <div className="p-3 bg-muted/30 rounded-lg">
-                  <p className="text-xs text-muted-foreground mb-1">Your Phantom SOL</p>
-                  <p className="font-mono text-lg" data-testid="text-gas-user-sol">
-                    {solLoading ? (
-                      <Loader2 className="w-4 h-4 animate-spin inline" />
-                    ) : (
-                      `${(userSolBalance ?? 0).toFixed(4)} SOL`
-                    )}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-4 bg-muted/30 rounded-xl">
+                  <p className="text-xs text-muted-foreground mb-2">Your Wallet SOL</p>
+                  <p className="font-mono text-xl font-semibold" data-testid="text-gas-user-sol">
+                    {solLoading ? <Loader2 className="w-4 h-4 animate-spin inline" /> : `${(userSolBalance ?? 0).toFixed(4)}`}
                   </p>
                 </div>
-                <div className="p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg">
-                  <p className="text-xs text-muted-foreground mb-1">Agent SOL (Gas)</p>
-                  <p className="font-mono text-lg text-orange-500" data-testid="text-gas-agent-sol">
-                    {agentLoading ? (
-                      <Loader2 className="w-4 h-4 animate-spin inline" />
-                    ) : (
-                      `${(agentWallet?.solBalance ?? 0).toFixed(4)} SOL`
-                    )}
+                <div className="p-4 bg-orange-500/10 border border-orange-500/20 rounded-xl">
+                  <p className="text-xs text-orange-500/70 mb-2">Agent Gas Balance</p>
+                  <p className="font-mono text-xl font-semibold text-orange-500" data-testid="text-gas-agent-sol">
+                    {agentLoading ? <Loader2 className="w-4 h-4 animate-spin inline" /> : `${(agentWallet?.solBalance ?? 0).toFixed(4)}`}
                   </p>
                 </div>
               </div>
 
-              <div className="p-4 bg-muted/30 rounded-xl space-y-4">
+              <div className="p-5 bg-muted/30 rounded-xl space-y-5">
+                <div className="flex items-center justify-center gap-4 py-2">
+                  <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-lg">
+                    <Wallet className="w-4 h-4 text-muted-foreground" />
+                    <span className="text-sm font-medium">Your SOL</span>
+                  </div>
+                  <div className="flex items-center gap-1 text-muted-foreground">
+                    <ArrowRight className="w-5 h-5" />
+                  </div>
+                  <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg">
+                    <Fuel className="w-4 h-4 text-orange-500" />
+                    <span className="text-sm font-medium text-orange-500">Agent Gas</span>
+                  </div>
+                </div>
+
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <label className="text-sm font-medium">Amount (SOL)</label>
+                    <label className="text-sm font-medium">Deposit Amount (SOL)</label>
                     <span className="text-xs text-muted-foreground">
                       Available: {(userSolBalance ?? 0).toFixed(4)} SOL
                     </span>
@@ -1102,7 +1055,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                       step="0.001"
                       value={solDepositAmount}
                       onChange={(e) => setSolDepositAmount(e.target.value)}
-                      className="flex-1"
+                      className="flex-1 text-lg"
                       data-testid="input-sol-deposit-amount"
                     />
                     <Button 
@@ -1113,43 +1066,51 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                       Max
                     </Button>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-1">
+                  <p className="text-xs text-muted-foreground mt-1.5">
                     Keeps 0.01 SOL in your wallet for transaction fees
                   </p>
                 </div>
                 
-                <div className="flex items-center justify-between text-sm text-muted-foreground">
-                  <span>From: Phantom Wallet</span>
-                  <ArrowRight className="w-4 h-4" />
-                  <span>To: Agent Wallet (Gas)</span>
-                </div>
-                
                 <Button
-                  className="w-full bg-gradient-to-r from-orange-500 to-orange-600"
+                  className="w-full bg-gradient-to-r from-orange-500 to-orange-600 h-12 text-base"
                   onClick={handleSolDeposit}
                   disabled={isDepositingSol || !solDepositAmount || parseFloat(solDepositAmount) <= 0}
                   data-testid="button-sol-deposit"
                 >
                   {isDepositingSol ? (
                     <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
                       Processing...
                     </>
                   ) : (
                     <>
-                      <Fuel className="w-4 h-4 mr-2" />
+                      <Fuel className="w-5 h-5 mr-2" />
                       Fund Agent Gas
                     </>
                   )}
                 </Button>
               </div>
 
-              <div className="p-4 bg-muted/30 rounded-xl space-y-4 mt-4">
+              <div className="p-5 bg-muted/30 rounded-xl space-y-5">
+                <div className="flex items-center justify-center gap-4 py-2">
+                  <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg">
+                    <Fuel className="w-4 h-4 text-orange-500" />
+                    <span className="text-sm font-medium text-orange-500">Agent Gas</span>
+                  </div>
+                  <div className="flex items-center gap-1 text-muted-foreground">
+                    <ArrowRight className="w-5 h-5" />
+                  </div>
+                  <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-lg">
+                    <Wallet className="w-4 h-4 text-muted-foreground" />
+                    <span className="text-sm font-medium">Your Wallet</span>
+                  </div>
+                </div>
+
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <label className="text-sm font-medium">Withdraw SOL</label>
+                    <label className="text-sm font-medium">Withdraw Amount (SOL)</label>
                     <span className="text-xs text-muted-foreground">
-                      Available: {((agentWallet?.solBalance ?? 0) - 0.005).toFixed(4)} SOL
+                      Available: {Math.max(0, (agentWallet?.solBalance ?? 0) - 0.005).toFixed(4)} SOL
                     </span>
                   </div>
                   <div className="flex gap-2">
@@ -1159,7 +1120,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                       step="0.001"
                       value={solWithdrawAmount}
                       onChange={(e) => setSolWithdrawAmount(e.target.value)}
-                      className="flex-1"
+                      className="flex-1 text-lg"
                       data-testid="input-sol-withdraw-amount"
                     />
                     <Button 
@@ -1170,32 +1131,26 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                       Max
                     </Button>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Keep at least 0.005 SOL for transaction fees
+                  <p className="text-xs text-muted-foreground mt-1.5">
+                    Keep at least 0.005 SOL for agent transaction fees
                   </p>
-                </div>
-                
-                <div className="flex items-center justify-between text-sm text-muted-foreground">
-                  <span>From: Agent Wallet</span>
-                  <ArrowRight className="w-4 h-4" />
-                  <span>To: Phantom Wallet</span>
                 </div>
                 
                 <Button
                   variant="outline"
-                  className="w-full border-orange-500/50 text-orange-500 hover:bg-orange-500/10"
+                  className="w-full border-orange-500/50 text-orange-500 hover:bg-orange-500/10 h-12 text-base"
                   onClick={handleSolWithdraw}
                   disabled={solWithdrawing || !solWithdrawAmount || parseFloat(solWithdrawAmount) <= 0}
                   data-testid="button-sol-withdraw"
                 >
                   {solWithdrawing ? (
                     <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
                       Processing...
                     </>
                   ) : (
                     <>
-                      <ArrowUpFromLine className="w-4 h-4 mr-2" />
+                      <ArrowUpFromLine className="w-5 h-5 mr-2" />
                       Withdraw SOL
                     </>
                   )}
