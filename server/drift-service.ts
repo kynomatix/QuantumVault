@@ -425,9 +425,17 @@ async function getAgentDriftClient(
     env: sdkEnv,
     activeSubAccountId: subAccountId,
     subAccountIds,
+    accountSubscription: {
+      type: 'polling',
+      frequency: 1000, // Polling is more reliable and doesn't leak websocket connections
+    },
   });
   
-  await driftClient.subscribe();
+  // Subscribe with timeout to prevent hangs
+  const subscribeTimeout = new Promise<void>((_, reject) => 
+    setTimeout(() => reject(new Error('DriftClient subscribe timed out after 15 seconds')), 15000)
+  );
+  await Promise.race([driftClient.subscribe(), subscribeTimeout]);
   
   // If using a non-zero subaccount, verify it exists before trading
   if (subAccountId !== 0) {
@@ -2747,9 +2755,17 @@ export async function executeAgentTransferBetweenSubaccounts(
       env: sdkEnv,
       activeSubAccountId: fromSubAccountId,
       subAccountIds,
+      accountSubscription: {
+        type: 'polling',
+        frequency: 1000, // Polling is more reliable and doesn't leak websocket connections
+      },
     });
     
-    await driftClient.subscribe();
+    // Subscribe with timeout to prevent hangs
+    const subscribeTimeout = new Promise<void>((_, reject) => 
+      setTimeout(() => reject(new Error('DriftClient subscribe timed out after 15 seconds')), 15000)
+    );
+    await Promise.race([driftClient.subscribe(), subscribeTimeout]);
     
     try {
       // Initialize target subaccount if it doesn't exist
