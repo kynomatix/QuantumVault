@@ -31,185 +31,129 @@ function getBackupRpcUrl() {
 }
 
 // ============================================================================
-// SMART FAILOVER: In-memory RPC health tracker with rolling metrics
-// Conservative thresholds to avoid unnecessary switches while ensuring reliability
+// SIMPLE FAILOVER: Only switch to backup when primary actually fails
+// This is the safest approach - no extra RPC calls, no complex state machine
+// Switch to backup on failure, try primary again after cooldown
 // ============================================================================
 
-const RPC_HEALTH_TRACKER = {
-  // Rolling window of recent request results (last 10 requests)
-  primaryHistory: [], // Array of { success: boolean, latency: number, timestamp: number }
-  backupHistory: [],
-  
+// Feature flag - set to false to disable failover entirely (use only primary)
+const ENABLE_FAILOVER = process.env.DISABLE_RPC_FAILOVER !== 'true';
+
+const FAILOVER_STATE = {
   // Current active RPC ('primary' or 'backup')
   activeRpc: 'primary',
   
-  // Timestamp when we switched to backup (for cooldown)
+  // Timestamp when we switched to backup
   switchedToBackupAt: null,
   
-  // Config - CONSERVATIVE thresholds to prioritize stability
-  config: {
-    historySize: 10,           // Track last 10 requests
-    failureThreshold: 3,       // Switch after 3 failures in window
-    latencyThreshold: 3000,    // High latency = >3 seconds (very conservative)
-    cooldownMs: 3 * 60 * 1000, // 3 minutes before trying primary again
-    healthCheckTimeout: 5000,  // 5 second timeout for health checks
-  }
+  // Count of consecutive primary failures
+  consecutivePrimaryFailures: 0,
+  
+  // Cooldown: 3 minutes before trying primary again
+  cooldownMs: 3 * 60 * 1000,
 };
 
-function recordRpcResult(rpc, success, latency) {
-  const history = rpc === 'primary' ? RPC_HEALTH_TRACKER.primaryHistory : RPC_HEALTH_TRACKER.backupHistory;
-  history.push({ success, latency, timestamp: Date.now() });
-  
-  // Keep only last N entries
-  while (history.length > RPC_HEALTH_TRACKER.config.historySize) {
-    history.shift();
-  }
-}
-
-function shouldSwitchToBackup() {
-  const { primaryHistory, config } = RPC_HEALTH_TRACKER;
-  
-  // Need at least 3 data points to make a decision
-  if (primaryHistory.length < 3) {
-    return false;
-  }
-  
-  // Count failures in recent history
-  const recentFailures = primaryHistory.filter(r => !r.success).length;
-  
-  // Count high-latency requests (>3s)
-  const highLatencyCount = primaryHistory.filter(r => r.success && r.latency > config.latencyThreshold).length;
-  
-  // Switch if too many failures OR if most requests are extremely slow
-  if (recentFailures >= config.failureThreshold) {
-    console.error(`[Executor] Smart failover: ${recentFailures}/${primaryHistory.length} recent failures - switching to backup`);
-    return true;
-  }
-  
-  if (highLatencyCount >= config.failureThreshold) {
-    const avgLatency = primaryHistory.filter(r => r.success).reduce((sum, r) => sum + r.latency, 0) / primaryHistory.filter(r => r.success).length;
-    console.error(`[Executor] Smart failover: ${highLatencyCount}/${primaryHistory.length} high-latency requests (avg ${avgLatency.toFixed(0)}ms) - switching to backup`);
-    return true;
-  }
-  
-  return false;
-}
-
-function shouldSwitchBackToPrimary() {
-  const { switchedToBackupAt, config } = RPC_HEALTH_TRACKER;
-  
-  if (!switchedToBackupAt) return false;
-  
-  // Check if cooldown period has passed
-  const elapsed = Date.now() - switchedToBackupAt;
-  if (elapsed >= config.cooldownMs) {
-    console.error(`[Executor] Cooldown elapsed (${(elapsed / 1000).toFixed(0)}s) - will try primary again`);
-    return true;
-  }
-  
-  return false;
-}
-
-async function checkRpcHealth(url, timeoutMs = 5000) {
-  const start = Date.now();
-  try {
-    const conn = new Connection(url, { commitment: 'confirmed' });
-    await Promise.race([
-      conn.getSlot(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), timeoutMs))
-    ]);
-    const latency = Date.now() - start;
-    return { healthy: true, latency, connection: conn };
-  } catch (err) {
-    return { healthy: false, latency: null, connection: null, error: err.message };
-  }
-}
-
-// Try to get a working connection with smart failover
+// Try to get a working connection - simple failover on actual failure only
 async function getWorkingConnection() {
   const primaryUrl = getPrimaryRpcUrl();
   const backupUrl = getBackupRpcUrl();
-  const { config } = RPC_HEALTH_TRACKER;
   
-  // Check if we should switch back to primary after cooldown
-  if (RPC_HEALTH_TRACKER.activeRpc === 'backup' && shouldSwitchBackToPrimary()) {
-    console.error('[Executor] Attempting to switch back to primary RPC after cooldown...');
-    const primaryCheck = await checkRpcHealth(primaryUrl, config.healthCheckTimeout);
-    
-    if (primaryCheck.healthy) {
-      console.error(`[Executor] Primary RPC recovered (${primaryCheck.latency}ms) - switching back`);
-      RPC_HEALTH_TRACKER.activeRpc = 'primary';
-      RPC_HEALTH_TRACKER.switchedToBackupAt = null;
-      RPC_HEALTH_TRACKER.primaryHistory = []; // Reset history after recovery
-      recordRpcResult('primary', true, primaryCheck.latency);
-      return { connection: primaryCheck.connection, rpcUrl: primaryUrl, usingBackup: false };
-    } else {
-      console.error(`[Executor] Primary RPC still unhealthy: ${primaryCheck.error} - staying on backup`);
-      RPC_HEALTH_TRACKER.switchedToBackupAt = Date.now(); // Reset cooldown
+  // If failover is disabled, always use primary
+  if (!ENABLE_FAILOVER) {
+    console.error('[Executor] Failover disabled - using primary RPC only');
+    return { 
+      connection: new Connection(primaryUrl, { commitment: 'confirmed' }), 
+      rpcUrl: primaryUrl, 
+      usingBackup: false 
+    };
+  }
+  
+  // If we're on backup, check if cooldown has elapsed to try primary again
+  if (FAILOVER_STATE.activeRpc === 'backup' && FAILOVER_STATE.switchedToBackupAt) {
+    const elapsed = Date.now() - FAILOVER_STATE.switchedToBackupAt;
+    if (elapsed >= FAILOVER_STATE.cooldownMs) {
+      console.error(`[Executor] Cooldown elapsed (${(elapsed / 1000).toFixed(0)}s) - trying primary again`);
+      FAILOVER_STATE.activeRpc = 'primary';
+      FAILOVER_STATE.switchedToBackupAt = null;
+      FAILOVER_STATE.consecutivePrimaryFailures = 0;
     }
   }
   
-  // If we're on backup, continue using it (unless cooldown triggers above)
-  if (RPC_HEALTH_TRACKER.activeRpc === 'backup' && backupUrl) {
-    const backupCheck = await checkRpcHealth(backupUrl, config.healthCheckTimeout);
-    if (backupCheck.healthy) {
-      recordRpcResult('backup', true, backupCheck.latency);
-      console.error(`[Executor] Using backup RPC (Triton) - ${backupCheck.latency}ms`);
-      return { connection: backupCheck.connection, rpcUrl: backupUrl, usingBackup: true };
-    } else {
-      console.error(`[Executor] Backup RPC failed: ${backupCheck.error} - falling back to primary`);
-      // Backup failed, try primary anyway
-    }
-  }
+  // Try the active RPC first
+  const activeUrl = FAILOVER_STATE.activeRpc === 'primary' ? primaryUrl : backupUrl;
+  const activeName = FAILOVER_STATE.activeRpc === 'primary' ? 'Helius' : 'Triton';
   
-  // Try primary RPC
-  const primaryCheck = await checkRpcHealth(primaryUrl, config.healthCheckTimeout);
-  
-  if (primaryCheck.healthy) {
-    recordRpcResult('primary', true, primaryCheck.latency);
+  try {
+    const conn = new Connection(activeUrl, { commitment: 'confirmed' });
+    // Quick health check - getSlot is fast
+    const start = Date.now();
+    await Promise.race([
+      conn.getSlot(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), 5000))
+    ]);
+    const latency = Date.now() - start;
     
-    // Check if smart failover should trigger based on rolling metrics
-    if (shouldSwitchToBackup() && backupUrl) {
-      console.error('[Executor] Smart failover triggered - checking backup RPC...');
-      const backupCheck = await checkRpcHealth(backupUrl, config.healthCheckTimeout);
+    // Success - reset failure counter if primary
+    if (FAILOVER_STATE.activeRpc === 'primary') {
+      FAILOVER_STATE.consecutivePrimaryFailures = 0;
+    }
+    
+    console.error(`[Executor] ${activeName} RPC healthy (${latency}ms)`);
+    return { connection: conn, rpcUrl: activeUrl, usingBackup: FAILOVER_STATE.activeRpc === 'backup' };
+  } catch (err) {
+    console.error(`[Executor] ${activeName} RPC failed: ${err.message}`);
+    
+    // If primary failed, try backup
+    if (FAILOVER_STATE.activeRpc === 'primary' && backupUrl) {
+      FAILOVER_STATE.consecutivePrimaryFailures++;
+      console.error(`[Executor] Primary failure #${FAILOVER_STATE.consecutivePrimaryFailures} - trying backup (Triton)...`);
       
-      if (backupCheck.healthy) {
-        console.error(`[Executor] Backup RPC healthy (${backupCheck.latency}ms) - switching to Triton`);
-        RPC_HEALTH_TRACKER.activeRpc = 'backup';
-        RPC_HEALTH_TRACKER.switchedToBackupAt = Date.now();
-        recordRpcResult('backup', true, backupCheck.latency);
-        return { connection: backupCheck.connection, rpcUrl: backupUrl, usingBackup: true };
-      } else {
-        console.error(`[Executor] Backup RPC unhealthy: ${backupCheck.error} - staying on primary despite issues`);
+      try {
+        const backupConn = new Connection(backupUrl, { commitment: 'confirmed' });
+        const start = Date.now();
+        await Promise.race([
+          backupConn.getSlot(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Backup RPC timeout')), 5000))
+        ]);
+        const latency = Date.now() - start;
+        
+        // Switch to backup
+        FAILOVER_STATE.activeRpc = 'backup';
+        FAILOVER_STATE.switchedToBackupAt = Date.now();
+        console.error(`[Executor] Switched to backup RPC (Triton) - ${latency}ms. Will try primary again in ${FAILOVER_STATE.cooldownMs / 1000}s`);
+        return { connection: backupConn, rpcUrl: backupUrl, usingBackup: true };
+      } catch (backupErr) {
+        console.error(`[Executor] Backup RPC also failed: ${backupErr.message}`);
       }
     }
     
-    console.error(`[Executor] Using primary RPC (Helius) - ${primaryCheck.latency}ms`);
-    return { connection: primaryCheck.connection, rpcUrl: primaryUrl, usingBackup: false };
-  }
-  
-  // Primary failed - record and try backup
-  recordRpcResult('primary', false, null);
-  console.error(`[Executor] Primary RPC failed: ${primaryCheck.error}`);
-  
-  if (backupUrl) {
-    console.error('[Executor] Trying backup RPC (Triton)...');
-    const backupCheck = await checkRpcHealth(backupUrl, config.healthCheckTimeout);
-    
-    if (backupCheck.healthy) {
-      console.error(`[Executor] Backup RPC healthy (${backupCheck.latency}ms) - switching to Triton`);
-      RPC_HEALTH_TRACKER.activeRpc = 'backup';
-      RPC_HEALTH_TRACKER.switchedToBackupAt = Date.now();
-      recordRpcResult('backup', true, backupCheck.latency);
-      return { connection: backupCheck.connection, rpcUrl: backupUrl, usingBackup: true };
-    } else {
-      console.error(`[Executor] Backup RPC also failed: ${backupCheck.error}`);
+    // If backup failed, try primary as fallback
+    if (FAILOVER_STATE.activeRpc === 'backup') {
+      console.error('[Executor] Backup failed - trying primary as fallback...');
+      try {
+        const primaryConn = new Connection(primaryUrl, { commitment: 'confirmed' });
+        const start = Date.now();
+        await Promise.race([
+          primaryConn.getSlot(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Primary RPC timeout')), 5000))
+        ]);
+        const latency = Date.now() - start;
+        
+        // Primary recovered - switch back
+        FAILOVER_STATE.activeRpc = 'primary';
+        FAILOVER_STATE.switchedToBackupAt = null;
+        FAILOVER_STATE.consecutivePrimaryFailures = 0;
+        console.error(`[Executor] Primary RPC recovered (${latency}ms) - switching back`);
+        return { connection: primaryConn, rpcUrl: primaryUrl, usingBackup: false };
+      } catch (primaryErr) {
+        console.error(`[Executor] Primary RPC also failed: ${primaryErr.message}`);
+      }
     }
+    
+    // Both failed - return primary anyway and let the operation fail with a clear error
+    console.error('[Executor] All RPCs failed - using primary as last resort');
+    return { connection: new Connection(primaryUrl, { commitment: 'confirmed' }), rpcUrl: primaryUrl, usingBackup: false };
   }
-  
-  // Both failed - return primary anyway and let the operation fail with a clear error
-  console.error('[Executor] All RPCs failed health check - using primary as last resort');
-  return { connection: new Connection(primaryUrl, { commitment: 'confirmed' }), rpcUrl: primaryUrl, usingBackup: false };
 }
 
 function getDriftStatePDA() {
@@ -1783,6 +1727,10 @@ process.stdin.on('data', (chunk) => { inputData += chunk; });
 process.stdin.on('end', async () => {
   try {
     const command = JSON.parse(inputData);
+    
+    // Log failover configuration at startup
+    console.error(`[Executor] RPC Failover: ${ENABLE_FAILOVER ? 'ENABLED' : 'DISABLED'} (set DISABLE_RPC_FAILOVER=true to disable)`);
+    
     let result;
     
     if (command.action === 'close') {
