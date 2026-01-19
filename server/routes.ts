@@ -6801,6 +6801,83 @@ export async function registerRoutes(
     }
   });
 
+  // RPC Status endpoint - check health of primary and backup RPC providers
+  app.get("/api/rpc-status", async (req, res) => {
+    try {
+      const IS_MAINNET = process.env.DRIFT_ENV !== 'devnet';
+      
+      // Determine RPC URLs
+      let primaryUrl: string;
+      let primaryName: string;
+      
+      if (process.env.SOLANA_RPC_URL) {
+        primaryUrl = process.env.SOLANA_RPC_URL;
+        primaryName = 'Custom RPC';
+      } else if (IS_MAINNET && process.env.HELIUS_API_KEY) {
+        primaryUrl = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
+        primaryName = 'Helius';
+      } else {
+        primaryUrl = IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
+        primaryName = 'Solana Public';
+      }
+      
+      const backupUrl = process.env.TRITON_ONE_RPC || null;
+      const backupName = backupUrl ? 'Triton One' : null;
+      
+      // Helper to check RPC health
+      const checkRpcHealth = async (url: string): Promise<{ healthy: boolean; latency: number | null; slot: number | null; error?: string }> => {
+        const start = Date.now();
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSlot' }),
+            signal: AbortSignal.timeout(5000),
+          });
+          const data = await response.json() as any;
+          const latency = Date.now() - start;
+          
+          if (data.result) {
+            return { healthy: true, latency, slot: data.result };
+          } else {
+            return { healthy: false, latency: null, slot: null, error: data.error?.message || 'Unknown error' };
+          }
+        } catch (err: any) {
+          return { healthy: false, latency: null, slot: null, error: err.message || 'Connection failed' };
+        }
+      };
+      
+      // Check both RPCs in parallel
+      const [primaryStatus, backupStatus] = await Promise.all([
+        checkRpcHealth(primaryUrl),
+        backupUrl ? checkRpcHealth(backupUrl) : Promise.resolve(null),
+      ]);
+      
+      res.json({
+        primary: {
+          name: primaryName,
+          configured: true,
+          ...primaryStatus,
+        },
+        backup: backupUrl ? {
+          name: backupName,
+          configured: true,
+          ...backupStatus,
+        } : {
+          name: null,
+          configured: false,
+          healthy: false,
+          latency: null,
+          slot: null,
+        },
+        network: IS_MAINNET ? 'mainnet-beta' : 'devnet',
+      });
+    } catch (error: any) {
+      console.error("RPC status error:", error);
+      res.status(500).json({ error: "Failed to check RPC status" });
+    }
+  });
+
   // Solana RPC proxy - forwards requests to Helius securely with rate limiting and caching
   const rpcCache = new Map<string, { data: any; timestamp: number }>();
   const RPC_CACHE_TTL = 2000; // 2 second cache for balance/account queries
