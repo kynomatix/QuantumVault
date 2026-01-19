@@ -5288,14 +5288,17 @@ export async function registerRoutes(
       if (!orderResult.success) {
         const userFriendlyError = parseDriftError(orderResult.error);
         console.log(`[Webhook] Trade failed: ${orderResult.error}`);
+        console.log(`[Webhook] TRADE FAILURE CONTEXT: freeCollateral=$${freeCollateral.toFixed(2)}, maxTradeableValue=$${maxTradeableValue.toFixed(2)}, tradeAmountUsd=$${tradeAmountUsd.toFixed(2)}, finalContractSize=${finalContractSize}, oraclePrice=$${oraclePrice.toFixed(2)}, notional=$${(finalContractSize * oraclePrice).toFixed(2)}`);
         
-        // Check if this is a rate limit error - queue for automatic retry
+        // Check if this is a rate limit error or temporary collateral issue - queue for automatic retry
         const errorToCheck = orderResult.error || '';
         const isRateLimit = isRateLimitError(errorToCheck);
-        console.log(`[Webhook] Rate limit check: isRateLimit=${isRateLimit}, error="${errorToCheck.slice(0, 100)}..."`);
+        const isCollateralError = errorToCheck.includes('InsufficientCollateral') || errorToCheck.includes('6010');
+        console.log(`[Webhook] Retry eligibility: isRateLimit=${isRateLimit}, isCollateralError=${isCollateralError}, error="${errorToCheck.slice(0, 100)}..."`);
         
-        if (isRateLimit) {
-          console.log(`[Webhook] Rate limit detected, queueing trade for automatic retry`);
+        // Also retry on InsufficientCollateral - sometimes it's a temporary condition due to oracle price spikes
+        if (isRateLimit || isCollateralError) {
+          console.log(`[Webhook] Retryable error detected (rateLimit=${isRateLimit}, collateral=${isCollateralError}), queueing trade for automatic retry`);
           
           const retryJobId = queueTradeRetry({
             botId: bot.id,
@@ -5315,18 +5318,19 @@ export async function registerRoutes(
             webhookPayload: { action, contracts, market: bot.market },
           });
           
+          const retryReason = isCollateralError ? 'Temporary margin issue' : 'Rate limited';
           await storage.updateBotTrade(trade.id, {
             status: "pending",
             txSignature: null,
             size: finalContractSize.toFixed(8),
-            errorMessage: `Rate limited - auto-retry queued (job: ${retryJobId})`,
+            errorMessage: `${retryReason} - auto-retry queued (job: ${retryJobId})`,
           });
-          await storage.updateWebhookLog(log.id, { errorMessage: `Rate limited - retry queued: ${retryJobId}`, processed: true });
+          await storage.updateWebhookLog(log.id, { errorMessage: `${retryReason} - retry queued: ${retryJobId}`, processed: true });
           
           return res.status(202).json({ 
             status: "queued_for_retry",
             retryJobId,
-            message: "Trade rate limited - automatic retry scheduled"
+            message: `${retryReason} - automatic retry scheduled`
           });
         }
         
