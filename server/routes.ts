@@ -4080,12 +4080,30 @@ export async function registerRoutes(
           break;
       }
 
-      const series = await storage.getBotPerformanceSeries(req.params.id, since);
-      const totalPnl = series.length > 0 ? series[series.length - 1].cumulativePnl : 0;
+      const tradeSeries = await storage.getBotPerformanceSeries(req.params.id, since);
+      
+      // Add initial 0 point at bot creation date for proper chart baseline
+      const botCreatedAt = new Date(bot.createdAt);
+      const initialPoint = {
+        timestamp: botCreatedAt,
+        pnl: 0,
+        cumulativePnl: 0,
+      };
+      
+      // Only add initial point if it's before the first trade and within requested timeframe
+      let series = tradeSeries;
+      const shouldAddInitialPoint = !since || botCreatedAt >= since;
+      if (shouldAddInitialPoint) {
+        if (tradeSeries.length === 0 || botCreatedAt < tradeSeries[0].timestamp) {
+          series = [initialPoint, ...tradeSeries];
+        }
+      }
+      
+      const totalPnl = tradeSeries.length > 0 ? tradeSeries[tradeSeries.length - 1].cumulativePnl : 0;
       res.json({
         series,
         totalPnl,
-        tradeCount: series.length,
+        tradeCount: tradeSeries.length,
       });
     } catch (error) {
       console.error("Get bot performance error:", error);
