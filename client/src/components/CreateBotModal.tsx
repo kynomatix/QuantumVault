@@ -300,7 +300,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       return;
     }
 
-    const amount = Math.max(solRequirement.deficit + 0.01, 0.05);
+    const amount = solRequirement.deficit;
     
     setIsDepositingSol(true);
     try {
@@ -814,7 +814,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
             ) : (
               <>
                 <Fuel className="w-4 h-4 mr-2" />
-                Deposit {Math.max(solRequirement.deficit + 0.01, 0.05).toFixed(3)} SOL
+                Deposit {solRequirement.deficit.toFixed(3)} SOL
               </>
             )}
           </Button>
