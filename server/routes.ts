@@ -7146,7 +7146,8 @@ export async function registerRoutes(
       }
 
       // Validate profit share percentage (0-10%)
-      const validProfitShare = Math.min(10, Math.max(0, profitSharePercent ?? 0));
+      const rawProfitShare = Number(profitSharePercent);
+      const validProfitShare = isNaN(rawProfitShare) ? 0 : Math.min(10, Math.max(0, rawProfitShare));
 
       // Create published bot entry
       const publishedBot = await storage.createPublishedBot({

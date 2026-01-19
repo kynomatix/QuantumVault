@@ -2255,7 +2255,14 @@ export default function AppPage() {
                                 </a>
                               )}
                             </span>
-                            <span>${totalCapital.toLocaleString()} TVL</span>
+                            <div className="flex items-center gap-3">
+                              {parseFloat(bot.profitSharePercent || '0') > 0 && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-primary/20 text-primary" data-testid={`text-profit-share-${bot.id}`}>
+                                  {parseFloat(bot.profitSharePercent).toFixed(0)}% share
+                                </span>
+                              )}
+                              <span>${totalCapital.toLocaleString()} TVL</span>
+                            </div>
                           </div>
 
                           <div className="flex gap-2">
