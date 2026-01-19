@@ -7124,7 +7124,7 @@ export async function registerRoutes(
   app.post("/api/trading-bots/:id/publish", requireWallet, async (req, res) => {
     try {
       const { id } = req.params;
-      const { name, description } = req.body;
+      const { name, description, profitSharePercent } = req.body;
 
       const tradingBot = await storage.getTradingBotById(id);
       if (!tradingBot) {
@@ -7145,6 +7145,9 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Only signal bots can be published to the marketplace" });
       }
 
+      // Validate profit share percentage (0-10%)
+      const validProfitShare = Math.min(10, Math.max(0, profitSharePercent ?? 0));
+
       // Create published bot entry
       const publishedBot = await storage.createPublishedBot({
         tradingBotId: id,
@@ -7154,6 +7157,7 @@ export async function registerRoutes(
         market: tradingBot.market,
         isActive: true,
         isFeatured: false,
+        profitSharePercent: validProfitShare.toString(),
       });
 
       console.log(`[Marketplace] Bot ${id} published by ${req.walletAddress}`);

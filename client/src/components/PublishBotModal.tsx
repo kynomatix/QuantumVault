@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Slider } from '@/components/ui/slider';
 import {
   Dialog,
   DialogContent,
@@ -43,6 +44,7 @@ export function PublishBotModal({ isOpen, onClose, bot, walletAddress, referralC
   
   const [name, setName] = useState(bot.name);
   const [description, setDescription] = useState('');
+  const [profitSharePercent, setProfitSharePercent] = useState(0);
   const [riskAccepted, setRiskAccepted] = useState(false);
   const [publishedBotId, setPublishedBotId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -54,6 +56,7 @@ export function PublishBotModal({ isOpen, onClose, bot, walletAddress, referralC
   const handleClose = () => {
     setName(bot.name);
     setDescription('');
+    setProfitSharePercent(0);
     setRiskAccepted(false);
     setPublishedBotId(null);
     setCopied(false);
@@ -106,6 +109,7 @@ export function PublishBotModal({ isOpen, onClose, bot, walletAddress, referralC
         data: {
           name: name.trim(),
           description: description.trim() || undefined,
+          profitSharePercent,
         },
       });
       
@@ -236,6 +240,27 @@ export function PublishBotModal({ isOpen, onClose, bot, walletAddress, referralC
               rows={4}
               data-testid="input-publish-description"
             />
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label>Profit Share</Label>
+              <span className="text-sm font-medium text-primary" data-testid="text-profit-share-value">
+                {profitSharePercent}%
+              </span>
+            </div>
+            <Slider
+              value={[profitSharePercent]}
+              onValueChange={(value) => setProfitSharePercent(value[0])}
+              max={10}
+              min={0}
+              step={1}
+              className="w-full"
+              data-testid="slider-profit-share"
+            />
+            <p className="text-xs text-muted-foreground">
+              Set the percentage of subscriber profits you'll receive (0-10%). This is deducted from subscriber gains when they close profitable positions.
+            </p>
           </div>
 
           <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/20">
