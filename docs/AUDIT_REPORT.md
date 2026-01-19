@@ -577,6 +577,102 @@ grep -rn "setInterval" server/
 
 ---
 
+## 6. Safe Legacy Encryption Removal Plan
+
+### Current State Analysis
+
+The legacy encryption system is **partially sunset** but still actively used:
+
+| Component | Legacy Usage | V3 Usage |
+|-----------|--------------|----------|
+| New wallet creation | ✅ Writes `agentPrivateKeyEncrypted` | ✅ Also writes `agentPrivateKeyEncryptedV3` |
+| Trade execution | ✅ Uses legacy field (60+ references) | ❌ Not used |
+| drift-executor.mjs | ✅ Decrypts with `AGENT_ENCRYPTION_KEY` | ❌ Not used |
+| Mnemonic reveal | ❌ Not used | ✅ Uses v3 decryption |
+| Session initialization | ❌ Not used | ✅ UMK derivation uses key |
+
+### Why This is Complex
+
+1. **Dual-write architecture**: New wallets write BOTH encryption formats
+2. **Trade execution only uses legacy**: All 60+ trade paths use `agentPrivateKeyEncrypted`
+3. **drift-executor.mjs is separate**: Runs as subprocess, has its own decryption logic
+4. **V3 only partial**: V3 encryption exists but only used for mnemonic operations
+
+### Safe Removal Strategy (Phased Approach)
+
+#### Phase 1: Audit & Preparation (No Code Changes)
+- [ ] Verify all wallets have BOTH legacy AND v3 encryption
+- [ ] Run SQL: `SELECT COUNT(*) FROM wallets WHERE agent_private_key_encrypted IS NOT NULL AND agent_private_key_encrypted_v3 IS NULL`
+- [ ] If count > 0, some wallets need migration before proceeding
+
+#### Phase 2: Add V3 Decryption to Trade Paths
+- [ ] Create `getAgentKeypairV3(umk, encryptedV3, walletAddress)` function
+- [ ] Add fallback pattern: try v3 first, fall back to legacy
+- [ ] Update `drift-executor.mjs` to accept v3-encrypted keys
+- [ ] Test thoroughly in development with existing wallets
+
+#### Phase 3: Migrate Trade Execution to V3
+- [ ] Update all 60+ trade paths in routes.ts to use v3 decryption
+- [ ] Key files to modify:
+  - `server/routes.ts` - all `agentPrivateKeyEncrypted` references
+  - `server/drift-service.ts` - `getAgentKeypair` calls
+  - `server/trade-retry-service.ts` - retry job structure
+  - `server/position-service.ts` - position checks
+  - `server/drift-executor.mjs` - subprocess decryption
+- [ ] Keep legacy fallback for safety
+
+#### Phase 4: Stop Writing Legacy
+- [ ] Remove `legacyEncrypt` calls from new wallet creation (routes.ts:532, 1447)
+- [ ] Only write `agentPrivateKeyEncryptedV3` for new wallets
+- [ ] Existing wallets continue to work via fallback
+
+#### Phase 5: Clean Up Legacy Code
+- [ ] After confirming all wallets have v3 keys working
+- [ ] Remove legacy fallback code
+- [ ] Remove `server/crypto.ts` (legacy module)
+- [ ] Remove `generateAgentWallet()` from agent-wallet.ts
+- [ ] Clean up database columns (separate migration)
+
+### Files to Modify (Complete List)
+
+| File | Changes Needed |
+|------|---------------|
+| `server/routes.ts` | 60+ references to update |
+| `server/drift-service.ts` | Update `getAgentKeypair` calls |
+| `server/drift-executor.mjs` | Add v3 decryption support |
+| `server/agent-wallet.ts` | Remove legacy `generateAgentWallet` |
+| `server/crypto.ts` | Remove entire file (Phase 5) |
+| `server/session-v3.ts` | Remove legacy fallback (Phase 5) |
+| `server/trade-retry-service.ts` | Update job structure |
+| `server/position-service.ts` | Update function signatures |
+| `server/storage.ts` | Update interface (Phase 5) |
+| `shared/schema.ts` | Remove legacy column (Phase 5) |
+
+### Risks & Mitigations
+
+| Risk | Mitigation |
+|------|------------|
+| Breaking trade execution | Phase 2-3: Add fallback, test thoroughly |
+| Losing access to wallet funds | Never delete legacy code until v3 proven working |
+| Missing wallets without v3 | Phase 1: Audit all wallets first |
+| Subprocess communication | Phase 2: Update drift-executor.mjs carefully |
+
+### Estimated Effort
+
+- Phase 1: 1-2 hours (audit only)
+- Phase 2: 4-6 hours (add v3 support)
+- Phase 3: 8-12 hours (migrate 60+ paths)
+- Phase 4: 1 hour (stop writing legacy)
+- Phase 5: 2-4 hours (cleanup)
+
+**Total: 16-25 hours of careful work**
+
+### Recommendation
+
+Do NOT rush this migration. The current dual-write system is safe - it's just redundant. A phased approach ensures no wallet funds are ever at risk.
+
+---
+
 **End of Audit Report**
 
 *This report should be reviewed and validated by the development team before implementing any changes.*
