@@ -2,7 +2,7 @@
 // Drift Trade Executor - runs in pure Node.js ESM mode to avoid tsx ESM/CJS issues
 // This script receives trade commands via stdin and executes them via Drift SDK
 
-import { DriftClient, Wallet, PositionDirection, OrderType, MarketType, getMarketsAndOraclesForSubscription, initialize } from '@drift-labs/sdk';
+import { DriftClient, Wallet, PositionDirection, OrderType, MarketType, getMarketsAndOraclesForSubscription, initialize, BulkAccountLoader } from '@drift-labs/sdk';
 import { Connection, Keypair, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
 import bs58 from 'bs58';
 import crypto from 'crypto';
@@ -820,6 +820,11 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
   // Include subaccount 0 (main account) to ensure SDK can resolve account hierarchy
   const subAccountIdsToSubscribe = subAccountId === 0 ? [0] : [0, subAccountId];
   
+  // CRITICAL FIX: Create BulkAccountLoader for polling mode
+  // The SDK requires an accountLoader when using polling subscription type
+  // Without this, PollingUserAccountSubscriber.addAccount() fails with "undefined" error
+  const accountLoader = new BulkAccountLoader(connection, 'confirmed', 1000);
+  
   const driftClient = new DriftClient({
     connection,
     wallet,
@@ -828,7 +833,7 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
     subAccountIds: subAccountIdsToSubscribe,
     accountSubscription: {
       type: 'polling',
-      frequency: 1000, // 1 second polling for trade execution
+      accountLoader, // CRITICAL: Must pass accountLoader for polling mode
     },
     perpMarketIndexes,
     spotMarketIndexes: defaultSubscription.spotMarketIndexes || [0], // At least USDC
@@ -954,34 +959,8 @@ async function executeTrade(command) {
       }
     } catch (subscribeError) {
       console.error(`[Executor] subscribe() failed: ${subscribeError.message}`);
-      // Try alternative: force polling mode instead of websocket
-      if (subscribeError.message?.includes('addAccount') || subscribeError.message?.includes('undefined')) {
-        console.error('[Executor] SDK subscribe bug detected, attempting workaround...');
-        // Force re-create with polling subscription
-        const rpcUrl = process.env.SOLANA_RPC_URL || 
-          (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
-          'https://api.mainnet-beta.solana.com');
-        const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
-        const wallet = driftClient.wallet;
-        
-        const pollingClient = new DriftClient({
-          connection,
-          wallet,
-          env: 'mainnet-beta',
-          activeSubAccountId: subAccountId,
-          subAccountIds: [subAccountId],
-          accountSubscription: { 
-            type: 'polling',
-            frequency: 5000,
-          },
-        });
-        
-        await pollingClient.subscribe();
-        console.error('[Executor] Polling fallback subscribe succeeded');
-        // Replace driftClient reference (can't reassign const, so we need to proceed differently)
-        // For now, just rethrow - this is a fundamental SDK issue
-        throw new Error(`SDK subscription failed even with polling fallback. Please try again.`);
-      }
+      // The SDK subscribe bug should now be fixed with BulkAccountLoader
+      // If we still get here, it's a different issue - just rethrow
       throw subscribeError;
     }
     console.error(`[Executor] Executing ${side} ${sizeInBase} ${market}`);

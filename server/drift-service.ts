@@ -404,8 +404,10 @@ async function getAgentDriftClient(
   const sdk = await getDriftSDK();
   const { Wallet, initialize } = sdk;
   
-  // Load DriftClient via lazy ESM import to avoid CJS/ESM interop issues
-  const DriftClient = await loadDriftClient();
+  // Load DriftClient and BulkAccountLoader via lazy ESM import to avoid CJS/ESM interop issues
+  const sdkModule = await import('@drift-labs/sdk');
+  const DriftClient = sdkModule.DriftClient;
+  const BulkAccountLoader = sdkModule.BulkAccountLoader;
   
   const connection = getConnection();
   const agentKeypair = getAgentKeypair(encryptedPrivateKey);
@@ -418,6 +420,11 @@ async function getAgentDriftClient(
   // Include both subaccount 0 and target subaccount so we can initialize them if needed
   const subAccountIds = subAccountId === 0 ? [0] : [0, subAccountId];
   
+  // CRITICAL FIX: Create BulkAccountLoader for polling mode
+  // The SDK requires an accountLoader when using polling subscription type
+  // Without this, PollingUserAccountSubscriber.addAccount() fails with "undefined" error
+  const accountLoader = new BulkAccountLoader(connection, 'confirmed', 1000);
+  
   const driftClient = new DriftClient({
     connection,
     wallet,
@@ -427,7 +434,7 @@ async function getAgentDriftClient(
     subAccountIds,
     accountSubscription: {
       type: 'polling',
-      frequency: 1000, // Polling is more reliable and doesn't leak websocket connections
+      accountLoader, // CRITICAL: Must pass accountLoader for polling mode
     },
   });
   
@@ -2740,13 +2747,18 @@ export async function executeAgentTransferBetweenSubaccounts(
     const sdk = await getDriftSDK();
     const { Wallet, initialize } = sdk;
     
-    // Load DriftClient via lazy ESM import to avoid CJS/ESM interop issues
-    const DriftClient = await loadDriftClient();
+    // Load DriftClient and BulkAccountLoader via lazy ESM import to avoid CJS/ESM interop issues
+    const sdkModule = await import('@drift-labs/sdk');
+    const DriftClient = sdkModule.DriftClient;
+    const BulkAccountLoader = sdkModule.BulkAccountLoader;
     
     const wallet = new Wallet(agentKeypair);
     
     const sdkEnv = IS_MAINNET ? 'mainnet-beta' : 'devnet';
     const sdkConfig = initialize({ env: sdkEnv });
+    
+    // CRITICAL FIX: Create BulkAccountLoader for polling mode
+    const accountLoader = new BulkAccountLoader(connection, 'confirmed', 1000);
     
     const driftClient = new DriftClient({
       connection,
@@ -2757,7 +2769,7 @@ export async function executeAgentTransferBetweenSubaccounts(
       subAccountIds,
       accountSubscription: {
         type: 'polling',
-        frequency: 1000, // Polling is more reliable and doesn't leak websocket connections
+        accountLoader, // CRITICAL: Must pass accountLoader for polling mode
       },
     });
     
