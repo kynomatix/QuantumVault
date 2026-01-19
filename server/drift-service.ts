@@ -3020,14 +3020,15 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     child.stdin.write(JSON.stringify(command));
     child.stdin.end();
     
-    // Timeout after 60 seconds - mark as rate limit to enable retry
+    // Timeout after 30 seconds - mark as rate limit to enable retry faster
     setTimeout(() => {
       child.kill();
+      console.log('[Drift] Subprocess timed out after 30s - will trigger auto-retry');
       resolve({
         success: false,
-        error: 'Operation timed out after 60 seconds (possible rate limiting)',
+        error: '429 rate limit (timeout): Operation timed out after 30 seconds',
       });
-    }, 60000);
+    }, 30000);
   });
 }
 

@@ -815,7 +815,8 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
     // Oracle will be auto-fetched when market is subscribed
   }
   
-  // Use websocket subscription - polling requires external accountLoader which SDK doesn't auto-create
+  // Use polling subscription for reliability - websockets often fail/timeout
+  // Polling is slower but much more reliable for trade execution
   // Include subaccount 0 (main account) to ensure SDK can resolve account hierarchy
   const subAccountIdsToSubscribe = subAccountId === 0 ? [0] : [0, subAccountId];
   
@@ -826,7 +827,8 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
     activeSubAccountId: subAccountId,
     subAccountIds: subAccountIdsToSubscribe,
     accountSubscription: {
-      type: 'websocket',
+      type: 'polling',
+      frequency: 1000, // 1 second polling for trade execution
     },
     perpMarketIndexes,
     spotMarketIndexes: defaultSubscription.spotMarketIndexes || [0], // At least USDC
@@ -854,9 +856,12 @@ async function executeTrade(command) {
   const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId, marketIndex);
   
   try {
-    // Try to subscribe - SDK has a bug with addAccount that can cause failures
+    // Try to subscribe with timeout - SDK can hang on subscription
     try {
-      await driftClient.subscribe();
+      const subscribeTimeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('SDK subscribe timed out after 15 seconds')), 15000)
+      );
+      await Promise.race([driftClient.subscribe(), subscribeTimeout]);
       console.error(`[Executor] Subscribed successfully`);
       
       // For non-zero subaccounts, the SDK's websocket subscription has a bug
