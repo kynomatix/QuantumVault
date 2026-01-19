@@ -1,6 +1,8 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile } from "fs/promises";
+import { rm, readFile, stat, symlink, unlink } from "fs/promises";
+import { existsSync } from "fs";
+import { join } from "path";
 
 // server deps to bundle to reduce openat(2) syscalls
 // which helps cold start times
@@ -16,23 +18,42 @@ const allowlist = [
   "express-rate-limit",
   "express-session",
   "jsonwebtoken",
-  "memorystore",
   "multer",
   "nanoid",
   "nodemailer",
   "openai",
-  "passport",
-  "passport-local",
   "pg",
   "stripe",
   "uuid",
   "ws",
-  "xlsx",
   "zod",
   "zod-validation-error",
 ];
 
+async function fixNestedDependencies() {
+  console.log("Fixing nested @solana/web3.js dependencies...");
+  
+  const nestedPath = "node_modules/@pythnetwork/solana-utils/node_modules/jito-ts/node_modules/@solana/web3.js";
+  const topLevelPath = "../../../../../../@solana/web3.js";
+  
+  try {
+    if (existsSync(nestedPath)) {
+      const stats = await stat(nestedPath);
+      if (!stats.isSymbolicLink()) {
+        await rm(nestedPath, { recursive: true, force: true });
+        await symlink(topLevelPath, nestedPath);
+        console.log("Replaced nested @solana/web3.js with symlink to top-level version");
+      } else {
+        console.log("Nested @solana/web3.js is already symlinked");
+      }
+    }
+  } catch (error) {
+    console.warn("Could not fix nested dependencies:", error);
+  }
+}
+
 async function buildAll() {
+  await fixNestedDependencies();
   await rm("dist", { recursive: true, force: true });
 
   console.log("building client...");

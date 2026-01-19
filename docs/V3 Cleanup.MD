@@ -229,6 +229,33 @@ git checkout HEAD~1 -- <deleted-file>
 
 ---
 
+## 10. Bug Fixes - January 19, 2026 (Production Dependency Issue)
+
+### Fixed: Nested @solana/web3.js CJS/ESM Interop Issue
+
+**Problem:** Production deployment failing with "Class extends value #<Object> is not a constructor" error.
+
+**Root Cause:** Nested dependency chain creates incompatible @solana/web3.js version:
+```
+@drift-labs/sdk → @pythnetwork/pyth-solana-receiver → @pythnetwork/solana-utils → jito-ts → @solana/web3.js@1.77.3
+```
+The old 1.77.3 version has CJS/ESM interop issues with `rpc-websockets` module.
+
+**Fix Applied:** Added `fixNestedDependencies()` function to `script/build.ts` that:
+1. Checks if nested `@solana/web3.js` exists at `node_modules/@pythnetwork/solana-utils/node_modules/jito-ts/node_modules/@solana/web3.js`
+2. If not already symlinked, removes it and creates symlink to top-level `@solana/web3.js@1.98.4`
+3. Runs automatically before each production build
+
+**Why Symlink:** Cannot edit package.json to add npm overrides (Replit restriction). Symlink forces jito-ts to use the compatible top-level version.
+
+**Allowlist Cleanup:** Removed references to uninstalled packages from build.ts allowlist:
+- `memorystore` (removed)
+- `passport` (removed)
+- `passport-local` (removed)
+- `xlsx` (removed)
+
+---
+
 ## Notes
 
 - The `AGENT_ENCRYPTION_KEY` environment variable is still needed by v3 security
