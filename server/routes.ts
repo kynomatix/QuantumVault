@@ -13,7 +13,7 @@ import { getMarketPrice, getAllPrices, forceRefreshPrices } from "./drift-price"
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, getBatchDriftAccountInfo, getBatchPerpPositions, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { generateAgentWallet, getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
@@ -4015,35 +4015,6 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Confirm delete trading bot error:", error);
       res.status(500).json({ error: "Internal server error" });
-    }
-  });
-
-  app.post("/api/trading-bots/:id/init-wallet", requireWallet, async (req, res) => {
-    try {
-      const bot = await storage.getTradingBotById(req.params.id);
-      if (!bot) {
-        return res.status(404).json({ error: "Bot not found" });
-      }
-      if (bot.walletAddress !== req.walletAddress) {
-        return res.status(403).json({ error: "Forbidden" });
-      }
-      if (bot.agentPublicKey) {
-        return res.status(400).json({ error: "Bot already has an agent wallet", agentPublicKey: bot.agentPublicKey });
-      }
-
-      const agentWallet = generateAgentWallet();
-      await storage.updateTradingBot(req.params.id, {
-        agentPublicKey: agentWallet.publicKey,
-        agentPrivateKeyEncrypted: agentWallet.encryptedPrivateKey,
-      } as any);
-
-      res.json({ 
-        success: true, 
-        agentPublicKey: agentWallet.publicKey 
-      });
-    } catch (error) {
-      console.error("Init agent wallet error:", error);
-      res.status(500).json({ error: "Failed to initialize agent wallet" });
     }
   });
 
