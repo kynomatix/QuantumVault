@@ -438,18 +438,6 @@ export function getMinOrderSize(symbol: string): number {
 }
 
 /**
- * Get maximum leverage allowed for a market
- * Different markets have different risk tiers affecting max leverage
- * Examples: SOL/BTC/ETH = 101x, TNSR = 5x, meme tokens = 3-5x
- */
-export function getMarketMaxLeverage(symbol: string): number {
-  const normalizedSymbol = symbol.toUpperCase().includes('-PERP') 
-    ? symbol.toUpperCase() 
-    : `${symbol.toUpperCase()}-PERP`;
-  return MARKET_METADATA[normalizedSymbol]?.maxLeverage ?? 10; // Default to 10x if unknown
-}
-
-/**
  * Force refresh market data and return status
  */
 export async function refreshMarketData(): Promise<{ 

@@ -154,14 +154,6 @@ export default function AppPage() {
   const [defaultLeverage, setDefaultLeverage] = useState(3);
   const [slippageBps, setSlippageBps] = useState(50);
   
-  // RPC status state
-  const [rpcStatus, setRpcStatus] = useState<{
-    primary: { name: string; configured: boolean; healthy: boolean; latency: number | null };
-    backup: { name: string | null; configured: boolean; healthy: boolean; latency: number | null };
-    network: string;
-  } | null>(null);
-  const [rpcStatusLoading, setRpcStatusLoading] = useState(false);
-  
   // Seed phrase backup state
   const [revealMnemonicLoading, setRevealMnemonicLoading] = useState(false);
   const [mnemonic, setMnemonic] = useState<string | null>(null);
@@ -290,28 +282,6 @@ export default function AppPage() {
     
     loadSettings();
   }, [connected]);
-
-  // Fetch RPC status when trading section is expanded
-  useEffect(() => {
-    if (expandedSection !== 'trading') return;
-    
-    const fetchRpcStatus = async () => {
-      setRpcStatusLoading(true);
-      try {
-        const res = await fetch('/api/rpc-status');
-        if (res.ok) {
-          const data = await res.json();
-          setRpcStatus(data);
-        }
-      } catch (error) {
-        console.error('Error fetching RPC status:', error);
-      } finally {
-        setRpcStatusLoading(false);
-      }
-    };
-    
-    fetchRpcStatus();
-  }, [expandedSection]);
 
   const handleSaveSettings = async () => {
     setSettingsSaving(true);
@@ -2649,53 +2619,6 @@ export default function AppPage() {
                                   />
                                   <span className="text-sm text-muted-foreground">bps ({(slippageBps / 100).toFixed(2)}%)</span>
                                 </div>
-                              </div>
-                              
-                              {/* RPC Status */}
-                              <div className="pt-4 border-t border-border/30">
-                                <label className="text-sm text-muted-foreground mb-1.5 block">RPC Status</label>
-                                <p className="text-xs text-muted-foreground mb-3">Connection status of Solana RPC providers used for trade execution.</p>
-                                {rpcStatusLoading ? (
-                                  <div className="text-sm text-muted-foreground">Checking RPC status...</div>
-                                ) : rpcStatus ? (
-                                  <div className="space-y-2">
-                                    <div className="flex items-center justify-between bg-muted/30 rounded-lg p-3 border border-border/50">
-                                      <div className="flex items-center gap-2">
-                                        <div className={`w-2 h-2 rounded-full ${rpcStatus.primary.healthy ? 'bg-green-500' : 'bg-red-500'}`} />
-                                        <span className="text-sm font-medium">{rpcStatus.primary.name}</span>
-                                        <span className="text-xs px-1.5 py-0.5 bg-primary/20 text-primary rounded">Primary</span>
-                                      </div>
-                                      <div className="text-xs text-muted-foreground">
-                                        {rpcStatus.primary.healthy 
-                                          ? `${rpcStatus.primary.latency}ms` 
-                                          : 'Offline'}
-                                      </div>
-                                    </div>
-                                    {rpcStatus.backup.configured ? (
-                                      <div className="flex items-center justify-between bg-muted/30 rounded-lg p-3 border border-border/50">
-                                        <div className="flex items-center gap-2">
-                                          <div className={`w-2 h-2 rounded-full ${rpcStatus.backup.healthy ? 'bg-green-500' : 'bg-amber-500'}`} />
-                                          <span className="text-sm font-medium">{rpcStatus.backup.name}</span>
-                                          <span className="text-xs px-1.5 py-0.5 bg-muted text-muted-foreground rounded">Backup</span>
-                                        </div>
-                                        <div className="text-xs text-muted-foreground">
-                                          {rpcStatus.backup.healthy 
-                                            ? `${rpcStatus.backup.latency}ms` 
-                                            : 'Offline'}
-                                        </div>
-                                      </div>
-                                    ) : (
-                                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                                        <span>No backup RPC configured</span>
-                                      </div>
-                                    )}
-                                    <p className="text-xs text-muted-foreground mt-1">
-                                      Network: {rpcStatus.network}
-                                    </p>
-                                  </div>
-                                ) : (
-                                  <div className="text-sm text-muted-foreground">Unable to check RPC status</div>
-                                )}
                               </div>
                             </div>
                           </motion.div>
