@@ -382,6 +382,8 @@ export const insertPublishedBotSchema = createInsertSchema(publishedBots).omit({
   pnlPercentAllTime: true,
   publishedAt: true,
   updatedAt: true,
+}).extend({
+  profitSharePercent: z.string().optional(),
 });
 export type InsertPublishedBot = z.infer<typeof insertPublishedBotSchema>;
 export type PublishedBot = typeof publishedBots.$inferSelect;
