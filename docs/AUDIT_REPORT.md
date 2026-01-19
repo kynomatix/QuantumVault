@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This audit identified **3 CRITICAL**, **5 HIGH**, **8 MEDIUM**, and **6 LOW** severity issues across security, code quality, and architectural concerns. Key findings include legacy encryption still in active use, potential memory leak patterns, and unused legacy tables/endpoints that should be removed.
+This audit identified **2 CRITICAL**, **5 HIGH**, **9 MEDIUM**, and **6 LOW** severity issues across security, code quality, and architectural concerns. Key findings include deprecated security functions that should be removed, potential memory leak patterns, and unused legacy tables/endpoints that should be cleaned up. Note: The legacy encryption system is sunset and only retained for backward compatibility with existing wallets.
 
 ---
 
@@ -24,14 +24,19 @@ This audit identified **3 CRITICAL**, **5 HIGH**, **8 MEDIUM**, and **6 LOW** se
 
 ## 1. Security Findings
 
-### 1.1 CRITICAL: Legacy Single-Key Encryption Still Active
+### 1.1 MEDIUM: Legacy Single-Key Encryption (Sunset - Backward Compatibility Only)
 
-**Severity:** CRITICAL  
+**Severity:** MEDIUM (downgraded from CRITICAL - system is sunset)  
 **Location:** `server/crypto.ts`, `server/agent-wallet.ts`, `server/routes.ts`
 
-**Issue:** The legacy crypto.ts uses a single `AGENT_ENCRYPTION_KEY` for ALL wallet private keys. This is a single point of compromise - if the key leaks, all agent wallets are compromised.
+**Status:** The legacy `crypto.ts` single-key encryption is **SUNSET**. The v3 security system is now the primary system.
 
-**Evidence:**
+**Current State:**
+- `AGENT_ENCRYPTION_KEY` is now used in TWO ways:
+  1. **V3 (Secure):** `session-v3.ts:60` uses it as INPUT to per-user key derivation (combined with wallet address + salt) - this is secure
+  2. **Legacy (Backward Compat):** `drift-executor.mjs` and `agent-wallet.ts` still decrypt legacy-encrypted keys for wallets created before v3
+
+**Legacy Code Paths (for backward compatibility):**
 ```
 server/agent-wallet.ts:2 - import { encrypt, decrypt } from './crypto';
 server/routes.ts:8 - import { encrypt as legacyEncrypt } from "./crypto";
@@ -39,24 +44,16 @@ server/routes.ts:532 - const encryptedPrivateKey = legacyEncrypt(privateKeyBase5
 server/routes.ts:1447 - const encryptedPrivateKey = legacyEncrypt(privateKeyBase58);
 ```
 
-**Active Usage Paths:**
-1. `server/agent-wallet.ts:63-66` - `getAgentKeypair()` decrypts using legacy single key
-2. `server/routes.ts:532` - New wallet creation still uses `legacyEncrypt`
-3. `server/routes.ts:1447` - Agent wallet reset uses `legacyEncrypt`
-4. `server/drift-service.ts:412,2362,2443,2716` - Trade execution calls `getAgentKeypair()`
+**Question for Review:**
+- Are new wallets still being created with legacy encryption (`legacyEncrypt` calls in routes.ts)?
+- If yes, these should be migrated to v3-only encryption
+- If no (only v3 is used for new wallets), then legacy code is only for existing wallet support
 
-**Impact:** If `AGENT_ENCRYPTION_KEY` is compromised, an attacker can decrypt ALL agent wallet private keys in the database.
-
-**Proposed Fix:**
-1. Migrate all wallet creation to use v3 per-user encryption (UMK-derived keys)
-2. Create a migration script to re-encrypt existing wallets with v3
-3. Remove legacy `crypto.ts` after migration is complete
-4. Update `getAgentKeypair()` to prefer v3 decryption path
-
-**Verification Required:**
-- [ ] Audit all call sites of `legacyEncrypt` and `getAgentKeypair`
-- [ ] Verify v3 encryption is working correctly
-- [ ] Plan migration timeline for existing wallets
+**Proposed Fix (if legacy is truly sunset):**
+1. Verify all NEW wallet creation uses v3 encryption only
+2. Keep legacy decrypt for backward compatibility with existing wallets
+3. Consider migration script to re-encrypt existing wallets to v3-only
+4. Document sunset timeline in code comments
 
 ---
 
@@ -523,14 +520,14 @@ process.on('SIGTERM', async () => {
 
 | # | Issue | Action | Files |
 |---|-------|--------|-------|
-| 1 | Legacy encryption in new wallets | Migrate to v3 encryption only | routes.ts, agent-wallet.ts |
-| 2 | Deprecated nonce function | Remove or throw error | session-v3.ts |
-| 3 | Key zeroization | Add cleanup after key use | agent-wallet.ts |
+| 1 | Deprecated nonce function | Remove or throw error | session-v3.ts |
+| 2 | Key zeroization | Add cleanup after key use | agent-wallet.ts |
 
 ### High Priority (This Sprint)
 
 | # | Issue | Action | Files |
 |---|-------|--------|-------|
+| 3 | Verify legacy encryption is sunset | Confirm new wallets use v3 only | routes.ts |
 | 4 | Webhook rate limiting | Add express-rate-limit | routes.ts |
 | 5 | In-memory sessions | Persist to database | session-v3.ts |
 | 6 | Verify webhook secret order | Ensure early validation | routes.ts |
