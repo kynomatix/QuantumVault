@@ -2887,6 +2887,28 @@ const PERP_MARKET_INDICES: Record<string, number> = {
   'LIT': 84, 'LIT-PERP': 84, 'LITUSD': 84,
 };
 
+// Helper: Normalize error messages to ensure rate limit patterns are detectable
+function normalizeRateLimitError(errorMsg: string): string {
+  const lower = errorMsg.toLowerCase();
+  // Check for rate limit patterns that might be missed by isRateLimitError
+  const hasRateLimitPattern = 
+    lower.includes('429') || 
+    lower.includes('too many requests') || 
+    lower.includes('-32429') ||
+    lower.includes('rate limit') ||
+    lower.includes('timed out') ||
+    lower.includes('timeout');
+  
+  // If it has a pattern but doesn't have the canonical "429" prefix, add it
+  if (hasRateLimitPattern && !errorMsg.includes('429')) {
+    if (lower.includes('timeout') || lower.includes('timed out')) {
+      return `429 rate limit (timeout): ${errorMsg}`;
+    }
+    return `429 rate limit: ${errorMsg}`;
+  }
+  return errorMsg;
+}
+
 // Execute trade/close via subprocess to avoid ESM/CJS issues with Drift SDK
 async function executeDriftCommandViaSubprocess(command: Record<string, any>): Promise<any> {
   return new Promise((resolve) => {
@@ -2929,20 +2951,44 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     child.on('close', (code) => {
       console.log(`[Drift] Subprocess exited with code ${code}`);
       
+      // Helper: Check if any output contains rate limit indicators
+      const checkForRateLimit = (text: string): string | null => {
+        const lower = text.toLowerCase();
+        if (lower.includes('429') || lower.includes('too many requests') || 
+            lower.includes('-32429') || lower.includes('rate limit')) {
+          // Extract the rate limit message for proper detection
+          const match = text.match(/429[^}]*/i) || text.match(/too many requests[^}]*/i);
+          return match ? `429 Too Many Requests: ${match[0]}` : '429 Too Many Requests';
+        }
+        return null;
+      };
+      
       try {
         if (stdout.trim()) {
           const result = JSON.parse(stdout.trim());
+          // Ensure rate limit errors in parsed result are properly formatted
+          if (!result.success && result.error) {
+            const rateLimit = checkForRateLimit(result.error);
+            if (rateLimit && !result.error.includes('429')) {
+              result.error = `${rateLimit} - ${result.error}`;
+            }
+          }
           resolve(result);
         } else {
+          // Check stderr for rate limit errors
+          const rateLimit = checkForRateLimit(stderr);
           resolve({
             success: false,
-            error: stderr || `Subprocess exited with code ${code}`,
+            error: rateLimit || stderr || `Subprocess exited with code ${code}`,
           });
         }
       } catch (parseErr) {
+        // Check combined output for rate limit patterns before falling back
+        const combined = `${stdout} ${stderr}`;
+        const rateLimit = checkForRateLimit(combined);
         resolve({
           success: false,
-          error: `Failed to parse executor output: ${stdout || stderr}`,
+          error: rateLimit || `Failed to parse executor output: ${stdout || stderr}`,
         });
       }
     });
@@ -2974,12 +3020,12 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     child.stdin.write(JSON.stringify(command));
     child.stdin.end();
     
-    // Timeout after 60 seconds
+    // Timeout after 60 seconds - mark as rate limit to enable retry
     setTimeout(() => {
       child.kill();
       resolve({
         success: false,
-        error: 'Operation timed out after 60 seconds',
+        error: 'Operation timed out after 60 seconds (possible rate limiting)',
       });
     }, 60000);
   });
@@ -3115,6 +3161,9 @@ export async function executePerpOrder(
       errorMessage = String(error);
     }
     
+    // Normalize rate limit errors to ensure they're detectable by isRateLimitError
+    errorMessage = normalizeRateLimitError(errorMessage);
+    
     return { success: false, error: errorMessage };
   }
 }
@@ -3227,9 +3276,12 @@ export async function closePerpPosition(
     return result;
   } catch (error) {
     console.error('[Drift] Close position error:', error);
+    const errorMsg = normalizeRateLimitError(
+      error instanceof Error ? error.message : String(error)
+    );
     return {
       success: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMsg,
     };
   }
 }

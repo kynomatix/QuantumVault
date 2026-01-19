@@ -5244,7 +5244,11 @@ export async function registerRoutes(
         console.log(`[Webhook] Trade failed: ${orderResult.error}`);
         
         // Check if this is a rate limit error - queue for automatic retry
-        if (isRateLimitError(orderResult.error || '')) {
+        const errorToCheck = orderResult.error || '';
+        const isRateLimit = isRateLimitError(errorToCheck);
+        console.log(`[Webhook] Rate limit check: isRateLimit=${isRateLimit}, error="${errorToCheck.slice(0, 100)}..."`);
+        
+        if (isRateLimit) {
           console.log(`[Webhook] Rate limit detected, queueing trade for automatic retry`);
           
           const retryJobId = queueTradeRetry({
