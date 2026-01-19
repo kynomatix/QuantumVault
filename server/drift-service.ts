@@ -3110,15 +3110,23 @@ export async function executePerpOrder(
           console.warn('[Drift] Could not get oracle price for slippage calc, proceeding without limit');
         }
         
-        const txSig = await driftClient.placeAndTakePerpOrder({
-          direction,
-          baseAssetAmount,
-          marketIndex,
-          marketType: sdk.MarketType.PERP,
-          orderType: sdk.OrderType.MARKET,
-          reduceOnly,
-          ...(price && { price }),
-        });
+        // Add 30-second timeout to prevent hanging (matches subprocess timeout)
+        const tradeTimeout = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('429 rate limit (timeout): Trade execution timed out after 30 seconds')), 30000)
+        );
+        
+        const txSig = await Promise.race([
+          driftClient.placeAndTakePerpOrder({
+            direction,
+            baseAssetAmount,
+            marketIndex,
+            marketType: sdk.MarketType.PERP,
+            orderType: sdk.OrderType.MARKET,
+            reduceOnly,
+            ...(price && { price }),
+          }),
+          tradeTimeout
+        ]);
         
         console.log(`[Drift] Order executed: ${txSig}`);
         
@@ -3252,15 +3260,23 @@ export async function closePerpPosition(
           console.warn('[Drift] Could not get oracle price for close slippage calc, proceeding without limit');
         }
         
-        const txSig = await driftClient.placeAndTakePerpOrder({
-          direction: closeDirection,
-          baseAssetAmount: closeAmount,
-          marketIndex,
-          marketType: sdk.MarketType.PERP,
-          orderType: sdk.OrderType.MARKET,
-          reduceOnly: true,
-          ...(price && { price }),
-        });
+        // Add 30-second timeout to prevent hanging (matches subprocess timeout)
+        const closeTimeout = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('429 rate limit (timeout): Close execution timed out after 30 seconds')), 30000)
+        );
+        
+        const txSig = await Promise.race([
+          driftClient.placeAndTakePerpOrder({
+            direction: closeDirection,
+            baseAssetAmount: closeAmount,
+            marketIndex,
+            marketType: sdk.MarketType.PERP,
+            orderType: sdk.OrderType.MARKET,
+            reduceOnly: true,
+            ...(price && { price }),
+          }),
+          closeTimeout
+        ]);
         
         console.log(`[Drift] Position closed: ${txSig}`);
         await cleanup();
