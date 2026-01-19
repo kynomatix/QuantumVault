@@ -16,8 +16,10 @@ interface Trade {
   size: string;
   price: string;
   fee?: string | null;
+  pnl?: string | null;
   status: string;
   executedAt: string;
+  botName?: string;
   webhookPayload?: {
     position_size?: string | number;
     data?: {
@@ -80,11 +82,15 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
     };
 
     const feeValue = trade.fee ? Number(trade.fee) : 0;
+    const pnlValue = trade.pnl ? Number(trade.pnl) : null;
 
     return (
       <tr key={trade.id || index} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-history-trade-${index}`}>
         <td className="py-3 px-2 font-mono text-muted-foreground text-xs">
           {trade.executedAt ? new Date(trade.executedAt).toLocaleString() : '--'}
+        </td>
+        <td className="py-3 px-2 font-medium text-xs truncate max-w-[100px]" title={trade.botName}>
+          {trade.botName || '--'}
         </td>
         <td className="py-3 px-2 font-medium">{trade.market}</td>
         <td className="py-3 px-2">
@@ -98,6 +104,13 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
         <td className="py-3 px-2 text-right font-mono text-amber-400">
           {feeValue > 0 ? `-$${feeValue.toFixed(4)}` : '--'}
         </td>
+        <td className="py-3 px-2 text-right font-mono">
+          {pnlValue !== null ? (
+            <span className={pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+              {pnlValue >= 0 ? '+' : ''}${pnlValue.toFixed(2)}
+            </span>
+          ) : '--'}
+        </td>
         <td className="py-3 px-2 text-right">
           <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle()}`}>
             {trade.status}
@@ -109,7 +122,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[80vh]">
+      <DialogContent className="max-w-5xl max-h-[80vh]">
         <DialogHeader>
           <DialogTitle>Trade History</DialogTitle>
         </DialogHeader>
@@ -120,11 +133,13 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
               <thead className="sticky top-0 bg-background">
                 <tr className="text-muted-foreground text-xs border-b border-border/50">
                   <th className="text-left py-3 px-2 font-medium">Time</th>
+                  <th className="text-left py-3 px-2 font-medium">Bot</th>
                   <th className="text-left py-3 px-2 font-medium">Market</th>
                   <th className="text-left py-3 px-2 font-medium">Side</th>
                   <th className="text-right py-3 px-2 font-medium">Size</th>
                   <th className="text-right py-3 px-2 font-medium">Price</th>
                   <th className="text-right py-3 px-2 font-medium">Fee</th>
+                  <th className="text-right py-3 px-2 font-medium">PnL</th>
                   <th className="text-right py-3 px-2 font-medium">Status</th>
                 </tr>
               </thead>
