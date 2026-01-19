@@ -13,7 +13,12 @@ export function getPrimaryRpcUrl(): string {
 
 export function getBackupRpcUrl(): string | null {
   if (process.env.TRITON_ONE_RPC) {
-    return process.env.TRITON_ONE_RPC;
+    let url = process.env.TRITON_ONE_RPC;
+    // Ensure URL has protocol prefix
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = `https://${url}`;
+    }
+    return url;
   }
   return null;
 }

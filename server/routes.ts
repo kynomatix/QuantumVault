@@ -6821,7 +6821,11 @@ export async function registerRoutes(
         primaryName = 'Solana Public';
       }
       
-      const backupUrl = process.env.TRITON_ONE_RPC || null;
+      let backupUrl = process.env.TRITON_ONE_RPC || null;
+      // Ensure backup URL has protocol prefix
+      if (backupUrl && !backupUrl.startsWith('http://') && !backupUrl.startsWith('https://')) {
+        backupUrl = `https://${backupUrl}`;
+      }
       const backupName = backupUrl ? 'Triton One' : null;
       
       // Helper to check RPC health
