@@ -365,6 +365,7 @@ export const publishedBots = pgTable("published_bots", {
   pnlPercent30d: decimal("pnl_percent_30d", { precision: 10, scale: 4 }),
   pnlPercent90d: decimal("pnl_percent_90d", { precision: 10, scale: 4 }),
   pnlPercentAllTime: decimal("pnl_percent_all_time", { precision: 10, scale: 4 }),
+  profitSharePercent: decimal("profit_share_percent", { precision: 5, scale: 2 }).default("0").notNull(),
   publishedAt: timestamp("published_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

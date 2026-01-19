@@ -308,6 +308,7 @@ export interface PublishedBot {
   pnlPercent30d: string | null;
   pnlPercent90d: string | null;
   pnlPercentAllTime: string | null;
+  profitSharePercent: string;
   publishedAt: string;
   creator: {
     displayName: string | null;
@@ -357,7 +358,7 @@ async function checkBotPublished(botId: string): Promise<{ published: boolean; p
   return res.json();
 }
 
-async function publishBot(botId: string, data: { name: string; description?: string }): Promise<PublishedBot> {
+async function publishBot(botId: string, data: { name: string; description?: string; profitSharePercent?: number }): Promise<PublishedBot> {
   const res = await fetch(`/api/trading-bots/${botId}/publish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -445,7 +446,7 @@ export function useBotPublishedStatus(botId: string | null) {
 export function usePublishBot() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ botId, data }: { botId: string; data: { name: string; description?: string } }) =>
+    mutationFn: ({ botId, data }: { botId: string; data: { name: string; description?: string; profitSharePercent?: number } }) =>
       publishBot(botId, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["marketplace"] });
