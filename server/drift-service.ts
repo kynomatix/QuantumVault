@@ -5,7 +5,6 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import BN from 'bn.js';
-import * as anchor from '@coral-xyz/anchor';
 import { getAgentKeypair } from './agent-wallet';
 import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 
