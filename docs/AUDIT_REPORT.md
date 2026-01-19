@@ -157,21 +157,43 @@ app.post("/api/webhook/tradingview/:botId", async (req, res) => {
 app.post("/api/webhook/user/:walletAddress", async (req, res) => {
 ```
 
+**Considerations:**
+- Active trading bots may fire signals frequently during volatile markets
+- Scalping/HFT bots could send 20-60+ signals per hour legitimately
+- Rate limits must be high enough to not block legitimate trading
+- Limits should be per-bot or per-wallet, not just per-IP (TradingView uses shared IPs)
+
 **Proposed Fix:**
-1. Add express-rate-limit middleware to webhook endpoints
-2. Suggested limits: 10 requests per minute per IP, 100 per hour
+1. Add express-rate-limit middleware with trading-appropriate limits
+2. Key by `botId` or `walletAddress` rather than IP (TradingView sends from shared infrastructure)
+3. Suggested limits:
+   - Per-bot: 60 requests per minute (1/second average), 500 per hour
+   - Per-IP fallback: 200 requests per minute (covers multiple bots from same source)
 
 ```typescript
 import rateLimit from 'express-rate-limit';
 
 const webhookLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 10,
-  message: { error: 'Too many webhook requests' }
+  max: 60, // 1 per second average - allows burst trading
+  keyGenerator: (req) => req.params.botId || req.ip, // Key by bot, not IP
+  message: { error: 'Rate limit exceeded - max 60 signals per minute per bot' }
 });
 
-app.post("/api/webhook/tradingview/:botId", webhookLimiter, async (req, res) => {
+// Separate IP-based limit for abuse protection
+const webhookIpLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 200, // High limit for legitimate multi-bot setups
+  message: { error: 'Too many requests from this IP' }
+});
+
+app.post("/api/webhook/tradingview/:botId", webhookIpLimiter, webhookLimiter, async (req, res) => {
 ```
+
+**Alternative: Webhook deduplication already exists**
+- The `webhook_logs` table with `signalHash` already prevents duplicate signal processing
+- This provides some protection against replay attacks
+- Rate limiting would add protection against volume-based DoS
 
 ---
 
