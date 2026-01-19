@@ -69,6 +69,9 @@ function generateWebhookUrl(botId: string, secret: string): string {
 function parseDriftError(error: string | undefined): string {
   if (!error) return "Trade execution failed";
   
+  // Always log the full error for debugging
+  console.log(`[Drift Error] Full error: ${error}`);
+  
   // Check for common Drift errors and provide clear messages
   if (error.includes("InsufficientCollateral")) {
     return "Insufficient capital in bot's account. Add more funds or reduce your Max Position Size.";
@@ -91,13 +94,56 @@ function parseDriftError(error: string | undefined): string {
   if (error.includes("timeout") || error.includes("Timeout")) {
     return "Transaction timed out. The trade may have executed - check Drift.";
   }
+  // Additional common Drift/Anchor errors
+  if (error.includes("ReduceOnly") || error.includes("FillPaused")) {
+    return "Market is in reduce-only mode. Only closing positions is allowed.";
+  }
+  if (error.includes("AMMPaused")) {
+    return "Market trading is temporarily paused. Try again later.";
+  }
+  if (error.includes("AccountOwnedByWrongProgram") || error.includes("wrong owner")) {
+    return "Account initialization issue. Try resetting your Drift account in Settings.";
+  }
+  if (error.includes("userStats account") || error.includes("Main account") || error.includes("account does not exist")) {
+    return "Drift account not properly initialized. Please deposit funds first.";
+  }
+  if (error.includes("Key mismatch") || error.includes("decrypted key")) {
+    return "Wallet key error. Please contact support.";
+  }
+  if (error.includes("subscription failed") || error.includes("Market data could not be loaded")) {
+    return "Could not load market data. Try again in a few seconds.";
+  }
+  if (error.includes("0x1") || error.includes("InstructionError")) {
+    // Try to extract more specific info from Anchor/instruction errors
+    const hexMatch = error.match(/0x([0-9a-fA-F]+)/);
+    if (hexMatch) {
+      return `Trade rejected by Drift (code: ${hexMatch[0]}). Check account balance.`;
+    }
+    return "Trade instruction rejected. Check account balance and try again.";
+  }
+  if (error.includes("SlippageToleranceExceeded") || error.includes("slippage")) {
+    return "Price moved too much. Try increasing slippage in Settings.";
+  }
+  if (error.includes("BorrowLimitExceeded")) {
+    return "Borrow limit exceeded. Reduce position size or add more collateral.";
+  }
   
-  // For other errors, return a simplified version
-  if (error.length > 100) {
-    // Extract the main error message if it's too long
-    const match = error.match(/Error Message: ([^.]+)/);
-    if (match) return match[1].trim();
-    return "Trade failed. Check bot balance and try again.";
+  // For other errors, extract a useful portion instead of hiding it
+  if (error.length > 150) {
+    // Try to extract the main error message
+    const errMsgMatch = error.match(/Error Message: ([^.]+)/);
+    if (errMsgMatch) return errMsgMatch[1].trim();
+    
+    // Try to extract Anchor error names
+    const anchorMatch = error.match(/Error Name: (\w+)/);
+    if (anchorMatch) return `Drift error: ${anchorMatch[1]}`;
+    
+    // Try to extract the key part of the error
+    const errorMatch = error.match(/Error: ([^.]+)/);
+    if (errorMatch) return errorMatch[1].trim().slice(0, 100);
+    
+    // Return a truncated version with the start of the error, not a generic message
+    return `Trade failed: ${error.slice(0, 120)}...`;
   }
   
   return error;
