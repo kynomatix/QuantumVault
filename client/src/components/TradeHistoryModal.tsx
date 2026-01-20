@@ -50,39 +50,106 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
     }
   };
 
-  const renderTradeRow = (trade: Trade, index: number) => {
+  const getTradeInfo = (trade: Trade) => {
     const payload = trade.webhookPayload;
     const positionSize = payload?.position_size || payload?.data?.position_size;
     const isCloseSignal = positionSize === '0' || positionSize === 0 || trade.side === 'CLOSE';
     const isLong = trade.side?.toUpperCase() === 'LONG';
     const isFailed = trade.status === 'failed';
     const isExecuted = trade.status === 'executed';
-
-    const getSideColor = () => {
-      if (isCloseSignal) return 'text-amber-400';
-      if (isLong) return 'text-emerald-400';
-      return 'text-red-400';
-    };
-
-    const getSideIcon = () => {
-      if (isCloseSignal) return <XCircle className="w-3 h-3" />;
-      if (isLong) return <ArrowUpRight className="w-3 h-3" />;
-      return <ArrowDownRight className="w-3 h-3" />;
-    };
-
-    const getSideLabel = () => {
-      if (isCloseSignal) return 'CLOSE';
-      return trade.side?.toUpperCase();
-    };
-
-    const getStatusStyle = () => {
-      if (isFailed) return 'bg-red-500/20 text-red-400';
-      if (isExecuted) return 'bg-emerald-500/20 text-emerald-400';
-      return 'bg-yellow-500/20 text-yellow-400';
-    };
-
     const feeValue = trade.fee ? Number(trade.fee) : 0;
     const pnlValue = trade.pnl ? Number(trade.pnl) : null;
+
+    return { isCloseSignal, isLong, isFailed, isExecuted, feeValue, pnlValue };
+  };
+
+  const getSideColor = (isCloseSignal: boolean, isLong: boolean) => {
+    if (isCloseSignal) return 'text-amber-400';
+    if (isLong) return 'text-emerald-400';
+    return 'text-red-400';
+  };
+
+  const getSideIcon = (isCloseSignal: boolean, isLong: boolean) => {
+    if (isCloseSignal) return <XCircle className="w-3 h-3" />;
+    if (isLong) return <ArrowUpRight className="w-3 h-3" />;
+    return <ArrowDownRight className="w-3 h-3" />;
+  };
+
+  const getSideLabel = (trade: Trade, isCloseSignal: boolean) => {
+    if (isCloseSignal) return 'CLOSE';
+    return trade.side?.toUpperCase();
+  };
+
+  const getStatusStyle = (isFailed: boolean, isExecuted: boolean) => {
+    if (isFailed) return 'bg-red-500/20 text-red-400';
+    if (isExecuted) return 'bg-emerald-500/20 text-emerald-400';
+    return 'bg-yellow-500/20 text-yellow-400';
+  };
+
+  const renderMobileTradeCard = (trade: Trade, index: number) => {
+    const { isCloseSignal, isLong, isFailed, isExecuted, feeValue, pnlValue } = getTradeInfo(trade);
+
+    return (
+      <div 
+        key={trade.id || index} 
+        className="border border-border/30 rounded-lg p-3 mb-2 bg-card/50"
+        data-testid={`card-history-trade-${index}`}
+      >
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <span className={`flex items-center gap-1 font-medium ${getSideColor(isCloseSignal, isLong)}`}>
+              {getSideIcon(isCloseSignal, isLong)}
+              {getSideLabel(trade, isCloseSignal)}
+            </span>
+            <span className="font-medium text-sm">{trade.market}</span>
+          </div>
+          <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)}`}>
+            {trade.status}
+          </span>
+        </div>
+        
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div>
+            <span className="text-muted-foreground">Bot:</span>
+            <span className="ml-1 truncate">{trade.botName || '--'}</span>
+          </div>
+          <div className="text-right">
+            <span className="text-muted-foreground">Size:</span>
+            <span className="ml-1 font-mono">{trade.size}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">Price:</span>
+            <span className="ml-1 font-mono">${Number(trade.price).toLocaleString()}</span>
+          </div>
+          <div className="text-right">
+            <span className="text-muted-foreground">Fee:</span>
+            <span className="ml-1 font-mono text-amber-400">
+              {feeValue > 0 ? `-$${feeValue.toFixed(4)}` : '--'}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between mt-2 pt-2 border-t border-border/30">
+          <span className="text-xs text-muted-foreground">
+            {trade.executedAt ? new Date(trade.executedAt).toLocaleString() : '--'}
+          </span>
+          <div className="text-right">
+            <span className="text-xs text-muted-foreground mr-1">PnL:</span>
+            {pnlValue !== null ? (
+              <span className={`font-mono font-medium ${pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {pnlValue >= 0 ? '+' : ''}${pnlValue.toFixed(2)}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">--</span>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderDesktopTradeRow = (trade: Trade, index: number) => {
+    const { isCloseSignal, isLong, isFailed, isExecuted, feeValue, pnlValue } = getTradeInfo(trade);
 
     return (
       <tr key={trade.id || index} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-history-trade-${index}`}>
@@ -94,9 +161,9 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
         </td>
         <td className="py-3 px-2 font-medium">{trade.market}</td>
         <td className="py-3 px-2">
-          <span className={`flex items-center gap-1 ${getSideColor()}`}>
-            {getSideIcon()}
-            {getSideLabel()}
+          <span className={`flex items-center gap-1 ${getSideColor(isCloseSignal, isLong)}`}>
+            {getSideIcon(isCloseSignal, isLong)}
+            {getSideLabel(trade, isCloseSignal)}
           </span>
         </td>
         <td className="py-3 px-2 text-right font-mono">{trade.size}</td>
@@ -112,7 +179,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
           ) : '--'}
         </td>
         <td className="py-3 px-2 text-right">
-          <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle()}`}>
+          <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)}`}>
             {trade.status}
           </span>
         </td>
@@ -122,31 +189,38 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-5xl max-h-[80vh]">
+      <DialogContent className="max-w-5xl max-h-[85vh] w-[95vw] sm:w-auto">
         <DialogHeader>
           <DialogTitle>Trade History</DialogTitle>
         </DialogHeader>
         
-        <ScrollArea className="h-[60vh]">
+        <ScrollArea className="h-[65vh] sm:h-[60vh]">
           {currentTrades.length > 0 ? (
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-background">
-                <tr className="text-muted-foreground text-xs border-b border-border/50">
-                  <th className="text-left py-3 px-2 font-medium">Time</th>
-                  <th className="text-left py-3 px-2 font-medium">Bot</th>
-                  <th className="text-left py-3 px-2 font-medium">Market</th>
-                  <th className="text-left py-3 px-2 font-medium">Side</th>
-                  <th className="text-right py-3 px-2 font-medium">Size</th>
-                  <th className="text-right py-3 px-2 font-medium">Price</th>
-                  <th className="text-right py-3 px-2 font-medium">Fee</th>
-                  <th className="text-right py-3 px-2 font-medium">PnL</th>
-                  <th className="text-right py-3 px-2 font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {currentTrades.map((trade, i) => renderTradeRow(trade, startIndex + i))}
-              </tbody>
-            </table>
+            <>
+              <div className="hidden md:block">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-background">
+                    <tr className="text-muted-foreground text-xs border-b border-border/50">
+                      <th className="text-left py-3 px-2 font-medium">Time</th>
+                      <th className="text-left py-3 px-2 font-medium">Bot</th>
+                      <th className="text-left py-3 px-2 font-medium">Market</th>
+                      <th className="text-left py-3 px-2 font-medium">Side</th>
+                      <th className="text-right py-3 px-2 font-medium">Size</th>
+                      <th className="text-right py-3 px-2 font-medium">Price</th>
+                      <th className="text-right py-3 px-2 font-medium">Fee</th>
+                      <th className="text-right py-3 px-2 font-medium">PnL</th>
+                      <th className="text-right py-3 px-2 font-medium">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currentTrades.map((trade, i) => renderDesktopTradeRow(trade, startIndex + i))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="md:hidden">
+                {currentTrades.map((trade, i) => renderMobileTradeCard(trade, startIndex + i))}
+              </div>
+            </>
           ) : (
             <div className="text-center py-12 text-muted-foreground">
               <p>No trades found</p>
@@ -155,9 +229,9 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
         </ScrollArea>
 
         {totalPages > 1 && (
-          <div className="flex items-center justify-between pt-4 border-t border-border/50">
-            <p className="text-sm text-muted-foreground">
-              Showing {startIndex + 1}-{Math.min(endIndex, trades?.length || 0)} of {trades?.length || 0} trades
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-4 border-t border-border/50">
+            <p className="text-xs sm:text-sm text-muted-foreground">
+              {startIndex + 1}-{Math.min(endIndex, trades?.length || 0)} of {trades?.length || 0}
             </p>
             <div className="flex items-center gap-2">
               <Button
@@ -168,10 +242,10 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
                 data-testid="button-prev-page"
               >
                 <ChevronLeft className="w-4 h-4" />
-                Previous
+                <span className="hidden sm:inline">Previous</span>
               </Button>
-              <span className="text-sm text-muted-foreground px-2">
-                Page {currentPage} of {totalPages}
+              <span className="text-xs sm:text-sm text-muted-foreground px-2">
+                {currentPage}/{totalPages}
               </span>
               <Button
                 variant="outline"
@@ -180,7 +254,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
                 disabled={currentPage === totalPages}
                 data-testid="button-next-page"
               >
-                Next
+                <span className="hidden sm:inline">Next</span>
                 <ChevronRight className="w-4 h-4" />
               </Button>
             </div>
