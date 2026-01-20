@@ -510,3 +510,36 @@ export function useMyPublishedBots() {
     staleTime: 10000,
   });
 }
+
+export interface BotPerformanceData {
+  botId: string;
+  market: string;
+  totalTrades: number;
+  winningTrades: number;
+  winRate: string;
+  pnlPercent7d: string | null;
+  pnlPercent30d: string | null;
+  pnlPercent90d: string | null;
+  pnlPercentAllTime: string | null;
+  profitSharePercent: string;
+  subscriberCount: number;
+  totalCapitalInvested: string;
+  equityHistory: Array<{
+    date: string;
+    equity: number;
+    pnl: number;
+  }>;
+}
+
+export function useBotPerformance(botId: string | null) {
+  return useQuery({
+    queryKey: ['/api/marketplace', botId, 'performance'],
+    queryFn: async (): Promise<BotPerformanceData | null> => {
+      if (!botId) return null;
+      const res = await fetch(`/api/marketplace/${botId}/performance`, { credentials: 'include' });
+      if (!res.ok) throw new Error('Failed to fetch performance');
+      return res.json();
+    },
+    enabled: !!botId,
+  });
+}

@@ -7120,6 +7120,48 @@ export async function registerRoutes(
     }
   });
 
+  // Get public performance data for a published bot (equity chart, no private data)
+  app.get("/api/marketplace/:id/performance", async (req, res) => {
+    try {
+      const publishedBot = await storage.getPublishedBotById(req.params.id);
+      if (!publishedBot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      
+      // Get PnL snapshots for equity chart (last 90 days)
+      const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      const snapshots = await storage.getPnlSnapshots(publishedBot.tradingBotId, ninetyDaysAgo);
+      
+      // Return aggregated performance data without exposing private trade details
+      const performanceData = snapshots.map(s => ({
+        date: s.snapshotDate,
+        equity: parseFloat(s.equity),
+        pnl: parseFloat(s.realizedPnl) + parseFloat(s.unrealizedPnl),
+      })).reverse(); // Oldest first for chart
+      
+      res.json({
+        botId: publishedBot.id,
+        market: publishedBot.market,
+        totalTrades: publishedBot.totalTrades,
+        winningTrades: publishedBot.winningTrades,
+        winRate: publishedBot.totalTrades > 0 
+          ? ((publishedBot.winningTrades / publishedBot.totalTrades) * 100).toFixed(1)
+          : '0',
+        pnlPercent7d: publishedBot.pnlPercent7d,
+        pnlPercent30d: publishedBot.pnlPercent30d,
+        pnlPercent90d: publishedBot.pnlPercent90d,
+        pnlPercentAllTime: publishedBot.pnlPercentAllTime,
+        profitSharePercent: publishedBot.profitSharePercent,
+        subscriberCount: publishedBot.subscriberCount,
+        totalCapitalInvested: publishedBot.totalCapitalInvested,
+        equityHistory: performanceData,
+      });
+    } catch (error) {
+      console.error("Get bot performance error:", error);
+      res.status(500).json({ error: "Failed to fetch performance data" });
+    }
+  });
+
   // Publish a bot to marketplace
   app.post("/api/trading-bots/:id/publish", requireWallet, async (req, res) => {
     try {
@@ -7160,6 +7202,19 @@ export async function registerRoutes(
         isFeatured: false,
         profitSharePercent: validProfitShare.toString(),
       });
+
+      // Sync initial stats from trading bot to published bot
+      const stats = tradingBot.stats as any || {};
+      const totalTrades = stats.totalTrades || 0;
+      const winningTrades = stats.winningTrades || 0;
+      
+      if (totalTrades > 0) {
+        await storage.updatePublishedBotStats(publishedBot.id, {
+          totalTrades,
+          winningTrades,
+        });
+        console.log(`[Marketplace] Bot ${id} published with stats: ${totalTrades} trades, ${winningTrades} wins`);
+      }
 
       console.log(`[Marketplace] Bot ${id} published by ${req.walletAddress}`);
       res.json(publishedBot);

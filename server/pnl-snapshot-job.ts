@@ -27,6 +27,8 @@ export async function takePnlSnapshots(): Promise<void> {
         
         const stats = sourceTradingBot.stats as any || {};
         const realizedPnl = stats.totalPnl || 0;
+        const totalTrades = stats.totalTrades || 0;
+        const winningTrades = stats.winningTrades || 0;
         
         await storage.createPnlSnapshot({
           tradingBotId: sourceTradingBot.id,
@@ -37,7 +39,17 @@ export async function takePnlSnapshots(): Promise<void> {
           totalDeposited: String(sourceTradingBot.maxPositionSize || 0),
         });
         
-        console.log(`[PnL Snapshots] Saved snapshot for bot ${sourceTradingBot.name}: equity=${accountInfo.usdcBalance?.toFixed(2)}, pnl=${realizedPnl.toFixed(2)}`);
+        // Sync trade stats from trading_bots to published_bots
+        // Calculate PnL percentages from snapshots
+        const pnlStats = await calculatePnlPercentages(publishedBot.tradingBotId);
+        
+        await storage.updatePublishedBotStats(publishedBot.id, {
+          totalTrades,
+          winningTrades,
+          ...pnlStats,
+        });
+        
+        console.log(`[PnL Snapshots] Saved snapshot for bot ${sourceTradingBot.name}: equity=${accountInfo.usdcBalance?.toFixed(2)}, pnl=${realizedPnl.toFixed(2)}, trades=${totalTrades}, wins=${winningTrades}`);
       } catch (botError) {
         console.error(`[PnL Snapshots] Error taking snapshot for published bot ${publishedBot.id}:`, botError);
       }
@@ -46,6 +58,55 @@ export async function takePnlSnapshots(): Promise<void> {
     console.log("[PnL Snapshots] Snapshot run completed");
   } catch (error) {
     console.error("[PnL Snapshots] Error in snapshot job:", error);
+  }
+}
+
+async function calculatePnlPercentages(tradingBotId: string): Promise<{
+  pnlPercent7d?: string;
+  pnlPercent30d?: string;
+  pnlPercent90d?: string;
+  pnlPercentAllTime?: string;
+}> {
+  try {
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    const snapshots = await storage.getPnlSnapshots(tradingBotId, ninetyDaysAgo);
+    if (snapshots.length === 0) return {};
+    
+    const now = new Date();
+    const latestSnapshot = snapshots[0];
+    const currentEquity = parseFloat(latestSnapshot.equity);
+    
+    const findSnapshotNearDate = (daysAgo: number) => {
+      const targetDate = new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+      return snapshots.find(s => {
+        const snapshotDate = new Date(s.snapshotDate);
+        const diffHours = Math.abs(snapshotDate.getTime() - targetDate.getTime()) / (1000 * 60 * 60);
+        return diffHours < 24; // Within 24 hours of target
+      });
+    };
+    
+    const calculatePnlPercent = (oldSnapshot: typeof snapshots[0] | undefined) => {
+      if (!oldSnapshot) return undefined;
+      const oldEquity = parseFloat(oldSnapshot.equity);
+      const deposited = parseFloat(oldSnapshot.totalDeposited) || oldEquity;
+      if (deposited === 0) return undefined;
+      const pnlPercent = ((currentEquity - deposited) / deposited) * 100;
+      return pnlPercent.toFixed(4);
+    };
+    
+    const oldestSnapshot = snapshots[snapshots.length - 1];
+    const deposited = parseFloat(oldestSnapshot.totalDeposited) || parseFloat(oldestSnapshot.equity);
+    const allTimePnl = deposited > 0 ? ((currentEquity - deposited) / deposited) * 100 : 0;
+    
+    return {
+      pnlPercent7d: calculatePnlPercent(findSnapshotNearDate(7)),
+      pnlPercent30d: calculatePnlPercent(findSnapshotNearDate(30)),
+      pnlPercent90d: calculatePnlPercent(findSnapshotNearDate(90)),
+      pnlPercentAllTime: allTimePnl.toFixed(4),
+    };
+  } catch (error) {
+    console.error("[PnL Snapshots] Error calculating PnL percentages:", error);
+    return {};
   }
 }
 

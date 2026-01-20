@@ -73,6 +73,7 @@ import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
 import { PublishBotModal } from '@/components/PublishBotModal';
 import { SubscribeBotModal } from '@/components/SubscribeBotModal';
+import { BotDetailsModal } from '@/components/BotDetailsModal';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
 
 interface TradingBot {
@@ -180,6 +181,7 @@ export default function AppPage() {
   const [myPublishedBotsExpanded, setMyPublishedBotsExpanded] = useState(true);
   const [unpublishConfirmOpen, setUnpublishConfirmOpen] = useState(false);
   const [botToUnpublish, setBotToUnpublish] = useState<{ id: string; name: string } | null>(null);
+  const [viewDetailBot, setViewDetailBot] = useState<PublishedBot | null>(null);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -2143,10 +2145,7 @@ export default function AppPage() {
                           <div 
                             key={bot.id} 
                             className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/5 border border-primary/20 hover:border-primary/40 transition-all cursor-pointer group"
-                            onClick={() => {
-                              setBotToSubscribe(bot);
-                              setSubscribeModalOpen(true);
-                            }}
+                            onClick={() => setViewDetailBot(bot)}
                             data-testid={`featured-bot-${bot.id}`}
                           >
                             <div className="flex items-center gap-3 mb-3">
@@ -2266,6 +2265,15 @@ export default function AppPage() {
                           </div>
 
                           <div className="flex gap-2">
+                            <Button 
+                              variant="outline"
+                              className="flex-1"
+                              onClick={() => setViewDetailBot(bot)}
+                              data-testid={`button-view-details-${bot.id}`}
+                            >
+                              <Eye className="w-4 h-4 mr-2" />
+                              Details
+                            </Button>
                             {isSubscribed ? (
                               <Button 
                                 variant="outline"
@@ -3715,6 +3723,20 @@ export default function AppPage() {
           bot={botToSubscribe}
           onSubscribed={() => {
             refetchBots();
+            refetchMySubscriptions();
+          }}
+        />
+      )}
+
+      {viewDetailBot && (
+        <BotDetailsModal
+          isOpen={!!viewDetailBot}
+          onClose={() => setViewDetailBot(null)}
+          bot={viewDetailBot}
+          isSubscribed={mySubscriptions?.some((sub) => sub.publishedBotId === viewDetailBot.id)}
+          onSubscribed={() => {
+            refetchBots();
+            refetchMySubscriptions();
           }}
         />
       )}
