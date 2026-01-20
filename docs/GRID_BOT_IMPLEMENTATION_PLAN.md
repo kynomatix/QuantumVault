@@ -135,30 +135,101 @@ interface VirtualGrid {
 }
 ```
 
-### 2. Grid Calculation Engine (Pre-Calculated at Bot Creation)
+### 2. Grid Calculation Engine (Pre-Calculated PRICES and SIZES at Bot Creation)
 
 ```typescript
-// Called ONCE when bot is created - stores all levels
+interface VirtualGrid {
+  level: number;
+  price: number;
+  size: number;           // Pre-calculated size for this level
+  side: 'buy' | 'sell';
+  isReduceOnly: boolean;
+  status: 'pending' | 'active' | 'filled';
+}
+
+// Called ONCE when bot is created - stores all levels WITH sizes
 function calculateAndStoreGridLevels(config: GridBotConfig, startPrice: number): VirtualGrid[] {
   const grids: VirtualGrid[] = [];
   const priceRange = config.upperPrice - config.lowerPrice;
   const gridSpacing = priceRange / (config.gridCount - 1);
   
+  // Split grids into buy/sell counts
+  const buyCount = Math.floor((startPrice - config.lowerPrice) / gridSpacing);
+  const sellCount = config.gridCount - buyCount;
+  
+  // Calculate sizes based on scale type
+  const buySizes = calculateScaledSizes(buyCount, config.totalInvestment * 0.5, config.buyScaleType);
+  const sellSizes = calculateScaledSizes(sellCount, config.totalInvestment * 0.5, config.sellScaleType);
+  
+  let buyIndex = 0;
+  let sellIndex = 0;
+  
   for (let i = 0; i < config.gridCount; i++) {
     const price = config.lowerPrice + (i * gridSpacing);
+    const isBuy = price < startPrice;
+    
     grids.push({
-      level: i + 1,  // Level 1 = lowest price, Level N = highest price
+      level: i + 1,
       price: parseFloat(price.toFixed(4)),
-      side: price < startPrice ? 'buy' : 'sell',  // Below start = buy, above = sell
+      side: isBuy ? 'buy' : 'sell',
+      size: isBuy ? buySizes[buyIndex++] : sellSizes[sellIndex++],  // Pre-calculated size!
+      isReduceOnly: !isBuy,  // All sells are reduce-only in long grid
       status: 'pending',
-      isReduceOnly: price > startPrice,  // Sells are reduce-only in long grid
     });
   }
   
-  // Store to database - these never change
+  // Store to database - prices AND sizes never change
   await storage.storeGridLevels(config.id, grids);
   return grids;
 }
+
+// Calculate sizes following ascending/descending/flat pattern
+function calculateScaledSizes(
+  orderCount: number,
+  totalCapital: number,
+  scaleType: 'ascending' | 'descending' | 'flat'
+): number[] {
+  const sizes: number[] = [];
+  
+  if (scaleType === 'flat') {
+    // Equal sizes
+    const sizePerOrder = totalCapital / orderCount;
+    for (let i = 0; i < orderCount; i++) {
+      sizes.push(sizePerOrder);
+    }
+    return sizes;
+  }
+  
+  // For ascending/descending: use arithmetic progression
+  // Sum of 1+2+3+...+n = n(n+1)/2
+  const sumOfWeights = (orderCount * (orderCount + 1)) / 2;
+  const unitSize = totalCapital / sumOfWeights;
+  
+  for (let i = 0; i < orderCount; i++) {
+    const weight = scaleType === 'ascending' 
+      ? orderCount - i      // Largest first (for buys: biggest at lowest price)
+      : i + 1;              // Smallest first (for buys: smallest at lowest price)
+    sizes.push(unitSize * weight);
+  }
+  
+  return sizes;
+}
+
+/*
+Example: 16 buy orders, $1000 capital, ASCENDING
+
+sumOfWeights = 16 * 17 / 2 = 136
+unitSize = $1000 / 136 = $7.35
+
+Level 1 (lowest price):  weight=16, size = $117.60 (LARGEST)
+Level 2:                 weight=15, size = $110.25
+...
+Level 15:                weight=2,  size = $14.70
+Level 16 (near entry):   weight=1,  size = $7.35  (SMALLEST)
+
+Result: Most capital deployed at best prices (lowest)
+*/
+```
 
 // State tracking (stored in grid bot record)
 interface GridBotState {
@@ -293,24 +364,32 @@ async function handleFilledGrid(
   }
 }
 
-async function placeSingleOrder(
-  bot: GridBotConfig, 
-  grid: VirtualGrid,
-  options?: { reduceOnly?: boolean }
-): Promise<void> {
-  // Price is already pre-calculated in grid.price
+async function placeSingleOrder(bot: GridBotConfig, grid: VirtualGrid): Promise<void> {
+  // Price AND size are pre-calculated - no calculation needed!
   await driftClient.placePerpOrder({
     marketIndex: getMarketIndex(bot.market),
     direction: grid.side === 'buy' ? PositionDirection.LONG : PositionDirection.SHORT,
     orderType: OrderType.LIMIT,
-    price: grid.price,
-    baseAssetAmount: bot.orderSizePerGrid,
-    reduceOnly: options?.reduceOnly || false,
-    postOnly: true,  // Maker fees
+    price: grid.price,                    // Pre-calculated
+    baseAssetAmount: grid.size,           // Pre-calculated with ascending/descending
+    reduceOnly: grid.isReduceOnly,        // Pre-set (all sells are reduce-only)
+    postOnly: true,                       // Maker fees
   });
   
   await storage.updateGridLevel(grid.id, { status: 'active' });
 }
+
+/*
+Why this works:
+
+When a buy at Level 5 ($85, size 4.5 SOL) fills:
+1. Look up Level 4 from pre-calculated list
+2. Level 4 = $83, size 5.0 SOL (already computed with ascending scale)
+3. Place order instantly - no math needed
+
+The ascending/descending pattern CONTINUES automatically because
+all sizes were calculated upfront following the same progression.
+*/
 ```
 
 ### 4. Leveraging Drift Scale Orders
@@ -355,9 +434,67 @@ async function placeScaleOrders(params: ScaleOrderParams): Promise<void> {
 
 ## Grid Strategy Types
 
+### Why Ascending/Descending Scale Orders Give an Edge
+
+The key advantage over flat grid systems is **cost basis optimization**:
+
+**Ascending (for Long Grid Buys):**
+```
+Grid Level | Price  | Size   | Effect
+──────────────────────────────────────
+Level 1    | $80    | 5 SOL  | Largest buy at lowest price
+Level 2    | $82    | 4 SOL  | 
+Level 3    | $84    | 3 SOL  | 
+...
+Level 16   | $98    | 0.5 SOL| Smallest buy near entry
+
+Result: Average cost basis is MUCH LOWER than flat sizing
+        - More capital deployed at better prices
+        - Less capital at risky prices near entry
+        - If price dumps, you accumulate more at discount
+```
+
+**Descending (for Aggressive Entry):**
+```
+Grid Level | Price  | Size   | Effect
+──────────────────────────────────────
+Level 1    | $80    | 0.5 SOL| Small buys at extreme lows
+Level 2    | $82    | 1 SOL  | 
+...
+Level 16   | $98    | 5 SOL  | Largest buy near entry
+
+Result: Gets positioned quickly if price doesn't drop much
+        - More aggressive profit-taking above entry
+        - Fringe orders are small "just in case" orders
+        - Good for trending markets where dips are shallow
+```
+
+### Critical: Why Reduce-Only Sells Are Essential
+
+Without reduce-only on sell orders, this dangerous scenario occurs:
+
+```
+Scenario: Price drops, then rallies sharply
+
+1. Bot places: 16 buys below, 16 sells above
+2. Price drops: Only 5 buys fill (5 SOL long position)
+3. Price rallies past ALL sell levels
+4. All 16 sells fill...
+
+WITHOUT reduce-only:
+  - First 5 sells close the long (correct)
+  - Next 11 sells OPEN A SHORT POSITION (WRONG!)
+  - User now has -11 SOL short they didn't want
+
+WITH reduce-only:
+  - First 5 sells close the long (correct)  
+  - Remaining 11 sells are REJECTED (no position to reduce)
+  - User's position is flat, no accidental short
+```
+
 ### 1. Neutral Grid (Range Trading)
 
-Best for sideways markets. Equal buy and sell orders around current price.
+Best for sideways markets. Flat sizing, equal buy and sell orders.
 
 ```
 Configuration:
@@ -365,6 +502,7 @@ Configuration:
 - Current price: $100
 - Grids: 40
 - Order split: 20 buys below, 20 sells above
+- Scale type: FLAT (equal sizes)
 
 Behavior:
 - Buy at $99, sell at $101 (profit $2)
@@ -372,33 +510,43 @@ Behavior:
 - Profit = Grid spacing × Number of cycles
 ```
 
-### 2. Long Bias Grid
+### 2. Long Bias Grid (Recommended)
 
-For uptrending markets. More buy orders, fewer sell orders.
+For accumulation strategies. Ascending buys, descending reduce-only sells.
 
 ```
 Configuration:
-- Same range, but 30 buy grids, 10 sell grids
-- Scale type: ascending (larger buys at lower prices)
+- Range: $80 - $120
+- Current price: $100
+- Grids: 100
+- Scale type: ASCENDING for buys, DESCENDING for sells
 
-Behavior:
-- Accumulate more on dips
-- Take partial profits on pops
-- Net long exposure over time
+Buy Side (Ascending):
+- Level 1 ($80): 5 SOL (largest - best price)
+- Level 50 ($99): 0.5 SOL (smallest - near entry)
+
+Sell Side (Reduce-Only, Descending):
+- Level 51 ($101): 2 SOL (take profit aggressively near entry)
+- Level 100 ($120): 0.2 SOL (small takes at extreme highs)
+
+Result:
+- Cost basis ends up lower than entry price
+- Most profit taken near entry (where fills are likely)
+- Fringe sells are small "moonbag" takes
 ```
 
 ### 3. Short Bias Grid
 
-For downtrending markets. More sell orders, fewer buy orders.
+For distribution strategies. Descending buys, ascending reduce-only sells.
 
 ```
 Configuration:
-- 10 buy grids, 30 sell grids
-- Scale type: descending (larger sells at higher prices)
+- Opposite of long bias
+- Scale type: DESCENDING for buys, ASCENDING for sells
 
 Behavior:
-- Scale into shorts on rallies
-- Take profits on dips
+- Small buys at low prices (just covering shorts)
+- Large sells at high prices (main position)
 - Net short exposure over time
 ```
 
