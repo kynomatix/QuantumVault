@@ -19,6 +19,7 @@ import {
   publishedBots,
   botSubscriptions,
   pnlSnapshots,
+  marketplaceEquitySnapshots,
   telegramConnectionTokens,
   type User,
   type InsertUser,
@@ -54,6 +55,8 @@ import {
   type InsertBotSubscription,
   type PnlSnapshot,
   type InsertPnlSnapshot,
+  type MarketplaceEquitySnapshot,
+  type InsertMarketplaceEquitySnapshot,
   authNonces,
   type AuthNonce,
   type InsertAuthNonce,
@@ -159,7 +162,15 @@ export interface IStorage {
   updatePublishedBot(id: string, updates: Partial<InsertPublishedBot>): Promise<PublishedBot | undefined>;
   deletePublishedBot(id: string): Promise<void>;
   incrementPublishedBotSubscribers(id: string, delta: number, capitalDelta: number): Promise<void>;
-  updatePublishedBotStats(id: string, stats: { totalTrades: number; winningTrades: number; pnlPercent7d?: string; pnlPercent30d?: string; pnlPercent90d?: string; pnlPercentAllTime?: string }): Promise<void>;
+  updatePublishedBotStats(id: string, stats: { 
+    totalTrades: number; 
+    winningTrades: number; 
+    creatorCapital?: string;
+    pnlPercent7d?: string; 
+    pnlPercent30d?: string; 
+    pnlPercent90d?: string; 
+    pnlPercentAllTime?: string 
+  }): Promise<void>;
 
   // Marketplace: Bot Subscriptions
   getBotSubscription(publishedBotId: string, subscriberWalletAddress: string): Promise<BotSubscription | undefined>;
@@ -174,6 +185,10 @@ export interface IStorage {
   createPnlSnapshot(snapshot: InsertPnlSnapshot): Promise<PnlSnapshot>;
   getPnlSnapshots(tradingBotId: string, since?: Date): Promise<PnlSnapshot[]>;
   getLatestPnlSnapshot(tradingBotId: string): Promise<PnlSnapshot | undefined>;
+
+  // Marketplace: Public Equity Snapshots
+  createMarketplaceEquitySnapshot(snapshot: InsertMarketplaceEquitySnapshot): Promise<MarketplaceEquitySnapshot>;
+  getMarketplaceEquitySnapshots(publishedBotId: string, since?: Date): Promise<MarketplaceEquitySnapshot[]>;
 
   // Security v3: Wallet security updates
   updateWalletSecurityV3(address: string, updates: {
@@ -958,8 +973,16 @@ export class DatabaseStorage implements IStorage {
     }).where(eq(publishedBots.id, id));
   }
 
-  async updatePublishedBotStats(id: string, stats: { totalTrades: number; winningTrades: number; pnlPercent7d?: string; pnlPercent30d?: string; pnlPercent90d?: string; pnlPercentAllTime?: string }): Promise<void> {
-    await db.update(publishedBots).set({
+  async updatePublishedBotStats(id: string, stats: { 
+    totalTrades: number; 
+    winningTrades: number; 
+    creatorCapital?: string;
+    pnlPercent7d?: string; 
+    pnlPercent30d?: string; 
+    pnlPercent90d?: string; 
+    pnlPercentAllTime?: string 
+  }): Promise<void> {
+    const updates: any = {
       totalTrades: stats.totalTrades,
       winningTrades: stats.winningTrades,
       pnlPercent7d: stats.pnlPercent7d,
@@ -967,7 +990,11 @@ export class DatabaseStorage implements IStorage {
       pnlPercent90d: stats.pnlPercent90d,
       pnlPercentAllTime: stats.pnlPercentAllTime,
       updatedAt: sql`NOW()`,
-    }).where(eq(publishedBots.id, id));
+    };
+    if (stats.creatorCapital !== undefined) {
+      updates.creatorCapital = stats.creatorCapital;
+    }
+    await db.update(publishedBots).set(updates).where(eq(publishedBots.id, id));
   }
 
   // Marketplace: Bot Subscriptions
@@ -1071,6 +1098,30 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(pnlSnapshots.snapshotDate))
       .limit(1);
     return result[0];
+  }
+
+  // Marketplace: Public Equity Snapshots
+  async createMarketplaceEquitySnapshot(snapshot: InsertMarketplaceEquitySnapshot): Promise<MarketplaceEquitySnapshot> {
+    const result = await db.insert(marketplaceEquitySnapshots).values(snapshot)
+      .onConflictDoUpdate({
+        target: [marketplaceEquitySnapshots.publishedBotId, marketplaceEquitySnapshots.snapshotDate],
+        set: {
+          equity: snapshot.equity,
+          pnlPercent: snapshot.pnlPercent,
+        },
+      })
+      .returning();
+    return result[0];
+  }
+
+  async getMarketplaceEquitySnapshots(publishedBotId: string, since?: Date): Promise<MarketplaceEquitySnapshot[]> {
+    const conditions = [eq(marketplaceEquitySnapshots.publishedBotId, publishedBotId)];
+    if (since) {
+      conditions.push(gte(marketplaceEquitySnapshots.snapshotDate, since));
+    }
+    return db.select().from(marketplaceEquitySnapshots)
+      .where(and(...conditions))
+      .orderBy(desc(marketplaceEquitySnapshots.snapshotDate));
   }
 
   // Security v3: Wallet security updates

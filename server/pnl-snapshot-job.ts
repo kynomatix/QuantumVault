@@ -29,27 +29,46 @@ export async function takePnlSnapshots(): Promise<void> {
         const realizedPnl = stats.totalPnl || 0;
         const totalTrades = stats.totalTrades || 0;
         const winningTrades = stats.winningTrades || 0;
+        const creatorEquity = accountInfo.usdcBalance || 0;
         
+        // Save private PnL snapshot for trading bot
         await storage.createPnlSnapshot({
           tradingBotId: sourceTradingBot.id,
           snapshotDate: new Date(),
-          equity: String(accountInfo.usdcBalance || 0),
+          equity: String(creatorEquity),
           realizedPnl: String(realizedPnl),
           unrealizedPnl: String(accountInfo.unrealizedPnl || 0),
           totalDeposited: String(sourceTradingBot.maxPositionSize || 0),
         });
         
-        // Sync trade stats from trading_bots to published_bots
         // Calculate PnL percentages from snapshots
         const pnlStats = await calculatePnlPercentages(publishedBot.tradingBotId);
         
+        // Calculate total capital: creator capital + subscriber capital
+        const subscriberCapital = parseFloat(publishedBot.totalCapitalInvested || '0') - parseFloat(publishedBot.creatorCapital || '0');
+        const newTotalCapital = creatorEquity + Math.max(0, subscriberCapital);
+        
+        // Sync stats from trading_bots to published_bots including creator capital
         await storage.updatePublishedBotStats(publishedBot.id, {
           totalTrades,
           winningTrades,
+          creatorCapital: String(creatorEquity),
           ...pnlStats,
         });
         
-        console.log(`[PnL Snapshots] Saved snapshot for bot ${sourceTradingBot.name}: equity=${accountInfo.usdcBalance?.toFixed(2)}, pnl=${realizedPnl.toFixed(2)}, trades=${totalTrades}, wins=${winningTrades}`);
+        // Update totalCapitalInvested separately if needed
+        await storage.incrementPublishedBotSubscribers(publishedBot.id, 0, newTotalCapital - parseFloat(publishedBot.totalCapitalInvested || '0'));
+        
+        // Save public equity snapshot for marketplace
+        const allTimePnl = pnlStats.pnlPercentAllTime ? parseFloat(pnlStats.pnlPercentAllTime) : 0;
+        await storage.createMarketplaceEquitySnapshot({
+          publishedBotId: publishedBot.id,
+          snapshotDate: new Date(),
+          equity: String(creatorEquity),
+          pnlPercent: String(allTimePnl),
+        });
+        
+        console.log(`[PnL Snapshots] Saved snapshot for bot ${sourceTradingBot.name}: equity=${creatorEquity.toFixed(2)}, pnl=${realizedPnl.toFixed(2)}, trades=${totalTrades}, wins=${winningTrades}`);
       } catch (botError) {
         console.error(`[PnL Snapshots] Error taking snapshot for published bot ${publishedBot.id}:`, botError);
       }
