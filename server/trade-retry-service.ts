@@ -78,7 +78,7 @@ function calculateBackoff(attempts: number, priority: 'critical' | 'normal'): nu
   return backoff + jitter;
 }
 
-export function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'maxAttempts' | 'nextRetryAt' | 'createdAt'>): string {
+export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'maxAttempts' | 'nextRetryAt' | 'createdAt'>): Promise<string> {
   const id = generateJobId();
   const maxAttempts = job.priority === 'critical' ? MAX_ATTEMPTS_CRITICAL : MAX_ATTEMPTS_NORMAL;
   const backoff = calculateBackoff(0, job.priority);
@@ -93,6 +93,27 @@ export function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'maxAtte
   };
   
   retryQueue.set(id, fullJob);
+  
+  // Persist to database for survival across server restarts
+  try {
+    await storage.createTradeRetryJob({
+      originalTradeId: job.originalTradeId || '',
+      botId: job.botId,
+      walletAddress: job.walletAddress,
+      market: job.market,
+      side: job.side,
+      size: job.size.toString(),
+      leverage: 1,
+      priority: job.priority,
+      attempts: 0,
+      maxAttempts,
+      nextRetryAt: new Date(fullJob.nextRetryAt),
+      status: 'pending',
+    });
+    console.log(`[TradeRetry] Persisted job ${id} to database`);
+  } catch (dbErr) {
+    console.warn(`[TradeRetry] Failed to persist job to database:`, dbErr);
+  }
   
   console.log(`[TradeRetry] Queued ${job.priority} ${job.side} ${job.market} retry, first attempt in ${Math.round(backoff / 1000)}s (job ${id})`);
   
@@ -283,6 +304,12 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       
       await notifyRetryResult(job, true);
       retryQueue.delete(job.id);
+      // Remove from database
+      try {
+        await storage.deleteTradeRetryJob(job.id);
+      } catch (dbErr) {
+        console.warn(`[TradeRetry] Failed to delete completed job from DB:`, dbErr);
+      }
       return;
     }
     
@@ -309,6 +336,12 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     
     await notifyRetryResult(job, false, job.lastError);
     retryQueue.delete(job.id);
+    // Mark as failed in database
+    try {
+      await storage.markTradeRetryJobFailed(job.id, job.lastError || 'Unknown error');
+    } catch (dbErr) {
+      console.warn(`[TradeRetry] Failed to mark job as failed in DB:`, dbErr);
+    }
     
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
@@ -362,10 +395,53 @@ async function processQueue(): Promise<void> {
   }
 }
 
-export function startRetryWorker(): void {
+export async function startRetryWorker(): Promise<void> {
   if (workerInterval) {
     console.log('[TradeRetry] Worker already running');
     return;
+  }
+  
+  // Load pending jobs from database on startup (survive server restarts)
+  try {
+    const pendingJobs = await storage.getPendingTradeRetryJobs();
+    if (pendingJobs.length > 0) {
+      console.log(`[TradeRetry] Loading ${pendingJobs.length} pending jobs from database`);
+      for (const dbJob of pendingJobs) {
+        // Get the bot to retrieve agent keys for execution
+        const bot = await storage.getTradingBotById(dbJob.botId);
+        const wallet = await storage.getWallet(dbJob.walletAddress);
+        if (!bot || !wallet) {
+          console.warn(`[TradeRetry] Skipping job ${dbJob.id} - bot or wallet not found`);
+          await storage.markTradeRetryJobFailed(dbJob.id, 'Bot or wallet not found');
+          continue;
+        }
+        
+        const fullJob: RetryJob = {
+          id: dbJob.id,
+          botId: dbJob.botId,
+          walletAddress: dbJob.walletAddress,
+          agentPrivateKeyEncrypted: bot.agentPrivateKeyEncrypted || '',
+          agentPublicKey: bot.agentPublicKey || wallet.agentPublicKey || '',
+          market: dbJob.market,
+          side: dbJob.side as 'long' | 'short' | 'close',
+          size: parseFloat(dbJob.size),
+          subAccountId: bot.driftSubaccountId || 0,
+          reduceOnly: dbJob.side === 'close',
+          slippageBps: wallet.slippageBps || 50,
+          priority: dbJob.priority as 'critical' | 'normal',
+          attempts: dbJob.attempts,
+          maxAttempts: dbJob.maxAttempts,
+          nextRetryAt: new Date(dbJob.nextRetryAt).getTime(),
+          createdAt: new Date(dbJob.createdAt).getTime(),
+          lastError: dbJob.lastError || undefined,
+          originalTradeId: dbJob.originalTradeId,
+        };
+        retryQueue.set(dbJob.id, fullJob);
+      }
+      console.log(`[TradeRetry] Restored ${retryQueue.size} jobs from database`);
+    }
+  } catch (dbErr) {
+    console.warn('[TradeRetry] Failed to load pending jobs from database:', dbErr);
   }
   
   console.log('[TradeRetry] Starting retry worker (checking every 2s)');

@@ -493,3 +493,30 @@ export const insertTelegramConnectionTokenSchema = createInsertSchema(telegramCo
 });
 export type InsertTelegramConnectionToken = z.infer<typeof insertTelegramConnectionTokenSchema>;
 export type TelegramConnectionToken = typeof telegramConnectionTokens.$inferSelect;
+
+// Trade retry queue - persists failed trades for retry across server restarts
+export const tradeRetryQueue = pgTable("trade_retry_queue", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  originalTradeId: varchar("original_trade_id").notNull(),
+  botId: varchar("bot_id").notNull().references(() => tradingBots.id, { onDelete: "cascade" }),
+  walletAddress: text("wallet_address").notNull(),
+  market: text("market").notNull(),
+  side: text("side").notNull(),
+  size: decimal("size", { precision: 20, scale: 8 }).notNull(),
+  price: decimal("price", { precision: 20, scale: 8 }),
+  leverage: integer("leverage").default(1).notNull(),
+  priority: text("priority").default("normal").notNull(),
+  attempts: integer("attempts").default(0).notNull(),
+  maxAttempts: integer("max_attempts").default(5).notNull(),
+  nextRetryAt: timestamp("next_retry_at").notNull(),
+  lastError: text("last_error"),
+  status: text("status").default("pending").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertTradeRetryQueueSchema = createInsertSchema(tradeRetryQueue).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertTradeRetryQueue = z.infer<typeof insertTradeRetryQueueSchema>;
+export type TradeRetryQueue = typeof tradeRetryQueue.$inferSelect;

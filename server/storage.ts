@@ -21,6 +21,7 @@ import {
   pnlSnapshots,
   marketplaceEquitySnapshots,
   telegramConnectionTokens,
+  tradeRetryQueue,
   type User,
   type InsertUser,
   type Wallet,
@@ -62,6 +63,8 @@ import {
   type InsertAuthNonce,
   type TelegramConnectionToken,
   type InsertTelegramConnectionToken,
+  type TradeRetryQueue,
+  type InsertTradeRetryQueue,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -1214,6 +1217,59 @@ export class DatabaseStorage implements IStorage {
       .where(eq(wallets.telegramChatId, chatId))
       .limit(1);
     return result[0];
+  }
+
+  // Trade retry queue - persists failed trades for retry across server restarts
+  async createTradeRetryJob(job: InsertTradeRetryQueue): Promise<TradeRetryQueue> {
+    const result = await db.insert(tradeRetryQueue).values(job).returning();
+    return result[0];
+  }
+
+  async getTradeRetryJobById(id: string): Promise<TradeRetryQueue | undefined> {
+    const result = await db.select().from(tradeRetryQueue)
+      .where(eq(tradeRetryQueue.id, id))
+      .limit(1);
+    return result[0];
+  }
+
+  async getPendingTradeRetryJobs(): Promise<TradeRetryQueue[]> {
+    return db.select().from(tradeRetryQueue)
+      .where(eq(tradeRetryQueue.status, 'pending'))
+      .orderBy(tradeRetryQueue.nextRetryAt);
+  }
+
+  async updateTradeRetryJob(id: string, updates: Partial<InsertTradeRetryQueue>): Promise<TradeRetryQueue | undefined> {
+    const result = await db.update(tradeRetryQueue)
+      .set(updates)
+      .where(eq(tradeRetryQueue.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async deleteTradeRetryJob(id: string): Promise<void> {
+    await db.delete(tradeRetryQueue).where(eq(tradeRetryQueue.id, id));
+  }
+
+  async markTradeRetryJobFailed(id: string, error: string): Promise<void> {
+    await db.update(tradeRetryQueue)
+      .set({ status: 'failed', lastError: error })
+      .where(eq(tradeRetryQueue.id, id));
+  }
+
+  async markTradeRetryJobCompleted(id: string): Promise<void> {
+    await db.update(tradeRetryQueue)
+      .set({ status: 'completed' })
+      .where(eq(tradeRetryQueue.id, id));
+  }
+
+  async cleanupCompletedRetryJobs(): Promise<number> {
+    const result = await db.delete(tradeRetryQueue)
+      .where(or(
+        eq(tradeRetryQueue.status, 'completed'),
+        eq(tradeRetryQueue.status, 'failed')
+      ))
+      .returning();
+    return result.length;
   }
 }
 
