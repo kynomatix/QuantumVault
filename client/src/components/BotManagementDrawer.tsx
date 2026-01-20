@@ -1404,7 +1404,7 @@ export function BotManagementDrawer({
                           fontSize: '12px',
                         }}
                         labelFormatter={(value) => new Date(value).toLocaleDateString()}
-                        formatter={(value: number) => [`$${value >= 0 ? '+' : ''}${value.toFixed(2)}`, 'Cumulative PnL']}
+                        formatter={(value: number) => [`$${value >= 0 ? '+' : ''}${value.toFixed(2)}`, 'Gross PnL (excl. fees)']}
                       />
                       <Line
                         type="monotone"
@@ -1790,8 +1790,8 @@ export function BotManagementDrawer({
                           </span>
                           <p className="text-xs text-muted-foreground">contracts @ ${parseFloat(trade.price || '0').toFixed(2)}</p>
                           {(trade as any).pnl !== null && (trade as any).pnl !== undefined && (
-                            <p className={`text-xs font-medium ${parseFloat((trade as any).pnl) >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
-                              {parseFloat((trade as any).pnl) >= 0 ? '+' : ''}${parseFloat((trade as any).pnl).toFixed(2)} PnL
+                            <p className={`text-xs font-medium ${parseFloat((trade as any).pnl) >= 0 ? 'text-emerald-500' : 'text-red-500'}`} title="Gross PnL (excludes fees, slippage, funding)">
+                              {parseFloat((trade as any).pnl) >= 0 ? '+' : ''}${parseFloat((trade as any).pnl).toFixed(2)} gross
                             </p>
                           )}
                         </div>

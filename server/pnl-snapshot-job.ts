@@ -31,6 +31,15 @@ export async function takePnlSnapshots(): Promise<void> {
         const winningTrades = stats.winningTrades || 0;
         const creatorEquity = accountInfo.usdcBalance || 0;
         
+        // Get actual net deposited from equity events (same as bot management drawer)
+        const botEvents = await storage.getBotEquityEvents(sourceTradingBot.id, 1000);
+        const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+        // Fall back to maxPositionSize if no equity events (legacy data)
+        const maxPosSize = typeof sourceTradingBot.maxPositionSize === 'string' 
+          ? parseFloat(sourceTradingBot.maxPositionSize) 
+          : (sourceTradingBot.maxPositionSize || 0);
+        const totalDeposited = netDeposited > 0 ? netDeposited : maxPosSize;
+        
         // Save private PnL snapshot for trading bot
         await storage.createPnlSnapshot({
           tradingBotId: sourceTradingBot.id,
@@ -38,11 +47,11 @@ export async function takePnlSnapshots(): Promise<void> {
           equity: String(creatorEquity),
           realizedPnl: String(realizedPnl),
           unrealizedPnl: String(accountInfo.unrealizedPnl || 0),
-          totalDeposited: String(sourceTradingBot.maxPositionSize || 0),
+          totalDeposited: String(totalDeposited),
         });
         
-        // Calculate PnL percentages from snapshots
-        const pnlStats = await calculatePnlPercentages(publishedBot.tradingBotId);
+        // Calculate PnL percentages from snapshots, using actual deposited for all-time
+        const pnlStats = await calculatePnlPercentages(publishedBot.tradingBotId, creatorEquity, totalDeposited);
         
         // Calculate total capital: creator capital + subscriber capital
         const subscriberCapital = parseFloat(publishedBot.totalCapitalInvested || '0') - parseFloat(publishedBot.creatorCapital || '0');
@@ -80,42 +89,41 @@ export async function takePnlSnapshots(): Promise<void> {
   }
 }
 
-async function calculatePnlPercentages(tradingBotId: string): Promise<{
+async function calculatePnlPercentages(
+  tradingBotId: string,
+  currentEquity: number,
+  totalDeposited: number
+): Promise<{
   pnlPercent7d?: string;
   pnlPercent30d?: string;
   pnlPercent90d?: string;
   pnlPercentAllTime?: string;
 }> {
   try {
+    // Use actual deposited for all-time PnL (matches bot management drawer calculation)
+    const allTimePnl = totalDeposited > 0 ? ((currentEquity - totalDeposited) / totalDeposited) * 100 : 0;
+    
+    // For 7d/30d/90d, we still compare to historical snapshots
     const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
     const snapshots = await storage.getPnlSnapshots(tradingBotId, ninetyDaysAgo);
-    if (snapshots.length === 0) return {};
-    
-    const now = new Date();
-    const latestSnapshot = snapshots[0];
-    const currentEquity = parseFloat(latestSnapshot.equity);
     
     const findSnapshotNearDate = (daysAgo: number) => {
-      const targetDate = new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+      const targetDate = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
       return snapshots.find(s => {
         const snapshotDate = new Date(s.snapshotDate);
         const diffHours = Math.abs(snapshotDate.getTime() - targetDate.getTime()) / (1000 * 60 * 60);
-        return diffHours < 24; // Within 24 hours of target
+        return diffHours < 24;
       });
     };
     
     const calculatePnlPercent = (oldSnapshot: typeof snapshots[0] | undefined) => {
       if (!oldSnapshot) return undefined;
       const oldEquity = parseFloat(oldSnapshot.equity);
-      const deposited = parseFloat(oldSnapshot.totalDeposited) || oldEquity;
-      if (deposited === 0) return undefined;
-      const pnlPercent = ((currentEquity - deposited) / deposited) * 100;
+      if (oldEquity === 0) return undefined;
+      // Period PnL: how much equity changed from snapshot date to now
+      const pnlPercent = ((currentEquity - oldEquity) / oldEquity) * 100;
       return pnlPercent.toFixed(4);
     };
-    
-    const oldestSnapshot = snapshots[snapshots.length - 1];
-    const deposited = parseFloat(oldestSnapshot.totalDeposited) || parseFloat(oldestSnapshot.equity);
-    const allTimePnl = deposited > 0 ? ((currentEquity - deposited) / deposited) * 100 : 0;
     
     return {
       pnlPercent7d: calculatePnlPercent(findSnapshotNearDate(7)),
