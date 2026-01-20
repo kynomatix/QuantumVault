@@ -886,9 +886,9 @@ export function BotManagementDrawer({
   const getWinRate = () => {
     const stats = localBot?.stats || bot?.stats;
     if (!stats) return 0;
-    const total = stats.totalTrades;
-    if (total === 0) return 0;
-    return ((stats.winningTrades / total) * 100).toFixed(1);
+    const realizedTrades = (stats.winningTrades || 0) + (stats.losingTrades || 0);
+    if (realizedTrades === 0) return 0;
+    return ((stats.winningTrades / realizedTrades) * 100).toFixed(1);
   };
 
   const displayBot = localBot || bot;
