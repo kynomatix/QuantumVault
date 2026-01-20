@@ -47,6 +47,7 @@ This implementation leverages the existing QuantumVault bot architecture rather 
 9. **Financial Tracking**: PnL calculation with weighted average cost
 10. **User Controls**: Pause, resume, stop, sync operations
 11. **Database Schema**: New tables and fields required
+12. **Audit Response & Advanced Topics**: External audit findings and solutions
 
 ### Critical Assumptions & Invariants
 
@@ -64,6 +65,14 @@ These rules MUST be maintained throughout implementation:
 | 8 | **On-chain state is source of truth** | Database drift causes order duplication |
 | 9 | **Deterministic level sequencing** | Grid expansion order broken; sizing pattern lost |
 | 10 | **Policy HMAC integrity verification** | Tampered bot config could execute unauthorized trades |
+| 11 | **Multi-layer idempotency (on-chain + price matching)** | Duplicate orders on network retries |
+| 12 | **98% fill threshold = complete (dust cleanup)** | Grid stalls waiting for micro-remainders |
+| 13 | **Circuit breaker on 5 consecutive failures** | Infinite retry loops; resource exhaustion |
+| 14 | **Settlement calls serialized per bot (locking)** | Race conditions; failed settlements |
+| 15 | **Position reconciliation on startup & periodically** | Drift between expected and actual positions |
+| 16 | **Agent wallet SOL balance monitored** | All transactions fail silently; bot halts |
+| 17 | **Database transactions for multi-step state updates** | Inconsistent grid state on interruption |
+| 18 | **Subaccount recycling before creating new** | Unnecessary SOL rent accumulation |
 
 ### Key File References
 
@@ -3179,21 +3188,33 @@ export const gridFills = pgTable("grid_fills", {
 
 ## Open Questions for Audit
 
-1. **Order Priority**: When price moves fast, which orders get placed first - closest to price, or largest size?
+**RESOLVED Questions** (addressed in Audit Response section):
 
-2. **Partial Fills**: How to handle partially filled orders? Wait for full fill or manage partial?
+1. ~~**Order Priority**: When price moves fast, which orders get placed first - closest to price, or largest size?~~
+   - **RESOLVED**: Closest to price (deterministic level sequencing - Invariant #9)
 
-3. **Rebalancing Frequency**: How often should we rebalance active orders as price moves?
+2. ~~**Partial Fills**: How to handle partially filled orders? Wait for full fill or manage partial?~~
+   - **RESOLVED**: 98% threshold = complete, cancel remaining dust (Invariant #12)
 
-4. **Memory vs Database**: Should virtual grids be stored in DB or held in memory with periodic snapshots?
+3. ~~**Rebalancing Frequency**: How often should we rebalance active orders as price moves?~~
+   - **RESOLVED**: 5-second polling with 0.5% price change threshold (hysteresis)
+
+4. ~~**Memory vs Database**: Should virtual grids be stored in DB or held in memory with periodic snapshots?~~
+   - **RESOLVED**: Database is source of cache, on-chain is source of truth. Memory for transient state only.
+
+**Remaining Open Questions**:
 
 5. **Multi-Market Grids**: Should one grid bot span multiple markets, or one market per bot?
+   - *Recommendation*: One market per bot for clarity and subaccount isolation
 
 6. **Grid Spacing**: Linear spacing, or should we support logarithmic/percentage-based spacing?
+   - *Recommendation*: Start with linear, add geometric as Phase 2 feature
 
 7. **Initial Position**: When starting grid bot, should it immediately take a position at current price?
+   - *Recommendation*: No immediate position - wait for first grid level to fill naturally
 
 8. **Profit Lock**: When a grid cycle completes profitably, auto-withdraw profits or reinvest?
+   - *Recommendation*: Default to reinvest, with user option to auto-sweep above threshold
 
 ---
 
@@ -3217,6 +3238,971 @@ export const gridFills = pgTable("grid_fills", {
 - Geometric grid spacing (% based)
 - Multi-leg grids (different spacing in different ranges)
 - AI-driven range adjustment
+
+---
+
+## Audit Response & Advanced Topics
+
+This section addresses findings from external audits and provides implementation details for edge cases and advanced scenarios.
+
+### Order Idempotency Strategy
+
+**Issue**: Network timeouts or RPC failures could cause duplicate order placements. If the server sends a "Place Order" tx, times out, and retries, it might accidentally place TWO orders for the same grid level.
+
+**Solution**: Multi-layer idempotency approach combining on-chain verification and database tracking.
+
+```typescript
+/*
+ORDER IDEMPOTENCY - MULTI-LAYER DUPLICATE PREVENTION
+
+Drift's userOrderId is u8 (0-255) which is too small for reliable hashing across
+many grid levels. Instead, we use a multi-layer approach:
+
+1. **Database tracking**: Track pending placements with timestamp
+2. **On-chain verification**: Always check existing orders before placement
+3. **Price+Side matching**: Use price and side as the unique identifier per subaccount
+4. **Idempotency window**: Dedupe retries within 30-second window
+
+This approach is collision-free because we match on exact price+side within a
+single subaccount - no two grid levels in the same bot will have the same price.
+*/
+
+interface PendingPlacement {
+  gridLevelId: string;
+  price: number;
+  side: 'buy' | 'sell';
+  timestamp: number;
+}
+
+// Track pending placements to prevent duplicate attempts
+const pendingPlacements = new Map<string, PendingPlacement>();
+const IDEMPOTENCY_WINDOW_MS = 30000; // 30 seconds
+
+function getPlacementKey(botId: string, price: number, side: string): string {
+  // Unique key per bot+price+side - guaranteed unique within a grid bot
+  return `${botId}:${price.toFixed(6)}:${side}`;
+}
+
+async function placeGridOrderIdempotent(
+  bot: GridBotConfig,
+  grid: VirtualGrid,
+  driftClient: DriftClient
+): Promise<{ orderId: number | null; alreadyExists: boolean; reason?: string }> {
+  const placementKey = getPlacementKey(bot.id, grid.price, grid.side);
+  
+  // Layer 1: Check pending placement within idempotency window
+  const pending = pendingPlacements.get(placementKey);
+  if (pending && Date.now() - pending.timestamp < IDEMPOTENCY_WINDOW_MS) {
+    console.log(`[GridBot] Duplicate placement attempt within window for level ${grid.level}`);
+    return { orderId: null, alreadyExists: true, reason: 'pending_placement' };
+  }
+  
+  // Layer 2: Check on-chain for existing order at this price+side
+  const openOrders = await driftClient.getUserOpenOrders(bot.driftSubaccountId);
+  const existingOrder = openOrders.find(order => 
+    Math.abs(order.price.toNumber() / 1e6 - grid.price) < 0.0001 &&
+    (order.direction === PositionDirection.LONG ? 'buy' : 'sell') === grid.side &&
+    order.marketIndex === grid.marketIndex
+  );
+  
+  if (existingOrder) {
+    console.log(`[GridBot] Order already exists on-chain for level ${grid.level} at price ${grid.price}`);
+    // Update our database with the actual orderId if we didn't have it
+    await updateGridLevel(grid.id, { driftOrderId: existingOrder.orderId, status: 'active' });
+    return { orderId: existingOrder.orderId, alreadyExists: true, reason: 'on_chain_exists' };
+  }
+  
+  // Layer 3: Mark as pending before attempting placement
+  pendingPlacements.set(placementKey, {
+    gridLevelId: grid.id,
+    price: grid.price,
+    side: grid.side,
+    timestamp: Date.now(),
+  });
+  
+  try {
+    const result = await driftClient.placePerpOrder({
+      marketIndex: grid.marketIndex,
+      direction: grid.side === 'buy' ? PositionDirection.LONG : PositionDirection.SHORT,
+      baseAssetAmount: grid.size,
+      price: grid.price,
+      orderType: OrderType.LIMIT,
+      postOnly: true,
+      reduceOnly: grid.isReduceOnly,
+      // Note: We don't rely on userOrderId due to u8 limitation
+      // Instead we use price+side matching for idempotency
+    });
+    
+    // Update database with actual orderId
+    await updateGridLevel(grid.id, { driftOrderId: result.orderId, status: 'active' });
+    
+    return { orderId: result.orderId, alreadyExists: false };
+  } catch (error: any) {
+    // On any error, check on-chain again - the order might have succeeded
+    const recheckOrders = await driftClient.getUserOpenOrders(bot.driftSubaccountId);
+    const maybeCreated = recheckOrders.find(order => 
+      Math.abs(order.price.toNumber() / 1e6 - grid.price) < 0.0001 &&
+      (order.direction === PositionDirection.LONG ? 'buy' : 'sell') === grid.side
+    );
+    
+    if (maybeCreated) {
+      console.log(`[GridBot] Order was created despite error for level ${grid.level}`);
+      await updateGridLevel(grid.id, { driftOrderId: maybeCreated.orderId, status: 'active' });
+      return { orderId: maybeCreated.orderId, alreadyExists: true, reason: 'created_on_error' };
+    }
+    
+    throw error;
+  } finally {
+    // Clear pending after attempt (successful or not)
+    pendingPlacements.delete(placementKey);
+  }
+}
+
+// Cleanup stale pending entries periodically
+function cleanupStalePendingPlacements(): void {
+  const now = Date.now();
+  for (const [key, pending] of pendingPlacements.entries()) {
+    if (now - pending.timestamp > IDEMPOTENCY_WINDOW_MS * 2) {
+      pendingPlacements.delete(key);
+    }
+  }
+}
+
+setInterval(cleanupStalePendingPlacements, 60000); // Every minute
+```
+
+### Dust Threshold for Partial Fills
+
+**Issue**: Orders may fill for 99.99% of the size, leaving tiny "dust" amounts. Waiting for the remaining dust could stall the grid indefinitely.
+
+**Solution**: Treat orders as "filled" when they reach 98% of intended size. Cancel remaining dust and proceed.
+
+```typescript
+/*
+DUST THRESHOLD - PREVENT GRID STALLS FROM MICRO-REMAINDERS
+
+In crypto markets, you often get fills for 99.99% of an order, leaving
+0.00001 tokens unfilled. This "dust" may never fill. We treat 98%+ as complete.
+*/
+
+const DUST_THRESHOLD = 0.98; // 98% filled = complete
+
+async function checkFillStatus(grid: VirtualGrid): Promise<'pending' | 'partial' | 'filled'> {
+  const filledAmount = grid.filledSize || 0;
+  const totalSize = grid.size;
+  
+  const fillRatio = filledAmount / totalSize;
+  
+  if (fillRatio >= DUST_THRESHOLD) {
+    // Cancel any remaining dust and mark as filled
+    if (fillRatio < 1.0 && grid.driftOrderId) {
+      await cancelRemainingDust(grid.driftOrderId);
+    }
+    return 'filled';
+  }
+  
+  if (filledAmount > 0) {
+    return 'partial';
+  }
+  
+  return 'pending';
+}
+
+async function cancelRemainingDust(orderId: number): Promise<void> {
+  try {
+    await driftClient.cancelOrder(orderId);
+    console.log(`[GridBot] Cancelled dust remainder for order ${orderId}`);
+  } catch (error) {
+    // Order may have already filled completely - ignore
+    console.log(`[GridBot] Dust cancel failed (likely already filled): ${orderId}`);
+  }
+}
+```
+
+### PostOnly Rejection Handling (Slide Logic)
+
+**Issue**: `postOnly: true` orders are rejected if they would cross the spread (execute as Taker). During high volatility, limit orders might be repeatedly rejected.
+
+**Solution**: Implement "slide" logic - if rejected, retry once with a slightly less aggressive price.
+
+```typescript
+/*
+POSTONLY SLIDE LOGIC - HANDLE FAST-MOVING MARKETS
+
+When postOnly orders are rejected (PostOnlyWouldFill error), the price has
+moved past our limit. We "slide" the price by 1 tick away from the spread
+and retry once. If still rejected, wait for next polling cycle.
+*/
+
+const PRICE_SLIDE_TICKS = 1; // How many price ticks to slide on rejection
+
+async function placeOrderWithSlide(
+  grid: VirtualGrid,
+  oraclePrice: number
+): Promise<{ success: boolean; orderId?: number; slid: boolean }> {
+  const tickSize = getMarketTickSize(grid.marketIndex);
+  
+  try {
+    const result = await placeLimitOrder(grid);
+    return { success: true, orderId: result.orderId, slid: false };
+  } catch (error: any) {
+    if (!error.message?.includes('PostOnlyWouldFill')) {
+      throw error;
+    }
+    
+    // Calculate slid price - move away from spread
+    let slidPrice: number;
+    if (grid.side === 'buy') {
+      // Slide down for buys
+      slidPrice = grid.price - (tickSize * PRICE_SLIDE_TICKS);
+      // Don't slide below grid's intended price by more than 0.1%
+      if ((grid.price - slidPrice) / grid.price > 0.001) {
+        console.log(`[GridBot] Slide too large, skipping order for level ${grid.level}`);
+        return { success: false, slid: true };
+      }
+    } else {
+      // Slide up for sells
+      slidPrice = grid.price + (tickSize * PRICE_SLIDE_TICKS);
+      if ((slidPrice - grid.price) / grid.price > 0.001) {
+        console.log(`[GridBot] Slide too large, skipping order for level ${grid.level}`);
+        return { success: false, slid: true };
+      }
+    }
+    
+    console.log(`[GridBot] PostOnly rejected, sliding price from ${grid.price} to ${slidPrice}`);
+    
+    try {
+      const slidResult = await placeLimitOrder({ ...grid, price: slidPrice });
+      return { success: true, orderId: slidResult.orderId, slid: true };
+    } catch (slideError) {
+      console.log(`[GridBot] Slid order also rejected, will retry next cycle`);
+      return { success: false, slid: true };
+    }
+  }
+}
+```
+
+### Circuit Breaker Pattern
+
+**Issue**: Failed operations might retry indefinitely without escalation. Persistent RPC failures could cause infinite loops and resource exhaustion.
+
+**Solution**: Implement circuit breaker pattern that "opens" after consecutive failures and enters cooldown.
+
+```typescript
+/*
+CIRCUIT BREAKER - PREVENT INFINITE ERROR LOOPS
+
+After 5 consecutive failures, the circuit "opens" and stops attempts for
+60 seconds. This prevents resource exhaustion and gives systems time to recover.
+*/
+
+class GridBotCircuitBreaker {
+  private failures = 0;
+  private lastFailureTime = 0;
+  private state: 'closed' | 'open' | 'half-open' = 'closed';
+  
+  private readonly failureThreshold = 5;
+  private readonly recoveryTimeMs = 60000; // 1 minute
+  
+  async execute<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.state === 'open') {
+      const timeSinceFailure = Date.now() - this.lastFailureTime;
+      if (timeSinceFailure > this.recoveryTimeMs) {
+        this.state = 'half-open';
+        console.log(`[CircuitBreaker] Entering half-open state, testing recovery`);
+      } else {
+        throw new Error(`Circuit breaker open, retry in ${Math.ceil((this.recoveryTimeMs - timeSinceFailure) / 1000)}s`);
+      }
+    }
+    
+    try {
+      const result = await operation();
+      
+      // Success - reset failures
+      if (this.state === 'half-open') {
+        console.log(`[CircuitBreaker] Recovery successful, closing circuit`);
+      }
+      this.failures = 0;
+      this.state = 'closed';
+      
+      return result;
+    } catch (error) {
+      this.failures++;
+      this.lastFailureTime = Date.now();
+      
+      if (this.failures >= this.failureThreshold) {
+        this.state = 'open';
+        console.error(`[CircuitBreaker] Circuit opened after ${this.failures} failures`);
+      }
+      
+      throw error;
+    }
+  }
+  
+  getState(): { state: string; failures: number } {
+    return { state: this.state, failures: this.failures };
+  }
+}
+
+// Per-bot circuit breakers
+const circuitBreakers = new Map<string, GridBotCircuitBreaker>();
+
+function getCircuitBreaker(botId: string): GridBotCircuitBreaker {
+  if (!circuitBreakers.has(botId)) {
+    circuitBreakers.set(botId, new GridBotCircuitBreaker());
+  }
+  return circuitBreakers.get(botId)!;
+}
+```
+
+### PnL Settlement Locking
+
+**Issue**: Multiple concurrent calls to `settleAllPnl` could cause race conditions, failures, or duplicate settlements.
+
+**Solution**: Implement locking mechanism to serialize settlement calls per bot.
+
+```typescript
+/*
+SETTLEMENT LOCKING - PREVENT CONCURRENT SETTLEMENT RACE CONDITIONS
+
+Multiple polling threads could trigger settlement simultaneously. We use
+a locking mechanism to ensure only one settlement runs at a time per bot.
+*/
+
+const settlementLocks = new Map<string, Promise<boolean>>();
+
+async function settlePnlWithLock(
+  botId: string,
+  subaccountId: number,
+  agentPrivateKey: Uint8Array
+): Promise<boolean> {
+  // Check if settlement already in progress
+  const existingLock = settlementLocks.get(botId);
+  if (existingLock) {
+    console.log(`[GridBot] Settlement already in progress for ${botId}, waiting...`);
+    return await existingLock;
+  }
+  
+  // Create new settlement promise
+  const settlementPromise = performSettlement(botId, subaccountId, agentPrivateKey);
+  settlementLocks.set(botId, settlementPromise);
+  
+  try {
+    const result = await settlementPromise;
+    return result;
+  } finally {
+    // Always clear lock when done
+    settlementLocks.delete(botId);
+  }
+}
+
+async function performSettlement(
+  botId: string,
+  subaccountId: number,
+  agentPrivateKey: Uint8Array
+): Promise<boolean> {
+  try {
+    console.log(`[GridBot] Settling PnL for bot ${botId} (subaccount ${subaccountId})`);
+    await settleAllPnl(agentPrivateKey, subaccountId);
+    return true;
+  } catch (error: any) {
+    // Settlement might fail if no PnL to settle - this is OK
+    if (error.message?.includes('NothingToSettle')) {
+      return true;
+    }
+    console.error(`[GridBot] Settlement failed for ${botId}:`, error.message);
+    return false;
+  }
+}
+```
+
+### Position Drift Detection & Reconciliation
+
+**Issue**: Position discrepancies between bot expectations and actual Drift positions could occur from failed fills, manual interventions, or state corruption.
+
+**Solution**: Periodic position reconciliation comparing expected vs actual.
+
+```typescript
+/*
+POSITION DRIFT DETECTION - CATCH STATE INCONSISTENCIES
+
+Compares the bot's expected position (sum of filled entry orders - filled profit orders)
+with the actual on-chain position. Triggers reconciliation if discrepancy detected.
+*/
+
+async function detectPositionDrift(bot: GridBotConfig): Promise<{
+  hasDrift: boolean;
+  expected: number;
+  actual: number;
+  drift: number;
+}> {
+  // Calculate expected position from grid fills
+  const fills = await getGridFills(bot.id);
+  let expectedPosition = 0;
+  
+  for (const fill of fills) {
+    if (fill.side === 'buy') {
+      expectedPosition += fill.size;
+    } else {
+      expectedPosition -= fill.size;
+    }
+  }
+  
+  // Get actual on-chain position
+  const positions = await getBatchPerpPositions(
+    bot.agentPublicKey,
+    [bot.marketIndex],
+    bot.driftSubaccountId
+  );
+  const actualPosition = positions[0]?.baseAssetAmount || 0;
+  
+  const drift = Math.abs(expectedPosition - actualPosition);
+  const driftThreshold = 0.0001; // Allow tiny rounding differences
+  
+  const hasDrift = drift > driftThreshold;
+  
+  if (hasDrift) {
+    console.warn(`[GridBot] Position drift detected for ${bot.id}: expected ${expectedPosition}, actual ${actualPosition}`);
+  }
+  
+  return { hasDrift, expected: expectedPosition, actual: actualPosition, drift };
+}
+
+async function handlePositionDrift(bot: GridBotConfig): Promise<void> {
+  const driftCheck = await detectPositionDrift(bot);
+  
+  if (!driftCheck.hasDrift) return;
+  
+  console.log(`[GridBot] Triggering reconciliation for ${bot.id} due to position drift`);
+  
+  // Option 1: Trust on-chain (recommended) - adjust expected to match actual
+  await reconcileGridBotFromOnChain(bot.id);
+  
+  // Notify user
+  await notifyUser(bot.walletAddress, {
+    type: 'grid_position_drift',
+    message: `Position discrepancy detected and corrected. Expected: ${driftCheck.expected.toFixed(4)}, Actual: ${driftCheck.actual.toFixed(4)}`,
+    botId: bot.id,
+  });
+}
+```
+
+### Range Recovery Logic
+
+**Issue**: Once a bot reaches "range_exhausted" status, it stays stopped even if price returns to the range, requiring manual user intervention.
+
+**Solution**: Automatic range recovery when price returns within active grid range.
+
+```typescript
+/*
+RANGE RECOVERY - AUTO-RESUME WHEN PRICE RETURNS
+
+When price moves outside the grid range, the bot enters "range_exhausted" status.
+This function checks if price has returned and automatically resumes the bot.
+*/
+
+async function checkRangeRecovery(bot: GridBotConfig): Promise<boolean> {
+  if (bot.status !== 'range_exhausted') return false;
+  
+  const currentPrice = await getCurrentMarketPrice(bot.market);
+  
+  // Get the bot's price range
+  const lowerPrice = parseFloat(bot.lowerPrice);
+  const upperPrice = parseFloat(bot.upperPrice);
+  
+  // Check if current price is within range (with 1% buffer inside)
+  const buffer = (upperPrice - lowerPrice) * 0.01;
+  const inRange = currentPrice >= (lowerPrice + buffer) && currentPrice <= (upperPrice - buffer);
+  
+  if (inRange) {
+    console.log(`[GridBot] Price ${currentPrice} returned to range [${lowerPrice}, ${upperPrice}], resuming bot ${bot.id}`);
+    
+    // Resume the bot
+    await updateGridBot(bot.id, { status: 'active' });
+    
+    // Recalculate active window and place orders
+    await reconcileGridBotOnStartup(bot.id);
+    
+    // Notify user
+    await notifyUser(bot.walletAddress, {
+      type: 'grid_range_recovered',
+      message: `Price has returned to grid range. Bot automatically resumed.`,
+      botId: bot.id,
+    });
+    
+    return true;
+  }
+  
+  return false;
+}
+
+// Check range_exhausted bots periodically (every 5 minutes)
+async function rangeRecoveryCheck(): Promise<void> {
+  const exhaustedBots = await storage.getGridBotsByStatus(['range_exhausted']);
+  
+  for (const bot of exhaustedBots) {
+    try {
+      await checkRangeRecovery(bot);
+    } catch (error) {
+      console.error(`[GridBot] Range recovery check failed for ${bot.id}:`, error);
+    }
+  }
+}
+```
+
+### Agent Wallet SOL Monitoring
+
+**Issue**: Insufficient SOL in agent wallet could cause all transactions to fail silently.
+
+**Solution**: Monitor SOL balance and pause bots / alert users when low.
+
+```typescript
+/*
+WALLET SOL MONITORING - PREVENT TX FAILURES FROM GAS EXHAUSTION
+
+Agent wallets need SOL to pay transaction fees. If balance drops too low,
+all bot operations will fail. We monitor and alert proactively.
+*/
+
+const MIN_SOL_BALANCE = 0.05; // Minimum SOL required for operations
+const LOW_SOL_THRESHOLD = 0.1; // Alert threshold
+
+async function checkAgentWalletBalance(
+  walletAddress: string,
+  agentPublicKey: string
+): Promise<{ sufficient: boolean; balance: number; action: 'ok' | 'warn' | 'pause' }> {
+  const balance = await getAgentSolBalance(agentPublicKey);
+  
+  if (balance < MIN_SOL_BALANCE) {
+    return { sufficient: false, balance, action: 'pause' };
+  }
+  
+  if (balance < LOW_SOL_THRESHOLD) {
+    return { sufficient: true, balance, action: 'warn' };
+  }
+  
+  return { sufficient: true, balance, action: 'ok' };
+}
+
+async function handleLowBalance(
+  walletAddress: string,
+  agentPublicKey: string
+): Promise<void> {
+  const check = await checkAgentWalletBalance(walletAddress, agentPublicKey);
+  
+  if (check.action === 'pause') {
+    console.warn(`[GridBot] Agent wallet critically low: ${check.balance} SOL`);
+    
+    // Pause all grid bots for this wallet
+    const bots = await storage.getGridBotsByWallet(walletAddress);
+    for (const bot of bots) {
+      if (bot.status === 'active') {
+        await updateGridBot(bot.id, { 
+          status: 'paused',
+          pauseReason: 'insufficient_sol'
+        });
+      }
+    }
+    
+    await notifyUser(walletAddress, {
+      type: 'wallet_low_sol',
+      message: `Agent wallet balance critically low (${check.balance.toFixed(4)} SOL). Grid bots paused. Please fund your agent wallet.`,
+      priority: 'critical',
+    });
+  } else if (check.action === 'warn') {
+    await notifyUser(walletAddress, {
+      type: 'wallet_low_sol_warning',
+      message: `Agent wallet balance low (${check.balance.toFixed(4)} SOL). Consider adding more SOL soon.`,
+      priority: 'warning',
+    });
+  }
+}
+```
+
+### Database Transaction Isolation
+
+**Issue**: Multiple grid state operations could be interrupted, leaving inconsistent state.
+
+**Solution**: Wrap critical multi-step operations in database transactions.
+
+```typescript
+/*
+DATABASE TRANSACTIONS - ENSURE ATOMIC STATE UPDATES
+
+Fill detection and state updates must be atomic. If interrupted mid-way,
+the grid could have inconsistent state (e.g., fill recorded but status not updated).
+*/
+
+async function processFilledOrderWithTransaction(
+  botId: string,
+  filledGrid: VirtualGrid,
+  fillDetails: FillDetails
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    // 1. Update grid level status
+    await tx.update(gridLevels)
+      .set({
+        status: 'filled',
+        filledAt: new Date(),
+        filledPrice: fillDetails.price,
+        filledSize: fillDetails.size,
+      })
+      .where(eq(gridLevels.id, filledGrid.id));
+    
+    // 2. Record fill in gridFills table
+    await tx.insert(gridFills).values({
+      id: generateId(),
+      gridLevelId: filledGrid.id,
+      gridBotId: botId,
+      side: filledGrid.side,
+      price: fillDetails.price,
+      size: fillDetails.size,
+      fee: fillDetails.fee,
+      filledAt: new Date(),
+    });
+    
+    // 3. Update rolling state tracking
+    if (filledGrid.side === 'buy') {
+      await tx.update(gridBots)
+        .set({
+          lowestActiveBuyLevel: filledGrid.level - 1,
+          updatedAt: new Date(),
+        })
+        .where(eq(gridBots.id, botId));
+    } else {
+      await tx.update(gridBots)
+        .set({
+          highestActiveSellLevel: filledGrid.level + 1,
+          updatedAt: new Date(),
+        })
+        .where(eq(gridBots.id, botId));
+    }
+  });
+  
+  console.log(`[GridBot] Atomically processed fill for level ${filledGrid.level}`);
+}
+```
+
+### Oracle vs Mark Price Awareness
+
+**Issue**: Drift uses Oracle prices (Pyth) for liquidation/margin but trades execute against the DLOB. During volatility, these can diverge.
+
+**Solution**: Check both prices before placing orders to avoid unexpected fills.
+
+```typescript
+/*
+ORACLE VS MARK PRICE - DETECT PRICE DIVERGENCE
+
+During high volatility, Oracle price and internal Drift mark price can diverge.
+We check both before placing orders to avoid trading into de-pegged conditions.
+*/
+
+const MAX_PRICE_DIVERGENCE = 0.005; // 0.5% max allowed divergence
+
+async function checkPriceDivergence(
+  marketIndex: number
+): Promise<{ safe: boolean; oraclePrice: number; markPrice: number; divergence: number }> {
+  const marketAccount = await driftClient.getPerpMarketAccount(marketIndex);
+  
+  // Oracle price from Pyth
+  const oraclePrice = marketAccount.amm.historicalOracleData.lastOraclePrice.toNumber() / 1e6;
+  
+  // Mark price from AMM reserves
+  const quoteReserves = marketAccount.amm.quoteAssetReserve.toNumber();
+  const baseReserves = marketAccount.amm.baseAssetReserve.toNumber();
+  const markPrice = quoteReserves / baseReserves;
+  
+  const divergence = Math.abs(oraclePrice - markPrice) / oraclePrice;
+  
+  const safe = divergence <= MAX_PRICE_DIVERGENCE;
+  
+  if (!safe) {
+    console.warn(`[GridBot] Price divergence detected: oracle=${oraclePrice}, mark=${markPrice}, divergence=${(divergence * 100).toFixed(2)}%`);
+  }
+  
+  return { safe, oraclePrice, markPrice, divergence };
+}
+
+// Check before placing orders
+async function safeOrderPlacement(grid: VirtualGrid): Promise<boolean> {
+  const priceCheck = await checkPriceDivergence(grid.marketIndex);
+  
+  if (!priceCheck.safe) {
+    console.log(`[GridBot] Skipping order placement due to price divergence, will retry next cycle`);
+    return false;
+  }
+  
+  // Proceed with normal order placement
+  await placeGridOrderIdempotent(grid, driftClient);
+  return true;
+}
+```
+
+### Coordinated Polling & Rate Limit Management
+
+**Issue**: Multiple bots polling simultaneously could exceed RPC rate limits.
+
+**Solution**: Stagger polling across bots and implement exponential backoff.
+
+```typescript
+/*
+COORDINATED POLLING - PREVENT RPC RATE LIMIT EXHAUSTION
+
+With many active bots, simultaneous polling can hit rate limits. We stagger
+bot processing and implement backoff on rate limit errors.
+*/
+
+const POLL_INTERVAL_MS = 5000;
+const STAGGER_DELAY_MS = 500; // Delay between starting each bot's poll
+
+async function startCoordinatedPolling(): Promise<void> {
+  const activeBots = await storage.getActiveGridBots();
+  
+  // Stagger start times to spread RPC load
+  for (let i = 0; i < activeBots.length; i++) {
+    const bot = activeBots[i];
+    const startDelay = i * STAGGER_DELAY_MS;
+    
+    setTimeout(() => {
+      startBotPolling(bot.id);
+    }, startDelay);
+  }
+}
+
+async function startBotPolling(botId: string): Promise<void> {
+  let backoffMs = 0;
+  
+  const poll = async () => {
+    try {
+      const circuitBreaker = getCircuitBreaker(botId);
+      
+      await circuitBreaker.execute(async () => {
+        await gridOrderManagementLoop(botId);
+      });
+      
+      // Success - reset backoff
+      backoffMs = 0;
+      
+    } catch (error: any) {
+      if (isRateLimitError(error)) {
+        // Exponential backoff on rate limits
+        backoffMs = Math.min(backoffMs * 2 || 1000, 60000);
+        console.log(`[GridBot] Rate limited, backing off ${backoffMs}ms for ${botId}`);
+      }
+    }
+    
+    // Schedule next poll
+    setTimeout(poll, POLL_INTERVAL_MS + backoffMs);
+  };
+  
+  poll();
+}
+```
+
+### Funding Rate Awareness
+
+**Issue**: Holding large positions in a paused grid could bleed margin due to funding payments against the position.
+
+**Solution**: Monitor predicted funding rates and warn/pause when adverse.
+
+```typescript
+/*
+FUNDING RATE AWARENESS - PREVENT MARGIN BLEED IN PAUSED GRIDS
+
+If a grid bot is paused with a large position and funding is highly negative
+for that position direction, margin will bleed out even with flat prices.
+*/
+
+const FUNDING_RATE_ALERT_THRESHOLD = 0.001; // 0.1% per hour = extreme
+
+async function checkFundingRateRisk(bot: GridBotConfig): Promise<{
+  riskLevel: 'low' | 'medium' | 'high';
+  predictedHourlyRate: number;
+  action: string;
+}> {
+  const marketAccount = await driftClient.getPerpMarketAccount(bot.marketIndex);
+  const fundingRate = marketAccount.amm.lastFundingRate.toNumber() / 1e9; // Convert to decimal
+  
+  // Get current position direction
+  const positions = await getBatchPerpPositions(bot.agentPublicKey, [bot.marketIndex], bot.driftSubaccountId);
+  const position = positions[0];
+  
+  if (!position || Math.abs(position.baseAssetAmount) < 0.0001) {
+    return { riskLevel: 'low', predictedHourlyRate: 0, action: 'none' };
+  }
+  
+  const isLong = position.baseAssetAmount > 0;
+  const positionSize = Math.abs(position.baseAssetAmount);
+  
+  // Longs pay when funding is positive, shorts pay when negative
+  const paysIfPositive = isLong;
+  const adverseFunding = (fundingRate > 0 && paysIfPositive) || (fundingRate < 0 && !paysIfPositive);
+  
+  if (!adverseFunding) {
+    return { riskLevel: 'low', predictedHourlyRate: fundingRate, action: 'none' };
+  }
+  
+  const absFunding = Math.abs(fundingRate);
+  
+  if (absFunding >= FUNDING_RATE_ALERT_THRESHOLD) {
+    return {
+      riskLevel: 'high',
+      predictedHourlyRate: fundingRate,
+      action: 'Consider closing position or adjusting grid',
+    };
+  }
+  
+  if (absFunding >= FUNDING_RATE_ALERT_THRESHOLD / 2) {
+    return {
+      riskLevel: 'medium', 
+      predictedHourlyRate: fundingRate,
+      action: 'Monitor closely',
+    };
+  }
+  
+  return { riskLevel: 'low', predictedHourlyRate: fundingRate, action: 'none' };
+}
+```
+
+### Memory Cleanup for Stopped Bots
+
+**Issue**: In-memory caches (lastKnownPrices, circuit breakers) grow indefinitely.
+
+**Solution**: Periodic cleanup of stopped bot data.
+
+```typescript
+/*
+MEMORY CLEANUP - PREVENT MEMORY LEAKS FROM STOPPED BOTS
+
+Maps like lastKnownPrices grow indefinitely. Clean up entries for stopped bots.
+*/
+
+async function cleanupStoppedBotMemory(): Promise<void> {
+  const stoppedBotIds = await storage.getGridBotIdsByStatus(['stopped']);
+  
+  for (const botId of stoppedBotIds) {
+    lastKnownPrices.delete(botId);
+    circuitBreakers.delete(botId);
+    settlementLocks.delete(botId);
+  }
+  
+  console.log(`[GridBot] Cleaned up memory for ${stoppedBotIds.length} stopped bots`);
+}
+
+// Run cleanup every hour
+setInterval(cleanupStoppedBotMemory, 3600000);
+```
+
+### Subaccount Recycling & Rent Management
+
+**Issue**: Creating a new Drift subaccount costs ~0.035 SOL in rent. Users creating and deleting many bots accumulate these costs.
+
+**Solution**: Recycle inactive subaccounts instead of always creating new ones.
+
+```typescript
+/*
+SUBACCOUNT RECYCLING - REDUCE RENT COSTS
+
+Instead of always creating new subaccounts, check for inactive/empty subaccounts
+from previously stopped bots and reuse them. This saves ~0.035 SOL per bot.
+*/
+
+async function findRecyclableSubaccount(
+  walletAddress: string,
+  agentPublicKey: string
+): Promise<number | null> {
+  // Get all bots for this wallet
+  const allBots = await storage.getBotsByWallet(walletAddress);
+  const gridBots = await storage.getGridBotsByWallet(walletAddress);
+  
+  // Find subaccounts used by stopped/deleted bots
+  const stoppedBotSubaccounts = new Set<number>();
+  for (const bot of [...allBots, ...gridBots]) {
+    if (bot.status === 'stopped' || bot.status === 'deleted') {
+      stoppedBotSubaccounts.add(bot.driftSubaccountId);
+    }
+  }
+  
+  // Find subaccounts still in use by active bots
+  const activeSubaccounts = new Set<number>();
+  for (const bot of [...allBots, ...gridBots]) {
+    if (bot.status !== 'stopped' && bot.status !== 'deleted') {
+      activeSubaccounts.add(bot.driftSubaccountId);
+    }
+  }
+  
+  // Find recyclable subaccounts (stopped but not reused)
+  const recyclable: number[] = [];
+  for (const subId of stoppedBotSubaccounts) {
+    if (!activeSubaccounts.has(subId) && subId !== 0) { // Never recycle subaccount 0
+      recyclable.push(subId);
+    }
+  }
+  
+  if (recyclable.length === 0) {
+    return null;
+  }
+  
+  // Verify the subaccount is actually empty on-chain
+  for (const subId of recyclable) {
+    try {
+      const accountInfo = await getDriftAccountInfo(agentPublicKey, subId);
+      const positions = await getBatchPerpPositions(agentPublicKey, [], subId);
+      
+      // Check: no open positions and no significant balance
+      const hasNoPositions = positions.every(p => Math.abs(p?.baseAssetAmount || 0) < 0.0001);
+      const hasLowBalance = parseFloat(accountInfo.balance) < 1.0; // < $1
+      
+      if (hasNoPositions && hasLowBalance) {
+        console.log(`[GridBot] Found recyclable subaccount ${subId}`);
+        return subId;
+      }
+    } catch (error) {
+      // Subaccount might not exist on-chain (closed), skip
+      continue;
+    }
+  }
+  
+  return null;
+}
+
+async function getOrCreateSubaccountForGridBot(
+  walletAddress: string,
+  agentPublicKey: string,
+  agentPrivateKeyEncrypted: string
+): Promise<number> {
+  // First, try to recycle an existing subaccount
+  const recyclable = await findRecyclableSubaccount(walletAddress, agentPublicKey);
+  
+  if (recyclable !== null) {
+    console.log(`[GridBot] Recycling subaccount ${recyclable} for new grid bot`);
+    return recyclable;
+  }
+  
+  // No recyclable subaccount, create new one
+  const newSubaccountId = await getNextOnChainSubaccountId(agentPublicKey);
+  console.log(`[GridBot] Creating new subaccount ${newSubaccountId} for grid bot`);
+  
+  return newSubaccountId;
+}
+```
+
+**Rent Reclamation Note**: Drift subaccounts cannot be fully closed to reclaim rent while the main account (subaccount 0) exists. Recycling is the only practical approach to managing costs. Users should be informed that subaccount rent is non-refundable.
+
+### Updated Critical Assumptions Table
+
+Add these invariants to the existing table (Section: Critical Assumptions & Invariants):
+
+| # | Assumption/Invariant | Consequence if Violated |
+|---|---------------------|------------------------|
+| 11 | **Multi-layer idempotency (on-chain + price matching)** | Duplicate orders on network retries |
+| 12 | **98% fill threshold = complete** | Grid stalls waiting for dust |
+| 13 | **Circuit breaker on 5 consecutive failures** | Infinite retry loops, resource exhaustion |
+| 14 | **Settlement calls are serialized per bot** | Race conditions, failed settlements |
+| 15 | **Position reconciliation runs on startup and periodically** | Drift between expected and actual positions |
+| 16 | **Agent wallet SOL monitored** | All transactions fail silently |
+| 17 | **Database transactions for multi-step state updates** | Inconsistent grid state on interruption |
+| 18 | **Subaccount recycling before creating new** | Unnecessary SOL rent accumulation |
 
 ---
 
