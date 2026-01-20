@@ -7128,16 +7128,43 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Bot not found" });
       }
       
-      // Get public equity snapshots for equity chart (last 90 days)
+      // Get public equity snapshots for equity chart - only from publish date onwards
+      const publishedAt = new Date(publishedBot.publishedAt);
       const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-      const snapshots = await storage.getMarketplaceEquitySnapshots(publishedBot.id, ninetyDaysAgo);
+      const sinceDate = publishedAt > ninetyDaysAgo ? publishedAt : ninetyDaysAgo;
+      const snapshots = await storage.getMarketplaceEquitySnapshots(publishedBot.id, sinceDate);
       
-      // Return aggregated performance data from public snapshots only
-      const performanceData = snapshots.map(s => ({
-        date: s.snapshotDate,
-        equity: parseFloat(s.equity),
-        pnl: parseFloat(s.pnlPercent),
-      })).reverse(); // Oldest first for chart
+      // Filter to only include snapshots from after publish date and build chart data
+      const filteredSnapshots = snapshots.filter(s => new Date(s.snapshotDate) >= publishedAt);
+      
+      // Build chart data with PnL calculated from equity change since first snapshot
+      const performanceData: { date: Date; equity: number; pnl: number }[] = [];
+      
+      if (filteredSnapshots.length > 0) {
+        // Get baseline equity from first snapshot (oldest, at end of array since sorted desc)
+        const baselineEquity = parseFloat(filteredSnapshots[filteredSnapshots.length - 1].equity);
+        
+        // Start with 0% at publish date
+        performanceData.push({
+          date: publishedAt,
+          equity: baselineEquity,
+          pnl: 0, // Start at 0% since this is the baseline
+        });
+        
+        // Add actual snapshots (oldest first for chart), calculating PnL from baseline
+        filteredSnapshots.reverse().forEach(s => {
+          const currentEquity = parseFloat(s.equity);
+          // Calculate PnL as percentage change from baseline equity
+          const pnlFromBaseline = baselineEquity > 0 
+            ? ((currentEquity - baselineEquity) / baselineEquity) * 100 
+            : 0;
+          performanceData.push({
+            date: s.snapshotDate,
+            equity: currentEquity,
+            pnl: parseFloat(pnlFromBaseline.toFixed(4)),
+          });
+        });
+      }
       
       res.json({
         botId: publishedBot.id,
