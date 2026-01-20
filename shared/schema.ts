@@ -358,6 +358,7 @@ export const publishedBots = pgTable("published_bots", {
   isActive: boolean("is_active").default(true).notNull(),
   isFeatured: boolean("is_featured").default(false).notNull(),
   subscriberCount: integer("subscriber_count").default(0).notNull(),
+  creatorCapital: decimal("creator_capital", { precision: 20, scale: 2 }).default("0").notNull(),
   totalCapitalInvested: decimal("total_capital_invested", { precision: 20, scale: 2 }).default("0").notNull(),
   totalTrades: integer("total_trades").default(0).notNull(),
   winningTrades: integer("winning_trades").default(0).notNull(),
@@ -373,6 +374,7 @@ export const publishedBots = pgTable("published_bots", {
 export const insertPublishedBotSchema = createInsertSchema(publishedBots).omit({
   id: true,
   subscriberCount: true,
+  creatorCapital: true,
   totalCapitalInvested: true,
   totalTrades: true,
   winningTrades: true,
@@ -430,6 +432,25 @@ export const insertPnlSnapshotSchema = createInsertSchema(pnlSnapshots).omit({
 });
 export type InsertPnlSnapshot = z.infer<typeof insertPnlSnapshotSchema>;
 export type PnlSnapshot = typeof pnlSnapshots.$inferSelect;
+
+// Marketplace: Public equity snapshots for published bots (decoupled from private trading bot data)
+export const marketplaceEquitySnapshots = pgTable("marketplace_equity_snapshots", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  publishedBotId: varchar("published_bot_id").notNull().references(() => publishedBots.id, { onDelete: "cascade" }),
+  snapshotDate: timestamp("snapshot_date").notNull(),
+  equity: decimal("equity", { precision: 20, scale: 6 }).notNull(),
+  pnlPercent: decimal("pnl_percent", { precision: 10, scale: 4 }).notNull().default("0"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqueBotDate: unique("marketplace_equity_snapshots_bot_date_unique").on(table.publishedBotId, table.snapshotDate),
+}));
+
+export const insertMarketplaceEquitySnapshotSchema = createInsertSchema(marketplaceEquitySnapshots).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertMarketplaceEquitySnapshot = z.infer<typeof insertMarketplaceEquitySnapshotSchema>;
+export type MarketplaceEquitySnapshot = typeof marketplaceEquitySnapshots.$inferSelect;
 
 // Security v3: Single-use nonces for signature verification
 export const authNonces = pgTable("auth_nonces", {
