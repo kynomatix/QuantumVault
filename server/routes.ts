@@ -7139,7 +7139,8 @@ export async function registerRoutes(
         const equityEvents = await storage.getBotEquityEvents(publishedBot.tradingBotId, 1000);
         netDeposited = equityEvents.reduce((sum, e) => {
           const amount = parseFloat(e.amount || '0');
-          return e.eventType === 'deposit' ? sum + amount : sum - amount;
+          const isDeposit = e.eventType === 'deposit' || e.eventType === 'drift_deposit';
+          return isDeposit ? sum + amount : sum - amount;
         }, 0);
       }
       
