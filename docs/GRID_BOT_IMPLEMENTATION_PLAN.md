@@ -90,6 +90,329 @@ Buy 1   ────────         Buy 15
 
 ---
 
+## Integration with Existing Bot Architecture
+
+### Overview
+
+Grid bots MUST leverage the existing bot architecture patterns rather than reinventing the wheel. The following systems are already implemented and tested:
+
+1. **Subaccount Management**: Each bot uses a dedicated Drift subaccount for isolation
+2. **Capital Deposits**: `executeAgentDriftDeposit`, `executeAgentTransferBetweenSubaccounts`
+3. **PnL Settlement**: `settleAllPnl` frees up margin by settling unrealized PnL
+4. **Leverage Configuration**: Per-bot leverage stored in schema with policy HMAC integrity
+5. **Margin Checks**: Drift SDK rejects insufficient collateral orders with specific error codes
+
+### Leverage Configuration (Match Existing Bots)
+
+```typescript
+/*
+LEVERAGE CONFIGURATION - REUSE EXISTING PATTERNS
+
+Existing trading_bots schema stores:
+- leverage: integer("leverage").default(1).notNull()
+- policyHmac: HMAC of (market, leverage, maxPositionSize) for integrity
+
+Grid bots should follow the same pattern:
+*/
+
+interface GridBotConfig {
+  // ... existing fields ...
+  
+  // Match trading_bots schema
+  leverage: number;           // User-configured leverage (1-20 depending on market tier)
+  totalInvestment: number;    // USDC amount deposited for this bot
+  policyHmac: string;         // HMAC of (market, leverage, gridCount, etc.) for integrity
+  
+  // New fields for grid-specific config
+  gridCount: number;
+  upperPrice: number;
+  lowerPrice: number;
+  entryScaleType: 'ascending' | 'descending' | 'flat';
+  profitScaleType: 'ascending' | 'descending' | 'flat';
+}
+
+// Grid bot creation validates leverage against market tier limits
+async function validateGridBotLeverage(
+  marketIndex: number,
+  requestedLeverage: number
+): Promise<{ valid: boolean; maxAllowed: number; error?: string }> {
+  const marketInfo = await getMarketBySymbol(/* ... */);
+  const maxLeverage = getMarketMaxLeverage(marketIndex);
+  
+  if (requestedLeverage > maxLeverage) {
+    return {
+      valid: false,
+      maxAllowed: maxLeverage,
+      error: `Max leverage for this market is ${maxLeverage}x`,
+    };
+  }
+  
+  return { valid: true, maxAllowed: maxLeverage };
+}
+```
+
+### Initial Investment and Capital Flow (Match Existing Bots)
+
+```typescript
+/*
+CAPITAL FLOW - LEVERAGE EXISTING PATTERNS
+
+Existing bot creation flow (from server/routes.ts):
+1. User configures bot with totalInvestment
+2. System transfers USDC from main subaccount (0) to bot's subaccount
+3. Bot trades within that capital allocation
+4. PnL stays in subaccount (or withdrawn based on settings)
+
+Grid bots should use the SAME capital flow:
+*/
+
+async function createGridBot(
+  walletAddress: string,
+  config: CreateGridBotRequest
+): Promise<GridBot> {
+  const wallet = await storage.getWallet(walletAddress);
+  if (!wallet || !wallet.agentPublicKey) {
+    throw new Error('Wallet not configured with agent wallet');
+  }
+  
+  // STEP 1: Allocate subaccount (same as trading bots)
+  const nextSubId = await getNextOnChainSubaccountId(wallet.agentPublicKey);
+  
+  // STEP 2: Transfer initial investment to subaccount
+  // REUSE: executeAgentTransferBetweenSubaccounts from drift-service.ts
+  const transferResult = await executeAgentTransferBetweenSubaccounts(
+    wallet.agentPublicKey,
+    0,                        // From main subaccount
+    nextSubId,                // To bot subaccount
+    config.totalInvestment    // Amount in USDC
+  );
+  
+  if (!transferResult.success) {
+    throw new Error(`Failed to transfer capital: ${transferResult.error}`);
+  }
+  
+  // STEP 3: Calculate position sizing based on leverage
+  // With 3x leverage and $1000 investment, max position = $3000 notional
+  const maxNotionalValue = config.totalInvestment * config.leverage;
+  
+  // STEP 4: Create bot record with HMAC integrity check
+  // REUSE: computeBotPolicyHmac from session-v3.ts
+  const policyHmac = await computeBotPolicyHmac(
+    walletAddress,
+    config.market,
+    config.leverage,
+    maxNotionalValue
+  );
+  
+  // STEP 5: Generate and store grid levels
+  const grids = generateVirtualGridWithSizing({
+    ...config,
+    totalInvestment: maxNotionalValue,  // Use leveraged amount for sizing
+  });
+  
+  // STEP 6: Store bot and grid levels
+  const bot = await storage.createGridBot({
+    walletAddress,
+    driftSubaccountId: nextSubId,
+    leverage: config.leverage,
+    totalInvestment: config.totalInvestment,
+    policyHmac,
+    ...config,
+  });
+  
+  await storage.storeGridLevels(bot.id, grids);
+  
+  return bot;
+}
+```
+
+### PnL Settlement for Margin Management
+
+```typescript
+/*
+PnL SETTLEMENT - LEVERAGE EXISTING settleAllPnl
+
+In grid trading, continuous buy/sell cycles generate floating PnL.
+This PnL is "unrealized" until settled, and doesn't free up margin.
+
+When to settle PnL (REUSE existing patterns):
+1. Before placing new orders if margin is tight
+2. After a profit cycle completes (position returns to zero)
+3. Periodically (every N minutes) to keep margin fluid
+4. When bot detects InsufficientCollateral error
+
+EXISTING FUNCTION: settleAllPnl(encryptedPrivateKey, subAccountId)
+- Lives in: server/drift-service.ts
+- Called by: routes.ts during reset, webhook after profit closes
+*/
+
+async function ensureSufficientMarginForGrid(
+  bot: GridBotConfig,
+  wallet: Wallet,
+  requiredMargin: number
+): Promise<{ success: boolean; error?: string }> {
+  // STEP 1: Check current account health
+  const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, bot.driftSubaccountId);
+  const freeCollateral = accountInfo.freeCollateral;
+  
+  if (freeCollateral >= requiredMargin) {
+    return { success: true };
+  }
+  
+  // STEP 2: Try settling PnL to free up margin
+  // REUSE: settleAllPnl from drift-service.ts
+  console.log(`[GridBot] Low margin ($${freeCollateral}), settling PnL...`);
+  
+  const settleResult = await settleAllPnl(
+    wallet.agentPublicKey,
+    bot.driftSubaccountId
+  );
+  
+  if (settleResult.success) {
+    console.log(`[GridBot] Settled PnL for ${settleResult.settledMarkets?.length || 0} market(s)`);
+  }
+  
+  // STEP 3: Re-check margin after settlement
+  const updatedInfo = await getDriftAccountInfo(wallet.agentPublicKey, bot.driftSubaccountId);
+  
+  if (updatedInfo.freeCollateral >= requiredMargin) {
+    return { success: true };
+  }
+  
+  // STEP 4: Still not enough - pause bot and notify user
+  return {
+    success: false,
+    error: `Insufficient margin after PnL settlement. Need $${requiredMargin}, have $${updatedInfo.freeCollateral}`,
+  };
+}
+
+// Integrate into order placement flow
+async function placeGridOrderWithMarginCheck(
+  bot: GridBotConfig,
+  grid: VirtualGrid,
+  wallet: Wallet
+): Promise<OrderPlacementResult> {
+  // Calculate margin needed for this order
+  const marginRequired = calculateMarginRequired(grid.size, grid.price, bot.leverage);
+  
+  // Ensure sufficient margin (may settle PnL)
+  const marginCheck = await ensureSufficientMarginForGrid(bot, wallet, marginRequired);
+  
+  if (!marginCheck.success) {
+    // Pause bot - can't place orders without margin
+    await storage.updateGridBot(bot.id, { status: 'paused' });
+    await notifyUser(wallet.address, {
+      type: 'grid_insufficient_margin',
+      message: marginCheck.error,
+    });
+    return { success: false, error: 'insufficient_margin', retryable: false };
+  }
+  
+  // Place order using existing error handling patterns
+  return await placeSingleOrderWithRetry(bot, grid);
+}
+```
+
+### Automatic PnL Settlement Triggers
+
+```typescript
+/*
+AUTO-SETTLEMENT TRIGGERS:
+
+1. AFTER PROFIT CYCLE COMPLETES (position returns to zero)
+   - Already implemented in calculateGridBotPnL
+   - Add settlement call when cycle detected
+
+2. ON INSUFFICIENT MARGIN ERROR
+   - Handle Drift error 6010 (InsufficientCollateral)
+   - Settle PnL and retry
+
+3. PERIODIC MAINTENANCE (every 10 minutes)
+   - Settle any floating PnL to keep margin fluid
+   - Prevents margin squeeze during volatile periods
+
+4. BEFORE MAJOR OPERATIONS
+   - Before adding more capital
+   - Before stopping bot and withdrawing
+*/
+
+async function periodicGridBotMaintenance(botId: string): Promise<void> {
+  const bot = await storage.getGridBot(botId);
+  if (!bot || bot.status !== 'active') return;
+  
+  const wallet = await storage.getWallet(bot.walletAddress);
+  if (!wallet?.agentPublicKey) return;
+  
+  // Settle any floating PnL
+  try {
+    const settleResult = await settleAllPnl(
+      wallet.agentPublicKey,
+      bot.driftSubaccountId
+    );
+    
+    if (settleResult.success && settleResult.settledMarkets?.length > 0) {
+      console.log(`[GridBot Maintenance] Settled PnL for ${settleResult.settledMarkets.length} market(s)`);
+    }
+  } catch (err: any) {
+    // Non-fatal - log and continue
+    console.warn(`[GridBot Maintenance] PnL settlement error: ${err.message}`);
+  }
+}
+
+// Schedule: Run every 10 minutes for active grid bots
+// setInterval(() => runForAllActiveGridBots(periodicGridBotMaintenance), 10 * 60 * 1000);
+```
+
+### Margin Calculation for Grid Orders
+
+```typescript
+/*
+MARGIN CALCULATION:
+
+For perpetual futures with leverage:
+  Margin Required = (Order Size × Price) / Leverage
+
+Example:
+- Order: Buy 0.1 BTC at $50,000
+- Leverage: 5x
+- Margin = (0.1 × 50000) / 5 = $1,000 USDC
+*/
+
+function calculateMarginRequired(
+  size: number,
+  price: number,
+  leverage: number
+): number {
+  const notionalValue = size * price;
+  const marginRequired = notionalValue / leverage;
+  
+  // Add 10% buffer for price movement and fees
+  return marginRequired * 1.10;
+}
+
+// Calculate total margin needed for initial grid placement
+function calculateInitialMarginRequirement(
+  grids: VirtualGrid[],
+  leverage: number,
+  direction: 'long' | 'short'
+): number {
+  // Only entry orders need margin (buys for long, sells for short)
+  const entryGrids = grids.filter(g => 
+    direction === 'long' ? g.side === 'buy' : g.side === 'sell'
+  );
+  
+  // Sum margin for all entry orders
+  let totalMargin = 0;
+  for (const grid of entryGrids) {
+    totalMargin += calculateMarginRequired(grid.size, grid.price, leverage);
+  }
+  
+  return totalMargin;
+}
+```
+
+---
+
 ## Capital Allocation Model
 
 ### Why Entry Orders Need Capital, Profit Orders Don't
@@ -2424,13 +2747,18 @@ export const gridBots = pgTable("grid_bots", {
   walletAddress: text("wallet_address").notNull(),
   driftSubaccountId: integer("drift_subaccount_id").notNull(),
   
-  // Configuration
+  // Configuration (MATCHES trading_bots pattern)
   market: text("market").notNull(),
   marketIndex: integer("market_index").notNull(),
   upperPrice: decimal("upper_price").notNull(),
   lowerPrice: decimal("lower_price").notNull(),
   gridCount: integer("grid_count").notNull(),
-  totalInvestment: decimal("total_investment").notNull(),
+  
+  // Investment & Leverage (SAME AS trading_bots)
+  totalInvestment: decimal("total_investment", { precision: 20, scale: 2 }).notNull(),
+  leverage: integer("leverage").default(1).notNull(),           // User-configured leverage
+  policyHmac: text("policy_hmac"),                              // HMAC integrity check
+  
   startPrice: decimal("start_price").notNull(),  // Price when bot was created
   
   // Direction & Independent Scale Types
