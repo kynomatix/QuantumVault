@@ -7120,7 +7120,7 @@ export async function registerRoutes(
     }
   });
 
-  // Get public performance data for a published bot (equity chart, no private data)
+  // Get public performance data for a published bot (trade-based chart like bot management drawer)
   app.get("/api/marketplace/:id/performance", async (req, res) => {
     try {
       const publishedBot = await storage.getPublishedBotById(req.params.id);
@@ -7128,43 +7128,42 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Bot not found" });
       }
       
-      // Get public equity snapshots for equity chart - only from publish date onwards
+      // Get performance series from trades (same as bot management drawer)
       const publishedAt = new Date(publishedBot.publishedAt);
-      const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-      const sinceDate = publishedAt > ninetyDaysAgo ? publishedAt : ninetyDaysAgo;
-      const snapshots = await storage.getMarketplaceEquitySnapshots(publishedBot.id, sinceDate);
+      const tradeSeries = await storage.getBotPerformanceSeries(publishedBot.tradingBotId, publishedAt);
       
-      // Filter to only include snapshots from after publish date and build chart data
-      const filteredSnapshots = snapshots.filter(s => new Date(s.snapshotDate) >= publishedAt);
-      
-      // Build chart data showing performance since publish (starts at 0%, shows change over time)
-      const performanceData: { date: Date; equity: number; pnl: number }[] = [];
-      
-      if (filteredSnapshots.length > 0) {
-        // Get baseline equity from first snapshot after publish (oldest, at end of array since sorted desc)
-        const baselineEquity = parseFloat(filteredSnapshots[filteredSnapshots.length - 1].equity);
-        
-        // Start with 0% at publish date
-        performanceData.push({
-          date: publishedAt,
-          equity: baselineEquity,
-          pnl: 0, // Start at 0% since this is the baseline
-        });
-        
-        // Reverse to get oldest first for chart display
-        filteredSnapshots.reverse().forEach(s => {
-          const currentEquity = parseFloat(s.equity);
-          // Calculate PnL as percentage change from baseline equity at publish time
-          const pnlFromBaseline = baselineEquity > 0 
-            ? ((currentEquity - baselineEquity) / baselineEquity) * 100 
-            : 0;
-          performanceData.push({
-            date: s.snapshotDate,
-            equity: currentEquity,
-            pnl: parseFloat(pnlFromBaseline.toFixed(4)),
-          });
-        });
+      // Get the creator's net deposited amount for percentage calculations
+      const tradingBot = await storage.getTradingBotById(publishedBot.tradingBotId);
+      let netDeposited = 0;
+      if (tradingBot) {
+        const equityEvents = await storage.getBotEquityEvents(publishedBot.tradingBotId, 1000);
+        netDeposited = equityEvents.reduce((sum, e) => {
+          const amount = parseFloat(e.amount || '0');
+          return e.eventType === 'deposit' ? sum + amount : sum - amount;
+        }, 0);
       }
+      
+      // Build chart data showing performance since publish (starts at 0%)
+      const performanceData: { date: Date; pnl: number; pnlDollar: number }[] = [];
+      
+      // Add initial 0 point at publish date
+      performanceData.push({
+        date: publishedAt,
+        pnl: 0,
+        pnlDollar: 0,
+      });
+      
+      // Add trade points with cumulative PnL as percentage of net deposited
+      tradeSeries.forEach(trade => {
+        const pnlPercent = netDeposited > 0 
+          ? (trade.cumulativePnl / netDeposited) * 100 
+          : 0;
+        performanceData.push({
+          date: trade.timestamp,
+          pnl: parseFloat(pnlPercent.toFixed(4)),
+          pnlDollar: trade.cumulativePnl,
+        });
+      });
       
       res.json({
         botId: publishedBot.id,
