@@ -19,13 +19,14 @@ import {
   LineChart as LineChartIcon
 } from 'lucide-react';
 import {
-  LineChart,
-  Line,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  ReferenceLine,
 } from 'recharts';
 import { SubscribeBotModal } from './SubscribeBotModal';
 
@@ -63,8 +64,11 @@ export function BotDetailsModal({ isOpen, onClose, bot, isSubscribed, onSubscrib
 
   const chartData = performanceData?.equityHistory?.map((point) => ({
     date: new Date(point.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-    equity: point.equity,
+    performance: point.pnl,
   })) || [];
+
+  const latestPerformance = chartData.length > 0 ? chartData[chartData.length - 1].performance : 0;
+  const performanceColor = latestPerformance >= 0 ? 'hsl(142.1 76.2% 36.3%)' : 'hsl(0 72.2% 50.6%)';
 
   const handleSubscribe = () => {
     setSubscribeModalOpen(true);
@@ -194,7 +198,7 @@ export function BotDetailsModal({ isOpen, onClose, bot, isSubscribed, onSubscrib
             <div className="p-4 rounded-xl bg-muted/30 border border-border/50">
               <h4 className="font-semibold mb-3 flex items-center gap-2">
                 <LineChartIcon className="w-4 h-4 text-primary" />
-                Equity History
+                Performance Chart
               </h4>
               {performanceLoading ? (
                 <div className="flex items-center justify-center h-48">
@@ -202,9 +206,15 @@ export function BotDetailsModal({ isOpen, onClose, bot, isSubscribed, onSubscrib
                   <span className="ml-2 text-muted-foreground">Loading performance data...</span>
                 </div>
               ) : chartData.length > 0 ? (
-                <div className="h-48" data-testid="chart-equity-history">
+                <div className="h-48" data-testid="chart-performance">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+                    <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+                      <defs>
+                        <linearGradient id="performanceGradient" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor={performanceColor} stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor={performanceColor} stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
                       <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
                       <XAxis 
                         dataKey="date" 
@@ -216,8 +226,10 @@ export function BotDetailsModal({ isOpen, onClose, bot, isSubscribed, onSubscrib
                         tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
                         axisLine={{ stroke: 'hsl(var(--border))' }}
                         tickLine={false}
-                        tickFormatter={(value) => `$${value >= 1000 ? `${(value/1000).toFixed(1)}K` : value}`}
+                        tickFormatter={(value) => `${value >= 0 ? '+' : ''}${value.toFixed(0)}%`}
+                        domain={['auto', 'auto']}
                       />
+                      <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" opacity={0.5} />
                       <Tooltip 
                         contentStyle={{ 
                           backgroundColor: 'hsl(var(--card))', 
@@ -225,17 +237,18 @@ export function BotDetailsModal({ isOpen, onClose, bot, isSubscribed, onSubscrib
                           borderRadius: '8px',
                           fontSize: '12px'
                         }}
-                        formatter={(value: number) => [`$${value.toFixed(2)}`, 'Equity']}
+                        formatter={(value: number) => [`${value >= 0 ? '+' : ''}${value.toFixed(2)}%`, 'Return']}
                       />
-                      <Line 
+                      <Area 
                         type="monotone" 
-                        dataKey="equity" 
-                        stroke="hsl(var(--primary))" 
+                        dataKey="performance" 
+                        stroke={performanceColor}
                         strokeWidth={2}
+                        fill="url(#performanceGradient)"
                         dot={false}
-                        activeDot={{ r: 4, fill: 'hsl(var(--primary))' }}
+                        activeDot={{ r: 4, fill: performanceColor }}
                       />
-                    </LineChart>
+                    </AreaChart>
                   </ResponsiveContainer>
                 </div>
               ) : (
