@@ -46,18 +46,47 @@ Virtual Grid (100 levels)              Active Orders (max 32)
 └─────────────────────────────┘       └─────────────────────────┘
 ```
 
-### Rolling Order Logic
+### Rolling Order Logic (Clarified)
 
-When an order fills:
-1. Remove filled order from active set
-2. Check if next virtual grid level should become active
-3. Place new limit order for that level
-4. Maintain buy/sell balance around current price
+**Key Insight**: All grid levels are PRE-CALCULATED at bot creation. No real-time price calculation needed.
 
-When price moves significantly:
-1. Cancel orders that are now "too far" from price
-2. Activate virtual grids that are now "close enough"
-3. Rebalance order distribution
+**Initial Setup (Long Grid Example):**
+1. Calculate all 100 grid price levels at bot creation and store them
+2. Place 16 BUY scale orders below current price (levels 1-16 from bottom)
+3. Place 16 REDUCE-ONLY sell orders above current price (levels closest above)
+4. Track: `lowestActiveBuyLevel`, `highestActiveSellLevel`
+
+**When a BUY order fills:**
+1. Mark that grid level as "filled"
+2. Look up the NEXT pre-calculated buy level (below lowest active)
+3. Place new buy limit order at that exact price
+4. Update `lowestActiveBuyLevel`
+
+**When a SELL (reduce-only) order fills:**
+1. Mark that grid level as "filled"  
+2. Look up the NEXT pre-calculated sell level (above highest active)
+3. Place new reduce-only sell at that exact price
+4. Update `highestActiveSellLevel`
+
+**Grid Expansion Pattern:**
+```
+Initial State:           After 3 Buy Fills:
+                         
+Sell 16 ────────         Sell 19 ──────── (new)
+Sell 15                  Sell 18 (new)
+...                      Sell 17 (new)
+Sell 1  ────────         Sell 16
+═══ Current Price ═══    ...
+Buy 16  ────────         Sell 1
+Buy 15                   ═══ Price dropped ═══
+...                      Buy 16
+Buy 1   ────────         Buy 15
+                         ...
+                         Buy 4  ──────── (now lowest)
+                         Buy 3  (filled)
+                         Buy 2  (filled)
+                         Buy 1  (filled)
+```
 
 ---
 
@@ -106,106 +135,181 @@ interface VirtualGrid {
 }
 ```
 
-### 2. Grid Calculation Engine
+### 2. Grid Calculation Engine (Pre-Calculated at Bot Creation)
 
 ```typescript
-function calculateGridLevels(config: GridBotConfig): VirtualGrid[] {
+// Called ONCE when bot is created - stores all levels
+function calculateAndStoreGridLevels(config: GridBotConfig, startPrice: number): VirtualGrid[] {
   const grids: VirtualGrid[] = [];
   const priceRange = config.upperPrice - config.lowerPrice;
-  const gridSpacing = priceRange / config.gridCount;
+  const gridSpacing = priceRange / (config.gridCount - 1);
   
   for (let i = 0; i < config.gridCount; i++) {
     const price = config.lowerPrice + (i * gridSpacing);
     grids.push({
-      level: i + 1,
+      level: i + 1,  // Level 1 = lowest price, Level N = highest price
       price: parseFloat(price.toFixed(4)),
-      side: price > currentPrice ? 'sell' : 'buy',
+      side: price < startPrice ? 'buy' : 'sell',  // Below start = buy, above = sell
       status: 'pending',
+      isReduceOnly: price > startPrice,  // Sells are reduce-only in long grid
     });
   }
   
+  // Store to database - these never change
+  await storage.storeGridLevels(config.id, grids);
   return grids;
 }
 
-function determineActiveGrids(
-  allGrids: VirtualGrid[],
-  currentPrice: number,
-  maxOrders: number = 32
-): VirtualGrid[] {
-  // Split available orders: half buys, half sells
-  const maxPerSide = Math.floor(maxOrders / 2);
+// State tracking (stored in grid bot record)
+interface GridBotState {
+  lowestActiveBuyLevel: number;   // e.g., level 5
+  highestActiveSellLevel: number; // e.g., level 60
+  nextBuyLevel: number;           // Next level to place when buy fills
+  nextSellLevel: number;          // Next level to place when sell fills
+}
+
+// Initial placement - uses scale orders for efficiency
+async function placeInitialGridOrders(
+  config: GridBotConfig,
+  grids: VirtualGrid[],
+  startPrice: number
+): Promise<void> {
+  const buyGrids = grids.filter(g => g.price < startPrice).slice(-16); // Top 16 buys (closest)
+  const sellGrids = grids.filter(g => g.price > startPrice).slice(0, 16); // Bottom 16 sells (closest)
   
-  const buyGrids = allGrids
-    .filter(g => g.side === 'buy' && g.status === 'pending')
-    .sort((a, b) => b.price - a.price)  // Closest to price first
-    .slice(0, maxPerSide);
-    
-  const sellGrids = allGrids
-    .filter(g => g.side === 'sell' && g.status === 'pending')
-    .sort((a, b) => a.price - b.price)  // Closest to price first
-    .slice(0, maxPerSide);
-    
-  return [...buyGrids, ...sellGrids];
+  // Place 16 buy scale orders
+  await driftClient.placeScaleOrders({
+    direction: PositionDirection.LONG,
+    numOrders: buyGrids.length,
+    startPrice: buyGrids[0].price,
+    endPrice: buyGrids[buyGrids.length - 1].price,
+    // ... size config
+  });
+  
+  // Place 16 reduce-only sell scale orders
+  await driftClient.placeScaleOrders({
+    direction: PositionDirection.SHORT,
+    reduceOnly: true,
+    numOrders: sellGrids.length,
+    startPrice: sellGrids[0].price,
+    endPrice: sellGrids[sellGrids.length - 1].price,
+    // ... size config
+  });
+  
+  // Initialize state
+  await storage.updateGridBotState(config.id, {
+    lowestActiveBuyLevel: buyGrids[0].level,
+    highestActiveSellLevel: sellGrids[sellGrids.length - 1].level,
+    nextBuyLevel: buyGrids[0].level - 1,  // Next buy goes one level lower
+    nextSellLevel: sellGrids[sellGrids.length - 1].level + 1,  // Next sell goes one level higher
+  });
 }
 ```
 
-### 3. Order Management Loop
+### 3. Order Management Loop (Simplified with Pre-Calculated Levels)
 
 ```typescript
 async function gridOrderManagementLoop(botId: string): Promise<void> {
   const bot = await storage.getGridBot(botId);
   if (!bot || bot.status !== 'active') return;
   
-  const currentPrice = await getCurrentMarketPrice(bot.market);
-  const allGrids = await storage.getVirtualGrids(botId);
+  const state = bot.state as GridBotState;
+  const grids = await storage.getGridLevels(botId);  // Pre-calculated, immutable
   
-  // 1. Check for filled orders
+  // 1. Get current open orders from Drift
   const activeOrders = await driftClient.getOpenOrders(bot.subaccountId);
-  for (const grid of allGrids.filter(g => g.status === 'active')) {
-    const order = activeOrders.find(o => o.orderId === grid.orderId);
-    if (!order) {
-      // Order was filled or cancelled
-      await handleFilledGrid(bot, grid, currentPrice);
+  const activeOrderPrices = new Set(activeOrders.map(o => o.price.toFixed(4)));
+  
+  // 2. Find which grid levels had orders that are now missing (filled)
+  const activeGrids = grids.filter(g => g.status === 'active');
+  const filledGrids: VirtualGrid[] = [];
+  
+  for (const grid of activeGrids) {
+    if (!activeOrderPrices.has(grid.price.toFixed(4))) {
+      filledGrids.push(grid);
     }
   }
   
-  // 2. Determine which grids should be active
-  const shouldBeActive = determineActiveGrids(allGrids, currentPrice, 32);
-  
-  // 3. Cancel orders that shouldn't be active anymore
-  const currentlyActive = allGrids.filter(g => g.status === 'active');
-  for (const grid of currentlyActive) {
-    if (!shouldBeActive.find(g => g.level === grid.level)) {
-      await cancelGridOrder(bot, grid);
-    }
-  }
-  
-  // 4. Place orders for grids that should be active but aren't
-  for (const grid of shouldBeActive) {
-    if (grid.status === 'pending') {
-      await placeGridOrder(bot, grid);
-    }
+  // 3. Process each filled grid
+  for (const filledGrid of filledGrids) {
+    await handleFilledGrid(bot, filledGrid, state, grids);
   }
 }
 
 async function handleFilledGrid(
   bot: GridBotConfig,
   filledGrid: VirtualGrid,
-  currentPrice: number
+  state: GridBotState,
+  grids: VirtualGrid[]
 ): Promise<void> {
   // Mark as filled
-  await storage.updateVirtualGrid(filledGrid.id, { 
+  await storage.updateGridLevel(filledGrid.id, { 
     status: 'filled',
     filledAt: new Date(),
   });
   
-  // Calculate PnL if this was a closing order
-  // (depends on grid strategy - see Strategy Types below)
+  if (filledGrid.side === 'buy') {
+    // BUY filled - place next buy at lower level (if available)
+    if (state.nextBuyLevel >= 1) {
+      const nextBuyGrid = grids.find(g => g.level === state.nextBuyLevel);
+      if (nextBuyGrid) {
+        await placeSingleOrder(bot, nextBuyGrid);
+        
+        // Update state
+        await storage.updateGridBotState(bot.id, {
+          lowestActiveBuyLevel: state.nextBuyLevel,
+          nextBuyLevel: state.nextBuyLevel - 1,
+        });
+      }
+    }
+    
+    // Also place a new reduce-only sell above current highest
+    if (state.nextSellLevel <= grids.length) {
+      const nextSellGrid = grids.find(g => g.level === state.nextSellLevel);
+      if (nextSellGrid) {
+        await placeSingleOrder(bot, nextSellGrid, { reduceOnly: true });
+        
+        await storage.updateGridBotState(bot.id, {
+          highestActiveSellLevel: state.nextSellLevel,
+          nextSellLevel: state.nextSellLevel + 1,
+        });
+      }
+    }
+    
+  } else {
+    // SELL (reduce-only) filled - profit taken!
+    // Place next sell at higher level (if available)
+    if (state.nextSellLevel <= grids.length) {
+      const nextSellGrid = grids.find(g => g.level === state.nextSellLevel);
+      if (nextSellGrid) {
+        await placeSingleOrder(bot, nextSellGrid, { reduceOnly: true });
+        
+        await storage.updateGridBotState(bot.id, {
+          highestActiveSellLevel: state.nextSellLevel,
+          nextSellLevel: state.nextSellLevel + 1,
+        });
+      }
+    }
+  }
+}
+
+async function placeSingleOrder(
+  bot: GridBotConfig, 
+  grid: VirtualGrid,
+  options?: { reduceOnly?: boolean }
+): Promise<void> {
+  // Price is already pre-calculated in grid.price
+  await driftClient.placePerpOrder({
+    marketIndex: getMarketIndex(bot.market),
+    direction: grid.side === 'buy' ? PositionDirection.LONG : PositionDirection.SHORT,
+    orderType: OrderType.LIMIT,
+    price: grid.price,
+    baseAssetAmount: bot.orderSizePerGrid,
+    reduceOnly: options?.reduceOnly || false,
+    postOnly: true,  // Maker fees
+  });
   
-  // Create the "opposite" order for this grid level
-  // Buy filled -> place sell at same level (or higher for profit)
-  // Sell filled -> place buy at same level (or lower for profit)
-  await createOppositeOrder(bot, filledGrid, currentPrice);
+  await storage.updateGridLevel(grid.id, { status: 'active' });
 }
 ```
 
