@@ -108,15 +108,37 @@ interface GridBotConfig {
   
   // Position sizing
   totalInvestment: number; // Total USDC to use
-  orderSizePerGrid: number; // Calculated: totalInvestment / gridCount
   
-  // Strategy type
-  strategyType: 'neutral' | 'long_bias' | 'short_bias';
+  // Direction
+  direction: 'long' | 'short';  // Long = buy below/sell above, Short = sell above/buy below
   
-  // Advanced settings
-  useScaleOrders: boolean;        // Use Drift's built-in scale orders
-  scaleType: 'ascending' | 'descending' | 'flat';
-  takeProfitPercent?: number;     // Optional TP per grid
+  // INDEPENDENT SCALE TYPES for entry and profit-taking
+  entryScaleType: 'ascending' | 'descending' | 'flat';      // For position entry orders
+  profitScaleType: 'ascending' | 'descending' | 'flat';     // For profit-taking orders
+  
+  /*
+  Long Grid Examples:
+  ───────────────────
+  Entry = ASCENDING, Profit = DESCENDING (Conservative)
+    - Large buys at low prices (lower cost basis)
+    - Large sells near entry (take profit quickly)
+    
+  Entry = DESCENDING, Profit = ASCENDING (Aggressive)
+    - Large buys near entry (get positioned fast)
+    - Large sells at high prices (ride the trend)
+    
+  Entry = DESCENDING, Profit = DESCENDING (Balanced Aggressive)
+    - Large buys near entry (get positioned fast)  
+    - Large sells near entry (take profit quickly)
+    - Fringe orders are small on both sides
+  
+  Entry = ASCENDING, Profit = ASCENDING (Moon Strategy)
+    - Large buys at low prices (accumulate on dumps)
+    - Large sells at high prices (maximize upside)
+    - Risk: most profit locked in unlikely high fills
+  */
+  
+  // Risk settings
   stopLossPercent?: number;       // Optional SL for entire grid
   
   // State
@@ -153,27 +175,43 @@ function calculateAndStoreGridLevels(config: GridBotConfig, startPrice: number):
   const priceRange = config.upperPrice - config.lowerPrice;
   const gridSpacing = priceRange / (config.gridCount - 1);
   
-  // Split grids into buy/sell counts
-  const buyCount = Math.floor((startPrice - config.lowerPrice) / gridSpacing);
-  const sellCount = config.gridCount - buyCount;
+  // Split grids into entry/profit counts based on direction
+  const entryCount = Math.floor((startPrice - config.lowerPrice) / gridSpacing);
+  const profitCount = config.gridCount - entryCount;
   
-  // Calculate sizes based on scale type
-  const buySizes = calculateScaledSizes(buyCount, config.totalInvestment * 0.5, config.buyScaleType);
-  const sellSizes = calculateScaledSizes(sellCount, config.totalInvestment * 0.5, config.sellScaleType);
+  // For LONG: buys are entry, sells are profit-taking
+  // For SHORT: sells are entry, buys are profit-taking (inverted)
+  const isLong = config.direction === 'long';
   
-  let buyIndex = 0;
-  let sellIndex = 0;
+  // Calculate sizes using INDEPENDENT scale types
+  const entrySizes = calculateScaledSizes(
+    entryCount, 
+    config.totalInvestment * 0.5, 
+    config.entryScaleType    // User's choice for entry side
+  );
+  const profitSizes = calculateScaledSizes(
+    profitCount, 
+    config.totalInvestment * 0.5, 
+    config.profitScaleType   // User's choice for profit side (independent!)
+  );
+  
+  let entryIndex = 0;
+  let profitIndex = 0;
   
   for (let i = 0; i < config.gridCount; i++) {
     const price = config.lowerPrice + (i * gridSpacing);
-    const isBuy = price < startPrice;
+    const isEntryOrder = isLong ? (price < startPrice) : (price > startPrice);
     
     grids.push({
       level: i + 1,
       price: parseFloat(price.toFixed(4)),
-      side: isBuy ? 'buy' : 'sell',
-      size: isBuy ? buySizes[buyIndex++] : sellSizes[sellIndex++],  // Pre-calculated size!
-      isReduceOnly: !isBuy,  // All sells are reduce-only in long grid
+      side: isLong 
+        ? (price < startPrice ? 'buy' : 'sell')    // Long: buy below, sell above
+        : (price > startPrice ? 'sell' : 'buy'),   // Short: sell above, buy below
+      size: isEntryOrder 
+        ? entrySizes[entryIndex++]   // Entry orders use entryScaleType
+        : profitSizes[profitIndex++], // Profit orders use profitScaleType
+      isReduceOnly: !isEntryOrder,   // Profit-taking orders are always reduce-only
       status: 'pending',
     });
   }
