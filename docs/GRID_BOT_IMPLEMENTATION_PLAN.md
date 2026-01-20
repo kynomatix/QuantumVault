@@ -72,7 +72,6 @@ These rules MUST be maintained throughout implementation:
 | 15 | **Position reconciliation on startup & periodically** | Drift between expected and actual positions |
 | 16 | **Agent wallet SOL balance monitored** | All transactions fail silently; bot halts |
 | 17 | **Database transactions for multi-step state updates** | Inconsistent grid state on interruption |
-| 18 | **Subaccount recycling before creating new** | Unnecessary SOL rent accumulation |
 
 ### Key File References
 
@@ -3999,70 +3998,15 @@ async function startBotPolling(botId: string): Promise<void> {
 }
 ```
 
-### Funding Rate Awareness
+### Funding Rate Awareness (Future Enhancement)
 
-**Issue**: Holding large positions in a paused grid could bleed margin due to funding payments against the position.
+**Status**: Optional future enhancement, not required for MVP.
 
-**Solution**: Monitor predicted funding rates and warn/pause when adverse.
+**Context**: When a grid bot is paused with open inventory, adverse funding rates can bleed margin even with flat prices. Longs pay when funding is positive, shorts pay when negative.
 
-```typescript
-/*
-FUNDING RATE AWARENESS - PREVENT MARGIN BLEED IN PAUSED GRIDS
+**Data Availability**: Drift SDK provides funding rate directly via `marketAccount.amm.lastFundingRate`. No need to calculate via perp-spot basis.
 
-If a grid bot is paused with a large position and funding is highly negative
-for that position direction, margin will bleed out even with flat prices.
-*/
-
-const FUNDING_RATE_ALERT_THRESHOLD = 0.001; // 0.1% per hour = extreme
-
-async function checkFundingRateRisk(bot: GridBotConfig): Promise<{
-  riskLevel: 'low' | 'medium' | 'high';
-  predictedHourlyRate: number;
-  action: string;
-}> {
-  const marketAccount = await driftClient.getPerpMarketAccount(bot.marketIndex);
-  const fundingRate = marketAccount.amm.lastFundingRate.toNumber() / 1e9; // Convert to decimal
-  
-  // Get current position direction
-  const positions = await getBatchPerpPositions(bot.agentPublicKey, [bot.marketIndex], bot.driftSubaccountId);
-  const position = positions[0];
-  
-  if (!position || Math.abs(position.baseAssetAmount) < 0.0001) {
-    return { riskLevel: 'low', predictedHourlyRate: 0, action: 'none' };
-  }
-  
-  const isLong = position.baseAssetAmount > 0;
-  const positionSize = Math.abs(position.baseAssetAmount);
-  
-  // Longs pay when funding is positive, shorts pay when negative
-  const paysIfPositive = isLong;
-  const adverseFunding = (fundingRate > 0 && paysIfPositive) || (fundingRate < 0 && !paysIfPositive);
-  
-  if (!adverseFunding) {
-    return { riskLevel: 'low', predictedHourlyRate: fundingRate, action: 'none' };
-  }
-  
-  const absFunding = Math.abs(fundingRate);
-  
-  if (absFunding >= FUNDING_RATE_ALERT_THRESHOLD) {
-    return {
-      riskLevel: 'high',
-      predictedHourlyRate: fundingRate,
-      action: 'Consider closing position or adjusting grid',
-    };
-  }
-  
-  if (absFunding >= FUNDING_RATE_ALERT_THRESHOLD / 2) {
-    return {
-      riskLevel: 'medium', 
-      predictedHourlyRate: fundingRate,
-      action: 'Monitor closely',
-    };
-  }
-  
-  return { riskLevel: 'low', predictedHourlyRate: fundingRate, action: 'none' };
-}
-```
+**Future Implementation**: Display a warning in the Bot Management Drawer when adverse funding exceeds a threshold (e.g., 0.1%/hr). This is informational only - no automatic behavior changes.
 
 ### Memory Cleanup for Stopped Bots
 
@@ -4093,101 +4037,38 @@ async function cleanupStoppedBotMemory(): Promise<void> {
 setInterval(cleanupStoppedBotMemory, 3600000);
 ```
 
-### Subaccount Recycling & Rent Management
+### Bot Management Drawer (Grid-Specific UI)
 
-**Issue**: Creating a new Drift subaccount costs ~0.035 SOL in rent. Users creating and deleting many bots accumulate these costs.
+**Context**: The existing `BotManagementDrawer.tsx` component handles signal bot management. Grid bots should inherit the same UX patterns while adding grid-specific controls and metrics.
 
-**Solution**: Recycle inactive subaccounts instead of always creating new ones.
+**Inherited Controls (from Signal Bots)**:
+- Pause/Resume bot
+- Delete bot (with sweep + close account + rent reclaim)
+- Deposit/Withdraw funds
+- View trade history
+- PnL chart and statistics
+- Webhook configuration (if applicable)
 
-```typescript
-/*
-SUBACCOUNT RECYCLING - REDUCE RENT COSTS
+**Grid-Specific Additions**:
 
-Instead of always creating new subaccounts, check for inactive/empty subaccounts
-from previously stopped bots and reuse them. This saves ~0.035 SOL per bot.
-*/
+| UI Element | Description |
+|------------|-------------|
+| **Grid Range Display** | Visual indicator showing upper/lower price bounds with current price position |
+| **Active Orders Count** | "12/100 orders active" - shows rolling window utilization |
+| **Grid Fill Progress** | How many buy/sell levels have been filled in current cycle |
+| **Range Status Badge** | "In Range" / "Out of Range (Above)" / "Out of Range (Below)" |
+| **Range Recovery Toggle** | Enable/disable automatic resume when price returns to range |
+| **Re-sync Grid Button** | Manual trigger for position reconciliation |
+| **Dust Cleanup Status** | Shows if any partial fills are pending cleanup |
+| **Grid Configuration** | Read-only display of entry scale, profit scale, grid count |
 
-async function findRecyclableSubaccount(
-  walletAddress: string,
-  agentPublicKey: string
-): Promise<number | null> {
-  // Get all bots for this wallet
-  const allBots = await storage.getBotsByWallet(walletAddress);
-  const gridBots = await storage.getGridBotsByWallet(walletAddress);
-  
-  // Find subaccounts used by stopped/deleted bots
-  const stoppedBotSubaccounts = new Set<number>();
-  for (const bot of [...allBots, ...gridBots]) {
-    if (bot.status === 'stopped' || bot.status === 'deleted') {
-      stoppedBotSubaccounts.add(bot.driftSubaccountId);
-    }
-  }
-  
-  // Find subaccounts still in use by active bots
-  const activeSubaccounts = new Set<number>();
-  for (const bot of [...allBots, ...gridBots]) {
-    if (bot.status !== 'stopped' && bot.status !== 'deleted') {
-      activeSubaccounts.add(bot.driftSubaccountId);
-    }
-  }
-  
-  // Find recyclable subaccounts (stopped but not reused)
-  const recyclable: number[] = [];
-  for (const subId of stoppedBotSubaccounts) {
-    if (!activeSubaccounts.has(subId) && subId !== 0) { // Never recycle subaccount 0
-      recyclable.push(subId);
-    }
-  }
-  
-  if (recyclable.length === 0) {
-    return null;
-  }
-  
-  // Verify the subaccount is actually empty on-chain
-  for (const subId of recyclable) {
-    try {
-      const accountInfo = await getDriftAccountInfo(agentPublicKey, subId);
-      const positions = await getBatchPerpPositions(agentPublicKey, [], subId);
-      
-      // Check: no open positions and no significant balance
-      const hasNoPositions = positions.every(p => Math.abs(p?.baseAssetAmount || 0) < 0.0001);
-      const hasLowBalance = parseFloat(accountInfo.balance) < 1.0; // < $1
-      
-      if (hasNoPositions && hasLowBalance) {
-        console.log(`[GridBot] Found recyclable subaccount ${subId}`);
-        return subId;
-      }
-    } catch (error) {
-      // Subaccount might not exist on-chain (closed), skip
-      continue;
-    }
-  }
-  
-  return null;
-}
+**Grid Bot States**:
+- `running` - Actively managing orders within range
+- `paused` - User-initiated pause, orders cancelled, position may remain
+- `out_of_range` - Price outside grid bounds, waiting for return (if recovery enabled)
+- `stopped` - Fully stopped, funds swept, account closed
 
-async function getOrCreateSubaccountForGridBot(
-  walletAddress: string,
-  agentPublicKey: string,
-  agentPrivateKeyEncrypted: string
-): Promise<number> {
-  // First, try to recycle an existing subaccount
-  const recyclable = await findRecyclableSubaccount(walletAddress, agentPublicKey);
-  
-  if (recyclable !== null) {
-    console.log(`[GridBot] Recycling subaccount ${recyclable} for new grid bot`);
-    return recyclable;
-  }
-  
-  // No recyclable subaccount, create new one
-  const newSubaccountId = await getNextOnChainSubaccountId(agentPublicKey);
-  console.log(`[GridBot] Creating new subaccount ${newSubaccountId} for grid bot`);
-  
-  return newSubaccountId;
-}
-```
-
-**Rent Reclamation Note**: Drift subaccounts cannot be fully closed to reclaim rent while the main account (subaccount 0) exists. Recycling is the only practical approach to managing costs. Users should be informed that subaccount rent is non-refundable.
+**Implementation Note**: Create `GridBotManagementDrawer.tsx` that wraps or extends the existing drawer component pattern, reusing shared UI components from shadcn/ui.
 
 ### Updated Critical Assumptions Table
 
@@ -4202,7 +4083,6 @@ Add these invariants to the existing table (Section: Critical Assumptions & Inva
 | 15 | **Position reconciliation runs on startup and periodically** | Drift between expected and actual positions |
 | 16 | **Agent wallet SOL monitored** | All transactions fail silently |
 | 17 | **Database transactions for multi-step state updates** | Inconsistent grid state on interruption |
-| 18 | **Subaccount recycling before creating new** | Unnecessary SOL rent accumulation |
 
 ---
 
