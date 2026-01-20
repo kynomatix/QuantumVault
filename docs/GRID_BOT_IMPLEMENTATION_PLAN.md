@@ -90,6 +90,120 @@ Buy 1   ────────         Buy 15
 
 ---
 
+## Capital Allocation Model
+
+### Why Entry Orders Need Capital, Profit Orders Don't
+
+In perpetual futures, only **entry orders** require margin capital. Profit-taking orders (reduce-only) simply close existing positions and don't need additional margin.
+
+```
+LONG GRID CAPITAL FLOW:
+
+1. User deposits $1,000 USDC as margin
+2. Bot places BUY orders using this margin
+3. When buys fill → position opens (margin used)
+4. SELL orders are reduce-only → no additional margin needed
+5. When sells fill → position closes → margin freed + PnL realized
+
+Capital needed = Maximum position size from entry orders only
+```
+
+### Capital Allocation for Grid Sizing
+
+```typescript
+/*
+CAPITAL ALLOCATION:
+
+Total investment is allocated to ENTRY orders only (the side that opens positions).
+Profit orders (reduce-only) don't require additional capital.
+
+For LONG grid:
+- Entry = BUY orders (need margin)
+- Profit = SELL orders (reduce-only, no margin)
+- Allocate 100% of totalInvestment to buy side sizing
+
+For SHORT grid:
+- Entry = SELL orders (need margin)  
+- Profit = BUY orders (reduce-only, no margin)
+- Allocate 100% of totalInvestment to sell side sizing
+
+The ascending/descending scale applies to order SIZES, not capital allocation.
+*/
+
+function calculateGridCapitalAllocation(config: GridBotConfig): {
+  entryCapital: number;
+  profitCapital: number;
+} {
+  // Entry orders use the full investment as margin backing
+  // Profit orders (reduce-only) don't need capital - they just close positions
+  return {
+    entryCapital: config.totalInvestment,
+    profitCapital: 0,  // Reduce-only orders don't need margin
+  };
+}
+
+// Updated size calculation reflecting this
+function calculateAndStoreGridLevels(config: GridBotConfig, startPrice: number): VirtualGrid[] {
+  // ... price calculation same as before ...
+  
+  const entryCount = /* grids below/above startPrice based on direction */;
+  const profitCount = config.gridCount - entryCount;
+  
+  // Entry orders sized based on total investment
+  // Each entry order's size is calculated so that if ALL entry orders fill,
+  // the total position equals totalInvestment at average cost
+  const entrySizes = calculateScaledSizes(
+    entryCount,
+    config.totalInvestment,     // Full capital to entry side
+    config.entryScaleType
+  );
+  
+  // Profit order sizes mirror the entry sizes they're meant to close
+  // This ensures each sell can close what the corresponding buy opened
+  const profitSizes = calculateScaledSizes(
+    profitCount,
+    config.totalInvestment,     // Same total value for matching closes
+    config.profitScaleType
+  );
+  
+  // ...rest of grid building...
+}
+```
+
+### Leverage Considerations
+
+```typescript
+/*
+LEVERAGE IMPACT:
+
+User's totalInvestment is MARGIN, not position size.
+Actual position size = margin × leverage
+
+Example with 5x leverage:
+- totalInvestment = $1,000 (margin)
+- Max position value = $5,000
+- If SOL = $100, max position = 50 SOL
+
+Grid sizing must account for this:
+*/
+
+function calculatePositionSizePerGrid(
+  config: GridBotConfig,
+  leverage: number
+): number {
+  const maxPositionValue = config.totalInvestment * leverage;
+  const entryGridCount = /* count of entry grids */;
+  
+  // For flat scaling
+  const avgSizePerGrid = maxPositionValue / entryGridCount;
+  
+  // Apply ascending/descending distribution
+  return avgSizePerGrid;  // Adjusted by scale type
+}
+```
+
+---
+
 ## Detailed Technical Design
 
 ### 1. Grid Configuration Model
@@ -99,22 +213,26 @@ interface GridBotConfig {
   // Basic settings
   id: string;
   name: string;
-  market: string;  // e.g., "SOL-PERP"
+  market: string;                  // e.g., "SOL-PERP"
+  marketIndex: number;             // Drift market index (for SDK calls)
+  driftSubaccountId: number;       // Drift subaccount for this bot
+  walletAddress: string;
   
   // Grid range
-  upperPrice: number;      // Top of grid range
-  lowerPrice: number;      // Bottom of grid range
-  gridCount: number;       // Total virtual grids (e.g., 100)
+  upperPrice: number;              // Top of grid range
+  lowerPrice: number;              // Bottom of grid range
+  gridCount: number;               // Total virtual grids (e.g., 100)
+  startPrice: number;              // Price when bot was created
   
   // Position sizing
-  totalInvestment: number; // Total USDC to use
+  totalInvestment: number;         // Total USDC to use as margin
   
   // Direction
-  direction: 'long' | 'short';  // Long = buy below/sell above, Short = sell above/buy below
+  direction: 'long' | 'short';     // Long = buy below/sell above, Short = sell above/buy below
   
   // INDEPENDENT SCALE TYPES for entry and profit-taking
-  entryScaleType: 'ascending' | 'descending' | 'flat';      // For position entry orders
-  profitScaleType: 'ascending' | 'descending' | 'flat';     // For profit-taking orders
+  entryScaleType: 'ascending' | 'descending' | 'flat';
+  profitScaleType: 'ascending' | 'descending' | 'flat';
   
   /*
   Long Grid Examples:
@@ -139,35 +257,38 @@ interface GridBotConfig {
   */
   
   // Risk settings
-  stopLossPercent?: number;       // Optional SL for entire grid
+  stopLossPercent?: number;
   
-  // State
-  status: 'active' | 'paused' | 'stopped';
+  // Rolling State (tracked in database, loaded into config)
+  lowestActiveBuyLevel?: number;
+  highestActiveSellLevel?: number;
+  nextBuyLevel?: number;
+  nextSellLevel?: number;
+  
+  // Status
+  status: 'active' | 'paused' | 'stopped' | 'range_exhausted';
   createdAt: Date;
 }
 
 interface VirtualGrid {
-  level: number;           // Grid level (1 to gridCount)
-  price: number;           // Price for this grid
-  side: 'buy' | 'sell';    // Order side
+  id: string;                      // Unique ID for this grid level
+  level: number;                   // Grid level (1 to gridCount)
+  price: number;                   // Pre-calculated price (IMMUTABLE)
+  size: number;                    // Pre-calculated size (IMMUTABLE)
+  side: 'buy' | 'sell';            // Order side
+  isReduceOnly: boolean;           // true for profit-taking orders
   status: 'pending' | 'active' | 'filled' | 'cancelled';
-  orderId?: string;        // Drift order ID if active on-chain
+  driftOrderId?: number;           // Drift's order ID when active (for fill tracking)
   filledAt?: Date;
-  pnl?: number;            // Realized PnL when closed
+  filledPrice?: number;            // Actual fill price
+  filledSize?: number;             // For partial fill tracking
 }
 ```
 
 ### 2. Grid Calculation Engine (Pre-Calculated PRICES and SIZES at Bot Creation)
 
 ```typescript
-interface VirtualGrid {
-  level: number;
-  price: number;
-  size: number;           // Pre-calculated size for this level
-  side: 'buy' | 'sell';
-  isReduceOnly: boolean;
-  status: 'pending' | 'active' | 'filled';
-}
+// Uses VirtualGrid interface defined above (id, level, price, size, side, isReduceOnly, status, driftOrderId, filledAt, filledPrice, filledSize)
 
 // Called ONCE when bot is created - stores all levels WITH sizes
 function calculateAndStoreGridLevels(config: GridBotConfig, startPrice: number): VirtualGrid[] {
@@ -184,15 +305,20 @@ function calculateAndStoreGridLevels(config: GridBotConfig, startPrice: number):
   const isLong = config.direction === 'long';
   
   // Calculate sizes using INDEPENDENT scale types
+  // Entry orders get 100% of capital (they need margin)
+  // Profit orders mirror entry sizes (they just close positions)
   const entrySizes = calculateScaledSizes(
     entryCount, 
-    config.totalInvestment * 0.5, 
-    config.entryScaleType    // User's choice for entry side
+    config.totalInvestment,     // 100% to entry side (margin requirement)
+    config.entryScaleType       // User's choice for entry side
   );
+  
+  // Profit orders: size distribution follows profitScaleType
+  // Total profit size = total entry size (to fully close all entries)
   const profitSizes = calculateScaledSizes(
     profitCount, 
-    config.totalInvestment * 0.5, 
-    config.profitScaleType   // User's choice for profit side (independent!)
+    config.totalInvestment,     // Mirrors entry capital for full closure
+    config.profitScaleType      // User's choice for profit side (independent!)
   );
   
   let entryIndex = 0;
@@ -269,152 +395,185 @@ Result: Most capital deployed at best prices (lowest)
 */
 ```
 
-// State tracking (stored in grid bot record)
-interface GridBotState {
-  lowestActiveBuyLevel: number;   // e.g., level 5
-  highestActiveSellLevel: number; // e.g., level 60
-  nextBuyLevel: number;           // Next level to place when buy fills
-  nextSellLevel: number;          // Next level to place when sell fills
-}
+/*
+STATE TRACKING:
 
-// Initial placement - uses scale orders for efficiency
+Rolling state is stored directly in the GridBotConfig (and gridBots table):
+- lowestActiveBuyLevel: The lowest grid level with an active buy order
+- highestActiveSellLevel: The highest grid level with an active sell order  
+- nextBuyLevel: Next level to place when a buy fills (expands downward)
+- nextSellLevel: Next level to place when a sell fills (expands upward)
+
+This eliminates the need for a separate GridBotState interface - all state
+is part of the bot configuration and persisted in the gridBots table schema.
+
+See GridBotConfig interface above and gridBots schema below for field definitions.
+*/
+
+// Initial placement - places orders individually to capture orderIds
+// (Scale orders could be used but require orderId mapping - see note below)
 async function placeInitialGridOrders(
   config: GridBotConfig,
   grids: VirtualGrid[],
   startPrice: number
 ): Promise<void> {
-  const buyGrids = grids.filter(g => g.price < startPrice).slice(-16); // Top 16 buys (closest)
-  const sellGrids = grids.filter(g => g.price > startPrice).slice(0, 16); // Bottom 16 sells (closest)
+  const buyGrids = grids
+    .filter(g => g.price < startPrice && g.status === 'pending')
+    .sort((a, b) => b.price - a.price)  // Closest to price first
+    .slice(0, 16);
+    
+  const sellGrids = grids
+    .filter(g => g.price > startPrice && g.status === 'pending')
+    .sort((a, b) => a.price - b.price)  // Closest to price first
+    .slice(0, 16);
   
-  // Place 16 buy scale orders
-  await driftClient.placeScaleOrders({
-    direction: PositionDirection.LONG,
-    numOrders: buyGrids.length,
-    startPrice: buyGrids[0].price,
-    endPrice: buyGrids[buyGrids.length - 1].price,
-    // ... size config
-  });
+  // Place each order individually using tracked placement
+  // This captures driftOrderId for each grid level
+  for (const grid of buyGrids) {
+    await placeSingleOrderWithTracking(config, grid);
+  }
   
-  // Place 16 reduce-only sell scale orders
-  await driftClient.placeScaleOrders({
-    direction: PositionDirection.SHORT,
-    reduceOnly: true,
-    numOrders: sellGrids.length,
-    startPrice: sellGrids[0].price,
-    endPrice: sellGrids[sellGrids.length - 1].price,
-    // ... size config
-  });
+  for (const grid of sellGrids) {
+    await placeSingleOrderWithTracking(config, grid);
+  }
   
-  // Initialize state
-  await storage.updateGridBotState(config.id, {
-    lowestActiveBuyLevel: buyGrids[0].level,
-    highestActiveSellLevel: sellGrids[sellGrids.length - 1].level,
-    nextBuyLevel: buyGrids[0].level - 1,  // Next buy goes one level lower
-    nextSellLevel: sellGrids[sellGrids.length - 1].level + 1,  // Next sell goes one level higher
+  // Initialize rolling state
+  const lowestBuy = buyGrids.length > 0 ? Math.min(...buyGrids.map(g => g.level)) : 0;
+  const highestSell = sellGrids.length > 0 ? Math.max(...sellGrids.map(g => g.level)) : config.gridCount;
+  
+  await storage.updateGridBot(config.id, {
+    lowestActiveBuyLevel: lowestBuy,
+    highestActiveSellLevel: highestSell,
+    nextBuyLevel: lowestBuy - 1,
+    nextSellLevel: highestSell + 1,
   });
 }
+
+/*
+NOTE ON SCALE ORDERS:
+
+Drift's placeScaleOrders batches multiple orders in one transaction, which is 
+more efficient but returns multiple orderIds. To use scale orders with our 
+orderId tracking:
+
+1. Call placeScaleOrders and capture the response
+2. Response contains array of orderIds in price order
+3. Map each orderId to corresponding grid level
+4. Update each grid's driftOrderId
+
+For simplicity, initial implementation uses individual order placement.
+Scale order optimization can be added later if initial placement speed 
+becomes a bottleneck.
+*/
 ```
 
-### 3. Order Management Loop (Simplified with Pre-Calculated Levels)
+### 3. Order Management Loop (Unified with Auditable Fill Detection)
 
 ```typescript
+/*
+MAIN POLLING LOOP:
+- Runs every 5 seconds for each active grid bot
+- Uses orderId tracking for reliable fill detection
+- Respects 32-order limit at all times
+*/
+
 async function gridOrderManagementLoop(botId: string): Promise<void> {
   const bot = await storage.getGridBot(botId);
   if (!bot || bot.status !== 'active') return;
   
-  const state = bot.state as GridBotState;
-  const grids = await storage.getGridLevels(botId);  // Pre-calculated, immutable
-  
-  // 1. Get current open orders from Drift
-  const activeOrders = await driftClient.getOpenOrders(bot.subaccountId);
-  const activeOrderPrices = new Set(activeOrders.map(o => o.price.toFixed(4)));
-  
-  // 2. Find which grid levels had orders that are now missing (filled)
-  const activeGrids = grids.filter(g => g.status === 'active');
-  const filledGrids: VirtualGrid[] = [];
-  
-  for (const grid of activeGrids) {
-    if (!activeOrderPrices.has(grid.price.toFixed(4))) {
-      filledGrids.push(grid);
-    }
+  // Skip if range exhausted (all grids used)
+  if (bot.status === 'range_exhausted') {
+    return;
   }
   
-  // 3. Process each filled grid
-  for (const filledGrid of filledGrids) {
-    await handleFilledGrid(bot, filledGrid, state, grids);
+  // Fetch grid levels (prices/sizes are immutable, status is mutable)
+  const grids = await storage.getGridLevels(botId);
+  
+  // STEP 1: Detect filled and cancelled orders using orderId tracking
+  const { filled, cancelled } = await detectFilledOrders(bot, grids);
+  
+  // STEP 2: Process state changes
+  await processOrderStateChanges(bot, grids, filled, cancelled);
+  
+  // STEP 3: Check for partial fills (update filledSize for visibility)
+  await checkPartialFills(bot, grids);
+  
+  // STEP 4: Rebalance to maintain optimal order distribution
+  // Re-fetch grids after state changes
+  const updatedGrids = await storage.getGridLevels(botId);
+  await rebalanceActiveOrders(bot, updatedGrids);
+  
+  // STEP 5: Check for range exhaustion
+  await handleRangeExhaustion(bot, updatedGrids);
+}
+
+// Place order and track orderId for fill detection
+async function placeSingleOrderWithTracking(
+  bot: GridBotConfig, 
+  grid: VirtualGrid
+): Promise<boolean> {
+  try {
+    const result = await driftClient.placePerpOrder({
+      marketIndex: bot.marketIndex,
+      direction: grid.side === 'buy' ? PositionDirection.LONG : PositionDirection.SHORT,
+      orderType: OrderType.LIMIT,
+      price: grid.price,                    // Pre-calculated
+      baseAssetAmount: grid.size,           // Pre-calculated
+      reduceOnly: grid.isReduceOnly,        // Pre-set
+      postOnly: true,
+    });
+    
+    // Store Drift's orderId for reliable fill tracking
+    await storage.updateGridLevel(grid.id, { 
+      status: 'active',
+      driftOrderId: result.orderId,
+    });
+    
+    return true;
+  } catch (err) {
+    console.error(`[GridBot] Failed to place order for level ${grid.level}: ${err.message}`);
+    return false;
   }
 }
 
+// Handle filled grid - update state and queue expansion orders
+// Note: Actual order placement happens in rebalanceActiveOrders to respect 32-order limit
 async function handleFilledGrid(
   bot: GridBotConfig,
   filledGrid: VirtualGrid,
-  state: GridBotState,
   grids: VirtualGrid[]
 ): Promise<void> {
-  // Mark as filled
+  // Mark grid as filled
   await storage.updateGridLevel(filledGrid.id, { 
     status: 'filled',
     filledAt: new Date(),
+    driftOrderId: null,
   });
   
+  // Update rolling state based on which side filled
   if (filledGrid.side === 'buy') {
-    // BUY filled - place next buy at lower level (if available)
-    if (state.nextBuyLevel >= 1) {
-      const nextBuyGrid = grids.find(g => g.level === state.nextBuyLevel);
-      if (nextBuyGrid) {
-        await placeSingleOrder(bot, nextBuyGrid);
-        
-        // Update state
-        await storage.updateGridBotState(bot.id, {
-          lowestActiveBuyLevel: state.nextBuyLevel,
-          nextBuyLevel: state.nextBuyLevel - 1,
-        });
-      }
-    }
+    // BUY filled - update nextBuyLevel to expand grid downward
+    const newNextBuy = (bot.nextBuyLevel ?? filledGrid.level) - 1;
+    await storage.updateGridBot(bot.id, {
+      nextBuyLevel: Math.max(0, newNextBuy),
+    });
     
-    // Also place a new reduce-only sell above current highest
-    if (state.nextSellLevel <= grids.length) {
-      const nextSellGrid = grids.find(g => g.level === state.nextSellLevel);
-      if (nextSellGrid) {
-        await placeSingleOrder(bot, nextSellGrid, { reduceOnly: true });
-        
-        await storage.updateGridBotState(bot.id, {
-          highestActiveSellLevel: state.nextSellLevel,
-          nextSellLevel: state.nextSellLevel + 1,
-        });
-      }
-    }
+    // Increment cycle count (buy+sell = 1 cycle, but track partial)
+    console.log(`[GridBot ${bot.id}] Buy filled at level ${filledGrid.level}, price ${filledGrid.price}`);
     
   } else {
     // SELL (reduce-only) filled - profit taken!
-    // Place next sell at higher level (if available)
-    if (state.nextSellLevel <= grids.length) {
-      const nextSellGrid = grids.find(g => g.level === state.nextSellLevel);
-      if (nextSellGrid) {
-        await placeSingleOrder(bot, nextSellGrid, { reduceOnly: true });
-        
-        await storage.updateGridBotState(bot.id, {
-          highestActiveSellLevel: state.nextSellLevel,
-          nextSellLevel: state.nextSellLevel + 1,
-        });
-      }
-    }
+    const newNextSell = (bot.nextSellLevel ?? filledGrid.level) + 1;
+    await storage.updateGridBot(bot.id, {
+      nextSellLevel: Math.min(bot.gridCount + 1, newNextSell),
+      totalCycles: (bot.totalCycles ?? 0) + 1,
+    });
+    
+    console.log(`[GridBot ${bot.id}] Sell filled at level ${filledGrid.level}, price ${filledGrid.price}`);
   }
-}
-
-async function placeSingleOrder(bot: GridBotConfig, grid: VirtualGrid): Promise<void> {
-  // Price AND size are pre-calculated - no calculation needed!
-  await driftClient.placePerpOrder({
-    marketIndex: getMarketIndex(bot.market),
-    direction: grid.side === 'buy' ? PositionDirection.LONG : PositionDirection.SHORT,
-    orderType: OrderType.LIMIT,
-    price: grid.price,                    // Pre-calculated
-    baseAssetAmount: grid.size,           // Pre-calculated with ascending/descending
-    reduceOnly: grid.isReduceOnly,        // Pre-set (all sells are reduce-only)
-    postOnly: true,                       // Maker fees
-  });
   
-  await storage.updateGridLevel(grid.id, { status: 'active' });
+  // Note: New orders will be placed by rebalanceActiveOrders in the main loop
+  // This ensures we never exceed 32 orders
 }
 
 /*
@@ -428,45 +587,412 @@ When a buy at Level 5 ($85, size 4.5 SOL) fills:
 The ascending/descending pattern CONTINUES automatically because
 all sizes were calculated upfront following the same progression.
 */
-```
 
-### 4. Leveraging Drift Scale Orders
+/*
+REBALANCING LOGIC:
+- Maintains optimal order distribution around current price
+- NEVER exceeds 32 orders (Drift hard limit)
+- Cancels far orders before placing new ones
+*/
 
-Drift has built-in scale order functionality that can help maximize the 32 order limit:
+const MAX_ORDERS = 32;
+const TARGET_PER_SIDE = 16;
 
-```typescript
-interface ScaleOrderParams {
-  market: string;
-  side: 'buy' | 'sell';
-  totalSize: number;        // Total position size
-  orderCount: number;       // Number of orders (max 32)
-  startPrice: number;       // First order price
-  endPrice: number;         // Last order price
-  scaleType: 'ascending' | 'descending' | 'flat';
-  // ascending: smaller orders first, larger at end
-  // descending: larger orders first, smaller at end
-  // flat: equal size orders
+async function rebalanceActiveOrders(bot: GridBotConfig, grids: VirtualGrid[]): Promise<void> {
+  const currentPrice = await getCurrentMarketPrice(bot.market);
+  const priceRange = bot.upperPrice - bot.lowerPrice;
+  
+  // Get current state
+  const activeGrids = grids.filter(g => g.status === 'active');
+  const pendingGrids = grids.filter(g => g.status === 'pending');
+  
+  // Track counts (will be updated as we cancel/place)
+  let totalActive = activeGrids.length;
+  let activeBuyCount = activeGrids.filter(g => g.side === 'buy').length;
+  let activeSellCount = activeGrids.filter(g => g.side === 'sell').length;
+  
+  // STEP 1: Cancel far orders if we need room for closer ones
+  // Only cancel if there are pending orders closer to price than active ones
+  const ordersToCancel = determineOrdersToCancel(
+    activeGrids, 
+    pendingGrids, 
+    currentPrice, 
+    priceRange
+  );
+  
+  for (const grid of ordersToCancel) {
+    await cancelGridOrder(bot, grid);
+    totalActive--;
+    if (grid.side === 'buy') activeBuyCount--;
+    else activeSellCount--;
+  }
+  
+  // STEP 2: Calculate available slots (never exceed 32)
+  const slotsAvailable = MAX_ORDERS - totalActive;
+  
+  if (slotsAvailable <= 0) {
+    return;  // At limit, nothing to do
+  }
+  
+  // STEP 3: Distribute slots between buys and sells
+  const buyNeed = Math.max(0, TARGET_PER_SIDE - activeBuyCount);
+  const sellNeed = Math.max(0, TARGET_PER_SIDE - activeSellCount);
+  
+  // Allocate proportionally, respecting available slots
+  let buySlots = Math.min(buyNeed, Math.ceil(slotsAvailable / 2));
+  let sellSlots = Math.min(sellNeed, slotsAvailable - buySlots);
+  
+  // STEP 4: Place orders (closest to current price first)
+  let ordersPlaced = 0;
+  
+  if (buySlots > 0) {
+    const pendingBuys = pendingGrids
+      .filter(g => g.side === 'buy')
+      .sort((a, b) => b.price - a.price);  // Closest to price first
+      
+    for (const grid of pendingBuys.slice(0, buySlots)) {
+      if (ordersPlaced + totalActive >= MAX_ORDERS) break;  // Safety check
+      const success = await placeSingleOrderWithTracking(bot, grid);
+      if (success) ordersPlaced++;
+    }
+  }
+  
+  if (sellSlots > 0) {
+    const pendingSells = pendingGrids
+      .filter(g => g.side === 'sell')
+      .sort((a, b) => a.price - b.price);  // Closest to price first
+      
+    for (const grid of pendingSells.slice(0, sellSlots)) {
+      if (ordersPlaced + totalActive >= MAX_ORDERS) break;  // Safety check
+      const success = await placeSingleOrderWithTracking(bot, grid);
+      if (success) ordersPlaced++;
+    }
+  }
 }
 
-async function placeScaleOrders(params: ScaleOrderParams): Promise<void> {
-  // Use Drift SDK's scale order functionality
-  await driftClient.placeScaleOrders({
-    marketIndex: getMarketIndex(params.market),
-    direction: params.side === 'buy' ? PositionDirection.LONG : PositionDirection.SHORT,
-    baseAssetAmount: params.totalSize,
-    numOrders: params.orderCount,
-    startPrice: params.startPrice,
-    endPrice: params.endPrice,
-    orderType: OrderType.LIMIT,
-    postOnly: true,  // Maker orders for better fees
+/*
+CANCEL POLICY FOR RAPID VOLATILITY:
+
+During rapid price moves, many orders may fill quickly. This policy ensures
+we never exceed 32 orders while keeping orders close to current price.
+
+Policy: Cancel up to 4 orders per cycle if needed
+- This throttles cancellations to prevent order spam
+- Combined with 5-second polling, adapts within 20-30 seconds
+- If price moves faster than this, some distant orders remain (acceptable)
+*/
+
+function determineOrdersToCancel(
+  activeGrids: VirtualGrid[],
+  pendingGrids: VirtualGrid[],
+  currentPrice: number,
+  priceRange: number
+): VirtualGrid[] {
+  const toCancel: VirtualGrid[] = [];
+  const MAX_CANCELS_PER_CYCLE = 4;  // Throttle to prevent order spam
+  
+  // Only cancel if we're at or near the 32-order limit
+  if (activeGrids.length < MAX_ORDERS - 4) {
+    return [];  // Plenty of room, no need to cancel
+  }
+  
+  // Calculate distance from current price for each order
+  const activeWithDistance = activeGrids.map(g => ({
+    grid: g,
+    distance: Math.abs(g.price - currentPrice) / priceRange,
+  })).sort((a, b) => b.distance - a.distance);  // Furthest first
+  
+  const pendingWithDistance = pendingGrids.map(g => ({
+    grid: g,
+    distance: Math.abs(g.price - currentPrice) / priceRange,
+  })).sort((a, b) => a.distance - b.distance);  // Closest first
+  
+  // Cancel furthest active orders if pending orders are significantly closer
+  for (let i = 0; i < Math.min(activeWithDistance.length, MAX_CANCELS_PER_CYCLE); i++) {
+    const furthest = activeWithDistance[i];
+    const closest = pendingWithDistance[i];
+    
+    if (!furthest || !closest) break;
+    
+    // Cancel if pending is >10% of range closer than active
+    if (furthest.distance - closest.distance > 0.1) {
+      toCancel.push(furthest.grid);
+    } else {
+      break;  // No more beneficial swaps
+    }
+  }
+  
+  return toCancel;
+}
+
+// Safe cancel that updates grid state
+async function cancelGridOrder(bot: GridBotConfig, grid: VirtualGrid): Promise<void> {
+  try {
+    if (grid.driftOrderId) {
+      await driftClient.cancelOrder(bot.driftSubaccountId, grid.driftOrderId);
+    }
+  } catch (err) {
+    // Order may already be filled/cancelled - proceed with state update
+    console.log(`[GridBot] Cancel failed for order ${grid.driftOrderId}: ${err.message}`);
+  }
+  
+  // Update state regardless (order is gone either way)
+  await storage.updateGridLevel(grid.id, {
+    status: 'pending',
+    driftOrderId: null,
   });
 }
 ```
 
-**Scale Order Advantages**:
-- Single transaction to place multiple orders
+### 3.1 Fill Detection Policy (Auditable)
+
+```typescript
+/*
+FILL DETECTION POLICY:
+
+We use Drift's orderId (not price matching) to detect fills reliably.
+
+FLOW:
+1. When placing order → store driftOrderId in grid level
+2. Each poll cycle → get all open orders from Drift
+3. For each grid with status='active':
+   a. If driftOrderId NOT in open orders → order was filled or cancelled
+   b. Verify by checking Drift order history or position change
+4. Mark grid as 'filled' and place next order
+
+WHY orderId TRACKING:
+- Price matching is unsafe (multiple orders at same price possible)
+- orderId is unique and definitive
+- Drift's getOrderHistory can confirm fill vs cancel if needed
+
+EDGE CASE: Order cancelled externally
+- If orderId is gone but position didn't change → order was cancelled
+- Reset grid to 'pending' so it can be re-placed
+*/
+
+async function detectFilledOrders(
+  bot: GridBotConfig, 
+  grids: VirtualGrid[]
+): Promise<{ filled: VirtualGrid[]; cancelled: VirtualGrid[] }> {
+  const activeOrders = await driftClient.getOpenOrders(bot.driftSubaccountId);
+  const activeOrderIds = new Map(activeOrders.map(o => [o.orderId, o]));
+  
+  const filled: VirtualGrid[] = [];
+  const cancelled: VirtualGrid[] = [];
+  
+  // Get current position for verification
+  const position = await driftClient.getPosition(bot.marketIndex);
+  const positionSize = position?.baseAssetAmount || 0;
+  
+  for (const grid of grids.filter(g => g.status === 'active' && g.driftOrderId)) {
+    const order = activeOrderIds.get(grid.driftOrderId);
+    
+    if (!order) {
+      // Order is gone - determine if filled or cancelled
+      // Check order history for definitive answer
+      const orderHistory = await driftClient.getOrderHistory(grid.driftOrderId);
+      
+      if (orderHistory?.status === 'filled') {
+        filled.push(grid);
+      } else {
+        // Order was cancelled - reset to pending
+        cancelled.push(grid);
+      }
+    }
+  }
+  
+  return { filled, cancelled };
+}
+
+// Process detected fills and cancellations
+async function processOrderStateChanges(
+  bot: GridBotConfig,
+  grids: VirtualGrid[],
+  filled: VirtualGrid[],
+  cancelled: VirtualGrid[]
+): Promise<void> {
+  // Handle filled orders - place next orders
+  for (const grid of filled) {
+    await handleFilledGrid(bot, grid, grids);
+  }
+  
+  // Handle cancelled orders - reset to pending for re-placement
+  for (const grid of cancelled) {
+    await storage.updateGridLevel(grid.id, {
+      status: 'pending',
+      driftOrderId: null,
+    });
+  }
+  
+  // Rebalance will re-place cancelled orders if needed
+}
+```
+
+### 3.2 Partial Fill Handling Policy
+
+```typescript
+/*
+PARTIAL FILL POLICY:
+
+Drift limit orders can be partially filled. Our strategy:
+
+1. CHECK FOR PARTIAL FILLS: When an order is still active but has 
+   baseAssetAmountFilled > 0, it's partially filled.
+
+2. POLICY: Wait for full fill (recommended for simplicity)
+   - Don't place new orders until the current level fully fills
+   - Track filledSize for user visibility
+   - If order sits partially filled too long, user can manually cancel
+
+3. STATE TRACKING:
+   - Grid stays 'active' while partially filled
+   - filledSize updated each poll cycle
+   - When order fully fills, transitions to 'filled'
+*/
+
+async function checkPartialFills(bot: GridBotConfig, grids: VirtualGrid[]): Promise<void> {
+  const activeOrders = await driftClient.getOpenOrders(bot.driftSubaccountId);
+  
+  for (const order of activeOrders) {
+    const grid = grids.find(g => g.driftOrderId === order.orderId);
+    if (!grid) continue;
+    
+    if (order.baseAssetAmountFilled > 0) {
+      // Track partial fill progress
+      await storage.updateGridLevel(grid.id, {
+        filledSize: order.baseAssetAmountFilled,
+      });
+      
+      console.log(`[GridBot] Partial fill on level ${grid.level}: ${order.baseAssetAmountFilled}/${order.baseAssetAmount}`);
+    }
+  }
+}
+```
+
+### 3.2 Range Exhaustion Handling
+
+```typescript
+/*
+RANGE EXHAUSTION: What happens when grid boundaries are reached?
+
+Scenario 1: All buy levels filled (price dumped through entire range)
+- nextBuyLevel < 1 (no more buy levels)
+- Bot continues with sell orders only
+- When sells fill, they take profit but can't place new buys below range
+
+Scenario 2: All sell levels filled (price pumped through entire range)  
+- nextSellLevel > gridCount (no more sell levels)
+- Bot continues with buy orders only (if any position remains)
+- When buys fill, they add to position but can't place new sells above range
+
+Scenario 3: Both sides exhausted
+- No pending orders left
+- Mark bot as 'range_exhausted'
+- Notify user - they may want to:
+  a) Close remaining position manually
+  b) Create new grid bot with updated range
+  c) Wait for price to return to range
+*/
+
+async function handleRangeExhaustion(bot: GridBotConfig, grids: VirtualGrid[]): Promise<void> {
+  const pendingGrids = grids.filter(g => g.status === 'pending');
+  const activeGrids = grids.filter(g => g.status === 'active');
+  
+  if (pendingGrids.length === 0 && activeGrids.length === 0) {
+    // All grids used - range exhausted
+    await storage.updateGridBot(bot.id, { status: 'range_exhausted' });
+    
+    // Notify user
+    await notifyUser(bot.walletAddress, {
+      type: 'grid_range_exhausted',
+      message: `Grid bot "${bot.name}" has used all ${bot.gridCount} levels. Price has moved outside your range ($${bot.lowerPrice} - $${bot.upperPrice}).`,
+      suggestion: 'Consider creating a new grid with an updated price range.',
+    });
+    
+    return;
+  }
+  
+  // One side exhausted - log but continue
+  const pendingBuys = pendingGrids.filter(g => g.side === 'buy').length;
+  const pendingSells = pendingGrids.filter(g => g.side === 'sell').length;
+  
+  if (pendingBuys === 0) {
+    console.log(`[GridBot ${bot.id}] Buy side exhausted - price below range`);
+  }
+  if (pendingSells === 0) {
+    console.log(`[GridBot ${bot.id}] Sell side exhausted - price above range`);
+  }
+}
+```
+
+### 4. Drift Scale Orders (Future Optimization)
+
+Drift has built-in scale order functionality that could optimize initial placement:
+
+```typescript
+/*
+SCALE ORDERS - POTENTIAL OPTIMIZATION:
+
+Drift's placeScaleOrders places multiple orders in a single transaction.
+This could speed up initial placement from ~32 transactions to 2.
+
+IMPORTANT: To use scale orders with our orderId tracking system:
+
+1. placeScaleOrders returns an array of orderIds
+2. Map each orderId to corresponding grid level by price
+3. Store driftOrderId in each grid level
+
+Example integration (not used in initial implementation):
+*/
+
+interface ScaleOrderResult {
+  orderIds: number[];        // Array of Drift orderIds
+  prices: number[];          // Corresponding prices
+}
+
+async function placeScaleOrdersWithTracking(
+  bot: GridBotConfig,
+  grids: VirtualGrid[],
+  side: 'buy' | 'sell'
+): Promise<void> {
+  const targetGrids = grids.filter(g => g.side === side && g.status === 'pending');
+  if (targetGrids.length === 0) return;
+  
+  // Place scale orders
+  const result: ScaleOrderResult = await driftClient.placeScaleOrders({
+    marketIndex: bot.marketIndex,
+    direction: side === 'buy' ? PositionDirection.LONG : PositionDirection.SHORT,
+    baseAssetAmount: targetGrids.reduce((sum, g) => sum + g.size, 0),
+    numOrders: targetGrids.length,
+    startPrice: targetGrids[0].price,
+    endPrice: targetGrids[targetGrids.length - 1].price,
+    orderType: OrderType.LIMIT,
+    reduceOnly: side === 'sell',  // Sells are reduce-only
+    postOnly: true,
+  });
+  
+  // Map orderIds to grid levels by matching prices
+  for (let i = 0; i < result.orderIds.length; i++) {
+    const grid = targetGrids.find(g => 
+      Math.abs(g.price - result.prices[i]) < 0.0001
+    );
+    if (grid) {
+      await storage.updateGridLevel(grid.id, {
+        status: 'active',
+        driftOrderId: result.orderIds[i],  // Critical for fill tracking!
+      });
+    }
+  }
+}
+```
+
+**Scale Order Advantages** (future optimization):
+- Single transaction for multiple orders (faster initial setup)
 - Built-in price distribution
-- Ascending/descending can weight orders toward support/resistance levels
+- Lower transaction fees
+
+**Current Implementation**: Uses individual order placement via 
+`placeSingleOrderWithTracking` for simplicity and guaranteed orderId tracking.
 
 ---
 
@@ -758,25 +1284,33 @@ export const gridBots = pgTable("grid_bots", {
   id: varchar("id").primaryKey(),
   tradingBotId: varchar("trading_bot_id").references(() => tradingBots.id),
   walletAddress: text("wallet_address").notNull(),
+  driftSubaccountId: integer("drift_subaccount_id").notNull(),
   
   // Configuration
   market: text("market").notNull(),
+  marketIndex: integer("market_index").notNull(),
   upperPrice: decimal("upper_price").notNull(),
   lowerPrice: decimal("lower_price").notNull(),
   gridCount: integer("grid_count").notNull(),
   totalInvestment: decimal("total_investment").notNull(),
+  startPrice: decimal("start_price").notNull(),  // Price when bot was created
   
-  // Strategy
-  strategyType: text("strategy_type").notNull(), // neutral, long_bias, short_bias
-  useScaleOrders: boolean("use_scale_orders").default(false),
-  scaleType: text("scale_type"), // ascending, descending, flat
+  // Direction & Independent Scale Types
+  direction: text("direction").notNull(),  // 'long' or 'short'
+  entryScaleType: text("entry_scale_type").notNull(),   // ascending, descending, flat
+  profitScaleType: text("profit_scale_type").notNull(), // ascending, descending, flat
   
   // Risk
   stopLossPercent: decimal("stop_loss_percent"),
-  takeProfitPercent: decimal("take_profit_percent"),
   
-  // State
-  status: text("status").notNull().default("active"),
+  // Rolling State Tracking
+  lowestActiveBuyLevel: integer("lowest_active_buy_level"),
+  highestActiveSellLevel: integer("highest_active_sell_level"),
+  nextBuyLevel: integer("next_buy_level"),
+  nextSellLevel: integer("next_sell_level"),
+  
+  // Statistics
+  status: text("status").notNull().default("active"),  // active, paused, stopped, range_exhausted
   totalCycles: integer("total_cycles").default(0),
   totalPnl: decimal("total_pnl").default("0"),
   
@@ -784,21 +1318,33 @@ export const gridBots = pgTable("grid_bots", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
-// Virtual grid levels (in-memory or cached, not necessarily persisted)
-export const virtualGrids = pgTable("virtual_grids", {
+// Pre-calculated grid levels (IMMUTABLE after creation - prices and sizes never change)
+export const gridLevels = pgTable("grid_levels", {
   id: varchar("id").primaryKey(),
   gridBotId: varchar("grid_bot_id").references(() => gridBots.id),
   
-  level: integer("level").notNull(),
-  price: decimal("price").notNull(),
-  side: text("side").notNull(), // buy, sell
-  status: text("status").notNull(), // pending, active, filled
+  // Pre-calculated at bot creation (IMMUTABLE)
+  level: integer("level").notNull(),           // 1 = lowest price, N = highest
+  price: decimal("price").notNull(),           // Pre-calculated price
+  size: decimal("size").notNull(),             // Pre-calculated size (ascending/descending applied)
+  side: text("side").notNull(),                // 'buy' or 'sell'
+  isReduceOnly: boolean("is_reduce_only").notNull(),  // true for profit-taking orders
   
-  orderId: varchar("order_id"),
+  // Mutable state
+  status: text("status").notNull(),            // pending, active, filled, cancelled
+  driftOrderId: integer("drift_order_id"),     // Drift's order ID when active (for tracking fills)
+  
+  // Fill tracking
   filledAt: timestamp("filled_at"),
   filledPrice: decimal("filled_price"),
-  pnl: decimal("pnl"),
+  filledSize: decimal("filled_size"),          // For partial fill tracking
+  
+  createdAt: timestamp("created_at").defaultNow(),
 });
+
+// Index for fast lookups
+// CREATE INDEX idx_grid_levels_bot_status ON grid_levels(grid_bot_id, status);
+// CREATE INDEX idx_grid_levels_bot_level ON grid_levels(grid_bot_id, level);
 ```
 
 ---
