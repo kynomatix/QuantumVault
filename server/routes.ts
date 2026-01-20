@@ -17,7 +17,7 @@ import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransactio
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMarketMaxLeverage } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
-import { queueTradeRetry, isRateLimitError, getQueueStatus } from "./trade-retry-service";
+import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus } from "./trade-retry-service";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
@@ -2282,9 +2282,9 @@ export async function registerRoutes(
 
       // Handle error case
       if (!result.success) {
-        // Check if this is a rate limit error - queue for CRITICAL automatic retry
-        if (isRateLimitError(result.error || '')) {
-          console.log(`[ClosePosition] CRITICAL: Rate limit on close order, queueing for priority retry`);
+        // Check if this is a transient error (rate limit, price feed, etc.) - queue for CRITICAL automatic retry
+        if (isTransientError(result.error || '')) {
+          console.log(`[ClosePosition] CRITICAL: Transient error on close order, queueing for priority retry`);
           
           const retryJobId = queueTradeRetry({
             botId: bot.id,
@@ -4835,9 +4835,9 @@ export async function registerRoutes(
         } catch (closeError: any) {
           console.error(`[Webhook] Close order failed:`, closeError);
           
-          // Check if this is a rate limit error - queue for CRITICAL automatic retry
-          if (isRateLimitError(closeError.message || String(closeError))) {
-            console.log(`[Webhook] CRITICAL: Rate limit on close order, queueing for priority retry`);
+          // Check if this is a transient error (rate limit, price feed, etc.) - queue for CRITICAL automatic retry
+          if (isTransientError(closeError.message || String(closeError))) {
+            console.log(`[Webhook] CRITICAL: Transient error on close order, queueing for priority retry`);
             
             const retryJobId = queueTradeRetry({
               botId: bot.id,
@@ -5303,15 +5303,15 @@ export async function registerRoutes(
         console.log(`[Webhook] Trade failed: ${orderResult.error}`);
         console.log(`[Webhook] TRADE FAILURE CONTEXT: freeCollateral=$${freeCollateral.toFixed(2)}, maxTradeableValue=$${maxTradeableValue.toFixed(2)}, tradeAmountUsd=$${tradeAmountUsd.toFixed(2)}, finalContractSize=${finalContractSize}, oraclePrice=$${oraclePrice.toFixed(2)}, notional=$${(finalContractSize * oraclePrice).toFixed(2)}`);
         
-        // Check if this is a rate limit error or temporary collateral issue - queue for automatic retry
+        // Check if this is a transient error (rate limit, price feed, oracle) or temporary collateral issue - queue for automatic retry
         const errorToCheck = orderResult.error || '';
-        const isRateLimit = isRateLimitError(errorToCheck);
+        const isTransient = isTransientError(errorToCheck);
         const isCollateralError = errorToCheck.includes('InsufficientCollateral') || errorToCheck.includes('6010');
-        console.log(`[Webhook] Retry eligibility: isRateLimit=${isRateLimit}, isCollateralError=${isCollateralError}, error="${errorToCheck.slice(0, 100)}..."`);
+        console.log(`[Webhook] Retry eligibility: isTransient=${isTransient}, isCollateralError=${isCollateralError}, error="${errorToCheck.slice(0, 100)}..."`);
         
         // Also retry on InsufficientCollateral - sometimes it's a temporary condition due to oracle price spikes
-        if (isRateLimit || isCollateralError) {
-          console.log(`[Webhook] Retryable error detected (rateLimit=${isRateLimit}, collateral=${isCollateralError}), queueing trade for automatic retry`);
+        if (isTransient || isCollateralError) {
+          console.log(`[Webhook] Retryable error detected (transient=${isTransient}, collateral=${isCollateralError}), queueing trade for automatic retry`);
           
           const retryJobId = queueTradeRetry({
             botId: bot.id,

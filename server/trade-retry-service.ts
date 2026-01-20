@@ -50,6 +50,23 @@ export function isRateLimitError(error: string | Error | unknown): boolean {
   );
 }
 
+// Transient errors that should be retried (price feed issues, oracle staleness)
+export function isTransientError(error: string | Error | unknown): boolean {
+  const errorStr = error instanceof Error ? error.message : String(error);
+  const lowerError = errorStr.toLowerCase();
+  return (
+    // Price feed / Oracle issues (temporary, usually resolve in seconds)
+    lowerError.includes('oraclenotfound') ||
+    lowerError.includes('oracle not found') ||
+    lowerError.includes('stale') ||
+    lowerError.includes('price feed') ||
+    lowerError.includes('invalid oracle') ||
+    lowerError.includes('invalidoracle') ||
+    // Also check for rate limit errors
+    isRateLimitError(error)
+  );
+}
+
 function generateJobId(): string {
   return `retry_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
@@ -271,11 +288,11 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     
     job.lastError = result.error || 'Unknown error';
     
-    // Retry if rate limited and attempts remaining
-    if (isRateLimitError(job.lastError) && job.attempts < job.maxAttempts) {
+    // Retry if transient error (rate limit, price feed, oracle issues) and attempts remaining
+    if (isTransientError(job.lastError) && job.attempts < job.maxAttempts) {
       const backoff = calculateBackoff(job.attempts, job.priority);
       job.nextRetryAt = Date.now() + backoff;
-      console.log(`[TradeRetry] Job ${job.id} rate limited, retry in ${Math.round(backoff / 1000)}s`);
+      console.log(`[TradeRetry] Job ${job.id} transient error, retry in ${Math.round(backoff / 1000)}s`);
       return;
     }
     
@@ -297,10 +314,10 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     const errorMsg = err instanceof Error ? err.message : String(err);
     job.lastError = errorMsg;
     
-    if (isRateLimitError(errorMsg) && job.attempts < job.maxAttempts) {
+    if (isTransientError(errorMsg) && job.attempts < job.maxAttempts) {
       const backoff = calculateBackoff(job.attempts, job.priority);
       job.nextRetryAt = Date.now() + backoff;
-      console.log(`[TradeRetry] Job ${job.id} threw rate limit error, retry in ${Math.round(backoff / 1000)}s`);
+      console.log(`[TradeRetry] Job ${job.id} threw transient error, retry in ${Math.round(backoff / 1000)}s`);
       return;
     }
     
