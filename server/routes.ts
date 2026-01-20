@@ -7128,15 +7128,15 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Bot not found" });
       }
       
-      // Get PnL snapshots for equity chart (last 90 days)
+      // Get public equity snapshots for equity chart (last 90 days)
       const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-      const snapshots = await storage.getPnlSnapshots(publishedBot.tradingBotId, ninetyDaysAgo);
+      const snapshots = await storage.getMarketplaceEquitySnapshots(publishedBot.id, ninetyDaysAgo);
       
-      // Return aggregated performance data without exposing private trade details
+      // Return aggregated performance data from public snapshots only
       const performanceData = snapshots.map(s => ({
         date: s.snapshotDate,
         equity: parseFloat(s.equity),
-        pnl: parseFloat(s.realizedPnl) + parseFloat(s.unrealizedPnl),
+        pnl: parseFloat(s.pnlPercent),
       })).reverse(); // Oldest first for chart
       
       res.json({
@@ -7153,6 +7153,7 @@ export async function registerRoutes(
         pnlPercentAllTime: publishedBot.pnlPercentAllTime,
         profitSharePercent: publishedBot.profitSharePercent,
         subscriberCount: publishedBot.subscriberCount,
+        creatorCapital: publishedBot.creatorCapital,
         totalCapitalInvested: publishedBot.totalCapitalInvested,
         equityHistory: performanceData,
       });
@@ -7208,15 +7209,44 @@ export async function registerRoutes(
       const totalTrades = stats.totalTrades || 0;
       const winningTrades = stats.winningTrades || 0;
       
-      if (totalTrades > 0) {
-        await storage.updatePublishedBotStats(publishedBot.id, {
-          totalTrades,
-          winningTrades,
-        });
-        console.log(`[Marketplace] Bot ${id} published with stats: ${totalTrades} trades, ${winningTrades} wins`);
+      // Get creator's current equity from Drift
+      let creatorEquity = 0;
+      try {
+        const wallet = await storage.getWallet(req.walletAddress!);
+        if (wallet?.agentPublicKey && tradingBot.driftSubaccountId) {
+          const accountInfo = await getDriftAccountInfo(
+            wallet.agentPublicKey,
+            tradingBot.driftSubaccountId
+          );
+          creatorEquity = accountInfo.usdcBalance || 0;
+        }
+      } catch (equityError) {
+        console.error(`[Marketplace] Failed to get creator equity:`, equityError);
       }
-
-      console.log(`[Marketplace] Bot ${id} published by ${req.walletAddress}`);
+      
+      // Update published bot stats including creator capital
+      await storage.updatePublishedBotStats(publishedBot.id, {
+        totalTrades,
+        winningTrades,
+        creatorCapital: String(creatorEquity),
+      });
+      
+      // Also update totalCapitalInvested to include creator's capital
+      if (creatorEquity > 0) {
+        await storage.incrementPublishedBotSubscribers(publishedBot.id, 0, creatorEquity);
+      }
+      
+      // Create initial marketplace equity snapshot
+      if (creatorEquity > 0) {
+        await storage.createMarketplaceEquitySnapshot({
+          publishedBotId: publishedBot.id,
+          snapshotDate: new Date(),
+          equity: String(creatorEquity),
+          pnlPercent: "0",
+        });
+      }
+      
+      console.log(`[Marketplace] Bot ${id} published with stats: ${totalTrades} trades, ${winningTrades} wins, creator capital: $${creatorEquity.toFixed(2)}`);
       res.json(publishedBot);
     } catch (error) {
       console.error("Publish bot error:", error);

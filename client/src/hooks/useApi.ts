@@ -301,6 +301,7 @@ export interface PublishedBot {
   isActive: boolean;
   isFeatured: boolean;
   subscriberCount: number;
+  creatorCapital: string;
   totalCapitalInvested: string;
   totalTrades: number;
   winningTrades: number;
@@ -523,6 +524,7 @@ export interface BotPerformanceData {
   pnlPercentAllTime: string | null;
   profitSharePercent: string;
   subscriberCount: number;
+  creatorCapital: string;
   totalCapitalInvested: string;
   equityHistory: Array<{
     date: string;
