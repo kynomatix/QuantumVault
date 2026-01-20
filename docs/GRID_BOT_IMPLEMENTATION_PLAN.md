@@ -2,7 +2,83 @@
 
 ## Executive Summary
 
-This document outlines a comprehensive strategy for implementing grid trading bots on Drift Protocol, working within the **32 limit order limitation** while enabling users to create strategies with potentially hundreds of virtual grid levels.
+This document outlines a comprehensive strategy for implementing grid trading bots on Drift Protocol (Solana), working within the **32 limit order limitation** while enabling users to create strategies with potentially hundreds of virtual grid levels.
+
+### What is a Grid Bot?
+
+A grid bot is an automated trading strategy designed for sideways/ranging markets. It places a series of buy orders below the current price and sell orders above it, creating a "grid" of price levels. As price oscillates within the range:
+- Buy orders fill when price dips → bot accumulates position
+- Sell orders fill when price rises → bot takes profit
+- Each complete buy→sell cycle generates profit from the price difference
+
+Grid bots excel in choppy markets where price moves up and down without a clear trend.
+
+### Key Technical Challenges
+
+1. **Drift's 32-Order Limit**: Drift Protocol allows maximum 32 open limit orders per subaccount. Users want 100+ grid levels. Solution: Virtual grid with rolling order placement - only the 32 orders closest to current price are on-chain at any time.
+
+2. **Server-Side Execution**: Unlike manual trading, grid bots execute automatically without user signatures. This requires server-managed agent wallets with encrypted keys.
+
+3. **State Consistency**: Server crashes must not corrupt grid state. Solution: On-chain orders as source of truth with database as cache, plus startup reconciliation.
+
+4. **Margin Management**: Continuous trading cycles generate unrealized PnL that must be settled to maintain margin. Solution: Automatic PnL settlement triggers.
+
+5. **Order Sizing**: Users want different capital weighting strategies. Solution: Independent entry/profit scale types (ascending, descending, flat).
+
+### Integration Philosophy
+
+This implementation leverages the existing QuantumVault bot architecture rather than building parallel systems. Key reuse areas:
+- **Subaccount isolation**: Same pattern as existing trading bots
+- **Capital transfers**: Existing `executeAgentTransferBetweenSubaccounts`
+- **PnL settlement**: Existing `settleAllPnl` function
+- **Leverage/HMAC**: Same integrity verification pattern
+- **Error handling**: Same Drift error parsing and retry logic
+
+### Document Structure
+
+1. **Problem Statement**: User needs and Drift constraints
+2. **Solution Overview**: Rolling limit order system concept
+3. **Integration with Existing Architecture**: Leverage, capital flow, settlement
+4. **Capital Allocation**: How sizing works with leverage
+5. **Independent Scale Types**: Entry vs profit scaling configuration
+6. **Order Lifecycle**: Fill detection, rebalancing, reconciliation
+7. **Edge Cases**: Partial fills, range exhaustion, crash recovery
+8. **Drift Failure Modes**: Error handling for each failure type
+9. **Financial Tracking**: PnL calculation with weighted average cost
+10. **User Controls**: Pause, resume, stop, sync operations
+11. **Database Schema**: New tables and fields required
+
+### Critical Assumptions & Invariants
+
+These rules MUST be maintained throughout implementation:
+
+| # | Assumption/Invariant | Consequence if Violated |
+|---|---------------------|------------------------|
+| 1 | **Grid prices and sizes are IMMUTABLE after creation** | Size continuity broken; PnL calculations incorrect |
+| 2 | **Level at exactly startPrice belongs to PROFIT side** | Boundary ordering inconsistent; wrong side assignment |
+| 3 | **Profit orders are ALWAYS reduce-only** | Could open opposite positions; unexpected losses |
+| 4 | **Maximum 32 active orders enforced server-side** | Drift SDK will reject orders; bot stalls |
+| 5 | **One subaccount per grid bot** | Position interference; incorrect margin tracking |
+| 6 | **Settlement before margin-tight operations** | Profitable bots stall; unnecessary pauses |
+| 7 | **Cycle count is DYNAMIC, not stored** | Stale/incorrect UI reporting |
+| 8 | **On-chain state is source of truth** | Database drift causes order duplication |
+| 9 | **Deterministic level sequencing** | Grid expansion order broken; sizing pattern lost |
+| 10 | **Policy HMAC integrity verification** | Tampered bot config could execute unauthorized trades |
+
+### Key File References
+
+| Component | File Path | Purpose |
+|-----------|-----------|---------|
+| Trading Bot Schema | `shared/schema.ts` | Existing bot model to mirror |
+| Capital Transfers | `server/drift-service.ts` | `executeAgentTransferBetweenSubaccounts` |
+| PnL Settlement | `server/drift-service.ts` | `settleAllPnl` function |
+| Account Info | `server/drift-service.ts` | `getDriftAccountInfo`, `getBatchPerpPositions` |
+| Order Execution | `server/drift-service.ts` | `executePerpOrder` |
+| Policy HMAC | `server/session-v3.ts` | `computeBotPolicyHmac`, `verifyBotPolicyHmac` |
+| Position Service | `server/position-service.ts` | Position tracking patterns |
+| Retry Service | `server/trade-retry-service.ts` | Error retry patterns |
+| API Routes | `server/routes.ts` | Bot creation/management endpoints |
+| PnL Snapshots | `server/pnl-snapshot-job.ts` | Periodic job patterns |
 
 ---
 
@@ -92,17 +168,48 @@ Buy 1   ────────         Buy 15
 
 ## Integration with Existing Bot Architecture
 
-### Overview
+### Overview and Design Philosophy
 
-Grid bots MUST leverage the existing bot architecture patterns rather than reinventing the wheel. The following systems are already implemented and tested:
+**CRITICAL DESIGN PRINCIPLE**: Grid bots MUST leverage the existing bot architecture patterns rather than creating new, parallel systems. The QuantumVault platform already has battle-tested implementations for capital management, subaccount isolation, PnL settlement, and order execution. Grid bots are an extension of this architecture, not a replacement.
 
-1. **Subaccount Management**: Each bot uses a dedicated Drift subaccount for isolation
-2. **Capital Deposits**: `executeAgentDriftDeposit`, `executeAgentTransferBetweenSubaccounts`
-3. **PnL Settlement**: `settleAllPnl` frees up margin by settling unrealized PnL
-4. **Leverage Configuration**: Per-bot leverage stored in schema with policy HMAC integrity
-5. **Margin Checks**: Drift SDK rejects insufficient collateral orders with specific error codes
+**Why This Matters**:
+- Existing patterns handle edge cases discovered through production use
+- Security measures (HMAC policy verification, encrypted key handling) are already implemented
+- Capital flow patterns have been tested for on-chain reliability
+- Error handling and retry logic is proven
+
+**Existing Systems to Reuse**:
+
+1. **Subaccount Management**: The platform uses Drift Protocol's subaccount feature to isolate each bot's positions and margin. Each trading bot gets a unique `driftSubaccountId` assigned at creation. This prevents position interference between bots and allows independent margin tracking. Grid bots will follow this same pattern - one subaccount per grid bot.
+
+2. **Capital Deposits and Transfers**: The platform manages capital flow through server-side agent wallets. Functions `executeAgentDriftDeposit` and `executeAgentTransferBetweenSubaccounts` handle moving USDC between subaccounts atomically. Grid bots will use `executeAgentTransferBetweenSubaccounts` to move the user's investment from the main subaccount (0) to the grid bot's dedicated subaccount.
+
+3. **PnL Settlement**: In perpetual futures, unrealized PnL doesn't automatically become available margin. The platform's `settleAllPnl` function calls Drift's settlement instruction to convert floating PnL into realized, usable collateral. Grid bots generate continuous PnL through buy/sell cycles, so settlement must be integrated into the order management loop.
+
+4. **Leverage Configuration with Policy HMAC**: Each trading bot stores its leverage setting along with a cryptographic HMAC hash of the bot's policy (market, leverage, max size). This prevents tampering - if someone modifies the leverage in the database, the HMAC verification will fail. Grid bots will use this same integrity check.
+
+5. **Margin and Collateral Checks**: Drift SDK rejects orders when margin is insufficient with error code 6010 (InsufficientCollateral). The existing error handling parses these errors and provides user feedback. Grid bots will reuse this error handling pattern.
 
 ### Leverage Configuration (Match Existing Bots)
+
+**What Leverage Means for Grid Bots**:
+
+Leverage determines how much notional exposure the bot can take relative to the deposited margin. With 3x leverage and $1,000 investment, the bot can control up to $3,000 worth of positions. This affects:
+- Maximum position size across all filled entry orders
+- Margin required per order (lower leverage = more margin per trade)
+- Risk profile (higher leverage = faster liquidation if market moves against)
+
+**How Existing Bots Handle Leverage**:
+
+The existing `trading_bots` table stores leverage as an integer field. When the bot is created, leverage is validated against the market's maximum allowed leverage (varies by risk tier - BTC/ETH allow higher leverage than altcoins). The leverage value is included in the `policyHmac` calculation to prevent unauthorized modification.
+
+**Grid Bot Leverage Implementation**:
+
+Grid bots will store leverage identically to trading bots. The `gridBots` table includes:
+- `leverage`: Integer field, validated against market tier limits at creation
+- `policyHmac`: HMAC of (market, leverage, gridCount, upperPrice, lowerPrice) for integrity
+
+When calculating grid sizes, the total notional value is: `totalInvestment × leverage`. This determines how much position the grid can accumulate when all entry orders fill.
 
 ```typescript
 /*
@@ -152,6 +259,50 @@ async function validateGridBotLeverage(
 ```
 
 ### Initial Investment and Capital Flow (Match Existing Bots)
+
+**How Capital Flows in the Existing System**:
+
+When a user creates a trading bot in QuantumVault, capital moves through a specific sequence:
+
+1. **User deposits USDC** into their agent wallet's main Drift account (subaccount 0)
+2. **Bot creation triggers transfer** from subaccount 0 to the bot's dedicated subaccount
+3. **Bot trades within allocated capital** - it cannot access funds in other subaccounts
+4. **PnL accumulates in bot's subaccount** until withdrawn or reinvested
+
+This isolation is critical for:
+- **Position tracking**: Each bot's positions are independent
+- **Margin calculation**: Bot-specific margin utilization
+- **PnL attribution**: Clear profit/loss per bot
+- **Risk isolation**: One bot's liquidation doesn't affect others
+
+**Grid Bot Capital Flow (Same Pattern)**:
+
+Grid bots will follow the identical capital flow:
+
+1. User specifies `totalInvestment` when creating the grid bot (e.g., $1,000 USDC)
+2. System calls `getNextOnChainSubaccountId` to get the next available subaccount number
+3. System calls `executeAgentTransferBetweenSubaccounts` to move funds from subaccount 0 to the new subaccount
+4. Grid bot stores the `driftSubaccountId` and operates only within that subaccount
+5. All grid orders are placed against this subaccount's margin
+
+**Key Function: `executeAgentTransferBetweenSubaccounts`**:
+
+This existing function (in `server/drift-service.ts`) handles atomic transfers between subaccounts. It:
+- Decrypts the agent wallet's private key
+- Builds a Drift transfer instruction
+- Signs and submits the transaction
+- Returns success/failure with transaction signature
+
+Grid bots will call this function identically to how existing trading bots do during creation.
+
+**Leveraged Position Sizing**:
+
+When calculating grid order sizes, we multiply the investment by leverage:
+- User invests: $1,000 USDC
+- Selected leverage: 3x
+- Maximum notional value: $3,000 worth of positions
+
+This means the sum of all entry order sizes (in notional value) should equal the leveraged amount.
 
 ```typescript
 /*
@@ -227,6 +378,46 @@ async function createGridBot(
 ```
 
 ### PnL Settlement for Margin Management
+
+**Why PnL Settlement is Critical for Grid Bots**:
+
+In Drift Protocol perpetual futures, when you have an open position with floating profit or loss, that PnL is "unrealized" - it exists on paper but hasn't been settled to your account balance. This has important implications:
+
+- **Unrealized profit does NOT increase available margin** - even if you're up $500, that $500 isn't available to open new positions
+- **Unrealized loss DOES reduce available margin** - if you're down $500, you have $500 less buying power
+- **Settlement converts unrealized to realized** - after settlement, profits become available collateral
+
+**Grid Bot PnL Characteristics**:
+
+Grid bots continuously cycle between entries and profit-taking. Consider a long grid:
+1. Buy order fills at $100 → position opens
+2. Sell order fills at $101 → position closes, $1 profit generated
+3. This profit is initially unrealized
+
+Without settlement, after many cycles:
+- Bot may have $100 in unrealized profits
+- But available margin hasn't increased
+- Eventually, margin becomes insufficient for new orders
+
+**When Settlement Must Occur**:
+
+1. **Before placing orders when margin is tight**: If available collateral is near the requirement, settle first to free up any accumulated profits
+2. **After a complete cycle** (position returns to zero): The cycle's profit should be settled to become available
+3. **Periodically** (every 10 minutes): Prevent margin squeeze during volatile periods
+4. **On InsufficientCollateral error**: The first recovery step is to settle PnL and retry
+
+**Existing Settlement Function: `settleAllPnl`**:
+
+The platform already has this function in `server/drift-service.ts`. It:
+- Calls the Drift SDK's PnL settlement instruction
+- Settles unrealized PnL for all markets in the subaccount
+- Returns success status and list of settled markets
+
+Grid bots will call this same function - no new settlement code needed.
+
+**Settlement Failure Handling**:
+
+Settlement can fail if there's no PnL to settle (not an error) or due to RPC issues (retry). The existing code handles this gracefully with non-blocking error logging.
 
 ```typescript
 /*
@@ -315,6 +506,41 @@ async function placeGridOrderWithMarginCheck(
 
 ### Automatic PnL Settlement Triggers
 
+**Why Automatic Settlement is Essential**:
+
+Unlike manual trading where a user can settle their PnL when needed, grid bots run autonomously. They must automatically detect when settlement is needed and execute it. Without automatic settlement:
+- Profitable bots could stall due to margin exhaustion
+- Users would need to manually intervene to continue trading
+- The "set and forget" value proposition would be broken
+
+**Four Settlement Trigger Points**:
+
+1. **After Profit Cycle Completes**: When the grid detects a complete buy→sell cycle (for long grids), the position returns to zero and there's realized profit. This is the ideal time to settle because:
+   - The cycle is complete, profit is locked in
+   - Settlement adds the profit to available margin
+   - Future cycles can use the increased capital
+
+2. **On Insufficient Margin Error**: When Drift rejects an order with error code 6010, the first remediation step is:
+   - Call `settleAllPnl` to free up any floating profits
+   - Re-check available margin
+   - Retry the order if margin is now sufficient
+   - Only pause the bot if settlement didn't provide enough margin
+
+3. **Periodic Maintenance**: Every 10 minutes, each active grid bot should:
+   - Settle any accumulated PnL
+   - This prevents gradual margin squeeze during volatile periods
+   - Acts as a safety net if other triggers missed settlement
+
+4. **Before Major Operations**: When the user wants to:
+   - Add more capital to the bot
+   - Stop the bot and withdraw funds
+   - Modify bot configuration
+   Settlement ensures accurate balance reporting.
+
+**Integration with Existing Maintenance Patterns**:
+
+The platform already runs periodic jobs (e.g., `pnl-snapshot-job.ts`). Grid bot maintenance should plug into the same scheduling pattern rather than creating a separate timer system.
+
 ```typescript
 /*
 AUTO-SETTLEMENT TRIGGERS:
@@ -364,6 +590,45 @@ async function periodicGridBotMaintenance(botId: string): Promise<void> {
 ```
 
 ### Margin Calculation for Grid Orders
+
+**Understanding Margin in Perpetual Futures**:
+
+Margin is the collateral required to open and maintain leveraged positions. In Drift Protocol:
+- **Initial Margin**: Amount required to open a position
+- **Maintenance Margin**: Minimum amount to keep position open (lower than initial)
+- **Free Collateral**: Available margin after accounting for open positions
+
+When the bot places a buy order, it doesn't immediately use margin. Margin is consumed when the order fills and a position opens. This means:
+- Limit orders are "reserved" against margin
+- Multiple unfilled orders reserve cumulative margin
+- Filled orders convert reserved margin to used margin
+
+**Grid Bot Margin Requirements**:
+
+For a grid bot with 100 levels, 50 entry orders, and 3x leverage on $1,000 investment:
+- Total notional capacity: $3,000
+- Each entry order: ~$60 notional ($3,000 ÷ 50)
+- Margin per order (before leverage): $60 ÷ 3 = $20
+
+However, we only place ~16 entry orders at a time (32 total orders, half buys half sells):
+- Active margin requirement: 16 × $20 = $320 + buffer
+- Remaining $680 is free collateral for filled positions
+
+**Margin Buffer Requirement**:
+
+Always calculate margin with a 10% buffer because:
+- Prices move between calculation and execution
+- Fees reduce available collateral
+- Slippage on fills may use more margin than expected
+
+**Pre-Flight Margin Check Flow**:
+
+Before placing any order, the grid bot should:
+1. Calculate margin required for this order
+2. Check current free collateral via `getDriftAccountInfo`
+3. If insufficient: attempt PnL settlement
+4. Re-check after settlement
+5. Only pause if still insufficient after settlement
 
 ```typescript
 /*
