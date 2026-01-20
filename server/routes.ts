@@ -7137,19 +7137,31 @@ export async function registerRoutes(
       // Filter to only include snapshots from after publish date and build chart data
       const filteredSnapshots = snapshots.filter(s => new Date(s.snapshotDate) >= publishedAt);
       
-      // Build chart data using stored pnlPercent from each snapshot (the actual performance)
+      // Build chart data showing performance since publish (starts at 0%, shows change over time)
       const performanceData: { date: Date; equity: number; pnl: number }[] = [];
       
       if (filteredSnapshots.length > 0) {
+        // Get baseline equity from first snapshot after publish (oldest, at end of array since sorted desc)
+        const baselineEquity = parseFloat(filteredSnapshots[filteredSnapshots.length - 1].equity);
+        
+        // Start with 0% at publish date
+        performanceData.push({
+          date: publishedAt,
+          equity: baselineEquity,
+          pnl: 0, // Start at 0% since this is the baseline
+        });
+        
         // Reverse to get oldest first for chart display
         filteredSnapshots.reverse().forEach(s => {
           const currentEquity = parseFloat(s.equity);
-          // Use the stored pnlPercent which represents actual performance vs total deposits
-          const storedPnl = parseFloat(s.pnlPercent || '0');
+          // Calculate PnL as percentage change from baseline equity at publish time
+          const pnlFromBaseline = baselineEquity > 0 
+            ? ((currentEquity - baselineEquity) / baselineEquity) * 100 
+            : 0;
           performanceData.push({
             date: s.snapshotDate,
             equity: currentEquity,
-            pnl: storedPnl,
+            pnl: parseFloat(pnlFromBaseline.toFixed(4)),
           });
         });
       }
