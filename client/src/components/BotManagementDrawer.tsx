@@ -222,6 +222,7 @@ export function BotManagementDrawer({
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [usdcApy, setUsdcApy] = useState<number | null>(null);
   const [performanceTimeframe, setPerformanceTimeframe] = useState<'7d' | '30d' | '90d' | 'all'>('7d');
+  const [performanceView, setPerformanceView] = useState<'dollar' | 'percent'>('dollar');
   const [performanceData, setPerformanceData] = useState<{ timestamp: string; pnl: number; cumulativePnl: number }[]>([]);
   const [performanceLoading, setPerformanceLoading] = useState(false);
   const [performanceTotalPnl, setPerformanceTotalPnl] = useState<number>(0);
@@ -1377,7 +1378,13 @@ export function BotManagementDrawer({
               ) : (
                 <div className="h-[130px]" data-testid="performance-chart">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={performanceData} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+                    <LineChart 
+                      data={performanceView === 'percent' && netDeposited > 0
+                        ? performanceData.map(d => ({ ...d, cumulativePnlPercent: (d.cumulativePnl / netDeposited) * 100 }))
+                        : performanceData
+                      } 
+                      margin={{ top: 5, right: 5, left: -20, bottom: 5 }}
+                    >
                       <XAxis
                         dataKey="timestamp"
                         tick={{ fontSize: 10 }}
@@ -1391,7 +1398,10 @@ export function BotManagementDrawer({
                       />
                       <YAxis
                         tick={{ fontSize: 10 }}
-                        tickFormatter={(value) => `$${value >= 0 ? '+' : ''}${value.toFixed(0)}`}
+                        tickFormatter={(value) => performanceView === 'percent' 
+                          ? `${value >= 0 ? '+' : ''}${value.toFixed(0)}%`
+                          : `$${value >= 0 ? '+' : ''}${value.toFixed(0)}`
+                        }
                         stroke="#888"
                         axisLine={false}
                         tickLine={false}
@@ -1404,11 +1414,16 @@ export function BotManagementDrawer({
                           fontSize: '12px',
                         }}
                         labelFormatter={(value) => new Date(value).toLocaleDateString()}
-                        formatter={(value: number) => [`$${value >= 0 ? '+' : ''}${value.toFixed(2)}`, 'Gross PnL (excl. fees)']}
+                        formatter={(value: number) => [
+                          performanceView === 'percent'
+                            ? `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+                            : `$${value >= 0 ? '+' : ''}${value.toFixed(2)}`,
+                          'Gross PnL (excl. fees)'
+                        ]}
                       />
                       <Line
                         type="monotone"
-                        dataKey="cumulativePnl"
+                        dataKey={performanceView === 'percent' ? 'cumulativePnlPercent' : 'cumulativePnl'}
                         stroke={performanceTotalPnl >= 0 ? '#22c55e' : '#ef4444'}
                         strokeWidth={2}
                         dot={false}
@@ -1417,11 +1432,32 @@ export function BotManagementDrawer({
                   </ResponsiveContainer>
                 </div>
               )}
-              <div className="flex justify-between text-xs text-muted-foreground mt-2">
-                <span>{performanceTradeCount} trade{performanceTradeCount !== 1 ? 's' : ''}</span>
+              <div className="flex items-center justify-between text-xs text-muted-foreground mt-2">
                 <span className={performanceTotalPnl >= 0 ? 'text-green-500' : 'text-red-500'}>
-                  Total: {performanceTotalPnl >= 0 ? '+' : ''}{performanceTotalPnl.toFixed(2)} USDC
+                  {performanceView === 'percent' && netDeposited > 0
+                    ? `${performanceTotalPnl >= 0 ? '+' : ''}${((performanceTotalPnl / netDeposited) * 100).toFixed(2)}%`
+                    : `${performanceTotalPnl >= 0 ? '+' : ''}$${performanceTotalPnl.toFixed(2)}`
+                  }
                 </span>
+                <span>{performanceTradeCount} trade{performanceTradeCount !== 1 ? 's' : ''}</span>
+                <div className="flex gap-1" data-testid="toggle-performance-view">
+                  <Button
+                    variant={performanceView === 'dollar' ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-5 px-2 text-xs"
+                    onClick={() => setPerformanceView('dollar')}
+                  >
+                    $
+                  </Button>
+                  <Button
+                    variant={performanceView === 'percent' ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-5 px-2 text-xs"
+                    onClick={() => setPerformanceView('percent')}
+                  >
+                    %
+                  </Button>
+                </div>
               </div>
             </div>
           </TabsContent>
