@@ -7,8 +7,6 @@ import { Button } from '@/components/ui/button';
 interface PlatformMetrics {
   tvl: number;
   totalVolume: number;
-  volume24h: number;
-  volume7d: number;
   activeBots: number;
   activeUsers: number;
   totalTrades: number;
@@ -374,17 +372,17 @@ export default function Analytics() {
                   </div>
                 </GlowCard>
                 
-                <GlowCard testId="card-volume-24h">
-                  <div className="p-6 rounded-xl bg-card/40 border border-white/5 backdrop-blur-sm">
-                    <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">24h Volume</p>
-                    <p className="text-3xl font-display font-bold" data-testid="value-volume-24h">{formatCurrency(metrics.volume24h)}</p>
+                <GlowCard glowColor="violet" testId="card-active-bots-stat">
+                  <div className="p-6 rounded-xl bg-gradient-to-br from-violet-500/10 to-violet-500/5 border border-violet-500/15 backdrop-blur-sm">
+                    <p className="text-xs text-violet-300/80 uppercase tracking-wider mb-1">Active Bots</p>
+                    <p className="text-3xl font-display font-bold text-white" data-testid="value-active-bots-stat">{metrics.activeBots}</p>
                   </div>
                 </GlowCard>
                 
-                <GlowCard testId="card-volume-7d">
-                  <div className="p-6 rounded-xl bg-card/40 border border-white/5 backdrop-blur-sm">
-                    <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">7d Volume</p>
-                    <p className="text-3xl font-display font-bold" data-testid="value-volume-7d">{formatCurrency(metrics.volume7d)}</p>
+                <GlowCard glowColor="blue" testId="card-traders-stat">
+                  <div className="p-6 rounded-xl bg-gradient-to-br from-blue-500/10 to-blue-500/5 border border-blue-500/15 backdrop-blur-sm">
+                    <p className="text-xs text-blue-300/80 uppercase tracking-wider mb-1">Traders</p>
+                    <p className="text-3xl font-display font-bold text-white" data-testid="value-traders-stat">{metrics.activeUsers}</p>
                   </div>
                 </GlowCard>
               </motion.div>
@@ -395,43 +393,17 @@ export default function Analytics() {
                 transition={{ delay: 0.1 }}
               >
                 <AnimatedBorder>
-                  <div className="grid grid-cols-3 divide-x divide-white/5">
-                    <div className="p-8 text-center" data-testid="card-active-bots">
-                      <motion.p 
-                        className="text-5xl font-display font-bold bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent drop-shadow-[0_0_20px_rgba(139,92,246,0.4)]"
-                        data-testid="value-active-bots"
-                        initial={{ scale: 0.5, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        transition={{ delay: 0.2, type: "spring" }}
-                      >
-                        {metrics.activeBots}
-                      </motion.p>
-                      <p className="text-sm text-muted-foreground mt-2">Active Bots</p>
-                    </div>
-                    <div className="p-8 text-center" data-testid="card-active-users">
-                      <motion.p 
-                        className="text-5xl font-display font-bold bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent drop-shadow-[0_0_20px_rgba(139,92,246,0.4)]"
-                        data-testid="value-active-users"
-                        initial={{ scale: 0.5, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        transition={{ delay: 0.3, type: "spring" }}
-                      >
-                        {metrics.activeUsers}
-                      </motion.p>
-                      <p className="text-sm text-muted-foreground mt-2">Traders</p>
-                    </div>
-                    <div className="p-8 text-center" data-testid="card-total-trades">
-                      <motion.p 
-                        className="text-5xl font-display font-bold bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent drop-shadow-[0_0_20px_rgba(139,92,246,0.4)]"
-                        data-testid="value-total-trades"
-                        initial={{ scale: 0.5, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        transition={{ delay: 0.4, type: "spring" }}
-                      >
-                        {formatNumber(metrics.totalTrades)}
-                      </motion.p>
-                      <p className="text-sm text-muted-foreground mt-2">Trades</p>
-                    </div>
+                  <div className="p-8 text-center" data-testid="card-total-trades">
+                    <motion.p 
+                      className="text-5xl font-display font-bold bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent drop-shadow-[0_0_20px_rgba(139,92,246,0.4)]"
+                      data-testid="value-total-trades"
+                      initial={{ scale: 0.5, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      transition={{ delay: 0.4, type: "spring" }}
+                    >
+                      {formatNumber(metrics.totalTrades)}
+                    </motion.p>
+                    <p className="text-sm text-muted-foreground mt-2">Total Trades</p>
                   </div>
                 </AnimatedBorder>
               </motion.div>
