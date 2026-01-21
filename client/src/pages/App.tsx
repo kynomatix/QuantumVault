@@ -48,7 +48,9 @@ import {
   EyeOff,
   Clock,
   Sliders,
-  User
+  User,
+  BarChart3,
+  BookOpen
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -1362,7 +1364,23 @@ export default function AppPage() {
               <Menu className="w-5 h-5" />
             </button>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
+            <a 
+              href="/analytics" 
+              className="p-2 hover:bg-muted rounded-lg"
+              data-testid="link-analytics-header"
+              title="Analytics"
+            >
+              <BarChart3 className="w-5 h-5 text-muted-foreground" />
+            </a>
+            <a 
+              href="/docs" 
+              className="p-2 hover:bg-muted rounded-lg"
+              data-testid="link-docs-header"
+              title="Documentation"
+            >
+              <BookOpen className="w-5 h-5 text-muted-foreground" />
+            </a>
             <button 
               className="p-2 hover:bg-muted rounded-lg relative" 
               data-testid="button-notifications"

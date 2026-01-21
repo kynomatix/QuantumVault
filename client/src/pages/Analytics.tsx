@@ -50,71 +50,18 @@ function formatShortDate(dateString: string): string {
   });
 }
 
-function HeroStat({ value, label, sublabel, gradient, delay = 0, testId }: {
-  value: string;
-  label: string;
-  sublabel: string;
-  gradient: string;
-  delay?: number;
-  testId: string;
-}) {
+function LivePulse() {
   return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.9 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ delay, duration: 0.5, ease: "easeOut" }}
-      className="relative group"
-      data-testid={`card-${testId}`}
-    >
-      <div className={`absolute inset-0 ${gradient} rounded-3xl blur-xl opacity-30 group-hover:opacity-50 transition-opacity duration-500`} />
-      <div className="relative p-8 rounded-3xl bg-card/80 backdrop-blur-sm border border-white/10 overflow-hidden">
-        <div className={`absolute top-0 right-0 w-32 h-32 ${gradient} opacity-10 blur-3xl`} />
-        <p className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-2">{label}</p>
-        <p className="text-5xl md:text-6xl font-display font-bold bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent" data-testid={`value-${testId}`}>
-          {value}
-        </p>
-        <p className="text-sm text-muted-foreground mt-3">{sublabel}</p>
-      </div>
-    </motion.div>
+    <span className="relative flex h-2 w-2">
+      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75"></span>
+      <span className="relative inline-flex rounded-full h-2 w-2 bg-violet-500"></span>
+    </span>
   );
 }
 
-function StatBlock({ value, label, accentColor, delay = 0, testId }: {
-  value: number;
-  label: string;
-  accentColor: string;
-  delay?: number;
-  testId: string;
-}) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay, duration: 0.5 }}
-      className="relative p-8 rounded-2xl bg-card/50 border border-border/30 overflow-hidden group"
-      data-testid={`card-${testId}`}
-    >
-      <div className={`absolute top-0 left-0 w-1 h-full ${accentColor}`} />
-      <div className="relative">
-        <motion.p 
-          className="text-5xl font-display font-bold mb-2"
-          data-testid={`value-${testId}`}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: delay + 0.2 }}
-        >
-          {formatNumber(value)}
-        </motion.p>
-        <p className="text-muted-foreground">{label}</p>
-      </div>
-    </motion.div>
-  );
-}
-
-function AreaChart({ data, label, color, testId }: {
+function AreaChart({ data, label, testId }: {
   data: HistoricalDataPoint[];
   label: string;
-  color: string;
   testId: string;
 }) {
   if (!data || data.length < 2) return null;
@@ -125,8 +72,8 @@ function AreaChart({ data, label, color, testId }: {
   const range = max - min || 1;
   
   const width = 400;
-  const height = 160;
-  const padding = { top: 20, right: 20, bottom: 40, left: 60 };
+  const height = 140;
+  const padding = { top: 16, right: 16, bottom: 32, left: 56 };
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
 
@@ -142,19 +89,13 @@ function AreaChart({ data, label, color, testId }: {
   const yAxisTicks = [min, min + range * 0.5, max];
   
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.5, duration: 0.5 }}
-      className="p-6 rounded-2xl bg-card/50 border border-border/30"
-      data-testid={testId}
-    >
-      <h3 className="font-display font-semibold text-lg mb-4">{label}</h3>
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ maxHeight: '200px' }}>
+    <div data-testid={testId}>
+      <p className="text-sm text-muted-foreground mb-3">{label}</p>
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
         <defs>
-          <linearGradient id={`gradient-${testId}`} x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stopColor={color} stopOpacity="0.4" />
-            <stop offset="100%" stopColor={color} stopOpacity="0" />
+          <linearGradient id={`grad-${testId}`} x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="rgb(139, 92, 246)" stopOpacity="0.3" />
+            <stop offset="100%" stopColor="rgb(139, 92, 246)" stopOpacity="0" />
           </linearGradient>
         </defs>
         
@@ -167,17 +108,17 @@ function AreaChart({ data, label, color, testId }: {
                 y1={y}
                 x2={width - padding.right}
                 y2={y}
-                stroke="hsl(var(--border))"
+                stroke="currentColor"
                 strokeWidth="1"
-                strokeDasharray="4,4"
-                opacity="0.3"
+                opacity="0.1"
               />
               <text
                 x={padding.left - 8}
-                y={y + 4}
-                fill="hsl(var(--muted-foreground))"
-                fontSize="10"
+                y={y + 3}
+                fill="currentColor"
+                fontSize="9"
                 textAnchor="end"
+                opacity="0.5"
               >
                 {formatCurrency(tick)}
               </text>
@@ -187,66 +128,30 @@ function AreaChart({ data, label, color, testId }: {
 
         <motion.path
           d={areaPath}
-          fill={`url(#gradient-${testId})`}
+          fill={`url(#grad-${testId})`}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ delay: 0.8, duration: 0.5 }}
+          transition={{ delay: 0.3, duration: 0.5 }}
         />
         
         <motion.path
           d={linePath}
           fill="none"
-          stroke={color}
-          strokeWidth="2.5"
+          stroke="rgb(139, 92, 246)"
+          strokeWidth="2"
           strokeLinecap="round"
-          strokeLinejoin="round"
           initial={{ pathLength: 0 }}
           animate={{ pathLength: 1 }}
-          transition={{ delay: 0.6, duration: 1, ease: "easeOut" }}
+          transition={{ delay: 0.2, duration: 0.8, ease: "easeOut" }}
         />
 
-        {points.length > 0 && (
-          <motion.circle
-            cx={points[points.length - 1].x}
-            cy={points[points.length - 1].y}
-            r="5"
-            fill={color}
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            transition={{ delay: 1.6, duration: 0.3 }}
-          />
-        )}
-
-        <text
-          x={padding.left}
-          y={height - 10}
-          fill="hsl(var(--muted-foreground))"
-          fontSize="10"
-        >
+        <text x={padding.left} y={height - 8} fill="currentColor" fontSize="9" opacity="0.5">
           {formatShortDate(data[0].timestamp)}
         </text>
-        <text
-          x={width - padding.right}
-          y={height - 10}
-          fill="hsl(var(--muted-foreground))"
-          fontSize="10"
-          textAnchor="end"
-        >
+        <text x={width - padding.right} y={height - 8} fill="currentColor" fontSize="9" textAnchor="end" opacity="0.5">
           {formatShortDate(data[data.length - 1].timestamp)}
         </text>
       </svg>
-    </motion.div>
-  );
-}
-
-function LiveIndicator() {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="relative flex h-2 w-2">
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-        <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-      </span>
-      <span className="text-xs text-muted-foreground uppercase tracking-wide">Live</span>
     </div>
   );
 }
@@ -273,209 +178,166 @@ export default function Analytics() {
   });
 
   return (
-    <div className="min-h-screen bg-background overflow-hidden">
-      <div className="fixed inset-0 pointer-events-none">
-        <div className="absolute top-0 left-1/4 w-96 h-96 bg-primary/20 rounded-full blur-3xl opacity-20" />
-        <div className="absolute bottom-1/4 right-1/4 w-80 h-80 bg-purple-500/20 rounded-full blur-3xl opacity-20" />
+    <div className="min-h-screen bg-background">
+      <div className="fixed inset-0 pointer-events-none overflow-hidden">
+        <div className="absolute -top-40 -right-40 w-80 h-80 bg-violet-500/10 rounded-full blur-3xl" />
+        <div className="absolute top-1/2 -left-40 w-80 h-80 bg-blue-500/10 rounded-full blur-3xl" />
       </div>
 
-      <nav className="fixed top-0 left-0 right-0 z-50 bg-background/60 backdrop-blur-xl border-b border-white/5">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-3" data-testid="link-home">
-            <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-10 h-10 rounded-xl" />
-            <span className="font-display font-bold text-xl">QuantumVault</span>
+      <nav className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-xl border-b border-border/50">
+        <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+          <Link href="/" className="flex items-center gap-2.5" data-testid="link-home">
+            <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-8 h-8 rounded-lg" />
+            <span className="font-display font-semibold text-lg">QuantumVault</span>
           </Link>
           
-          <div className="hidden md:flex items-center gap-8">
-            <Link href="/" className="text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="link-home-nav">Home</Link>
-            <span className="text-sm text-foreground font-medium" data-testid="link-analytics-active">Analytics</span>
-            <Link href="/docs" className="text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="link-docs">Docs</Link>
+          <div className="flex items-center gap-6">
+            <Link href="/" className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:block" data-testid="link-home-nav">Home</Link>
+            <span className="text-sm text-foreground font-medium hidden sm:block" data-testid="link-analytics-active">Analytics</span>
+            <Link href="/docs" className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:block" data-testid="link-docs">Docs</Link>
+            <a href="/app">
+              <Button size="sm" data-testid="button-launch-app">
+                Launch App
+              </Button>
+            </a>
           </div>
-
-          <a href="/app">
-            <Button size="sm" className="gap-2" data-testid="button-launch-app">
-              Launch App
-              <ArrowUpRight className="w-4 h-4" />
-            </Button>
-          </a>
         </div>
       </nav>
 
-      <main className="relative pt-24 pb-16 px-6">
-        <div className="max-w-7xl mx-auto">
+      <main className="relative pt-20 pb-16 px-6">
+        <div className="max-w-6xl mx-auto">
           <motion.div
-            initial={{ opacity: 0, y: -20 }}
+            initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="text-center mb-16"
+            className="mb-12"
           >
-            <div className="flex items-center justify-center gap-3 mb-6">
-              <LiveIndicator />
-              {metrics?.lastUpdated && (
-                <span className="text-xs text-muted-foreground" data-testid="text-last-updated">
-                  Updated {new Date(metrics.lastUpdated).toLocaleTimeString()}
-                </span>
-              )}
+            <div className="flex items-center gap-2 mb-4">
+              <LivePulse />
+              <span className="text-xs text-muted-foreground uppercase tracking-wider">Live Data</span>
             </div>
-            <h1 className="text-5xl md:text-7xl font-display font-bold mb-6 bg-gradient-to-r from-foreground via-foreground to-foreground/50 bg-clip-text text-transparent">
+            <h1 className="text-4xl md:text-5xl font-display font-bold mb-3">
               Platform Analytics
             </h1>
-            <p className="text-lg text-muted-foreground max-w-xl mx-auto">
-              Real-time on-chain statistics from the Drift Protocol
+            <p className="text-muted-foreground">
+              On-chain metrics from Drift Protocol
             </p>
           </motion.div>
 
           {isLoading ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              {[...Array(4)].map((_, i) => (
-                <div key={i} className="h-48 rounded-3xl bg-card/30 animate-pulse" />
-              ))}
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {[...Array(4)].map((_, i) => (
+                  <div key={i} className="h-24 rounded-xl bg-card/50 animate-pulse" />
+                ))}
+              </div>
             </div>
           ) : error ? (
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="text-center py-20"
-            >
-              <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-destructive/10 mb-4">
-                <span className="text-2xl">!</span>
-              </div>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center py-16">
               <p className="text-destructive">Failed to load metrics</p>
             </motion.div>
           ) : metrics ? (
-            <>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-16">
-                <HeroStat
-                  value={formatCurrency(metrics.tvl)}
-                  label="Total Value Locked"
-                  sublabel="Capital deployed across all trading bots"
-                  gradient="bg-gradient-to-br from-emerald-500 to-teal-600"
-                  delay={0}
-                  testId="tvl"
-                />
-                <HeroStat
-                  value={formatCurrency(metrics.totalVolume)}
-                  label="Trading Volume"
-                  sublabel="All-time volume on Drift Protocol"
-                  gradient="bg-gradient-to-br from-blue-500 to-indigo-600"
-                  delay={0.1}
-                  testId="total-volume"
-                />
-              </div>
-
+            <div className="space-y-8">
               <motion.div
-                initial={{ opacity: 0, y: 20 }}
+                initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.2 }}
-                className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-16"
+                className="grid grid-cols-2 lg:grid-cols-4 gap-4"
               >
-                <div className="p-5 rounded-2xl bg-card/40 border border-border/20 text-center" data-testid="card-volume-24h">
-                  <p className="text-2xl md:text-3xl font-display font-bold" data-testid="value-volume-24h">{formatCurrency(metrics.volume24h)}</p>
-                  <p className="text-xs text-muted-foreground mt-1">24h Volume</p>
+                <div className="p-6 rounded-xl bg-gradient-to-br from-violet-500/10 to-violet-500/5 border border-violet-500/20" data-testid="card-tvl">
+                  <p className="text-xs text-violet-300 uppercase tracking-wider mb-1">TVL</p>
+                  <p className="text-3xl font-display font-bold" data-testid="value-tvl">{formatCurrency(metrics.tvl)}</p>
                 </div>
-                <div className="p-5 rounded-2xl bg-card/40 border border-border/20 text-center" data-testid="card-volume-7d">
-                  <p className="text-2xl md:text-3xl font-display font-bold" data-testid="value-volume-7d">{formatCurrency(metrics.volume7d)}</p>
-                  <p className="text-xs text-muted-foreground mt-1">7d Volume</p>
+                <div className="p-6 rounded-xl bg-gradient-to-br from-blue-500/10 to-blue-500/5 border border-blue-500/20" data-testid="card-total-volume">
+                  <p className="text-xs text-blue-300 uppercase tracking-wider mb-1">Total Volume</p>
+                  <p className="text-3xl font-display font-bold" data-testid="value-total-volume">{formatCurrency(metrics.totalVolume)}</p>
                 </div>
-                <div className="p-5 rounded-2xl bg-card/40 border border-border/20 text-center" data-testid="card-active-bots">
-                  <p className="text-2xl md:text-3xl font-display font-bold" data-testid="value-active-bots">{metrics.activeBots}</p>
-                  <p className="text-xs text-muted-foreground mt-1">Active Bots</p>
+                <div className="p-6 rounded-xl bg-card/50 border border-border/30" data-testid="card-volume-24h">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">24h Volume</p>
+                  <p className="text-3xl font-display font-bold" data-testid="value-volume-24h">{formatCurrency(metrics.volume24h)}</p>
                 </div>
-                <div className="p-5 rounded-2xl bg-card/40 border border-border/20 text-center" data-testid="card-total-trades">
-                  <p className="text-2xl md:text-3xl font-display font-bold" data-testid="value-total-trades">{formatNumber(metrics.totalTrades)}</p>
-                  <p className="text-xs text-muted-foreground mt-1">Total Trades</p>
+                <div className="p-6 rounded-xl bg-card/50 border border-border/30" data-testid="card-volume-7d">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">7d Volume</p>
+                  <p className="text-3xl font-display font-bold" data-testid="value-volume-7d">{formatCurrency(metrics.volume7d)}</p>
                 </div>
               </motion.div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-16">
-                <StatBlock
-                  value={metrics.activeBots}
-                  label="Active Trading Bots"
-                  accentColor="bg-emerald-500"
-                  delay={0.3}
-                  testId="stat-bots"
-                />
-                <StatBlock
-                  value={metrics.activeUsers}
-                  label="Active Traders"
-                  accentColor="bg-blue-500"
-                  delay={0.4}
-                  testId="stat-users"
-                />
-                <StatBlock
-                  value={metrics.totalTrades}
-                  label="Executed Trades"
-                  accentColor="bg-purple-500"
-                  delay={0.5}
-                  testId="stat-trades"
-                />
-              </div>
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.1 }}
+                className="grid grid-cols-3 gap-4"
+              >
+                <div className="p-6 rounded-xl bg-card/30 border border-border/20 text-center" data-testid="card-active-bots">
+                  <p className="text-4xl font-display font-bold bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent" data-testid="value-active-bots">
+                    {metrics.activeBots}
+                  </p>
+                  <p className="text-sm text-muted-foreground mt-1">Active Bots</p>
+                </div>
+                <div className="p-6 rounded-xl bg-card/30 border border-border/20 text-center" data-testid="card-active-users">
+                  <p className="text-4xl font-display font-bold bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent" data-testid="value-active-users">
+                    {metrics.activeUsers}
+                  </p>
+                  <p className="text-sm text-muted-foreground mt-1">Traders</p>
+                </div>
+                <div className="p-6 rounded-xl bg-card/30 border border-border/20 text-center" data-testid="card-total-trades">
+                  <p className="text-4xl font-display font-bold bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent" data-testid="value-total-trades">
+                    {formatNumber(metrics.totalTrades)}
+                  </p>
+                  <p className="text-sm text-muted-foreground mt-1">Trades</p>
+                </div>
+              </motion.div>
 
-              {history && (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-16">
+              {history && (history.tvl.length > 1 || history.volume.length > 1) && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.2 }}
+                  className="grid grid-cols-1 lg:grid-cols-2 gap-6"
+                >
                   {history.tvl.length > 1 && (
-                    <AreaChart
-                      data={history.tvl}
-                      label="TVL Over Time"
-                      color="hsl(142, 76%, 36%)"
-                      testId="chart-tvl-history"
-                    />
+                    <div className="p-6 rounded-xl bg-card/30 border border-border/20">
+                      <AreaChart data={history.tvl} label="TVL Over Time" testId="chart-tvl-history" />
+                    </div>
                   )}
                   {history.volume.length > 1 && (
-                    <AreaChart
-                      data={history.volume}
-                      label="Cumulative Volume"
-                      color="hsl(217, 91%, 60%)"
-                      testId="chart-volume-history"
-                    />
+                    <div className="p-6 rounded-xl bg-card/30 border border-border/20">
+                      <AreaChart data={history.volume} label="Cumulative Volume" testId="chart-volume-history" />
+                    </div>
                   )}
-                </div>
+                </motion.div>
               )}
 
               <motion.div
-                initial={{ opacity: 0, y: 20 }}
+                initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.8 }}
-                className="relative overflow-hidden rounded-3xl"
+                transition={{ delay: 0.3 }}
+                className="p-8 rounded-xl bg-gradient-to-r from-violet-500/20 via-blue-500/20 to-violet-500/20 border border-violet-500/30"
               >
-                <div className="absolute inset-0 bg-gradient-to-r from-primary via-purple-500 to-pink-500 opacity-90" />
-                <div className="absolute inset-0 bg-[url('/images/grid.svg')] opacity-10" />
-                <div className="relative p-10 md:p-14 flex flex-col md:flex-row items-center justify-between gap-8">
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div>
-                    <h3 className="font-display font-bold text-3xl md:text-4xl text-white mb-3">
-                      Start Trading Today
-                    </h3>
-                    <p className="text-white/80 text-lg max-w-md">
-                      Deploy automated trading bots on Solana with just a few clicks.
-                    </p>
+                    <h3 className="font-display font-bold text-xl mb-1">Ready to trade?</h3>
+                    <p className="text-sm text-muted-foreground">Deploy automated bots on Solana</p>
                   </div>
                   <a href="/app">
-                    <Button size="lg" variant="secondary" className="gap-2 text-lg px-8 py-6" data-testid="button-get-started">
-                      Launch App
-                      <ArrowUpRight className="w-5 h-5" />
+                    <Button className="gap-2 bg-violet-600 hover:bg-violet-700" data-testid="button-get-started">
+                      Get Started
+                      <ArrowUpRight className="w-4 h-4" />
                     </Button>
                   </a>
                 </div>
               </motion.div>
-            </>
+            </div>
           ) : null}
         </div>
       </main>
 
-      <footer className="relative border-t border-white/5 bg-card/20">
-        <div className="max-w-7xl mx-auto px-6 py-10">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-            <div className="flex items-center gap-3">
-              <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-8 h-8 rounded-lg" />
-              <span className="font-display font-bold">QuantumVault</span>
+      <footer className="border-t border-border/50 bg-card/20">
+        <div className="max-w-6xl mx-auto px-6 py-8">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="flex items-center gap-2">
+              <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-6 h-6 rounded" />
+              <span className="font-display font-semibold text-sm">QuantumVault</span>
             </div>
-            <div className="flex items-center gap-8 text-sm">
-              <Link href="/docs" className="text-muted-foreground hover:text-foreground transition-colors" data-testid="link-footer-docs">Docs</Link>
-              <a href="#" className="text-muted-foreground hover:text-foreground transition-colors" data-testid="link-twitter">Twitter</a>
-              <a href="#" className="text-muted-foreground hover:text-foreground transition-colors" data-testid="link-discord">Discord</a>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              Built on Solana
-            </p>
+            <p className="text-xs text-muted-foreground">Built on Solana</p>
           </div>
         </div>
       </footer>
