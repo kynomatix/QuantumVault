@@ -354,6 +354,16 @@ export function BotManagementDrawer({
         
         // Track partial data status (some RPC calls may have failed)
         setDataPartial(data.partialData ?? false);
+        
+        // Update bot status if changed (for auto-pause detection)
+        if (data.isActive !== undefined || data.pauseReason !== undefined) {
+          setLocalBot(prev => prev ? {
+            ...prev,
+            isActive: data.isActive ?? prev.isActive,
+            pauseReason: data.pauseReason,
+            autoTopUp: data.autoTopUp ?? prev.autoTopUp,
+          } : prev);
+        }
       }
     } catch (error) {
       console.error('Failed to fetch bot overview:', error);

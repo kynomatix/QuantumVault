@@ -3247,6 +3247,11 @@ export async function registerRoutes(
         : null;
       
       res.json({
+        // Bot status (for auto-pause detection)
+        isActive: bot.isActive,
+        pauseReason: bot.pauseReason,
+        autoTopUp: bot.autoTopUp,
+        
         // From getDriftAccountInfo (1 RPC)
         usdcBalance: accountInfo.usdcBalance,
         totalCollateral: accountInfo.totalCollateral,
