@@ -108,7 +108,7 @@ const MARKET_METADATA: Record<string, MarketMetadata> = {
   'PAXG-PERP': { symbol: 'PAXG-PERP', fullName: 'PAX Gold', marketIndex: 59, category: ['Commodity', 'Gold'], baseAssetSymbol: 'PAXG', isActive: true, maxLeverage: 10, minOrderSize: 0.001 },
   'LAUNCHCOIN-PERP': { symbol: 'LAUNCHCOIN-PERP', fullName: 'Believe', marketIndex: 60, category: ['Meme', 'Solana'], baseAssetSymbol: 'LAUNCHCOIN', isActive: true, maxLeverage: 5, minOrderSize: 100, warning: 'High volatility' },
   'PUMP-PERP': { symbol: 'PUMP-PERP', fullName: 'Pump.fun', marketIndex: 61, category: ['Meme', 'Solana'], baseAssetSymbol: 'PUMP', isActive: true, maxLeverage: 5, minOrderSize: 1, warning: 'High volatility' },
-  'ASTER-PERP': { symbol: 'ASTER-PERP', fullName: 'Aster', marketIndex: 62, category: ['L1'], baseAssetSymbol: 'ASTER', isActive: true, maxLeverage: 10, minOrderSize: 100 },
+  'ASTER-PERP': { symbol: 'ASTER-PERP', fullName: 'Aster', marketIndex: 76, category: ['L1'], baseAssetSymbol: 'ASTER', isActive: true, maxLeverage: 10, minOrderSize: 100 },
   'XPL-PERP': { symbol: 'XPL-PERP', fullName: 'XPL', marketIndex: 63, category: ['Infra'], baseAssetSymbol: 'XPL', isActive: true, maxLeverage: 10, minOrderSize: 1 },
   '2Z-PERP': { symbol: '2Z-PERP', fullName: '2Z', marketIndex: 64, category: ['Meme'], baseAssetSymbol: '2Z', isActive: true, maxLeverage: 5, minOrderSize: 100 },
   'MNT-PERP': { symbol: 'MNT-PERP', fullName: 'Mantle', marketIndex: 65, category: ['L2'], baseAssetSymbol: 'MNT', isActive: true, maxLeverage: 5, minOrderSize: 1 },

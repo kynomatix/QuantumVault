@@ -5047,7 +5047,7 @@ export async function registerRoutes(
           );
           
           if (!closeResult.success) {
-            await storage.updateBotTrade(closeTrade.id, { status: "failed" });
+            await storage.updateBotTrade(closeTrade.id, { status: "failed", errorMessage: `Position flip close failed: ${closeResult.error}` });
             await storage.updateWebhookLog(log.id, { errorMessage: `Position flip close failed: ${closeResult.error}`, processed: true });
             return res.status(500).json({ error: `Position flip close failed: ${closeResult.error}` });
           }
@@ -5159,7 +5159,7 @@ export async function registerRoutes(
           
         } catch (closeError: any) {
           console.error(`[Webhook] Position flip close failed:`, closeError);
-          await storage.updateBotTrade(closeTrade.id, { status: "failed" });
+          await storage.updateBotTrade(closeTrade.id, { status: "failed", errorMessage: `Position flip close failed: ${closeError.message}` });
           await storage.updateWebhookLog(log.id, { errorMessage: `Position flip close failed: ${closeError.message}`, processed: true });
           return res.status(500).json({ error: `Position flip close failed: ${closeError.message}` });
         }
