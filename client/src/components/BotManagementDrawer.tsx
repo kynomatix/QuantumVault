@@ -2088,7 +2088,7 @@ export function BotManagementDrawer({
                   <div className="space-y-0.5">
                     <label className="text-sm font-medium">Auto Top-Up</label>
                     <p className="text-xs text-muted-foreground">
-                      Automatically deposit from your main account when margin is too low to trade
+                      Automatically deposit from your agent wallet when margin is too low to trade
                     </p>
                   </div>
                   <Switch
@@ -2100,7 +2100,7 @@ export function BotManagementDrawer({
                 {editAutoTopUp && (
                   <p className="text-xs text-blue-500 flex items-center gap-1 -mt-2 pb-2">
                     <Info className="w-3 h-3" />
-                    When bot needs more margin, it will transfer from your main Drift account (subaccount 0)
+                    When bot needs more margin, it will deposit from your agent wallet's USDC balance
                   </p>
                 )}
                 
