@@ -116,3 +116,75 @@ export async function fetchPlatformVolumeFromDrift(agentWalletAddresses: string[
     walletData: validResults,
   };
 }
+
+export interface WalletTVLData {
+  walletAddress: string;
+  driftEquity: number;
+  accountCount: number;
+}
+
+export interface PlatformTVLFromDrift {
+  totalTVL: number;
+  walletData: WalletTVLData[];
+}
+
+async function fetchWalletDriftEquity(authorityAddress: string): Promise<WalletTVLData | null> {
+  try {
+    const response = await fetch(`${DRIFT_DATA_API_BASE}/authority/${authorityAddress}/snapshots/trading`, {
+      headers: { 'Accept': 'application/json' },
+    });
+    
+    if (!response.ok) {
+      return null;
+    }
+    
+    const data: DriftTradingResponse = await response.json();
+    
+    if (!data.success || !data.accounts || data.accounts.length === 0) {
+      return {
+        walletAddress: authorityAddress,
+        driftEquity: 0,
+        accountCount: 0,
+      };
+    }
+    
+    let totalEquity = 0;
+    
+    for (const account of data.accounts) {
+      if (account.snapshots && account.snapshots.length > 0) {
+        const latestSnapshot = account.snapshots[account.snapshots.length - 1];
+        const balance = parseFloat(latestSnapshot.accountBalance) || 0;
+        const unrealizedPnl = parseFloat(latestSnapshot.unrealizedPnl) || 0;
+        totalEquity += balance + unrealizedPnl;
+      }
+    }
+    
+    return {
+      walletAddress: authorityAddress,
+      driftEquity: totalEquity,
+      accountCount: data.accounts.length,
+    };
+  } catch (error) {
+    console.error(`[DriftAPI] Error fetching equity for ${authorityAddress}:`, error);
+    return null;
+  }
+}
+
+export async function fetchPlatformTVLFromDrift(agentWalletAddresses: string[]): Promise<PlatformTVLFromDrift> {
+  const results = await Promise.all(
+    agentWalletAddresses.map(addr => fetchWalletDriftEquity(addr))
+  );
+  
+  const validResults = results.filter((r): r is WalletTVLData => r !== null);
+  
+  const totalTVL = validResults.reduce((sum, r) => sum + r.driftEquity, 0);
+  
+  console.log(`[DriftAPI] TVL breakdown: ${validResults.map(r => 
+    `${r.walletAddress.slice(0,4)}...: $${r.driftEquity.toFixed(2)}`
+  ).join(', ')}`);
+  
+  return {
+    totalTVL,
+    walletData: validResults,
+  };
+}
