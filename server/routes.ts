@@ -18,6 +18,7 @@ import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, r
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus } from "./trade-retry-service";
+import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
@@ -474,6 +475,29 @@ export async function registerRoutes(
       return false;
     }
   }
+
+  // Start analytics indexer for platform metrics
+  startAnalyticsIndexer();
+
+  // Public API: Platform metrics (no auth required) - for landing page
+  app.get("/api/metrics", async (req, res) => {
+    try {
+      const metrics = await getMetrics();
+      res.json({
+        tvl: metrics.tvl,
+        totalVolume: metrics.totalVolume,
+        volume24h: metrics.volume24h,
+        volume7d: metrics.volume7d,
+        activeBots: metrics.activeBots,
+        activeUsers: metrics.activeUsers,
+        totalTrades: metrics.totalTrades,
+        lastUpdated: metrics.lastUpdated.toISOString(),
+      });
+    } catch (error) {
+      console.error("[Metrics] Error fetching platform metrics:", error);
+      res.status(500).json({ error: "Failed to fetch platform metrics" });
+    }
+  });
 
   app.post("/api/auth/nonce", async (req, res) => {
     try {

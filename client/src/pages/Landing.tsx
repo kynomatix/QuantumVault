@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, useScroll, useTransform, useMotionTemplate } from 'framer-motion';
 import { useLocation } from 'wouter';
+import { useQuery } from '@tanstack/react-query';
 import { 
   Wallet, 
   Shield, 
@@ -22,6 +23,35 @@ import {
 import { Button } from '@/components/ui/button';
 import { useWallet } from '@/hooks/useWallet';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
+
+interface PlatformMetrics {
+  tvl: number;
+  totalVolume: number;
+  volume24h: number;
+  volume7d: number;
+  activeBots: number;
+  activeUsers: number;
+  totalTrades: number;
+  lastUpdated: string;
+}
+
+function formatNumber(value: number): string {
+  if (value >= 1_000_000) {
+    return `$${(value / 1_000_000).toFixed(1)}M`;
+  } else if (value >= 1_000) {
+    return `$${(value / 1_000).toFixed(1)}K`;
+  }
+  return `$${value.toFixed(0)}`;
+}
+
+function formatCount(value: number): string {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1)}M`;
+  } else if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(1)}K`;
+  }
+  return value.toString();
+}
 
 const fadeInUp = {
   hidden: { opacity: 0, y: 20 },
@@ -64,6 +94,17 @@ export default function Landing() {
   const heroRef = useRef<HTMLDivElement>(null);
   const vaultSectionRef = useRef<HTMLDivElement>(null);
   const [isMounted, setIsMounted] = useState(false);
+  
+  const { data: metrics } = useQuery<PlatformMetrics>({
+    queryKey: ['platform-metrics'],
+    queryFn: async () => {
+      const response = await fetch('/api/metrics');
+      if (!response.ok) throw new Error('Failed to fetch metrics');
+      return response.json();
+    },
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: 5 * 60 * 1000,
+  });
   
   // Track when component is mounted to safely use scroll-based animations
   useEffect(() => {
@@ -275,12 +316,16 @@ export default function Landing() {
                   <p className="text-xs sm:text-sm text-white/60 mt-1">Perp Markets</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-leverage">50x</p>
-                  <p className="text-xs sm:text-sm text-white/60 mt-1">Max Leverage</p>
+                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-tvl">
+                    {metrics ? formatNumber(metrics.tvl) : '$0'}
+                  </p>
+                  <p className="text-xs sm:text-sm text-white/60 mt-1">Total TVL</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-speed">&lt;1s</p>
-                  <p className="text-xs sm:text-sm text-white/60 mt-1">Execution Time</p>
+                  <p className="text-2xl sm:text-3xl font-display font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent" data-testid="text-stat-volume">
+                    {metrics ? formatNumber(metrics.totalVolume) : '$0'}
+                  </p>
+                  <p className="text-xs sm:text-sm text-white/60 mt-1">Total Volume</p>
                 </div>
               </motion.div>
             </motion.div>

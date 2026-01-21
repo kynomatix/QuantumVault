@@ -22,6 +22,7 @@ import {
   marketplaceEquitySnapshots,
   telegramConnectionTokens,
   tradeRetryQueue,
+  platformMetrics,
   type User,
   type InsertUser,
   type Wallet,
@@ -65,6 +66,9 @@ import {
   type InsertTelegramConnectionToken,
   type TradeRetryQueue,
   type InsertTradeRetryQueue,
+  type PlatformMetric,
+  type InsertPlatformMetric,
+  type PlatformMetricType,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -233,6 +237,16 @@ export interface IStorage {
   deleteTelegramConnectionToken(id: string): Promise<void>;
   deleteExpiredTelegramTokens(): Promise<number>;
   getWalletByTelegramChatId(chatId: string): Promise<Wallet | undefined>;
+
+  // Platform Analytics
+  upsertPlatformMetric(metricType: PlatformMetricType, value: number, metadata?: Record<string, unknown>): Promise<PlatformMetric>;
+  cleanupOldMetrics(retentionDays?: number): Promise<number>;
+  getLatestPlatformMetric(metricType: PlatformMetricType): Promise<PlatformMetric | undefined>;
+  getLatestPlatformMetrics(): Promise<PlatformMetric[]>;
+  getPlatformMetricHistory(metricType: PlatformMetricType, since?: Date, limit?: number): Promise<PlatformMetric[]>;
+  calculatePlatformTVL(): Promise<number>;
+  calculatePlatformVolume(): Promise<{ total: number; volume24h: number; volume7d: number }>;
+  calculatePlatformStats(): Promise<{ activeBots: number; activeUsers: number; totalTrades: number }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1270,6 +1284,138 @@ export class DatabaseStorage implements IStorage {
       ))
       .returning();
     return result.length;
+  }
+
+  // Platform Analytics
+  async upsertPlatformMetric(metricType: PlatformMetricType, value: number, metadata?: Record<string, unknown>): Promise<PlatformMetric> {
+    const now = new Date();
+    
+    const result = await db.insert(platformMetrics).values({
+      metricType,
+      value: value.toString(),
+      metadata: metadata ?? null,
+      calculatedAt: now,
+    }).returning();
+    return result[0];
+  }
+  
+  async cleanupOldMetrics(retentionDays: number = 30): Promise<number> {
+    const cutoffDate = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+    const result = await db.delete(platformMetrics)
+      .where(lte(platformMetrics.calculatedAt, cutoffDate))
+      .returning();
+    return result.length;
+  }
+
+  async getLatestPlatformMetric(metricType: PlatformMetricType): Promise<PlatformMetric | undefined> {
+    const result = await db.select().from(platformMetrics)
+      .where(eq(platformMetrics.metricType, metricType))
+      .orderBy(desc(platformMetrics.calculatedAt))
+      .limit(1);
+    return result[0];
+  }
+
+  async getLatestPlatformMetrics(): Promise<PlatformMetric[]> {
+    const metricTypes: PlatformMetricType[] = [
+      'tvl', 'total_volume', 'total_trades', 'active_bots', 'active_users', 'volume_24h', 'volume_7d'
+    ];
+    
+    const results: PlatformMetric[] = [];
+    for (const metricType of metricTypes) {
+      const metric = await this.getLatestPlatformMetric(metricType);
+      if (metric) results.push(metric);
+    }
+    return results;
+  }
+
+  async getPlatformMetricHistory(metricType: PlatformMetricType, since?: Date, limit?: number): Promise<PlatformMetric[]> {
+    let query = db.select().from(platformMetrics)
+      .where(eq(platformMetrics.metricType, metricType))
+      .orderBy(desc(platformMetrics.calculatedAt));
+    
+    if (since) {
+      query = db.select().from(platformMetrics)
+        .where(and(
+          eq(platformMetrics.metricType, metricType),
+          gte(platformMetrics.calculatedAt, since)
+        ))
+        .orderBy(desc(platformMetrics.calculatedAt));
+    }
+    
+    if (limit) {
+      return query.limit(limit);
+    }
+    return query;
+  }
+
+  async calculatePlatformTVL(): Promise<number> {
+    const result = await db.select({
+      totalAllocated: sql<string>`COALESCE(SUM(CAST(total_investment AS DECIMAL)), 0)`,
+    }).from(tradingBots)
+      .where(eq(tradingBots.isActive, true));
+    
+    return parseFloat(result[0]?.totalAllocated || '0');
+  }
+
+  async calculatePlatformVolume(): Promise<{ total: number; volume24h: number; volume7d: number }> {
+    const now = new Date();
+    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    
+    const allBots = await db.select({
+      stats: tradingBots.stats,
+    }).from(tradingBots);
+    
+    let totalVolume = 0;
+    for (const bot of allBots) {
+      const stats = bot.stats as { totalVolume?: number } | null;
+      totalVolume += stats?.totalVolume || 0;
+    }
+    
+    const trades24h = await db.select({
+      volume: sql<string>`COALESCE(SUM(ABS(CAST(size AS DECIMAL) * CAST(price AS DECIMAL))), 0)`,
+    }).from(botTrades)
+      .where(and(
+        eq(botTrades.status, 'filled'),
+        gte(botTrades.executedAt, oneDayAgo)
+      ));
+    
+    const trades7d = await db.select({
+      volume: sql<string>`COALESCE(SUM(ABS(CAST(size AS DECIMAL) * CAST(price AS DECIMAL))), 0)`,
+    }).from(botTrades)
+      .where(and(
+        eq(botTrades.status, 'filled'),
+        gte(botTrades.executedAt, sevenDaysAgo)
+      ));
+    
+    return {
+      total: totalVolume,
+      volume24h: parseFloat(trades24h[0]?.volume || '0'),
+      volume7d: parseFloat(trades7d[0]?.volume || '0'),
+    };
+  }
+
+  async calculatePlatformStats(): Promise<{ activeBots: number; activeUsers: number; totalTrades: number }> {
+    const activeBots = await db.select({
+      count: sql<string>`COUNT(*)`,
+    }).from(tradingBots)
+      .where(eq(tradingBots.isActive, true));
+    
+    const activeUsers = await db.select({
+      count: sql<string>`COUNT(DISTINCT wallet_address)`,
+    }).from(tradingBots)
+      .where(eq(tradingBots.isActive, true));
+    
+    const totalTrades = await db.select({
+      count: sql<string>`COUNT(*)`,
+    }).from(botTrades)
+      .where(eq(botTrades.status, 'filled'));
+    
+    return {
+      activeBots: parseInt(activeBots[0]?.count || '0'),
+      activeUsers: parseInt(activeUsers[0]?.count || '0'),
+      totalTrades: parseInt(totalTrades[0]?.count || '0'),
+    };
   }
 }
 

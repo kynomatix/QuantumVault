@@ -520,3 +520,30 @@ export const insertTradeRetryQueueSchema = createInsertSchema(tradeRetryQueue).o
 });
 export type InsertTradeRetryQueue = z.infer<typeof insertTradeRetryQueueSchema>;
 export type TradeRetryQueue = typeof tradeRetryQueue.$inferSelect;
+
+// Platform Analytics: Aggregated metrics for landing page and monitoring
+export const platformMetrics = pgTable("platform_metrics", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  metricType: text("metric_type").notNull(),
+  value: decimal("value", { precision: 30, scale: 6 }).notNull(),
+  metadata: jsonb("metadata"),
+  calculatedAt: timestamp("calculated_at").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertPlatformMetricSchema = createInsertSchema(platformMetrics).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertPlatformMetric = z.infer<typeof insertPlatformMetricSchema>;
+export type PlatformMetric = typeof platformMetrics.$inferSelect;
+
+// Platform metrics types
+export type PlatformMetricType = 
+  | "tvl"              // Total Value Locked - sum of all USDC in Drift accounts
+  | "total_volume"     // Total trading volume across all bots
+  | "total_trades"     // Total number of trades executed
+  | "active_bots"      // Number of active trading bots
+  | "active_users"     // Number of active users (wallets with bots)
+  | "volume_24h"       // 24-hour trading volume
+  | "volume_7d";       // 7-day trading volume
