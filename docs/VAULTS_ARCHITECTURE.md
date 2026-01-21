@@ -674,6 +674,518 @@ These are nice-to-haves, not core functionality.
 4. Clear risk disclosures to users
 5. Emergency stop functionality
 
+## Drift Strategy Vaults Integration
+
+Drift Protocol offers pre-built strategy vaults (e.g., INF delta-neutral, JLP yield) that users can subscribe to. These represent sophisticated yield strategies that we can integrate as deposit destinations.
+
+### Understanding Drift Strategy Vaults
+
+#### How They Work
+
+```
+User Deposits → Strategy Vault → Complex DeFi Strategy → Yield
+                     ↓
+              Withdrawal Queue (Wait Period)
+```
+
+**Example: INF Delta-Neutral Vault**
+1. User deposits USDC
+2. Vault buys INF (Infinity/LST token) as collateral
+3. Vault opens perpetual SHORT on SOL to hedge price exposure
+4. Collects: INF staking yield + funding payments (when shorts pay longs)
+5. Net result: Yield without directional price exposure
+
+**Example: JLP Yield Vault**
+1. User deposits USDC
+2. Vault deposits to Jupiter Liquidity Pool
+3. Collects: Trading fees + JLP rewards
+4. Risk: Impermanent loss, protocol risk
+
+### Critical Considerations
+
+#### 1. Withdrawal Wait Periods
+
+**MUST factor in before any deposit decision:**
+
+```typescript
+interface StrategyVaultMetadata {
+  vaultAddress: string;
+  name: string;
+  strategy: 'delta_neutral' | 'yield_farming' | 'basis_trade';
+  
+  // CRITICAL: Withdrawal constraints
+  withdrawalPeriod: {
+    requestWindow: number;      // Hours to submit withdrawal request
+    processingTime: number;     // Hours after request before withdrawal executes
+    minLockPeriod: number;      // Minimum days funds must stay deposited
+  };
+  
+  // Example: INF vault might have
+  // requestWindow: 24 (can request during 24h window)
+  // processingTime: 48 (takes 48h to process)
+  // minLockPeriod: 7 (must stay 7 days minimum)
+}
+```
+
+**Pre-Deposit Checks:**
+```typescript
+async function evaluateVaultDeposit(vault: StrategyVault, amount: number): Promise<DepositDecision> {
+  const userLiquidityNeeds = await estimateUserLiquidityNeeds();
+  
+  // Check 1: Can user afford to lock funds?
+  if (userLiquidityNeeds.urgentWithin < vault.withdrawalPeriod.processingTime) {
+    return {
+      canDeposit: false,
+      reason: `Vault has ${vault.withdrawalPeriod.processingTime}h withdrawal delay, but you may need funds sooner`
+    };
+  }
+  
+  // Check 2: Is the APY worth the lockup?
+  const expectedYield = amount * vault.currentApy * (vault.withdrawalPeriod.minLockPeriod / 365);
+  const opportunityCost = this.calculateOpportunityCost(amount, vault.withdrawalPeriod.minLockPeriod);
+  
+  if (expectedYield < opportunityCost) {
+    return {
+      canDeposit: false,
+      reason: `Expected yield ($${expectedYield.toFixed(2)}) doesn't justify lockup opportunity cost`
+    };
+  }
+  
+  return { canDeposit: true };
+}
+```
+
+#### 2. Funding Rate Analysis
+
+For delta-neutral strategies, funding rates determine profitability:
+
+```typescript
+interface FundingRateAnalysis {
+  market: string;
+  
+  // Historical funding data
+  hourlyFundingRate: number;        // Current hourly rate
+  dailyFundingRate: number;         // Annualized from hourly
+  weeklyAverage: number;            // 7-day average
+  monthlyAverage: number;           // 30-day average
+  
+  // Funding direction
+  longsPayShorts: boolean;          // true = shorts earn funding
+  
+  // Volatility of funding
+  fundingVolatility: number;        // Standard deviation
+  
+  // Profitability estimate
+  estimatedAnnualFundingYield: number;
+}
+
+async function shouldEnterDeltaNeutralVault(vault: DeltaNeutralVault): Promise<boolean> {
+  const funding = await getFundingRateAnalysis(vault.hedgeMarket);
+  
+  // Check 1: Is funding consistently favorable?
+  if (!funding.longsPayShorts) {
+    // Shorts pay longs - strategy loses money on funding
+    return false;
+  }
+  
+  // Check 2: Is funding stable enough?
+  if (funding.fundingVolatility > 0.05) {
+    // High volatility - funding could flip frequently
+    // Only proceed if average is strongly positive
+    if (funding.monthlyAverage < 0.15) return false;
+  }
+  
+  // Check 3: Does total yield justify the complexity?
+  const totalYield = vault.baseYield + funding.estimatedAnnualFundingYield;
+  const minAcceptableYield = 0.10; // 10% minimum for complex strategy
+  
+  return totalYield > minAcceptableYield;
+}
+```
+
+**Funding Rate Data Sources:**
+- Drift API: `GET /fundingRates/{market}`
+- Historical: Store in database for trend analysis
+- Real-time: WebSocket subscription for live updates
+
+#### 3. Strategy-Specific Risk Factors
+
+```typescript
+interface StrategyRiskProfile {
+  // Execution risks
+  rebalanceFrequency: 'continuous' | 'hourly' | 'daily';
+  slippageSensitivity: 'low' | 'medium' | 'high';
+  
+  // Market risks
+  fundingFlipRisk: number;          // Probability funding direction changes
+  liquidationRisk: number;          // Probability of hedge liquidation
+  depegRisk: number;                // For LST strategies - depeg probability
+  
+  // Protocol risks
+  smartContractRisk: 'audited' | 'unaudited';
+  oracleRisk: 'chainlink' | 'pyth' | 'custom';
+  
+  // Capacity constraints
+  maxTvl: number;                   // Strategy capacity limit
+  currentTvl: number;               // Current deposits
+  utilizationPercent: number;       // How full is the vault
+}
+```
+
+### JLP and High-APR Vault Considerations
+
+#### JLP (Jupiter Liquidity Pool) Specifics
+
+```typescript
+interface JLPVaultAnalysis {
+  // Yield components
+  tradingFeeApy: number;            // From Jupiter perps trading volume
+  jlpRewardsApy: number;            // JLP token emissions
+  totalApy: number;
+  
+  // Risk factors
+  exposureAssets: string[];         // SOL, ETH, BTC, USDC, USDT
+  impermanentLossEstimate: number;  // Based on asset volatility
+  
+  // Capacity
+  currentTvl: number;
+  historicalApyTrend: number[];     // APY decreases as TVL grows
+  
+  // Evaluation
+  netExpectedReturn(): number {
+    return this.totalApy - this.impermanentLossEstimate;
+  }
+}
+```
+
+**APR Decay Warning:**
+High-APR vaults often have diminishing returns as TVL grows. The displayed APR may not reflect what new depositors will earn.
+
+```typescript
+function estimateActualApy(vault: HighAprVault, depositAmount: number): number {
+  const currentTvl = vault.currentTvl;
+  const newTvl = currentTvl + depositAmount;
+  
+  // APR often scales inversely with TVL
+  // APR_new = APR_current * (currentTvl / newTvl)
+  const dilutionFactor = currentTvl / newTvl;
+  return vault.displayedApy * dilutionFactor;
+}
+```
+
+## External Yield Aggregation (Lulo-Style)
+
+### Concept
+
+Lulo and similar protocols automatically move assets across Solana DeFi to capture the highest yield. We can implement a similar system:
+
+```
+User USDC → Yield Router → Highest Yield Protocol → Auto-Rebalance
+                ↓
+         Monitor all options:
+         - Drift Lending
+         - Kamino
+         - Marginfi
+         - Solend
+         - Save (formerly Solend)
+         - Meteora
+         - Orca Whirlpools
+```
+
+### Architecture
+
+```typescript
+interface YieldAggregator {
+  // Supported protocols
+  protocols: YieldProtocol[];
+  
+  // Current allocation
+  allocations: Map<string, {
+    protocol: string;
+    amount: number;
+    currentApy: number;
+    depositedAt: Date;
+  }>;
+  
+  // Rebalancing logic
+  async rebalance(): Promise<void> {
+    const opportunities = await this.fetchAllYields();
+    const sorted = opportunities.sort((a, b) => b.apy - a.apy);
+    
+    for (const allocation of this.allocations.values()) {
+      const currentApy = allocation.currentApy;
+      const bestApy = sorted[0].apy;
+      const switchCost = this.calculateSwitchCost(allocation.protocol, sorted[0].protocol);
+      const breakEvenDays = switchCost / ((bestApy - currentApy) * allocation.amount / 365);
+      
+      if (breakEvenDays < 7 && (bestApy - currentApy) > 0.02) {
+        await this.migrate(allocation, sorted[0]);
+      }
+    }
+  }
+}
+
+interface YieldProtocol {
+  name: string;
+  type: 'lending' | 'lp' | 'staking' | 'vault';
+  
+  // Yield data
+  getCurrentApy(): Promise<number>;
+  getHistoricalApy(days: number): Promise<number[]>;
+  
+  // Liquidity
+  getAvailableLiquidity(): Promise<number>;
+  getUtilizationRate(): Promise<number>;
+  
+  // Constraints
+  minDeposit: number;
+  maxDeposit: number | null;
+  withdrawalDelay: number;          // Seconds
+  
+  // Actions
+  deposit(amount: number): Promise<TxSignature>;
+  withdraw(amount: number): Promise<TxSignature>;
+}
+```
+
+### Protocol Integration Requirements
+
+| Protocol | API Available | Withdrawal Delay | Complexity |
+|----------|--------------|------------------|------------|
+| Drift Lending | Yes (SDK) | Instant | Low |
+| Kamino | Yes | Instant | Medium |
+| Marginfi | Yes | Instant | Medium |
+| Solend/Save | Yes | Instant | Medium |
+| Meteora | Limited | Instant | High |
+| Orca | Limited | Instant | High |
+| Lulo (aggregate) | Yes | Varies | Low (use their API) |
+
+### Resource Consumption Analysis
+
+```typescript
+interface ResourceRequirements {
+  // API calls per rebalance check
+  apiCallsPerProtocol: number;      // ~2-3 calls per protocol
+  totalProtocols: number;           // 6-8 protocols
+  checkFrequency: number;           // Every 6 hours = 4x daily
+  dailyApiCalls: number;            // ~100-150 calls/day per user
+  
+  // RPC requirements
+  rpcCallsPerCheck: number;         // ~10-20 for balance checks
+  rpcCallsPerMigration: number;     // ~5-10 for withdraw+deposit
+  
+  // Transaction costs
+  txPerMigration: number;           // 2 (withdraw + deposit)
+  avgTxCostSol: number;             // ~0.00025 SOL per tx
+  
+  // Time requirements
+  migrationDuration: number;        // 30-60 seconds for full migration
+}
+```
+
+**Scaling Considerations:**
+- 100 users × 150 API calls = 15,000 calls/day
+- Need rate limiting and caching
+- Batch user checks where possible
+- Consider Lulo API as aggregator (reduces our API calls)
+
+### Limitations and Constraints
+
+#### 1. Transaction Costs vs Yield
+
+```typescript
+function isProfitableToMigrate(
+  currentProtocol: YieldProtocol,
+  targetProtocol: YieldProtocol,
+  amount: number
+): boolean {
+  const apyDifference = targetProtocol.apy - currentProtocol.apy;
+  
+  // Transaction costs
+  const withdrawTxCost = 0.00025; // SOL
+  const depositTxCost = 0.00025;
+  const solPrice = await getSolPrice();
+  const totalTxCostUsd = (withdrawTxCost + depositTxCost) * solPrice;
+  
+  // Slippage (if swapping tokens)
+  const slippageCost = amount * 0.001; // 0.1% typical
+  
+  // Total cost
+  const migrationCost = totalTxCostUsd + slippageCost;
+  
+  // Daily yield difference
+  const dailyYieldDiff = amount * (apyDifference / 365);
+  
+  // Break-even in days
+  const breakEvenDays = migrationCost / dailyYieldDiff;
+  
+  // Only migrate if break-even < 7 days
+  return breakEvenDays < 7 && apyDifference > 0.01;
+}
+```
+
+#### 2. Liquidity Constraints
+
+```typescript
+interface LiquidityCheck {
+  // Can we withdraw from current protocol?
+  async canWithdraw(protocol: string, amount: number): Promise<boolean> {
+    const available = await protocol.getAvailableLiquidity();
+    return available >= amount;
+  }
+  
+  // Can we deposit to target protocol?
+  async canDeposit(protocol: string, amount: number): Promise<boolean> {
+    const capacity = await protocol.getRemainingCapacity();
+    const minDeposit = protocol.minDeposit;
+    return capacity >= amount && amount >= minDeposit;
+  }
+}
+```
+
+#### 3. Smart Contract / Protocol Risk Diversification
+
+```typescript
+interface RiskDiversification {
+  // Max allocation per protocol (risk limit)
+  maxPerProtocol: number;           // e.g., 30% of total
+  
+  // Protocol risk scores
+  riskScores: Map<string, number>;  // 1-10 (10 = highest risk)
+  
+  // Allocation considering risk
+  calculateOptimalAllocation(yields: YieldOpportunity[]): Allocation[] {
+    // Don't just chase highest yield
+    // Balance yield vs risk diversification
+    
+    const allocations: Allocation[] = [];
+    let remaining = this.totalCapital;
+    
+    for (const opp of yields.sort((a, b) => b.riskAdjustedYield - a.riskAdjustedYield)) {
+      const maxForThisProtocol = this.totalCapital * this.maxPerProtocol;
+      const allocation = Math.min(remaining, maxForThisProtocol);
+      
+      if (allocation > opp.protocol.minDeposit) {
+        allocations.push({ protocol: opp.protocol, amount: allocation });
+        remaining -= allocation;
+      }
+      
+      if (remaining <= 0) break;
+    }
+    
+    return allocations;
+  }
+}
+```
+
+#### 4. Market Condition Handling
+
+```typescript
+interface MarketConditionHandler {
+  // High volatility: Reduce migrations, increase cash buffer
+  onHighVolatility(): void {
+    this.migrationThreshold = 0.05; // Require 5% APY diff instead of 2%
+    this.cashBuffer = 0.20;         // Keep 20% in stables
+  }
+  
+  // Liquidity crisis: Pause all migrations
+  onLiquidityCrisis(): void {
+    this.migrationEnabled = false;
+    this.alertUser('Migrations paused due to market conditions');
+  }
+  
+  // Protocol exploit: Emergency withdrawal
+  async onProtocolExploit(protocol: string): void {
+    await this.emergencyWithdraw(protocol);
+    this.blacklistProtocol(protocol);
+    this.alertUser(`Emergency withdrawal from ${protocol} due to exploit`);
+  }
+}
+```
+
+## Comprehensive Limitations
+
+### Technical Limitations
+
+| Limitation | Impact | Mitigation |
+|------------|--------|------------|
+| RPC rate limits | Can't check all protocols frequently | Cache yields, batch requests |
+| Transaction failures | Migration can fail mid-way | Retry logic, atomic operations |
+| Price oracle delays | Slippage on swaps | Use conservative slippage settings |
+| Protocol API changes | Integration breaks | Version pinning, health checks |
+
+### Economic Limitations
+
+| Limitation | Impact | Mitigation |
+|------------|--------|------------|
+| Gas costs eat yield | Small deposits unprofitable | Minimum deposit thresholds |
+| Slippage on large moves | Reduces actual yield | Split large migrations |
+| APY displayed ≠ APY earned | User disappointment | Show realistic projections |
+| Withdrawal delays | Can't react to market changes | Factor in before depositing |
+
+### Operational Limitations
+
+| Limitation | Impact | Mitigation |
+|------------|--------|------------|
+| 24/7 monitoring needed | Missed opportunities | Automated systems with alerts |
+| Protocol risk assessment | Exposure to exploits | Diversification, audit checks |
+| Regulatory uncertainty | Protocol shutdowns | Geographic diversification |
+| Key management complexity | Security risks | Hardware security modules |
+
+## System Requirements Summary
+
+### Minimum Infrastructure
+
+```yaml
+# For production yield aggregation
+compute:
+  - Background workers: 2 instances
+  - API server: 2 instances (redundancy)
+  - Database: PostgreSQL with read replicas
+
+external_apis:
+  - RPC: Dedicated Helius/Quicknode (not public)
+  - Rate limit: 100 req/sec minimum
+  
+monitoring:
+  - Yield rate feeds: 5-minute refresh
+  - Health checks: 1-minute intervals
+  - Alerting: PagerDuty/Discord integration
+  
+caching:
+  - Redis for yield data (TTL: 5 minutes)
+  - Protocol metadata (TTL: 1 hour)
+```
+
+### Data Requirements
+
+```typescript
+interface RequiredDataFeeds {
+  // Real-time
+  yieldRates: {
+    sources: ['drift', 'kamino', 'marginfi', 'solend', 'meteora'],
+    refreshInterval: 300, // 5 minutes
+  };
+  
+  fundingRates: {
+    sources: ['drift'],
+    markets: ['SOL-PERP', 'BTC-PERP', 'ETH-PERP'],
+    refreshInterval: 3600, // 1 hour
+  };
+  
+  protocolHealth: {
+    metrics: ['tvl', 'utilization', 'available_liquidity'],
+    refreshInterval: 300,
+  };
+  
+  // Historical (for analysis)
+  historicalYields: {
+    retention: 365, // days
+    granularity: 'hourly',
+  };
+}
+```
+
 ## Dependencies
 
 - Drift SDK borrow/lend functions
@@ -681,6 +1193,9 @@ These are nice-to-haves, not core functionality.
 - Interest rate APIs
 - Oracle price feeds
 - Existing bot infrastructure
+- External protocol SDKs (Kamino, Marginfi, etc.)
+- Lulo API (optional aggregator)
+- Dedicated RPC endpoint with high rate limits
 
 ## Notes
 
