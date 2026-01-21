@@ -405,6 +405,217 @@ interface ProfitDistributionAgent {
 - Minimum threshold before distribution
 - Per-bot or global settings
 
+### Bot Management Drawer - Profit Sweep Settings
+
+The existing Bot Management Drawer (Settings tab) needs to be extended to let users choose their profit destination.
+
+#### Current State
+
+```typescript
+// Existing fields in trading_bots schema
+profitReinvest: boolean;           // Reinvest profits back into bot
+autoWithdrawThreshold: number;     // Withdraw when profit exceeds threshold
+```
+
+#### Enhanced State (With Vaults)
+
+```typescript
+// Extended profit management options
+interface BotProfitSettings {
+  // Profit destination (mutually exclusive primary choice)
+  profitDestination: 'reinvest' | 'vault' | 'agent_wallet';
+  
+  // Threshold before any sweep occurs
+  profitSweepThreshold: number;    // e.g., $50 minimum before sweep
+  
+  // If destination is 'vault' - which vault?
+  targetVaultId: string | null;    // User's selected vault for yield
+  
+  // Split mode (advanced - optional)
+  splitMode: boolean;              // Enable splitting profits
+  splitConfig: {
+    reinvestPercent: number;       // % back to bot
+    vaultPercent: number;          // % to yield vault
+    agentWalletPercent: number;    // % to agent wallet
+  } | null;
+}
+```
+
+#### UI Design for Bot Management Drawer
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Settings                                                    │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Profit Sweep Destination                                   │
+│  ─────────────────────────────────────────────────────────  │
+│  Where should profits go when threshold is reached?         │
+│                                                              │
+│  ○ Reinvest in Bot                                          │
+│    Keep profits in this bot to compound returns             │
+│                                                              │
+│  ○ Sweep to Yield Vault                          [NEW]      │
+│    Move profits to vault for additional yield               │
+│    ┌─────────────────────────────────────────┐              │
+│    │ Select Vault: [INF Delta-Neutral ▼]     │              │
+│    │ Current APY: 12.5%                       │              │
+│    └─────────────────────────────────────────┘              │
+│                                                              │
+│  ○ Sweep to Agent Wallet                                    │
+│    Withdraw profits to your agent wallet (current behavior) │
+│                                                              │
+│  ─────────────────────────────────────────────────────────  │
+│  Sweep Threshold                                            │
+│  ┌─────────────────┐                                        │
+│  │ $  50.00        │  Sweep when profits exceed this amount │
+│  └─────────────────┘                                        │
+│                                                              │
+│  ─────────────────────────────────────────────────────────  │
+│  [ ] Advanced: Split profits between destinations           │
+│                                                              │
+│  (If enabled)                                               │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ Reinvest:      [40%] ────●──────────────            │   │
+│  │ Yield Vault:   [40%] ────●──────────────            │   │
+│  │ Agent Wallet:  [20%] ──●────────────────            │   │
+│  │                        Total: 100% ✓                 │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │              [Cancel]    [Save Settings]              │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Schema Updates Required
+
+```typescript
+// In shared/schema.ts - extend trading_bots table
+export const tradingBots = pgTable("trading_bots", {
+  // ... existing fields ...
+  
+  // Enhanced profit management
+  profitDestination: varchar("profit_destination").default("reinvest"),
+    // 'reinvest' | 'vault' | 'agent_wallet'
+  
+  profitSweepThreshold: real("profit_sweep_threshold").default(50),
+  
+  targetVaultId: varchar("target_vault_id").references(() => vaults.id),
+  
+  // Split mode
+  profitSplitEnabled: boolean("profit_split_enabled").default(false),
+  profitSplitReinvest: real("profit_split_reinvest").default(100),
+  profitSplitVault: real("profit_split_vault").default(0),
+  profitSplitAgentWallet: real("profit_split_agent_wallet").default(0),
+});
+```
+
+#### Migration from Current Fields
+
+```typescript
+// Backward compatibility mapping
+function migrateExistingSettings(bot: TradingBot): BotProfitSettings {
+  if (bot.profitReinvest) {
+    return {
+      profitDestination: 'reinvest',
+      profitSweepThreshold: bot.autoWithdrawThreshold || 50,
+      targetVaultId: null,
+      splitMode: false,
+      splitConfig: null,
+    };
+  } else {
+    return {
+      profitDestination: 'agent_wallet',
+      profitSweepThreshold: bot.autoWithdrawThreshold || 50,
+      targetVaultId: null,
+      splitMode: false,
+      splitConfig: null,
+    };
+  }
+}
+```
+
+#### Execution Logic
+
+```typescript
+async function handleProfitSweep(botId: string, realizedProfit: number): Promise<void> {
+  const bot = await storage.getTradingBotById(botId);
+  const wallet = await storage.getWallet(bot.walletAddress);
+  
+  // Check threshold
+  if (realizedProfit < bot.profitSweepThreshold) {
+    console.log(`[Profit Sweep] Profit $${realizedProfit} below threshold $${bot.profitSweepThreshold}`);
+    return;
+  }
+  
+  if (bot.profitSplitEnabled) {
+    // Split mode - distribute to multiple destinations
+    const reinvestAmount = realizedProfit * (bot.profitSplitReinvest / 100);
+    const vaultAmount = realizedProfit * (bot.profitSplitVault / 100);
+    const walletAmount = realizedProfit * (bot.profitSplitAgentWallet / 100);
+    
+    if (reinvestAmount > 0) {
+      // Keep in bot (already there after settlement)
+      console.log(`[Profit Sweep] Keeping $${reinvestAmount.toFixed(2)} in bot`);
+    }
+    
+    if (vaultAmount > 0 && bot.targetVaultId) {
+      await depositToVault(wallet, bot.targetVaultId, vaultAmount);
+      console.log(`[Profit Sweep] Deposited $${vaultAmount.toFixed(2)} to vault`);
+    }
+    
+    if (walletAmount > 0) {
+      await withdrawToAgentWallet(wallet, bot.driftSubaccountId, walletAmount);
+      console.log(`[Profit Sweep] Withdrew $${walletAmount.toFixed(2)} to agent wallet`);
+    }
+  } else {
+    // Single destination mode
+    switch (bot.profitDestination) {
+      case 'reinvest':
+        // Keep in bot (already there after settlement)
+        console.log(`[Profit Sweep] Reinvesting $${realizedProfit.toFixed(2)} in bot`);
+        break;
+        
+      case 'vault':
+        if (bot.targetVaultId) {
+          await depositToVault(wallet, bot.targetVaultId, realizedProfit);
+          console.log(`[Profit Sweep] Deposited $${realizedProfit.toFixed(2)} to vault`);
+        } else {
+          // Fallback to agent wallet if no vault selected
+          await withdrawToAgentWallet(wallet, bot.driftSubaccountId, realizedProfit);
+          console.log(`[Profit Sweep] No vault selected, fell back to agent wallet`);
+        }
+        break;
+        
+      case 'agent_wallet':
+        await withdrawToAgentWallet(wallet, bot.driftSubaccountId, realizedProfit);
+        console.log(`[Profit Sweep] Withdrew $${realizedProfit.toFixed(2)} to agent wallet`);
+        break;
+    }
+  }
+}
+```
+
+#### User Flow
+
+1. User opens Bot Management Drawer → Settings tab
+2. Scrolls to "Profit Sweep Destination" section
+3. Selects one of three options:
+   - **Reinvest in Bot** (current profitReinvest=true behavior)
+   - **Sweep to Yield Vault** (NEW - requires vault selection)
+   - **Sweep to Agent Wallet** (current profitReinvest=false behavior)
+4. Sets threshold (minimum profit before sweep triggers)
+5. Optionally enables "Advanced: Split profits" for percentage-based distribution
+6. Saves settings
+
+#### Dependency
+
+This feature requires:
+- Phase 1 (Core Vault) complete - so users have a vault to sweep to
+- Vault selection dropdown populated from user's available vaults
+- If no vault exists, "Sweep to Yield Vault" option should be disabled with tooltip: "Create a vault first"
+
 #### 3. Risk Management Agent
 
 Monitors health and takes protective actions:
