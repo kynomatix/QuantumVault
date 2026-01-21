@@ -499,6 +499,31 @@ export async function registerRoutes(
     }
   });
 
+  // Public API: Historical metrics for charts (no auth required)
+  app.get("/api/metrics/history", async (req, res) => {
+    try {
+      const days = Math.min(parseInt(req.query.days as string) || 7, 30);
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      
+      const tvlHistory = await storage.getPlatformMetricHistory('tvl', since, 100);
+      const volumeHistory = await storage.getPlatformMetricHistory('total_volume', since, 100);
+      
+      res.json({
+        tvl: tvlHistory.map(m => ({
+          timestamp: m.calculatedAt.toISOString(),
+          value: parseFloat(m.value),
+        })),
+        volume: volumeHistory.map(m => ({
+          timestamp: m.calculatedAt.toISOString(),
+          value: parseFloat(m.value),
+        })),
+      });
+    } catch (error) {
+      console.error("[Metrics] Error fetching metrics history:", error);
+      res.status(500).json({ error: "Failed to fetch metrics history" });
+    }
+  });
+
   app.post("/api/auth/nonce", async (req, res) => {
     try {
       const { walletAddress, purpose } = req.body;

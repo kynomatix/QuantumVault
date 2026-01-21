@@ -187,6 +187,7 @@ export default function Landing() {
           <div className="hidden md:flex items-center gap-8">
             <a href="#features" className="text-sm text-white/60 hover:text-white transition-colors" data-testid="link-features">Features</a>
             <a href="#how-it-works" className="text-sm text-white/60 hover:text-white transition-colors" data-testid="link-how">How It Works</a>
+            <a href="/analytics" className="text-sm text-white/60 hover:text-white transition-colors" data-testid="link-analytics">Analytics</a>
             <a href="/docs" className="text-sm text-white/60 hover:text-white transition-colors" data-testid="link-docs">Docs</a>
           </div>
 
@@ -718,6 +719,7 @@ export default function Landing() {
               <span className="font-display font-bold text-xl">QuantumVault</span>
             </div>
             <div className="flex items-center gap-8 text-sm">
+              <a href="/analytics" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-footer-analytics">Analytics</a>
               <a href="/docs" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-footer-docs">Docs</a>
               <a href="#" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-twitter">Twitter</a>
               <a href="#" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-discord">Discord</a>
