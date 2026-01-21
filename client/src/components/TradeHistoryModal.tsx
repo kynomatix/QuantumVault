@@ -207,7 +207,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-5xl max-h-[85vh] w-[95vw] sm:w-auto">
+      <DialogContent className="max-w-6xl max-h-[85vh] w-[95vw] lg:w-[90vw] lg:min-w-[900px]">
         <DialogHeader>
           <DialogTitle>Trade History</DialogTitle>
         </DialogHeader>
@@ -226,19 +226,19 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
         <ScrollArea className="h-[60vh] sm:h-[55vh]">
           {currentTrades.length > 0 ? (
             <>
-              <div className="hidden md:block">
-                <table className="w-full text-sm">
+              <div className="hidden lg:block">
+                <table className="w-full text-sm table-fixed">
                   <thead className="sticky top-0 bg-background">
                     <tr className="text-muted-foreground text-xs border-b border-border/50">
-                      <th className="text-left py-3 px-2 font-medium">Time</th>
-                      <th className="text-left py-3 px-2 font-medium">Bot</th>
-                      <th className="text-left py-3 px-2 font-medium">Market</th>
-                      <th className="text-left py-3 px-2 font-medium">Side</th>
-                      <th className="text-right py-3 px-2 font-medium">Size</th>
-                      <th className="text-right py-3 px-2 font-medium">Price</th>
-                      <th className="text-right py-3 px-2 font-medium">Fee</th>
-                      <th className="text-right py-3 px-2 font-medium">PnL</th>
-                      <th className="text-right py-3 px-2 font-medium">Status</th>
+                      <th className="text-left py-3 px-2 font-medium w-[140px]">Time</th>
+                      <th className="text-left py-3 px-2 font-medium w-[120px]">Bot</th>
+                      <th className="text-left py-3 px-2 font-medium w-[100px]">Market</th>
+                      <th className="text-left py-3 px-2 font-medium w-[70px]">Side</th>
+                      <th className="text-right py-3 px-2 font-medium w-[100px]">Size</th>
+                      <th className="text-right py-3 px-2 font-medium w-[90px]">Price</th>
+                      <th className="text-right py-3 px-2 font-medium w-[80px]">Fee</th>
+                      <th className="text-right py-3 px-2 font-medium w-[80px]">PnL</th>
+                      <th className="text-right py-3 px-2 font-medium w-[80px]">Status</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -246,7 +246,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
                   </tbody>
                 </table>
               </div>
-              <div className="md:hidden">
+              <div className="lg:hidden">
                 {currentTrades.map((trade, i) => renderMobileTradeCard(trade, startIndex + i))}
               </div>
             </>
