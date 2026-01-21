@@ -72,16 +72,15 @@ function GlowCard({ children, className = "", glowColor = "violet", testId }: {
   };
 
   return (
-    <motion.div
+    <div
       className={`relative group ${className}`}
-      whileHover={{ scale: 1.02, transition: { duration: 0.2 } }}
       data-testid={testId}
     >
       <div className={`absolute -inset-0.5 rounded-xl blur-xl opacity-0 group-hover:opacity-100 transition-opacity duration-500 ${glowClasses[glowColor].replace('before:', '')}`} />
       <div className="relative">
         {children}
       </div>
-    </motion.div>
+    </div>
   );
 }
 
