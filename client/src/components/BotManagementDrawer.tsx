@@ -1433,13 +1433,6 @@ export function BotManagementDrawer({
                 </div>
               )}
               <div className="flex items-center justify-between text-xs text-muted-foreground mt-2">
-                <span className={performanceTotalPnl >= 0 ? 'text-green-500' : 'text-red-500'}>
-                  {performanceView === 'percent' && netDeposited > 0
-                    ? `${performanceTotalPnl >= 0 ? '+' : ''}${((performanceTotalPnl / netDeposited) * 100).toFixed(2)}%`
-                    : `${performanceTotalPnl >= 0 ? '+' : ''}$${performanceTotalPnl.toFixed(2)}`
-                  }
-                </span>
-                <span>{performanceTradeCount} trade{performanceTradeCount !== 1 ? 's' : ''}</span>
                 <div className="flex gap-1" data-testid="toggle-performance-view">
                   <Button
                     variant={performanceView === 'dollar' ? 'default' : 'outline'}
@@ -1458,6 +1451,13 @@ export function BotManagementDrawer({
                     %
                   </Button>
                 </div>
+                <span>{performanceTradeCount} trade{performanceTradeCount !== 1 ? 's' : ''}</span>
+                <span className={performanceTotalPnl >= 0 ? 'text-green-500' : 'text-red-500'}>
+                  {performanceView === 'percent' && netDeposited > 0
+                    ? `${performanceTotalPnl >= 0 ? '+' : ''}${((performanceTotalPnl / netDeposited) * 100).toFixed(2)}%`
+                    : `${performanceTotalPnl >= 0 ? '+' : ''}$${performanceTotalPnl.toFixed(2)}`
+                  }
+                </span>
               </div>
             </div>
           </TabsContent>
