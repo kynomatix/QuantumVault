@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { ArrowUpRight } from 'lucide-react';
+import { ArrowUpRight, Zap, Users, BarChart2 } from 'lucide-react';
 import { Link } from 'wouter';
 import { Button } from '@/components/ui/button';
 
@@ -79,56 +79,40 @@ function HeroStat({ value, label, sublabel, gradient, delay = 0, testId }: {
   );
 }
 
-function MetricRing({ value, max, label, color, delay = 0, testId }: {
+function StatBlock({ value, label, icon, gradient, delay = 0, testId }: {
   value: number;
-  max: number;
   label: string;
-  color: string;
+  icon: React.ReactNode;
+  gradient: string;
   delay?: number;
   testId: string;
 }) {
-  const percentage = Math.min((value / max) * 100, 100);
-  const circumference = 2 * Math.PI * 45;
-  const strokeDashoffset = circumference - (percentage / 100) * circumference;
-
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay, duration: 0.5 }}
-      className="flex flex-col items-center p-6 rounded-2xl bg-card/50 border border-border/30"
+      className="relative p-8 rounded-2xl bg-card/50 border border-border/30 overflow-hidden group"
       data-testid={`card-${testId}`}
     >
-      <div className="relative w-28 h-28">
-        <svg className="w-28 h-28 transform -rotate-90">
-          <circle
-            cx="56"
-            cy="56"
-            r="45"
-            fill="none"
-            stroke="hsl(var(--muted))"
-            strokeWidth="8"
-            opacity="0.2"
-          />
-          <motion.circle
-            cx="56"
-            cy="56"
-            r="45"
-            fill="none"
-            stroke={color}
-            strokeWidth="8"
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            initial={{ strokeDashoffset: circumference }}
-            animate={{ strokeDashoffset }}
-            transition={{ delay: delay + 0.3, duration: 1, ease: "easeOut" }}
-          />
-        </svg>
-        <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-2xl font-display font-bold" data-testid={`value-${testId}`}>{formatNumber(value)}</span>
+      <div className={`absolute top-0 right-0 w-24 h-24 ${gradient} opacity-20 blur-2xl group-hover:opacity-30 transition-opacity`} />
+      <div className="relative flex items-center gap-6">
+        <div className={`w-16 h-16 rounded-2xl ${gradient} flex items-center justify-center text-white shadow-lg`}>
+          {icon}
+        </div>
+        <div>
+          <motion.p 
+            className="text-4xl font-display font-bold"
+            data-testid={`value-${testId}`}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: delay + 0.2 }}
+          >
+            {formatNumber(value)}
+          </motion.p>
+          <p className="text-sm text-muted-foreground mt-1">{label}</p>
         </div>
       </div>
-      <p className="text-sm text-muted-foreground mt-3 text-center">{label}</p>
     </motion.div>
   );
 }
@@ -409,29 +393,29 @@ export default function Analytics() {
               </motion.div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-16">
-                <MetricRing
+                <StatBlock
                   value={metrics.activeBots}
-                  max={Math.max(metrics.activeBots * 2, 20)}
                   label="Active Trading Bots"
-                  color="hsl(142, 76%, 36%)"
+                  icon={<Zap className="w-7 h-7" />}
+                  gradient="bg-gradient-to-br from-emerald-500 to-green-600"
                   delay={0.3}
-                  testId="ring-bots"
+                  testId="stat-bots"
                 />
-                <MetricRing
+                <StatBlock
                   value={metrics.activeUsers}
-                  max={Math.max(metrics.activeUsers * 2, 10)}
                   label="Active Traders"
-                  color="hsl(217, 91%, 60%)"
+                  icon={<Users className="w-7 h-7" />}
+                  gradient="bg-gradient-to-br from-blue-500 to-indigo-600"
                   delay={0.4}
-                  testId="ring-users"
+                  testId="stat-users"
                 />
-                <MetricRing
+                <StatBlock
                   value={metrics.totalTrades}
-                  max={Math.max(metrics.totalTrades * 1.5, 200)}
                   label="Executed Trades"
-                  color="hsl(280, 87%, 65%)"
+                  icon={<BarChart2 className="w-7 h-7" />}
+                  gradient="bg-gradient-to-br from-purple-500 to-pink-600"
                   delay={0.5}
-                  testId="ring-trades"
+                  testId="stat-trades"
                 />
               </div>
 
