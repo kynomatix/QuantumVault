@@ -1186,16 +1186,534 @@ interface RequiredDataFeeds {
 }
 ```
 
+## Drift Vault Discovery & Indexing
+
+### Vault Ecosystem on Drift
+
+Drift has multiple vaults built by third parties and the core team. We need to discover and index all of them.
+
+```typescript
+interface DriftVaultIndex {
+  // Vault metadata
+  vaultAddress: PublicKey;
+  name: string;
+  manager: PublicKey;
+  
+  // Strategy classification
+  strategyType: 'delta_neutral' | 'directional' | 'yield_farming' | 'basis_trade' | 'market_making';
+  underlyingAssets: string[];       // SOL, BTC, ETH, INF, JLP, etc.
+  hedgeMarkets: string[];           // Perp markets used for hedging
+  
+  // Performance metrics
+  currentApy: number;
+  historicalApy: {
+    day7: number;
+    day30: number;
+    day90: number;
+    allTime: number;
+  };
+  
+  // Risk metrics
+  maxDrawdown: number;
+  sharpeRatio: number;
+  volatility: number;
+  
+  // Capacity
+  tvl: number;
+  maxCapacity: number | null;
+  utilizationPercent: number;
+  
+  // Liquidity
+  withdrawalPeriodHours: number;
+  minDeposit: number;
+  
+  // Status
+  isAcceptingDeposits: boolean;
+  isVerified: boolean;
+  auditStatus: 'audited' | 'unaudited' | 'pending';
+}
+```
+
+### Data Sources for Vault Discovery
+
+| Source | Data Available | Reliability | Update Frequency |
+|--------|---------------|-------------|------------------|
+| Drift SDK | Vault list, TVL, basic stats | High | Real-time |
+| Drift API | APY, historical performance | High | 5-minute |
+| Drift UI scraping | Display APY, manager info | Medium | Manual |
+| On-chain parsing | Raw vault state | High | Real-time |
+| Third-party APIs | Aggregated data | Varies | Varies |
+
+### Indexing Architecture
+
+```typescript
+interface VaultIndexer {
+  // Discovery
+  async discoverVaults(): Promise<DriftVaultIndex[]> {
+    // 1. Query Drift for all registered vaults
+    const vaultProgram = new Program(DRIFT_VAULTS_IDL, VAULTS_PROGRAM_ID);
+    const allVaults = await vaultProgram.account.vault.all();
+    
+    // 2. Enrich with performance data
+    const enriched = await Promise.all(
+      allVaults.map(v => this.enrichVaultData(v))
+    );
+    
+    // 3. Filter active/healthy vaults
+    return enriched.filter(v => v.isAcceptingDeposits && v.tvl > 10000);
+  }
+  
+  // Continuous indexing
+  async runIndexer(): void {
+    // Initial discovery
+    let vaults = await this.discoverVaults();
+    await this.storeVaults(vaults);
+    
+    // Periodic refresh
+    setInterval(async () => {
+      // APY/TVL refresh every 5 minutes
+      await this.refreshMetrics(vaults);
+    }, 5 * 60 * 1000);
+    
+    // Full re-discovery daily
+    setInterval(async () => {
+      vaults = await this.discoverVaults();
+      await this.storeVaults(vaults);
+    }, 24 * 60 * 60 * 1000);
+  }
+}
+```
+
+### APY/APR Calculation Challenges
+
+**Problem**: Displayed APY often doesn't reflect actual returns.
+
+```typescript
+interface ApyCalculation {
+  // What's displayed vs what you get
+  displayedApy: number;             // Marketing number
+  realizedApy: number;              // What depositors actually earned
+  projectedApy: number;             // Forward-looking estimate
+  
+  // Why they differ
+  reasons: {
+    tvlDilution: number;            // More deposits = lower per-user yield
+    fundingRateVariability: number; // Funding can flip
+    rebalanceCosts: number;         // Strategy execution costs
+    managementFees: number;         // Vault manager fees
+    performanceFees: number;        // Success fees
+  };
+}
+
+// Calculate realistic APY
+function calculateRealisticApy(vault: DriftVaultIndex): number {
+  const grossApy = vault.currentApy;
+  
+  // Deductions
+  const managementFee = 0.02;       // Typical 2% annual
+  const performanceFee = 0.20;      // Typical 20% of profits
+  const estimatedCosts = 0.005;     // Rebalancing, gas, etc.
+  
+  // Dilution factor (if vault is growing)
+  const growthRate = vault.tvlGrowthRate30d;
+  const dilutionFactor = growthRate > 0 ? 0.9 : 1.0;
+  
+  // Realistic projection
+  const netApy = (grossApy - managementFee - estimatedCosts) * (1 - performanceFee) * dilutionFactor;
+  
+  return Math.max(0, netApy);
+}
+```
+
+## Market Regime Integration with Vault Selection
+
+### The Core Challenge
+
+Different vault strategies perform better in different market conditions. Selecting vaults based on current regime adds complexity but potentially improves returns.
+
+### Market Regime Classification
+
+```typescript
+type MarketRegime = 
+  | 'bull_trending'        // Strong uptrend, high momentum
+  | 'bear_trending'        // Strong downtrend
+  | 'consolidation'        // Range-bound, low volatility
+  | 'high_volatility'      // Large swings, uncertain direction
+  | 'low_volatility'       // Quiet market, small moves
+  | 'funding_positive'     // Longs paying shorts
+  | 'funding_negative';    // Shorts paying longs
+
+interface RegimeDetector {
+  // Inputs needed
+  priceData: OHLCV[];               // 30-90 days minimum
+  fundingRates: FundingRate[];      // Historical funding
+  volatilityData: number[];         // ATR, realized vol
+  
+  // Detection methods
+  detectTrend(): 'bull' | 'bear' | 'neutral' {
+    const sma50 = this.calculateSMA(50);
+    const sma200 = this.calculateSMA(200);
+    const adx = this.calculateADX(14);
+    
+    if (adx < 20) return 'neutral';  // No trend
+    return sma50 > sma200 ? 'bull' : 'bear';
+  }
+  
+  detectVolatility(): 'high' | 'normal' | 'low' {
+    const currentVol = this.calculate30dVolatility();
+    const historicalAvg = this.calculate1yAvgVolatility();
+    
+    if (currentVol > historicalAvg * 1.5) return 'high';
+    if (currentVol < historicalAvg * 0.5) return 'low';
+    return 'normal';
+  }
+  
+  detectFundingRegime(): 'positive' | 'negative' | 'neutral' {
+    const avgFunding7d = this.calculateAvgFunding(7);
+    
+    if (avgFunding7d > 0.01) return 'positive';  // Longs pay >1% weekly
+    if (avgFunding7d < -0.01) return 'negative'; // Shorts pay
+    return 'neutral';
+  }
+}
+```
+
+### Regime-Based Vault Scoring
+
+```typescript
+interface VaultRegimeScore {
+  vault: DriftVaultIndex;
+  regimeScores: Record<MarketRegime, number>;  // 0-100
+}
+
+// Which vaults work best in which regimes
+const REGIME_VAULT_AFFINITY: Record<MarketRegime, Record<string, number>> = {
+  'bull_trending': {
+    'directional_long': 100,      // Leveraged long exposure
+    'delta_neutral': 40,          // Misses the move
+    'yield_farming': 70,          // JLP benefits from volume
+  },
+  
+  'bear_trending': {
+    'directional_short': 100,     // Short exposure
+    'delta_neutral': 60,          // Hedged, but shorts may cost
+    'yield_farming': 50,          // Lower volume, LP risk
+  },
+  
+  'consolidation': {
+    'delta_neutral': 100,         // Best for sideways
+    'market_making': 90,          // Range strategies work
+    'yield_farming': 80,          // Steady fees
+  },
+  
+  'high_volatility': {
+    'delta_neutral': 30,          // Hedge can get liquidated
+    'yield_farming': 40,          // IL risk high
+    'cash': 100,                  // Preserve capital
+  },
+  
+  'funding_positive': {
+    'delta_neutral': 100,         // Shorts earn funding
+    'basis_trade': 90,            // Basis strategies profit
+  },
+  
+  'funding_negative': {
+    'delta_neutral': 20,          // Shorts PAY funding
+    'directional_long': 70,       // Longs earn funding
+  },
+};
+
+function scoreVaultForCurrentRegime(
+  vault: DriftVaultIndex,
+  currentRegime: MarketRegime
+): number {
+  const strategyType = vault.strategyType;
+  const baseScore = REGIME_VAULT_AFFINITY[currentRegime][strategyType] || 50;
+  
+  // Adjust for vault-specific factors
+  const apyBonus = Math.min(20, vault.currentApy * 100);
+  const riskPenalty = vault.maxDrawdown * 50;
+  const liquidityBonus = vault.withdrawalPeriodHours < 24 ? 10 : 0;
+  
+  return Math.max(0, Math.min(100, baseScore + apyBonus - riskPenalty + liquidityBonus));
+}
+```
+
+### Overhead Analysis: Is Regime Detection Worth It?
+
+```typescript
+interface RegimeDetectionOverhead {
+  // Data requirements
+  priceDataNeeded: {
+    markets: ['SOL', 'BTC', 'ETH'];  // Major markets
+    candles: 90;                      // 90 days of data
+    granularity: '1h';                // Hourly candles
+    storagePerMarket: '~500KB';
+    totalStorage: '~1.5MB';
+  };
+  
+  fundingDataNeeded: {
+    markets: 10;                      // Top 10 perp markets
+    history: 30;                      // 30 days
+    storagePerMarket: '~50KB';
+    totalStorage: '~500KB';
+  };
+  
+  // Computation
+  calculationFrequency: 'daily';      // Regime changes slowly
+  calculationTime: '~2 seconds';
+  cpuImpact: 'negligible';
+  
+  // API calls
+  initialDataFetch: 15;               // One-time per market
+  ongoingRefresh: 3;                  // Per day per market
+  dailyApiCalls: 30;                  // 10 markets × 3 calls
+}
+```
+
+**Verdict**: Regime detection overhead is **LOW**. The complexity is in the logic, not the resources.
+
+## Technical Complexity Analysis
+
+### Complexity Scoring (1-10)
+
+| Component | Implementation | Maintenance | Risk | Total |
+|-----------|---------------|-------------|------|-------|
+| **Core Vault (Subaccount 0)** | 4 | 3 | 3 | 10 |
+| Multi-asset deposits | 5 | 4 | 4 | 13 |
+| Borrowing integration | 6 | 5 | 6 | 17 |
+| **Drift Strategy Vault Integration** | 7 | 6 | 7 | 20 |
+| Vault discovery/indexing | 5 | 4 | 3 | 12 |
+| APY calculation | 6 | 5 | 4 | 15 |
+| Withdrawal period handling | 5 | 4 | 5 | 14 |
+| **External Yield Aggregation** | 8 | 7 | 7 | 22 |
+| Multi-protocol integration | 8 | 8 | 6 | 22 |
+| Migration logic | 7 | 6 | 7 | 20 |
+| **Market Regime Detection** | 4 | 3 | 2 | 9 |
+| Data collection | 3 | 3 | 2 | 8 |
+| Classification logic | 5 | 4 | 3 | 12 |
+| Vault scoring | 4 | 4 | 3 | 11 |
+| **Intelligent Automation** | 6 | 5 | 5 | 16 |
+| Yield arbitrage agent | 6 | 5 | 5 | 16 |
+| Risk management agent | 5 | 4 | 4 | 13 |
+| Capital rebalancing | 6 | 5 | 5 | 16 |
+
+### Implementation Order (Recommended)
+
+Based on complexity, dependencies, and value:
+
+```
+Phase 1: Foundation (Weeks 1-4)
+├── Core Vault on Subaccount 0
+├── USDC deposits/withdrawals
+├── Basic health monitoring
+└── Prerequisites: None, extends current system
+
+Phase 2: Multi-Asset (Weeks 5-8)
+├── SOL, BTC, ETH as collateral
+├── Collateral weight calculations
+├── Cross-collateral display
+└── Prerequisites: Phase 1
+
+Phase 3: Borrowing (Weeks 9-12)
+├── USDC borrowing against collateral
+├── Health factor monitoring
+├── Auto-deleverage logic
+├── Bot funding via borrowed USDC
+└── Prerequisites: Phase 2
+
+Phase 4: Vault Discovery (Weeks 13-16)
+├── Index Drift strategy vaults
+├── APY/performance tracking
+├── Withdrawal period handling
+├── Display vault options to users
+└── Prerequisites: Phase 1 (can parallel with 2-3)
+
+Phase 5: Vault Integration (Weeks 17-20)
+├── Deposit to external vaults
+├── Withdrawal queue management
+├── Funding rate analysis
+├── Vault selection UI
+└── Prerequisites: Phase 4
+
+Phase 6: Market Regime (Weeks 21-24)
+├── Price/funding data collection
+├── Regime classification
+├── Vault scoring by regime
+├── Regime-aware recommendations
+└── Prerequisites: Phase 4
+
+Phase 7: External Aggregation (Weeks 25-32)
+├── Protocol integrations (Kamino, Marginfi, etc.)
+├── Migration logic
+├── Cost/benefit calculations
+├── OR: Use Lulo API as shortcut
+└── Prerequisites: Phase 3
+
+Phase 8: Intelligent Automation (Weeks 33-40)
+├── Yield arbitrage agent
+├── Profit distribution agent
+├── Risk management agent
+├── Capital rebalancing
+└── Prerequisites: All above
+```
+
+### Resource Requirements by Phase
+
+| Phase | Dev Time | Ongoing Infra | API Costs | RPC Costs |
+|-------|----------|---------------|-----------|-----------|
+| 1. Foundation | 4 weeks | Low | $0 | Existing |
+| 2. Multi-Asset | 4 weeks | Low | $0 | +10% |
+| 3. Borrowing | 4 weeks | Medium | $0 | +20% |
+| 4. Vault Discovery | 4 weeks | Medium | ~$50/mo | +30% |
+| 5. Vault Integration | 4 weeks | Medium | ~$50/mo | +20% |
+| 6. Market Regime | 4 weeks | Low | ~$20/mo | +5% |
+| 7. External Aggregation | 8 weeks | High | ~$100/mo | +50% |
+| 8. Automation | 8 weeks | High | $0 | +10% |
+
+**Total**: ~40 weeks, infrastructure scales with user count
+
+### Critical Dependencies
+
+```mermaid
+graph TD
+    A[Current Bot System] --> B[Phase 1: Core Vault]
+    B --> C[Phase 2: Multi-Asset]
+    C --> D[Phase 3: Borrowing]
+    D --> H[Phase 8: Automation]
+    
+    B --> E[Phase 4: Vault Discovery]
+    E --> F[Phase 5: Vault Integration]
+    F --> G[Phase 6: Market Regime]
+    
+    D --> I[Phase 7: External Aggregation]
+    
+    G --> H
+    I --> H
+```
+
+### Failure Modes & Mitigations
+
+| Failure Mode | Probability | Impact | Mitigation |
+|--------------|-------------|--------|------------|
+| Drift API changes | Medium | High | Version pinning, health checks |
+| Vault exploit | Low | Critical | Diversification, TVL limits per vault |
+| Funding rate flip | High | Medium | Real-time monitoring, auto-exit |
+| RPC rate limiting | Medium | Medium | Dedicated endpoint, caching |
+| Liquidation cascade | Low | High | Conservative health factors |
+| External protocol failure | Low | High | Protocol limits, circuit breakers |
+| Oracle manipulation | Very Low | Critical | Multi-oracle, sanity checks |
+
+### Go/No-Go Criteria for Each Phase
+
+```typescript
+interface PhaseGoCriteria {
+  phase: number;
+  criteria: {
+    technical: string[];
+    operational: string[];
+    business: string[];
+  };
+}
+
+const PHASE_CRITERIA: PhaseGoCriteria[] = [
+  {
+    phase: 1,
+    criteria: {
+      technical: [
+        'Bot system stable for 30 days',
+        'Subaccount management tested',
+        'Agent wallet security audited',
+      ],
+      operational: [
+        'Error monitoring in place',
+        'Alerting configured',
+      ],
+      business: [
+        'User demand validated',
+        'Clear value proposition',
+      ],
+    },
+  },
+  {
+    phase: 3,  // Borrowing - high risk
+    criteria: {
+      technical: [
+        'Multi-asset deposits working',
+        'Health calculations verified',
+        'Liquidation simulation passed',
+      ],
+      operational: [
+        'Real-time health monitoring',
+        '24/7 alerting for critical events',
+        'Emergency procedures documented',
+      ],
+      business: [
+        'Risk disclosures approved',
+        'User education materials ready',
+      ],
+    },
+  },
+  {
+    phase: 7,  // External aggregation - highest complexity
+    criteria: {
+      technical: [
+        'All protocol integrations tested',
+        'Migration logic verified',
+        'Fallback mechanisms working',
+      ],
+      operational: [
+        'Per-protocol circuit breakers',
+        'Exploit monitoring',
+        'Emergency withdrawal procedures',
+      ],
+      business: [
+        'Cost/benefit positive at scale',
+        'Competitive with Lulo direct',
+      ],
+    },
+  },
+];
+```
+
+## Platform Evolution Summary
+
+```
+CURRENT STATE (Bots - 90% Complete)
+├── Signal-based trading automation ✓
+├── Webhook integration ✓
+├── Position management ✓
+├── Auto-pause/top-up ✓
+├── Marketplace (signals) ✓
+└── Analytics ✓
+
+NEXT STATE (Vaults - Phase 1-3)
+├── Capital efficiency via borrowing
+├── Multi-asset support
+├── Health management
+└── Enhanced bot funding options
+
+FUTURE STATE (Full Platform - Phase 4-8)
+├── Drift vault integration
+├── Market regime awareness
+├── External yield aggregation
+├── Fully autonomous capital allocation
+└── "Set and forget" DeFi optimization
+```
+
 ## Dependencies
 
 - Drift SDK borrow/lend functions
+- Drift Vaults SDK/API (for strategy vault integration)
 - Spot market data for collateral assets
 - Interest rate APIs
-- Oracle price feeds
+- Oracle price feeds (Pyth, Switchboard)
 - Existing bot infrastructure
 - External protocol SDKs (Kamino, Marginfi, etc.)
 - Lulo API (optional aggregator)
 - Dedicated RPC endpoint with high rate limits
+- Historical price data provider (for regime detection)
+- Funding rate historical data
 
 ## Notes
 
