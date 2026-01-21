@@ -98,23 +98,29 @@ function AnimatedBorder({ children, className = "" }: { children: React.ReactNod
 
 function createSmoothPath(points: { x: number; y: number }[]): string {
   if (points.length < 2) return '';
+  if (points.length === 2) {
+    return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
+  }
   
   let path = `M ${points[0].x} ${points[0].y}`;
   
   for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[Math.max(0, i - 1)];
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = points[Math.min(points.length - 1, i + 2)];
+    const p0 = points[i];
+    const p1 = points[i + 1];
     
-    const tension = 0.3;
-    const cp1x = p1.x + (p2.x - p0.x) * tension;
-    const cp1y = p1.y + (p2.y - p0.y) * tension;
-    const cp2x = p2.x - (p3.x - p1.x) * tension;
-    const cp2y = p2.y - (p3.y - p1.y) * tension;
+    const midX = (p0.x + p1.x) / 2;
+    const midY = (p0.y + p1.y) / 2;
     
-    path += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
+    if (i === 0) {
+      path += ` Q ${p0.x} ${p0.y}, ${midX} ${midY}`;
+    } else {
+      path += ` Q ${p0.x} ${p0.y}, ${midX} ${midY}`;
+    }
   }
+  
+  const last = points[points.length - 1];
+  const secondLast = points[points.length - 2];
+  path += ` Q ${secondLast.x} ${secondLast.y}, ${last.x} ${last.y}`;
   
   return path;
 }
@@ -126,7 +132,11 @@ function AreaChart({ data, label, testId }: {
 }) {
   if (!data || data.length < 2) return null;
 
-  const values = data.map(d => d.value);
+  const sortedData = [...data].sort((a, b) => 
+    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+
+  const values = sortedData.map(d => d.value);
   const max = Math.max(...values);
   const min = Math.min(...values);
   const range = max - min || 1;
@@ -137,14 +147,15 @@ function AreaChart({ data, label, testId }: {
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
 
-  const points = data.map((d, i) => {
-    const x = padding.left + (i / (data.length - 1)) * chartWidth;
+  const points = sortedData.map((d, i) => {
+    const x = padding.left + (i / (sortedData.length - 1)) * chartWidth;
     const y = padding.top + chartHeight - ((d.value - min) / range) * chartHeight;
     return { x, y, value: d.value, date: d.timestamp };
   });
 
+  const straightLinePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
   const linePath = createSmoothPath(points);
-  const areaPath = `${linePath} L ${points[points.length - 1].x} ${padding.top + chartHeight} L ${padding.left} ${padding.top + chartHeight} Z`;
+  const areaPath = `${straightLinePath} L ${points[points.length - 1].x} ${padding.top + chartHeight} L ${padding.left} ${padding.top + chartHeight} Z`;
 
   const yAxisTicks = [min, min + range * 0.5, max];
   
@@ -227,10 +238,10 @@ function AreaChart({ data, label, testId }: {
         )}
 
         <text x={padding.left} y={height - 8} fill="currentColor" fontSize="9" opacity="0.5">
-          {formatShortDate(data[0].timestamp)}
+          {formatShortDate(sortedData[0].timestamp)}
         </text>
         <text x={width - padding.right} y={height - 8} fill="currentColor" fontSize="9" textAnchor="end" opacity="0.5">
-          {formatShortDate(data[data.length - 1].timestamp)}
+          {formatShortDate(sortedData[sortedData.length - 1].timestamp)}
         </text>
       </svg>
     </div>
