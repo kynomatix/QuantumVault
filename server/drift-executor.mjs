@@ -1210,18 +1210,50 @@ async function executeTrade(command) {
     
     console.error(`[Executor] Trade executed: ${txSig}`);
     
-    let fillPrice = null;
+    // Get oracle price as fallback
+    let oracleFillPrice = null;
     try {
       const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
-      fillPrice = oracleData?.price?.toNumber() / 1e6;
+      oracleFillPrice = oracleData?.price?.toNumber() / 1e6;
     } catch (e) {
-      console.error('[Executor] Could not get fill price');
+      console.error('[Executor] Could not get oracle price');
     }
+    
+    // Try to get actual fill price from refreshed account state
+    let actualFillPrice = null;
+    let actualFee = null;
+    try {
+      const user = driftClient.getUser();
+      await user.fetchAccounts(); // Refresh to get post-trade state
+      
+      const perpPosition = user.getPerpPosition(marketIndex);
+      if (perpPosition && !perpPosition.baseAssetAmount.isZero()) {
+        // Calculate average entry price from position
+        // quoteAssetAmount is cumulative quote value, baseAssetAmount is cumulative base
+        const quoteAbs = Math.abs(perpPosition.quoteAssetAmount.toNumber()) / 1e6;
+        const baseAbs = Math.abs(perpPosition.baseAssetAmount.toNumber()) / 1e9;
+        if (baseAbs > 0) {
+          actualFillPrice = quoteAbs / baseAbs;
+          console.error(`[Executor] Actual fill price from position: $${actualFillPrice.toFixed(6)}`);
+        }
+      }
+      
+      // Try to get actual fee from user stats or recent orders
+      // For now, estimate fee more accurately: 0.05% base - 10% referral discount = 0.045%
+      const notional = (actualFillPrice || oracleFillPrice || 0) * sizeInBase;
+      actualFee = notional * 0.00045; // 0.045% after referral discount
+      console.error(`[Executor] Estimated fee (with referral): $${actualFee?.toFixed(6) || 'unknown'}`);
+      
+    } catch (fetchErr) {
+      console.error(`[Executor] Could not fetch actual fill data: ${fetchErr.message}`);
+    }
+    
+    const fillPrice = actualFillPrice || oracleFillPrice;
     
     // Skip unsubscribe - subprocess exits anyway and SDK's cleanup floods logs with errors
     // The OS will forcefully close WebSocket connections when process exits
     
-    return { success: true, signature: txSig, txSignature: txSig, fillPrice };
+    return { success: true, signature: txSig, txSignature: txSig, fillPrice, actualFee };
   } catch (error) {
     // Don't try to unsubscribe on error either - just let process exit
     throw error;
@@ -1259,6 +1291,12 @@ async function closePosition(command) {
     const isLong = perpPosition.baseAssetAmount.gt(new BN(0));
     const positionSize = perpPosition.baseAssetAmount.abs().toNumber() / 1e9;
     console.error(`[Executor] Found position: ${positionSize} ${isLong ? 'long' : 'short'}`);
+    
+    // Capture entry price BEFORE closing for PnL calculation
+    const quoteAbsBefore = Math.abs(perpPosition.quoteAssetAmount.toNumber()) / 1e6;
+    const baseAbsBefore = Math.abs(perpPosition.baseAssetAmount.toNumber()) / 1e9;
+    const entryPrice = baseAbsBefore > 0 ? quoteAbsBefore / baseAbsBefore : 0;
+    console.error(`[Executor] Position entry price: $${entryPrice.toFixed(6)}`);
     
     // Use placeAndTakePerpOrder with reduceOnly to close position
     // We use this instead of driftClient.closePosition() so we can pass referrerInfo
@@ -1299,7 +1337,31 @@ async function closePosition(command) {
     
     console.error(`[Executor] Position closed: ${txSig}`);
     
-    return { success: true, signature: txSig };
+    // Get actual exit price from oracle (position is now zero so we can't get it from position)
+    let exitPrice = null;
+    let actualFee = null;
+    try {
+      const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
+      exitPrice = oracleData?.price?.toNumber() / 1e6;
+      console.error(`[Executor] Exit price (oracle): $${exitPrice?.toFixed(6) || 'unknown'}`);
+      
+      // Estimate fee with referral discount: 0.045%
+      const notional = (exitPrice || entryPrice || 0) * positionSize;
+      actualFee = notional * 0.00045;
+      console.error(`[Executor] Estimated close fee (with referral): $${actualFee?.toFixed(6) || 'unknown'}`);
+    } catch (e) {
+      console.error(`[Executor] Could not get exit price: ${e.message}`);
+    }
+    
+    return { 
+      success: true, 
+      signature: txSig, 
+      entryPrice, 
+      fillPrice: exitPrice, 
+      positionSize, 
+      isLong, 
+      actualFee 
+    };
   } catch (error) {
     throw error;
   }

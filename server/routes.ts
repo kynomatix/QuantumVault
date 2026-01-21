@@ -21,6 +21,9 @@ import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus } f
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 
+// Drift trading fee rate (0.05% base - 10% referral discount = 0.045%)
+const DRIFT_FEE_RATE = 0.00045;
+
 declare module "express-session" {
   interface SessionData {
     userId: string;
@@ -2378,7 +2381,7 @@ export async function registerRoutes(
 
       // Calculate fee (0.05% taker fee on notional value)
       const closeNotional = closeSize * fillPrice;
-      const closeFee = closeNotional * 0.0005;
+      const closeFee = closeNotional * DRIFT_FEE_RATE;
 
       // Calculate trade PnL based on entry and exit prices
       // closeSide = 'short' means we're closing a LONG (bought low, selling high)
@@ -2718,7 +2721,8 @@ export async function registerRoutes(
 
       const fillPrice = orderResult.fillPrice || oraclePrice;
       const tradeNotional = contractSize * fillPrice;
-      const tradeFee = tradeNotional * 0.0005;
+      // Use actual fee from executor if available, otherwise estimate
+      const tradeFee = orderResult.actualFee ?? (tradeNotional * DRIFT_FEE_RATE);
 
       await storage.updateBotTrade(trade.id, {
         status: "executed",
@@ -3540,7 +3544,7 @@ export async function registerRoutes(
               // Calculate fee (0.05% taker fee on notional value)
               const pauseFillPrice = result.fillPrice || 0;
               const closeNotional = closeSize * pauseFillPrice;
-              const closeFee = closeNotional * 0.0005;
+              const closeFee = closeNotional * DRIFT_FEE_RATE;
               
               // Calculate trade PnL for pause close
               let pauseClosePnl = 0;
@@ -4570,7 +4574,7 @@ export async function registerRoutes(
             // Since closePerpPosition doesn't return fillPrice, use the signal price as estimate
             const closeFillPrice = parseFloat(signalPrice) || 0;
             const closeNotional = closeSize * closeFillPrice;
-            const closeFee = closeNotional * 0.0005;
+            const closeFee = closeNotional * DRIFT_FEE_RATE;
             
             // Calculate trade PnL based on entry and exit prices
             // IMPORTANT: onChainPosition was queried BEFORE close - it should have the entry price
@@ -5006,7 +5010,7 @@ export async function registerRoutes(
           // This ensures PnL is recorded even if position was closed by another process
           const closeFillPrice = parseFloat(signalPrice || "0");
           const closeNotional = closeSize * closeFillPrice;
-          const closeFee = closeNotional * 0.0005;
+          const closeFee = closeNotional * DRIFT_FEE_RATE;
           
           // Calculate trade PnL for position flip close
           const flipEntryPrice = onChainPosition.entryPrice || 0;
@@ -5369,9 +5373,9 @@ export async function registerRoutes(
 
       const fillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
       
-      // Calculate fee (0.05% taker fee on notional value)
+      // Calculate fee - use actual fee from executor if available
       const tradeNotional = finalContractSize * fillPrice;
-      const tradeFee = tradeNotional * 0.0005;
+      const tradeFee = orderResult.actualFee ?? (tradeNotional * DRIFT_FEE_RATE);
       
       await storage.updateBotTrade(trade.id, {
         status: "executed",
@@ -5831,7 +5835,7 @@ export async function registerRoutes(
           if (result.success && result.signature) {
             const closeFillPrice = parseFloat(signalPrice) || 0;
             const closeNotional = closeSize * closeFillPrice;
-            const closeFee = closeNotional * 0.0005;
+            const closeFee = closeNotional * DRIFT_FEE_RATE;
             
             // Calculate PnL
             const closeEntryPrice = onChainPosition.entryPrice || 0;
@@ -6191,7 +6195,7 @@ export async function registerRoutes(
       
       // Calculate fee (0.05% taker fee on notional value)
       const userTradeNotional = contractSize * userFillPrice;
-      const userTradeFee = userTradeNotional * 0.0005;
+      const userTradeFee = userTradeNotional * DRIFT_FEE_RATE;
       
       await storage.updateBotTrade(trade.id, {
         status: "executed",
@@ -7711,7 +7715,7 @@ export async function registerRoutes(
         
         // Estimate fee (0.05% taker fee)
         const notionalValue = size * fillPrice;
-        const estimatedFee = notionalValue * 0.0005;
+        const estimatedFee = notionalValue * DRIFT_FEE_RATE;
         
         // Create a new trade record for the retry
         const newTrade = await storage.createBotTrade({

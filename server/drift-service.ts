@@ -3069,7 +3069,7 @@ export async function executePerpOrder(
   slippageBps: number = 50,
   privateKeyBase58?: string,
   expectedAgentPubkey?: string,
-): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number }> {
+): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number }> {
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
   

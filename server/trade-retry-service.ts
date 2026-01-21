@@ -185,7 +185,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   console.log(`[TradeRetry] Processing ${job.priority} job ${job.id}: ${job.side} ${job.market} (attempt ${job.attempts}/${job.maxAttempts})`);
   
   try {
-    let result: { success: boolean; signature?: string; error?: string; fillPrice?: number };
+    let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number };
     let actualCloseSide: 'long' | 'short' = 'short';
     
     if (job.side === 'close') {
