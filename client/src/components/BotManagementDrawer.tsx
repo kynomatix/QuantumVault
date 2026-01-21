@@ -1418,7 +1418,7 @@ export function BotManagementDrawer({
                           performanceView === 'percent'
                             ? `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
                             : `$${value >= 0 ? '+' : ''}${value.toFixed(2)}`,
-                          'Gross PnL (excl. fees)'
+                          'PnL'
                         ]}
                       />
                       <Line
@@ -1827,7 +1827,7 @@ export function BotManagementDrawer({
                           <p className="text-xs text-muted-foreground">contracts @ ${parseFloat(trade.price || '0').toFixed(2)}</p>
                           {(trade as any).pnl !== null && (trade as any).pnl !== undefined && (
                             <p className={`text-xs font-medium ${parseFloat((trade as any).pnl) >= 0 ? 'text-emerald-500' : 'text-red-500'}`} title="Gross PnL (excludes fees, slippage, funding)">
-                              {parseFloat((trade as any).pnl) >= 0 ? '+' : ''}${parseFloat((trade as any).pnl).toFixed(2)} gross
+                              {parseFloat((trade as any).pnl) >= 0 ? '+' : ''}${parseFloat((trade as any).pnl).toFixed(2)}
                             </p>
                           )}
                         </div>
