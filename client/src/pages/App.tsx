@@ -1679,6 +1679,23 @@ export default function AppPage() {
                                       ) : (
                                         <p className="text-sm text-muted-foreground text-center py-2">Unable to load health data</p>
                                       )}
+                                      <div className="flex justify-end mt-3 pt-3 border-t border-border/20">
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            const bot = botsData?.find((b: TradingBot) => b.id === pos.botId);
+                                            if (bot) {
+                                              setSelectedManagedBot(bot);
+                                              setManageBotDrawerOpen(true);
+                                            }
+                                          }}
+                                          className="text-xs text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1"
+                                          data-testid={`button-manage-position-bot-${i}`}
+                                        >
+                                          <Settings className="w-3 h-3" />
+                                          Manage Bot
+                                        </button>
+                                      </div>
                                     </div>
                                   </motion.div>
                                 )}
