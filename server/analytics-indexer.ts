@@ -2,7 +2,18 @@ import { storage } from './storage';
 import type { PlatformMetricType } from '@shared/schema';
 import { fetchPlatformVolumeFromDrift, fetchPlatformTVLFromDrift } from './drift-data-api';
 
-const INDEXER_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const DAILY_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function getMillisecondsUntilMidnightUTC(): number {
+  const now = new Date();
+  const nextMidnight = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+    0, 0, 0, 0
+  ));
+  return nextMidnight.getTime() - now.getTime();
+}
 
 export interface PlatformMetricsSnapshot {
   tvl: number;
@@ -99,7 +110,7 @@ export function getCachedMetrics(): PlatformMetricsSnapshot | null {
 }
 
 export async function getMetrics(): Promise<PlatformMetricsSnapshot> {
-  if (cachedMetrics && (Date.now() - cachedMetrics.lastUpdated.getTime()) < INDEXER_INTERVAL_MS) {
+  if (cachedMetrics && (Date.now() - cachedMetrics.lastUpdated.getTime()) < DAILY_INTERVAL_MS) {
     return cachedMetrics;
   }
   
@@ -109,7 +120,7 @@ export async function getMetrics(): Promise<PlatformMetricsSnapshot> {
     const metricsMap = new Map(dbMetrics.map(m => [m.metricType, parseFloat(m.value)]));
     const latestCalcTime = dbMetrics[0]?.calculatedAt;
     
-    if (latestCalcTime && (Date.now() - latestCalcTime.getTime()) < INDEXER_INTERVAL_MS) {
+    if (latestCalcTime && (Date.now() - latestCalcTime.getTime()) < DAILY_INTERVAL_MS) {
       cachedMetrics = {
         tvl: metricsMap.get('tvl') || 0,
         totalVolume: metricsMap.get('total_volume') || 0,
@@ -133,17 +144,25 @@ export function startAnalyticsIndexer(): void {
     return;
   }
   
-  console.log('[Analytics] Starting analytics indexer (interval: 5 minutes)');
+  const msUntilMidnight = getMillisecondsUntilMidnightUTC();
+  const hoursUntil = (msUntilMidnight / (1000 * 60 * 60)).toFixed(1);
+  console.log(`[Analytics] Starting analytics indexer (daily at 00:00 UTC, next run in ${hoursUntil} hours)`);
   
   calculateAndStoreMetrics().catch(err => {
     console.error('[Analytics] Initial metrics calculation failed:', err);
   });
   
-  indexerInterval = setInterval(() => {
+  setTimeout(() => {
     calculateAndStoreMetrics().catch(err => {
-      console.error('[Analytics] Scheduled metrics calculation failed:', err);
+      console.error('[Analytics] Midnight metrics calculation failed:', err);
     });
-  }, INDEXER_INTERVAL_MS);
+    
+    indexerInterval = setInterval(() => {
+      calculateAndStoreMetrics().catch(err => {
+        console.error('[Analytics] Scheduled metrics calculation failed:', err);
+      });
+    }, DAILY_INTERVAL_MS);
+  }, msUntilMidnight);
 }
 
 export function stopAnalyticsIndexer(): void {
