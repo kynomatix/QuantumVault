@@ -5342,55 +5342,44 @@ export async function registerRoutes(
           
           // Check if auto top-up is enabled
           if (bot.autoTopUp) {
-            console.log(`[Webhook] Auto top-up enabled, attempting to transfer from main account`);
+            console.log(`[Webhook] Auto top-up enabled, attempting to deposit from agent wallet`);
             
             try {
-              // For bots on subaccount 0 (main account), no transfer needed - check if combined balance is enough
-              if (botSubaccountId === 0) {
-                // Bot is on main account, no transfer possible/needed
-                // If we're here, the main account doesn't have enough - pause the bot
-                const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${bot.market}, but only $${freeCollateral.toFixed(2)} available in main account. Top up your main account to continue.`;
-                console.log(`[Webhook] Bot on main account, cannot auto top-up: ${pauseReason}`);
-                await storage.updateTradingBot(bot.id, { isActive: false, pauseReason } as any);
-                await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, size: contractSize.toFixed(8), errorMessage: pauseReason });
-                await storage.updateWebhookLog(log.id, { errorMessage: pauseReason, processed: true });
-                return res.status(400).json({ error: pauseReason });
-              }
+              // Check agent wallet USDC balance (not Drift subaccount 0 - that's just a placeholder)
+              const agentUsdcBalance = await getAgentUsdcBalance(wallet.agentPublicKey!);
+              console.log(`[Webhook] Agent wallet USDC balance: $${agentUsdcBalance.toFixed(2)}, shortfall: $${shortfall.toFixed(2)}`);
               
-              // Check main account balance for transfer to bot's subaccount
-              const mainAccountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, 0);
-              const mainBalance = mainAccountInfo.freeCollateral || 0;
-              
-              if (mainBalance >= shortfall) {
-                // Transfer required amount from main to bot's subaccount
-                const transferResult = await executeAgentTransferBetweenSubaccounts(
+              if (agentUsdcBalance >= shortfall) {
+                // Deposit required amount from agent wallet to bot's Drift subaccount
+                const depositAmount = Math.ceil(shortfall * 100) / 100; // Round up to nearest cent
+                const depositResult = await executeAgentDriftDeposit(
                   wallet.agentPublicKey!,
                   wallet.agentPrivateKeyEncrypted,
-                  0, // from main account
+                  depositAmount,
                   botSubaccountId,
-                  Math.ceil(shortfall * 100) / 100 // Round up to nearest cent
+                  false // not pre-decrypted
                 );
                 
-                if (transferResult.success) {
-                  console.log(`[Webhook] Auto top-up successful: transferred $${shortfall.toFixed(2)} to bot subaccount ${botSubaccountId}`);
+                if (depositResult.success) {
+                  console.log(`[Webhook] Auto top-up successful: deposited $${depositAmount.toFixed(2)} to bot subaccount ${botSubaccountId}, tx: ${depositResult.signature}`);
                   // Clear pause reason since we topped up
                   await storage.updateTradingBot(bot.id, { pauseReason: null } as any);
                   
                   // Update freeCollateral and recalculate
-                  freeCollateral += shortfall;
+                  freeCollateral += depositAmount;
                   finalContractSize = minOrderSize;
                   console.log(`[Webhook] Proceeding with trade after auto top-up: ${finalContractSize} contracts`);
                 } else {
-                  console.log(`[Webhook] Auto top-up transfer failed: ${transferResult.error}`);
-                  const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${bot.market}. Auto top-up failed.`;
+                  console.log(`[Webhook] Auto top-up deposit failed: ${depositResult.error}`);
+                  const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${bot.market}. Auto top-up failed: ${depositResult.error}`;
                   await storage.updateTradingBot(bot.id, { isActive: false, pauseReason } as any);
                   await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, size: contractSize.toFixed(8), errorMessage: pauseReason });
                   await storage.updateWebhookLog(log.id, { errorMessage: pauseReason, processed: true });
                   return res.status(400).json({ error: pauseReason });
                 }
               } else {
-                // Not enough in main account
-                const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${bot.market}. Main account only has $${mainBalance.toFixed(2)} available for top-up.`;
+                // Not enough in agent wallet
+                const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${bot.market}. Agent wallet only has $${agentUsdcBalance.toFixed(2)} USDC available for top-up.`;
                 console.log(`[Webhook] ${pauseReason}`);
                 await storage.updateTradingBot(bot.id, { isActive: false, pauseReason } as any);
                 await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, size: contractSize.toFixed(8), errorMessage: pauseReason });
