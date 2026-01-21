@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -6,7 +6,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { ArrowUpRight, ArrowDownRight, XCircle, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Input } from '@/components/ui/input';
+import { ArrowUpRight, ArrowDownRight, XCircle, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 interface Trade {
@@ -38,16 +39,33 @@ const TRADES_PER_PAGE = 20;
 
 export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryModalProps) {
   const [currentPage, setCurrentPage] = useState(1);
+  const [searchQuery, setSearchQuery] = useState('');
   
-  const totalPages = Math.ceil((trades?.length || 0) / TRADES_PER_PAGE);
+  const filteredTrades = useMemo(() => {
+    if (!searchQuery.trim()) return trades || [];
+    const query = searchQuery.toLowerCase();
+    return (trades || []).filter(trade => 
+      trade.market?.toLowerCase().includes(query) ||
+      trade.botName?.toLowerCase().includes(query) ||
+      trade.side?.toLowerCase().includes(query) ||
+      trade.status?.toLowerCase().includes(query)
+    );
+  }, [trades, searchQuery]);
+
+  const totalPages = Math.ceil((filteredTrades.length || 0) / TRADES_PER_PAGE);
   const startIndex = (currentPage - 1) * TRADES_PER_PAGE;
   const endIndex = startIndex + TRADES_PER_PAGE;
-  const currentTrades = trades?.slice(startIndex, endIndex) || [];
+  const currentTrades = filteredTrades.slice(startIndex, endIndex);
 
   const goToPage = (page: number) => {
     if (page >= 1 && page <= totalPages) {
       setCurrentPage(page);
     }
+  };
+
+  const handleSearch = (value: string) => {
+    setSearchQuery(value);
+    setCurrentPage(1);
   };
 
   const getTradeInfo = (trade: Trade) => {
@@ -194,7 +212,18 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
           <DialogTitle>Trade History</DialogTitle>
         </DialogHeader>
         
-        <ScrollArea className="h-[65vh] sm:h-[60vh]">
+        <div className="relative mb-3">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <Input
+            placeholder="Search by market, bot, side, or status..."
+            value={searchQuery}
+            onChange={(e) => handleSearch(e.target.value)}
+            className="pl-9"
+            data-testid="input-trade-search"
+          />
+        </div>
+        
+        <ScrollArea className="h-[60vh] sm:h-[55vh]">
           {currentTrades.length > 0 ? (
             <>
               <div className="hidden md:block">
@@ -231,7 +260,8 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
         {totalPages > 1 && (
           <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-4 border-t border-border/50">
             <p className="text-xs sm:text-sm text-muted-foreground">
-              {startIndex + 1}-{Math.min(endIndex, trades?.length || 0)} of {trades?.length || 0}
+              {startIndex + 1}-{Math.min(endIndex, filteredTrades.length)} of {filteredTrades.length}
+              {searchQuery && ` (filtered)`}
             </p>
             <div className="flex items-center gap-2">
               <Button
