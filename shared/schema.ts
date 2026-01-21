@@ -138,6 +138,10 @@ export const tradingBots = pgTable("trading_bots", {
   umkEncryptedForBot: text("umk_encrypted_for_bot"),              // Bot-specific encrypted UMK for trade execution
   policyHmac: text("policy_hmac"),                                // HMAC of bot policy (market, leverage, maxPositionSize) for integrity
   
+  // Auto top-up: Automatically deposit required collateral when margin is insufficient
+  autoTopUp: boolean("auto_top_up").default(false).notNull(),
+  pauseReason: text("pause_reason"), // Reason why bot was auto-paused (e.g., "Insufficient margin")
+  
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
