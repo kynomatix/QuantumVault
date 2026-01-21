@@ -355,24 +355,40 @@ export default function AppPage() {
     setRefreshing(true);
     try {
       // Reconnect session with current wallet to handle wallet switches
-      await fetch('/api/wallet/connect', {
+      const connectRes = await fetch('/api/wallet/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ walletAddress: publicKeyString }),
       });
       
+      if (!connectRes.ok) {
+        console.warn('Session reconnect failed, data may be stale');
+      }
+      
+      // Helper to safely fetch JSON
+      const safeFetchJson = async (url: string) => {
+        try {
+          const res = await fetch(url, { credentials: 'include' });
+          if (!res.ok) return null;
+          const text = await res.text();
+          if (!text || text.startsWith('<!')) return null;
+          return JSON.parse(text);
+        } catch {
+          return null;
+        }
+      };
+      
       // Refresh all data in parallel
       const refreshPromises = [
-        refetchBots(),
-        refetchTrades(),
-        refetchMySubscriptions?.(),
-        refetchMyPublishedBots?.(),
+        refetchBots().catch(() => null),
+        refetchTrades().catch(() => null),
+        refetchMySubscriptions?.().catch(() => null),
+        refetchMyPublishedBots?.().catch(() => null),
       ].filter(Boolean);
       
       // Refresh equity data
-      const equityPromise = fetch('/api/total-equity', { credentials: 'include' })
-        .then(res => res.ok ? res.json() : null)
+      const equityPromise = safeFetchJson('/api/total-equity')
         .then(data => {
           if (data) {
             setTotalEquity(data.totalEquity ?? 0);
@@ -383,8 +399,7 @@ export default function AppPage() {
         });
       
       // Refresh settings
-      const settingsPromise = fetch('/api/wallet/settings', { credentials: 'include' })
-        .then(res => res.ok ? res.json() : null)
+      const settingsPromise = safeFetchJson('/api/wallet/settings')
         .then(data => {
           if (data) {
             setDisplayName(data.displayName || '');
@@ -402,8 +417,7 @@ export default function AppPage() {
         });
       
       // Fetch agent public key
-      const agentKeyPromise = fetch('/api/wallet/agent-public-key', { credentials: 'include' })
-        .then(res => res.ok ? res.json() : null)
+      const agentKeyPromise = safeFetchJson('/api/wallet/agent-public-key')
         .then(data => {
           if (data?.agentPublicKey) {
             setAgentPublicKey(data.agentPublicKey);
