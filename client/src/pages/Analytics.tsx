@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { ArrowUpRight, Zap, Users, BarChart2 } from 'lucide-react';
+import { ArrowUpRight } from 'lucide-react';
 import { Link } from 'wouter';
 import { Button } from '@/components/ui/button';
 
@@ -79,11 +79,10 @@ function HeroStat({ value, label, sublabel, gradient, delay = 0, testId }: {
   );
 }
 
-function StatBlock({ value, label, icon, gradient, delay = 0, testId }: {
+function StatBlock({ value, label, accentColor, delay = 0, testId }: {
   value: number;
   label: string;
-  icon: React.ReactNode;
-  gradient: string;
+  accentColor: string;
   delay?: number;
   testId: string;
 }) {
@@ -95,23 +94,18 @@ function StatBlock({ value, label, icon, gradient, delay = 0, testId }: {
       className="relative p-8 rounded-2xl bg-card/50 border border-border/30 overflow-hidden group"
       data-testid={`card-${testId}`}
     >
-      <div className={`absolute top-0 right-0 w-24 h-24 ${gradient} opacity-20 blur-2xl group-hover:opacity-30 transition-opacity`} />
-      <div className="relative flex items-center gap-6">
-        <div className={`w-16 h-16 rounded-2xl ${gradient} flex items-center justify-center text-white shadow-lg`}>
-          {icon}
-        </div>
-        <div>
-          <motion.p 
-            className="text-4xl font-display font-bold"
-            data-testid={`value-${testId}`}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: delay + 0.2 }}
-          >
-            {formatNumber(value)}
-          </motion.p>
-          <p className="text-sm text-muted-foreground mt-1">{label}</p>
-        </div>
+      <div className={`absolute top-0 left-0 w-1 h-full ${accentColor}`} />
+      <div className="relative">
+        <motion.p 
+          className="text-5xl font-display font-bold mb-2"
+          data-testid={`value-${testId}`}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: delay + 0.2 }}
+        >
+          {formatNumber(value)}
+        </motion.p>
+        <p className="text-muted-foreground">{label}</p>
       </div>
     </motion.div>
   );
@@ -396,24 +390,21 @@ export default function Analytics() {
                 <StatBlock
                   value={metrics.activeBots}
                   label="Active Trading Bots"
-                  icon={<Zap className="w-7 h-7" />}
-                  gradient="bg-gradient-to-br from-emerald-500 to-green-600"
+                  accentColor="bg-emerald-500"
                   delay={0.3}
                   testId="stat-bots"
                 />
                 <StatBlock
                   value={metrics.activeUsers}
                   label="Active Traders"
-                  icon={<Users className="w-7 h-7" />}
-                  gradient="bg-gradient-to-br from-blue-500 to-indigo-600"
+                  accentColor="bg-blue-500"
                   delay={0.4}
                   testId="stat-users"
                 />
                 <StatBlock
                   value={metrics.totalTrades}
                   label="Executed Trades"
-                  icon={<BarChart2 className="w-7 h-7" />}
-                  gradient="bg-gradient-to-br from-purple-500 to-pink-600"
+                  accentColor="bg-purple-500"
                   delay={0.5}
                   testId="stat-trades"
                 />
