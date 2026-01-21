@@ -347,6 +347,84 @@ export default function AppPage() {
     }
   };
 
+  const [refreshing, setRefreshing] = useState(false);
+  
+  const handleRefreshAll = async () => {
+    if (refreshing || !publicKeyString) return;
+    
+    setRefreshing(true);
+    try {
+      // Reconnect session with current wallet to handle wallet switches
+      await fetch('/api/wallet/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ walletAddress: publicKeyString }),
+      });
+      
+      // Refresh all data in parallel
+      const refreshPromises = [
+        refetchBots(),
+        refetchTrades(),
+        refetchMySubscriptions?.(),
+        refetchMyPublishedBots?.(),
+      ].filter(Boolean);
+      
+      // Refresh equity data
+      const equityPromise = fetch('/api/total-equity', { credentials: 'include' })
+        .then(res => res.ok ? res.json() : null)
+        .then(data => {
+          if (data) {
+            setTotalEquity(data.totalEquity ?? 0);
+            setAgentBalance(data.agentBalance ?? 0);
+            setDriftBalance(data.driftBalance ?? 0);
+            setSolBalance(data.solBalance ?? 0);
+          }
+        });
+      
+      // Refresh settings
+      const settingsPromise = fetch('/api/wallet/settings', { credentials: 'include' })
+        .then(res => res.ok ? res.json() : null)
+        .then(data => {
+          if (data) {
+            setDisplayName(data.displayName || '');
+            setXUsername(data.xUsername || '');
+            setNotificationsEnabled(data.notificationsEnabled ?? false);
+            setNotifyTradeExecuted(data.notifyTradeExecuted ?? true);
+            setNotifyTradeFailed(data.notifyTradeFailed ?? true);
+            setNotifyPositionClosed(data.notifyPositionClosed ?? true);
+            setTelegramConnected(data.telegramConnected ?? false);
+            setReferralCode(data.referralCode || null);
+            setReferredBy(data.referredBy || null);
+            setDefaultLeverage(data.defaultLeverage ?? 3);
+            setSlippageBps(data.slippageBps ?? 50);
+          }
+        });
+      
+      // Fetch agent public key
+      const agentKeyPromise = fetch('/api/wallet/agent-public-key', { credentials: 'include' })
+        .then(res => res.ok ? res.json() : null)
+        .then(data => {
+          if (data?.agentPublicKey) {
+            setAgentPublicKey(data.agentPublicKey);
+          }
+        });
+      
+      await Promise.all([...refreshPromises, equityPromise, settingsPromise, agentKeyPromise]);
+      
+      toast({ title: 'Refreshed', description: 'All data updated' });
+    } catch (error) {
+      console.error('Refresh error:', error);
+      toast({ 
+        title: 'Refresh failed', 
+        description: 'Some data may not have updated',
+        variant: 'destructive' 
+      });
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const handleSaveNotificationPrefs = async (updates: {
     notificationsEnabled?: boolean;
     notifyTradeExecuted?: boolean;
@@ -1348,8 +1426,14 @@ export default function AppPage() {
                 </div>
               </SheetContent>
             </Sheet>
-            <button className="p-2 hover:bg-muted rounded-lg" data-testid="button-refresh">
-              <RefreshCw className="w-5 h-5 text-muted-foreground" />
+            <button 
+              className="p-2 hover:bg-muted rounded-lg" 
+              data-testid="button-refresh"
+              onClick={handleRefreshAll}
+              disabled={refreshing}
+              title="Refresh all data"
+            >
+              <RefreshCw className={`w-5 h-5 text-muted-foreground ${refreshing ? 'animate-spin' : ''}`} />
             </button>
           </div>
         </header>
