@@ -3483,7 +3483,7 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold } = req.body;
+      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp } = req.body;
       
       if (leverage !== undefined) {
         const leverageNum = Number(leverage);
@@ -3665,8 +3665,10 @@ export async function registerRoutes(
         ...(signalConfig && { signalConfig }),
         ...(riskConfig && { riskConfig }),
         ...(isActive !== undefined && { isActive }),
+        ...(isActive === true && { pauseReason: null }), // Clear pause reason when reactivating
         ...(profitReinvest !== undefined && { profitReinvest }),
         ...(autoWithdrawThreshold !== undefined && { autoWithdrawThreshold: autoWithdrawThreshold !== null ? String(autoWithdrawThreshold) : null }),
+        ...(autoTopUp !== undefined && { autoTopUp }),
       });
 
       // Include position close info in response
@@ -5325,15 +5327,88 @@ export async function registerRoutes(
           finalContractSize = minOrderSize;
           console.log(`[Webhook] BUMPED UP: ${contractSize.toFixed(4)} contracts → ${minOrderSize} minimum (requires $${minCapitalNeeded.toFixed(2)}, you have $${maxCapacity.toFixed(2)} capacity)`);
         } else {
-          const errorMsg = `Order too small: ${contractSize.toFixed(6)} contracts is below minimum ${minOrderSize} for ${bot.market}. At $${oraclePrice.toFixed(2)}, minimum requires $${minCapitalNeeded.toFixed(2)} but you only have $${maxCapacity.toFixed(2)} capacity. Increase your investment or choose a different market.`;
-          console.log(`[Webhook] ${errorMsg}`);
-          await storage.updateBotTrade(trade.id, {
-            status: "failed",
-            txSignature: null,
-            size: contractSize.toFixed(8),
-          });
-          await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
-          return res.status(400).json({ error: errorMsg });
+          // Cannot meet minimum order size with current margin
+          // Calculate required deposit to meet minimum (with 20% buffer for safety)
+          const requiredCollateral = (minCapitalNeeded / effectiveLeverage) * 1.2;
+          const shortfall = Math.max(0, requiredCollateral - freeCollateral); // Clamp to non-negative
+          const botSubaccountId = bot.driftSubaccountId ?? 0;
+          
+          console.log(`[Webhook] Insufficient margin: need $${requiredCollateral.toFixed(2)} collateral, have $${freeCollateral.toFixed(2)}, shortfall: $${shortfall.toFixed(2)}, botSubaccount: ${botSubaccountId}`);
+          
+          // Check if auto top-up is enabled
+          if (bot.autoTopUp) {
+            console.log(`[Webhook] Auto top-up enabled, attempting to transfer from main account`);
+            
+            try {
+              // For bots on subaccount 0 (main account), no transfer needed - check if combined balance is enough
+              if (botSubaccountId === 0) {
+                // Bot is on main account, no transfer possible/needed
+                // If we're here, the main account doesn't have enough - pause the bot
+                const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${bot.market}, but only $${freeCollateral.toFixed(2)} available in main account. Top up your main account to continue.`;
+                console.log(`[Webhook] Bot on main account, cannot auto top-up: ${pauseReason}`);
+                await storage.updateTradingBot(bot.id, { isActive: false, pauseReason } as any);
+                await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, size: contractSize.toFixed(8), errorMessage: pauseReason });
+                await storage.updateWebhookLog(log.id, { errorMessage: pauseReason, processed: true });
+                return res.status(400).json({ error: pauseReason });
+              }
+              
+              // Check main account balance for transfer to bot's subaccount
+              const mainAccountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, 0);
+              const mainBalance = mainAccountInfo.freeCollateral || 0;
+              
+              if (mainBalance >= shortfall) {
+                // Transfer required amount from main to bot's subaccount
+                const transferResult = await executeAgentTransferBetweenSubaccounts(
+                  wallet.agentPublicKey!,
+                  wallet.agentPrivateKeyEncrypted,
+                  0, // from main account
+                  botSubaccountId,
+                  Math.ceil(shortfall * 100) / 100 // Round up to nearest cent
+                );
+                
+                if (transferResult.success) {
+                  console.log(`[Webhook] Auto top-up successful: transferred $${shortfall.toFixed(2)} to bot subaccount ${botSubaccountId}`);
+                  // Clear pause reason since we topped up
+                  await storage.updateTradingBot(bot.id, { pauseReason: null } as any);
+                  
+                  // Update freeCollateral and recalculate
+                  freeCollateral += shortfall;
+                  finalContractSize = minOrderSize;
+                  console.log(`[Webhook] Proceeding with trade after auto top-up: ${finalContractSize} contracts`);
+                } else {
+                  console.log(`[Webhook] Auto top-up transfer failed: ${transferResult.error}`);
+                  const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${bot.market}. Auto top-up failed.`;
+                  await storage.updateTradingBot(bot.id, { isActive: false, pauseReason } as any);
+                  await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, size: contractSize.toFixed(8), errorMessage: pauseReason });
+                  await storage.updateWebhookLog(log.id, { errorMessage: pauseReason, processed: true });
+                  return res.status(400).json({ error: pauseReason });
+                }
+              } else {
+                // Not enough in main account
+                const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${bot.market}. Main account only has $${mainBalance.toFixed(2)} available for top-up.`;
+                console.log(`[Webhook] ${pauseReason}`);
+                await storage.updateTradingBot(bot.id, { isActive: false, pauseReason } as any);
+                await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, size: contractSize.toFixed(8), errorMessage: pauseReason });
+                await storage.updateWebhookLog(log.id, { errorMessage: pauseReason, processed: true });
+                return res.status(400).json({ error: pauseReason });
+              }
+            } catch (topUpErr: any) {
+              console.log(`[Webhook] Auto top-up error: ${topUpErr.message}`);
+              const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${bot.market}. Auto top-up failed: ${topUpErr.message}`;
+              await storage.updateTradingBot(bot.id, { isActive: false, pauseReason } as any);
+              await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, size: contractSize.toFixed(8), errorMessage: pauseReason });
+              await storage.updateWebhookLog(log.id, { errorMessage: pauseReason, processed: true });
+              return res.status(400).json({ error: pauseReason });
+            }
+          } else {
+            // Auto top-up disabled - pause the bot
+            const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${bot.market}, but only $${freeCollateral.toFixed(2)} available. Top up your bot to continue trading.`;
+            console.log(`[Webhook] Auto-pausing bot: ${pauseReason}`);
+            await storage.updateTradingBot(bot.id, { isActive: false, pauseReason } as any);
+            await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, size: contractSize.toFixed(8), errorMessage: pauseReason });
+            await storage.updateWebhookLog(log.id, { errorMessage: pauseReason, processed: true });
+            return res.status(400).json({ error: pauseReason });
+          }
         }
       }
 

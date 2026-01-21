@@ -108,6 +108,8 @@ interface TradingBot {
   driftSubaccountId?: number | null;
   profitReinvest?: boolean;
   autoWithdrawThreshold?: string | null;
+  autoTopUp?: boolean;
+  pauseReason?: string | null;
   stats: {
     totalTrades: number;
     winningTrades: number;
@@ -208,6 +210,7 @@ export function BotManagementDrawer({
   const [editMaxPositionSize, setEditMaxPositionSize] = useState<string>('');
   const [editProfitReinvest, setEditProfitReinvest] = useState<boolean>(false);
   const [editAutoWithdrawThreshold, setEditAutoWithdrawThreshold] = useState<string>('');
+  const [editAutoTopUp, setEditAutoTopUp] = useState<boolean>(false);
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
@@ -292,9 +295,10 @@ export function BotManagementDrawer({
       const storedMaxPos = parseFloat(bot.maxPositionSize || '0');
       const investmentAmount = bot.leverage > 0 ? storedMaxPos / bot.leverage : storedMaxPos;
       setEditMaxPositionSize(investmentAmount > 0 ? investmentAmount.toFixed(2) : '');
-      // Initialize profit reinvest and auto withdraw settings
+      // Initialize profit reinvest, auto withdraw, and auto top-up settings
       setEditProfitReinvest(bot.profitReinvest ?? false);
       setEditAutoWithdrawThreshold(bot.autoWithdrawThreshold ?? '');
+      setEditAutoTopUp(bot.autoTopUp ?? false);
     }
   }, [bot]);
 
@@ -822,6 +826,7 @@ export function BotManagementDrawer({
           maxPositionSize: calculatedMaxPosition > 0 ? calculatedMaxPosition : null,
           profitReinvest: editProfitReinvest,
           autoWithdrawThreshold: editAutoWithdrawThreshold ? parseFloat(editAutoWithdrawThreshold) : null,
+          autoTopUp: editAutoTopUp,
         }),
       });
 
@@ -858,9 +863,10 @@ export function BotManagementDrawer({
       const storedMaxPos = parseFloat(localBot.maxPositionSize || '0');
       const investmentAmount = localBot.leverage > 0 ? storedMaxPos / localBot.leverage : storedMaxPos;
       setEditMaxPositionSize(investmentAmount > 0 ? investmentAmount.toFixed(2) : '');
-      // Reset profit reinvest and auto withdraw settings
+      // Reset profit reinvest, auto withdraw, and auto top-up settings
       setEditProfitReinvest(localBot.profitReinvest ?? false);
       setEditAutoWithdrawThreshold(localBot.autoWithdrawThreshold ?? '');
+      setEditAutoTopUp(localBot.autoTopUp ?? false);
     }
   };
 
@@ -877,7 +883,8 @@ export function BotManagementDrawer({
     editLeverage !== Math.min(localBot.leverage, MARKET_MAX_LEVERAGE[localBot.market] || 20) || 
     editMaxPositionSize !== getStoredInvestmentAmount() ||
     editProfitReinvest !== (localBot.profitReinvest ?? false) ||
-    editAutoWithdrawThreshold !== (localBot.autoWithdrawThreshold ?? '')
+    editAutoWithdrawThreshold !== (localBot.autoWithdrawThreshold ?? '') ||
+    editAutoTopUp !== (localBot.autoTopUp ?? false)
   ) : false;
 
   const formatDate = (dateString: string) => {
@@ -983,6 +990,39 @@ export function BotManagementDrawer({
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4 mt-4">
+            {/* Pause reason warning banner */}
+            {displayBot?.pauseReason && !displayBot?.isActive && (
+              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="text-sm font-medium text-amber-500">Bot Paused - Insufficient Margin</p>
+                  <p className="text-xs text-muted-foreground">{displayBot.pauseReason}</p>
+                  <div className="flex gap-2 mt-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      onClick={() => onShowWalletTab?.()}
+                      data-testid="button-add-funds"
+                    >
+                      <Wallet className="w-3 h-3 mr-1" />
+                      Add Funds
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-xs"
+                      onClick={() => setActiveTab('settings')}
+                      data-testid="button-enable-auto-topup"
+                    >
+                      <Settings className="w-3 h-3 mr-1" />
+                      Enable Auto Top-Up
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+            
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
                 <p className="text-xs text-muted-foreground">
@@ -2032,6 +2072,27 @@ export function BotManagementDrawer({
                     </p>
                   )}
                 </div>
+
+                {/* Auto Top-Up Toggle */}
+                <div className="flex items-center justify-between py-3 border-t border-border/50">
+                  <div className="space-y-0.5">
+                    <label className="text-sm font-medium">Auto Top-Up</label>
+                    <p className="text-xs text-muted-foreground">
+                      Automatically deposit from your main account when margin is too low to trade
+                    </p>
+                  </div>
+                  <Switch
+                    checked={editAutoTopUp}
+                    onCheckedChange={setEditAutoTopUp}
+                    data-testid="switch-auto-top-up"
+                  />
+                </div>
+                {editAutoTopUp && (
+                  <p className="text-xs text-blue-500 flex items-center gap-1 -mt-2 pb-2">
+                    <Info className="w-3 h-3" />
+                    When bot needs more margin, it will transfer from your main Drift account (subaccount 0)
+                  </p>
+                )}
                 
                 {hasSettingsChanges && (
                   <div className="flex gap-2 pt-2">
