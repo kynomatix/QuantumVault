@@ -4,6 +4,361 @@
 
 Vaults represent an advanced capital management layer that utilizes Drift Protocol's Subaccount 0 for multi-asset collateral deposits, lending/borrowing capabilities, and yield optimization. This system will enable users to maximize capital efficiency while funding isolated trading bots.
 
+**Plan Status**: 85% solid architecture. Critical constraints identified and mitigations documented below.
+
+---
+
+## CRITICAL TECHNICAL RISKS (Must Address Before Implementation)
+
+These are "showstoppers" that could cause implementation failures if not handled correctly.
+
+### 1. Collateral Eligibility Reality vs Plan
+
+**The Assumption**: Users can deposit any asset (JLP, Strategy Vault Tokens) and borrow against them.
+
+**The Reality**: Drift Protocol has a **strict whitelist** for collateral.
+
+| Asset | Collateral Status | Initial Weight | Can Borrow Against? |
+|-------|------------------|----------------|---------------------|
+| USDC | ✅ Confirmed | 100% | Yes |
+| SOL | ✅ Confirmed | 80% | Yes |
+| BTC | ✅ Confirmed | 85% | Yes |
+| ETH | ✅ Confirmed | 85% | Yes |
+| USDT | ✅ Confirmed | 100% | Yes |
+| INF (Infinity) | ✅ Confirmed | 71% | Yes |
+| JLP (Jupiter LP) | ❌ NOT COLLATERAL | 0% | **NO** |
+| Strategy Vault Tokens | ❌ NOT COLLATERAL | 0% | **NO** |
+
+**Impact**: Users can deposit JLP to earn yield, but they **CANNOT borrow USDC against it** to fund bots. This breaks the "Capital Efficiency" loop for those specific assets.
+
+**Mitigation**:
+```typescript
+// Split assets in database
+type AssetCategory = 'collateral' | 'yield_only';
+
+interface AssetConfig {
+  symbol: string;
+  category: AssetCategory;
+  canBorrowAgainst: boolean;
+  initialWeight: number;  // 0 for yield-only assets
+}
+
+const ASSET_CONFIGS: AssetConfig[] = [
+  { symbol: 'USDC', category: 'collateral', canBorrowAgainst: true, initialWeight: 1.0 },
+  { symbol: 'SOL', category: 'collateral', canBorrowAgainst: true, initialWeight: 0.8 },
+  { symbol: 'INF', category: 'collateral', canBorrowAgainst: true, initialWeight: 0.71 },
+  { symbol: 'JLP', category: 'yield_only', canBorrowAgainst: false, initialWeight: 0 },
+];
+```
+
+**UI Update**: Show clear distinction between "Collateral Assets" and "Yield-Only Assets" with tooltips explaining the difference.
+
+### 2. Subaccount Transfer Friction (The 3-TX Problem)
+
+**The Assumption**: Subaccount 0 can directly fund bot subaccounts.
+
+**The Reality**: In Drift v2, all subaccounts are **peers**, not hierarchical. To fund a bot:
+
+```
+Step 1: Borrow USDC on Subaccount 0 (TX #1)
+Step 2: Withdraw from Subaccount 0 to Agent Wallet (TX #2)  
+Step 3: Deposit from Agent Wallet to Bot Subaccount (TX #3)
+
+Total Time: 5-15 seconds
+Total Fees: 3x transaction costs
+```
+
+**Critical Race Condition**: If a bot is nearing liquidation and needs emergency funding, this 15-second delay could be fatal during high network congestion.
+
+**Mitigation - Smart Buffer Strategy**:
+```typescript
+interface BotBufferConfig {
+  // Instead of $0 idle cash, maintain a safety buffer
+  minBufferPercent: number;    // Default: 10% of max position size
+  
+  // Pre-fund bots proactively, not reactively
+  proactiveFundingThreshold: number;  // Trigger top-up at 20% buffer remaining
+}
+
+// Example: Bot with $1000 max position
+// Keep $100 buffer at all times
+// Start top-up process when buffer drops to $20
+// This gives 15+ seconds of runway before critical
+```
+
+**Alternative**: Keep USDC directly in agent wallet (current system) for time-critical operations. Only use vault borrowing for scheduled/planned funding.
+
+### 3. Lulo API Availability Risk
+
+**The Assumption**: Phase 7 can use "Lulo API as shortcut" (1-2 days).
+
+**The Reality**: Lulo (FlexLend) does **NOT currently publicize a robust open developer API** for third-party integrators to route funds programmatically.
+
+**Impact**: Phase 7 may require building individual adapters for Kamino, Marginfi, Solend, etc. - making it 5-7 days minimum, not 1-2 days.
+
+**Mitigation Options**:
+1. **Contact Lulo directly** - Request API access for integration partnership
+2. **Build single adapter first** - Start with just Kamino to prove concept
+3. **Defer Phase 7** - Focus on Drift-native strategies until external demand is validated
+
+---
+
+## ARCHITECTURAL GAPS & REFINEMENTS
+
+### Gap 1: The Deleverage Spiral (Force Recall Protocol)
+
+**Scenario**: Vault health drops critically. Need to repay USDC debt. But the USDC is locked inside active bot positions.
+
+**Missing Protocol**:
+```typescript
+interface ForceRecallProtocol {
+  // 1. Vault detects low health
+  onHealthCritical(vaultId: string): void {
+    const allocatedToBots = this.getBotAllocations(vaultId);
+    const recallNeeded = this.calculateRecallAmount(vaultId);
+    
+    // 2. Send recall signal to bots (prioritize by drawdown)
+    const botsByDrawdown = allocatedToBots.sort((a, b) => a.currentPnl - b.currentPnl);
+    
+    for (const bot of botsByDrawdown) {
+      if (recallNeeded <= 0) break;
+      
+      // 3. Force close positions at market
+      await this.forceClosePosition(bot.id);
+      
+      // 4. Transfer freed USDC back to vault
+      const freed = await this.recallFunds(bot.id, bot.freeCollateral);
+      recallNeeded -= freed;
+    }
+    
+    // 5. Repay debt
+    await this.repayDebt(vaultId);
+  }
+}
+```
+
+**User Preference Required**:
+```typescript
+type DeleveragePreference = 
+  | 'save_vault'      // Close positions immediately, lock in losses if needed
+  | 'risk_liquidation' // Keep positions open, hope for rebound
+  | 'partial_close';   // Close 50% of positions as compromise
+
+// Add to user settings
+deleveragePreference: DeleveragePreference;
+```
+
+### Gap 2: Oracle Latency vs Liquidation Speed
+
+**The Problem**: Plan calls for "Risk Management Agent runs every minute."
+
+**The Reality**: Drift's liquidators are **bots running in milliseconds**. If SOL crashes 5% in 1 minute, Drift will liquidate the user BEFORE your agent wakes up.
+
+**Mitigation**:
+```typescript
+// DON'T: Poll every minute
+setInterval(() => checkHealth(), 60000); // Too slow!
+
+// DO: Subscribe to WebSocket account updates
+const connection = new Connection(RPC_URL);
+connection.onAccountChange(
+  userAccountPubkey,
+  (accountInfo) => {
+    const health = parseHealthFromAccount(accountInfo);
+    if (health < WARNING_THRESHOLD) {
+      triggerImmediateRiskCheck();
+    }
+  },
+  'confirmed'
+);
+```
+
+**Threshold Adjustments**:
+| Threshold | Current Plan | Recommended | Reason |
+|-----------|-------------|-------------|--------|
+| Warning | 1.5 | 1.5 | Good |
+| Critical | 1.2 | **1.3** | More runway before liquidation |
+| Emergency | 1.1 | **1.15** | Drift liquidates at ~1.0, need buffer |
+
+### Gap 3: Interest Rate Volatility (Negative Carry)
+
+**The Problem**: Drift borrow rates are variable and can spike to >100% APR during high utilization.
+
+**Scenario**:
+- User borrows USDC at 5% APR to fund a bot
+- Bot generates 20% returns - great!
+- Market stress hits, utilization spikes to 90%
+- Borrow APR jumps to 60%
+- User is now **losing 40%** net
+
+**Mitigation - Negative Carry Protection Agent**:
+```typescript
+interface NegativeCarryProtector {
+  checkInterval: 3600000; // Every hour
+  
+  async check(userId: string): Promise<void> {
+    const borrowApy = await this.getCurrentBorrowApy();
+    const botAvgReturn = await this.getAverageBotReturn(userId, 7); // 7-day avg
+    
+    if (borrowApy > botAvgReturn) {
+      const hoursInNegative = await this.getHoursInNegativeCarry(userId);
+      
+      if (hoursInNegative > 6) {
+        // Alert user
+        await this.notify(userId, 'negative_carry', {
+          borrowApy,
+          botReturn: botAvgReturn,
+          recommendation: 'Consider reducing borrowed position'
+        });
+        
+        // Optional: Auto-unwind if configured
+        if (user.autoUnwindOnNegativeCarry) {
+          await this.initiateGradualUnwind(userId);
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+## PHASE 0: PREREQUISITES (Before Any Implementation)
+
+Based on reviewer feedback, add this phase before starting:
+
+### Security Prerequisites
+- [ ] Smart contract interaction audit (review Drift SDK usage patterns)
+- [ ] Agent wallet security review (multi-sig or hardware wallet for high TVL)
+- [ ] Oracle sanity checks implemented (max 10% deviation from averages)
+- [ ] Emergency withdrawal procedures documented and tested
+
+### Technical Prerequisites
+- [ ] Dedicated RPC endpoint with high rate limits (not public)
+- [ ] WebSocket subscription infrastructure for real-time account updates
+- [ ] Redis caching layer for yield data (5-minute TTL)
+- [ ] Monitoring and alerting infrastructure (PagerDuty/Discord)
+
+### Testing Prerequisites
+- [ ] Historical data backtesting for agents (simulate 2022 bear market)
+- [ ] Chaos engineering tests (simulate oracle failures, RPC outages)
+- [ ] Load testing for RPC calls at scale (50k calls/day target)
+- [ ] Canary deployment pipeline (roll features to 10% of users first)
+
+### Legal/Compliance Prerequisites
+- [ ] Legal review of lending/borrowing features in target jurisdictions
+- [ ] Risk disclosure documentation for users
+- [ ] Terms of service updates for vault features
+
+### User Validation Prerequisites
+- [ ] Survey existing bot users on vault interest
+- [ ] Identify 5-10 beta testers for Phase 1
+- [ ] Document specific pain points to solve
+
+---
+
+## ADDITIONAL DATABASE SCHEMA
+
+Based on reviewer feedback, add these tables/fields:
+
+### Vault Health Tracking
+```typescript
+// Add to vaults table
+effectiveCollateralValue: real("effective_collateral_value"),  // With weights applied
+maintenanceCollateralValue: real("maintenance_collateral_value"), // For liquidation checks
+liquidationPrice: real("liquidation_price"),  // Approx SOL price where health < 1
+lastHealthCheck: timestamp("last_health_check"),
+```
+
+### Transfer Logs (Multi-Step Transaction Tracking)
+```typescript
+// New table: track the 3-step transfer flow
+export const transferLogs = pgTable("transfer_logs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: varchar("wallet_address").notNull(),
+  fromSubaccount: integer("from_subaccount").notNull(),
+  toSubaccount: integer("to_subaccount").notNull(),
+  amount: real("amount").notNull(),
+  
+  // Track each step
+  step1Status: varchar("step1_status"),  // 'pending' | 'success' | 'failed'
+  step1TxSignature: varchar("step1_tx_signature"),
+  step1CompletedAt: timestamp("step1_completed_at"),
+  
+  step2Status: varchar("step2_status"),
+  step2TxSignature: varchar("step2_tx_signature"),
+  step2CompletedAt: timestamp("step2_completed_at"),
+  
+  step3Status: varchar("step3_status"),
+  step3TxSignature: varchar("step3_tx_signature"),
+  step3CompletedAt: timestamp("step3_completed_at"),
+  
+  overallStatus: varchar("overall_status"),  // 'in_progress' | 'completed' | 'failed' | 'rolled_back'
+  errorMessage: text("error_message"),
+  
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+```
+
+### Negative Carry Tracking
+```typescript
+// Track borrow APY vs returns for negative carry detection
+export const carryTracking = pgTable("carry_tracking", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: varchar("wallet_address").notNull(),
+  borrowApy: real("borrow_apy").notNull(),
+  botAverageReturn: real("bot_average_return").notNull(),
+  isNegativeCarry: boolean("is_negative_carry").notNull(),
+  consecutiveNegativeHours: integer("consecutive_negative_hours").default(0),
+  recordedAt: timestamp("recorded_at").defaultNow(),
+});
+```
+
+---
+
+## REVISED IMPLEMENTATION RECOMMENDATIONS
+
+Based on critical risks identified:
+
+### Phase Priority Adjustments
+
+```
+ORIGINAL ORDER:
+1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
+
+REVISED ORDER (Risk-Adjusted):
+1 → 2 → 4 → 3 → 5 → 6 → 8 → 7
+
+Changes:
+- Phase 4 (Vault Discovery) moved BEFORE Phase 3 (Borrowing)
+  Reason: Confirm which vaults provide valid collateral before building borrow logic
+  
+- Phase 7 (External Aggregation) moved to LAST
+  Reason: Highest risk, Lulo API uncertain, build Drift-native first
+```
+
+### Phase 3 (Borrowing) - Risk Mitigations
+
+1. **Start with manual triggers only** - No auto-borrow until transfer speed is proven
+2. **Implement Smart Buffer** - Keep 10% idle in bot accounts
+3. **Add Negative Carry Protection** - Monitor borrow APY vs returns
+4. **Use WebSockets** - Not polling for health checks
+
+### Phase 4 (Vault Discovery) - Focus Areas
+
+1. **Prioritize INF vault** - Confirmed 71% collateral weight
+2. **Skip JLP initially** - Not valid collateral, pure yield only
+3. **Document collateral vs yield-only** - Clear UI distinction
+
+### Phase 7 (External Aggregation) - Scope Reduction
+
+1. **Contact Lulo first** - Validate API availability before planning
+2. **If no API**: Build single adapter (Kamino only) to prove concept
+3. **Defer multi-protocol** - Until demand validated and revenue supports
+
+---
+
 ## Core Concepts
 
 ### Current Architecture (Bots Only)
