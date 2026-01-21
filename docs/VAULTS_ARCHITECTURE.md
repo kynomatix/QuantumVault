@@ -1709,59 +1709,59 @@ interface RegimeDetectionOverhead {
 | Risk management agent | 5 | 4 | 4 | 13 |
 | Capital rebalancing | 6 | 5 | 5 | 16 |
 
-### Implementation Order (Recommended)
+### Implementation Order (AI-Assisted Timeline)
 
-Based on complexity, dependencies, and value:
+Based on complexity, dependencies, and value. Timeframes adjusted for AI-assisted development.
 
 ```
-Phase 1: Foundation (Weeks 1-4)
+Phase 1: Foundation (2-4 days)
 ├── Core Vault on Subaccount 0
 ├── USDC deposits/withdrawals
 ├── Basic health monitoring
 └── Prerequisites: None, extends current system
 
-Phase 2: Multi-Asset (Weeks 5-8)
+Phase 2: Multi-Asset (2-3 days)
 ├── SOL, BTC, ETH as collateral
 ├── Collateral weight calculations
 ├── Cross-collateral display
 └── Prerequisites: Phase 1
 
-Phase 3: Borrowing (Weeks 9-12)
+Phase 3: Borrowing (3-5 days)
 ├── USDC borrowing against collateral
 ├── Health factor monitoring
 ├── Auto-deleverage logic
 ├── Bot funding via borrowed USDC
 └── Prerequisites: Phase 2
 
-Phase 4: Vault Discovery (Weeks 13-16)
+Phase 4: Vault Discovery (2-3 days)
 ├── Index Drift strategy vaults
 ├── APY/performance tracking
 ├── Withdrawal period handling
 ├── Display vault options to users
 └── Prerequisites: Phase 1 (can parallel with 2-3)
 
-Phase 5: Vault Integration (Weeks 17-20)
+Phase 5: Vault Integration (3-4 days)
 ├── Deposit to external vaults
 ├── Withdrawal queue management
 ├── Funding rate analysis
 ├── Vault selection UI
 └── Prerequisites: Phase 4
 
-Phase 6: Market Regime (Weeks 21-24)
+Phase 6: Market Regime (2-3 days)
 ├── Price/funding data collection
 ├── Regime classification
 ├── Vault scoring by regime
 ├── Regime-aware recommendations
 └── Prerequisites: Phase 4
 
-Phase 7: External Aggregation (Weeks 25-32)
+Phase 7: External Aggregation (5-7 days)
 ├── Protocol integrations (Kamino, Marginfi, etc.)
 ├── Migration logic
 ├── Cost/benefit calculations
-├── OR: Use Lulo API as shortcut
+├── OR: Use Lulo API as shortcut (1-2 days)
 └── Prerequisites: Phase 3
 
-Phase 8: Intelligent Automation (Weeks 33-40)
+Phase 8: Intelligent Automation (4-6 days)
 ├── Yield arbitrage agent
 ├── Profit distribution agent
 ├── Risk management agent
@@ -1769,20 +1769,177 @@ Phase 8: Intelligent Automation (Weeks 33-40)
 └── Prerequisites: All above
 ```
 
+**Total AI-Assisted Timeline**: ~4-6 weeks (vs ~40 weeks traditional)
+
 ### Resource Requirements by Phase
 
-| Phase | Dev Time | Ongoing Infra | API Costs | RPC Costs |
-|-------|----------|---------------|-----------|-----------|
-| 1. Foundation | 4 weeks | Low | $0 | Existing |
-| 2. Multi-Asset | 4 weeks | Low | $0 | +10% |
-| 3. Borrowing | 4 weeks | Medium | $0 | +20% |
-| 4. Vault Discovery | 4 weeks | Medium | ~$50/mo | +30% |
-| 5. Vault Integration | 4 weeks | Medium | ~$50/mo | +20% |
-| 6. Market Regime | 4 weeks | Low | ~$20/mo | +5% |
-| 7. External Aggregation | 8 weeks | High | ~$100/mo | +50% |
-| 8. Automation | 8 weeks | High | $0 | +10% |
+| Phase | AI Dev Time | Ongoing Infra | API Costs | RPC Costs |
+|-------|-------------|---------------|-----------|-----------|
+| 1. Foundation | 2-4 days | Low | $0 | Existing |
+| 2. Multi-Asset | 2-3 days | Low | $0 | +10% |
+| 3. Borrowing | 3-5 days | Medium | $0 | +20% |
+| 4. Vault Discovery | 2-3 days | Medium | ~$50/mo | +30% |
+| 5. Vault Integration | 3-4 days | Medium | ~$50/mo | +20% |
+| 6. Market Regime | 2-3 days | Low | ~$20/mo | +5% |
+| 7. External Aggregation | 5-7 days | High | ~$100/mo | +50% |
+| 8. Automation | 4-6 days | High | $0 | +10% |
 
-**Total**: ~40 weeks, infrastructure scales with user count
+## Business Feasibility & Revenue Alignment
+
+### When to Implement Each Phase
+
+Features should be implemented when revenue can support the additional infrastructure costs.
+
+```
+Revenue Milestone → Feature Unlock
+──────────────────────────────────────────────────────────────
+$0/mo (Current)      → Bots only (current state) ✓
+                        Infra cost: ~$50-100/mo (Replit + RPC)
+
+$200/mo revenue      → Phase 1-3: Core Vault + Borrowing
+                        Additional infra: +$50/mo
+                        Break-even: 4 paying users @ $50/mo
+
+$500/mo revenue      → Phase 4-6: Vault Discovery + Regime
+                        Additional infra: +$100/mo
+                        Unlocks: Strategy vault subscriptions
+
+$1,000/mo revenue    → Phase 7: External Aggregation
+                        Additional infra: +$150/mo
+                        Requires: Dedicated RPC, background workers
+
+$2,500/mo revenue    → Phase 8: Full Automation
+                        Additional infra: +$200/mo
+                        Unlocks: Premium "set and forget" tier
+```
+
+### Revenue Model Considerations
+
+| Feature | Revenue Potential | Infrastructure Cost | Net Margin |
+|---------|------------------|---------------------|------------|
+| Bot Trading (current) | Subscription + % AUM | Low (~$100/mo) | High |
+| Vault Deposits | % of yield earned | Medium (~$150/mo) | Medium |
+| External Aggregation | % of yield + performance fee | High (~$250/mo) | Medium |
+| Full Automation | Premium subscription | High (~$300/mo) | High at scale |
+
+### Monetization Strategy by Phase
+
+```typescript
+interface RevenueModel {
+  phase1_3: {
+    // Core vault + borrowing
+    model: 'subscription',
+    tiers: {
+      free: { maxBots: 1, maxVaultDeposit: 1000 },
+      basic: { price: 29, maxBots: 5, maxVaultDeposit: 10000 },
+      pro: { price: 79, maxBots: 20, maxVaultDeposit: 100000 },
+    },
+  };
+  
+  phase4_6: {
+    // Vault discovery + regime
+    model: 'subscription + performance',
+    additionalFee: '0.5% of vault profits',
+    justification: 'Intelligent allocation saves user time/money',
+  };
+  
+  phase7: {
+    // External aggregation
+    model: 'yield share',
+    fee: '10% of yield improvement vs baseline',
+    example: 'If we boost yield from 5% to 8%, we take 10% of the 3% improvement',
+  };
+  
+  phase8: {
+    // Full automation
+    model: 'premium tier',
+    price: 149,
+    includes: 'All automation features, priority execution, advanced analytics',
+  };
+}
+```
+
+### Infrastructure Scaling Triggers
+
+| Metric | Threshold | Action Required | Cost Impact |
+|--------|-----------|-----------------|-------------|
+| Active Users | 50 | Upgrade RPC plan | +$100/mo |
+| Active Users | 200 | Add background worker | +$50/mo |
+| TVL | $100k | Enhanced monitoring | +$50/mo |
+| TVL | $500k | Dedicated infra | +$200/mo |
+| API calls/day | 50k | Rate limit upgrades | +$100/mo |
+| Vaults indexed | 20+ | Database scaling | +$50/mo |
+
+### Go/No-Go Decision Framework
+
+Before starting each phase, evaluate:
+
+```typescript
+interface PhaseDecision {
+  canProceed(): boolean {
+    // Financial check
+    const monthlyRevenue = this.getCurrentRevenue();
+    const phaseCost = this.getPhaseInfraCost();
+    const hasBuffer = monthlyRevenue > (phaseCost * 3); // 3x buffer
+    
+    // Demand check
+    const userRequests = this.getFeatureRequests();
+    const hasDemand = userRequests > 10; // At least 10 users asking
+    
+    // Technical readiness
+    const prerequisitesComplete = this.checkPrerequisites();
+    
+    // Risk tolerance
+    const currentStability = this.getPlatformUptime() > 0.99;
+    
+    return hasBuffer && hasDemand && prerequisitesComplete && currentStability;
+  }
+}
+```
+
+### Recommended Sequencing Based on Revenue
+
+```
+TODAY (Pre-Revenue)
+└── Focus: Get bots working flawlessly, acquire first paying users
+
+MILESTONE 1: First 10 Paying Users (~$300-500/mo)
+├── Validate product-market fit
+├── Collect feedback on vault interest
+└── Start Phase 1 planning/prep
+
+MILESTONE 2: 20+ Users, $1k/mo Revenue
+├── Implement Phase 1-3 (Core Vault)
+├── Beta test with power users
+└── Monitor infrastructure costs
+
+MILESTONE 3: 50+ Users, $2.5k/mo Revenue
+├── Implement Phase 4-6 (Vault Integration + Regime)
+├── Launch vault features publicly
+└── Evaluate external aggregation demand
+
+MILESTONE 4: 100+ Users, $5k/mo Revenue
+├── Implement Phase 7 (External Aggregation)
+├── Consider dedicated infrastructure
+└── Hire additional support if needed
+
+MILESTONE 5: 200+ Users, $10k/mo Revenue
+├── Implement Phase 8 (Full Automation)
+├── Launch premium tier
+└── Scale infrastructure proactively
+```
+
+### Cost Control Strategies
+
+1. **Use Lulo API instead of building aggregation** - Phase 7 can be 1-2 days instead of 5-7 if we use Lulo's existing infrastructure
+
+2. **Lazy loading** - Only index vaults when users request them, not proactively
+
+3. **Caching aggressively** - APY data doesn't need real-time updates, 5-minute cache is fine
+
+4. **User-triggered regime detection** - Don't run regime detection globally, only for users who enable it
+
+5. **Tiered infrastructure** - Free users share resources, paid users get priority
 
 ### Critical Dependencies
 
