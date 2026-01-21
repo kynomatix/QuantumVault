@@ -257,6 +257,407 @@ Based on reviewer feedback, add this phase before starting:
 
 ---
 
+## LEVERAGING EXISTING SYSTEMS
+
+Build on existing infrastructure rather than reinventing the wheel. The vault system can reuse many functions already in production.
+
+### Existing Functions to Reuse
+
+| Function | Location | Vault Use Case |
+|----------|----------|----------------|
+| `executeAgentDriftDeposit` | drift-service.ts | Deposit to vault subaccount |
+| `executeAgentDriftWithdraw` | drift-service.ts | Withdraw from vault |
+| `executeAgentTransferBetweenSubaccounts` | drift-service.ts | Move funds vault → bot |
+| `getDriftAccountInfo` | drift-service.ts | Get vault health metrics |
+| `settlePnl` | drift-service.ts | Settle PnL before withdrawals |
+| `getAgentUsdcBalance` | agent-wallet.ts | Check agent wallet balance |
+| `getPrimaryRpcUrl` / `getBackupRpcUrl` | rpc-config.ts | RPC fallback logic |
+
+### New Functions Needed (Build on Existing Patterns)
+
+```typescript
+// These follow existing patterns in drift-service.ts
+
+// 1. Borrow USDC from vault (extends executeAgentDriftDeposit pattern)
+export async function executeVaultBorrow(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  amountUsdc: number,
+  subAccountId: number = 0
+): Promise<{ success: boolean; signature?: string; error?: string }>;
+
+// 2. Repay borrowed USDC (extends executeAgentDriftWithdraw pattern)  
+export async function executeVaultRepay(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  amountUsdc: number,
+  subAccountId: number = 0
+): Promise<{ success: boolean; signature?: string; error?: string }>;
+
+// 3. Get vault health (extends getDriftAccountInfo pattern)
+export async function getVaultHealth(
+  agentPublicKey: string,
+  subAccountId: number = 0
+): Promise<{
+  totalCollateral: number;
+  effectiveCollateral: number;  // With weights applied
+  totalBorrows: number;
+  healthFactor: number;
+  liquidationPrice: number | null;
+}>;
+```
+
+---
+
+## RPC OPTIMIZATION FOR VAULTS
+
+Vaults are NOT time-critical like bot trades. This allows for smarter RPC usage.
+
+### Key Insight: Vaults Have More Time
+
+| Operation | Bot Trades | Vaults |
+|-----------|-----------|--------|
+| Time sensitivity | Milliseconds matter | Seconds/minutes OK |
+| Failure impact | Missed trade, potential loss | Retry acceptable |
+| RPC priority | Highest | Can yield to trades |
+| Fallback viable | Rarely used (Triton) | Good use case |
+
+### Current RPC Infrastructure
+
+```typescript
+// server/rpc-config.ts - Already exists
+export function getPrimaryRpcUrl(): string;    // Helius (fast, reliable)
+export function getBackupRpcUrl(): string;     // Triton (fallback)
+export function getAllRpcUrls(): string[];     // Both
+```
+
+### Smart RPC Selection for Vaults
+
+Since vault operations aren't time-critical, implement intelligent RPC selection:
+
+```typescript
+interface VaultRpcConfig {
+  // Existing infrastructure
+  primaryRpc: string;      // Helius - use for health checks, critical ops
+  backupRpc: string;       // Triton - use for non-critical, batch ops
+  
+  // New: Load-based selection
+  useBackupWhenPrimaryBusy: boolean;  // Default: true
+  primaryBusyThreshold: number;       // Requests/sec before switching (e.g., 20)
+  
+  // New: Latency-based selection
+  checkLatencyBeforeCall: boolean;    // Default: true for vault ops
+  maxAcceptableLatency: number;       // ms - use backup if primary exceeds
+}
+
+// Smart RPC selector for vault operations
+async function getVaultRpc(): Promise<string> {
+  const primary = getPrimaryRpcUrl();
+  const backup = getBackupRpcUrl();
+  
+  // If no backup, use primary
+  if (!backup) return primary;
+  
+  // Check current system load (reuse existing rate limit tracking)
+  const currentLoad = getRpcRequestCount(); // From routes.ts rate limiting
+  if (currentLoad > 20) {
+    console.log('[Vault RPC] Primary busy, using backup');
+    return backup;
+  }
+  
+  // Optional: Quick latency check (only for non-urgent vault ops)
+  if (shouldCheckLatency()) {
+    const primaryLatency = await measureLatency(primary);
+    const backupLatency = await measureLatency(backup);
+    
+    if (primaryLatency > 500 && backupLatency < primaryLatency) {
+      console.log(`[Vault RPC] Primary slow (${primaryLatency}ms), using backup (${backupLatency}ms)`);
+      return backup;
+    }
+  }
+  
+  return primary;
+}
+
+// Latency measurement (lightweight, cached)
+const latencyCache = new Map<string, { latency: number; timestamp: number }>();
+const LATENCY_CACHE_TTL = 60000; // 1 minute
+
+async function measureLatency(rpcUrl: string): Promise<number> {
+  const cached = latencyCache.get(rpcUrl);
+  if (cached && Date.now() - cached.timestamp < LATENCY_CACHE_TTL) {
+    return cached.latency;
+  }
+  
+  const start = Date.now();
+  try {
+    const connection = new Connection(rpcUrl);
+    await connection.getSlot(); // Lightweight call
+    const latency = Date.now() - start;
+    latencyCache.set(rpcUrl, { latency, timestamp: Date.now() });
+    return latency;
+  } catch {
+    return 9999; // Mark as unavailable
+  }
+}
+```
+
+### RPC Call Frequency Limits for Vaults
+
+Vault operations should NOT spam the RPC. Enforce reasonable frequencies:
+
+```typescript
+interface VaultOperationLimits {
+  // Health checks
+  healthCheckInterval: 60000;       // Every 60 seconds (not every minute per user)
+  healthCheckBatchSize: 10;         // Check 10 users per batch
+  
+  // Yield rate fetching
+  yieldRateRefresh: 300000;         // Every 5 minutes
+  yieldRateCache: true;             // Cache for all users
+  
+  // Capital rotation decisions
+  rotationEvalInterval: 21600000;   // Every 6 hours
+  rotationMinThreshold: 0.02;       // 2% APY difference minimum
+  
+  // Rebalancing
+  rebalanceCheckInterval: 604800000; // Weekly
+  rebalanceMinDelta: 0.10;          // 10% allocation difference
+}
+
+// Global vault scheduler (not per-user)
+class VaultScheduler {
+  private healthCheckQueue: string[] = [];
+  
+  async runHealthChecks(): Promise<void> {
+    // Batch all users needing health checks
+    const usersToCheck = await this.getUsersWithActiveVaults();
+    
+    // Process in batches of 10
+    for (let i = 0; i < usersToCheck.length; i += 10) {
+      const batch = usersToCheck.slice(i, i + 10);
+      
+      // Use backup RPC for batch operations
+      const rpc = await getVaultRpc();
+      
+      // Batch account fetch (1 RPC call for multiple accounts)
+      const accounts = await getBatchDriftAccountInfo(
+        rpc,
+        batch.map(u => u.agentPublicKey)
+      );
+      
+      // Process results
+      for (const account of accounts) {
+        if (account.healthFactor < WARNING_THRESHOLD) {
+          await this.triggerHealthAlert(account);
+        }
+      }
+      
+      // Rate limit between batches
+      await sleep(1000);
+    }
+  }
+}
+```
+
+### Existing Batch Functions to Leverage
+
+Already have batch RPC optimization in place:
+
+```typescript
+// drift-service.ts - Already exists
+getBatchDriftAccountInfo()   // Single RPC call for multiple accounts
+getBatchPerpPositions()      // Single RPC call for multiple positions
+```
+
+Use these for vault operations instead of individual calls.
+
+### RPC Cost Estimates
+
+| Operation | Calls/Day (100 users) | With Batching | Savings |
+|-----------|----------------------|---------------|---------|
+| Health checks (per user) | 1,440 | 144 | 90% |
+| Yield rate checks | 28,800 | 288 | 99% |
+| Balance checks | 2,400 | 240 | 90% |
+| **Total** | **32,640** | **672** | **98%** |
+
+### Triton Fallback Strategy
+
+Triton has been underutilized. For vaults, it's a good fit:
+
+```typescript
+// Vault operation categories
+const VAULT_OP_RPC_PRIORITY = {
+  // Use PRIMARY (Helius) - time matters
+  'emergency_deleverage': 'primary',
+  'liquidation_check': 'primary',
+  'force_recall': 'primary',
+  
+  // Use EITHER (load-based) - can tolerate delay
+  'health_check': 'smart',
+  'balance_refresh': 'smart',
+  
+  // Use BACKUP (Triton) - background, non-urgent
+  'yield_rate_fetch': 'backup',
+  'historical_data': 'backup',
+  'vault_discovery': 'backup',
+  'apy_comparison': 'backup',
+};
+
+async function executeVaultOperation(
+  operation: string,
+  fn: (rpc: string) => Promise<any>
+): Promise<any> {
+  const priority = VAULT_OP_RPC_PRIORITY[operation] || 'smart';
+  
+  let rpc: string;
+  switch (priority) {
+    case 'primary':
+      rpc = getPrimaryRpcUrl();
+      break;
+    case 'backup':
+      rpc = getBackupRpcUrl() || getPrimaryRpcUrl();
+      break;
+    case 'smart':
+    default:
+      rpc = await getVaultRpc();
+  }
+  
+  return fn(rpc);
+}
+```
+
+---
+
+## MAINTAINABILITY GUIDELINES
+
+Technical complexity is acceptable IF maintainable. Follow these principles:
+
+### 1. Code Organization
+
+```
+server/
+├── drift-service.ts        # Existing - core Drift operations
+├── vault-service.ts        # NEW - vault-specific logic
+├── vault-health.ts         # NEW - health monitoring
+├── vault-agents/           # NEW - intelligent automation
+│   ├── yield-arbitrage.ts
+│   ├── risk-management.ts
+│   ├── profit-distribution.ts
+│   └── scheduler.ts        # Coordinates all agents
+└── rpc-config.ts           # Existing - extend for smart selection
+```
+
+### 2. Single Responsibility
+
+Each vault agent should do ONE thing well:
+
+```typescript
+// GOOD: Single responsibility
+class YieldArbitrageAgent {
+  async evaluate(): Promise<YieldDecision>;
+  async execute(decision: YieldDecision): Promise<void>;
+}
+
+// BAD: God class doing everything
+class VaultManager {
+  async checkYield(): Promise<void>;
+  async checkHealth(): Promise<void>;
+  async rebalance(): Promise<void>;
+  async distribute(): Promise<void>;
+  // ... 50 more methods
+}
+```
+
+### 3. Configuration Over Code
+
+Make thresholds configurable, not hardcoded:
+
+```typescript
+// GOOD: Configurable
+const config = {
+  healthWarningThreshold: parseFloat(process.env.VAULT_HEALTH_WARNING || '1.5'),
+  yieldDifferenceThreshold: parseFloat(process.env.VAULT_YIELD_DIFF || '0.02'),
+  rebalanceInterval: parseInt(process.env.VAULT_REBALANCE_INTERVAL || '604800000'),
+};
+
+// BAD: Magic numbers everywhere
+if (health < 1.5) { ... }
+if (apyDiff > 0.02) { ... }
+```
+
+### 4. Graceful Degradation
+
+Every vault operation should have fallbacks:
+
+```typescript
+async function getVaultYield(vaultId: string): Promise<number> {
+  try {
+    // Try API first
+    return await fetchFromDriftApi(vaultId);
+  } catch (apiError) {
+    console.warn('API failed, falling back to on-chain');
+    try {
+      // Fallback to on-chain
+      return await calculateFromOnChain(vaultId);
+    } catch (chainError) {
+      console.warn('On-chain failed, using cached');
+      // Final fallback: cached value
+      return getCachedYield(vaultId) || 0;
+    }
+  }
+}
+```
+
+### 5. Logging & Observability
+
+Vault operations should be traceable:
+
+```typescript
+// Structured logging for vault operations
+function logVaultOp(operation: string, details: object): void {
+  console.log(JSON.stringify({
+    timestamp: new Date().toISOString(),
+    service: 'vault',
+    operation,
+    ...details,
+  }));
+}
+
+// Usage
+logVaultOp('health_check', { 
+  userId: 'xxx', 
+  healthFactor: 1.45, 
+  rpcUsed: 'backup',
+  latencyMs: 120 
+});
+```
+
+### 6. Testing Strategy
+
+```typescript
+// Unit tests: Agent logic in isolation
+describe('YieldArbitrageAgent', () => {
+  it('should recommend swap when APY diff > threshold');
+  it('should NOT swap when break-even > 7 days');
+  it('should handle API failures gracefully');
+});
+
+// Integration tests: With mock RPC
+describe('VaultHealthCheck', () => {
+  it('should batch multiple user checks');
+  it('should fallback to backup RPC on timeout');
+});
+
+// Simulation tests: Historical data
+describe('VaultAgentBacktest', () => {
+  it('should survive 2022 bear market without liquidation');
+  it('should outperform passive USDC lending');
+});
+```
+
+---
+
 ## ADDITIONAL DATABASE SCHEMA
 
 Based on reviewer feedback, add these tables/fields:
