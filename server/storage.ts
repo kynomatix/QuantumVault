@@ -1376,7 +1376,7 @@ export class DatabaseStorage implements IStorage {
       volume: sql<string>`COALESCE(SUM(ABS(CAST(size AS DECIMAL) * CAST(price AS DECIMAL))), 0)`,
     }).from(botTrades)
       .where(and(
-        eq(botTrades.status, 'filled'),
+        eq(botTrades.status, 'executed'),
         gte(botTrades.executedAt, oneDayAgo)
       ));
     
@@ -1384,7 +1384,7 @@ export class DatabaseStorage implements IStorage {
       volume: sql<string>`COALESCE(SUM(ABS(CAST(size AS DECIMAL) * CAST(price AS DECIMAL))), 0)`,
     }).from(botTrades)
       .where(and(
-        eq(botTrades.status, 'filled'),
+        eq(botTrades.status, 'executed'),
         gte(botTrades.executedAt, sevenDaysAgo)
       ));
     
@@ -1409,7 +1409,7 @@ export class DatabaseStorage implements IStorage {
     const totalTrades = await db.select({
       count: sql<string>`COUNT(*)`,
     }).from(botTrades)
-      .where(eq(botTrades.status, 'filled'));
+      .where(eq(botTrades.status, 'executed'));
     
     return {
       activeBots: parseInt(activeBots[0]?.count || '0'),

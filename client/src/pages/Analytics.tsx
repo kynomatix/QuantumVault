@@ -169,27 +169,23 @@ export default function Analytics() {
     <div className="min-h-screen bg-background">
       <nav className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-xl border-b border-border">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link href="/">
-            <a className="flex items-center gap-3" data-testid="link-home">
-              <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-10 h-10 rounded-xl" />
-              <span className="font-display font-bold text-xl">QuantumVault</span>
-            </a>
+          <Link href="/" className="flex items-center gap-3" data-testid="link-home">
+            <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-10 h-10 rounded-xl" />
+            <span className="font-display font-bold text-xl">QuantumVault</span>
           </Link>
           
           <div className="hidden md:flex items-center gap-8">
-            <Link href="/">
-              <a className="text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="link-home-nav">Home</a>
-            </Link>
+            <Link href="/" className="text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="link-home-nav">Home</Link>
             <span className="text-sm text-foreground font-medium" data-testid="link-analytics-active">Analytics</span>
-            <Link href="/docs">
-              <a className="text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="link-docs">Docs</a>
-            </Link>
+            <Link href="/docs" className="text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="link-docs">Docs</Link>
           </div>
 
           <Link href="/app">
-            <Button size="sm" className="gap-2" data-testid="button-launch-app">
-              Launch App
-              <ArrowUpRight className="w-4 h-4" />
+            <Button size="sm" className="gap-2" data-testid="button-launch-app" asChild>
+              <span>
+                Launch App
+                <ArrowUpRight className="w-4 h-4" />
+              </span>
             </Button>
           </Link>
         </div>
@@ -341,9 +337,11 @@ export default function Analytics() {
                     <p className="text-muted-foreground">Deploy your first automated trading bot on Solana in minutes.</p>
                   </div>
                   <Link href="/app">
-                    <Button size="lg" className="gap-2" data-testid="button-get-started">
-                      Get Started
-                      <ArrowUpRight className="w-5 h-5" />
+                    <Button size="lg" className="gap-2" data-testid="button-get-started" asChild>
+                      <span>
+                        Get Started
+                        <ArrowUpRight className="w-5 h-5" />
+                      </span>
                     </Button>
                   </Link>
                 </div>
@@ -361,9 +359,7 @@ export default function Analytics() {
               <span className="font-display font-bold">QuantumVault</span>
             </div>
             <div className="flex items-center gap-8 text-sm">
-              <Link href="/docs">
-                <a className="text-muted-foreground hover:text-foreground transition-colors" data-testid="link-footer-docs">Docs</a>
-              </Link>
+              <Link href="/docs" className="text-muted-foreground hover:text-foreground transition-colors" data-testid="link-footer-docs">Docs</Link>
               <a href="#" className="text-muted-foreground hover:text-foreground transition-colors" data-testid="link-twitter">Twitter</a>
               <a href="#" className="text-muted-foreground hover:text-foreground transition-colors" data-testid="link-discord">Discord</a>
             </div>
