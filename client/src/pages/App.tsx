@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import bs58 from 'bs58';
@@ -128,6 +128,8 @@ export default function AppPage() {
   const [welcomePopupOpen, setWelcomePopupOpen] = useState(false);
   const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
   const welcomeCheckedRef = useRef(false);
+  const prevWalletRef = useRef<string | null>(null);
+  const pendingRefreshRef = useRef(false);
   
   // Settings state
   const [settingsLoading, setSettingsLoading] = useState(false);
@@ -438,6 +440,49 @@ export default function AppPage() {
       setRefreshing(false);
     }
   };
+
+  // Auto-refresh when wallet changes (e.g., user switches wallets in Phantom)
+  useEffect(() => {
+    if (!publicKeyString) {
+      prevWalletRef.current = null;
+      pendingRefreshRef.current = false;
+      return;
+    }
+    
+    // If this is the first connection, just store and return
+    if (!prevWalletRef.current) {
+      prevWalletRef.current = publicKeyString;
+      return;
+    }
+    
+    // Wallet changed - trigger refresh
+    if (prevWalletRef.current !== publicKeyString) {
+      const prevWallet = prevWalletRef.current;
+      prevWalletRef.current = publicKeyString;
+      
+      console.log(`[Wallet] Detected wallet change: ${prevWallet?.slice(0,8)}... → ${publicKeyString.slice(0,8)}...`);
+      
+      // If already refreshing, set flag to refresh when done
+      if (refreshing) {
+        console.log('[Wallet] Refresh in progress, will refresh when complete');
+        pendingRefreshRef.current = true;
+        return;
+      }
+      
+      // Trigger immediate refresh
+      handleRefreshAll();
+    }
+  }, [publicKeyString, refreshing]);
+  
+  // Process pending refresh when refreshing completes
+  useEffect(() => {
+    if (!refreshing && pendingRefreshRef.current && publicKeyString) {
+      console.log(`[Wallet] Processing pending refresh for ${publicKeyString.slice(0,8)}...`);
+      pendingRefreshRef.current = false;
+      // Small delay to ensure state is settled
+      setTimeout(() => handleRefreshAll(), 100);
+    }
+  }, [refreshing, publicKeyString]);
 
   const handleSaveNotificationPrefs = async (updates: {
     notificationsEnabled?: boolean;
