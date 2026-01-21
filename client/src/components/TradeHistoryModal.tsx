@@ -21,6 +21,7 @@ interface Trade {
   status: string;
   executedAt: string;
   botName?: string;
+  errorMessage?: string | null;
   webhookPayload?: {
     position_size?: string | number;
     data?: {
@@ -104,6 +105,10 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
     return 'bg-yellow-500/20 text-yellow-400';
   };
 
+  const showErrorMessage = (errorMessage: string) => {
+    alert(`Trade Failed:\n\n${errorMessage}`);
+  };
+
   const renderMobileTradeCard = (trade: Trade, index: number) => {
     const { isCloseSignal, isLong, isFailed, isExecuted, feeValue, pnlValue } = getTradeInfo(trade);
 
@@ -121,9 +126,19 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
             </span>
             <span className="font-medium text-sm">{trade.market}</span>
           </div>
-          <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)}`}>
-            {trade.status}
-          </span>
+          {isFailed && trade.errorMessage ? (
+            <button
+              onClick={() => showErrorMessage(trade.errorMessage!)}
+              className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)} cursor-pointer active:opacity-70`}
+              data-testid={`button-error-${index}`}
+            >
+              {trade.status} ⓘ
+            </button>
+          ) : (
+            <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)}`}>
+              {trade.status}
+            </span>
+          )}
         </div>
         
         <div className="grid grid-cols-2 gap-2 text-xs">
@@ -197,9 +212,20 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
           ) : '--'}
         </td>
         <td className="py-3 px-2 text-right">
-          <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)}`}>
-            {trade.status}
-          </span>
+          {isFailed && trade.errorMessage ? (
+            <button
+              onClick={() => showErrorMessage(trade.errorMessage!)}
+              className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)} cursor-pointer hover:opacity-80`}
+              title={trade.errorMessage}
+              data-testid={`button-error-desktop-${index}`}
+            >
+              {trade.status} ⓘ
+            </button>
+          ) : (
+            <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)}`}>
+              {trade.status}
+            </span>
+          )}
         </td>
       </tr>
     );
