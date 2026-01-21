@@ -247,6 +247,7 @@ export interface IStorage {
   calculatePlatformTVL(): Promise<number>;
   calculatePlatformVolume(): Promise<{ total: number; volume24h: number; volume7d: number }>;
   calculatePlatformStats(): Promise<{ activeBots: number; activeUsers: number; totalTrades: number }>;
+  getAllAgentWalletAddresses(): Promise<string[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1355,6 +1356,17 @@ export class DatabaseStorage implements IStorage {
       .where(eq(tradingBots.isActive, true));
     
     return parseFloat(result[0]?.totalAllocated || '0');
+  }
+  
+  async getAllAgentWalletAddresses(): Promise<string[]> {
+    const result = await db.select({
+      agentPublicKey: wallets.agentPublicKey,
+    }).from(wallets)
+      .where(sql`${wallets.agentPublicKey} IS NOT NULL`);
+    
+    return result
+      .map(r => r.agentPublicKey)
+      .filter((addr): addr is string => addr !== null);
   }
 
   async calculatePlatformVolume(): Promise<{ total: number; volume24h: number; volume7d: number }> {

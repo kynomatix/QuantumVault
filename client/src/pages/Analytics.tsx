@@ -180,14 +180,12 @@ export default function Analytics() {
             <Link href="/docs" className="text-sm text-muted-foreground hover:text-foreground transition-colors" data-testid="link-docs">Docs</Link>
           </div>
 
-          <Link href="/app">
-            <Button size="sm" className="gap-2" data-testid="button-launch-app" asChild>
-              <span>
-                Launch App
-                <ArrowUpRight className="w-4 h-4" />
-              </span>
+          <a href="/app">
+            <Button size="sm" className="gap-2" data-testid="button-launch-app">
+              Launch App
+              <ArrowUpRight className="w-4 h-4" />
             </Button>
-          </Link>
+          </a>
         </div>
       </nav>
 
@@ -336,14 +334,12 @@ export default function Analytics() {
                     <h3 className="font-display font-bold text-2xl mb-2">Ready to start trading?</h3>
                     <p className="text-muted-foreground">Deploy your first automated trading bot on Solana in minutes.</p>
                   </div>
-                  <Link href="/app">
-                    <Button size="lg" className="gap-2" data-testid="button-get-started" asChild>
-                      <span>
-                        Get Started
-                        <ArrowUpRight className="w-5 h-5" />
-                      </span>
+                  <a href="/app">
+                    <Button size="lg" className="gap-2" data-testid="button-get-started">
+                      Get Started
+                      <ArrowUpRight className="w-5 h-5" />
                     </Button>
-                  </Link>
+                  </a>
                 </div>
               </motion.div>
             </>

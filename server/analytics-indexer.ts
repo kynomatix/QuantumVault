@@ -1,5 +1,6 @@
 import { storage } from './storage';
 import type { PlatformMetricType } from '@shared/schema';
+import { fetchPlatformVolumeFromDrift } from './drift-data-api';
 
 const INDEXER_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -22,15 +23,30 @@ export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapsho
     console.log('[Analytics] Calculating platform metrics...');
     const startTime = Date.now();
     
-    const [tvl, volumeData, statsData] = await Promise.all([
+    const [tvl, volumeData, statsData, agentWallets] = await Promise.all([
       storage.calculatePlatformTVL(),
       storage.calculatePlatformVolume(),
       storage.calculatePlatformStats(),
+      storage.getAllAgentWalletAddresses(),
     ]);
+    
+    let totalVolumeFromDrift = volumeData.total;
+    
+    if (agentWallets.length > 0) {
+      try {
+        const driftData = await fetchPlatformVolumeFromDrift(agentWallets);
+        if (driftData.totalVolume > 0) {
+          totalVolumeFromDrift = driftData.totalVolume;
+          console.log(`[Analytics] Fetched real volume from Drift API: $${driftData.totalVolume.toFixed(2)}`);
+        }
+      } catch (driftError) {
+        console.warn('[Analytics] Failed to fetch Drift API volume, using local data:', driftError);
+      }
+    }
     
     const metrics: PlatformMetricsSnapshot = {
       tvl,
-      totalVolume: volumeData.total,
+      totalVolume: totalVolumeFromDrift,
       volume24h: volumeData.volume24h,
       volume7d: volumeData.volume7d,
       activeBots: statsData.activeBots,
