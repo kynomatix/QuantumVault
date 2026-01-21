@@ -251,11 +251,13 @@ app.use(helmet());
 
 **HIGH RISK** - The following files log portions of private keys:
 
-| File | Line | Issue |
-|------|------|-------|
-| `drift-service.ts` | 3034 | Logs first 4 chars of base58 key |
-| `drift-executor.mjs` | 888 | Logs first 4 chars of base58 key |
-| `routes.ts` | 4334 | Logs first 4 chars of base58 key |
+| File | Line | Issue | Verified Active |
+|------|------|-------|-----------------|
+| `drift-service.ts` | 3034 | Logs first 4 chars of base58 key | YES - subprocess command path |
+| `drift-executor.mjs` | 888 | Logs first 4 chars of base58 key | YES - v3 security path |
+| `routes.ts` | 4334 | Logs first 4 chars of base58 key | YES - webhook trade execution |
+
+**Verification:** These are in the LIVE trade execution path. Every TradingView webhook that executes a trade logs partial key material. This was confirmed by tracing the webhook handler at `/api/webhook/tradingview/:botId`.
 
 **Example:**
 ```javascript
@@ -292,19 +294,24 @@ console.log(`[Executor] Key validated: length=${privateKeyBase58.length}, format
 
 ### 7.2 Legacy Code Paths
 
-**Still Active:**
-1. Legacy AES encryption in `crypto.ts`
-2. Legacy agent key decryption fallback
-3. Subscriber routing uses legacy encrypted key path (routes.ts:155)
+**VERIFIED STILL ACTIVE:**
+1. Legacy AES encryption in `crypto.ts` - Used when creating new agent wallets (routes.ts:535, 1450)
+2. Legacy agent key decryption fallback - Active fallback for wallets without v3 keys (session-v3.ts:833)
+3. Subscriber routing uses legacy encrypted key path (routes.ts:155) - Active for marketplace subscriptions
 
-**Recommendation:** Create migration plan to fully transition to v3 security model.
+**Why Still Active:** The system stores BOTH legacy and v3 encrypted keys for backward compatibility. New wallets get both, old wallets may only have legacy. The v3 path is preferred but legacy fallback is required for migration.
 
-### 7.3 Unused Tables/Code
+**Recommendation:** Complete migration to v3 for all existing wallets, then remove legacy path.
 
-**Potential Dead Code:**
-- `users` table (lines 6-22 in schema) - appears unused, wallets are primary identity
-- `bots` table (lines 74-94) - separate from `tradingBots`, unclear purpose
-- `dialectAddress`, `dialectBearerToken` fields - Dialect integration removed?
+### 7.3 Unused/Unclear Code
+
+**Verified In Use:**
+- `bots` table - Used for featured bots, subscriptions, and marketplace (storage.ts:310-331)
+- `users` table - Used by leaderboard stats join (storage.ts:275)
+
+**Potentially Unused Fields:**
+- `dialectAddress`, `dialectBearerToken` in wallets table - Dialect notification integration may be removed
+- `driftSubaccount` in wallets table (line 30) - Appears to be legacy, now using per-bot subaccounts
 
 ---
 
