@@ -335,12 +335,36 @@ function CreatingBotsSection() {
         </div>
       </div>
       
+      {/* Automated Capital Management Intro */}
+      <SubHeading>Automated Capital Management</SubHeading>
+      <div className="p-5 rounded-xl bg-gradient-to-r from-violet-500/10 via-fuchsia-500/10 to-purple-500/10 border border-violet-500/20 mb-8">
+        <p className="text-white/80 leading-relaxed mb-4">
+          These three features let you fully automate how your bot handles money. 
+          Instead of manually depositing, withdrawing, and adjusting your investment — 
+          the system does it for you.
+        </p>
+        <div className="grid md:grid-cols-3 gap-3 text-sm">
+          <div className="flex items-start gap-2">
+            <div className="w-2 h-2 rounded-full bg-violet-400 mt-1.5 flex-shrink-0" />
+            <span className="text-white/60"><strong className="text-violet-300">Profit Reinvest</strong> — Grow your trades as you win</span>
+          </div>
+          <div className="flex items-start gap-2">
+            <div className="w-2 h-2 rounded-full bg-fuchsia-400 mt-1.5 flex-shrink-0" />
+            <span className="text-white/60"><strong className="text-fuchsia-300">Auto Withdraw</strong> — Take profits automatically</span>
+          </div>
+          <div className="flex items-start gap-2">
+            <div className="w-2 h-2 rounded-full bg-sky-400 mt-1.5 flex-shrink-0" />
+            <span className="text-white/60"><strong className="text-sky-300">Auto Top-Up</strong> — Refill when running low</span>
+          </div>
+        </div>
+      </div>
+      
       {/* Profit Reinvest Section */}
-      <div className="relative mt-8 mb-10">
-        <div className="absolute -inset-1 bg-gradient-to-r from-violet-500/20 to-blue-500/20 rounded-2xl blur-xl opacity-50" />
+      <div className="relative mb-10">
+        <div className="absolute -inset-1 bg-gradient-to-r from-violet-500/20 to-purple-500/20 rounded-2xl blur-xl opacity-50" />
         <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-violet-500/20">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
               <RefreshCw className="w-5 h-5 text-white" />
             </div>
             <h3 className="text-xl font-semibold text-white">Profit Reinvest</h3>
@@ -384,10 +408,10 @@ function CreatingBotsSection() {
       
       {/* Auto Withdraw Section */}
       <div className="relative mb-10">
-        <div className="absolute -inset-1 bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-2xl blur-xl opacity-50" />
-        <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-green-500/20">
+        <div className="absolute -inset-1 bg-gradient-to-r from-fuchsia-500/20 to-pink-500/20 rounded-2xl blur-xl opacity-50" />
+        <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-fuchsia-500/20">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-green-500 to-emerald-500 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-fuchsia-500 to-pink-500 flex items-center justify-center">
               <ArrowUp className="w-5 h-5 text-white" />
             </div>
             <h3 className="text-xl font-semibold text-white">Auto Withdraw</h3>
@@ -410,8 +434,8 @@ function CreatingBotsSection() {
                 <span className="text-white/70">Your bot wins a trade and now has <strong className="text-white">$150</strong></span>
               </div>
               <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-green-500/30 flex items-center justify-center text-sm font-medium text-green-400">3</div>
-                <span className="text-white/70">System automatically withdraws <strong className="text-green-400">$50</strong> to your agent wallet</span>
+                <div className="w-8 h-8 rounded-full bg-fuchsia-500/30 flex items-center justify-center text-sm font-medium text-fuchsia-400">3</div>
+                <span className="text-white/70">System automatically withdraws <strong className="text-fuchsia-300">$50</strong> to your agent wallet</span>
               </div>
               <div className="flex items-center gap-4">
                 <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">4</div>
@@ -420,7 +444,7 @@ function CreatingBotsSection() {
             </div>
           </div>
           
-          <p className="mt-4 text-sm text-green-300/80 flex items-center gap-2">
+          <p className="mt-4 text-sm text-fuchsia-300/80 flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4" />
             Happens automatically after each trade closes.
           </p>
@@ -429,10 +453,10 @@ function CreatingBotsSection() {
       
       {/* Auto Top-Up Section */}
       <div className="relative mb-10">
-        <div className="absolute -inset-1 bg-gradient-to-r from-blue-500/20 to-cyan-500/20 rounded-2xl blur-xl opacity-50" />
-        <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-blue-500/20">
+        <div className="absolute -inset-1 bg-gradient-to-r from-sky-500/20 to-blue-500/20 rounded-2xl blur-xl opacity-50" />
+        <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-sky-500/20">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-sky-500 to-blue-500 flex items-center justify-center">
               <ArrowDown className="w-5 h-5 text-white" />
             </div>
             <h3 className="text-xl font-semibold text-white">Auto Top-Up</h3>
@@ -451,22 +475,22 @@ function CreatingBotsSection() {
                 <span className="text-white/70">A trade signal arrives from TradingView</span>
               </div>
               <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-red-500/30 flex items-center justify-center text-sm font-medium text-red-400">2</div>
-                <span className="text-white/70">Bot only has <strong className="text-red-400">$2</strong>, needs <strong className="text-white">$5</strong> to trade</span>
+                <div className="w-8 h-8 rounded-full bg-purple-500/30 flex items-center justify-center text-sm font-medium text-purple-400">2</div>
+                <span className="text-white/70">Bot only has <strong className="text-purple-300">$2</strong>, needs <strong className="text-white">$5</strong> to trade</span>
               </div>
               <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-blue-500/30 flex items-center justify-center text-sm font-medium text-blue-400">3</div>
-                <span className="text-white/70">System deposits <strong className="text-blue-400">$3</strong> from your agent wallet</span>
+                <div className="w-8 h-8 rounded-full bg-sky-500/30 flex items-center justify-center text-sm font-medium text-sky-400">3</div>
+                <span className="text-white/70">System deposits <strong className="text-sky-300">$3</strong> from your agent wallet</span>
               </div>
               <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-green-500/30 flex items-center justify-center text-sm font-medium text-green-400">4</div>
-                <span className="text-white/70">Trade executes successfully - <strong className="text-green-400">no signal missed</strong></span>
+                <div className="w-8 h-8 rounded-full bg-violet-500/30 flex items-center justify-center text-sm font-medium text-violet-400">4</div>
+                <span className="text-white/70">Trade executes successfully - <strong className="text-violet-300">no signal missed</strong></span>
               </div>
             </div>
           </div>
           
-          <p className="mt-4 text-sm text-amber-300/80 flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4" />
+          <p className="mt-4 text-sm text-sky-300/80 flex items-center gap-2">
+            <Info className="w-4 h-4" />
             Requires USDC in your agent wallet to work.
           </p>
         </div>
@@ -474,12 +498,12 @@ function CreatingBotsSection() {
       
       {/* Using Together Section */}
       <div className="relative mb-8">
-        <div className="absolute -inset-1 bg-gradient-to-r from-violet-500/20 via-blue-500/20 to-green-500/20 rounded-2xl blur-xl opacity-50" />
+        <div className="absolute -inset-1 bg-gradient-to-r from-violet-500/20 via-fuchsia-500/20 to-sky-500/20 rounded-2xl blur-xl opacity-50" />
         <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-violet-500/20">
           <h3 className="text-xl font-semibold text-white mb-2">Using These Features Together</h3>
           <p className="text-white/50 text-sm mb-6">All three features are compatible and can create powerful automation.</p>
           
-          <div className="p-4 rounded-lg bg-gradient-to-r from-violet-500/10 via-blue-500/10 to-green-500/10 border border-white/10 mb-4">
+          <div className="p-4 rounded-lg bg-gradient-to-r from-violet-500/10 via-fuchsia-500/10 to-sky-500/10 border border-white/10 mb-4">
             <h4 className="font-semibold text-white mb-1">"Keep $100 Working" Strategy</h4>
             <p className="text-white/40 text-sm mb-4">
               Profit Reinvest ON • Auto Withdraw at $100 • Auto Top-Up ON
@@ -487,7 +511,7 @@ function CreatingBotsSection() {
             
             <div className="grid md:grid-cols-3 gap-3">
               <div className="p-3 rounded-lg bg-black/30">
-                <div className="text-green-400 text-sm font-medium mb-2 flex items-center gap-2">
+                <div className="text-fuchsia-400 text-sm font-medium mb-2 flex items-center gap-2">
                   <TrendingUp className="w-4 h-4" />
                   When you win
                 </div>
@@ -499,7 +523,7 @@ function CreatingBotsSection() {
               </div>
               
               <div className="p-3 rounded-lg bg-black/30">
-                <div className="text-red-400 text-sm font-medium mb-2 flex items-center gap-2">
+                <div className="text-sky-400 text-sm font-medium mb-2 flex items-center gap-2">
                   <TrendingDown className="w-4 h-4" />
                   When you lose
                 </div>
