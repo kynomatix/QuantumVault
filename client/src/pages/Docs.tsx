@@ -639,6 +639,24 @@ function TradingViewSection() {
         it uses 100% of available capital. If contracts = 0.5, it uses 50%.
       </Paragraph>
       
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-6">
+        <h4 className="font-medium text-white mb-2">Why positions open at ~90% of max size</h4>
+        <p className="text-white/70 text-sm mb-3">
+          When you set a $100 investment at 10x leverage, your theoretical max position is $1,000. 
+          However, actual trades open at approximately <strong className="text-white">90%</strong> of this 
+          amount (~$900) for important reasons:
+        </p>
+        <ul className="list-disc list-inside text-white/60 text-sm space-y-1 ml-2">
+          <li><strong className="text-white/80">Margin Buffer</strong> - Drift requires a safety cushion to accept orders</li>
+          <li><strong className="text-white/80">Trading Fees</strong> - Opening fees reduce available margin</li>
+          <li><strong className="text-white/80">Price Slippage</strong> - Market orders may fill at slightly different prices</li>
+          <li><strong className="text-white/80">Health Protection</strong> - Prevents immediate liquidation risk on entry</li>
+        </ul>
+        <p className="text-white/50 text-xs mt-3 italic">
+          Example: $20 at 10x = $200 max → $180 actual position (90%). This is intentional and protects your trade.
+        </p>
+      </div>
+      
       <Alert type="info">
         Signals are processed in real-time with typical execution latency under 2 seconds. 
         Your bot must be active (not paused) to execute trades.
