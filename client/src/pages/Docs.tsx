@@ -611,13 +611,13 @@ function TradingViewSection() {
       <div className="space-y-4 mb-6">
         <div>
           <h4 className="font-medium text-white mb-2 flex items-center gap-2">
-            <ArrowUp className="w-4 h-4 text-fuchsia-400" /> Long Entry (Buy)
+            <ArrowUp className="w-4 h-4 text-teal-400" /> Long Entry (Buy)
           </h4>
           <CodeBlock code={buySignalExample} />
         </div>
         <div>
           <h4 className="font-medium text-white mb-2 flex items-center gap-2">
-            <ArrowDown className="w-4 h-4 text-sky-400" /> Short Entry (Sell)
+            <ArrowDown className="w-4 h-4 text-red-400" /> Short Entry (Sell)
           </h4>
           <CodeBlock code={sellSignalExample} />
         </div>
