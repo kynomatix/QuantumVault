@@ -103,6 +103,423 @@ interface BotBufferConfig {
 
 ---
 
+## INTELLIGENT BORROWING & REPAYMENT STRATEGY
+
+The vault system's core value proposition is **intelligent borrowing** of stablecoins against deposited collateral in Subaccount 0. This is NOT simple "borrow and hold" — it's dynamic, responsive management.
+
+### Core Borrowing Principles
+
+1. **Borrow Only What's Needed**: Instead of borrowing max capacity upfront, borrow incrementally as bots need funding
+2. **Repay When Idle**: When bots have no positions, automatically repay borrowed USDC to minimize interest costs
+3. **Health-Aware Borrowing**: Never borrow if it would push vault health below safe thresholds
+4. **Rate-Aware Borrowing**: Monitor borrow APY and pause borrowing during rate spikes
+
+### Intelligent Borrow Agent
+
+```typescript
+interface IntelligentBorrowAgent {
+  // When a bot needs funding
+  async onBotFundingRequest(botId: string, amountNeeded: number): Promise<BorrowDecision> {
+    const vaultHealth = await this.getVaultHealth();
+    const currentBorrowApy = await this.getBorrowApy();
+    const projectedHealthAfterBorrow = this.projectHealth(amountNeeded);
+    
+    // Decision logic
+    if (projectedHealthAfterBorrow < SAFE_HEALTH_THRESHOLD) {
+      return { action: 'deny', reason: 'Would compromise vault health' };
+    }
+    
+    if (currentBorrowApy > MAX_ACCEPTABLE_BORROW_APY) {
+      return { action: 'defer', reason: 'Borrow rates too high', retryAfter: '1h' };
+    }
+    
+    return { 
+      action: 'approve', 
+      borrowAmount: amountNeeded,
+      expectedCost: amountNeeded * currentBorrowApy / 365 / 24  // Hourly cost
+    };
+  }
+  
+  // When a bot closes a position
+  async onPositionClosed(botId: string, freedCollateral: number): Promise<RepayDecision> {
+    const totalBorrowed = await this.getTotalBorrows();
+    const otherBotsNeedFunding = await this.getPendingFundingRequests();
+    
+    // If no other bots need funds, repay to reduce interest
+    if (otherBotsNeedFunding.length === 0 && totalBorrowed > 0) {
+      const repayAmount = Math.min(freedCollateral, totalBorrowed);
+      return { action: 'repay', amount: repayAmount };
+    }
+    
+    // If another bot needs funds, keep borrowed for quick reallocation
+    return { action: 'hold', reason: 'Funds may be needed by other bots' };
+  }
+}
+```
+
+### Automatic Repayment Triggers
+
+```typescript
+interface RepaymentTriggers {
+  // Time-based: Repay if USDC sits idle too long
+  idleRepaymentThreshold: number;  // e.g., 4 hours of no bot activity
+  
+  // Rate-based: Repay if borrow APY spikes
+  rateSpikeTrigger: number;        // e.g., 2x normal rate
+  
+  // Health-based: Repay if health drops
+  healthRepaymentTrigger: number;  // e.g., health < 1.4
+  
+  // Profit-based: Use bot profits to repay before distributing
+  repayFromProfitsFirst: boolean;  // Default: true
+}
+
+// Example flow
+async function checkRepaymentOpportunities(): Promise<void> {
+  const borrowed = await getTotalBorrows();
+  if (borrowed === 0) return;
+  
+  const idleUsdc = await getIdleUsdcInBots();
+  const currentApy = await getBorrowApy();
+  const avgApy = await getAverageBorrowApy(7);  // 7-day avg
+  
+  // Rate spike repayment
+  if (currentApy > avgApy * 2) {
+    await initiateEmergencyRepayment(borrowed * 0.5);  // Repay 50%
+    return;
+  }
+  
+  // Idle funds repayment
+  const idleHours = await getIdleDuration();
+  if (idleHours > 4 && idleUsdc > 0) {
+    await repayFromIdleFunds(idleUsdc);
+  }
+}
+```
+
+---
+
+## DRIFT TOKEN REWARDS COLLECTION
+
+Drift Protocol rewards traders with DRIFT tokens based on trading volume. Bots with high trading frequency can accumulate significant DRIFT rewards over time.
+
+### Understanding DRIFT Rewards
+
+| Reward Type | How Earned | Vesting | Collateral Eligible? |
+|-------------|-----------|---------|---------------------|
+| Trading Volume Rewards | % of trading fees returned as DRIFT | Immediate or vested | NO (until staked) |
+| Staking Rewards | DRIFT staked earns more DRIFT | Continuous | NO |
+| Insurance Fund Rewards | Providing liquidity to insurance | Variable | NO |
+
+**Key Insight**: DRIFT tokens themselves are **NOT collateral** on Drift. However, users can:
+1. Collect DRIFT rewards
+2. Stake DRIFT for additional yield
+3. Eventually swap DRIFT → SOL/USDC → deposit as collateral
+
+### Rewards Collection System
+
+```typescript
+interface DriftRewardsManager {
+  // Track user's unclaimed rewards
+  async getUnclaimedRewards(agentPublicKey: string): Promise<{
+    tradingRewards: number;      // DRIFT from volume
+    stakingRewards: number;      // DRIFT from staking
+    insuranceRewards: number;    // DRIFT from IF
+    totalClaimable: number;
+  }>;
+  
+  // Claim all available rewards
+  async claimRewards(
+    agentPublicKey: string,
+    encryptedPrivateKey: string
+  ): Promise<{ signature: string; amountClaimed: number }>;
+  
+  // Check staking status
+  async getStakingStatus(agentPublicKey: string): Promise<{
+    stakedAmount: number;
+    unstakingAmount: number;
+    unstakingCompletesAt: Date | null;
+    currentApy: number;
+  }>;
+}
+```
+
+### Auto-Collection Strategy
+
+```typescript
+interface RewardsCollectionStrategy {
+  // When to auto-claim rewards
+  claimThreshold: number;          // Minimum DRIFT before claiming (e.g., 10 DRIFT)
+  claimFrequency: 'daily' | 'weekly' | 'on_demand';
+  
+  // What to do with claimed rewards
+  rewardsDestination: 
+    | 'hold'           // Keep as DRIFT in agent wallet
+    | 'stake'          // Auto-stake for yield
+    | 'convert'        // Swap to USDC/SOL for collateral
+    | 'user_choice';   // Prompt user each time
+  
+  // Staking preferences
+  autoStake: boolean;              // Stake immediately after claiming
+  autoCompound: boolean;           // Re-stake staking rewards
+}
+
+// Weekly rewards collection job
+async function collectDriftRewards(userId: string): Promise<void> {
+  const rewards = await getUnclaimedRewards(userId);
+  
+  if (rewards.totalClaimable < MIN_CLAIM_THRESHOLD) {
+    return;  // Not worth the transaction fee
+  }
+  
+  // Claim rewards
+  const claimed = await claimRewards(userId);
+  
+  // Log for user visibility
+  await createRewardsEvent(userId, {
+    type: 'drift_rewards_claimed',
+    amount: claimed.amountClaimed,
+    tokenSymbol: 'DRIFT'
+  });
+  
+  // Handle based on user preference
+  const strategy = await getUserRewardsStrategy(userId);
+  
+  if (strategy.autoStake) {
+    await stakeDrift(userId, claimed.amountClaimed);
+  } else if (strategy.rewardsDestination === 'convert') {
+    await convertDriftToUsdc(userId, claimed.amountClaimed);
+  }
+}
+```
+
+### DRIFT → Collateral Pipeline
+
+For users who want to use their DRIFT rewards to increase borrowing power:
+
+```typescript
+async function convertDriftToCollateral(
+  userId: string,
+  driftAmount: number
+): Promise<{ usdcReceived: number; addedToCollateral: boolean }> {
+  // 1. Check if DRIFT is staked (needs unstaking first)
+  const stakingStatus = await getStakingStatus(userId);
+  
+  if (stakingStatus.stakedAmount > 0) {
+    // Initiate unstaking (takes ~7 days on Drift)
+    await initiateUnstake(userId, driftAmount);
+    return { usdcReceived: 0, addedToCollateral: false, 
+             note: 'Unstaking initiated. Will complete in ~7 days.' };
+  }
+  
+  // 2. Swap DRIFT → USDC (via Jupiter)
+  const usdcReceived = await swapDriftToUsdc(userId, driftAmount);
+  
+  // 3. Deposit USDC to vault (Subaccount 0)
+  await depositToVault(userId, usdcReceived);
+  
+  return { usdcReceived, addedToCollateral: true };
+}
+```
+
+### UI Considerations for DRIFT Rewards
+
+```typescript
+interface RewardsUIState {
+  // Show accumulated rewards
+  unclaimedDrift: number;
+  stakedDrift: number;
+  unstakingDrift: number;
+  unstakingCompletesIn: string | null;  // "5 days" or null
+  
+  // Show potential value
+  driftPrice: number;
+  estimatedUsdValue: number;
+  
+  // Actions available
+  canClaim: boolean;
+  canStake: boolean;
+  canUnstake: boolean;
+  canConvertToCollateral: boolean;
+}
+```
+
+### Database Schema for Rewards Tracking
+
+```typescript
+export const driftRewards = pgTable("drift_rewards", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: varchar("wallet_address").notNull(),
+  
+  // Cumulative tracking
+  totalClaimed: real("total_claimed").default(0),
+  totalStaked: real("total_staked").default(0),
+  totalConverted: real("total_converted").default(0),  // To USDC
+  
+  // Current state
+  currentStakedAmount: real("current_staked_amount").default(0),
+  unstakingAmount: real("unstaking_amount").default(0),
+  unstakingCompletesAt: timestamp("unstaking_completes_at"),
+  
+  // User preferences
+  autoClaimEnabled: boolean("auto_claim_enabled").default(false),
+  autoStakeEnabled: boolean("auto_stake_enabled").default(false),
+  rewardsDestination: varchar("rewards_destination").default('hold'),
+  
+  lastClaimAt: timestamp("last_claim_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const rewardsHistory = pgTable("rewards_history", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: varchar("wallet_address").notNull(),
+  
+  eventType: varchar("event_type").notNull(),  // 'claimed' | 'staked' | 'unstaked' | 'converted'
+  amount: real("amount").notNull(),
+  tokenSymbol: varchar("token_symbol").default('DRIFT'),
+  usdValueAtTime: real("usd_value_at_time"),
+  txSignature: varchar("tx_signature"),
+  
+  createdAt: timestamp("created_at").defaultNow(),
+});
+```
+
+---
+
+## MULTI-ASSET COLLATERAL MANAGEMENT
+
+The vault system supports multiple asset types as collateral, each with different properties and use cases.
+
+### Asset Categories
+
+```typescript
+type AssetCategory = 
+  | 'stablecoin'      // USDC, USDT - 100% weight, no volatility
+  | 'major_crypto'    // SOL, BTC, ETH - 80-85% weight, volatile
+  | 'lst'             // INF, mSOL, jitoSOL - 70-80% weight, yield-bearing
+  | 'lp_token'        // JLP - yield-bearing but NOT collateral
+  | 'governance'      // DRIFT - NOT collateral, but valuable
+  | 'yield_only';     // Strategy vault tokens - NOT collateral
+
+interface AssetConfig {
+  symbol: string;
+  category: AssetCategory;
+  
+  // Collateral properties
+  isCollateral: boolean;
+  initialWeight: number;       // 0-100% for borrowing power
+  maintenanceWeight: number;   // For liquidation calculations
+  
+  // Yield properties
+  hasNativeYield: boolean;     // LSTs, LP tokens
+  yieldSource: string | null;  // 'staking' | 'trading_fees' | 'lending'
+  
+  // Operational
+  canDeposit: boolean;
+  canWithdraw: boolean;
+  minDeposit: number;
+  
+  // Market data
+  spotMarketIndex: number;     // Drift spot market index
+  oracleSource: string;        // 'pyth' | 'switchboard'
+}
+```
+
+### Supported Assets Matrix
+
+| Asset | Category | Collateral | Weight | Native Yield | Notes |
+|-------|----------|------------|--------|--------------|-------|
+| USDC | stablecoin | ✅ Yes | 100% | No | Primary borrow asset |
+| USDT | stablecoin | ✅ Yes | 100% | No | Alternative stable |
+| SOL | major_crypto | ✅ Yes | 80% | No | Volatile, high liquidity |
+| BTC | major_crypto | ✅ Yes | 85% | No | Volatile, high liquidity |
+| ETH | major_crypto | ✅ Yes | 85% | No | Volatile, high liquidity |
+| INF | lst | ✅ Yes | 71% | Yes (~7% staking) | Infinity LST |
+| mSOL | lst | ✅ Yes | 75% | Yes (~6% staking) | Marinade staked SOL |
+| JLP | lp_token | ❌ No | 0% | Yes (~20-40%) | Jupiter LP - yield only |
+| DRIFT | governance | ❌ No | 0% | Yes (staking) | Must convert to use |
+
+### Intelligent Asset Allocation
+
+```typescript
+interface AllocationStrategy {
+  // Target allocation by category
+  stablecoinTarget: number;     // e.g., 40% - safe base
+  majorCryptoTarget: number;    // e.g., 30% - growth potential
+  lstTarget: number;            // e.g., 20% - yield + collateral
+  yieldOnlyTarget: number;      // e.g., 10% - max yield, no borrow
+  
+  // Rebalancing rules
+  rebalanceThreshold: number;   // e.g., 10% drift from target
+  rebalanceFrequency: 'weekly' | 'monthly' | 'manual';
+  
+  // Risk constraints
+  maxVolatileExposure: number;  // e.g., 60% max in volatile assets
+  minStablecoinFloor: number;   // e.g., 20% always in stables
+}
+
+// Calculate effective borrowing power
+function calculateBorrowingPower(assets: AssetPosition[]): number {
+  return assets.reduce((total, asset) => {
+    const config = ASSET_CONFIGS[asset.symbol];
+    if (!config.isCollateral) return total;
+    
+    const weightedValue = asset.usdValue * config.initialWeight;
+    return total + weightedValue;
+  }, 0);
+}
+
+// Example:
+// $10,000 USDC (100% weight) = $10,000 borrowing power
+// $5,000 SOL (80% weight) = $4,000 borrowing power  
+// $3,000 JLP (0% weight) = $0 borrowing power
+// Total: $14,000 borrowing power from $18,000 deposited
+```
+
+### Multi-Asset Deposit Flow
+
+```typescript
+async function depositToVault(
+  userId: string,
+  asset: string,
+  amount: number
+): Promise<DepositResult> {
+  const config = ASSET_CONFIGS[asset];
+  
+  // 1. Validate asset is supported
+  if (!config.canDeposit) {
+    throw new Error(`${asset} deposits not supported`);
+  }
+  
+  // 2. Execute deposit to Subaccount 0
+  const result = await executeAgentDriftDeposit(
+    userId,
+    amount,
+    config.spotMarketIndex,
+    0  // Subaccount 0 = vault
+  );
+  
+  // 3. Update vault state
+  await updateVaultAssetBalance(userId, asset, amount, 'add');
+  
+  // 4. Recalculate borrowing power
+  const newBorrowingPower = await recalculateBorrowingPower(userId);
+  
+  // 5. Notify user of impact
+  return {
+    success: true,
+    asset,
+    amount,
+    newBorrowingPower,
+    borrowingPowerAdded: amount * config.initialWeight,
+    yieldEstimate: config.hasNativeYield ? await getAssetYield(asset) : 0
+  };
+}
+```
+
+---
+
 ## ARCHITECTURAL GAPS & REFINEMENTS
 
 ### Gap 1: The Deleverage Spiral (Force Recall Protocol)
