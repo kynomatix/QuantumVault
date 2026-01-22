@@ -335,23 +335,102 @@ function CreatingBotsSection() {
         </div>
       </div>
       
-      <SubHeading>Advanced Settings</SubHeading>
+      <SubHeading>Automated Capital Management</SubHeading>
+      <Paragraph>
+        These features automate how your bot handles profits and losses. They can be used 
+        individually or together for hands-off capital management.
+      </Paragraph>
+      
       <div className="space-y-4 mb-6">
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
-          <h4 className="font-medium text-white mb-2">Profit Reinvest</h4>
-          <p className="text-white/60 text-sm">
-            When enabled, profits are added to your trading capital, allowing larger positions 
-            as your account grows.
+          <h4 className="font-medium text-white mb-2 flex items-center gap-2">
+            <RefreshCw className="w-4 h-4 text-primary" />
+            Profit Reinvest
+          </h4>
+          <p className="text-white/60 text-sm mb-3">
+            When enabled, your bot uses <strong className="text-white">all available margin</strong> for trades 
+            instead of a fixed investment amount. As profits accumulate, your position sizes grow automatically.
           </p>
+          <div className="bg-black/30 rounded p-3 text-xs font-mono text-white/70">
+            <div className="flex justify-between mb-1">
+              <span>OFF:</span>
+              <span>Trade size = Fixed $100 × leverage</span>
+            </div>
+            <div className="flex justify-between">
+              <span>ON:</span>
+              <span>Trade size = Full equity ($150) × leverage × 0.90</span>
+            </div>
+          </div>
         </div>
+        
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
-          <h4 className="font-medium text-white mb-2">Auto Withdraw Threshold</h4>
-          <p className="text-white/60 text-sm">
-            Automatically withdraw excess equity above this threshold to your agent wallet 
-            after positions close. Great for taking profits.
+          <h4 className="font-medium text-white mb-2 flex items-center gap-2">
+            <ArrowUp className="w-4 h-4 text-green-400" />
+            Auto Withdraw Threshold
+          </h4>
+          <p className="text-white/60 text-sm mb-3">
+            After a position closes, if your bot's equity exceeds this threshold, the excess 
+            is automatically withdrawn to your agent wallet. Great for taking profits.
           </p>
+          <div className="bg-black/30 rounded p-3 text-xs font-mono text-white/70">
+            <div>Threshold: $100</div>
+            <div>Bot equity after win: $150</div>
+            <div className="text-green-400">→ Auto withdraws $50 to agent wallet</div>
+          </div>
+        </div>
+        
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2 flex items-center gap-2">
+            <ArrowDown className="w-4 h-4 text-blue-400" />
+            Auto Top-Up
+          </h4>
+          <p className="text-white/60 text-sm mb-3">
+            When a trade signal arrives but your bot doesn't have enough margin, Auto Top-Up 
+            deposits the shortfall from your agent wallet and <strong className="text-white">immediately executes the trade</strong>. 
+            No signals are missed.
+          </p>
+          <div className="bg-black/30 rounded p-3 text-xs font-mono text-white/70">
+            <div>Bot equity: $2 (can't afford minimum trade)</div>
+            <div>Agent wallet: $50</div>
+            <div>Shortfall needed: $5</div>
+            <div className="text-blue-400">→ Deposits $5, then executes trade</div>
+          </div>
         </div>
       </div>
+      
+      <SubHeading>How They Work Together</SubHeading>
+      <Paragraph>
+        These features are fully compatible and create powerful automation when combined:
+      </Paragraph>
+      
+      <div className="p-4 rounded-lg bg-gradient-to-r from-purple-500/10 to-blue-500/10 border border-purple-500/30 mb-6">
+        <h4 className="font-medium text-white mb-3">Example: Fixed Allocation Strategy</h4>
+        <p className="text-white/60 text-sm mb-3">
+          Settings: Profit Reinvest ON, Auto Withdraw $100, Auto Top-Up ON
+        </p>
+        <div className="space-y-2 text-sm">
+          <div className="flex items-center gap-2">
+            <span className="text-green-400">Win big:</span>
+            <span className="text-white/70">Equity hits $150 → Auto Withdraw sends $50 to agent wallet → Bot stays at $100</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-red-400">Lose:</span>
+            <span className="text-white/70">Equity drops to $5 → Auto Top-Up refills from agent wallet → Bot continues trading</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-purple-400">Result:</span>
+            <span className="text-white/70">Bot maintains ~$100 working capital, profits accumulate in agent wallet</span>
+          </div>
+        </div>
+      </div>
+      
+      <Alert type="info">
+        Auto Top-Up only triggers when a trade signal arrives. It doesn't continuously monitor 
+        your balance - this keeps RPC usage minimal. The deposit and trade happen in the same 
+        request, so you never miss a signal.
+      </Alert>
+      
+      <div className="h-4" />
       
       <Alert type="warning">
         Always test your bot with a small amount first. Start with low leverage until you're 
