@@ -56,7 +56,7 @@ function CopyButton({ text }: { text: string }) {
       className="absolute right-2 top-2 p-1.5 rounded bg-white/10 hover:bg-white/20 transition-colors"
       data-testid="btn-copy-code"
     >
-      {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4 text-white/60" />}
+      {copied ? <Check className="w-4 h-4 text-violet-400" /> : <Copy className="w-4 h-4 text-white/60" />}
     </button>
   );
 }
@@ -77,9 +77,9 @@ function CodeBlock({ code, language = 'json' }: { code: string; language?: strin
 
 function Alert({ type, children }: { type: 'info' | 'warning' | 'success'; children: React.ReactNode }) {
   const styles = {
-    info: 'bg-blue-500/10 border-blue-500/30 text-blue-200',
+    info: 'bg-sky-500/10 border-sky-500/30 text-sky-200',
     warning: 'bg-amber-500/10 border-amber-500/30 text-amber-200',
-    success: 'bg-green-500/10 border-green-500/30 text-green-200',
+    success: 'bg-violet-500/10 border-violet-500/30 text-violet-200',
   };
   const icons = {
     info: Info,
@@ -611,13 +611,13 @@ function TradingViewSection() {
       <div className="space-y-4 mb-6">
         <div>
           <h4 className="font-medium text-white mb-2 flex items-center gap-2">
-            <ArrowUp className="w-4 h-4 text-green-400" /> Long Entry (Buy)
+            <ArrowUp className="w-4 h-4 text-fuchsia-400" /> Long Entry (Buy)
           </h4>
           <CodeBlock code={buySignalExample} />
         </div>
         <div>
           <h4 className="font-medium text-white mb-2 flex items-center gap-2">
-            <ArrowDown className="w-4 h-4 text-red-400" /> Short Entry (Sell)
+            <ArrowDown className="w-4 h-4 text-sky-400" /> Short Entry (Sell)
           </h4>
           <CodeBlock code={sellSignalExample} />
         </div>
@@ -658,20 +658,20 @@ function BotManagementSection() {
       
       <SubHeading>Bot States</SubHeading>
       <div className="space-y-3 mb-6">
-        <div className="flex items-center gap-3 p-3 rounded-lg bg-green-500/10 border border-green-500/30">
-          <div className="w-3 h-3 rounded-full bg-green-500" />
-          <span className="font-medium text-green-200">Active</span>
-          <span className="text-green-200/70 text-sm">- Bot is listening for signals and will execute trades</span>
+        <div className="flex items-center gap-3 p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
+          <div className="w-3 h-3 rounded-full bg-violet-500" />
+          <span className="font-medium text-violet-200">Active</span>
+          <span className="text-violet-200/70 text-sm">- Bot is listening for signals and will execute trades</span>
         </div>
         <div className="flex items-center gap-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
           <div className="w-3 h-3 rounded-full bg-amber-500" />
           <span className="font-medium text-amber-200">Paused</span>
           <span className="text-amber-200/70 text-sm">- Bot ignores signals but keeps existing positions</span>
         </div>
-        <div className="flex items-center gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
-          <div className="w-3 h-3 rounded-full bg-red-500" />
-          <span className="font-medium text-red-200">Has Position</span>
-          <span className="text-red-200/70 text-sm">- Bot has an open trade (shown in position card)</span>
+        <div className="flex items-center gap-3 p-3 rounded-lg bg-fuchsia-500/10 border border-fuchsia-500/30">
+          <div className="w-3 h-3 rounded-full bg-fuchsia-500" />
+          <span className="font-medium text-fuchsia-200">Has Position</span>
+          <span className="text-fuchsia-200/70 text-sm">- Bot has an open trade (shown in position card)</span>
         </div>
       </div>
       
@@ -840,15 +840,15 @@ function SettingsSection() {
         These actions are irreversible. Use with caution:
       </Paragraph>
       <div className="space-y-3 mb-4">
-        <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/30">
-          <h4 className="font-medium text-red-200 mb-1">Reset Drift Account</h4>
-          <p className="text-red-200/70 text-sm">
+        <div className="p-4 rounded-lg bg-purple-500/10 border border-purple-500/30">
+          <h4 className="font-medium text-purple-200 mb-1">Reset Drift Account</h4>
+          <p className="text-purple-200/70 text-sm">
             Closes all positions, withdraws funds, and deletes all bot subaccounts. Start fresh.
           </p>
         </div>
-        <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/30">
-          <h4 className="font-medium text-red-200 mb-1">Reset Agent Wallet</h4>
-          <p className="text-red-200/70 text-sm">
+        <div className="p-4 rounded-lg bg-purple-500/10 border border-purple-500/30">
+          <h4 className="font-medium text-purple-200 mb-1">Reset Agent Wallet</h4>
+          <p className="text-purple-200/70 text-sm">
             Withdraws all funds to your Phantom wallet and creates a completely new agent wallet.
           </p>
         </div>
@@ -929,7 +929,7 @@ function SecuritySection() {
       <div className="space-y-4 mb-6">
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <div className="flex items-center gap-3 mb-2">
-            <Lock className="w-5 h-5 text-green-400" />
+            <Lock className="w-5 h-5 text-violet-400" />
             <h4 className="font-medium text-white">Signature-Based Authorization</h4>
           </div>
           <p className="text-white/60 text-sm">
@@ -939,7 +939,7 @@ function SecuritySection() {
         </div>
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <div className="flex items-center gap-3 mb-2">
-            <Shield className="w-5 h-5 text-green-400" />
+            <Shield className="w-5 h-5 text-violet-400" />
             <h4 className="font-medium text-white">Bot Policy Protection</h4>
           </div>
           <p className="text-white/60 text-sm">
