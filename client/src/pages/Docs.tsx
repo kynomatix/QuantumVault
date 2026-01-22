@@ -675,6 +675,25 @@ function BotManagementSection() {
         </div>
       </div>
       
+      <SubHeading>Manual Trading</SubHeading>
+      <Paragraph>
+        When your bot doesn't have an open position, you can manually trigger a trade directly from 
+        the bot management drawer. This is useful if you:
+      </Paragraph>
+      <ul className="list-disc list-inside text-white/70 mb-4 space-y-1 ml-4">
+        <li>Found a good strategy but missed the last signal</li>
+        <li>Want to get into a position immediately after creating a bot</li>
+        <li>See a market opportunity and want to act on it right away</li>
+      </ul>
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-6">
+        <p className="text-white/70 text-sm">
+          Manual trades use your bot's existing settings for position sizing, leverage, and market. 
+          Simply click <strong className="text-white">Buy</strong> or <strong className="text-white">Sell</strong> to 
+          open a long or short position. Once a position is open, you can close it manually or wait 
+          for your TradingView strategy to send a close signal.
+        </p>
+      </div>
+      
       <SubHeading>Managing Equity</SubHeading>
       <Paragraph>
         Each bot has its own equity pool. You can deposit USDC to increase trading capital 
