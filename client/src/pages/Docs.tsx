@@ -6,7 +6,7 @@ import {
   ChevronRight, ArrowLeft, Zap, DollarSign,
   Copy, Check, Menu, X,
   AlertTriangle, Info, CheckCircle2, ArrowDown, ArrowUp,
-  Shield, Lock, Key, RefreshCw
+  Shield, Lock, Key, RefreshCw, Sparkles, TrendingUp, TrendingDown
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -335,135 +335,192 @@ function CreatingBotsSection() {
         </div>
       </div>
       
-      <SubHeading>Profit Reinvest</SubHeading>
-      <Paragraph>
-        By default, your bot trades with a fixed amount you set (e.g., $100). 
-        When <strong className="text-white">Profit Reinvest</strong> is enabled, 
-        your bot instead uses everything it has available.
-      </Paragraph>
-      
-      <div className="grid md:grid-cols-2 gap-4 mb-6">
-        <div className="p-4 rounded-lg bg-red-500/5 border border-red-500/20">
-          <h4 className="font-medium text-red-300 mb-3">OFF (Default)</h4>
-          <p className="text-white/60 text-sm mb-2">Bot trades with your fixed investment amount.</p>
-          <div className="text-sm text-white/50">
-            You set $100 → Bot always trades $100<br/>
-            Even if bot grows to $200, still trades $100
+      {/* Profit Reinvest Section */}
+      <div className="relative mt-8 mb-10">
+        <div className="absolute -inset-1 bg-gradient-to-r from-violet-500/20 to-blue-500/20 rounded-2xl blur-xl opacity-50" />
+        <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-violet-500/20">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center">
+              <RefreshCw className="w-5 h-5 text-white" />
+            </div>
+            <h3 className="text-xl font-semibold text-white">Profit Reinvest</h3>
           </div>
-        </div>
-        <div className="p-4 rounded-lg bg-green-500/5 border border-green-500/20">
-          <h4 className="font-medium text-green-300 mb-3">ON</h4>
-          <p className="text-white/60 text-sm mb-2">Bot trades with its full balance.</p>
-          <div className="text-sm text-white/50">
-            Bot has $100 → Trades $100<br/>
-            Bot grows to $200 → Trades $200
-          </div>
-        </div>
-      </div>
-      
-      <Alert type="info">
-        Use this if you want your profits to compound and grow your position sizes over time.
-      </Alert>
-      
-      
-      <SubHeading>Auto Withdraw</SubHeading>
-      <Paragraph>
-        Set a threshold amount. When your bot's balance goes above this number, 
-        the extra money is automatically moved to your agent wallet.
-      </Paragraph>
-      
-      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
-        <h4 className="font-medium text-white mb-4">Example</h4>
-        <div className="space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium">1</div>
-            <span className="text-white/70">You set threshold to <strong className="text-white">$100</strong></span>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium">2</div>
-            <span className="text-white/70">Your bot wins a trade and now has <strong className="text-white">$150</strong></span>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center text-sm font-medium text-green-400">3</div>
-            <span className="text-white/70">System automatically withdraws <strong className="text-green-400">$50</strong> to your agent wallet</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium">4</div>
-            <span className="text-white/70">Bot continues with $100, profits are safe in agent wallet</span>
-          </div>
-        </div>
-      </div>
-      
-      <Alert type="info">
-        This happens automatically after each trade closes. Great for taking profits without 
-        having to manually withdraw.
-      </Alert>
-      
-      
-      <SubHeading>Auto Top-Up</SubHeading>
-      <Paragraph>
-        If your bot doesn't have enough money to make a trade, this feature automatically 
-        adds funds from your agent wallet so the trade can go through.
-      </Paragraph>
-      
-      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
-        <h4 className="font-medium text-white mb-4">Example</h4>
-        <div className="space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium">1</div>
-            <span className="text-white/70">A trade signal arrives from TradingView</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-red-500/20 flex items-center justify-center text-sm font-medium text-red-400">2</div>
-            <span className="text-white/70">Bot only has <strong className="text-red-400">$2</strong>, needs <strong className="text-white">$5</strong> to trade</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center text-sm font-medium text-blue-400">3</div>
-            <span className="text-white/70">System deposits <strong className="text-blue-400">$3</strong> from your agent wallet</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center text-sm font-medium text-green-400">4</div>
-            <span className="text-white/70">Trade executes successfully - <strong className="text-green-400">no signal missed</strong></span>
-          </div>
-        </div>
-      </div>
-      
-      <Alert type="warning">
-        Auto Top-Up can only work if your agent wallet has USDC available. Make sure to keep 
-        funds in your agent wallet if you enable this feature.
-      </Alert>
-      
-      
-      <SubHeading>Using These Features Together</SubHeading>
-      <Paragraph>
-        All three features work together. Here's a common setup:
-      </Paragraph>
-      
-      <div className="p-4 rounded-lg bg-gradient-to-r from-purple-500/10 to-blue-500/10 border border-purple-500/20 mb-6">
-        <h4 className="font-medium text-white mb-2">"Keep $100 Working" Strategy</h4>
-        <p className="text-white/50 text-sm mb-4">
-          Profit Reinvest ON, Auto Withdraw at $100, Auto Top-Up ON
-        </p>
-        
-        <div className="space-y-4">
-          <div className="p-3 rounded bg-black/20">
-            <div className="text-green-400 text-sm font-medium mb-1">When you win:</div>
-            <div className="text-white/60 text-sm">
-              Balance goes to $150 → Auto Withdraw takes $50 → Bot stays at $100
+          
+          <Paragraph>
+            By default, your bot trades with a fixed amount you set (e.g., $100). 
+            When <strong className="text-violet-300">Profit Reinvest</strong> is enabled, 
+            your bot uses everything it has available instead.
+          </Paragraph>
+          
+          <div className="grid md:grid-cols-2 gap-4 mt-4">
+            <div className="p-4 rounded-lg bg-black/30 border border-white/10">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="w-3 h-3 rounded-full bg-white/30" />
+                <h4 className="font-medium text-white/80">OFF (Default)</h4>
+              </div>
+              <p className="text-white/50 text-sm leading-relaxed">
+                You set $100 → Bot always trades $100<br/>
+                Even if bot grows to $200, still trades $100
+              </p>
+            </div>
+            <div className="p-4 rounded-lg bg-gradient-to-br from-violet-500/10 to-blue-500/10 border border-violet-500/30">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="w-3 h-3 rounded-full bg-violet-400" />
+                <h4 className="font-medium text-violet-300">ON</h4>
+              </div>
+              <p className="text-white/50 text-sm leading-relaxed">
+                Bot has $100 → Trades $100<br/>
+                Bot grows to $200 → Trades $200
+              </p>
             </div>
           </div>
           
-          <div className="p-3 rounded bg-black/20">
-            <div className="text-red-400 text-sm font-medium mb-1">When you lose:</div>
-            <div className="text-white/60 text-sm">
-              Balance drops to $5 → Auto Top-Up adds funds → Bot can keep trading
+          <p className="mt-4 text-sm text-violet-300/80 flex items-center gap-2">
+            <Sparkles className="w-4 h-4" />
+            Use this to compound your profits and grow position sizes over time.
+          </p>
+        </div>
+      </div>
+      
+      {/* Auto Withdraw Section */}
+      <div className="relative mb-10">
+        <div className="absolute -inset-1 bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-2xl blur-xl opacity-50" />
+        <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-green-500/20">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-green-500 to-emerald-500 flex items-center justify-center">
+              <ArrowUp className="w-5 h-5 text-white" />
+            </div>
+            <h3 className="text-xl font-semibold text-white">Auto Withdraw</h3>
+          </div>
+          
+          <Paragraph>
+            Set a threshold amount. When your bot's balance goes above this number, 
+            the extra money is automatically moved to your agent wallet.
+          </Paragraph>
+          
+          <div className="mt-4 p-4 rounded-lg bg-black/30 border border-white/10">
+            <h4 className="font-medium text-white mb-4 text-sm uppercase tracking-wide opacity-60">How it works</h4>
+            <div className="space-y-3">
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">1</div>
+                <span className="text-white/70">You set threshold to <strong className="text-white">$100</strong></span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">2</div>
+                <span className="text-white/70">Your bot wins a trade and now has <strong className="text-white">$150</strong></span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-green-500/30 flex items-center justify-center text-sm font-medium text-green-400">3</div>
+                <span className="text-white/70">System automatically withdraws <strong className="text-green-400">$50</strong> to your agent wallet</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">4</div>
+                <span className="text-white/70">Bot continues with $100, profits are safe</span>
+              </div>
             </div>
           </div>
           
-          <div className="p-3 rounded bg-black/20">
-            <div className="text-purple-400 text-sm font-medium mb-1">The result:</div>
-            <div className="text-white/60 text-sm">
-              Your bot always has around $100 to work with. Profits pile up safely in your agent wallet.
+          <p className="mt-4 text-sm text-green-300/80 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4" />
+            Happens automatically after each trade closes.
+          </p>
+        </div>
+      </div>
+      
+      {/* Auto Top-Up Section */}
+      <div className="relative mb-10">
+        <div className="absolute -inset-1 bg-gradient-to-r from-blue-500/20 to-cyan-500/20 rounded-2xl blur-xl opacity-50" />
+        <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-blue-500/20">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center">
+              <ArrowDown className="w-5 h-5 text-white" />
+            </div>
+            <h3 className="text-xl font-semibold text-white">Auto Top-Up</h3>
+          </div>
+          
+          <Paragraph>
+            If your bot doesn't have enough money to make a trade, this feature automatically 
+            adds funds from your agent wallet so the trade can go through.
+          </Paragraph>
+          
+          <div className="mt-4 p-4 rounded-lg bg-black/30 border border-white/10">
+            <h4 className="font-medium text-white mb-4 text-sm uppercase tracking-wide opacity-60">How it works</h4>
+            <div className="space-y-3">
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">1</div>
+                <span className="text-white/70">A trade signal arrives from TradingView</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-red-500/30 flex items-center justify-center text-sm font-medium text-red-400">2</div>
+                <span className="text-white/70">Bot only has <strong className="text-red-400">$2</strong>, needs <strong className="text-white">$5</strong> to trade</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-blue-500/30 flex items-center justify-center text-sm font-medium text-blue-400">3</div>
+                <span className="text-white/70">System deposits <strong className="text-blue-400">$3</strong> from your agent wallet</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-green-500/30 flex items-center justify-center text-sm font-medium text-green-400">4</div>
+                <span className="text-white/70">Trade executes successfully - <strong className="text-green-400">no signal missed</strong></span>
+              </div>
+            </div>
+          </div>
+          
+          <p className="mt-4 text-sm text-amber-300/80 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4" />
+            Requires USDC in your agent wallet to work.
+          </p>
+        </div>
+      </div>
+      
+      {/* Using Together Section */}
+      <div className="relative mb-8">
+        <div className="absolute -inset-1 bg-gradient-to-r from-violet-500/20 via-blue-500/20 to-green-500/20 rounded-2xl blur-xl opacity-50" />
+        <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-violet-500/20">
+          <h3 className="text-xl font-semibold text-white mb-2">Using These Features Together</h3>
+          <p className="text-white/50 text-sm mb-6">All three features are compatible and can create powerful automation.</p>
+          
+          <div className="p-4 rounded-lg bg-gradient-to-r from-violet-500/10 via-blue-500/10 to-green-500/10 border border-white/10 mb-4">
+            <h4 className="font-semibold text-white mb-1">"Keep $100 Working" Strategy</h4>
+            <p className="text-white/40 text-sm mb-4">
+              Profit Reinvest ON • Auto Withdraw at $100 • Auto Top-Up ON
+            </p>
+            
+            <div className="grid md:grid-cols-3 gap-3">
+              <div className="p-3 rounded-lg bg-black/30">
+                <div className="text-green-400 text-sm font-medium mb-2 flex items-center gap-2">
+                  <TrendingUp className="w-4 h-4" />
+                  When you win
+                </div>
+                <div className="text-white/50 text-xs">
+                  Balance → $150<br/>
+                  Auto Withdraw takes $50<br/>
+                  Bot stays at $100
+                </div>
+              </div>
+              
+              <div className="p-3 rounded-lg bg-black/30">
+                <div className="text-red-400 text-sm font-medium mb-2 flex items-center gap-2">
+                  <TrendingDown className="w-4 h-4" />
+                  When you lose
+                </div>
+                <div className="text-white/50 text-xs">
+                  Balance → $5<br/>
+                  Auto Top-Up adds funds<br/>
+                  Bot keeps trading
+                </div>
+              </div>
+              
+              <div className="p-3 rounded-lg bg-black/30">
+                <div className="text-violet-400 text-sm font-medium mb-2 flex items-center gap-2">
+                  <Sparkles className="w-4 h-4" />
+                  The result
+                </div>
+                <div className="text-white/50 text-xs">
+                  Bot stays at ~$100<br/>
+                  Profits accumulate<br/>
+                  In your agent wallet
+                </div>
+              </div>
             </div>
           </div>
         </div>
