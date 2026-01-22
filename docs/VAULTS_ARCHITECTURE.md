@@ -252,16 +252,21 @@ interface RewardsCollectionStrategy {
   claimThreshold: number;          // Minimum DRIFT before claiming (e.g., 10 DRIFT)
   claimFrequency: 'daily' | 'weekly' | 'on_demand';
   
-  // What to do with claimed rewards
+  // What to do with claimed rewards (prefer borrowing over selling)
   rewardsDestination: 
-    | 'hold'           // Keep as DRIFT in agent wallet
-    | 'stake'          // Auto-stake for yield
-    | 'convert'        // Swap to USDC/SOL for collateral
-    | 'user_choice';   // Prompt user each time
+    | 'hold'              // Keep as DRIFT in vault (can borrow against)
+    | 'stake'             // Auto-stake for yield (staked DRIFT = collateral)
+    | 'borrow_against'    // Deposit to vault, borrow USDC against it (DEFAULT)
+    | 'swap_to_usdc'      // Manual swap via Titan/Jupiter (user must enable)
+    | 'user_choice';      // Prompt user each time
   
   // Staking preferences
   autoStake: boolean;              // Stake immediately after claiming
   autoCompound: boolean;           // Re-stake staking rewards
+  
+  // Swap preferences (only if user explicitly enables)
+  autoSwapEnabled: boolean;        // Default: false - prefer borrowing
+  swapAggregator: 'titan' | 'jupiter';  // Default: titan (Drift's preferred)
 }
 
 // Weekly rewards collection job
@@ -286,39 +291,147 @@ async function collectDriftRewards(userId: string): Promise<void> {
   const strategy = await getUserRewardsStrategy(userId);
   
   if (strategy.autoStake) {
+    // Stake DRIFT (staked DRIFT is still usable as collateral on Drift)
     await stakeDrift(userId, claimed.amountClaimed);
-  } else if (strategy.rewardsDestination === 'convert') {
-    await convertDriftToUsdc(userId, claimed.amountClaimed);
+  } else if (strategy.rewardsDestination === 'borrow_against') {
+    // DEFAULT: Deposit DRIFT to vault, use as collateral to borrow USDC
+    await depositDriftToVault(userId, claimed.amountClaimed);
+  } else if (strategy.rewardsDestination === 'swap_to_usdc' && strategy.autoSwapEnabled) {
+    // ONLY if user explicitly enabled auto-swap
+    await swapDriftToUsdc(userId, claimed.amountClaimed, strategy.swapAggregator);
+  }
+  // Otherwise 'hold' - keep in agent wallet for manual action
+}
+```
+
+### DRIFT as Collateral (Default Approach)
+
+**Key Insight**: DRIFT token IS accepted as collateral on Drift Protocol. This means users can **borrow USDC against their DRIFT** instead of selling it.
+
+**Benefits of Borrowing vs Selling**:
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Borrow Against DRIFT** | Keep upside exposure, no taxable event, earn staking yield | Pay borrow APY, liquidation risk |
+| **Sell DRIFT** | Immediate USDC, no ongoing costs | Lose token appreciation, taxable event |
+
+**Default Strategy**: Borrow against DRIFT (preserve token upside)
+
+```typescript
+async function useDriftAsCollateral(
+  userId: string,
+  driftAmount: number
+): Promise<{ borrowingPowerAdded: number; usdcBorrowed: number }> {
+  // 1. Deposit DRIFT to vault (Subaccount 0)
+  await depositToVault(userId, 'DRIFT', driftAmount);
+  
+  // 2. Calculate borrowing power (DRIFT has ~60-70% collateral weight)
+  const driftPrice = await getDriftPrice();
+  const driftValue = driftAmount * driftPrice;
+  const collateralWeight = 0.65;  // Approximate - check Drift docs for current
+  const borrowingPowerAdded = driftValue * collateralWeight;
+  
+  // 3. Optionally auto-borrow USDC for bot funding
+  const shouldAutoBorrow = await shouldBorrowForBots(userId);
+  let usdcBorrowed = 0;
+  
+  if (shouldAutoBorrow) {
+    // Borrow conservatively (50% of new borrowing power)
+    const safeBorrowAmount = borrowingPowerAdded * 0.5;
+    usdcBorrowed = await borrowUsdc(userId, safeBorrowAmount);
+  }
+  
+  return { borrowingPowerAdded, usdcBorrowed };
+}
+```
+
+### Manual Swap Option (Titan/Jupiter)
+
+For users who explicitly want to sell DRIFT for USDC:
+
+```typescript
+// Swap aggregator options
+type SwapAggregator = 'titan' | 'jupiter';
+
+interface SwapConfig {
+  aggregator: SwapAggregator;
+  slippageBps: number;       // Basis points (e.g., 50 = 0.5%)
+  priorityFee: number;       // Lamports for faster execution
+}
+
+// Titan: Meta DEX aggregator (aggregates Jupiter + OKX + Dflow + Argos)
+// - Claims ~87% better pricing than individual aggregators
+// - Zero fees in Prime mode
+// - MEV protection via Jito/Nozomi
+// - Drift's preferred swap aggregator
+
+// Jupiter: Established DEX aggregator
+// - Largest liquidity aggregation on Solana
+// - Well-documented API
+// - Widely used and battle-tested
+
+async function swapDriftToUsdc(
+  userId: string,
+  driftAmount: number,
+  aggregator: SwapAggregator = 'titan'
+): Promise<{ usdcReceived: number; signature: string }> {
+  const agentWallet = await getAgentWallet(userId);
+  
+  if (aggregator === 'titan') {
+    // Use Titan Prime API for zero-fee, best execution
+    return await executeTitanSwap({
+      inputMint: DRIFT_MINT,
+      outputMint: USDC_MINT,
+      amount: driftAmount,
+      wallet: agentWallet,
+      slippageBps: 50,
+      primeMode: true  // Zero fees + MEV protection
+    });
+  } else {
+    // Use Jupiter API
+    return await executeJupiterSwap({
+      inputMint: DRIFT_MINT,
+      outputMint: USDC_MINT,
+      amount: driftAmount,
+      wallet: agentWallet,
+      slippageBps: 50
+    });
   }
 }
 ```
 
-### DRIFT → Collateral Pipeline
+### Staked DRIFT Handling
 
-For users who want to use their DRIFT rewards to increase borrowing power:
+Staked DRIFT earns additional yield but requires unstaking before swapping:
 
 ```typescript
-async function convertDriftToCollateral(
+async function handleStakedDrift(
   userId: string,
-  driftAmount: number
-): Promise<{ usdcReceived: number; addedToCollateral: boolean }> {
-  // 1. Check if DRIFT is staked (needs unstaking first)
+  action: 'keep_staked' | 'unstake_for_collateral' | 'unstake_for_swap'
+): Promise<void> {
   const stakingStatus = await getStakingStatus(userId);
   
-  if (stakingStatus.stakedAmount > 0) {
-    // Initiate unstaking (takes ~7 days on Drift)
-    await initiateUnstake(userId, driftAmount);
-    return { usdcReceived: 0, addedToCollateral: false, 
-             note: 'Unstaking initiated. Will complete in ~7 days.' };
+  if (stakingStatus.stakedAmount === 0) {
+    return;  // Nothing staked
   }
   
-  // 2. Swap DRIFT → USDC (via Jupiter)
-  const usdcReceived = await swapDriftToUsdc(userId, driftAmount);
+  if (action === 'keep_staked') {
+    // Staked DRIFT still counts as collateral on Drift!
+    // No action needed - it's already usable
+    return;
+  }
   
-  // 3. Deposit USDC to vault (Subaccount 0)
-  await depositToVault(userId, usdcReceived);
+  // Initiate unstaking (takes ~7 days on Drift)
+  await initiateUnstake(userId, stakingStatus.stakedAmount);
   
-  return { usdcReceived, addedToCollateral: true };
+  await createRewardsEvent(userId, {
+    type: 'drift_unstaking_initiated',
+    amount: stakingStatus.stakedAmount,
+    note: 'Unstaking initiated. Will complete in ~7 days.'
+  });
+  
+  // After unstaking completes (handled by separate job):
+  // - If 'unstake_for_collateral': Deposit to vault as collateral
+  // - If 'unstake_for_swap': Swap via Titan/Jupiter (user preference)
 }
 ```
 
@@ -335,12 +448,18 @@ interface RewardsUIState {
   // Show potential value
   driftPrice: number;
   estimatedUsdValue: number;
+  borrowingPowerValue: number;  // Value with collateral weight applied
+  
+  // Current collateral status
+  driftInVault: number;         // DRIFT deposited as collateral
+  borrowedAgainstDrift: number; // USDC borrowed against DRIFT
   
   // Actions available
   canClaim: boolean;
   canStake: boolean;
   canUnstake: boolean;
-  canConvertToCollateral: boolean;
+  canDepositAsCollateral: boolean;  // Deposit to vault, borrow against
+  canSwapToUsdc: boolean;           // Manual swap (if enabled in settings)
 }
 ```
 
@@ -364,7 +483,11 @@ export const driftRewards = pgTable("drift_rewards", {
   // User preferences
   autoClaimEnabled: boolean("auto_claim_enabled").default(false),
   autoStakeEnabled: boolean("auto_stake_enabled").default(false),
-  rewardsDestination: varchar("rewards_destination").default('hold'),
+  rewardsDestination: varchar("rewards_destination").default('borrow_against'),  // Default: use as collateral
+  
+  // Swap settings (only if user explicitly enables)
+  autoSwapEnabled: boolean("auto_swap_enabled").default(false),  // Default: false
+  swapAggregator: varchar("swap_aggregator").default('titan'),   // 'titan' | 'jupiter'
   
   lastClaimAt: timestamp("last_claim_at"),
   createdAt: timestamp("created_at").defaultNow(),
