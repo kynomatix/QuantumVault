@@ -35,14 +35,114 @@ publishedBots.creatorWalletAddress → wallets.address (creator's main wallet)
 
 ---
 
-## Recommended Implementation: Immediate On-Chain Transfer
+## Recommended Implementation: Immediate On-Chain Transfer + IOU Failover
 
 ### Why This Approach
 1. Solana fees are negligible (~$0.0003 total per profitable close)
 2. Immediate payment builds trust with creators
-3. On-chain record provides transparency without database
-4. Minimal additional complexity
+3. On-chain record provides transparency
+4. IOU failover ensures creators never lose money due to temporary failures
 5. Aligns with DeFi principles of trustless execution
+
+### The IOU System (Failover for Failed Transfers)
+
+**Problem**: If an on-chain transfer fails (RPC overload, network issues), the creator could lose their profit share - especially if the subscriber closes their bot after a big win and there are no more trades.
+
+**Solution**: A lightweight "IOU" system that only tracks **failed transfers** in the database. Successful transfers are NOT stored (no database bloat).
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  PROFIT SHARE FLOW                                          │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Trade Closes with Profit                                   │
+│         │                                                   │
+│         ▼                                                   │
+│  ┌─────────────────┐                                        │
+│  │ Attempt On-Chain│                                        │
+│  │    Transfer     │                                        │
+│  └────────┬────────┘                                        │
+│           │                                                 │
+│     ┌─────┴─────┐                                           │
+│     │           │                                           │
+│   Success     Fail                                          │
+│     │           │                                           │
+│     ▼           ▼                                           │
+│   Done ✓    Record IOU                                      │
+│   (no DB)   in Database                                     │
+│                 │                                           │
+│                 ▼                                           │
+│         Multiple Retry Triggers:                            │
+│         • Next trade close                                  │
+│         • Background job (every 5 min)                      │
+│         • Before subscriber withdrawal                      │
+│         • Before bot deletion                               │
+│                 │                                           │
+│                 ▼                                           │
+│            IOU Paid → Delete from DB                        │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key Principle**: The database is NOT holding funds - it's just an "IOU note" that says "we owe this creator $X, keep trying to pay them." The actual money movement is always on-chain.
+
+### IOU Database Table (Failed Transfers Only)
+
+```sql
+CREATE TABLE pending_profit_shares (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  subscriber_bot_id VARCHAR NOT NULL REFERENCES trading_bots(id),
+  subscriber_wallet_address TEXT NOT NULL,
+  creator_wallet_address TEXT NOT NULL,
+  creator_agent_public_key TEXT NOT NULL,
+  amount DECIMAL(20, 6) NOT NULL,
+  realized_pnl DECIMAL(20, 6) NOT NULL,
+  profit_share_percent DECIMAL(5, 2) NOT NULL,
+  trade_id UUID REFERENCES bot_trades(id),
+  published_bot_id VARCHAR NOT NULL,
+  retry_count INTEGER DEFAULT 0,
+  last_error TEXT,
+  last_attempt_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+**Why only failed transfers?**
+- Successful transfers: On-chain record is the audit trail (queryable via Solana explorer)
+- Failed transfers: Need tracking to ensure eventual payment
+- No bloat: Table only grows when things go wrong (should be rare)
+
+### Payment Retry Triggers
+
+The IOU system has **multiple triggers** to ensure creators get paid even in edge cases:
+
+| Trigger | When | Why |
+|---------|------|-----|
+| **1. Next trade close** | Subscriber's next profitable close | Most common retry path |
+| **2. Background job** | Every 5 minutes | Catches orphaned IOUs |
+| **3. Before withdrawal** | Subscriber tries to withdraw USDC | Blocks "cash out and run" |
+| **4. Before bot deletion** | Subscriber tries to delete bot | Last line of defense |
+
+**Subscriber cannot escape**: They can't withdraw or delete their bot until pending IOUs are paid. This protects creators.
+
+### IOU Lifecycle
+
+```
+1. Transfer attempt fails
+   → Insert IOU record (status: pending, retry_count: 0)
+
+2. Retry triggers fire
+   → Attempt transfer again
+   → If success: DELETE IOU record
+   → If fail: Increment retry_count, update last_error
+
+3. After 20 retries (~1.5 hours of background attempts)
+   → Keep trying on withdrawal/deletion triggers
+   → Log for manual review if persists > 24 hours
+
+4. Eventually paid
+   → DELETE IOU record (no permanent storage)
+```
 
 ---
 
@@ -330,15 +430,19 @@ if (closeTradePnl > 0 && bot.sourcePublishedBotId) {
 
 | Scenario | Handling |
 |----------|----------|
-| Subscriber has insufficient USDC in agent wallet | Skip profit share, log warning (their Drift position is separate) |
+| Subscriber has insufficient USDC in agent wallet | Create IOU, retry later (subscriber can't withdraw until paid) |
 | Creator has no agent wallet | Skip profit share, log warning (creator must create agent wallet to receive) |
 | Creator wallet not found in DB | Skip profit share, log error |
 | Very small profit (<$0.01 share) | Skip to avoid dust transfers |
-| Network failure during transfer | Log failure, don't retry (accept some loss for simplicity) |
+| Network failure during transfer | Create IOU, retry via background job + other triggers |
+| RPC overload/rate limit | Create IOU, retry with backoff |
 | Position flip (close + open) | Only apply to the close portion's realized PnL |
 | Partial position close | Apply profit share on each partial close's realized PnL |
 | Bot unsubscribed mid-trade | Use `sourcePublishedBotId` on bot, not subscription status |
 | Creator changed profit share % | Use percentage at time of trade (from published bot) |
+| Subscriber closes bot after big win | IOUs block deletion until paid |
+| Subscriber tries to withdraw before paying | IOUs block withdrawal until paid |
+| IOU persists > 24 hours | Log alert for manual review |
 
 ---
 
@@ -373,7 +477,7 @@ Conclusion: Gas cost is negligible. Immediate on-chain settlement is practical.
 
 ## Implementation Phases
 
-### Phase 1: Core Implementation (3-4 hours)
+### Phase 1: Core Transfer System (3-4 hours)
 - [ ] Add `getBotSubscriptionBySubscriberBotId()` to storage interface and implementation
 - [ ] Add `transferUsdcBetweenAgents()` to agent-wallet.ts
 - [ ] Add `distributeCreatorProfitShare()` function
@@ -383,22 +487,36 @@ Conclusion: Gas cost is negligible. Immediate on-chain settlement is practical.
 - [ ] Integrate into retry close handler
 - [ ] Add console logging for monitoring
 
-### Phase 2: Testing (1-2 hours)
-- [ ] Test with subscription bot closing profitable position
+### Phase 2: IOU Failover System (2-3 hours)
+- [ ] Create `pending_profit_shares` table in schema
+- [ ] Add storage functions: `createPendingProfitShare()`, `getPendingProfitSharesBySubscriber()`, `deletePendingProfitShare()`
+- [ ] Add `retryPendingProfitShares()` function
+- [ ] Modify `distributeCreatorProfitShare()` to create IOU on failure
+- [ ] Add IOU check + payment to withdrawal endpoint (block until paid)
+- [ ] Add IOU check + payment to bot deletion endpoint (block until paid)
+- [ ] Add background job to retry IOUs every 5 minutes
+
+### Phase 3: Testing (2 hours)
+- [ ] Test successful profit share distribution
 - [ ] Test dust amount handling (< $0.01)
 - [ ] Test no-profit scenario
 - [ ] Test creator with no agent wallet
 - [ ] Test partial close distribution
+- [ ] Test IOU creation on RPC failure (mock)
+- [ ] Test IOU blocking withdrawal
+- [ ] Test IOU blocking bot deletion
+- [ ] Test background job retry
 
-### Phase 3: UI Transparency (Future)
+### Phase 4: UI Transparency (Future)
 - [ ] Show profit share history in creator dashboard
 - [ ] Show profit share deductions in subscriber trade history
 - [ ] Display estimated creator earnings on marketplace
+- [ ] Show pending IOUs (if any) to subscriber
 
-### Phase 4: Optional Enhancements (Future)
-- [ ] Database tracking table for analytics
+### Phase 5: Optional Enhancements (Future)
 - [ ] Telegram notifications for creators receiving profit share
-- [ ] Batch small amounts with threshold (if gas becomes concern)
+- [ ] Alert system for IOUs persisting > 24 hours
+- [ ] Admin dashboard for IOU monitoring
 
 ---
 
@@ -407,10 +525,13 @@ Conclusion: Gas cost is negligible. Immediate on-chain settlement is practical.
 | Question | Resolution |
 |----------|------------|
 | Dust threshold | $0.01 minimum - skip amounts below this |
-| Failure handling | Silent failure with logging (no retry) - accept some loss for simplicity |
+| Failure handling | IOU system - track failed transfers, retry via multiple triggers |
 | Creator notification | Future enhancement - can add Telegram alert |
 | Where do funds go? | Creator's agent wallet (they must have one to receive) |
 | Partial closes | Each partial triggers its own profit share calculation |
+| What if subscriber closes bot after big win? | IOUs block bot deletion until all pending shares paid |
+| What if subscriber tries to withdraw first? | IOUs block withdrawal until all pending shares paid |
+| Database bloat? | Only failed transfers stored; deleted after successful payment |
 
 ---
 
@@ -444,12 +565,30 @@ The profit share implementation reuses existing infrastructure:
 - SPL token transfers (agent-wallet.ts)
 - Subscription/published bot lookups (storage.ts)
 - Close trade flow (routes.ts)
+- Background job pattern (existing cron infrastructure)
 
-New code needed:
-- 1 storage function (~15 lines)
-- 1 transfer function (~60 lines)
-- 1 distribution function (~50 lines)
+### New Code Required
+
+**Phase 1 - Core Transfer:**
+- 1 storage function: `getBotSubscriptionBySubscriberBotId()` (~15 lines)
+- 1 transfer function: `transferUsdcBetweenAgents()` (~60 lines)
+- 1 distribution function: `distributeCreatorProfitShare()` (~50 lines)
 - 4 integration points (~10 lines each)
 
-**Total new code**: ~150 lines
-**Estimated time**: 4-6 hours including testing
+**Phase 2 - IOU Failover:**
+- 1 database table: `pending_profit_shares` (~15 lines schema)
+- 3 storage functions: create/get/delete IOUs (~30 lines)
+- 1 retry function: `retryPendingProfitShares()` (~40 lines)
+- 2 blocking checks: withdrawal + deletion endpoints (~20 lines each)
+- 1 background job: 5-minute retry cron (~20 lines)
+
+**Total new code**: ~300 lines
+**Estimated time**: 6-8 hours including testing
+
+### Key Design Decisions
+
+1. **Immediate on-chain transfer** - Primary path, no database involvement
+2. **IOU only on failure** - Database tracks failed transfers only, no bloat
+3. **Multiple retry triggers** - Background job + withdrawal block + deletion block
+4. **Creator protection** - Subscriber cannot escape without paying
+5. **Delete after payment** - IOUs removed from DB once paid, no permanent storage
