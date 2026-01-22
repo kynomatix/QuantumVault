@@ -840,15 +840,21 @@ function SettingsSection() {
         These actions are irreversible. Use with caution:
       </Paragraph>
       <div className="space-y-3 mb-4">
-        <div className="p-4 rounded-lg bg-purple-500/10 border border-purple-500/30">
-          <h4 className="font-medium text-purple-200 mb-1">Reset Drift Account</h4>
-          <p className="text-purple-200/70 text-sm">
+        <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/30">
+          <h4 className="font-medium text-red-200 mb-1">Close All Trades</h4>
+          <p className="text-red-200/70 text-sm">
+            Immediately closes all open positions across all your bots. Use this in emergencies to exit all trades at once.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/30">
+          <h4 className="font-medium text-red-200 mb-1">Reset Drift Account</h4>
+          <p className="text-red-200/70 text-sm">
             Closes all positions, withdraws funds, and deletes all bot subaccounts. Start fresh.
           </p>
         </div>
-        <div className="p-4 rounded-lg bg-purple-500/10 border border-purple-500/30">
-          <h4 className="font-medium text-purple-200 mb-1">Reset Agent Wallet</h4>
-          <p className="text-purple-200/70 text-sm">
+        <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/30">
+          <h4 className="font-medium text-red-200 mb-1">Reset Agent Wallet</h4>
+          <p className="text-red-200/70 text-sm">
             Withdraws all funds to your Phantom wallet and creates a completely new agent wallet.
           </p>
         </div>
