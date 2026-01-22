@@ -463,8 +463,8 @@ function CreatingBotsSection() {
           </div>
           
           <Paragraph>
-            If your bot doesn't have enough money to make a trade, this feature automatically 
-            adds funds from your agent wallet so the trade can go through.
+            When a trade signal arrives, if your bot's equity is below your investment amount, 
+            this feature automatically tops up from your agent wallet so you can trade at full size.
           </Paragraph>
           
           <div className="mt-4 p-4 rounded-lg bg-black/30 border border-white/10">
@@ -476,15 +476,15 @@ function CreatingBotsSection() {
               </div>
               <div className="flex items-center gap-4">
                 <div className="w-8 h-8 rounded-full bg-purple-500/30 flex items-center justify-center text-sm font-medium text-purple-400">2</div>
-                <span className="text-white/70">Bot only has <strong className="text-purple-300">$2</strong>, needs <strong className="text-white">$5</strong> to trade</span>
+                <span className="text-white/70">Bot has <strong className="text-purple-300">$4</strong> equity, but investment is <strong className="text-white">$10</strong></span>
               </div>
               <div className="flex items-center gap-4">
                 <div className="w-8 h-8 rounded-full bg-sky-500/30 flex items-center justify-center text-sm font-medium text-sky-400">3</div>
-                <span className="text-white/70">System deposits <strong className="text-sky-300">$3</strong> from your agent wallet</span>
+                <span className="text-white/70">System deposits <strong className="text-sky-300">$6</strong> from your agent wallet</span>
               </div>
               <div className="flex items-center gap-4">
                 <div className="w-8 h-8 rounded-full bg-violet-500/30 flex items-center justify-center text-sm font-medium text-violet-400">4</div>
-                <span className="text-white/70">Trade executes successfully - <strong className="text-violet-300">no signal missed</strong></span>
+                <span className="text-white/70">Trade executes at <strong className="text-violet-300">full $100 position</strong> (not scaled down)</span>
               </div>
             </div>
           </div>
