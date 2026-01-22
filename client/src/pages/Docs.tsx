@@ -816,22 +816,25 @@ function SettingsSection() {
       
       <SubHeading>Referral Program</SubHeading>
       <Paragraph>
-        Earn rewards by inviting friends to QuantumVault:
+        Grow the QuantumVault community and be rewarded for it:
       </Paragraph>
       <StepList steps={[
         'Find your unique referral code in Settings',
         'Share your referral link with friends',
-        'When they sign up and trade, you both benefit',
+        'Your referrals are tracked and attributed to your account',
       ]} />
       
-      <div className="p-4 rounded-lg bg-primary/10 border border-primary/30 mb-6">
+      <div className="p-4 rounded-lg bg-gradient-to-r from-violet-500/10 to-fuchsia-500/10 border border-violet-500/30 mb-6">
         <h4 className="font-medium text-white mb-2 flex items-center gap-2">
-          <Zap className="w-4 h-4 text-primary" />
-          Referral Benefits
+          <Zap className="w-4 h-4 text-violet-400" />
+          Building Towards Something Bigger
         </h4>
-        <p className="text-white/70 text-sm">
-          Referred users are tracked on-chain through Drift Protocol. As the platform grows, 
-          referral rewards may include fee discounts and other benefits.
+        <p className="text-white/70 text-sm mb-3">
+          Every referral you make is permanently recorded. As QuantumVault evolves, early supporters 
+          and active community builders will be recognized and rewarded in meaningful ways.
+        </p>
+        <p className="text-white/50 text-xs italic">
+          We're building more than just a trading platform. Your contributions today shape what's coming tomorrow.
         </p>
       </div>
       
