@@ -51,6 +51,7 @@ import {
   Settings,
   XCircle,
   RefreshCw,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   AlertDialog,
@@ -808,16 +809,27 @@ export function BotManagementDrawer({
       return;
     }
     
-    // Validate investment amount doesn't exceed bot's available equity
+    // Validate investment amount doesn't exceed available funds
+    // When Auto Top-Up is enabled, can use bot balance + agent wallet balance
     // Use small tolerance (0.01) to handle floating point precision when clicking "Max"
     const investmentValue = editMaxPositionSize ? parseFloat(editMaxPositionSize) : 0;
     const tolerance = 0.01;
-    if (investmentValue > 0 && botBalance > 0 && investmentValue > botBalance + tolerance) {
-      toast({ 
-        title: 'Investment too high', 
-        description: `Bot only has $${botBalance.toFixed(2)} available. Click "Max" to use full balance.`,
-        variant: 'destructive' 
-      });
+    const maxAvailable = editAutoTopUp ? (botBalance + mainAccountBalance) : botBalance;
+    
+    if (investmentValue > 0 && maxAvailable > 0 && investmentValue > maxAvailable + tolerance) {
+      if (editAutoTopUp) {
+        toast({ 
+          title: 'Investment too high', 
+          description: `Total available is $${maxAvailable.toFixed(2)} (bot: $${botBalance.toFixed(2)} + agent wallet: $${mainAccountBalance.toFixed(2)})`,
+          variant: 'destructive' 
+        });
+      } else {
+        toast({ 
+          title: 'Investment too high', 
+          description: `Bot only has $${botBalance.toFixed(2)} available. Enable Auto Top-Up to use agent wallet funds, or click "Max".`,
+          variant: 'destructive' 
+        });
+      }
       return;
     }
     
@@ -2086,7 +2098,7 @@ export function BotManagementDrawer({
                 {/* Auto Top-Up Toggle */}
                 <div className="flex items-center justify-between py-3 border-t border-border/50">
                   <div className="space-y-0.5">
-                    <label className="text-sm font-medium">Auto Top-Up</label>
+                    <label className={`text-sm font-medium ${mainAccountBalance <= 0 ? 'text-muted-foreground' : ''}`}>Auto Top-Up</label>
                     <p className="text-xs text-muted-foreground">
                       Automatically deposit from your agent wallet when margin is too low to trade
                     </p>
@@ -2094,13 +2106,20 @@ export function BotManagementDrawer({
                   <Switch
                     checked={editAutoTopUp}
                     onCheckedChange={setEditAutoTopUp}
+                    disabled={mainAccountBalance <= 0}
                     data-testid="switch-auto-top-up"
                   />
                 </div>
+                {mainAccountBalance <= 0 && !editAutoTopUp && (
+                  <p className="text-xs text-amber-500 flex items-center gap-1 -mt-2 pb-2">
+                    <AlertTriangle className="w-3 h-3" />
+                    Agent wallet has no USDC balance - deposit funds to enable Auto Top-Up
+                  </p>
+                )}
                 {editAutoTopUp && (
                   <p className="text-xs text-blue-500 flex items-center gap-1 -mt-2 pb-2">
                     <Info className="w-3 h-3" />
-                    When bot needs more margin, it will deposit from your agent wallet's USDC balance
+                    When bot needs more margin, it will deposit from your agent wallet (${mainAccountBalance.toFixed(2)} available)
                   </p>
                 )}
                 
