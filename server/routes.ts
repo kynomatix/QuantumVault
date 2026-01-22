@@ -2700,6 +2700,55 @@ export async function registerRoutes(
           if (baseCapital <= 0) {
             return res.status(400).json({ error: "Bot has no capital configured. Set Max Position Size." });
           }
+          
+          // Check if auto top-up can help reach full investment amount
+          if (bot.autoTopUp && baseCapital > maxTradeableValue && maxTradeableValue > 0) {
+            const requiredCollateralForFullTrade = (baseCapital / effectiveLeverage) * 1.15; // 15% buffer
+            const topUpNeeded = Math.max(0, requiredCollateralForFullTrade - freeCollateral);
+            const botSubaccountId = bot.driftSubaccountId ?? 0;
+            
+            console.log(`[ManualTrade] Auto top-up check: need $${requiredCollateralForFullTrade.toFixed(2)} collateral for $${baseCapital.toFixed(2)} trade, have $${freeCollateral.toFixed(2)}, shortfall: $${topUpNeeded.toFixed(2)}`);
+            
+            if (topUpNeeded > 0) {
+              try {
+                const agentUsdcBalance = await getAgentUsdcBalance(wallet.agentPublicKey!);
+                console.log(`[ManualTrade] Agent wallet USDC balance: $${agentUsdcBalance.toFixed(2)}, need: $${topUpNeeded.toFixed(2)}`);
+                
+                if (agentUsdcBalance >= topUpNeeded) {
+                  const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
+                  const depositResult = await executeAgentDriftDeposit(
+                    wallet.agentPublicKey!,
+                    wallet.agentPrivateKeyEncrypted,
+                    depositAmount,
+                    botSubaccountId,
+                    false
+                  );
+                  
+                  if (depositResult.success) {
+                    console.log(`[ManualTrade] Auto top-up successful: deposited $${depositAmount.toFixed(2)}, tx: ${depositResult.signature}`);
+                    freeCollateral += depositAmount;
+                    maxTradeableValue = freeCollateral * effectiveLeverage * 0.90;
+                    
+                    await storage.createEquityEvent({
+                      walletAddress: bot.walletAddress,
+                      tradingBotId: bot.id,
+                      eventType: 'auto_topup',
+                      amount: String(depositAmount),
+                      txSignature: depositResult.signature || null,
+                      notes: `Auto top-up: deposited $${depositAmount.toFixed(2)} for manual ${side} trade`,
+                    });
+                  } else {
+                    console.log(`[ManualTrade] Auto top-up failed: ${depositResult.error}`);
+                  }
+                } else {
+                  console.log(`[ManualTrade] Agent wallet ($${agentUsdcBalance.toFixed(2)}) insufficient for top-up ($${topUpNeeded.toFixed(2)})`);
+                }
+              } catch (topUpErr: any) {
+                console.log(`[ManualTrade] Auto top-up error: ${topUpErr.message}`);
+              }
+            }
+          }
+          
           tradeAmountUsd = Math.min(baseCapital, maxTradeableValue);
           console.log(`[ManualTrade] Using ${tradeAmountUsd === baseCapital ? 'full' : 'scaled'} position: $${tradeAmountUsd.toFixed(2)}`);
         }
@@ -2718,14 +2767,56 @@ export async function registerRoutes(
       // Bump up to minimum if needed
       if (contractSize < minOrderSize) {
         const minCapitalNeeded = minOrderSize * oraclePrice;
-        const maxCapacity = (freeCollateral || baseCapital / effectiveLeverage) * effectiveLeverage * 0.9;
+        let maxCapacity = (freeCollateral || baseCapital / effectiveLeverage) * effectiveLeverage * 0.9;
+        
+        // Try auto top-up if enabled and can't meet minimum
+        if (bot.autoTopUp && minCapitalNeeded > maxCapacity) {
+          const requiredCollateral = (minCapitalNeeded / effectiveLeverage) * 1.2;
+          const shortfall = Math.max(0, requiredCollateral - freeCollateral);
+          const botSubaccountId = bot.driftSubaccountId ?? 0;
+          
+          console.log(`[ManualTrade] Min order auto top-up check: need $${requiredCollateral.toFixed(2)}, have $${freeCollateral.toFixed(2)}, shortfall: $${shortfall.toFixed(2)}`);
+          
+          if (shortfall > 0) {
+            try {
+              const agentUsdcBalance = await getAgentUsdcBalance(wallet.agentPublicKey!);
+              if (agentUsdcBalance >= shortfall) {
+                const depositAmount = Math.ceil(shortfall * 100) / 100;
+                const depositResult = await executeAgentDriftDeposit(
+                  wallet.agentPublicKey!,
+                  wallet.agentPrivateKeyEncrypted,
+                  depositAmount,
+                  botSubaccountId,
+                  false
+                );
+                
+                if (depositResult.success) {
+                  console.log(`[ManualTrade] Min order auto top-up successful: deposited $${depositAmount.toFixed(2)}`);
+                  freeCollateral += depositAmount;
+                  maxCapacity = freeCollateral * effectiveLeverage * 0.9;
+                  
+                  await storage.createEquityEvent({
+                    walletAddress: bot.walletAddress,
+                    tradingBotId: bot.id,
+                    eventType: 'auto_topup',
+                    amount: String(depositAmount),
+                    txSignature: depositResult.signature || null,
+                    notes: `Auto top-up: deposited $${depositAmount.toFixed(2)} to meet ${minOrderSize} min order for ${bot.market}`,
+                  });
+                }
+              }
+            } catch (topUpErr: any) {
+              console.log(`[ManualTrade] Min order auto top-up error: ${topUpErr.message}`);
+            }
+          }
+        }
         
         if (minCapitalNeeded <= maxCapacity) {
           contractSize = minOrderSize;
           console.log(`[ManualTrade] BUMPED UP to minimum: ${minOrderSize} contracts`);
         } else {
           return res.status(400).json({ 
-            error: `Order too small. Minimum ${minOrderSize} contracts ($${minCapitalNeeded.toFixed(2)}) required, but only $${maxCapacity.toFixed(2)} capacity available.` 
+            error: `Order too small. Minimum ${minOrderSize} contracts ($${minCapitalNeeded.toFixed(2)}) required, but only $${maxCapacity.toFixed(2)} capacity available.${bot.autoTopUp ? ' Auto top-up attempted but insufficient funds in agent wallet.' : ' Enable Auto Top-Up to automatically fund from agent wallet.'}` 
           });
         }
       }
