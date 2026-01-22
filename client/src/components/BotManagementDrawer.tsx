@@ -2050,6 +2050,23 @@ export function BotManagementDrawer({
                     <Info className="w-3 h-3" />
                     Bot equity: ${botBalance.toFixed(2)}. With {editLeverage}x leverage = ${(botBalance * editLeverage).toFixed(2)} max position.
                   </p>
+                  {/* Show shortfall warning when Auto Top-Up is enabled and investment exceeds bot balance */}
+                  {editAutoTopUp && editMaxPositionSize && parseFloat(editMaxPositionSize) > botBalance && (
+                    (() => {
+                      const investmentValue = parseFloat(editMaxPositionSize);
+                      const shortfall = investmentValue - botBalance;
+                      const canCover = mainAccountBalance >= shortfall;
+                      return (
+                        <p className={`text-xs flex items-center gap-1 ${canCover ? 'text-blue-500' : 'text-red-500'}`}>
+                          {canCover ? <Info className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
+                          {canCover 
+                            ? `Auto Top-Up will deposit $${shortfall.toFixed(2)} from agent wallet when needed`
+                            : `Agent wallet ($${mainAccountBalance.toFixed(2)}) can't cover $${shortfall.toFixed(2)} shortfall - reduce investment or add funds`
+                          }
+                        </p>
+                      );
+                    })()
+                  )}
                 </div>
 
                 {/* Profit Reinvest Toggle */}
