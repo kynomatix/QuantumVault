@@ -7966,6 +7966,62 @@ export async function registerRoutes(
       
       console.log(`[Retry Trade] Retrying ${side} ${market} x${size} for bot ${bot.name}`);
       
+      // Check if auto top-up is needed before retrying
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      const baseCapital = parseFloat(bot.maxPositionSize?.toString() || '0');
+      const effectiveLeverage = Math.min(Number(bot.leverage) || 10, getMarketMaxLeverage(market) || 10);
+      
+      if (bot.autoTopUp && baseCapital > 0) {
+        try {
+          const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
+          let freeCollateral = Math.max(0, accountInfo.freeCollateral);
+          const maxTradeableValue = freeCollateral * effectiveLeverage * 0.90;
+          
+          // Check if we need top-up to reach full investment amount
+          if (baseCapital > maxTradeableValue && maxTradeableValue > 0) {
+            const requiredCollateral = (baseCapital / effectiveLeverage) * 1.15;
+            const topUpNeeded = Math.max(0, requiredCollateral - freeCollateral);
+            
+            console.log(`[Retry Trade] Auto top-up check: need $${requiredCollateral.toFixed(2)}, have $${freeCollateral.toFixed(2)}, shortfall: $${topUpNeeded.toFixed(2)}`);
+            
+            if (topUpNeeded > 0) {
+              const agentUsdcBalance = await getAgentUsdcBalance(wallet.agentPublicKey!);
+              console.log(`[Retry Trade] Agent wallet: $${agentUsdcBalance.toFixed(2)}, need: $${topUpNeeded.toFixed(2)}`);
+              
+              if (agentUsdcBalance >= topUpNeeded) {
+                const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
+                const depositResult = await executeAgentDriftDeposit(
+                  wallet.agentPublicKey!,
+                  wallet.agentPrivateKeyEncrypted,
+                  depositAmount,
+                  subAccountId,
+                  false
+                );
+                
+                if (depositResult.success) {
+                  console.log(`[Retry Trade] Auto top-up successful: deposited $${depositAmount.toFixed(2)}, tx: ${depositResult.signature}`);
+                  
+                  await storage.createEquityEvent({
+                    walletAddress,
+                    tradingBotId: bot.id,
+                    eventType: 'auto_topup',
+                    amount: String(depositAmount),
+                    txSignature: depositResult.signature || null,
+                    notes: `Auto top-up for retry: deposited $${depositAmount.toFixed(2)}`,
+                  });
+                } else {
+                  console.log(`[Retry Trade] Auto top-up failed: ${depositResult.error}`);
+                }
+              } else {
+                console.log(`[Retry Trade] Agent wallet insufficient for top-up`);
+              }
+            }
+          }
+        } catch (topUpErr: any) {
+          console.log(`[Retry Trade] Auto top-up check error: ${topUpErr.message}`);
+        }
+      }
+      
       // Get private key
       const { getAgentKeypair } = await import('./agent-wallet');
       const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
