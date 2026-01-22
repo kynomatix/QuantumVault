@@ -5365,6 +5365,16 @@ export async function registerRoutes(
                   // Clear pause reason since we topped up
                   await storage.updateTradingBot(bot.id, { pauseReason: null } as any);
                   
+                  // Record auto top-up as equity event for monitoring
+                  await storage.createEquityEvent({
+                    walletAddress: bot.walletAddress,
+                    tradingBotId: bot.id,
+                    eventType: 'auto_topup',
+                    amount: String(depositAmount),
+                    txSignature: depositResult.signature || null,
+                    notes: `Auto top-up triggered: margin $${freeCollateral.toFixed(2)} insufficient for ${minOrderSize} ${bot.market} (need $${requiredCollateral.toFixed(2)})`,
+                  });
+                  
                   // Update freeCollateral and recalculate
                   freeCollateral += depositAmount;
                   finalContractSize = minOrderSize;
