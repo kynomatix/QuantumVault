@@ -453,7 +453,7 @@ async function routeSignalToSubscribers(
             // freeCollateral is margin capacity (USD), multiply by leverage to get max notional position size
             // CRITICAL: Use effectiveLeverage (capped by market's max) to avoid InsufficientCollateral errors
             const maxNotionalCapacity = freeCollateral * effectiveLeverage;
-            const maxTradeableValue = maxNotionalCapacity * 0.90; // 90% buffer for fees/slippage
+            const maxTradeableValue = maxNotionalCapacity * 0.80; // 80% buffer for fees/slippage/oracle drift
             
             if (botLeverage > marketMaxLeverage) {
               console.log(`[Subscriber Routing] Bot ${subBot.id}: Leverage capped ${botLeverage}x → ${marketMaxLeverage}x (${subBot.market} max)`);
@@ -2925,7 +2925,7 @@ export async function registerRoutes(
         freeCollateral = Math.max(0, accountInfo.freeCollateral);
         // CRITICAL: Use effectiveLeverage (capped by market's max) to avoid InsufficientCollateral errors
         const maxNotionalCapacity = freeCollateral * effectiveLeverage;
-        maxTradeableValue = maxNotionalCapacity * 0.90;
+        maxTradeableValue = maxNotionalCapacity * 0.80; // 80% buffer for fees/slippage/oracle drift
 
         if (profitReinvestEnabled) {
           if (maxTradeableValue <= 0) {
@@ -2964,7 +2964,7 @@ export async function registerRoutes(
                   if (depositResult.success) {
                     console.log(`[ManualTrade] Auto top-up successful: deposited $${depositAmount.toFixed(2)}, tx: ${depositResult.signature}`);
                     freeCollateral += depositAmount;
-                    maxTradeableValue = freeCollateral * effectiveLeverage * 0.90;
+                    maxTradeableValue = freeCollateral * effectiveLeverage * 0.80;
                     
                     await storage.createEquityEvent({
                       walletAddress: bot.walletAddress,
@@ -5706,7 +5706,7 @@ export async function registerRoutes(
         freeCollateral = Math.max(0, accountInfo.freeCollateral);
         // CRITICAL: Use effectiveLeverage (capped by market's max) to avoid InsufficientCollateral errors
         const maxNotionalCapacity = freeCollateral * effectiveLeverage;
-        maxTradeableValue = maxNotionalCapacity * 0.90; // 90% buffer for fees/slippage
+        maxTradeableValue = maxNotionalCapacity * 0.80; // 80% buffer for fees/slippage/oracle drift
         
         if (profitReinvestEnabled) {
           // PROFIT REINVEST MODE: Use full available margin instead of fixed maxPositionSize
@@ -5719,7 +5719,7 @@ export async function registerRoutes(
           // Calculate requested trade size, then cap to available margin
           const requestedAmount = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
           tradeAmountUsd = Math.min(requestedAmount, maxTradeableValue); // CRITICAL: Never exceed available margin
-          console.log(`[Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
+          console.log(`[Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x × 80% = $${maxTradeableValue.toFixed(2)} max`);
           if (requestedAmount > maxTradeableValue) {
             console.log(`[Webhook] Requested $${requestedAmount.toFixed(2)} exceeds available, capped to $${tradeAmountUsd.toFixed(2)}`);
           } else {
@@ -5729,7 +5729,7 @@ export async function registerRoutes(
           // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
           tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
           console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
-          console.log(`[Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
+          console.log(`[Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 80% buffer)`);
           
           if (maxTradeableValue <= 0) {
             console.log(`[Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
@@ -5761,7 +5761,7 @@ export async function registerRoutes(
                       console.log(`[Webhook] Auto top-up successful: deposited $${depositAmount.toFixed(2)} to reach full investment, tx: ${depositResult.signature}`);
                       // Update freeCollateral and maxTradeableValue after deposit
                       freeCollateral += depositAmount;
-                      maxTradeableValue = freeCollateral * effectiveLeverage * 0.90;
+                      maxTradeableValue = freeCollateral * effectiveLeverage * 0.80;
                       
                       // Record auto top-up event
                       await storage.createEquityEvent({
@@ -6733,7 +6733,7 @@ export async function registerRoutes(
         const freeCollateral = Math.max(0, accountInfo.freeCollateral);
         // CRITICAL: Use effectiveLeverage (capped by market's max) to avoid InsufficientCollateral errors
         const maxNotionalCapacity = freeCollateral * effectiveLeverage;
-        maxTradeableValue = maxNotionalCapacity * 0.90;
+        maxTradeableValue = maxNotionalCapacity * 0.80; // 80% buffer for fees/slippage/oracle drift
         
         if (profitReinvestEnabled) {
           // PROFIT REINVEST MODE: Use full available margin instead of fixed maxPositionSize
@@ -6745,7 +6745,7 @@ export async function registerRoutes(
           // Calculate requested trade size, then cap to available margin
           const requestedAmount = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
           tradeAmountUsd = Math.min(requestedAmount, maxTradeableValue); // CRITICAL: Never exceed available margin
-          console.log(`[User Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
+          console.log(`[User Webhook] PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x × 80% = $${maxTradeableValue.toFixed(2)} max`);
           if (requestedAmount > maxTradeableValue) {
             console.log(`[User Webhook] Requested $${requestedAmount.toFixed(2)} exceeds available, capped to $${tradeAmountUsd.toFixed(2)}`);
           } else {
@@ -6755,7 +6755,7 @@ export async function registerRoutes(
           // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
           tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
           console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
-          console.log(`[User Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 90% buffer)`);
+          console.log(`[User Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 80% buffer)`);
           
           if (maxTradeableValue <= 0) {
             console.log(`[User Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
@@ -8343,15 +8343,29 @@ export async function registerRoutes(
       const baseCapital = parseFloat(bot.maxPositionSize?.toString() || '0');
       const effectiveLeverage = Math.min(Number(bot.leverage) || 10, getMarketMaxLeverage(market) || 10);
       
-      if (bot.autoTopUp && baseCapital > 0) {
+      // Get oracle price to calculate the actual trade notional value
+      let tradeNotionalValue = 0;
+      try {
+        const prices = await import('./price-cache').then(m => m.getCachedPrices());
+        const oraclePrice = prices[market] || 0;
+        tradeNotionalValue = size * oraclePrice;
+      } catch (e) {
+        console.log(`[Retry Trade] Could not get oracle price for notional calc`);
+      }
+      
+      // Use the LARGER of baseCapital or actual trade notional value for auto top-up check
+      // This fixes the bug where trades scaled to fit 90% margin fail, but baseCapital is lower
+      const capitalForTopUpCheck = Math.max(baseCapital, tradeNotionalValue);
+      
+      if (bot.autoTopUp && capitalForTopUpCheck > 0) {
         try {
           const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
           let freeCollateral = Math.max(0, accountInfo.freeCollateral);
-          const maxTradeableValue = freeCollateral * effectiveLeverage * 0.90;
+          const maxTradeableValue = freeCollateral * effectiveLeverage * 0.80; // 80% buffer for retries (stricter)
           
-          // Check if we need top-up to reach full investment amount
-          if (baseCapital > maxTradeableValue && maxTradeableValue > 0) {
-            const requiredCollateral = (baseCapital / effectiveLeverage) * 1.15;
+          // Check if we need top-up to execute the actual trade size
+          if (capitalForTopUpCheck > maxTradeableValue) {
+            const requiredCollateral = (capitalForTopUpCheck / effectiveLeverage) * 1.20; // 20% extra buffer
             const topUpNeeded = Math.max(0, requiredCollateral - freeCollateral);
             
             console.log(`[Retry Trade] Auto top-up check: need $${requiredCollateral.toFixed(2)}, have $${freeCollateral.toFixed(2)}, shortfall: $${topUpNeeded.toFixed(2)}`);

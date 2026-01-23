@@ -34,7 +34,7 @@ Preferred communication style: Simple, everyday language.
 -   **Automated Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol, with logic for converting `contracts` to a percentage of `bot.maxPositionSize`.
 -   **Robust Position Management**: Includes close signal detection, position flip detection, and precise close order execution with dust cleanup.
 -   **Bot Lifecycle Management**: Bots can be paused (closes open positions) and deleted (includes safety checks, auto-sweep, and subaccount closure).
--   **Dynamic Order Scaling**: Trades are automatically scaled down based on available margin and scaled up with equity recovery.
+-   **Dynamic Order Scaling**: Trades are automatically scaled down to 80% of available margin capacity (accounting for fees/slippage/oracle drift) and scaled up with equity recovery.
 -   **Profit Management**: Supports profit reinvestment (with automatic PnL settlement after position closes) and automatic withdrawal of excess profits.
 -   **Dynamic USDC Deposit APY**: Fetches real-time USDC lending APY from Drift Data API.
 -   **Reset Drift Account Feature**: A one-click solution to fully reset a user's Drift account, preserving the main Drift account (subaccount 0).
@@ -43,6 +43,7 @@ Preferred communication style: Simple, everyday language.
 -   **Account Health Metrics**: Uses SDK `decodeUser` for accurate account health, collateral, and liquidation price estimates.
 -   **Webhook Deduplication**: `webhook_logs` table prevents duplicate processing of TradingView signals.
 -   **Automatic Trade Retry**: Failed trades due to rate limiting are automatically queued for retry with exponential backoff. CLOSE orders get critical priority (10 attempts, shorter backoff) to prevent losses from failed position closures. On-chain position verification prevents duplicate closes.
+-   **Auto Top-Up on Retry**: When retrying trades that failed with InsufficientCollateral, uses the actual trade notional value (size × price) instead of baseCapital for top-up calculation. Applies 80% margin buffer with 20% extra collateral buffer to prevent repeated failures.
 -   **Equity Event Tracking**: Monitors deposits and withdrawals for transaction history.
 -   **Marketplace Feature**: Users can publish signal bots and subscribe to others' trading signals, with proportional trade sizing and PnL snapshots.
 -   **Creator Profit Sharing**: Signal bot creators earn 0-10% of subscriber profits on each profitable trade close. Uses immediate on-chain USDC transfers with IOU failover system for failed transactions. Background retry job processes pending IOUs every 5 minutes with TTL enforcement (50 retries or 7 days max). Hostage prevention blocks withdrawal/deletion until IOUs are paid.
