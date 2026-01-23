@@ -545,3 +545,38 @@ export function useBotPerformance(botId: string | null) {
     enabled: !!botId,
   });
 }
+
+export interface PortfolioPerformanceData {
+  currentBalance: number;
+  totalDeposits: number;
+  totalWithdrawals: number;
+  netPnl: number;
+  pnlPercent: number;
+  activeBotCount: number;
+  totalBots: number;
+  totalTrades: number;
+  totalVolume: number;
+  creatorEarnings: number;
+  chartData: Array<{ date: string; netPnl: number; balance: number }>;
+}
+
+async function fetchPortfolioPerformance(): Promise<PortfolioPerformanceData | null> {
+  try {
+    const res = await fetch("/api/portfolio-performance", { credentials: "include" });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export function usePortfolioPerformance() {
+  const { publicKeyString, sessionConnected } = useWallet();
+  return useQuery({
+    queryKey: ["portfolioPerformance", publicKeyString],
+    queryFn: fetchPortfolioPerformance,
+    enabled: !!publicKeyString && sessionConnected,
+    refetchInterval: 30000,
+    staleTime: 20000,
+  });
+}

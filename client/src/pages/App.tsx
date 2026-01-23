@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import bs58 from 'bs58';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, useUnsubscribeFromBot, type HealthMetrics, type PublishedBot } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, useUnsubscribeFromBot, usePortfolioPerformance, type HealthMetrics, type PublishedBot, type PortfolioPerformanceData } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet, 
@@ -50,7 +50,9 @@ import {
   Sliders,
   User,
   BarChart3,
-  BookOpen
+  BookOpen,
+  Info,
+  DollarSign
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -77,6 +79,7 @@ import { PublishBotModal } from '@/components/PublishBotModal';
 import { SubscribeBotModal } from '@/components/SubscribeBotModal';
 import { BotDetailsModal } from '@/components/BotDetailsModal';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
+import { AreaChart, Area, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
 interface TradingBot {
   id: string;
@@ -104,7 +107,7 @@ import { Transaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 
-type NavItem = 'dashboard' | 'bots' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet';
+type NavItem = 'dashboard' | 'bots' | 'portfolio' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet';
 type MarketplaceSortBy = 'pnl7d' | 'pnl30d' | 'pnl90d' | 'pnlAllTime' | 'subscribers';
 
 export default function AppPage() {
@@ -212,6 +215,9 @@ export default function AppPage() {
   const { data: myPublishedBots, refetch: refetchMyPublishedBots } = useMyPublishedBots();
   const unpublishBotMutation = useUnpublishBot();
   const unsubscribeMutation = useUnsubscribeFromBot();
+  
+  // Portfolio performance data
+  const { data: portfolioPerformanceData, isLoading: portfolioPerformanceLoading } = usePortfolioPerformance();
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [driftBalance, setDriftBalance] = useState<number | null>(null);
@@ -1193,6 +1199,7 @@ export default function AppPage() {
             {[
               { id: 'dashboard' as NavItem, icon: LayoutDashboard, label: 'Dashboard' },
               { id: 'bots' as NavItem, icon: Bot, label: 'My Bots' },
+              { id: 'portfolio' as NavItem, icon: BarChart3, label: 'Portfolio' },
               { id: 'marketplace' as NavItem, icon: Store, label: 'Marketplace' },
               { id: 'wallet' as NavItem, icon: Wallet, label: 'Wallet' },
               { id: 'leaderboard' as NavItem, icon: Users, label: 'Leaderboard' },
@@ -2100,6 +2107,218 @@ export default function AppPage() {
                     >
                       <Plus className="w-4 h-4 mr-2" />
                       Create Your First Bot
+                    </Button>
+                  </div>
+                )}
+              </motion.div>
+            )}
+
+            {activeNav === 'portfolio' && (
+              <motion.div
+                key="portfolio"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-6"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h1 className="text-2xl font-display font-bold">Portfolio Performance</h1>
+                    <p className="text-muted-foreground">Track your TRUE trading P&L</p>
+                  </div>
+                </div>
+
+                {portfolioPerformanceLoading ? (
+                  <div className="flex items-center justify-center py-20">
+                    <Loader2 className="w-8 h-8 animate-spin text-primary" />
+                    <span className="ml-3 text-muted-foreground">Loading portfolio data...</span>
+                  </div>
+                ) : portfolioPerformanceData ? (
+                  <>
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div className="gradient-border p-4 noise">
+                        <div className="flex items-center gap-2 mb-1">
+                          <DollarSign className="w-4 h-4 text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">Current Balance</p>
+                        </div>
+                        <p className="text-2xl font-bold font-mono" data-testid="text-portfolio-balance">
+                          ${portfolioPerformanceData.currentBalance.toFixed(2)}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">USDC</p>
+                      </div>
+                      <div className="gradient-border p-4 noise relative">
+                        <div className="flex items-center gap-2 mb-1">
+                          <TrendingUp className="w-4 h-4 text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">Net P&L</p>
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Info className="w-3 h-3 text-muted-foreground cursor-help" />
+                              </TooltipTrigger>
+                              <TooltipContent side="top" className="max-w-xs">
+                                <p className="text-xs">True P&L = Current Balance - Total Deposits + Total Withdrawals. This shows your actual trading performance, not inflated by deposits.</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        </div>
+                        <p className={`text-2xl font-bold font-mono ${portfolioPerformanceData.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`} data-testid="text-portfolio-pnl">
+                          {portfolioPerformanceData.netPnl >= 0 ? '+' : ''}${portfolioPerformanceData.netPnl.toFixed(2)}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">True trading performance</p>
+                      </div>
+                      <div className="gradient-border p-4 noise">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Activity className="w-4 h-4 text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">P&L Percentage</p>
+                        </div>
+                        <p className={`text-2xl font-bold font-mono ${portfolioPerformanceData.pnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}`} data-testid="text-portfolio-pnl-percent">
+                          {portfolioPerformanceData.pnlPercent >= 0 ? '+' : ''}{portfolioPerformanceData.pnlPercent.toFixed(2)}%
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">Return on deposits</p>
+                      </div>
+                      <div className="gradient-border p-4 noise">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Wallet className="w-4 h-4 text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">Deposits / Withdrawals</p>
+                        </div>
+                        <div className="flex items-baseline gap-2">
+                          <p className="text-lg font-bold font-mono text-emerald-400" data-testid="text-portfolio-deposits">
+                            +${portfolioPerformanceData.totalDeposits.toFixed(2)}
+                          </p>
+                          <span className="text-muted-foreground">/</span>
+                          <p className="text-lg font-bold font-mono text-red-400" data-testid="text-portfolio-withdrawals">
+                            -${portfolioPerformanceData.totalWithdrawals.toFixed(2)}
+                          </p>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">USDC flows</p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div className="gradient-border p-4 noise">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Bot className="w-4 h-4 text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">Active / Total Bots</p>
+                        </div>
+                        <p className="text-2xl font-bold font-mono" data-testid="text-portfolio-bots">
+                          {portfolioPerformanceData.activeBotCount} <span className="text-muted-foreground text-lg">/ {portfolioPerformanceData.totalBots}</span>
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">Trading bots</p>
+                      </div>
+                      <div className="gradient-border p-4 noise">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Activity className="w-4 h-4 text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">Total Trades</p>
+                        </div>
+                        <p className="text-2xl font-bold font-mono" data-testid="text-portfolio-trades">
+                          {portfolioPerformanceData.totalTrades.toLocaleString()}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">Executed trades</p>
+                      </div>
+                      <div className="gradient-border p-4 noise">
+                        <div className="flex items-center gap-2 mb-1">
+                          <BarChart3 className="w-4 h-4 text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">Total Volume</p>
+                        </div>
+                        <p className="text-2xl font-bold font-mono" data-testid="text-portfolio-volume">
+                          ${portfolioPerformanceData.totalVolume >= 1000000 
+                            ? (portfolioPerformanceData.totalVolume / 1000000).toFixed(2) + 'M' 
+                            : portfolioPerformanceData.totalVolume >= 1000 
+                              ? (portfolioPerformanceData.totalVolume / 1000).toFixed(2) + 'K' 
+                              : portfolioPerformanceData.totalVolume.toFixed(2)}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">USDC traded</p>
+                      </div>
+                      <div className="gradient-border p-4 noise">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Share2 className="w-4 h-4 text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">Creator Earnings</p>
+                        </div>
+                        <p className="text-2xl font-bold font-mono text-primary" data-testid="text-portfolio-creator-earnings">
+                          ${portfolioPerformanceData.creatorEarnings.toFixed(2)}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">From signal sharing</p>
+                      </div>
+                    </div>
+
+                    <div className="gradient-border p-6 noise">
+                      <div className="flex items-center justify-between mb-4">
+                        <h2 className="font-display font-semibold">P&L History</h2>
+                        <p className="text-sm text-muted-foreground">Net P&L over time</p>
+                      </div>
+                      {portfolioPerformanceData.chartData && portfolioPerformanceData.chartData.length > 0 ? (
+                        <div className="h-[300px]" data-testid="portfolio-pnl-chart">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <AreaChart data={portfolioPerformanceData.chartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                              <defs>
+                                <linearGradient id="colorPnlPositive" x1="0" y1="0" x2="0" y2="1">
+                                  <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
+                                  <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                                </linearGradient>
+                                <linearGradient id="colorPnlNegative" x1="0" y1="0" x2="0" y2="1">
+                                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
+                                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                                </linearGradient>
+                              </defs>
+                              <XAxis 
+                                dataKey="date" 
+                                stroke="#6b7280"
+                                tick={{ fill: '#9ca3af', fontSize: 12 }}
+                                tickFormatter={(value) => {
+                                  const date = new Date(value);
+                                  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                                }}
+                              />
+                              <YAxis 
+                                stroke="#6b7280"
+                                tick={{ fill: '#9ca3af', fontSize: 12 }}
+                                tickFormatter={(value) => `$${value >= 1000 ? (value / 1000).toFixed(1) + 'K' : value.toFixed(0)}`}
+                              />
+                              <RechartsTooltip 
+                                contentStyle={{ 
+                                  backgroundColor: 'rgba(23, 23, 23, 0.95)', 
+                                  border: '1px solid rgba(255,255,255,0.1)', 
+                                  borderRadius: '8px',
+                                  padding: '8px 12px'
+                                }}
+                                labelStyle={{ color: '#9ca3af' }}
+                                formatter={(value: number) => [`$${value.toFixed(2)}`, 'Net P&L']}
+                                labelFormatter={(label) => new Date(label).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                              />
+                              <ReferenceLine y={0} stroke="#6b7280" strokeDasharray="3 3" />
+                              <Area 
+                                type="monotone" 
+                                dataKey="netPnl" 
+                                stroke={portfolioPerformanceData.netPnl >= 0 ? '#10b981' : '#ef4444'}
+                                strokeWidth={2}
+                                fill={portfolioPerformanceData.netPnl >= 0 ? 'url(#colorPnlPositive)' : 'url(#colorPnlNegative)'}
+                              />
+                            </AreaChart>
+                          </ResponsiveContainer>
+                        </div>
+                      ) : (
+                        <div className="h-[300px] flex items-center justify-center text-muted-foreground">
+                          <div className="text-center">
+                            <BarChart3 className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                            <p>No P&L history available yet</p>
+                            <p className="text-sm mt-1">Start trading to see your performance chart</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="gradient-border p-8 noise text-center">
+                    <BarChart3 className="w-16 h-16 mx-auto mb-4 text-muted-foreground opacity-50" />
+                    <h3 className="text-lg font-semibold mb-2">No Portfolio Data</h3>
+                    <p className="text-muted-foreground mb-4">Start trading to see your portfolio performance</p>
+                    <Button 
+                      className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                      onClick={() => setActiveNav('bots')}
+                      data-testid="button-go-to-bots"
+                    >
+                      <Bot className="w-4 h-4 mr-2" />
+                      Create a Bot
                     </Button>
                   </div>
                 )}
