@@ -23,6 +23,30 @@ The following critical fixes were incorporated after external review:
 
 ---
 
+## RPC Optimization Summary
+
+Per-profitable-close RPC call budget (target: minimize without sacrificing reliability):
+
+| Operation | RPC Calls | Optimization Applied |
+|-----------|-----------|---------------------|
+| Validation (steps 1-5) | 0 | Pure logic, DB query only |
+| Drift withdrawal | 3-5 | Unavoidable (SDK-managed) |
+| Transfer to creator | 3-4 | Batched lookups + blockhash reuse |
+| **Total** | **6-9** | Down from 9-11 |
+
+**Key Optimizations:**
+1. **Batch account lookups**: `getMultipleAccountsInfo([agent, creatorATA])` instead of 2 separate calls
+2. **Skip redundant USDC check**: After Drift withdrawal succeeds, balance is guaranteed
+3. **Reuse blockhash**: Pass `recentBlockhash` from Drift withdrawal to transfer function
+4. **Early exit validation**: 5 validation steps before any RPC call
+
+**Why not fewer?**
+- Drift SDK withdrawal is opaque (3-5 calls unavoidable)
+- Transaction send + confirmation are mandatory (2 calls)
+- SOL balance check is safety-critical (batched into 1 call)
+
+---
+
 ## Current Architecture Context
 
 ### Existing Flow
@@ -258,42 +282,47 @@ async getBotSubscriptionBySubscriberBotId(botId: string): Promise<(BotSubscripti
 }
 ```
 
-### 2. Helper: `getAgentSolBalance()`
+### 2. RPC-Optimized Transfer: `transferUsdcToWallet()`
 
 **Location**: `server/agent-wallet.ts`
 
-**Purpose**: Check agent wallet SOL balance for gas fees
+**Purpose**: Transfer USDC from subscriber's agent wallet to creator's main Phantom wallet
 
-```typescript
-export async function getAgentSolBalance(agentPublicKey: string): Promise<number> {
-  const connection = getConnection();
-  const pubkey = new PublicKey(agentPublicKey);
-  const balance = await connection.getBalance(pubkey);
-  return balance / 1_000_000_000; // Convert lamports to SOL
-}
+**RPC Optimization**: Batch account lookups, skip redundant balance check
+
 ```
+BEFORE (9-11 RPC calls):
+1. getBalance (SOL check)
+2. getTokenAccountBalance (USDC check)
+3. getAccountInfo (creator ATA check)
+4. getLatestBlockhash
+5. sendRawTransaction
+6. confirmTransaction (polling)
++ Drift withdrawal calls
 
-### 3. USDC Transfer: `transferUsdcToWallet()`
+AFTER (5-7 RPC calls):
+1. getMultipleAccountsInfo (SOL + creator ATA in 1 call)
+2. getLatestBlockhash
+3. sendRawTransaction  
+4. confirmTransaction (polling)
++ Drift withdrawal calls
 
-**Location**: `server/agent-wallet.ts`
-
-**Purpose**: Transfer USDC from subscriber's agent wallet to any Solana wallet (creator's main Phantom wallet)
-
-**NOTE**: Receiver doesn't need to sign - we can send to any valid Solana address.
-Sending to creator's MAIN wallet (Phantom) is better UX than requiring an agent wallet.
+SAVINGS: 3-4 fewer RPC calls per profitable close
+```
 
 ```typescript
 export async function transferUsdcToWallet(
   fromAgentPublicKey: string,
   fromEncryptedPrivateKey: string,
-  toWalletAddress: string,  // Any Solana wallet (creator's Phantom)
+  toWalletAddress: string,  // Creator's Phantom wallet
   amountUsdc: number,
-): Promise<{ success: boolean; signature?: string; error?: string }> {
+  recentBlockhash?: { blockhash: string; lastValidBlockHeight: number },  // Reuse from Drift withdrawal
+): Promise<{ success: boolean; signature?: string; error?: string; solBalance?: number }> {
   try {
     const connection = getConnection();
     const fromKeypair = getAgentKeypair(fromEncryptedPrivateKey);
     const fromPubkey = new PublicKey(fromAgentPublicKey);
-    const toPubkey = new PublicKey(toAgentPublicKey);
+    const toPubkey = new PublicKey(toWalletAddress);
     const usdcMint = new PublicKey(USDC_MINT);
     
     const fromAta = getAssociatedTokenAddressSync(usdcMint, fromPubkey);
@@ -304,16 +333,24 @@ export async function transferUsdcToWallet(
       return { success: false, error: 'Invalid amount' };
     }
     
-    // Check balance first
-    const balance = await getAgentUsdcBalance(fromAgentPublicKey);
-    if (balance < amountUsdc) {
-      return { success: false, error: `Insufficient balance: ${balance} < ${amountUsdc}` };
+    // RPC OPTIMIZATION: Batch fetch agent SOL balance + creator ATA in 1 call
+    const [agentAccountInfo, toAtaInfo] = await connection.getMultipleAccountsInfo([
+      fromPubkey,  // Agent wallet (for SOL balance)
+      toAta,       // Creator's USDC ATA (check if exists)
+    ]);
+    
+    // Check SOL balance for gas fees (~0.003 SOL needed)
+    const solBalance = (agentAccountInfo?.lamports || 0) / 1_000_000_000;
+    if (solBalance < 0.003) {
+      return { success: false, error: `Insufficient SOL for gas: ${solBalance}`, solBalance };
     }
+    
+    // NOTE: Skip USDC balance check - Drift withdrawal already succeeded,
+    // so balance is guaranteed. Checking again would be redundant RPC call.
     
     const instructions: TransactionInstruction[] = [];
     
-    // Create destination ATA if it doesn't exist
-    const toAtaInfo = await connection.getAccountInfo(toAta);
+    // Create destination ATA if it doesn't exist (already checked via batch)
     if (!toAtaInfo) {
       instructions.push(
         createAssociatedTokenAccountInstruction(
@@ -330,7 +367,9 @@ export async function transferUsdcToWallet(
       createTransferInstruction(fromAta, toAta, fromPubkey, BigInt(amountLamports))
     );
     
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    // RPC OPTIMIZATION: Reuse blockhash from Drift withdrawal if provided
+    const { blockhash, lastValidBlockHeight } = recentBlockhash || 
+      await connection.getLatestBlockhash();
     
     const transaction = new Transaction({
       feePayer: fromPubkey,
@@ -349,32 +388,38 @@ export async function transferUsdcToWallet(
       { skipPreflight: false, preflightCommitment: 'confirmed' }
     );
     
-    // Wait for confirmation (non-blocking timeout)
+    // Wait for confirmation
     await connection.confirmTransaction({
       signature,
       blockhash,
       lastValidBlockHeight,
     }, 'confirmed');
     
-    return { success: true, signature };
+    return { success: true, signature, solBalance };
   } catch (error: any) {
-    console.error('[TransferBetweenAgents] Error:', error.message);
+    console.error('[TransferToWallet] Error:', error.message);
     return { success: false, error: error.message };
   }
 }
 ```
 
-### 4. Profit Share: `distributeCreatorProfitShare()`
+### 3. Profit Share: `distributeCreatorProfitShare()`
 
 **Location**: `server/routes.ts` (or new `server/profit-share.ts`)
 
-**Purpose**: Main profit share distribution logic
+**Purpose**: Main profit share distribution logic (RPC-optimized)
 
 **IMPORTANT: `realizedPnl` must be NET profit (after Drift fees)**
 The `closeTradePnl` calculated in routes.ts already subtracts fees:
 ```typescript
 tradePnl = (fillPrice - entryPrice) * closeSize - closeFee;  // Already net
 ```
+
+**RPC Optimization Summary:**
+- Steps 1-5: No RPC calls (pure validation logic)
+- Step 6: Drift withdrawal (~3-5 RPC calls, unavoidable)
+- Step 7: Transfer uses batched `getMultipleAccountsInfo` + blockhash reuse (3-4 RPC calls)
+- **Total: 6-9 RPC calls** (down from 9-11)
 
 ```typescript
 async function distributeCreatorProfitShare(
@@ -384,17 +429,16 @@ async function distributeCreatorProfitShare(
   subAccountId: number,
 ): Promise<{ success: boolean; txSignature?: string; amount?: number; skipped?: string; iouCreated?: boolean }> {
   
-  // 1. Skip if PnL is not positive
+  // 1-5: Pure validation (NO RPC CALLS)
   if (netRealizedPnl <= 0) {
     return { success: true, skipped: 'No profit to share' };
   }
   
-  // 2. Check if this is a subscription bot
   if (!subscriberBot.sourcePublishedBotId) {
     return { success: true, skipped: 'Not a subscription bot' };
   }
   
-  // 3. Get subscription and published bot details
+  // DB query (not RPC)
   const subscription = await storage.getBotSubscriptionBySubscriberBotId(subscriberBot.id);
   if (!subscription) {
     return { success: true, skipped: 'No active subscription found' };
@@ -405,36 +449,18 @@ async function distributeCreatorProfitShare(
     return { success: true, skipped: 'No profit share configured' };
   }
   
-  // 4. Calculate creator's share
   const creatorShare = netRealizedPnl * (profitSharePercent / 100);
-  
-  // 5. Skip dust amounts (less than 1 cent)
   if (creatorShare < 0.01) {
     return { success: true, skipped: `Dust amount: $${creatorShare.toFixed(4)}` };
   }
   
-  // 6. Get creator's main wallet address (destination for profit share)
-  // NOTE: We send to creator's MAIN wallet (Phantom), not agent wallet
-  // Receiver doesn't need to sign - any valid Solana address works
   const creatorMainWallet = subscription.publishedBot.creatorWalletAddress;
   if (!creatorMainWallet) {
-    console.warn(`[ProfitShare] Creator wallet not found in published bot`);
     return { success: false, error: 'Creator wallet not found' };
   }
   
-  // 7. PRE-FLIGHT CHECK: Verify subscriber agent has enough SOL for gas
-  // Need ~0.003 SOL for tx fee + potential ATA rent for creator
-  const MIN_SOL_FOR_GAS = 0.003;
-  const agentSolBalance = await getAgentSolBalance(subscriberWallet.agentPublicKey!);
-  if (agentSolBalance < MIN_SOL_FOR_GAS) {
-    console.warn(`[ProfitShare] Insufficient SOL for gas: ${agentSolBalance} < ${MIN_SOL_FOR_GAS}`);
-    // Create IOU and fail over - subscriber needs to top up SOL
-    return { success: false, error: `Insufficient SOL for gas: ${agentSolBalance}` };
-  }
-  
-  // 8. WITHDRAW from Drift to agent wallet
-  // CRITICAL: Profit is in Drift subaccount collateral, not agent SPL wallet
-  // Must withdraw before we can transfer to creator
+  // 6. WITHDRAW from Drift to agent wallet (~3-5 RPC calls)
+  // CRITICAL: Profit is in Drift subaccount, not agent SPL wallet
   console.log(`[ProfitShare] Withdrawing $${creatorShare.toFixed(4)} from Drift subaccount ${subAccountId}`);
   const withdrawResult = await withdrawFromDrift(
     subscriberWallet,
@@ -446,22 +472,24 @@ async function distributeCreatorProfitShare(
     return { success: false, error: `Drift withdrawal failed: ${withdrawResult.error}` };
   }
   
-  // 9. Execute the transfer to creator's MAIN wallet
-  console.log(`[ProfitShare] Transferring $${creatorShare.toFixed(4)} (${profitSharePercent}% of $${netRealizedPnl.toFixed(4)}) to creator ${creatorMainWallet}`);
+  // 7. Transfer to creator (3-4 RPC calls with optimizations)
+  // - SOL balance check is batched inside transferUsdcToWallet
+  // - Blockhash can be reused from Drift withdrawal if returned
+  console.log(`[ProfitShare] Transferring $${creatorShare.toFixed(4)} (${profitSharePercent}%) to ${creatorMainWallet}`);
   
   const transferResult = await transferUsdcToWallet(
     subscriberWallet.agentPublicKey!,
     subscriberWallet.agentPrivateKeyEncrypted!,
-    creatorMainWallet,  // Creator's MAIN wallet (Phantom), not agent
-    creatorShare
+    creatorMainWallet,
+    creatorShare,
+    withdrawResult.recentBlockhash  // RPC OPTIMIZATION: Reuse blockhash
   );
   
   if (transferResult.success) {
-    console.log(`[ProfitShare] SUCCESS: $${creatorShare.toFixed(4)} sent to creator, tx: ${transferResult.signature}`);
+    console.log(`[ProfitShare] SUCCESS: $${creatorShare.toFixed(4)} sent, tx: ${transferResult.signature}`);
     return { success: true, txSignature: transferResult.signature, amount: creatorShare };
   } else {
     console.error(`[ProfitShare] FAILED: ${transferResult.error}`);
-    // Transfer failed - IOU will be created by caller
     return { success: false, error: transferResult.error, iouCreated: true };
   }
 }
@@ -505,7 +533,7 @@ If we try to transfer before withdrawing, the agent wallet has insufficient USDC
 | File | Location | Change |
 |------|----------|--------|
 | `server/storage.ts` | Interface + implementation | Add `getBotSubscriptionBySubscriberBotId()` |
-| `server/agent-wallet.ts` | New exports | Add `transferUsdcToWallet()`, `getAgentSolBalance()` |
+| `server/agent-wallet.ts` | New export | Add `transferUsdcToWallet()` (RPC-optimized) |
 | `server/routes.ts` | After close in webhook (~line 4906) | Call `distributeCreatorProfitShare()` |
 | `server/routes.ts` | After close in user webhook (~line 6162) | Call `distributeCreatorProfitShare()` |
 | `server/routes.ts` | After manual close (~line 2450) | Call `distributeCreatorProfitShare()` |
@@ -592,8 +620,7 @@ Conclusion: Gas cost is negligible. Immediate on-chain settlement is practical.
 
 ### Phase 1: Core Transfer System (3-4 hours)
 - [ ] Add `getBotSubscriptionBySubscriberBotId()` to storage interface and implementation
-- [ ] Add `getAgentSolBalance()` to agent-wallet.ts
-- [ ] Add `transferUsdcToWallet()` to agent-wallet.ts
+- [ ] Add `transferUsdcToWallet()` to agent-wallet.ts (RPC-optimized with batched lookups)
 - [ ] Add `distributeCreatorProfitShare()` function
 - [ ] Integrate into webhook close handler
 - [ ] Integrate into user webhook close handler
@@ -685,9 +712,8 @@ The profit share implementation reuses existing infrastructure:
 
 **Phase 1 - Core Transfer:**
 - 1 storage function: `getBotSubscriptionBySubscriberBotId()` (~15 lines)
-- 1 helper function: `getAgentSolBalance()` (~10 lines)
-- 1 transfer function: `transferUsdcToWallet()` (~60 lines)
-- 1 distribution function: `distributeCreatorProfitShare()` (~60 lines)
+- 1 transfer function: `transferUsdcToWallet()` (~70 lines, RPC-optimized)
+- 1 distribution function: `distributeCreatorProfitShare()` (~50 lines)
 - 4 integration points (~10 lines each)
 
 **Phase 2 - IOU Failover:**
