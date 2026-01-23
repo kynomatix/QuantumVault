@@ -1587,9 +1587,11 @@ export class DatabaseStorage implements IStorage {
     
     for (const event of events) {
       const amount = parseFloat(event.amount);
-      if (event.eventType === 'agent_deposit' || event.eventType === 'drift_deposit') {
+      // Only count EXTERNAL deposits/withdrawals (Phantom <-> Agent wallet)
+      // Ignore internal movements (Agent wallet <-> Drift subaccounts) to avoid double-counting
+      if (event.eventType === 'agent_deposit') {
         deposits += Math.abs(amount);
-      } else if (event.eventType === 'agent_withdraw' || event.eventType === 'drift_withdraw') {
+      } else if (event.eventType === 'agent_withdraw') {
         withdrawals += Math.abs(amount);
       }
     }
