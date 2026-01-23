@@ -584,3 +584,29 @@ export const insertPendingProfitShareSchema = createInsertSchema(pendingProfitSh
 });
 export type InsertPendingProfitShare = z.infer<typeof insertPendingProfitShareSchema>;
 export type PendingProfitShare = typeof pendingProfitShares.$inferSelect;
+
+// Portfolio Daily Snapshots: Track daily balance for true P&L charting
+// Net P&L = currentBalance - totalDeposits + totalWithdrawals (deposits/withdrawals are cumulative)
+export const portfolioDailySnapshots = pgTable("portfolio_daily_snapshots", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  snapshotDate: timestamp("snapshot_date").notNull(),
+  totalBalance: decimal("total_balance", { precision: 20, scale: 6 }).notNull(),
+  cumulativeDeposits: decimal("cumulative_deposits", { precision: 20, scale: 6 }).notNull(),
+  cumulativeWithdrawals: decimal("cumulative_withdrawals", { precision: 20, scale: 6 }).notNull(),
+  netPnl: decimal("net_pnl", { precision: 20, scale: 6 }).notNull(),
+  activeBotCount: integer("active_bot_count").notNull().default(0),
+  totalTrades: integer("total_trades").notNull().default(0),
+  totalVolume: decimal("total_volume", { precision: 20, scale: 6 }).notNull().default("0"),
+  creatorEarnings: decimal("creator_earnings", { precision: 20, scale: 6 }).notNull().default("0"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqueWalletDate: unique("portfolio_snapshots_wallet_date").on(table.walletAddress, table.snapshotDate),
+}));
+
+export const insertPortfolioDailySnapshotSchema = createInsertSchema(portfolioDailySnapshots).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertPortfolioDailySnapshot = z.infer<typeof insertPortfolioDailySnapshotSchema>;
+export type PortfolioDailySnapshot = typeof portfolioDailySnapshots.$inferSelect;
