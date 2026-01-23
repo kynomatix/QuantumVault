@@ -271,6 +271,7 @@ export interface IStorage {
   getWalletTradeStats(walletAddress: string): Promise<{ totalTrades: number; totalVolume: number }>;
   getWalletCreatorEarnings(walletAddress: string): Promise<number>;
   getWalletsWithTradingBots(): Promise<string[]>;
+  getWalletFirstDepositDate(walletAddress: string): Promise<Date | null>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1634,6 +1635,19 @@ export class DatabaseStorage implements IStorage {
     const result = await db.selectDistinct({ walletAddress: tradingBots.walletAddress })
       .from(tradingBots);
     return result.map(r => r.walletAddress);
+  }
+
+  async getWalletFirstDepositDate(walletAddress: string): Promise<Date | null> {
+    const result = await db.select({ createdAt: equityEvents.createdAt })
+      .from(equityEvents)
+      .where(and(
+        eq(equityEvents.walletAddress, walletAddress),
+        eq(equityEvents.eventType, 'agent_deposit')
+      ))
+      .orderBy(equityEvents.createdAt)
+      .limit(1);
+    
+    return result[0]?.createdAt || null;
   }
 }
 

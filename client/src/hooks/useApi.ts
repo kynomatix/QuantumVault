@@ -557,7 +557,7 @@ export interface PortfolioPerformanceData {
   totalTrades: number;
   totalVolume: number;
   creatorEarnings: number;
-  chartData: Array<{ date: string; netPnl: number; balance: number }>;
+  chartData: Array<{ date: string; netPnl: number; pnlPercent: number; balance: number }>;
 }
 
 async function fetchPortfolioPerformance(): Promise<PortfolioPerformanceData | null> {

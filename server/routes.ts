@@ -8607,17 +8607,52 @@ export async function registerRoutes(
       // Get creator earnings from profit sharing
       const creatorEarnings = await storage.getWalletCreatorEarnings(walletAddress);
       
+      // Get first deposit date for initial zero point
+      const firstDepositDate = await storage.getWalletFirstDepositDate(walletAddress);
+      
       // Get historical snapshots for chart (last 90 days)
       const ninetyDaysAgo = new Date();
       ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
       const snapshots = await storage.getPortfolioDailySnapshots(walletAddress, ninetyDaysAgo);
       
-      // Build chart data from snapshots
-      const chartData = snapshots.map(s => ({
-        date: s.snapshotDate,
-        netPnl: parseFloat(s.netPnl),
-        balance: parseFloat(s.totalBalance),
-      }));
+      // Build chart data from snapshots with pnlPercent for % view
+      const chartData: { date: Date; netPnl: number; pnlPercent: number; balance: number }[] = [];
+      
+      // Add initial zero point at first deposit date if it exists and is within range
+      if (firstDepositDate) {
+        const firstDepositDay = new Date(firstDepositDate);
+        firstDepositDay.setHours(0, 0, 0, 0);
+        
+        // Check if first deposit is before our earliest snapshot (or no snapshots yet)
+        const hasSnapshotOnFirstDeposit = snapshots.some(s => {
+          const snapDate = new Date(s.snapshotDate);
+          snapDate.setHours(0, 0, 0, 0);
+          return snapDate.getTime() === firstDepositDay.getTime();
+        });
+        
+        if (!hasSnapshotOnFirstDeposit && firstDepositDay >= ninetyDaysAgo) {
+          chartData.push({
+            date: firstDepositDay,
+            netPnl: 0,
+            pnlPercent: 0,
+            balance: 0,
+          });
+        }
+      }
+      
+      // Add snapshots with pnlPercent calculated from cumulative deposits
+      for (const s of snapshots) {
+        const snapshotDeposits = parseFloat(s.cumulativeDeposits);
+        const snapshotPnl = parseFloat(s.netPnl);
+        const snapshotPnlPercent = snapshotDeposits > 0 ? (snapshotPnl / snapshotDeposits) * 100 : 0;
+        
+        chartData.push({
+          date: s.snapshotDate,
+          netPnl: snapshotPnl,
+          pnlPercent: snapshotPnlPercent,
+          balance: parseFloat(s.totalBalance),
+        });
+      }
       
       // Add current day if not in snapshots
       const today = new Date();
@@ -8632,6 +8667,7 @@ export async function registerRoutes(
         chartData.push({
           date: today,
           netPnl,
+          pnlPercent,
           balance: currentBalance,
         });
       }

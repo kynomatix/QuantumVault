@@ -130,6 +130,7 @@ export default function AppPage() {
   const [expandedPositionBotId, setExpandedPositionBotId] = useState<string | null>(null);
   const [createBotOpen, setCreateBotOpen] = useState(false);
   const [tradeHistoryOpen, setTradeHistoryOpen] = useState(false);
+  const [portfolioChartView, setPortfolioChartView] = useState<'dollar' | 'percent'>('dollar');
   const [welcomePopupOpen, setWelcomePopupOpen] = useState(false);
   const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
   const welcomeCheckedRef = useRef(false);
@@ -2243,8 +2244,30 @@ export default function AppPage() {
 
                     <div className="gradient-border p-6 noise">
                       <div className="flex items-center justify-between mb-4">
-                        <h2 className="font-display font-semibold">P&L History</h2>
-                        <p className="text-sm text-muted-foreground">Net P&L over time</p>
+                        <div className="flex items-center gap-3">
+                          <h2 className="font-display font-semibold">P&L History</h2>
+                          <div className="flex gap-1" data-testid="toggle-portfolio-chart-view">
+                            <Button
+                              variant={portfolioChartView === 'dollar' ? 'default' : 'outline'}
+                              size="sm"
+                              className="h-6 px-2 text-xs"
+                              onClick={() => setPortfolioChartView('dollar')}
+                            >
+                              $
+                            </Button>
+                            <Button
+                              variant={portfolioChartView === 'percent' ? 'default' : 'outline'}
+                              size="sm"
+                              className="h-6 px-2 text-xs"
+                              onClick={() => setPortfolioChartView('percent')}
+                            >
+                              %
+                            </Button>
+                          </div>
+                        </div>
+                        <p className="text-sm text-muted-foreground">
+                          {portfolioChartView === 'dollar' ? 'Net P&L in USD' : 'P&L as % of deposits'}
+                        </p>
                       </div>
                       {portfolioPerformanceData.chartData && portfolioPerformanceData.chartData.length > 0 ? (
                         <div className="h-[300px]" data-testid="portfolio-pnl-chart">
@@ -2272,7 +2295,10 @@ export default function AppPage() {
                               <YAxis 
                                 stroke="#6b7280"
                                 tick={{ fill: '#9ca3af', fontSize: 12 }}
-                                tickFormatter={(value) => `$${value >= 1000 ? (value / 1000).toFixed(1) + 'K' : value.toFixed(0)}`}
+                                tickFormatter={(value) => portfolioChartView === 'dollar' 
+                                  ? `$${value >= 1000 ? (value / 1000).toFixed(1) + 'K' : value >= -1000 ? value.toFixed(0) : (value / 1000).toFixed(1) + 'K'}`
+                                  : `${value.toFixed(1)}%`
+                                }
                               />
                               <RechartsTooltip 
                                 contentStyle={{ 
@@ -2282,13 +2308,18 @@ export default function AppPage() {
                                   padding: '8px 12px'
                                 }}
                                 labelStyle={{ color: '#9ca3af' }}
-                                formatter={(value: number) => [`$${value.toFixed(2)}`, 'Net P&L']}
+                                formatter={(value: number) => [
+                                  portfolioChartView === 'dollar' 
+                                    ? `$${value.toFixed(2)}` 
+                                    : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`,
+                                  portfolioChartView === 'dollar' ? 'Net P&L' : 'P&L %'
+                                ]}
                                 labelFormatter={(label) => new Date(label).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                               />
                               <ReferenceLine y={0} stroke="#6b7280" strokeDasharray="3 3" />
                               <Area 
                                 type="monotone" 
-                                dataKey="netPnl" 
+                                dataKey={portfolioChartView === 'dollar' ? 'netPnl' : 'pnlPercent'}
                                 stroke={portfolioPerformanceData.netPnl >= 0 ? '#10b981' : '#ef4444'}
                                 strokeWidth={2}
                                 fill={portfolioPerformanceData.netPnl >= 0 ? 'url(#colorPnlPositive)' : 'url(#colorPnlNegative)'}
