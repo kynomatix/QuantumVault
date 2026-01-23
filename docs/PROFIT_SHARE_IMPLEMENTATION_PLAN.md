@@ -257,6 +257,21 @@ This prevents a technical failure on the creator's side from permanently locking
 - Withdrawal of exactly $2.5034 might settle as $2.5033 due to rounding
 - **Solution**: If transfer fails with "Insufficient Funds" by tiny amount, retry with `amount - 0.000001`
 
+**4. Partial Withdrawal (New - Post-Audit):**
+- Drift withdrawal can succeed but return less than requested if collateral/margin constraints exist
+- **Solution**: Verify agent USDC balance after withdrawal meets `creatorShare`. If partial, create IOU for shortfall.
+
+**5. Creator Wallet Validation (New - Post-Audit):**
+- Must validate `creatorWalletAddress` is a valid Solana public key before attempting transfer
+- **Solution**: Wrap `new PublicKey(creatorMainWallet)` in try/catch. Invalid = create IOU with admin alert.
+
+**6. Admin Notifications for IOUs (New - Post-Audit):**
+- Creator and admin should be notified when IOU is created or voided
+- **Solution**: Add console logging + optional Telegram notification for:
+  - IOU created (with reason)
+  - IOU voided (after TTL)
+  - IOU paid (success after retry)
+
 ---
 
 ## Existing Functions to Reuse
@@ -484,6 +499,14 @@ async function distributeCreatorProfitShare(
   const creatorMainWallet = subscription.publishedBot.creatorWalletAddress;
   if (!creatorMainWallet) {
     return { success: false, error: 'Creator wallet not found' };
+  }
+  
+  // Validate creator wallet is a valid Solana address
+  try {
+    new PublicKey(creatorMainWallet);
+  } catch {
+    console.error(`[ProfitShare] Invalid creator wallet address: ${creatorMainWallet}`);
+    return { success: false, error: 'Invalid creator wallet address' };
   }
   
   // 6. WITHDRAW from Drift to agent wallet (~3-5 RPC calls)
