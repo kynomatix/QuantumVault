@@ -45,6 +45,7 @@ Preferred communication style: Simple, everyday language.
 -   **Automatic Trade Retry**: Failed trades due to rate limiting are automatically queued for retry with exponential backoff. CLOSE orders get critical priority (10 attempts, shorter backoff) to prevent losses from failed position closures. On-chain position verification prevents duplicate closes.
 -   **Equity Event Tracking**: Monitors deposits and withdrawals for transaction history.
 -   **Marketplace Feature**: Users can publish signal bots and subscribe to others' trading signals, with proportional trade sizing and PnL snapshots.
+-   **Creator Profit Sharing**: Signal bot creators earn 0-10% of subscriber profits on each profitable trade close. Uses immediate on-chain USDC transfers with IOU failover system for failed transactions. Background retry job processes pending IOUs every 5 minutes with TTL enforcement (50 retries or 7 days max). Hostage prevention blocks withdrawal/deletion until IOUs are paid.
 -   **Referral System**: Unique 6-character alphanumeric referral codes for each user, tracked via `ref` parameter in share URLs.
 
 ### Security Architecture
