@@ -270,6 +270,7 @@ export interface IStorage {
   getWalletCumulativeDepositsWithdrawals(walletAddress: string): Promise<{ deposits: number; withdrawals: number }>;
   getWalletTradeStats(walletAddress: string): Promise<{ totalTrades: number; totalVolume: number }>;
   getWalletCreatorEarnings(walletAddress: string): Promise<number>;
+  getWalletsWithTradingBots(): Promise<string[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1625,6 +1626,12 @@ export class DatabaseStorage implements IStorage {
     }
     
     return totalEarnings;
+  }
+
+  async getWalletsWithTradingBots(): Promise<string[]> {
+    const result = await db.selectDistinct({ walletAddress: tradingBots.walletAddress })
+      .from(tradingBots);
+    return result.map(r => r.walletAddress);
   }
 }
 

@@ -8,6 +8,7 @@ import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
 import { startRetryWorker } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
+import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 
 const app = express();
 const httpServer = createServer(app);
@@ -172,6 +173,9 @@ app.use((req, res, next) => {
       
       // Start profit share retry job for IOU failover system
       startProfitShareRetryJob();
+      
+      // Start portfolio snapshot job for daily performance tracking
+      startPortfolioSnapshotJob();
     },
   );
 })();
