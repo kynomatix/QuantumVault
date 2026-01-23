@@ -8555,6 +8555,106 @@ export async function registerRoutes(
     }
   });
 
+  // Portfolio Performance endpoint - True P&L tracking
+  app.get("/api/portfolio-performance", requireWallet, async (req, res) => {
+    try {
+      const walletAddress = req.walletAddress!;
+      
+      // Get current live data
+      const wallet = await storage.getWallet(walletAddress);
+      const bots = await storage.getTradingBots(walletAddress);
+      
+      let currentBalance = 0;
+      let activeBotCount = 0;
+      
+      // Get agent wallet balance
+      if (wallet?.agentPublicKey) {
+        try {
+          const agentBalance = await getUsdcBalance(wallet.agentPublicKey);
+          currentBalance += agentBalance;
+        } catch (error) {
+          console.error("[Portfolio] Error getting agent balance:", error);
+        }
+      }
+      
+      // Get Drift subaccount balances
+      for (const bot of bots) {
+        if (bot.isActive) activeBotCount++;
+        
+        if (wallet?.agentPublicKey && bot.driftSubaccountId) {
+          try {
+            const accountInfo = await getDriftAccountInfo(
+              wallet.agentPublicKey,
+              bot.driftSubaccountId
+            );
+            currentBalance += accountInfo.usdcBalance || 0;
+          } catch (error) {
+            console.error(`[Portfolio] Error getting balance for bot ${bot.id}:`, error);
+          }
+        }
+      }
+      
+      // Get cumulative deposits and withdrawals
+      const { deposits, withdrawals } = await storage.getWalletCumulativeDepositsWithdrawals(walletAddress);
+      
+      // Calculate TRUE P&L: current balance - total deposits + total withdrawals
+      const netPnl = currentBalance - deposits + withdrawals;
+      const pnlPercent = deposits > 0 ? (netPnl / deposits) * 100 : 0;
+      
+      // Get trade stats
+      const { totalTrades, totalVolume } = await storage.getWalletTradeStats(walletAddress);
+      
+      // Get creator earnings from profit sharing
+      const creatorEarnings = await storage.getWalletCreatorEarnings(walletAddress);
+      
+      // Get historical snapshots for chart (last 90 days)
+      const ninetyDaysAgo = new Date();
+      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+      const snapshots = await storage.getPortfolioDailySnapshots(walletAddress, ninetyDaysAgo);
+      
+      // Build chart data from snapshots
+      const chartData = snapshots.map(s => ({
+        date: s.snapshotDate,
+        netPnl: parseFloat(s.netPnl),
+        balance: parseFloat(s.totalBalance),
+      }));
+      
+      // Add current day if not in snapshots
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const hasToday = snapshots.some(s => {
+        const snapDate = new Date(s.snapshotDate);
+        snapDate.setHours(0, 0, 0, 0);
+        return snapDate.getTime() === today.getTime();
+      });
+      
+      if (!hasToday) {
+        chartData.push({
+          date: today,
+          netPnl,
+          balance: currentBalance,
+        });
+      }
+      
+      res.json({
+        currentBalance,
+        totalDeposits: deposits,
+        totalWithdrawals: withdrawals,
+        netPnl,
+        pnlPercent,
+        activeBotCount,
+        totalBots: bots.length,
+        totalTrades,
+        totalVolume,
+        creatorEarnings,
+        chartData,
+      });
+    } catch (error) {
+      console.error("[Portfolio] Error fetching portfolio performance:", error);
+      res.status(500).json({ error: "Failed to fetch portfolio performance" });
+    }
+  });
+
   return httpServer;
 }
 
