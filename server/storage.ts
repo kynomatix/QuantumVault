@@ -24,6 +24,7 @@ import {
   tradeRetryQueue,
   platformMetrics,
   pendingProfitShares,
+  portfolioDailySnapshots,
   type User,
   type InsertUser,
   type Wallet,
@@ -72,6 +73,8 @@ import {
   type PlatformMetricType,
   type PendingProfitShare,
   type InsertPendingProfitShare,
+  type PortfolioDailySnapshot,
+  type InsertPortfolioDailySnapshot,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -260,6 +263,13 @@ export interface IStorage {
   getAllPendingProfitShares(): Promise<PendingProfitShare[]>;
   updatePendingProfitShareStatus(id: string, updates: { status?: string; retryCount?: number; lastError?: string | null; lastAttemptAt?: Date }): Promise<PendingProfitShare | undefined>;
   deletePendingProfitShare(id: string): Promise<void>;
+
+  upsertPortfolioDailySnapshot(snapshot: InsertPortfolioDailySnapshot): Promise<PortfolioDailySnapshot>;
+  getPortfolioDailySnapshots(walletAddress: string, since?: Date): Promise<PortfolioDailySnapshot[]>;
+  getLatestPortfolioDailySnapshot(walletAddress: string): Promise<PortfolioDailySnapshot | undefined>;
+  getWalletCumulativeDepositsWithdrawals(walletAddress: string): Promise<{ deposits: number; withdrawals: number }>;
+  getWalletTradeStats(walletAddress: string): Promise<{ totalTrades: number; totalVolume: number }>;
+  getWalletCreatorEarnings(walletAddress: string): Promise<number>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1528,6 +1538,93 @@ export class DatabaseStorage implements IStorage {
 
   async deletePendingProfitShare(id: string): Promise<void> {
     await db.delete(pendingProfitShares).where(eq(pendingProfitShares.id, id));
+  }
+
+  async upsertPortfolioDailySnapshot(snapshot: InsertPortfolioDailySnapshot): Promise<PortfolioDailySnapshot> {
+    const result = await db.insert(portfolioDailySnapshots).values(snapshot)
+      .onConflictDoUpdate({
+        target: [portfolioDailySnapshots.walletAddress, portfolioDailySnapshots.snapshotDate],
+        set: {
+          totalBalance: snapshot.totalBalance,
+          cumulativeDeposits: snapshot.cumulativeDeposits,
+          cumulativeWithdrawals: snapshot.cumulativeWithdrawals,
+          netPnl: snapshot.netPnl,
+          activeBotCount: snapshot.activeBotCount,
+          totalTrades: snapshot.totalTrades,
+          totalVolume: snapshot.totalVolume,
+          creatorEarnings: snapshot.creatorEarnings,
+        }
+      })
+      .returning();
+    return result[0];
+  }
+
+  async getPortfolioDailySnapshots(walletAddress: string, since?: Date): Promise<PortfolioDailySnapshot[]> {
+    const conditions = [eq(portfolioDailySnapshots.walletAddress, walletAddress)];
+    if (since) {
+      conditions.push(gte(portfolioDailySnapshots.snapshotDate, since));
+    }
+    return db.select().from(portfolioDailySnapshots)
+      .where(and(...conditions))
+      .orderBy(portfolioDailySnapshots.snapshotDate);
+  }
+
+  async getLatestPortfolioDailySnapshot(walletAddress: string): Promise<PortfolioDailySnapshot | undefined> {
+    const result = await db.select().from(portfolioDailySnapshots)
+      .where(eq(portfolioDailySnapshots.walletAddress, walletAddress))
+      .orderBy(desc(portfolioDailySnapshots.snapshotDate))
+      .limit(1);
+    return result[0];
+  }
+
+  async getWalletCumulativeDepositsWithdrawals(walletAddress: string): Promise<{ deposits: number; withdrawals: number }> {
+    const events = await db.select().from(equityEvents)
+      .where(eq(equityEvents.walletAddress, walletAddress));
+    
+    let deposits = 0;
+    let withdrawals = 0;
+    
+    for (const event of events) {
+      const amount = parseFloat(event.amount);
+      if (event.eventType === 'agent_deposit' || event.eventType === 'drift_deposit') {
+        deposits += Math.abs(amount);
+      } else if (event.eventType === 'agent_withdraw' || event.eventType === 'drift_withdraw') {
+        withdrawals += Math.abs(amount);
+      }
+    }
+    
+    return { deposits, withdrawals };
+  }
+
+  async getWalletTradeStats(walletAddress: string): Promise<{ totalTrades: number; totalVolume: number }> {
+    const bots = await this.getTradingBots(walletAddress);
+    let totalTrades = 0;
+    let totalVolume = 0;
+    
+    for (const bot of bots) {
+      const stats = bot.stats as any;
+      if (stats) {
+        totalTrades += stats.totalTrades || 0;
+        totalVolume += stats.totalVolume || 0;
+      }
+    }
+    
+    return { totalTrades, totalVolume };
+  }
+
+  async getWalletCreatorEarnings(walletAddress: string): Promise<number> {
+    const paidShares = await db.select().from(pendingProfitShares)
+      .where(and(
+        eq(pendingProfitShares.creatorWalletAddress, walletAddress),
+        eq(pendingProfitShares.status, 'paid')
+      ));
+    
+    let totalEarnings = 0;
+    for (const share of paidShares) {
+      totalEarnings += parseFloat(share.amount);
+    }
+    
+    return totalEarnings;
   }
 }
 
