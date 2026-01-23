@@ -674,7 +674,7 @@ Conclusion: Gas cost is negligible. Immediate on-chain settlement is practical.
 - [x] Integrate into webhook close handler
 - [x] Integrate into user webhook close handler
 - [x] Integrate into manual close handler
-- [x] Integrate into retry close handler (TODO added - uses IOU system)
+- [x] Integrate into retry close handler (fully implemented with PnL calculation and IOU failover)
 - [x] Add console logging for monitoring
 
 ### Phase 2: IOU Failover System (2-3 hours) ✅ COMPLETED

@@ -2565,6 +2565,7 @@ export async function registerRoutes(
             slippageBps: closeSlippageBps,
             priority: 'critical', // CLOSE orders get highest priority
             lastError: result.error,
+            entryPrice: onChainPosition.entryPrice || 0, // For profit share calculation on retry success
           });
           
           return res.status(202).json({ 
@@ -4987,6 +4988,9 @@ export async function registerRoutes(
         const closeSide = onChainPosition.side === 'LONG' ? 'short' : 'long';
         const closeSize = Math.abs(currentPositionSize);
         
+        // Capture entry price BEFORE trying to close (needed for retry queue if close fails)
+        const closeEntryPrice = onChainPosition.entryPrice || 0;
+        
         // Create trade record for the close
         const closeTrade = await storage.createBotTrade({
           tradingBotId: botId,
@@ -5048,8 +5052,7 @@ export async function registerRoutes(
             const closeFee = closeNotional * DRIFT_FEE_RATE;
             
             // Calculate trade PnL based on entry and exit prices
-            // IMPORTANT: onChainPosition was queried BEFORE close - it should have the entry price
-            const closeEntryPrice = onChainPosition.entryPrice || 0;
+            // IMPORTANT: closeEntryPrice was captured BEFORE close attempt
             console.log(`[Webhook] PnL calculation inputs: entryPrice=${closeEntryPrice}, fillPrice=${closeFillPrice}, closeSide=${closeSide}, closeSize=${closeSize}`);
             
             let closeTradePnl = 0;
@@ -5350,6 +5353,7 @@ export async function registerRoutes(
               priority: 'critical', // CLOSE orders get highest priority
               lastError: closeError.message,
               originalTradeId: closeTrade.id,
+              entryPrice: closeEntryPrice, // For profit share calculation on retry success
             });
             
             await storage.updateBotTrade(closeTrade.id, {

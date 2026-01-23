@@ -1,8 +1,10 @@
 import { sendTradeNotification } from "./notification-service";
-import { executePerpOrder, closePerpPosition, getPerpPositions } from "./drift-service";
+import { executePerpOrder, closePerpPosition, getPerpPositions, settleAllPnl, executeAgentDriftWithdraw } from "./drift-service";
 import { syncPositionFromOnChain } from "./reconciliation-service";
 import { storage } from "./storage";
 import { getMarketBySymbol } from "./market-liquidity-service";
+import { transferUsdcToWallet } from "./agent-wallet";
+import { PublicKey } from "@solana/web3.js";
 
 export interface RetryJob {
   id: string;
@@ -25,6 +27,7 @@ export interface RetryJob {
   lastError?: string;
   originalTradeId?: string;
   webhookPayload?: unknown;
+  entryPrice?: number; // For close orders: entry price to calculate PnL for profit sharing
 }
 
 const retryQueue: Map<string, RetryJob> = new Map();
@@ -301,12 +304,105 @@ async function processRetryJob(job: RetryJob): Promise<void> {
           console.warn(`[TradeRetry] Position sync failed:`, syncErr);
         }
         
-        // TODO: PROFIT SHARE for successful close retries
-        // When a close order succeeds via retry, we need to:
-        // 1. Calculate PnL (need entry price from before close)
-        // 2. Distribute profit share to creator if this is a subscriber bot
-        // This will be handled in Phase 2 via the IOU failover system - any profit share
-        // that can't be distributed immediately will be queued as an IOU
+        // PROFIT SHARE: Distribute creator's share of realized profit for subscriber bots
+        if (job.side === 'close' && job.entryPrice && job.entryPrice > 0 && fillPrice > 0) {
+          try {
+            // Calculate PnL based on position side
+            const positionWasLong = actualCloseSide === 'short'; // If we closed with short, position was long
+            let closePnl: number;
+            if (positionWasLong) {
+              closePnl = (fillPrice - job.entryPrice) * job.size - fee;
+            } else {
+              closePnl = (job.entryPrice - fillPrice) * job.size - fee;
+            }
+            
+            console.log(`[TradeRetry] PnL calculated: entry=$${job.entryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, size=${job.size}, fee=$${fee.toFixed(4)}, pnl=$${closePnl.toFixed(4)}`);
+            
+            if (closePnl > 0) {
+              // Check if this is a subscriber bot
+              const subscription = await storage.getBotSubscriptionBySubscriberBotId(job.botId);
+              if (subscription) {
+                const profitSharePercent = parseFloat(String(subscription.publishedBot.profitSharePercent ?? 0));
+                if (profitSharePercent > 0) {
+                  const profitShareAmount = (closePnl * profitSharePercent) / 100;
+                  
+                  if (profitShareAmount >= 0.01) {
+                    const creatorWallet = subscription.publishedBot.creatorWalletAddress;
+                    
+                    // Validate creator wallet
+                    try {
+                      new PublicKey(creatorWallet);
+                    } catch {
+                      console.error(`[TradeRetry] Invalid creator wallet: ${creatorWallet}`);
+                      throw new Error('Invalid creator wallet address');
+                    }
+                    
+                    console.log(`[TradeRetry] Processing profit share: $${profitShareAmount.toFixed(4)} (${profitSharePercent}%) to ${creatorWallet}`);
+                    
+                    // Helper to create IOU on failure
+                    const createIouOnFailure = async (errorMsg: string) => {
+                      try {
+                        await storage.createPendingProfitShare({
+                          subscriberBotId: job.botId,
+                          subscriberWalletAddress: job.walletAddress,
+                          creatorWalletAddress: creatorWallet,
+                          amount: profitShareAmount.toString(),
+                          realizedPnl: closePnl.toString(),
+                          profitSharePercent: profitSharePercent.toString(),
+                          tradeId: tradeId || `retry-${job.id}`,
+                          publishedBotId: subscription.publishedBot.id,
+                          driftSubaccountId: job.subAccountId,
+                        });
+                        console.log(`[TradeRetry] IOU created for $${profitShareAmount.toFixed(4)} to ${creatorWallet}`);
+                      } catch (iouErr: any) {
+                        console.error(`[TradeRetry] Failed to create IOU: ${iouErr.message}`);
+                      }
+                    };
+                    
+                    // Step 1: Settle PnL
+                    const settleResult = await settleAllPnl(job.agentPrivateKeyEncrypted, job.subAccountId);
+                    if (!settleResult.success) {
+                      console.error(`[TradeRetry] Settle PnL failed: ${settleResult.error}`);
+                      await createIouOnFailure(`Settle PnL failed: ${settleResult.error}`);
+                    } else {
+                      // Step 2: Withdraw from Drift
+                      const withdrawResult = await executeAgentDriftWithdraw(
+                        job.agentPublicKey,
+                        job.agentPrivateKeyEncrypted,
+                        profitShareAmount,
+                        job.subAccountId
+                      );
+                      
+                      if (!withdrawResult.success) {
+                        console.error(`[TradeRetry] Drift withdrawal failed: ${withdrawResult.error}`);
+                        await createIouOnFailure(`Drift withdrawal failed: ${withdrawResult.error}`);
+                      } else {
+                        // Step 3: Transfer to creator
+                        const transferResult = await transferUsdcToWallet(
+                          job.agentPublicKey,
+                          job.agentPrivateKeyEncrypted,
+                          creatorWallet,
+                          profitShareAmount
+                        );
+                        
+                        if (transferResult.success) {
+                          console.log(`[TradeRetry] Profit share SUCCESS: $${profitShareAmount.toFixed(4)} sent to ${creatorWallet}, tx: ${transferResult.signature}`);
+                        } else {
+                          console.error(`[TradeRetry] Transfer failed: ${transferResult.error}`);
+                          await createIouOnFailure(`Transfer failed: ${transferResult.error}`);
+                        }
+                      }
+                    }
+                  } else {
+                    console.log(`[TradeRetry] Profit share skipped: dust amount $${profitShareAmount.toFixed(4)}`);
+                  }
+                }
+              }
+            }
+          } catch (profitShareErr: any) {
+            console.error(`[TradeRetry] Profit share error (non-blocking): ${profitShareErr.message}`);
+          }
+        }
       }
       
       await notifyRetryResult(job, true);
