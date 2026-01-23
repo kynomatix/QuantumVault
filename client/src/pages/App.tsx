@@ -1199,9 +1199,9 @@ export default function AppPage() {
             {[
               { id: 'dashboard' as NavItem, icon: LayoutDashboard, label: 'Dashboard' },
               { id: 'bots' as NavItem, icon: Bot, label: 'My Bots' },
-              { id: 'portfolio' as NavItem, icon: BarChart3, label: 'Portfolio' },
               { id: 'marketplace' as NavItem, icon: Store, label: 'Marketplace' },
               { id: 'wallet' as NavItem, icon: Wallet, label: 'Wallet' },
+              { id: 'portfolio' as NavItem, icon: BarChart3, label: 'Portfolio' },
               { id: 'leaderboard' as NavItem, icon: Users, label: 'Leaderboard' },
               { id: 'settings' as NavItem, icon: Settings, label: 'Settings' },
             ].map((item) => (
