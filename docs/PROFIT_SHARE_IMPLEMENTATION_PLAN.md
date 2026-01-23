@@ -31,19 +31,25 @@ Per-profitable-close RPC call budget (target: minimize without sacrificing relia
 |-----------|-----------|---------------------|
 | Validation (steps 1-5) | 0 | Pure logic, DB query only |
 | Drift withdrawal | 3-5 | Unavoidable (SDK-managed) |
-| Transfer to creator | 3-4 | Batched lookups + blockhash reuse |
-| **Total** | **6-9** | Down from 9-11 |
+| Transfer to creator | 4-5 | Batched lookups (fresh blockhash for reliability) |
+| **Total** | **7-10** | Down from 9-11 |
 
 **Key Optimizations:**
 1. **Batch account lookups**: `getMultipleAccountsInfo([agent, creatorATA])` instead of 2 separate calls
 2. **Skip redundant USDC check**: After Drift withdrawal succeeds, balance is guaranteed
-3. **Reuse blockhash**: Pass `recentBlockhash` from Drift withdrawal to transfer function
-4. **Early exit validation**: 5 validation steps before any RPC call
+3. **Early exit validation**: 5 validation steps before any RPC call
 
-**Why not fewer?**
+**Why not reuse blockhash from Drift withdrawal?**
+- Solana blockhashes expire in ~60-90 seconds
+- Drift withdrawal + confirmation can take 5-45 seconds
+- By transfer time, blockhash may be stale → "Blockhash not found" error
+- **Decision**: Always fetch fresh blockhash for transfer (1 extra RPC call worth the reliability)
+
+**Why not fewer RPC calls?**
 - Drift SDK withdrawal is opaque (3-5 calls unavoidable)
 - Transaction send + confirmation are mandatory (2 calls)
 - SOL balance check is safety-critical (batched into 1 call)
+- Fresh blockhash is reliability-critical (1 call)
 
 ---
 
@@ -149,6 +155,11 @@ CREATE TABLE pending_profit_shares (
 -- Index for efficient lookups
 CREATE INDEX idx_pending_profit_shares_status ON pending_profit_shares(status);
 CREATE INDEX idx_pending_profit_shares_subscriber ON pending_profit_shares(subscriber_bot_id);
+
+-- IDEMPOTENCY: Prevent duplicate IOUs for same trade (webhook may fire twice)
+CREATE UNIQUE INDEX idx_unique_profit_share 
+ON pending_profit_shares(subscriber_bot_id, trade_id) 
+WHERE status NOT IN ('voided', 'paid');
 ```
 
 **Status Column (Prevents Race Conditions):**
@@ -228,6 +239,24 @@ The IOU system has **multiple triggers** to ensure creators get paid even in edg
 
 This prevents a technical failure on the creator's side from permanently locking a subscriber's funds.
 
+### Edge Cases (Post-Audit)
+
+**1. Cross-Margin "Free Collateral" Issue:**
+- Subscriber has Bot A: +$100 profit (closing now)
+- Subscriber has Bot B: -$150 loss (still open)
+- **Problem**: Drift withdrawal fails with "Insufficient Collateral" because overall account is underwater
+- **Solution**: IOU is created. Background job retries. Creator gets paid when subscriber's account health improves or losing position closes.
+- **Note**: "Profitable Trade" ≠ "Withdrawable Cash" in cross-margin accounts. This is correct behavior.
+
+**2. SOL Starvation (UX Clarity):**
+- If agent wallet runs out of SOL, profit share fails → IOU created → withdrawal blocked
+- **UI Message should be specific**: "Withdrawal paused: Pending profit share payment. Your agent wallet needs ~0.003 SOL to process this fee."
+
+**3. Drift Rounding (Dust Handling):**
+- Drift's internal accounting uses high-precision integers
+- Withdrawal of exactly $2.5034 might settle as $2.5033 due to rounding
+- **Solution**: If transfer fails with "Insufficient Funds" by tiny amount, retry with `amount - 0.000001`
+
 ---
 
 ## Existing Functions to Reuse
@@ -300,14 +329,14 @@ BEFORE (9-11 RPC calls):
 6. confirmTransaction (polling)
 + Drift withdrawal calls
 
-AFTER (5-7 RPC calls):
+AFTER (4-5 RPC calls for transfer):
 1. getMultipleAccountsInfo (SOL + creator ATA in 1 call)
-2. getLatestBlockhash
+2. getLatestBlockhash (fresh for reliability)
 3. sendRawTransaction  
 4. confirmTransaction (polling)
-+ Drift withdrawal calls
++ Drift withdrawal calls (3-5)
 
-SAVINGS: 3-4 fewer RPC calls per profitable close
+SAVINGS: 2-3 fewer RPC calls per profitable close
 ```
 
 ```typescript
@@ -316,7 +345,6 @@ export async function transferUsdcToWallet(
   fromEncryptedPrivateKey: string,
   toWalletAddress: string,  // Creator's Phantom wallet
   amountUsdc: number,
-  recentBlockhash?: { blockhash: string; lastValidBlockHeight: number },  // Reuse from Drift withdrawal
 ): Promise<{ success: boolean; signature?: string; error?: string; solBalance?: number }> {
   try {
     const connection = getConnection();
@@ -367,9 +395,8 @@ export async function transferUsdcToWallet(
       createTransferInstruction(fromAta, toAta, fromPubkey, BigInt(amountLamports))
     );
     
-    // RPC OPTIMIZATION: Reuse blockhash from Drift withdrawal if provided
-    const { blockhash, lastValidBlockHeight } = recentBlockhash || 
-      await connection.getLatestBlockhash();
+    // Always fetch fresh blockhash for reliability (stale blockhash = tx failure)
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
     
     const transaction = new Transaction({
       feePayer: fromPubkey,
@@ -472,17 +499,16 @@ async function distributeCreatorProfitShare(
     return { success: false, error: `Drift withdrawal failed: ${withdrawResult.error}` };
   }
   
-  // 7. Transfer to creator (3-4 RPC calls with optimizations)
+  // 7. Transfer to creator (4-5 RPC calls with optimizations)
   // - SOL balance check is batched inside transferUsdcToWallet
-  // - Blockhash can be reused from Drift withdrawal if returned
+  // - Fresh blockhash fetched for reliability (stale blockhash = tx failure)
   console.log(`[ProfitShare] Transferring $${creatorShare.toFixed(4)} (${profitSharePercent}%) to ${creatorMainWallet}`);
   
   const transferResult = await transferUsdcToWallet(
     subscriberWallet.agentPublicKey!,
     subscriberWallet.agentPrivateKeyEncrypted!,
     creatorMainWallet,
-    creatorShare,
-    withdrawResult.recentBlockhash  // RPC OPTIMIZATION: Reuse blockhash
+    creatorShare
   );
   
   if (transferResult.success) {
