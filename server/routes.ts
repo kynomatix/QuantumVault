@@ -21,6 +21,7 @@ import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus } f
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
+import { PublicKey } from "@solana/web3.js";
 
 // Drift trading fee rate (0.05% base - 10% referral discount = 0.045%)
 const DRIFT_FEE_RATE = 0.00045;
@@ -186,10 +187,10 @@ async function distributeCreatorProfitShare(params: {
   }
 
   const { publishedBot } = subscription;
-  const profitSharePercent = publishedBot.profitSharePercent ?? 0;
+  const profitSharePercent = parseFloat(String(publishedBot.profitSharePercent ?? 0));
 
   // Validation 3: Check if profit sharing is enabled
-  if (profitSharePercent <= 0) {
+  if (profitSharePercent <= 0 || isNaN(profitSharePercent)) {
     console.log(`[ProfitShare] No profit share configured for published bot ${publishedBot.id}`);
     return { success: true };
   }
@@ -203,14 +204,12 @@ async function distributeCreatorProfitShare(params: {
     return { success: true };
   }
 
-  // Get creator's wallet address from source bot
-  const sourceTradingBot = await storage.getTradingBot(publishedBot.tradingBotId);
-  if (!sourceTradingBot) {
-    console.error(`[ProfitShare] Source trading bot not found: ${publishedBot.tradingBotId}`);
-    return { success: false, error: 'Source trading bot not found' };
+  // Get creator's wallet address directly from published bot
+  const creatorWalletAddress = publishedBot.creatorWalletAddress;
+  if (!creatorWalletAddress) {
+    console.error(`[ProfitShare] Creator wallet address not found for published bot ${publishedBot.id}`);
+    return { success: false, error: 'Creator wallet address not found' };
   }
-
-  const creatorWalletAddress = sourceTradingBot.walletAddress;
 
   // Validation 5: Validate creator wallet address
   try {
