@@ -4,7 +4,22 @@
 
 This document outlines the implementation strategy for profit sharing between signal bot creators and their subscribers in the QuantumVault marketplace. The goal is to enable creators to earn 0-10% of subscriber profits in a gas-optimized, reliable manner.
 
-**Last Updated**: 2026-01-22
+**Last Updated**: 2026-01-23
+
+---
+
+## Critical Design Decisions (Post-Audit)
+
+The following critical fixes were incorporated after external review:
+
+| Issue | Root Cause | Fix |
+|-------|------------|-----|
+| **Liquidity Gap** | Profit sits in Drift subaccount, not agent wallet | Settle PnL → **Withdraw from Drift** → Transfer to creator |
+| **Destination Wallet** | Originally planned for agent-to-agent only | Send directly to creator's **main Phantom wallet** (better UX) |
+| **SOL Gas Check** | Agent might have USDC but no SOL for fees | Pre-flight check: require >0.003 SOL before transfer |
+| **Hostage Risk** | Failed IOU = subscriber stuck forever | TTL: 50 retries or 7 days → void IOU, release subscriber |
+| **Race Conditions** | Multiple retry triggers could double-pay | Status column: `pending` → `processing` → `paid`/`voided` |
+| **Net vs Gross PnL** | Could charge fee on money subscriber didn't keep | Use `closeTradePnl` which already subtracts Drift fees |
 
 ---
 
@@ -93,19 +108,37 @@ CREATE TABLE pending_profit_shares (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   subscriber_bot_id VARCHAR NOT NULL REFERENCES trading_bots(id),
   subscriber_wallet_address TEXT NOT NULL,
-  creator_wallet_address TEXT NOT NULL,
-  creator_agent_public_key TEXT NOT NULL,
+  creator_wallet_address TEXT NOT NULL,  -- Creator's MAIN wallet (Phantom), not agent
   amount DECIMAL(20, 6) NOT NULL,
   realized_pnl DECIMAL(20, 6) NOT NULL,
   profit_share_percent DECIMAL(5, 2) NOT NULL,
   trade_id UUID REFERENCES bot_trades(id),
   published_bot_id VARCHAR NOT NULL,
+  drift_subaccount_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',  -- 'pending', 'processing', 'paid', 'voided'
   retry_count INTEGER DEFAULT 0,
   last_error TEXT,
   last_attempt_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT NOW()
 );
+
+-- Index for efficient lookups
+CREATE INDEX idx_pending_profit_shares_status ON pending_profit_shares(status);
+CREATE INDEX idx_pending_profit_shares_subscriber ON pending_profit_shares(subscriber_bot_id);
 ```
+
+**Status Column (Prevents Race Conditions):**
+| Status | Meaning |
+|--------|---------|
+| `pending` | Ready for retry attempt |
+| `processing` | Currently being attempted (prevents double-send) |
+| `paid` | Successfully transferred (will be deleted) |
+| `voided` | Max retries exceeded, subscriber released |
+
+**Race Condition Prevention:**
+1. Job picks up IOU → Update to `processing`
+2. If another trigger tries → Sees `processing` → Skips
+3. If `processing` > 5 minutes old → Reset to `pending` (stale/crashed)
 
 **Why only failed transfers?**
 - Successful transfers: On-chain record is the audit trail (queryable via Solana explorer)
@@ -129,20 +162,47 @@ The IOU system has **multiple triggers** to ensure creators get paid even in edg
 
 ```
 1. Transfer attempt fails
-   → Insert IOU record (status: pending, retry_count: 0)
+   → Insert IOU record (status: 'pending', retry_count: 0)
 
-2. Retry triggers fire
-   → Attempt transfer again
-   → If success: DELETE IOU record
-   → If fail: Increment retry_count, update last_error
+2. Retry trigger fires
+   → Update status to 'processing'
+   → Attempt transfer
+   → If success: Update status to 'paid', then DELETE record
+   → If fail: Increment retry_count, update last_error, reset status to 'pending'
 
-3. After 20 retries (~1.5 hours of background attempts)
-   → Keep trying on withdrawal/deletion triggers
-   → Log for manual review if persists > 24 hours
+3. Stale 'processing' check (in background job)
+   → If status = 'processing' AND last_attempt_at > 5 minutes ago
+   → Reset to 'pending' (crashed/timed out attempt)
 
-4. Eventually paid
+4. Max retry / TTL reached (HOSTAGE PREVENTION)
+   → If retry_count >= 50 OR created_at > 7 days ago
+   → Update status to 'voided'
+   → Subscriber is RELEASED (can withdraw/delete)
+   → Log alert for manual review
+   → Creator can contact support to claim
+
+5. Eventually paid
    → DELETE IOU record (no permanent storage)
 ```
+
+### Hostage Prevention (TTL)
+
+**Problem:** If the creator's wallet is broken/invalid, the transfer will always fail, trapping the subscriber forever.
+
+**Solution:** After max retries or time limit, void the IOU and release the subscriber.
+
+| Limit | Value | Rationale |
+|-------|-------|-----------|
+| Max retries | 50 | ~4 hours of background retries (every 5 min) |
+| Max age | 7 days | Enough time for network issues to resolve |
+
+**When IOU is voided:**
+- Subscriber can withdraw/delete their bot
+- Creator's funds remain in subscriber's Drift account (not lost)
+- Creator can contact support for manual resolution
+- Logged for admin review
+
+This prevents a technical failure on the creator's side from permanently locking a subscriber's funds.
 
 ---
 
@@ -198,17 +258,35 @@ async getBotSubscriptionBySubscriberBotId(botId: string): Promise<(BotSubscripti
 }
 ```
 
-### 2. Agent Wallet: `transferUsdcBetweenAgents()`
+### 2. Helper: `getAgentSolBalance()`
 
 **Location**: `server/agent-wallet.ts`
 
-**Purpose**: Transfer USDC directly from subscriber's agent wallet to creator's agent wallet
+**Purpose**: Check agent wallet SOL balance for gas fees
 
 ```typescript
-export async function transferUsdcBetweenAgents(
+export async function getAgentSolBalance(agentPublicKey: string): Promise<number> {
+  const connection = getConnection();
+  const pubkey = new PublicKey(agentPublicKey);
+  const balance = await connection.getBalance(pubkey);
+  return balance / 1_000_000_000; // Convert lamports to SOL
+}
+```
+
+### 3. USDC Transfer: `transferUsdcToWallet()`
+
+**Location**: `server/agent-wallet.ts`
+
+**Purpose**: Transfer USDC from subscriber's agent wallet to any Solana wallet (creator's main Phantom wallet)
+
+**NOTE**: Receiver doesn't need to sign - we can send to any valid Solana address.
+Sending to creator's MAIN wallet (Phantom) is better UX than requiring an agent wallet.
+
+```typescript
+export async function transferUsdcToWallet(
   fromAgentPublicKey: string,
   fromEncryptedPrivateKey: string,
-  toAgentPublicKey: string,
+  toWalletAddress: string,  // Any Solana wallet (creator's Phantom)
   amountUsdc: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
@@ -286,21 +364,28 @@ export async function transferUsdcBetweenAgents(
 }
 ```
 
-### 3. Profit Share: `distributeCreatorProfitShare()`
+### 4. Profit Share: `distributeCreatorProfitShare()`
 
 **Location**: `server/routes.ts` (or new `server/profit-share.ts`)
 
 **Purpose**: Main profit share distribution logic
 
+**IMPORTANT: `realizedPnl` must be NET profit (after Drift fees)**
+The `closeTradePnl` calculated in routes.ts already subtracts fees:
+```typescript
+tradePnl = (fillPrice - entryPrice) * closeSize - closeFee;  // Already net
+```
+
 ```typescript
 async function distributeCreatorProfitShare(
   subscriberBot: TradingBot,
   subscriberWallet: Wallet,
-  realizedPnl: number,
-): Promise<{ success: boolean; txSignature?: string; amount?: number; skipped?: string }> {
+  netRealizedPnl: number,  // MUST be net profit (after Drift fees)
+  subAccountId: number,
+): Promise<{ success: boolean; txSignature?: string; amount?: number; skipped?: string; iouCreated?: boolean }> {
   
   // 1. Skip if PnL is not positive
-  if (realizedPnl <= 0) {
+  if (netRealizedPnl <= 0) {
     return { success: true, skipped: 'No profit to share' };
   }
   
@@ -321,35 +406,53 @@ async function distributeCreatorProfitShare(
   }
   
   // 4. Calculate creator's share
-  const creatorShare = realizedPnl * (profitSharePercent / 100);
+  const creatorShare = netRealizedPnl * (profitSharePercent / 100);
   
   // 5. Skip dust amounts (less than 1 cent)
   if (creatorShare < 0.01) {
     return { success: true, skipped: `Dust amount: $${creatorShare.toFixed(4)}` };
   }
   
-  // 6. Get creator's wallet (check if they have an agent wallet)
-  const creatorWallet = await storage.getWallet(subscription.publishedBot.creatorWalletAddress);
-  if (!creatorWallet) {
-    console.warn(`[ProfitShare] Creator wallet not found: ${subscription.publishedBot.creatorWalletAddress}`);
+  // 6. Get creator's main wallet address (destination for profit share)
+  // NOTE: We send to creator's MAIN wallet (Phantom), not agent wallet
+  // Receiver doesn't need to sign - any valid Solana address works
+  const creatorMainWallet = subscription.publishedBot.creatorWalletAddress;
+  if (!creatorMainWallet) {
+    console.warn(`[ProfitShare] Creator wallet not found in published bot`);
     return { success: false, error: 'Creator wallet not found' };
   }
   
-  // 7. Determine destination: creator's agent wallet if available, otherwise skip
-  // NOTE: We can only transfer to agent wallets since we control them
-  // If creator has no agent wallet, they must create one to receive profit shares
-  if (!creatorWallet.agentPublicKey) {
-    console.warn(`[ProfitShare] Creator has no agent wallet, skipping profit share`);
-    return { success: true, skipped: 'Creator has no agent wallet' };
+  // 7. PRE-FLIGHT CHECK: Verify subscriber agent has enough SOL for gas
+  // Need ~0.003 SOL for tx fee + potential ATA rent for creator
+  const MIN_SOL_FOR_GAS = 0.003;
+  const agentSolBalance = await getAgentSolBalance(subscriberWallet.agentPublicKey!);
+  if (agentSolBalance < MIN_SOL_FOR_GAS) {
+    console.warn(`[ProfitShare] Insufficient SOL for gas: ${agentSolBalance} < ${MIN_SOL_FOR_GAS}`);
+    // Create IOU and fail over - subscriber needs to top up SOL
+    return { success: false, error: `Insufficient SOL for gas: ${agentSolBalance}` };
   }
   
-  // 8. Execute the transfer
-  console.log(`[ProfitShare] Distributing $${creatorShare.toFixed(4)} (${profitSharePercent}% of $${realizedPnl.toFixed(4)}) to creator ${creatorWallet.address}`);
+  // 8. WITHDRAW from Drift to agent wallet
+  // CRITICAL: Profit is in Drift subaccount collateral, not agent SPL wallet
+  // Must withdraw before we can transfer to creator
+  console.log(`[ProfitShare] Withdrawing $${creatorShare.toFixed(4)} from Drift subaccount ${subAccountId}`);
+  const withdrawResult = await withdrawFromDrift(
+    subscriberWallet,
+    subAccountId,
+    creatorShare
+  );
+  if (!withdrawResult.success) {
+    console.error(`[ProfitShare] Drift withdrawal failed: ${withdrawResult.error}`);
+    return { success: false, error: `Drift withdrawal failed: ${withdrawResult.error}` };
+  }
   
-  const transferResult = await transferUsdcBetweenAgents(
+  // 9. Execute the transfer to creator's MAIN wallet
+  console.log(`[ProfitShare] Transferring $${creatorShare.toFixed(4)} (${profitSharePercent}% of $${netRealizedPnl.toFixed(4)}) to creator ${creatorMainWallet}`);
+  
+  const transferResult = await transferUsdcToWallet(
     subscriberWallet.agentPublicKey!,
     subscriberWallet.agentPrivateKeyEncrypted!,
-    creatorWallet.agentPublicKey,
+    creatorMainWallet,  // Creator's MAIN wallet (Phantom), not agent
     creatorShare
   );
   
@@ -358,7 +461,8 @@ async function distributeCreatorProfitShare(
     return { success: true, txSignature: transferResult.signature, amount: creatorShare };
   } else {
     console.error(`[ProfitShare] FAILED: ${transferResult.error}`);
-    return { success: false, error: transferResult.error };
+    // Transfer failed - IOU will be created by caller
+    return { success: false, error: transferResult.error, iouCreated: true };
   }
 }
 ```
@@ -376,23 +480,32 @@ The profit share distribution should be inserted into the existing close trade f
 2. Record trade in database ✓
 3. Sync position from on-chain ✓
 4. Route close signal to subscribers ✓
-5. ★ PROFIT SHARE DISTRIBUTION ★  ← INSERT HERE
-6. Settle PnL (for profit reinvest) ✓
-7. Auto-withdraw (if threshold exceeded) ✓
-8. Send Telegram notifications ✓
+5. Settle PnL (converts realized PnL to USDC in Drift account) ✓
+6. ★ WITHDRAW PROFIT SHARE FROM DRIFT ★  ← NEW
+7. ★ TRANSFER TO CREATOR'S WALLET ★      ← NEW
+8. Auto-withdraw (if threshold exceeded) ✓
+9. Send Telegram notifications ✓
 ```
+
+**CRITICAL: Why Settle PnL comes BEFORE Profit Share:**
+When a trade closes on Drift, the profit is in the **Drift subaccount collateral**, NOT the agent's SPL wallet. We must:
+1. Settle PnL (makes the realized profit usable in Drift)
+2. Withdraw the creator's share from Drift to the agent wallet
+3. Transfer from agent wallet to creator's main wallet
+
+If we try to transfer before withdrawing, the agent wallet has insufficient USDC.
 
 **Why this order?**
 - After routing: ensures subscribers' trades are initiated first
-- Before settlePnl: profit share uses margin balance, settlement converts PnL to USDC
-- Before auto-withdraw: ensures creator gets their share before profits are withdrawn
+- After settlePnl: profit is now withdrawable from Drift
+- Before auto-withdraw: ensures creator gets their share before excess is withdrawn
 
 ### Files to Modify
 
 | File | Location | Change |
 |------|----------|--------|
 | `server/storage.ts` | Interface + implementation | Add `getBotSubscriptionBySubscriberBotId()` |
-| `server/agent-wallet.ts` | New export | Add `transferUsdcBetweenAgents()` |
+| `server/agent-wallet.ts` | New exports | Add `transferUsdcToWallet()`, `getAgentSolBalance()` |
 | `server/routes.ts` | After close in webhook (~line 4906) | Call `distributeCreatorProfitShare()` |
 | `server/routes.ts` | After close in user webhook (~line 6162) | Call `distributeCreatorProfitShare()` |
 | `server/routes.ts` | After manual close (~line 2450) | Call `distributeCreatorProfitShare()` |
@@ -479,7 +592,8 @@ Conclusion: Gas cost is negligible. Immediate on-chain settlement is practical.
 
 ### Phase 1: Core Transfer System (3-4 hours)
 - [ ] Add `getBotSubscriptionBySubscriberBotId()` to storage interface and implementation
-- [ ] Add `transferUsdcBetweenAgents()` to agent-wallet.ts
+- [ ] Add `getAgentSolBalance()` to agent-wallet.ts
+- [ ] Add `transferUsdcToWallet()` to agent-wallet.ts
 - [ ] Add `distributeCreatorProfitShare()` function
 - [ ] Integrate into webhook close handler
 - [ ] Integrate into user webhook close handler
@@ -571,8 +685,9 @@ The profit share implementation reuses existing infrastructure:
 
 **Phase 1 - Core Transfer:**
 - 1 storage function: `getBotSubscriptionBySubscriberBotId()` (~15 lines)
-- 1 transfer function: `transferUsdcBetweenAgents()` (~60 lines)
-- 1 distribution function: `distributeCreatorProfitShare()` (~50 lines)
+- 1 helper function: `getAgentSolBalance()` (~10 lines)
+- 1 transfer function: `transferUsdcToWallet()` (~60 lines)
+- 1 distribution function: `distributeCreatorProfitShare()` (~60 lines)
 - 4 integration points (~10 lines each)
 
 **Phase 2 - IOU Failover:**
