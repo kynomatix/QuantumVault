@@ -2938,13 +2938,15 @@ export async function registerRoutes(
             return res.status(400).json({ error: "Bot has no capital configured. Set Max Position Size." });
           }
           
-          // Check if auto top-up can help reach full investment amount
-          if (bot.autoTopUp && baseCapital > maxTradeableValue && maxTradeableValue > 0) {
-            const requiredCollateralForFullTrade = (baseCapital / effectiveLeverage) * 1.15; // 15% buffer
-            const topUpNeeded = Math.max(0, requiredCollateralForFullTrade - freeCollateral);
+          // SIMPLE FORMULA: deposit needed = target equity - current equity
+          // Target equity = maxPositionSize / leverage (investment amount user set)
+          if (bot.autoTopUp) {
+            const currentEquity = freeCollateral;
+            const targetEquity = baseCapital / effectiveLeverage; // Investment amount user wants
+            const topUpNeeded = Math.max(0, targetEquity - currentEquity);
             const botSubaccountId = bot.driftSubaccountId ?? 0;
             
-            console.log(`[ManualTrade] Auto top-up check: need $${requiredCollateralForFullTrade.toFixed(2)} collateral for $${baseCapital.toFixed(2)} trade, have $${freeCollateral.toFixed(2)}, shortfall: $${topUpNeeded.toFixed(2)}`);
+            console.log(`[ManualTrade] Auto top-up: current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)}, need $${topUpNeeded.toFixed(2)}`);
             
             if (topUpNeeded > 0) {
               try {
@@ -2962,9 +2964,9 @@ export async function registerRoutes(
                   );
                   
                   if (depositResult.success) {
-                    console.log(`[ManualTrade] Auto top-up successful: deposited $${depositAmount.toFixed(2)}, tx: ${depositResult.signature}`);
+                    console.log(`[ManualTrade] Auto top-up successful: deposited $${depositAmount.toFixed(2)} (equity $${currentEquity.toFixed(2)} → $${(currentEquity + depositAmount).toFixed(2)}), tx: ${depositResult.signature}`);
                     freeCollateral += depositAmount;
-                    maxTradeableValue = freeCollateral * effectiveLeverage * 0.80;
+                    maxTradeableValue = freeCollateral * effectiveLeverage; // Now at 100% capacity
                     
                     await storage.createEquityEvent({
                       walletAddress: bot.walletAddress,
@@ -2972,7 +2974,7 @@ export async function registerRoutes(
                       eventType: 'auto_topup',
                       amount: String(depositAmount),
                       txSignature: depositResult.signature || null,
-                      notes: `Auto top-up: deposited $${depositAmount.toFixed(2)} for manual ${side} trade`,
+                      notes: `Auto top-up: equity $${currentEquity.toFixed(2)} → $${freeCollateral.toFixed(2)} for $${baseCapital.toFixed(2)} position`,
                     });
                   } else {
                     console.log(`[ManualTrade] Auto top-up failed: ${depositResult.error}`);
@@ -5735,12 +5737,14 @@ export async function registerRoutes(
             console.log(`[Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
           } else if (tradeAmountUsd > maxTradeableValue) {
             // BEFORE SCALING DOWN: Check if auto top-up can help reach full investment amount
+            // SIMPLE FORMULA: deposit needed = investment setting - current equity (leverage is irrelevant for deposits)
             if (bot.autoTopUp && !profitReinvestEnabled) {
-              const requiredCollateralForFullTrade = (tradeAmountUsd / effectiveLeverage) * 1.15; // 15% buffer
-              const topUpNeeded = Math.max(0, requiredCollateralForFullTrade - freeCollateral);
+              const currentEquity = freeCollateral; // Bot's current equity in subaccount
+              const targetEquity = baseCapital / effectiveLeverage; // Required equity to support full investment
+              const topUpNeeded = Math.max(0, targetEquity - currentEquity);
               const botSubaccountId = bot.driftSubaccountId ?? 0;
               
-              console.log(`[Webhook] Auto top-up check: need $${requiredCollateralForFullTrade.toFixed(2)} collateral for $${tradeAmountUsd.toFixed(2)} trade, have $${freeCollateral.toFixed(2)}, shortfall: $${topUpNeeded.toFixed(2)}`);
+              console.log(`[Webhook] Auto top-up: current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)} (for $${baseCapital.toFixed(2)} position at ${effectiveLeverage}x), need $${topUpNeeded.toFixed(2)}`);
               
               if (topUpNeeded > 0) {
                 try {
@@ -5758,10 +5762,10 @@ export async function registerRoutes(
                     );
                     
                     if (depositResult.success) {
-                      console.log(`[Webhook] Auto top-up successful: deposited $${depositAmount.toFixed(2)} to reach full investment, tx: ${depositResult.signature}`);
-                      // Update freeCollateral and maxTradeableValue after deposit
+                      console.log(`[Webhook] Auto top-up successful: deposited $${depositAmount.toFixed(2)} to reach target equity, tx: ${depositResult.signature}`);
+                      // Update freeCollateral after deposit - now at full capacity
                       freeCollateral += depositAmount;
-                      maxTradeableValue = freeCollateral * effectiveLeverage * 0.80;
+                      maxTradeableValue = freeCollateral * effectiveLeverage; // No buffer - deposit brings us to 100%
                       
                       // Record auto top-up event
                       await storage.createEquityEvent({
@@ -5770,10 +5774,10 @@ export async function registerRoutes(
                         eventType: 'auto_topup',
                         amount: String(depositAmount),
                         txSignature: depositResult.signature || null,
-                        notes: `Auto top-up: deposited $${depositAmount.toFixed(2)} to enable full $${tradeAmountUsd.toFixed(2)} trade (was limited to $${maxTradeableValue.toFixed(2)})`,
+                        notes: `Auto top-up: deposited $${depositAmount.toFixed(2)} (equity $${currentEquity.toFixed(2)} → $${freeCollateral.toFixed(2)}) for full $${baseCapital.toFixed(2)} position`,
                       });
                       
-                      console.log(`[Webhook] Updated: freeCollateral=$${freeCollateral.toFixed(2)}, maxTradeableValue=$${maxTradeableValue.toFixed(2)}`);
+                      console.log(`[Webhook] Updated: equity=$${freeCollateral.toFixed(2)}, max position=$${maxTradeableValue.toFixed(2)}`);
                     } else {
                       console.log(`[Webhook] Auto top-up deposit failed: ${depositResult.error}, falling back to scaled trade`);
                     }
@@ -5786,14 +5790,15 @@ export async function registerRoutes(
               }
             }
             
-            // Re-check after potential top-up
-            if (tradeAmountUsd > maxTradeableValue) {
+            // Re-check after potential top-up (use 95% buffer for small margin of error)
+            const adjustedMaxTradeable = freeCollateral * effectiveLeverage * 0.95;
+            if (tradeAmountUsd > adjustedMaxTradeable) {
               const originalAmount = tradeAmountUsd;
-              tradeAmountUsd = maxTradeableValue;
+              tradeAmountUsd = adjustedMaxTradeable;
               const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
               console.log(`[Webhook] SCALED DOWN: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested, will scale back up as equity recovers)`);
             } else {
-              console.log(`[Webhook] Full size now available after top-up: $${tradeAmountUsd.toFixed(2)} within $${maxTradeableValue.toFixed(2)} capacity`);
+              console.log(`[Webhook] Full size now available after top-up: $${tradeAmountUsd.toFixed(2)} within $${adjustedMaxTradeable.toFixed(2)} capacity`);
             }
           } else {
             console.log(`[Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${maxTradeableValue.toFixed(2)} capacity`);
@@ -8339,68 +8344,51 @@ export async function registerRoutes(
       console.log(`[Retry Trade] Retrying ${side} ${market} x${size} for bot ${bot.name}`);
       
       // Check if auto top-up is needed before retrying
+      // SIMPLE FORMULA: deposit needed = target equity - current equity
+      // Target equity = maxPositionSize / leverage (investment amount user set)
       const subAccountId = bot.driftSubaccountId ?? 0;
-      const baseCapital = parseFloat(bot.maxPositionSize?.toString() || '0');
+      const baseCapital = parseFloat(bot.maxPositionSize?.toString() || '0'); // This is leveraged position size
       const effectiveLeverage = Math.min(Number(bot.leverage) || 10, getMarketMaxLeverage(market) || 10);
+      const targetEquity = baseCapital / effectiveLeverage; // The investment amount user wants
       
-      // Get oracle price to calculate the actual trade notional value
-      let tradeNotionalValue = 0;
-      try {
-        const prices = await import('./price-cache').then(m => m.getCachedPrices());
-        const oraclePrice = prices[market] || 0;
-        tradeNotionalValue = size * oraclePrice;
-      } catch (e) {
-        console.log(`[Retry Trade] Could not get oracle price for notional calc`);
-      }
-      
-      // Use the LARGER of baseCapital or actual trade notional value for auto top-up check
-      // This fixes the bug where trades scaled to fit 90% margin fail, but baseCapital is lower
-      const capitalForTopUpCheck = Math.max(baseCapital, tradeNotionalValue);
-      
-      if (bot.autoTopUp && capitalForTopUpCheck > 0) {
+      if (bot.autoTopUp && targetEquity > 0) {
         try {
           const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
-          let freeCollateral = Math.max(0, accountInfo.freeCollateral);
-          const maxTradeableValue = freeCollateral * effectiveLeverage * 0.80; // 80% buffer for retries (stricter)
+          const currentEquity = Math.max(0, accountInfo.freeCollateral);
+          const topUpNeeded = Math.max(0, targetEquity - currentEquity);
           
-          // Check if we need top-up to execute the actual trade size
-          if (capitalForTopUpCheck > maxTradeableValue) {
-            const requiredCollateral = (capitalForTopUpCheck / effectiveLeverage) * 1.20; // 20% extra buffer
-            const topUpNeeded = Math.max(0, requiredCollateral - freeCollateral);
+          console.log(`[Retry Trade] Auto top-up: current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)}, need $${topUpNeeded.toFixed(2)}`);
+          
+          if (topUpNeeded > 0) {
+            const agentUsdcBalance = await getAgentUsdcBalance(wallet.agentPublicKey!);
+            console.log(`[Retry Trade] Agent wallet: $${agentUsdcBalance.toFixed(2)}, need: $${topUpNeeded.toFixed(2)}`);
             
-            console.log(`[Retry Trade] Auto top-up check: need $${requiredCollateral.toFixed(2)}, have $${freeCollateral.toFixed(2)}, shortfall: $${topUpNeeded.toFixed(2)}`);
-            
-            if (topUpNeeded > 0) {
-              const agentUsdcBalance = await getAgentUsdcBalance(wallet.agentPublicKey!);
-              console.log(`[Retry Trade] Agent wallet: $${agentUsdcBalance.toFixed(2)}, need: $${topUpNeeded.toFixed(2)}`);
+            if (agentUsdcBalance >= topUpNeeded) {
+              const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
+              const depositResult = await executeAgentDriftDeposit(
+                wallet.agentPublicKey!,
+                wallet.agentPrivateKeyEncrypted,
+                depositAmount,
+                subAccountId,
+                false
+              );
               
-              if (agentUsdcBalance >= topUpNeeded) {
-                const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
-                const depositResult = await executeAgentDriftDeposit(
-                  wallet.agentPublicKey!,
-                  wallet.agentPrivateKeyEncrypted,
-                  depositAmount,
-                  subAccountId,
-                  false
-                );
+              if (depositResult.success) {
+                console.log(`[Retry Trade] Auto top-up successful: deposited $${depositAmount.toFixed(2)} (equity $${currentEquity.toFixed(2)} → $${(currentEquity + depositAmount).toFixed(2)}), tx: ${depositResult.signature}`);
                 
-                if (depositResult.success) {
-                  console.log(`[Retry Trade] Auto top-up successful: deposited $${depositAmount.toFixed(2)}, tx: ${depositResult.signature}`);
-                  
-                  await storage.createEquityEvent({
-                    walletAddress,
-                    tradingBotId: bot.id,
-                    eventType: 'auto_topup',
-                    amount: String(depositAmount),
-                    txSignature: depositResult.signature || null,
-                    notes: `Auto top-up for retry: deposited $${depositAmount.toFixed(2)}`,
-                  });
-                } else {
-                  console.log(`[Retry Trade] Auto top-up failed: ${depositResult.error}`);
-                }
+                await storage.createEquityEvent({
+                  walletAddress,
+                  tradingBotId: bot.id,
+                  eventType: 'auto_topup',
+                  amount: String(depositAmount),
+                  txSignature: depositResult.signature || null,
+                  notes: `Auto top-up for retry: equity $${currentEquity.toFixed(2)} → $${(currentEquity + depositAmount).toFixed(2)} for $${baseCapital.toFixed(2)} position`,
+                });
               } else {
-                console.log(`[Retry Trade] Agent wallet insufficient for top-up`);
+                console.log(`[Retry Trade] Auto top-up failed: ${depositResult.error}`);
               }
+            } else {
+              console.log(`[Retry Trade] Agent wallet insufficient for top-up ($${agentUsdcBalance.toFixed(2)} < $${topUpNeeded.toFixed(2)})`);
             }
           }
         } catch (topUpErr: any) {
