@@ -23,6 +23,7 @@ import {
   telegramConnectionTokens,
   tradeRetryQueue,
   platformMetrics,
+  pendingProfitShares,
   type User,
   type InsertUser,
   type Wallet,
@@ -69,6 +70,8 @@ import {
   type PlatformMetric,
   type InsertPlatformMetric,
   type PlatformMetricType,
+  type PendingProfitShare,
+  type InsertPendingProfitShare,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -183,6 +186,7 @@ export interface IStorage {
   getBotSubscription(publishedBotId: string, subscriberWalletAddress: string): Promise<BotSubscription | undefined>;
   getBotSubscriptionsByPublishedBot(publishedBotId: string): Promise<BotSubscription[]>;
   getBotSubscriptionsByWallet(walletAddress: string): Promise<(BotSubscription & { publishedBot: PublishedBot })[]>;
+  getBotSubscriptionBySubscriberBotId(botId: string): Promise<(BotSubscription & { publishedBot: PublishedBot }) | undefined>;
   getSubscriberBotsBySourceId(publishedBotId: string): Promise<TradingBot[]>;
   createBotSubscription(subscription: InsertBotSubscription): Promise<BotSubscription>;
   updateBotSubscription(id: string, updates: Partial<InsertBotSubscription>): Promise<BotSubscription | undefined>;
@@ -248,6 +252,14 @@ export interface IStorage {
   calculatePlatformVolume(): Promise<{ total: number; volume24h: number; volume7d: number }>;
   calculatePlatformStats(): Promise<{ activeBots: number; activeUsers: number; totalTrades: number }>;
   getAllAgentWalletAddresses(): Promise<string[]>;
+
+  // Profit Sharing: IOU records for failed profit share transfers
+  createPendingProfitShare(data: InsertPendingProfitShare): Promise<PendingProfitShare>;
+  getPendingProfitSharesBySubscriber(subscriberWalletAddress: string): Promise<PendingProfitShare[]>;
+  getPendingProfitSharesByBot(subscriberBotId: string): Promise<PendingProfitShare[]>;
+  getAllPendingProfitShares(): Promise<PendingProfitShare[]>;
+  updatePendingProfitShareStatus(id: string, updates: { status?: string; retryCount?: number; lastError?: string | null; lastAttemptAt?: Date }): Promise<PendingProfitShare | undefined>;
+  deletePendingProfitShare(id: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1051,6 +1063,23 @@ export class DatabaseStorage implements IStorage {
     }));
   }
 
+  async getBotSubscriptionBySubscriberBotId(botId: string): Promise<(BotSubscription & { publishedBot: PublishedBot }) | undefined> {
+    const results = await db.select({
+      subscription: botSubscriptions,
+      publishedBot: publishedBots,
+    })
+    .from(botSubscriptions)
+    .innerJoin(publishedBots, eq(botSubscriptions.publishedBotId, publishedBots.id))
+    .where(and(
+      eq(botSubscriptions.subscriberBotId, botId),
+      eq(botSubscriptions.status, 'active')
+    ))
+    .limit(1);
+
+    if (results.length === 0) return undefined;
+    return { ...results[0].subscription, publishedBot: results[0].publishedBot };
+  }
+
   async getSubscriberBotsBySourceId(publishedBotId: string): Promise<TradingBot[]> {
     // Join with bot_subscriptions to only return bots with active subscriptions
     // This ensures cancelled subscriptions don't receive signals
@@ -1428,6 +1457,77 @@ export class DatabaseStorage implements IStorage {
       activeUsers: parseInt(activeUsers[0]?.count || '0'),
       totalTrades: parseInt(totalTrades[0]?.count || '0'),
     };
+  }
+
+  // Profit Sharing: IOU records for failed profit share transfers
+  async createPendingProfitShare(data: InsertPendingProfitShare): Promise<PendingProfitShare> {
+    const result = await db.insert(pendingProfitShares).values(data)
+      .onConflictDoNothing({ target: [pendingProfitShares.subscriberBotId, pendingProfitShares.tradeId] })
+      .returning();
+    if (result.length === 0) {
+      const existing = await db.select().from(pendingProfitShares)
+        .where(and(
+          eq(pendingProfitShares.subscriberBotId, data.subscriberBotId),
+          eq(pendingProfitShares.tradeId, data.tradeId)
+        ))
+        .limit(1);
+      return existing[0];
+    }
+    return result[0];
+  }
+
+  async getPendingProfitSharesBySubscriber(subscriberWalletAddress: string): Promise<PendingProfitShare[]> {
+    return db.select().from(pendingProfitShares)
+      .where(and(
+        eq(pendingProfitShares.subscriberWalletAddress, subscriberWalletAddress),
+        eq(pendingProfitShares.status, 'pending')
+      ))
+      .orderBy(desc(pendingProfitShares.createdAt));
+  }
+
+  async getPendingProfitSharesByBot(subscriberBotId: string): Promise<PendingProfitShare[]> {
+    // Include both 'pending' and 'processing' to prevent hostage escape during retry
+    return db.select().from(pendingProfitShares)
+      .where(and(
+        eq(pendingProfitShares.subscriberBotId, subscriberBotId),
+        or(
+          eq(pendingProfitShares.status, 'pending'),
+          eq(pendingProfitShares.status, 'processing')
+        )
+      ))
+      .orderBy(desc(pendingProfitShares.createdAt));
+  }
+  
+  // Alias for routes.ts compatibility
+  async getPendingProfitSharesBySubscriberBot(subscriberBotId: string): Promise<PendingProfitShare[]> {
+    return this.getPendingProfitSharesByBot(subscriberBotId);
+  }
+  
+  async getPendingProfitSharesProcessing(): Promise<PendingProfitShare[]> {
+    return db.select().from(pendingProfitShares)
+      .where(eq(pendingProfitShares.status, 'processing'))
+      .orderBy(pendingProfitShares.createdAt);
+  }
+
+  async getAllPendingProfitShares(): Promise<PendingProfitShare[]> {
+    return db.select().from(pendingProfitShares)
+      .where(eq(pendingProfitShares.status, 'pending'))
+      .orderBy(pendingProfitShares.createdAt);
+  }
+
+  async updatePendingProfitShareStatus(
+    id: string, 
+    updates: { status?: string; retryCount?: number; lastError?: string | null; lastAttemptAt?: Date }
+  ): Promise<PendingProfitShare | undefined> {
+    const result = await db.update(pendingProfitShares)
+      .set(updates)
+      .where(eq(pendingProfitShares.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async deletePendingProfitShare(id: string): Promise<void> {
+    await db.delete(pendingProfitShares).where(eq(pendingProfitShares.id, id));
   }
 }
 

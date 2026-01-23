@@ -551,3 +551,36 @@ export type PlatformMetricType =
   | "active_users"     // Number of active users (wallets with bots)
   | "volume_24h"       // 24-hour trading volume
   | "volume_7d";       // 7-day trading volume
+
+// Profit Sharing: IOU records for failed profit share transfers
+// Tracks pending transfers that need to be retried (SOL starvation, RPC failures, etc.)
+export const pendingProfitShares = pgTable("pending_profit_shares", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  subscriberBotId: varchar("subscriber_bot_id").notNull().references(() => tradingBots.id, { onDelete: "cascade" }),
+  subscriberWalletAddress: text("subscriber_wallet_address").notNull(),
+  creatorWalletAddress: text("creator_wallet_address").notNull(),
+  amount: decimal("amount", { precision: 20, scale: 6 }).notNull(),
+  realizedPnl: decimal("realized_pnl", { precision: 20, scale: 6 }).notNull(),
+  profitSharePercent: decimal("profit_share_percent", { precision: 5, scale: 2 }).notNull(),
+  tradeId: text("trade_id").notNull(),
+  publishedBotId: varchar("published_bot_id").references(() => publishedBots.id, { onDelete: "set null" }),
+  driftSubaccountId: integer("drift_subaccount_id").notNull(),
+  status: text("status").notNull().default("pending"), // pending, processing, paid, voided
+  retryCount: integer("retry_count").notNull().default(0),
+  lastError: text("last_error"),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqueSubscriberTrade: unique("pending_profit_shares_unique").on(table.subscriberBotId, table.tradeId),
+}));
+
+export const insertPendingProfitShareSchema = createInsertSchema(pendingProfitShares).omit({
+  id: true,
+  status: true,
+  retryCount: true,
+  lastError: true,
+  lastAttemptAt: true,
+  createdAt: true,
+});
+export type InsertPendingProfitShare = z.infer<typeof insertPendingProfitShareSchema>;
+export type PendingProfitShare = typeof pendingProfitShares.$inferSelect;

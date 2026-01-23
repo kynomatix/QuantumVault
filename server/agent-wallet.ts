@@ -424,3 +424,88 @@ export async function executeAgentSolWithdraw(
     return { success: false, error: error.message || 'Unknown error' };
   }
 }
+
+// Transfer USDC from agent wallet to any Solana wallet (for profit sharing)
+export async function transferUsdcToWallet(
+  fromAgentPublicKey: string,
+  fromEncryptedPrivateKey: string,
+  toWalletAddress: string,
+  amountUsdc: number,
+): Promise<{ success: boolean; signature?: string; error?: string; solBalance?: number }> {
+  try {
+    const connection = getConnection();
+    const fromKeypair = getAgentKeypair(fromEncryptedPrivateKey);
+    const fromPubkey = new PublicKey(fromAgentPublicKey);
+    const toPubkey = new PublicKey(toWalletAddress);
+    const usdcMint = new PublicKey(USDC_MINT);
+    
+    const fromAta = getAssociatedTokenAddressSync(usdcMint, fromPubkey);
+    const toAta = getAssociatedTokenAddressSync(usdcMint, toPubkey);
+    
+    const amountLamports = Math.round(amountUsdc * 1_000_000);
+    if (amountLamports <= 0) {
+      return { success: false, error: 'Invalid amount' };
+    }
+    
+    // RPC OPTIMIZATION: Batch fetch agent SOL balance + destination ATA in 1 call
+    const [agentAccountInfo, toAtaInfo] = await connection.getMultipleAccountsInfo([
+      fromPubkey,
+      toAta,
+    ]);
+    
+    // Check SOL balance for gas fees (~0.003 SOL needed)
+    const solBalance = (agentAccountInfo?.lamports || 0) / LAMPORTS_PER_SOL;
+    if (solBalance < 0.003) {
+      return { success: false, error: `Insufficient SOL for gas: ${solBalance.toFixed(6)}`, solBalance };
+    }
+    
+    const instructions: TransactionInstruction[] = [];
+    
+    // Create destination ATA if it doesn't exist
+    if (!toAtaInfo) {
+      instructions.push(
+        createAssociatedTokenAccountInstruction(
+          fromPubkey,
+          toAta,
+          toPubkey,
+          usdcMint
+        )
+      );
+    }
+    
+    instructions.push(
+      createTransferInstruction(fromAta, toAta, fromPubkey, BigInt(amountLamports))
+    );
+    
+    // Always fetch fresh blockhash for reliability
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    
+    const transaction = new Transaction({
+      feePayer: fromPubkey,
+      blockhash,
+      lastValidBlockHeight,
+    });
+    
+    for (const ix of instructions) {
+      transaction.add(ix);
+    }
+    
+    transaction.sign(fromKeypair);
+    
+    const signature = await connection.sendRawTransaction(
+      transaction.serialize(),
+      { skipPreflight: false, preflightCommitment: 'confirmed' }
+    );
+    
+    await connection.confirmTransaction({
+      signature,
+      blockhash,
+      lastValidBlockHeight,
+    }, 'confirmed');
+    
+    return { success: true, signature, solBalance };
+  } catch (error: any) {
+    console.error('[TransferToWallet] Error:', error.message);
+    return { success: false, error: error.message };
+  }
+}

@@ -300,6 +300,13 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         } catch (syncErr) {
           console.warn(`[TradeRetry] Position sync failed:`, syncErr);
         }
+        
+        // TODO: PROFIT SHARE for successful close retries
+        // When a close order succeeds via retry, we need to:
+        // 1. Calculate PnL (need entry price from before close)
+        // 2. Distribute profit share to creator if this is a subscriber bot
+        // This will be handled in Phase 2 via the IOU failover system - any profit share
+        // that can't be distributed immediately will be queued as an IOU
       }
       
       await notifyRetryResult(job, true);

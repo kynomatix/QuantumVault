@@ -13,7 +13,7 @@ import { getMarketPrice, getAllPrices, forceRefreshPrices } from "./drift-price"
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, getBatchDriftAccountInfo, getBatchPerpPositions, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMarketMaxLeverage } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
@@ -151,6 +151,177 @@ function parseDriftError(error: string | undefined): string {
   }
   
   return error;
+}
+
+// Distribute profit share from subscriber bot to signal creator
+// Called after a profitable close trade on subscriber bots
+async function distributeCreatorProfitShare(params: {
+  subscriberBotId: string;
+  subscriberWalletAddress: string;
+  subscriberAgentPublicKey: string;
+  subscriberEncryptedPrivateKey: string;
+  driftSubaccountId: number;
+  realizedPnl: number;
+  tradeId: string;
+}): Promise<{ success: boolean; amount?: number; signature?: string; error?: string }> {
+  const { 
+    subscriberBotId, 
+    subscriberWalletAddress,
+    subscriberAgentPublicKey,
+    subscriberEncryptedPrivateKey,
+    driftSubaccountId,
+    realizedPnl, 
+    tradeId 
+  } = params;
+
+  // Validation 1: Only process profitable trades
+  if (realizedPnl <= 0) {
+    return { success: true }; // No profit = no share to distribute
+  }
+
+  // Validation 2: Check if this is a subscriber bot
+  const subscription = await storage.getBotSubscriptionBySubscriberBotId(subscriberBotId);
+  if (!subscription) {
+    return { success: true }; // Not a subscriber bot, no profit share
+  }
+
+  const { publishedBot } = subscription;
+  const profitSharePercent = publishedBot.profitSharePercent ?? 0;
+
+  // Validation 3: Check if profit sharing is enabled
+  if (profitSharePercent <= 0) {
+    console.log(`[ProfitShare] No profit share configured for published bot ${publishedBot.id}`);
+    return { success: true };
+  }
+
+  // Calculate profit share amount
+  const profitShareAmount = (realizedPnl * profitSharePercent) / 100;
+  
+  // Validation 4: Dust check - don't process amounts below $0.01
+  if (profitShareAmount < 0.01) {
+    console.log(`[ProfitShare] Dust amount $${profitShareAmount.toFixed(4)}, skipping for trade ${tradeId}`);
+    return { success: true };
+  }
+
+  // Get creator's wallet address from source bot
+  const sourceTradingBot = await storage.getTradingBot(publishedBot.tradingBotId);
+  if (!sourceTradingBot) {
+    console.error(`[ProfitShare] Source trading bot not found: ${publishedBot.tradingBotId}`);
+    return { success: false, error: 'Source trading bot not found' };
+  }
+
+  const creatorWalletAddress = sourceTradingBot.walletAddress;
+
+  // Validation 5: Validate creator wallet address
+  try {
+    new PublicKey(creatorWalletAddress);
+  } catch (e) {
+    console.error(`[ProfitShare] Invalid creator wallet address: ${creatorWalletAddress}`);
+    return { success: false, error: 'Invalid creator wallet address' };
+  }
+
+  console.log(`[ProfitShare] Processing: trade=${tradeId}, pnl=$${realizedPnl.toFixed(4)}, share=${profitSharePercent}%, amount=$${profitShareAmount.toFixed(4)}, creator=${creatorWalletAddress}`);
+
+  // Helper function to create IOU on failure
+  const createIouOnFailure = async (errorMsg: string) => {
+    try {
+      await storage.createPendingProfitShare({
+        subscriberBotId,
+        subscriberWalletAddress,
+        creatorWalletAddress,
+        amount: profitShareAmount.toString(),
+        realizedPnl: realizedPnl.toString(),
+        profitSharePercent: profitSharePercent.toString(),
+        tradeId,
+        publishedBotId: publishedBot.id,
+        driftSubaccountId,
+      });
+      console.log(`[ProfitShare] IOU created for $${profitShareAmount.toFixed(4)} to ${creatorWalletAddress} (trade: ${tradeId})`);
+    } catch (iouErr: any) {
+      console.error(`[ProfitShare] Failed to create IOU: ${iouErr.message}`);
+    }
+  };
+
+  // Step 1: Settle PnL from on-chain position
+  const settleResult = await settleAllPnl(subscriberEncryptedPrivateKey, driftSubaccountId);
+  if (!settleResult.success) {
+    console.error(`[ProfitShare] Failed to settle PnL: ${settleResult.error}`);
+    await createIouOnFailure(`Settle PnL failed: ${settleResult.error}`);
+    return { success: false, error: `Settle PnL failed: ${settleResult.error}` };
+  }
+
+  // Step 2: Withdraw from Drift subaccount to agent wallet
+  const withdrawResult = await executeAgentDriftWithdraw(
+    subscriberAgentPublicKey,
+    subscriberEncryptedPrivateKey,
+    profitShareAmount,
+    driftSubaccountId
+  );
+
+  if (!withdrawResult.success) {
+    // Handle cross-margin collateral and other withdrawal failures
+    const errorMsg = withdrawResult.error || 'Unknown withdrawal error';
+    console.error(`[ProfitShare] Drift withdrawal failed: ${errorMsg}`);
+    
+    // Check for dust error and retry with slightly less
+    if (errorMsg.includes('Withdraw leaves user negative USDC') || errorMsg.includes('6088')) {
+      const dustAdjustedAmount = profitShareAmount - 0.000001;
+      if (dustAdjustedAmount >= 0.01) {
+        console.log(`[ProfitShare] Retrying withdrawal with dust-adjusted amount: $${dustAdjustedAmount.toFixed(6)}`);
+        const retryResult = await executeAgentDriftWithdraw(
+          subscriberAgentPublicKey,
+          subscriberEncryptedPrivateKey,
+          dustAdjustedAmount,
+          driftSubaccountId
+        );
+        if (!retryResult.success) {
+          await createIouOnFailure(`Drift withdrawal failed after dust adjustment: ${retryResult.error}`);
+          return { success: false, error: `Drift withdrawal failed after dust adjustment: ${retryResult.error}`, amount: profitShareAmount };
+        }
+      } else {
+        await createIouOnFailure('Amount too small after dust adjustment');
+        return { success: false, error: 'Amount too small after dust adjustment', amount: profitShareAmount };
+      }
+    } else {
+      await createIouOnFailure(`Drift withdrawal failed: ${errorMsg}`);
+      return { success: false, error: `Drift withdrawal failed: ${errorMsg}`, amount: profitShareAmount };
+    }
+  }
+
+  // Step 3: Transfer USDC from agent wallet to creator's main wallet
+  const transferResult = await transferUsdcToWallet(
+    subscriberAgentPublicKey,
+    subscriberEncryptedPrivateKey,
+    creatorWalletAddress,
+    profitShareAmount
+  );
+
+  if (!transferResult.success) {
+    const errorMsg = transferResult.error || 'Unknown transfer error';
+    console.error(`[ProfitShare] Transfer to creator failed: ${errorMsg}`);
+    
+    // Create IOU for failed transfers (SOL starvation, RPC errors, etc.)
+    await createIouOnFailure(errorMsg);
+    
+    // SOL starvation is a specific condition to surface in error message
+    if (errorMsg.includes('Insufficient SOL')) {
+      return { 
+        success: false, 
+        error: `Transfer failed - agent wallet needs SOL for gas (balance: ${transferResult.solBalance?.toFixed(6) || '0'} SOL)`, 
+        amount: profitShareAmount 
+      };
+    }
+    
+    return { success: false, error: `Transfer failed: ${errorMsg}`, amount: profitShareAmount };
+  }
+
+  console.log(`[ProfitShare] SUCCESS: $${profitShareAmount.toFixed(4)} sent to ${creatorWalletAddress}, signature: ${transferResult.signature}`);
+  
+  return { 
+    success: true, 
+    amount: profitShareAmount, 
+    signature: transferResult.signature 
+  };
 }
 
 // PHASE 6.2 SECURITY NOTE: Subscriber Routing uses LEGACY encrypted key path
@@ -1965,6 +2136,50 @@ export async function registerRoutes(
         if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
           subAccountId = bot.driftSubaccountId;
         }
+        
+        // Check for pending profit share IOUs before allowing withdrawal
+        const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(botId);
+        if (pendingIOUs.length > 0) {
+          const totalOwed = pendingIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
+          console.log(`[Drift Withdraw] Bot ${botId} has ${pendingIOUs.length} pending IOUs totaling $${totalOwed.toFixed(4)}`);
+          
+          // Try to pay IOUs first
+          let allPaid = true;
+          for (const iou of pendingIOUs) {
+            const iouAmount = parseFloat(iou.amount);
+            const transferResult = await transferUsdcToWallet(
+              wallet.agentPublicKey,
+              wallet.agentPrivateKeyEncrypted,
+              iou.creatorWalletAddress,
+              iouAmount
+            );
+            
+            if (transferResult.success) {
+              await storage.updatePendingProfitShareStatus(iou.id, { status: 'paid', lastAttemptAt: new Date() });
+              console.log(`[Drift Withdraw] Paid IOU ${iou.id}: $${iouAmount.toFixed(4)} to ${iou.creatorWalletAddress}`);
+            } else {
+              allPaid = false;
+              console.error(`[Drift Withdraw] Failed to pay IOU ${iou.id}: ${transferResult.error}`);
+              // Check if it's SOL starvation
+              if (transferResult.error?.includes('Insufficient SOL')) {
+                return res.status(400).json({
+                  error: `Cannot withdraw - pending creator profit share of $${totalOwed.toFixed(2)} cannot be paid. Agent wallet needs more SOL for transaction fees (current: ${transferResult.solBalance?.toFixed(4) || '0'} SOL)`,
+                  pendingIOUs: pendingIOUs.length,
+                  totalOwed
+                });
+              }
+              break;
+            }
+          }
+          
+          if (!allPaid) {
+            return res.status(400).json({
+              error: `Cannot withdraw - you have $${totalOwed.toFixed(2)} in pending profit share payments to signal creators. Please ensure your agent wallet has enough USDC to cover these payments.`,
+              pendingIOUs: pendingIOUs.length,
+              totalOwed
+            });
+          }
+        }
       }
 
       const result = await executeAgentDriftWithdraw(
@@ -2554,6 +2769,28 @@ export async function registerRoutes(
         closeSide,
         closeSize
       );
+      
+      // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
+      // This must happen BEFORE auto-withdraw to ensure creator gets their share
+      if (tradePnl > 0) {
+        const tradeId = `${bot.id}-${Date.now()}`;
+        distributeCreatorProfitShare({
+          subscriberBotId: bot.id,
+          subscriberWalletAddress: wallet.address,
+          subscriberAgentPublicKey: wallet.agentPublicKey!,
+          subscriberEncryptedPrivateKey: wallet.agentPrivateKeyEncrypted,
+          driftSubaccountId: subAccountId,
+          realizedPnl: tradePnl,
+          tradeId,
+        }).then(result => {
+          if (result.success && result.amount) {
+            console.log(`[ClosePosition] Profit share distributed: $${result.amount.toFixed(4)}`);
+          } else if (!result.success && result.error) {
+            console.error(`[ClosePosition] Profit share failed: ${result.error}`);
+            // IOU is now created inside distributeCreatorProfitShare
+          }
+        }).catch(err => console.error('[ClosePosition] Profit share error:', err));
+      }
 
       res.json({ 
         success: true,
@@ -3798,6 +4035,50 @@ export async function registerRoutes(
       const wallet = await storage.getWallet(req.walletAddress!);
       const agentAddress = wallet?.agentPublicKey;
       
+      // Check for pending profit share IOUs before allowing deletion
+      const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(req.params.id);
+      if (pendingIOUs.length > 0) {
+        const totalOwed = pendingIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
+        console.log(`[Delete] Bot ${req.params.id} has ${pendingIOUs.length} pending IOUs totaling $${totalOwed.toFixed(4)}`);
+        
+        // Try to pay IOUs first if we have wallet access
+        if (wallet?.agentPublicKey && wallet?.agentPrivateKeyEncrypted) {
+          let allPaid = true;
+          for (const iou of pendingIOUs) {
+            const iouAmount = parseFloat(iou.amount);
+            const transferResult = await transferUsdcToWallet(
+              wallet.agentPublicKey,
+              wallet.agentPrivateKeyEncrypted,
+              iou.creatorWalletAddress,
+              iouAmount
+            );
+            
+            if (transferResult.success) {
+              await storage.updatePendingProfitShareStatus(iou.id, { status: 'paid', lastAttemptAt: new Date() });
+              console.log(`[Delete] Paid IOU ${iou.id}: $${iouAmount.toFixed(4)} to ${iou.creatorWalletAddress}`);
+            } else {
+              allPaid = false;
+              console.error(`[Delete] Failed to pay IOU ${iou.id}: ${transferResult.error}`);
+              break;
+            }
+          }
+          
+          if (!allPaid) {
+            return res.status(400).json({
+              error: `Cannot delete bot - you have $${totalOwed.toFixed(2)} in pending profit share payments to signal creators. Please fund your agent wallet and try again.`,
+              pendingIOUs: pendingIOUs.length,
+              totalOwed
+            });
+          }
+        } else {
+          return res.status(400).json({
+            error: `Cannot delete bot - you have $${totalOwed.toFixed(2)} in pending profit share payments. Agent wallet access is required to pay these.`,
+            pendingIOUs: pendingIOUs.length,
+            totalOwed
+          });
+        }
+      }
+      
       // CRITICAL: If bot has a subaccount but wallet/agent is missing, refuse to delete
       // This prevents orphaning funds when wallet record is corrupted or missing
       if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
@@ -4009,6 +4290,50 @@ export async function registerRoutes(
       // Get the wallet's agent public key - Drift accounts are under the AGENT wallet
       const wallet = await storage.getWallet(req.walletAddress!);
       const agentAddress = wallet?.agentPublicKey;
+      
+      // Check for pending profit share IOUs before allowing deletion
+      const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(req.params.id);
+      if (pendingIOUs.length > 0) {
+        const totalOwed = pendingIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
+        console.log(`[ForceDelete] Bot ${req.params.id} has ${pendingIOUs.length} pending IOUs totaling $${totalOwed.toFixed(4)}`);
+        
+        // Try to pay IOUs first if we have wallet access
+        if (wallet?.agentPublicKey && wallet?.agentPrivateKeyEncrypted) {
+          let allPaid = true;
+          for (const iou of pendingIOUs) {
+            const iouAmount = parseFloat(iou.amount);
+            const transferResult = await transferUsdcToWallet(
+              wallet.agentPublicKey,
+              wallet.agentPrivateKeyEncrypted,
+              iou.creatorWalletAddress,
+              iouAmount
+            );
+            
+            if (transferResult.success) {
+              await storage.updatePendingProfitShareStatus(iou.id, { status: 'paid', lastAttemptAt: new Date() });
+              console.log(`[ForceDelete] Paid IOU ${iou.id}: $${iouAmount.toFixed(4)} to ${iou.creatorWalletAddress}`);
+            } else {
+              allPaid = false;
+              console.error(`[ForceDelete] Failed to pay IOU ${iou.id}: ${transferResult.error}`);
+              break;
+            }
+          }
+          
+          if (!allPaid) {
+            return res.status(400).json({
+              error: `Cannot delete bot - you have $${totalOwed.toFixed(2)} in pending profit share payments to signal creators. Please fund your agent wallet and try again.`,
+              pendingIOUs: pendingIOUs.length,
+              totalOwed
+            });
+          }
+        } else {
+          return res.status(400).json({
+            error: `Cannot delete bot - you have $${totalOwed.toFixed(2)} in pending profit share payments. Agent wallet access is required to pay these.`,
+            pendingIOUs: pendingIOUs.length,
+            totalOwed
+          });
+        }
+      }
       
       // CRITICAL: If bot has a subaccount but wallet/agent is missing, refuse to delete
       if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
@@ -4904,6 +5229,28 @@ export async function registerRoutes(
               isCloseSignal: true,
               strategyPositionSize,
             }).catch(err => console.error('[Subscriber Routing] Error routing close to subscribers:', err));
+            
+            // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
+            // This must happen BEFORE auto-withdraw to ensure creator gets their share
+            if (closeTradePnl > 0) {
+              const tradeId = `${botId}-${Date.now()}`;
+              distributeCreatorProfitShare({
+                subscriberBotId: botId,
+                subscriberWalletAddress: wallet.address,
+                subscriberAgentPublicKey: wallet.agentPublicKey!,
+                subscriberEncryptedPrivateKey: wallet.agentPrivateKeyEncrypted,
+                driftSubaccountId: subAccountId,
+                realizedPnl: closeTradePnl,
+                tradeId,
+              }).then(result => {
+                if (result.success && result.amount) {
+                  console.log(`[Webhook] Profit share distributed: $${result.amount.toFixed(4)}`);
+                } else if (!result.success && result.error) {
+                  console.error(`[Webhook] Profit share failed: ${result.error}`);
+                  // IOU is now created inside distributeCreatorProfitShare
+                }
+              }).catch(err => console.error('[Webhook] Profit share error:', err));
+            }
             
             // SETTLE PNL: Convert realized PnL to usable USDC balance for profit reinvest
             // This must happen after close so profits can be used as margin for the next trade
@@ -6168,6 +6515,28 @@ export async function registerRoutes(
               market: bot.market,
               pnl: closeTradePnl,
             }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
+            
+            // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
+            // This must happen BEFORE auto-withdraw to ensure creator gets their share
+            if (closeTradePnl > 0) {
+              const tradeId = `${botId}-${Date.now()}`;
+              distributeCreatorProfitShare({
+                subscriberBotId: botId,
+                subscriberWalletAddress: walletAddress,
+                subscriberAgentPublicKey: wallet.agentPublicKey,
+                subscriberEncryptedPrivateKey: wallet.agentPrivateKeyEncrypted,
+                driftSubaccountId: subAccountId,
+                realizedPnl: closeTradePnl,
+                tradeId,
+              }).then(result => {
+                if (result.success && result.amount) {
+                  console.log(`[User Webhook] Profit share distributed: $${result.amount.toFixed(4)}`);
+                } else if (!result.success && result.error) {
+                  console.error(`[User Webhook] Profit share failed: ${result.error}`);
+                  // IOU is now created inside distributeCreatorProfitShare
+                }
+              }).catch(err => console.error('[User Webhook] Profit share error:', err));
+            }
             
             // SETTLE PNL: Convert realized PnL to usable USDC balance for profit reinvest
             if (bot.profitReinvest) {
