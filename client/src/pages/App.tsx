@@ -1576,7 +1576,6 @@ export default function AppPage() {
                           <RefreshCw className={`w-4 h-4 mr-1 ${reconcilePositions.isPending ? 'animate-spin' : ''}`} />
                           Sync
                         </Button>
-                        <Button variant="outline" size="sm" data-testid="button-view-all-positions">View All</Button>
                       </div>
                     </div>
                     <div className="space-y-3">

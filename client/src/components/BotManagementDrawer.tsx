@@ -1766,9 +1766,9 @@ export function BotManagementDrawer({
             </div>
           </TabsContent>
 
-          <TabsContent value="history" className="mt-4 space-y-6">
-            {/* Trades Section */}
-            <div>
+          <TabsContent value="history" className="mt-4 flex flex-col h-[calc(100vh-280px)]">
+            {/* Trades Section - 3/4 of available space */}
+            <div className="flex-[3] flex flex-col min-h-0">
               <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
                 <TrendingUp className="w-4 h-4" />
                 Trade Executions
@@ -1785,7 +1785,7 @@ export function BotManagementDrawer({
                   </p>
                 </div>
               ) : (
-                <div className="space-y-2 max-h-48 overflow-y-auto">
+                <div className="space-y-2 flex-1 overflow-y-auto">
                   {trades.map((trade) => {
                     const isLong = trade.side === 'LONG';
                     const isFailed = trade.status === 'failed';
@@ -1900,25 +1900,25 @@ export function BotManagementDrawer({
               )}
             </div>
 
-            {/* Equity Events Section */}
-            <div>
+            {/* Equity Events Section - 1/4 of available space */}
+            <div className="flex-1 flex flex-col min-h-0 mt-4">
               <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
                 <Wallet className="w-4 h-4" />
                 Deposits & Withdrawals
               </h3>
               {equityEventsLoading ? (
-                <div className="flex items-center justify-center py-6">
+                <div className="flex items-center justify-center py-4">
                   <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
                 </div>
               ) : equityEvents.length === 0 ? (
-                <div className="text-center py-6 bg-muted/20 rounded-lg">
+                <div className="text-center py-4 bg-muted/20 rounded-lg">
                   <p className="text-sm text-muted-foreground">No transactions yet</p>
                   <p className="text-xs text-muted-foreground/70 mt-1">
                     Deposits and withdrawals will appear here
                   </p>
                 </div>
               ) : (
-                <div className="space-y-2 max-h-48 overflow-y-auto">
+                <div className="space-y-2 flex-1 overflow-y-auto">
                   {equityEvents.map((event) => {
                     const isPositive = parseFloat(event.amount) > 0;
                     const formatEventType = (type: string) => {
