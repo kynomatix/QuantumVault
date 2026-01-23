@@ -5731,77 +5731,74 @@ export async function registerRoutes(
           // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
           tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
           console.log(`[Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
-          console.log(`[Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 80% buffer)`);
+          console.log(`[Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional`);
           
-          if (maxTradeableValue <= 0) {
-            console.log(`[Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
-          } else if (tradeAmountUsd > maxTradeableValue) {
-            // BEFORE SCALING DOWN: Check if auto top-up can help reach full investment amount
-            // SIMPLE FORMULA: deposit needed = investment setting - current equity (leverage is irrelevant for deposits)
-            if (bot.autoTopUp && !profitReinvestEnabled) {
-              const currentEquity = freeCollateral; // Bot's current equity in subaccount
-              const targetEquity = baseCapital / effectiveLeverage; // Required equity to support full investment
-              const topUpNeeded = Math.max(0, targetEquity - currentEquity);
-              const botSubaccountId = bot.driftSubaccountId ?? 0;
-              
-              console.log(`[Webhook] Auto top-up: current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)} (for $${baseCapital.toFixed(2)} position at ${effectiveLeverage}x), need $${topUpNeeded.toFixed(2)}`);
-              
-              if (topUpNeeded > 0) {
-                try {
-                  const agentUsdcBalance = await getAgentUsdcBalance(wallet.agentPublicKey!);
-                  console.log(`[Webhook] Agent wallet USDC balance: $${agentUsdcBalance.toFixed(2)}, need: $${topUpNeeded.toFixed(2)}`);
+          // STEP 1: Check if auto top-up is needed BEFORE any capacity checks
+          // SIMPLE FORMULA: deposit needed = target equity - current equity
+          // This runs first so bot can reach full investment even from $0 equity
+          if (bot.autoTopUp) {
+            const currentEquity = freeCollateral;
+            const targetEquity = baseCapital / effectiveLeverage; // Investment amount user wants
+            const topUpNeeded = Math.max(0, targetEquity - currentEquity);
+            const botSubaccountId = bot.driftSubaccountId ?? 0;
+            
+            console.log(`[Webhook] Auto top-up check: current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)}, need $${topUpNeeded.toFixed(2)}`);
+            
+            if (topUpNeeded > 0) {
+              try {
+                const agentUsdcBalance = await getAgentUsdcBalance(wallet.agentPublicKey!);
+                console.log(`[Webhook] Agent wallet USDC balance: $${agentUsdcBalance.toFixed(2)}, need: $${topUpNeeded.toFixed(2)}`);
+                
+                if (agentUsdcBalance >= topUpNeeded) {
+                  const depositAmount = Math.ceil(topUpNeeded * 100) / 100; // Round up to nearest cent
+                  const depositResult = await executeAgentDriftDeposit(
+                    wallet.agentPublicKey!,
+                    wallet.agentPrivateKeyEncrypted,
+                    depositAmount,
+                    botSubaccountId,
+                    false
+                  );
                   
-                  if (agentUsdcBalance >= topUpNeeded) {
-                    const depositAmount = Math.ceil(topUpNeeded * 100) / 100; // Round up to nearest cent
-                    const depositResult = await executeAgentDriftDeposit(
-                      wallet.agentPublicKey!,
-                      wallet.agentPrivateKeyEncrypted,
-                      depositAmount,
-                      botSubaccountId,
-                      false
-                    );
+                  if (depositResult.success) {
+                    console.log(`[Webhook] Auto top-up successful: deposited $${depositAmount.toFixed(2)} (equity $${currentEquity.toFixed(2)} → $${(currentEquity + depositAmount).toFixed(2)}), tx: ${depositResult.signature}`);
+                    // Update freeCollateral and maxTradeableValue - now at full capacity
+                    freeCollateral += depositAmount;
+                    maxTradeableValue = freeCollateral * effectiveLeverage; // 100% capacity after top-up
                     
-                    if (depositResult.success) {
-                      console.log(`[Webhook] Auto top-up successful: deposited $${depositAmount.toFixed(2)} to reach target equity, tx: ${depositResult.signature}`);
-                      // Update freeCollateral after deposit - now at full capacity
-                      freeCollateral += depositAmount;
-                      maxTradeableValue = freeCollateral * effectiveLeverage; // No buffer - deposit brings us to 100%
-                      
-                      // Record auto top-up event
-                      await storage.createEquityEvent({
-                        walletAddress: bot.walletAddress,
-                        tradingBotId: bot.id,
-                        eventType: 'auto_topup',
-                        amount: String(depositAmount),
-                        txSignature: depositResult.signature || null,
-                        notes: `Auto top-up: deposited $${depositAmount.toFixed(2)} (equity $${currentEquity.toFixed(2)} → $${freeCollateral.toFixed(2)}) for full $${baseCapital.toFixed(2)} position`,
-                      });
-                      
-                      console.log(`[Webhook] Updated: equity=$${freeCollateral.toFixed(2)}, max position=$${maxTradeableValue.toFixed(2)}`);
-                    } else {
-                      console.log(`[Webhook] Auto top-up deposit failed: ${depositResult.error}, falling back to scaled trade`);
-                    }
+                    // Record auto top-up event
+                    await storage.createEquityEvent({
+                      walletAddress: bot.walletAddress,
+                      tradingBotId: bot.id,
+                      eventType: 'auto_topup',
+                      amount: String(depositAmount),
+                      txSignature: depositResult.signature || null,
+                      notes: `Auto top-up: equity $${currentEquity.toFixed(2)} → $${freeCollateral.toFixed(2)} for $${baseCapital.toFixed(2)} position`,
+                    });
+                    
+                    console.log(`[Webhook] Updated: equity=$${freeCollateral.toFixed(2)}, max position=$${maxTradeableValue.toFixed(2)}`);
                   } else {
-                    console.log(`[Webhook] Agent wallet ($${agentUsdcBalance.toFixed(2)}) insufficient for full top-up ($${topUpNeeded.toFixed(2)}), will scale down trade`);
+                    console.log(`[Webhook] Auto top-up deposit failed: ${depositResult.error}, will scale trade to available margin`);
                   }
-                } catch (topUpErr: any) {
-                  console.log(`[Webhook] Auto top-up error: ${topUpErr.message}, falling back to scaled trade`);
+                } else {
+                  console.log(`[Webhook] Agent wallet ($${agentUsdcBalance.toFixed(2)}) insufficient for top-up ($${topUpNeeded.toFixed(2)}), will scale trade`);
                 }
+              } catch (topUpErr: any) {
+                console.log(`[Webhook] Auto top-up error: ${topUpErr.message}, will scale trade`);
               }
             }
-            
-            // Re-check after potential top-up (use 95% buffer for small margin of error)
-            const adjustedMaxTradeable = freeCollateral * effectiveLeverage * 0.95;
-            if (tradeAmountUsd > adjustedMaxTradeable) {
-              const originalAmount = tradeAmountUsd;
-              tradeAmountUsd = adjustedMaxTradeable;
-              const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
-              console.log(`[Webhook] SCALED DOWN: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested, will scale back up as equity recovers)`);
-            } else {
-              console.log(`[Webhook] Full size now available after top-up: $${tradeAmountUsd.toFixed(2)} within $${adjustedMaxTradeable.toFixed(2)} capacity`);
-            }
+          }
+          
+          // STEP 2: After potential top-up, check if we need to scale down (use 95% buffer)
+          const adjustedMaxTradeable = freeCollateral * effectiveLeverage * 0.95;
+          if (adjustedMaxTradeable <= 0) {
+            console.log(`[Webhook] No margin available after top-up check, will attempt minimum viable trade`);
+          } else if (tradeAmountUsd > adjustedMaxTradeable) {
+            const originalAmount = tradeAmountUsd;
+            tradeAmountUsd = adjustedMaxTradeable;
+            const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
+            console.log(`[Webhook] SCALED: Trade $${originalAmount.toFixed(2)} → $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested)`);
           } else {
-            console.log(`[Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${maxTradeableValue.toFixed(2)} capacity`);
+            console.log(`[Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${adjustedMaxTradeable.toFixed(2)} capacity`);
           }
         }
       } catch (collateralErr: any) {
@@ -6732,10 +6729,11 @@ export async function registerRoutes(
       // Calculate trade amount based on profit reinvest setting
       let tradeAmountUsd: number = 0; // Initialize to 0 for safety
       let maxTradeableValue = 0;
+      let freeCollateral = 0; // Declare outside so it can be updated by auto top-up
       
       try {
         const accountInfo = await getDriftAccountInfo(userWallet.agentPublicKey!, subAccountId);
-        const freeCollateral = Math.max(0, accountInfo.freeCollateral);
+        freeCollateral = Math.max(0, accountInfo.freeCollateral);
         // CRITICAL: Use effectiveLeverage (capped by market's max) to avoid InsufficientCollateral errors
         const maxNotionalCapacity = freeCollateral * effectiveLeverage;
         maxTradeableValue = maxNotionalCapacity * 0.80; // 80% buffer for fees/slippage/oracle drift
@@ -6760,17 +6758,69 @@ export async function registerRoutes(
           // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
           tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
           console.log(`[User Webhook] ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
-          console.log(`[User Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional (using $${maxTradeableValue.toFixed(2)} with 80% buffer)`);
+          console.log(`[User Webhook] Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional`);
           
-          if (maxTradeableValue <= 0) {
-            console.log(`[User Webhook] No margin available (freeCollateral=$${freeCollateral.toFixed(2)}), will attempt minimum viable trade`);
-          } else if (tradeAmountUsd > maxTradeableValue) {
+          // STEP 1: Check if auto top-up is needed BEFORE any capacity checks
+          // SIMPLE FORMULA: deposit needed = target equity - current equity
+          if (bot.autoTopUp) {
+            const currentEquity = freeCollateral;
+            const targetEquity = baseCapital / effectiveLeverage;
+            const topUpNeeded = Math.max(0, targetEquity - currentEquity);
+            const botSubaccountId = bot.driftSubaccountId ?? 0;
+            
+            console.log(`[User Webhook] Auto top-up check: current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)}, need $${topUpNeeded.toFixed(2)}`);
+            
+            if (topUpNeeded > 0) {
+              try {
+                const agentUsdcBalance = await getAgentUsdcBalance(userWallet.agentPublicKey!);
+                console.log(`[User Webhook] Agent wallet: $${agentUsdcBalance.toFixed(2)}, need: $${topUpNeeded.toFixed(2)}`);
+                
+                if (agentUsdcBalance >= topUpNeeded) {
+                  const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
+                  const depositResult = await executeAgentDriftDeposit(
+                    userWallet.agentPublicKey!,
+                    userWallet.agentPrivateKeyEncrypted,
+                    depositAmount,
+                    botSubaccountId,
+                    false
+                  );
+                  
+                  if (depositResult.success) {
+                    console.log(`[User Webhook] Auto top-up successful: deposited $${depositAmount.toFixed(2)}, tx: ${depositResult.signature}`);
+                    freeCollateral += depositAmount;
+                    maxTradeableValue = freeCollateral * effectiveLeverage;
+                    
+                    await storage.createEquityEvent({
+                      walletAddress: userWallet.address,
+                      tradingBotId: bot.id,
+                      eventType: 'auto_topup',
+                      amount: String(depositAmount),
+                      txSignature: depositResult.signature || null,
+                      notes: `Auto top-up: equity $${currentEquity.toFixed(2)} → $${freeCollateral.toFixed(2)}`,
+                    });
+                  } else {
+                    console.log(`[User Webhook] Auto top-up failed: ${depositResult.error}`);
+                  }
+                } else {
+                  console.log(`[User Webhook] Agent wallet insufficient for top-up`);
+                }
+              } catch (topUpErr: any) {
+                console.log(`[User Webhook] Auto top-up error: ${topUpErr.message}`);
+              }
+            }
+          }
+          
+          // STEP 2: Check if trade needs to be scaled (use 95% buffer)
+          const adjustedMaxTradeable = freeCollateral * effectiveLeverage * 0.95;
+          if (adjustedMaxTradeable <= 0) {
+            console.log(`[User Webhook] No margin available, will attempt minimum viable trade`);
+          } else if (tradeAmountUsd > adjustedMaxTradeable) {
             const originalAmount = tradeAmountUsd;
-            tradeAmountUsd = maxTradeableValue;
+            tradeAmountUsd = adjustedMaxTradeable;
             const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
-            console.log(`[User Webhook] SCALED DOWN: Trade reduced from $${originalAmount.toFixed(2)} to $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested, will scale back up as equity recovers)`);
+            console.log(`[User Webhook] SCALED: Trade $${originalAmount.toFixed(2)} → $${tradeAmountUsd.toFixed(2)} (${scalePercent}%)`);
           } else {
-            console.log(`[User Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${maxTradeableValue.toFixed(2)} capacity`);
+            console.log(`[User Webhook] Full size available: $${tradeAmountUsd.toFixed(2)} within $${adjustedMaxTradeable.toFixed(2)} capacity`);
           }
         }
       } catch (collateralErr: any) {
