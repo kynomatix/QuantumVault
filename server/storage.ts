@@ -145,6 +145,7 @@ export interface IStorage {
     xUsername: string | null;
     totalVolume: number;
     totalPnl: number;
+    pnlPercent: number;
     winRate: number;
     tradeCount: number;
   }>>;
@@ -647,6 +648,7 @@ export class DatabaseStorage implements IStorage {
     xUsername: string | null;
     totalVolume: number;
     totalPnl: number;
+    pnlPercent: number;
     winRate: number;
     tradeCount: number;
   }>> {
@@ -657,6 +659,7 @@ export class DatabaseStorage implements IStorage {
       xUsername: string | null;
       totalVolume: number;
       totalPnl: number;
+      pnlPercent: number;
       winRate: number;
       tradeCount: number;
     }> = [];
@@ -699,6 +702,10 @@ export class DatabaseStorage implements IStorage {
       }
 
       const winRate = totalTrades > 0 ? (totalWinningTrades / totalTrades) * 100 : 0;
+      
+      // Get cumulative deposits to calculate % P&L
+      const { deposits } = await this.getWalletCumulativeDepositsWithdrawals(wallet.address);
+      const pnlPercent = deposits > 0 ? (totalPnl / deposits) * 100 : 0;
 
       results.push({
         walletAddress: wallet.address,
@@ -706,12 +713,14 @@ export class DatabaseStorage implements IStorage {
         xUsername: wallet.xUsername,
         totalVolume,
         totalPnl,
+        pnlPercent,
         winRate,
         tradeCount: totalTrades,
       });
     }
 
-    results.sort((a, b) => b.totalPnl - a.totalPnl);
+    // Sort by % P&L (best performers first)
+    results.sort((a, b) => b.pnlPercent - a.pnlPercent);
     return results.slice(0, limit);
   }
 

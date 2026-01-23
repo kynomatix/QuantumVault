@@ -2811,14 +2811,14 @@ export default function AppPage() {
                           <th className="text-left py-4 px-4 font-medium">Rank</th>
                           <th className="text-left py-4 px-4 font-medium">Trader</th>
                           <th className="text-right py-4 px-4 font-medium">Volume</th>
-                          <th className="text-right py-4 px-4 font-medium">PnL</th>
+                          <th className="text-right py-4 px-4 font-medium">P&L %</th>
                           <th className="text-right py-4 px-4 font-medium">Win Rate</th>
                           <th className="text-right py-4 px-4 font-medium">Trades</th>
                           <th className="text-center py-4 px-4 font-medium">Profile</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {leaderboardData.map((trader: { walletAddress: string; displayName: string | null; xUsername: string | null; totalVolume: number; totalPnl: number; winRate: number; tradeCount: number }, index: number) => {
+                        {leaderboardData.map((trader: { walletAddress: string; displayName: string | null; xUsername: string | null; totalVolume: number; totalPnl: number; pnlPercent: number; winRate: number; tradeCount: number }, index: number) => {
                           const rank = index + 1;
                           const shortenedWallet = `${trader.walletAddress.slice(0, 4)}...${trader.walletAddress.slice(-4)}`;
                           const displayName = trader.displayName || shortenedWallet;
@@ -2827,7 +2827,7 @@ export default function AppPage() {
                             if (v >= 1000) return `${(v / 1000).toFixed(1)}K`;
                             return v.toFixed(0);
                           };
-                          const pnlFormatted = trader.totalPnl >= 0 ? `+$${trader.totalPnl.toFixed(2)}` : `-$${Math.abs(trader.totalPnl).toFixed(2)}`;
+                          const pnlFormatted = trader.pnlPercent >= 0 ? `+${trader.pnlPercent.toFixed(2)}%` : `${trader.pnlPercent.toFixed(2)}%`;
                           return (
                             <tr key={trader.walletAddress} className="border-t border-border/30 hover:bg-muted/20" data-testid={`row-leaderboard-${rank}`}>
                               <td className="py-4 px-4">
@@ -2849,7 +2849,7 @@ export default function AppPage() {
                                 </div>
                               </td>
                               <td className="py-4 px-4 text-right font-mono">${formatVolume(trader.totalVolume)}</td>
-                              <td className={`py-4 px-4 text-right font-mono ${trader.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{pnlFormatted}</td>
+                              <td className={`py-4 px-4 text-right font-mono ${trader.pnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{pnlFormatted}</td>
                               <td className="py-4 px-4 text-right font-mono">{trader.winRate.toFixed(1)}%</td>
                               <td className="py-4 px-4 text-right font-mono text-muted-foreground">{trader.tradeCount}</td>
                               <td className="py-4 px-4 text-center">
