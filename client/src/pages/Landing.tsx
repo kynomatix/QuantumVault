@@ -721,8 +721,7 @@ export default function Landing() {
             <div className="flex items-center gap-8 text-sm">
               <a href="/analytics" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-footer-analytics">Analytics</a>
               <a href="/docs" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-footer-docs">Docs</a>
-              <a href="#" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-twitter">Twitter</a>
-              <a href="#" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-discord">Discord</a>
+              <a href="https://x.com/myquantumvault" target="_blank" rel="noopener noreferrer" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-twitter">X</a>
               <a href="#" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-github">GitHub</a>
             </div>
             <p className="text-sm text-muted-foreground">
