@@ -8073,9 +8073,54 @@ export async function registerRoutes(
         });
       }
 
-      // Create subscriber's bot with same settings but their own capital
+      // Use on-chain discovery combined with database state to find the next valid sequential subaccount ID
+      // This ensures Drift's sequential requirement is met and avoids conflicts (same as bot creation)
       const webhookSecret = generateWebhookSecret();
-      let subscriberBot = await storage.createTradingBot({
+      let nextSubaccountId: number;
+      try {
+        // Get all subaccount IDs currently allocated in the database for this wallet
+        const dbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
+        
+        // SYNC: Create placeholder bots for any orphaned on-chain subaccounts
+        // This keeps DB in sync with on-chain state and prevents ID conflicts
+        const { syncOnChainSubaccounts } = await import('./drift-service');
+        await syncOnChainSubaccounts(
+          wallet.agentPublicKey,
+          req.walletAddress!,
+          dbAllocatedIds,
+          async (orphanedSubaccountId: number) => {
+            // Create a placeholder bot for the orphaned subaccount
+            const orphanedWebhookSecret = generateWebhookSecret();
+            await storage.createTradingBot({
+              walletAddress: req.walletAddress!,
+              name: `Recovered Bot (SA${orphanedSubaccountId})`,
+              market: 'SOL-PERP',
+              webhookSecret: orphanedWebhookSecret,
+              driftSubaccountId: orphanedSubaccountId,
+              isActive: false,
+              side: 'both',
+              leverage: 1,
+              totalInvestment: '0',
+              maxPositionSize: null,
+              signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
+              riskConfig: {},
+            } as any);
+            console.log(`[Marketplace] Created recovered bot for orphaned subaccount ${orphanedSubaccountId}`);
+          }
+        );
+        
+        // Re-fetch allocated IDs after sync (may have added orphaned bots)
+        const updatedDbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
+        
+        nextSubaccountId = await getNextOnChainSubaccountId(wallet.agentPublicKey, updatedDbAllocatedIds);
+        console.log(`[Marketplace] On-chain discovery returned subaccount ID: ${nextSubaccountId}`);
+      } catch (error) {
+        console.error(`[Marketplace] On-chain discovery failed, falling back to database:`, error);
+        nextSubaccountId = await storage.getNextSubaccountId(req.walletAddress!);
+      }
+
+      // Create subscriber's bot with same settings but their own capital (with subaccount ID already set)
+      const subscriberBot = await storage.createTradingBot({
         name: `${publishedBot.name} (Copy)`,
         market: originalBot.market,
         walletAddress: req.walletAddress!,
@@ -8085,13 +8130,8 @@ export async function registerRoutes(
         webhookSecret,
         isActive: true,
         sourcePublishedBotId: publishedBot.id,
-      });
-
-      // Assign subaccount ID (done separately since it's auto-managed)
-      const nextSubaccountId = await storage.getNextSubaccountId(req.walletAddress!);
-      subscriberBot = (await storage.updateTradingBot(subscriberBot.id, { 
-        driftSubaccountId: nextSubaccountId 
-      } as any))!;
+        driftSubaccountId: nextSubaccountId,
+      } as any);
       
       // Deposit USDC from agent wallet directly to the new bot's Drift subaccount
       console.log(`[Marketplace] Depositing $${capitalInvested} from agent wallet to subaccount ${nextSubaccountId} for subscriber bot`);
