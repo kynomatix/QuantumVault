@@ -23,13 +23,17 @@ import {
   DollarSign,
   Info,
   Wallet,
-  ChevronDown
+  ChevronDown,
+  Fuel
 } from 'lucide-react';
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { useWallet, useConnection } from '@solana/wallet-adapter-react';
+import { Transaction } from '@solana/web3.js';
+import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 
 const MARKET_MAX_LEVERAGE: Record<string, number> = {
   'SOL-PERP': 20,
@@ -123,6 +127,8 @@ interface SubscribeBotModalProps {
 export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: SubscribeBotModalProps) {
   const { toast } = useToast();
   const subscribe = useSubscribeToPublishedBot();
+  const wallet = useWallet();
+  const { connection } = useConnection();
   
   const [capitalInvested, setCapitalInvested] = useState('');
   const [leverage, setLeverage] = useState(1);
@@ -130,19 +136,96 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const [availableBalance, setAvailableBalance] = useState<number | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [disclaimerOpen, setDisclaimerOpen] = useState(false);
+  const [solRequirement, setSolRequirement] = useState<{
+    required: number;
+    current: number;
+    deficit: number;
+    canCreate: boolean;
+  } | null>(null);
+  const [isDepositingSol, setIsDepositingSol] = useState(false);
 
   const maxLeverage = MARKET_MAX_LEVERAGE[bot.market] || 20;
   
   useEffect(() => {
     if (isOpen) {
       setBalanceLoading(true);
-      fetch('/api/total-equity', { credentials: 'include' })
-        .then(res => res.ok ? res.json() : Promise.reject())
-        .then(data => setAvailableBalance(data.agentBalance ?? 0))
-        .catch(() => setAvailableBalance(null))
+      Promise.all([
+        fetch('/api/total-equity', { credentials: 'include' }).then(res => res.ok ? res.json() : Promise.reject()),
+        fetch('/api/agent/balance', { credentials: 'include' }).then(res => res.ok ? res.json() : Promise.reject())
+      ])
+        .then(([equityData, balanceData]) => {
+          setAvailableBalance(equityData.agentBalance ?? 0);
+          if (balanceData.botCreationSolRequirement) {
+            setSolRequirement(balanceData.botCreationSolRequirement);
+          }
+        })
+        .catch(() => {
+          setAvailableBalance(null);
+          setSolRequirement(null);
+        })
         .finally(() => setBalanceLoading(false));
     }
   }, [isOpen]);
+
+  const handleSolDeposit = async () => {
+    if (!solRequirement || solRequirement.canCreate) return;
+    
+    if (!wallet.publicKey || !wallet.signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    const amount = solRequirement.deficit;
+    
+    setIsDepositingSol(true);
+    try {
+      const response = await fetch('/api/agent/deposit-sol', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'SOL deposit failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await response.json();
+      
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      const signedTx = await wallet.signTransaction(transaction);
+      
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      await confirmTransactionWithFallback(connection, {
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ title: 'SOL deposited successfully!' });
+      
+      // Refresh SOL balance
+      const balanceRes = await fetch('/api/agent/balance', { credentials: 'include' });
+      if (balanceRes.ok) {
+        const data = await balanceRes.json();
+        if (data.botCreationSolRequirement) {
+          setSolRequirement(data.botCreationSolRequirement);
+        }
+      }
+      
+    } catch (error: any) {
+      console.error('SOL deposit failed:', error);
+      toast({ 
+        title: 'SOL Deposit Failed', 
+        description: error.message || 'Please try again',
+        variant: 'destructive' 
+      });
+    } finally {
+      setIsDepositingSol(false);
+    }
+  };
   
   const handleMax = () => {
     if (availableBalance !== null && availableBalance > 0) {
@@ -220,6 +303,27 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             Copy trades from this strategy automatically.
           </DialogDescription>
         </DialogHeader>
+
+        {/* SOL Balance Warning */}
+        {solRequirement && !solRequirement.canCreate && (
+          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mt-2" data-testid="warning-sol-insufficient-subscribe">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-yellow-400">
+                  Insufficient SOL for Subscription
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Subscribing requires {solRequirement.required.toFixed(3)} SOL for subaccount rent and transaction fees. 
+                  Your agent wallet has {solRequirement.current.toFixed(4)} SOL.
+                </p>
+                <p className="text-xs text-yellow-400/80">
+                  Please deposit at least <span className="font-semibold">{solRequirement.deficit.toFixed(3)} SOL</span> to your agent wallet.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="space-y-4 py-4">
           <div className="p-4 rounded-xl bg-muted/30 border border-border/50">
@@ -405,24 +509,45 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={handleClose} data-testid="button-cancel-subscribe">
+          <Button variant="outline" onClick={handleClose} disabled={isDepositingSol} data-testid="button-cancel-subscribe">
             Cancel
           </Button>
-          <Button
-            onClick={handleSubscribe}
-            disabled={!riskAccepted || !capitalInvested || subscribe.isPending}
-            className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
-            data-testid="button-confirm-subscribe"
-          >
-            {subscribe.isPending ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Subscribing...
-              </>
-            ) : (
-              'Subscribe'
-            )}
-          </Button>
+          {solRequirement && !solRequirement.canCreate ? (
+            <Button 
+              onClick={handleSolDeposit} 
+              disabled={isDepositingSol}
+              className="bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600"
+              data-testid="button-deposit-sol-for-subscribe"
+            >
+              {isDepositingSol ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Depositing...
+                </>
+              ) : (
+                <>
+                  <Fuel className="w-4 h-4 mr-2" />
+                  Deposit {solRequirement.deficit.toFixed(3)} SOL
+                </>
+              )}
+            </Button>
+          ) : (
+            <Button
+              onClick={handleSubscribe}
+              disabled={!riskAccepted || !capitalInvested || subscribe.isPending}
+              className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
+              data-testid="button-confirm-subscribe"
+            >
+              {subscribe.isPending ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Subscribing...
+                </>
+              ) : (
+                'Subscribe'
+              )}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
