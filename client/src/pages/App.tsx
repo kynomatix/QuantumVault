@@ -2462,7 +2462,7 @@ export default function AppPage() {
                                 )}
                               </div>
 
-                              <div className="grid grid-cols-2 gap-2 mb-3">
+                              <div className="grid grid-cols-3 gap-2 mb-3">
                                 <div className="text-center p-2 rounded-lg bg-muted/30">
                                   {pnlValue !== null ? (
                                     <p className={`text-sm font-bold ${pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -2476,6 +2476,12 @@ export default function AppPage() {
                                 <div className="text-center p-2 rounded-lg bg-muted/30">
                                   <p className="text-sm font-bold">{bot.subscriberCount}</p>
                                   <p className="text-xs text-muted-foreground">Subscribers</p>
+                                </div>
+                                <div className="text-center p-2 rounded-lg bg-gradient-to-br from-emerald-500/20 to-emerald-600/10 border border-emerald-500/30">
+                                  <p className="text-sm font-bold text-emerald-400">
+                                    ${parseFloat(bot.creatorEarnings || '0').toFixed(2)}
+                                  </p>
+                                  <p className="text-xs text-muted-foreground">Earnings</p>
                                 </div>
                               </div>
 
