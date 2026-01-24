@@ -271,6 +271,7 @@ export interface IStorage {
   getWalletCumulativeDepositsWithdrawals(walletAddress: string): Promise<{ deposits: number; withdrawals: number }>;
   getWalletTradeStats(walletAddress: string): Promise<{ totalTrades: number; totalVolume: number }>;
   getWalletCreatorEarnings(walletAddress: string): Promise<number>;
+  getPublishedBotEarnings(publishedBotId: string): Promise<number>;
   getWalletsWithTradingBots(): Promise<string[]>;
   getWalletFirstDepositDate(walletAddress: string): Promise<Date | null>;
 }
@@ -1629,6 +1630,21 @@ export class DatabaseStorage implements IStorage {
     const paidShares = await db.select().from(pendingProfitShares)
       .where(and(
         eq(pendingProfitShares.creatorWalletAddress, walletAddress),
+        eq(pendingProfitShares.status, 'paid')
+      ));
+    
+    let totalEarnings = 0;
+    for (const share of paidShares) {
+      totalEarnings += parseFloat(share.amount);
+    }
+    
+    return totalEarnings;
+  }
+
+  async getPublishedBotEarnings(publishedBotId: string): Promise<number> {
+    const paidShares = await db.select().from(pendingProfitShares)
+      .where(and(
+        eq(pendingProfitShares.publishedBotId, publishedBotId),
         eq(pendingProfitShares.status, 'paid')
       ));
     

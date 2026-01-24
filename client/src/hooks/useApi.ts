@@ -311,6 +311,7 @@ export interface PublishedBot {
   pnlPercentAllTime: string | null;
   profitSharePercent: string;
   publishedAt: string;
+  creatorEarnings?: string; // Profit share earnings from subscribers
   creator: {
     displayName: string | null;
     xUsername: string | null;

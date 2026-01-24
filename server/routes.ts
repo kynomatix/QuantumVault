@@ -7806,7 +7806,17 @@ export async function registerRoutes(
   app.get("/api/marketplace/my-published", requireWallet, async (req, res) => {
     try {
       const bots = await storage.getPublishedBotsByCreator(req.walletAddress!);
-      res.json(bots);
+      
+      // Add earnings to each bot
+      const botsWithEarnings = await Promise.all(bots.map(async (bot) => {
+        const earnings = await storage.getPublishedBotEarnings(bot.id);
+        return {
+          ...bot,
+          creatorEarnings: earnings.toFixed(2),
+        };
+      }));
+      
+      res.json(botsWithEarnings);
     } catch (error) {
       console.error("Get my published bots error:", error);
       res.status(500).json({ error: "Failed to fetch published bots" });
