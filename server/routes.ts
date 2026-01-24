@@ -8120,13 +8120,17 @@ export async function registerRoutes(
       }
 
       // Create subscriber's bot with same settings but their own capital (with subaccount ID already set)
+      // maxPositionSize = investment × leverage (same as normal bot creation)
+      const effectiveLeverage = leverage || originalBot.leverage || 1;
+      const maxPositionSize = capitalInvested * effectiveLeverage;
+      
       const subscriberBot = await storage.createTradingBot({
         name: `${publishedBot.name} (Copy)`,
         market: originalBot.market,
         walletAddress: req.walletAddress!,
         botType: 'signal',
-        maxPositionSize: capitalInvested.toString(),
-        leverage: leverage || originalBot.leverage,
+        maxPositionSize: maxPositionSize.toString(),
+        leverage: effectiveLeverage,
         webhookSecret,
         isActive: true,
         sourcePublishedBotId: publishedBot.id,
