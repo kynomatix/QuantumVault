@@ -8045,11 +8045,11 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Agent wallet not set up. Please set up your agent wallet first." });
       }
       
-      // Check available balance in main Drift account (subaccount 0)
-      const mainAccountBalance = await getDriftBalance(wallet.agentPublicKey, 0);
-      if (mainAccountBalance < capitalInvested) {
+      // Check available balance in agent wallet (SPL USDC token account, not Drift subaccount)
+      const agentUsdcBalance = await getUsdcBalance(wallet.agentPublicKey);
+      if (agentUsdcBalance < capitalInvested) {
         return res.status(400).json({ 
-          error: `Insufficient balance. You have $${mainAccountBalance.toFixed(2)} available but need $${capitalInvested.toFixed(2)}. Please deposit more USDC to your main Drift account first.` 
+          error: `Insufficient balance. You have $${agentUsdcBalance.toFixed(2)} available but need $${capitalInvested.toFixed(2)}. Please deposit more USDC to your agent wallet first.` 
         });
       }
 
@@ -8073,26 +8073,25 @@ export async function registerRoutes(
         driftSubaccountId: nextSubaccountId 
       } as any))!;
       
-      // Transfer USDC from main account (subaccount 0) to the new bot's subaccount
-      console.log(`[Marketplace] Transferring $${capitalInvested} from main account to subaccount ${nextSubaccountId} for subscriber bot`);
-      const transferResult = await executeAgentTransferBetweenSubaccounts(
+      // Deposit USDC from agent wallet directly to the new bot's Drift subaccount
+      console.log(`[Marketplace] Depositing $${capitalInvested} from agent wallet to subaccount ${nextSubaccountId} for subscriber bot`);
+      const depositResult = await executeAgentDriftDeposit(
         wallet.agentPublicKey,
         wallet.agentPrivateKeyEncrypted,
-        0, // from main account
-        nextSubaccountId,
-        capitalInvested
+        capitalInvested,
+        nextSubaccountId
       );
       
-      if (!transferResult.success) {
+      if (!depositResult.success) {
         // Rollback: delete the created bot
-        console.error(`[Marketplace] Transfer failed, rolling back bot creation: ${transferResult.error}`);
+        console.error(`[Marketplace] Deposit failed, rolling back bot creation: ${depositResult.error}`);
         await storage.deleteTradingBot(subscriberBot.id);
         return res.status(500).json({ 
-          error: `Failed to fund bot: ${transferResult.error}. Bot creation rolled back.` 
+          error: `Failed to fund bot: ${depositResult.error}. Bot creation rolled back.` 
         });
       }
       
-      console.log(`[Marketplace] Transfer successful: ${transferResult.signature}`);
+      console.log(`[Marketplace] Deposit successful: ${depositResult.signature}`);
       
       // Record the deposit as an equity event
       await storage.createEquityEvent({
@@ -8100,7 +8099,7 @@ export async function registerRoutes(
         tradingBotId: subscriberBot.id,
         eventType: 'deposit',
         amount: String(capitalInvested),
-        txSignature: transferResult.signature || null,
+        txSignature: depositResult.signature || null,
         notes: `Initial deposit for subscription to ${publishedBot.name}`,
       });
 
@@ -8121,7 +8120,7 @@ export async function registerRoutes(
         subscription,
         tradingBot: subscriberBot,
         webhookUrl: generateWebhookUrl(subscriberBot.id, webhookSecret),
-        depositTxSignature: transferResult.signature,
+        depositTxSignature: depositResult.signature,
       });
     } catch (error) {
       console.error("Subscribe error:", error);
