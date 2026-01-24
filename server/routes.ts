@@ -8046,10 +8046,30 @@ export async function registerRoutes(
       }
       
       // Check available balance in agent wallet (SPL USDC token account, not Drift subaccount)
-      const agentUsdcBalance = await getUsdcBalance(wallet.agentPublicKey);
+      const [agentUsdcBalance, solBalance, driftAccountExists] = await Promise.all([
+        getUsdcBalance(wallet.agentPublicKey),
+        getAgentSolBalance(wallet.agentPublicKey),
+        subaccountExists(wallet.agentPublicKey, 0),
+      ]);
+      
       if (agentUsdcBalance < capitalInvested) {
         return res.status(400).json({ 
           error: `Insufficient balance. You have $${agentUsdcBalance.toFixed(2)} available but need $${capitalInvested.toFixed(2)}. Please deposit more USDC to your agent wallet first.` 
+        });
+      }
+      
+      // Server-side SOL balance check for subscription (same as bot creation)
+      // 0.035 SOL per subaccount rent + 0.005 SOL for trading gas
+      const SUBACCOUNT_RENT = 0.035;
+      const TRADING_GAS = 0.005;
+      const requiredSol = driftAccountExists 
+        ? SUBACCOUNT_RENT + TRADING_GAS  // 0.04 SOL
+        : (SUBACCOUNT_RENT * 2) + TRADING_GAS; // 0.075 SOL
+      
+      if (solBalance < requiredSol - 0.001) { // Small tolerance for floating point
+        const deficit = requiredSol - solBalance;
+        return res.status(400).json({ 
+          error: `Insufficient SOL for subscription. Need ${requiredSol.toFixed(3)} SOL, have ${solBalance.toFixed(4)} SOL. Please deposit at least ${deficit.toFixed(3)} SOL to your agent wallet.` 
         });
       }
 
