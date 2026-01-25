@@ -34,6 +34,7 @@ Preferred communication style: Simple, everyday language.
 -   **Automated Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol, with logic for converting `contracts` to a percentage of `bot.maxPositionSize`.
 -   **Robust Position Management**: Includes close signal detection, position flip detection, and precise close order execution with dust cleanup.
 -   **Bot Lifecycle Management**: Bots can be paused (closes open positions) and deleted (includes safety checks, auto-sweep, and subaccount closure).
+-   **Unified Trade Execution**: All 4 trade paths (webhook, user webhook, manual trade, subscriber routing) use the shared `computeTradeSizingAndTopUp` helper for consistent auto top-up, profit reinvest, trade sizing, and minimum order handling.
 -   **Dynamic Order Scaling**: Trades are automatically scaled down to 80% of available margin capacity (accounting for fees/slippage/oracle drift) and scaled up with equity recovery.
 -   **Profit Management**: Supports profit reinvestment (with automatic PnL settlement after position closes) and automatic withdrawal of excess profits.
 -   **Dynamic USDC Deposit APY**: Fetches real-time USDC lending APY from Drift Data API.
