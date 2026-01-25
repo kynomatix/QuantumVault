@@ -564,6 +564,21 @@ function CreatingBotsSection() {
         Always test your bot with a small amount first. Start with low leverage until you're 
         confident in your signal strategy.
       </Alert>
+      
+      <div className="mt-4 p-4 rounded-lg bg-gradient-to-r from-emerald-500/10 to-teal-500/10 border border-emerald-500/20">
+        <div className="flex items-start gap-3">
+          <Sparkles className="w-5 h-5 text-emerald-400 mt-0.5 flex-shrink-0" />
+          <div>
+            <h4 className="font-medium text-emerald-300 mb-1">Let Your Bot Prove Itself</h4>
+            <p className="text-white/60 text-sm leading-relaxed">
+              Start with low capital and enable <strong className="text-violet-300">Profit Reinvest</strong>. 
+              As your bot wins trades, it will naturally grow its position sizes. This way, 
+              you only scale up with real profits — not hopeful deposits. A bot that can't grow 
+              on its own isn't ready for larger capital.
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
