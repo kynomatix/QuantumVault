@@ -6622,6 +6622,47 @@ export async function registerRoutes(
           
           // Close failed
           console.error(`[User Webhook] Close order failed:`, result.error);
+          
+          // Check if this is a transient error (rate limit, timeout, price feed) - queue for CRITICAL automatic retry
+          if (isTransientError(result.error || '')) {
+            console.log(`[User Webhook] CRITICAL: Transient error on close order, queueing for priority retry`);
+            
+            const retryJobId = await queueTradeRetry({
+              botId: bot.id,
+              walletAddress: wallet.address,
+              agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
+              agentPublicKey: wallet.agentPublicKey!,
+              market: bot.market,
+              side: 'close',
+              size: closeSize,
+              subAccountId,
+              reduceOnly: true,
+              slippageBps: userCloseSlippageBps,
+              priority: 'critical',
+              lastError: result.error,
+              originalTradeId: closeTrade.id,
+              entryPrice: onChainPosition.entryPrice || 0,
+            });
+            
+            await storage.updateBotTrade(closeTrade.id, {
+              status: "pending",
+              txSignature: null,
+              errorMessage: `Rate limited - CRITICAL auto-retry queued (job: ${retryJobId})`,
+            });
+            await storage.updateWebhookLog(log.id, { 
+              errorMessage: `Rate limited on close - CRITICAL retry queued: ${retryJobId}`, 
+              processed: true 
+            });
+            
+            return res.status(202).json({ 
+              status: "queued_for_retry",
+              retryJobId,
+              type: "close",
+              message: "CRITICAL: Close order rate limited - auto-retry scheduled with highest priority",
+              warning: "Position may remain open until retry succeeds"
+            });
+          }
+          
           await storage.updateBotTrade(closeTrade.id, {
             status: "failed",
             txSignature: null,
@@ -6759,6 +6800,50 @@ export async function registerRoutes(
       if (!orderResult.success) {
         const userFriendlyError = parseDriftError(orderResult.error);
         console.log(`[User Webhook] Trade failed: ${orderResult.error}`);
+        
+        // Check if this is a transient error (rate limit, timeout, price feed) - queue for automatic retry
+        const errorToCheck = orderResult.error || '';
+        const isTransient = isTransientError(errorToCheck);
+        const isCollateralError = errorToCheck.includes('InsufficientCollateral') || errorToCheck.includes('6010');
+        console.log(`[User Webhook] Retry eligibility: isTransient=${isTransient}, isCollateralError=${isCollateralError}, error="${errorToCheck.slice(0, 100)}..."`);
+        
+        if (isTransient || isCollateralError) {
+          console.log(`[User Webhook] Retryable error detected, queueing trade for automatic retry`);
+          
+          const retryJobId = await queueTradeRetry({
+            botId: bot.id,
+            walletAddress: userWallet.address,
+            agentPrivateKeyEncrypted: userWallet.agentPrivateKeyEncrypted,
+            agentPublicKey: userWallet.agentPublicKey!,
+            market: bot.market,
+            side: side,
+            size: contractSize,
+            subAccountId,
+            reduceOnly: false,
+            slippageBps: userSlippageBps2,
+            privateKeyBase58,
+            priority: 'normal',
+            lastError: orderResult.error,
+            originalTradeId: trade.id,
+            webhookPayload: { action, contracts, market: bot.market },
+          });
+          
+          const retryReason = isCollateralError ? 'Temporary margin issue' : 'Rate limited';
+          await storage.updateBotTrade(trade.id, {
+            status: "pending",
+            txSignature: null,
+            size: contractSize.toFixed(8),
+            errorMessage: `${retryReason} - auto-retry queued (job: ${retryJobId})`,
+          });
+          await storage.updateWebhookLog(log.id, { errorMessage: `${retryReason} - retry queued: ${retryJobId}`, processed: true });
+          
+          return res.status(202).json({ 
+            status: "queued_for_retry",
+            retryJobId,
+            message: `${retryReason} - automatic retry scheduled`
+          });
+        }
+        
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
