@@ -61,9 +61,9 @@ const SciFiCloseButton = () => (
     fill="none" 
     className="transition-all duration-300"
   >
-    {/* Trapezoid shape - wider on right (inside drawer), narrower on left */}
+    {/* Trapezoid shape - wider on left, narrower on right (pointing into drawer) */}
     <path 
-      d="M0 12 L20 0 L28 0 L28 56 L20 56 L0 44 Z" 
+      d="M0 0 L8 0 L28 12 L28 44 L8 56 L0 56 Z" 
       fill="currentColor" 
       fillOpacity="0.2"
       stroke="currentColor"
@@ -72,7 +72,7 @@ const SciFiCloseButton = () => (
     />
     {/* Inner accent line */}
     <path 
-      d="M4 14 L20 4 L24 4 L24 52 L20 52 L4 42 Z" 
+      d="M4 4 L8 4 L24 14 L24 42 L8 52 L4 52 Z" 
       fill="none"
       stroke="currentColor"
       strokeWidth="0.5"
@@ -80,7 +80,7 @@ const SciFiCloseButton = () => (
     />
     {/* Arrow pointing right */}
     <path 
-      d="M10 24 L18 28 L10 32 Z" 
+      d="M8 24 L16 28 L8 32 Z" 
       fill="currentColor"
       fillOpacity="0.9"
     />
@@ -98,13 +98,13 @@ const SheetContent = React.forwardRef<
       className={cn(sheetVariants({ side }), "overflow-visible", className)}
       {...props}
     >
-      {/* Sci-fi trapezoid close button sitting on left edge */}
+      {/* Sci-fi trapezoid close button - left edge aligned to drawer edge */}
       <button 
         onClick={() => {
           const closeEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true });
           document.dispatchEvent(closeEvent);
         }}
-        className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-1/2 z-[60] text-muted-foreground transition-all duration-300 focus:outline-none cursor-pointer hover:text-purple-400"
+        className="absolute left-0 top-1/2 -translate-y-1/2 z-[60] text-muted-foreground transition-all duration-300 focus:outline-none cursor-pointer hover:text-purple-400"
         style={{ filter: 'none' }}
         onMouseEnter={(e) => e.currentTarget.style.filter = 'drop-shadow(0 0 12px rgba(168, 85, 247, 0.8))'}
         onMouseLeave={(e) => e.currentTarget.style.filter = 'none'}
