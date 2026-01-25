@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { ArrowUpRight } from 'lucide-react';
 import { Link } from 'wouter';
 import { Button } from '@/components/ui/button';
+import { AreaChart as RechartsAreaChart, Area, XAxis, YAxis, ResponsiveContainer, Tooltip } from 'recharts';
 
 interface PlatformMetrics {
   tvl: number;
@@ -95,35 +96,6 @@ function AnimatedBorder({ children, className = "" }: { children: React.ReactNod
   );
 }
 
-function createSmoothPath(points: { x: number; y: number }[]): string {
-  if (points.length < 2) return '';
-  if (points.length === 2) {
-    return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
-  }
-  
-  let path = `M ${points[0].x} ${points[0].y}`;
-  
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[i];
-    const p1 = points[i + 1];
-    
-    const midX = (p0.x + p1.x) / 2;
-    const midY = (p0.y + p1.y) / 2;
-    
-    if (i === 0) {
-      path += ` Q ${p0.x} ${p0.y}, ${midX} ${midY}`;
-    } else {
-      path += ` Q ${p0.x} ${p0.y}, ${midX} ${midY}`;
-    }
-  }
-  
-  const last = points[points.length - 1];
-  const secondLast = points[points.length - 2];
-  path += ` Q ${secondLast.x} ${secondLast.y}, ${last.x} ${last.y}`;
-  
-  return path;
-}
-
 function AreaChart({ data, label, testId }: {
   data: HistoricalDataPoint[];
   label: string;
@@ -135,114 +107,61 @@ function AreaChart({ data, label, testId }: {
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
-  const values = sortedData.map(d => d.value);
-  const max = Math.max(...values);
-  const min = Math.min(...values);
-  const range = max - min || 1;
-  
-  const width = 400;
-  const height = 140;
-  const padding = { top: 16, right: 16, bottom: 32, left: 56 };
-  const chartWidth = width - padding.left - padding.right;
-  const chartHeight = height - padding.top - padding.bottom;
+  const chartData = sortedData.map(d => ({
+    date: formatShortDate(d.timestamp),
+    value: d.value,
+  }));
 
-  const points = sortedData.map((d, i) => {
-    const x = padding.left + (i / (sortedData.length - 1)) * chartWidth;
-    const y = padding.top + chartHeight - ((d.value - min) / range) * chartHeight;
-    return { x, y, value: d.value, date: d.timestamp };
-  });
+  const gradientId = `gradient-${testId}`;
 
-  const linePath = createSmoothPath(points);
-  // Use smooth path for area fill as well (close the path at the bottom for the gradient)
-  const areaPath = `${linePath} L ${points[points.length - 1].x} ${padding.top + chartHeight} L ${padding.left} ${padding.top + chartHeight} Z`;
-
-  const yAxisTicks = [min, min + range * 0.5, max];
-  
   return (
     <div data-testid={testId}>
       <p className="text-sm text-muted-foreground mb-3">{label}</p>
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
-        <defs>
-          <linearGradient id={`grad-${testId}`} x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stopColor="rgb(139, 92, 246)" stopOpacity="0.4" />
-            <stop offset="100%" stopColor="rgb(139, 92, 246)" stopOpacity="0" />
-          </linearGradient>
-          <filter id={`glow-${testId}`} x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur stdDeviation="2" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
-        
-        {yAxisTicks.map((tick, i) => {
-          const y = padding.top + chartHeight - ((tick - min) / range) * chartHeight;
-          return (
-            <g key={i}>
-              <line
-                x1={padding.left}
-                y1={y}
-                x2={width - padding.right}
-                y2={y}
-                stroke="currentColor"
-                strokeWidth="1"
-                opacity="0.1"
-              />
-              <text
-                x={padding.left - 8}
-                y={y + 3}
-                fill="currentColor"
-                fontSize="9"
-                textAnchor="end"
-                opacity="0.5"
-              >
-                {formatCurrency(tick)}
-              </text>
-            </g>
-          );
-        })}
-
-        <motion.path
-          d={areaPath}
-          fill={`url(#grad-${testId})`}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.3, duration: 0.5 }}
-        />
-        
-        <motion.path
-          d={linePath}
-          fill="none"
-          stroke="rgb(139, 92, 246)"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          filter={`url(#glow-${testId})`}
-          initial={{ pathLength: 0 }}
-          animate={{ pathLength: 1 }}
-          transition={{ delay: 0.2, duration: 0.8, ease: "easeOut" }}
-        />
-
-        {points.length > 0 && (
-          <motion.circle
-            cx={points[points.length - 1].x}
-            cy={points[points.length - 1].y}
-            r="4"
-            fill="rgb(139, 92, 246)"
-            className="drop-shadow-[0_0_6px_rgba(139,92,246,0.8)]"
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            transition={{ delay: 1, duration: 0.3 }}
-          />
-        )}
-
-        <text x={padding.left} y={height - 8} fill="currentColor" fontSize="9" opacity="0.5">
-          {formatShortDate(sortedData[0].timestamp)}
-        </text>
-        <text x={width - padding.right} y={height - 8} fill="currentColor" fontSize="9" textAnchor="end" opacity="0.5">
-          {formatShortDate(sortedData[sortedData.length - 1].timestamp)}
-        </text>
-      </svg>
+      <div className="h-[140px]">
+        <ResponsiveContainer width="100%" height="100%">
+          <RechartsAreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+            <defs>
+              <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="rgb(139, 92, 246)" stopOpacity={0.4} />
+                <stop offset="100%" stopColor="rgb(139, 92, 246)" stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <XAxis 
+              dataKey="date" 
+              tick={{ fontSize: 10, fill: 'currentColor', opacity: 0.5 }}
+              axisLine={false}
+              tickLine={false}
+              interval="preserveStartEnd"
+            />
+            <YAxis 
+              tick={{ fontSize: 10, fill: 'currentColor', opacity: 0.5 }}
+              axisLine={false}
+              tickLine={false}
+              tickFormatter={(value) => formatCurrency(value)}
+              width={50}
+            />
+            <Tooltip
+              contentStyle={{
+                backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                border: '1px solid rgba(139, 92, 246, 0.3)',
+                borderRadius: '8px',
+                fontSize: '12px',
+              }}
+              formatter={(value: number) => [formatCurrency(value), label]}
+              labelStyle={{ color: 'rgba(255, 255, 255, 0.7)' }}
+            />
+            <Area
+              type="monotone"
+              dataKey="value"
+              stroke="rgb(139, 92, 246)"
+              strokeWidth={2.5}
+              fill={`url(#${gradientId})`}
+              dot={false}
+              activeDot={{ r: 4, fill: 'rgb(139, 92, 246)', stroke: 'white', strokeWidth: 2 }}
+            />
+          </RechartsAreaChart>
+        </ResponsiveContainer>
+      </div>
     </div>
   );
 }
