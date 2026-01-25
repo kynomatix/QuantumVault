@@ -258,18 +258,13 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
   }
 
   // STEP 2: Auto top-up (run FIRST, before any trade size calculations)
+  // Investment amount IS the target equity - simple: deposit enough to reach it
   if (autoTopUp && baseCapital > 0) {
     const currentEquity = freeCollateral;
-    // When Profit Reinvest is enabled, we need MORE equity headroom because trades use full available margin
-    // Target: enough equity to support baseCapital position with buffer for the 90% capacity limit
-    // Without profit reinvest: targetEquity = baseCapital / leverage (just enough for investment amount)
-    // With profit reinvest: targetEquity = baseCapital / leverage / 0.90 (extra headroom for the 90% buffer)
-    const targetEquity = profitReinvestEnabled 
-      ? (baseCapital / effectiveLeverage) / 0.90 // Add ~11% extra to account for 90% buffer
-      : baseCapital / effectiveLeverage;
+    const targetEquity = baseCapital; // Investment amount = target equity
     const topUpNeeded = Math.max(0, targetEquity - currentEquity);
 
-    console.log(`${logPrefix} Auto top-up check (profitReinvest=${profitReinvestEnabled}): current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)}, need $${topUpNeeded.toFixed(2)}`);
+    console.log(`${logPrefix} Auto top-up check: current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)}, need $${topUpNeeded.toFixed(2)}`);
 
     if (topUpNeeded > 0) {
       try {
