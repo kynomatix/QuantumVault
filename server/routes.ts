@@ -154,6 +154,332 @@ function parseDriftError(error: string | undefined): string {
   return error;
 }
 
+// Shared trade sizing and capital management helper
+// Used by all trade execution paths for consistent behavior
+interface TradeSizingParams {
+  agentPublicKey: string;
+  agentPrivateKeyEncrypted: string;
+  subAccountId: number;
+  botId: string;
+  walletAddress: string;
+  market: string;
+  baseCapital: number; // maxPositionSize
+  leverage: number;
+  autoTopUp: boolean;
+  profitReinvestEnabled: boolean;
+  signalPercent: number; // 0-100, or 0 for full size
+  oraclePrice: number;
+  logPrefix: string; // For consistent logging
+}
+
+interface TradeSizingResult {
+  success: boolean;
+  tradeAmountUsd: number;
+  finalContractSize: number;
+  freeCollateral: number;
+  maxTradeableValue: number;
+  effectiveLeverage: number;
+  error?: string;
+  pauseReason?: string;
+  shouldPauseBot?: boolean;
+}
+
+async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<TradeSizingResult> {
+  const {
+    agentPublicKey,
+    agentPrivateKeyEncrypted,
+    subAccountId,
+    botId,
+    walletAddress,
+    market,
+    baseCapital,
+    leverage,
+    autoTopUp,
+    profitReinvestEnabled,
+    signalPercent,
+    oraclePrice,
+    logPrefix,
+  } = params;
+
+  // Calculate effective leverage (capped by market max)
+  const botLeverage = Math.max(1, leverage || 1);
+  const marketMaxLeverage = getMarketMaxLeverage(market);
+  const effectiveLeverage = Math.min(botLeverage, marketMaxLeverage);
+
+  if (botLeverage > marketMaxLeverage) {
+    console.log(`${logPrefix} Leverage capped: ${botLeverage}x → ${marketMaxLeverage}x (${market} max)`);
+  }
+
+  // Validate base capital for non-profit-reinvest mode
+  if (baseCapital <= 0 && !profitReinvestEnabled) {
+    return {
+      success: false,
+      tradeAmountUsd: 0,
+      finalContractSize: 0,
+      freeCollateral: 0,
+      maxTradeableValue: 0,
+      effectiveLeverage,
+      error: 'Bot has no capital configured. Set Max Position Size on the bot.',
+    };
+  }
+
+  let tradeAmountUsd = 0;
+  let maxTradeableValue = 0;
+  let freeCollateral = 0;
+
+  // STEP 1: Get available collateral
+  try {
+    const accountInfo = await getDriftAccountInfo(agentPublicKey, subAccountId);
+    freeCollateral = Math.max(0, accountInfo.freeCollateral);
+  } catch (collateralErr: any) {
+    console.warn(`${logPrefix} Could not check collateral: ${collateralErr.message}`);
+    if (profitReinvestEnabled) {
+      return {
+        success: false,
+        tradeAmountUsd: 0,
+        finalContractSize: 0,
+        freeCollateral: 0,
+        maxTradeableValue: 0,
+        effectiveLeverage,
+        error: 'Cannot execute trade: profit reinvest enabled but collateral check failed',
+      };
+    }
+    // Fallback for normal mode
+    tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+    const contractSize = tradeAmountUsd / oraclePrice;
+    return {
+      success: true,
+      tradeAmountUsd,
+      finalContractSize: contractSize,
+      freeCollateral: 0,
+      maxTradeableValue: 0,
+      effectiveLeverage,
+    };
+  }
+
+  // STEP 2: Auto top-up (run FIRST, before any trade size calculations)
+  if (autoTopUp && baseCapital > 0) {
+    const currentEquity = freeCollateral;
+    const targetEquity = baseCapital / effectiveLeverage; // Investment amount user wants
+    const topUpNeeded = Math.max(0, targetEquity - currentEquity);
+
+    console.log(`${logPrefix} Auto top-up check: current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)}, need $${topUpNeeded.toFixed(2)}`);
+
+    if (topUpNeeded > 0) {
+      try {
+        const agentUsdcBalance = await getAgentUsdcBalance(agentPublicKey);
+        console.log(`${logPrefix} Agent wallet USDC balance: $${agentUsdcBalance.toFixed(2)}, need: $${topUpNeeded.toFixed(2)}`);
+
+        if (agentUsdcBalance >= topUpNeeded) {
+          const depositAmount = Math.ceil(topUpNeeded * 100) / 100; // Round up to nearest cent
+          const depositResult = await executeAgentDriftDeposit(
+            agentPublicKey,
+            agentPrivateKeyEncrypted,
+            depositAmount,
+            subAccountId,
+            false
+          );
+
+          if (depositResult.success) {
+            console.log(`${logPrefix} Auto top-up successful: deposited $${depositAmount.toFixed(2)} (equity $${currentEquity.toFixed(2)} → $${(currentEquity + depositAmount).toFixed(2)}), tx: ${depositResult.signature}`);
+            freeCollateral += depositAmount;
+
+            // Record auto top-up event
+            await storage.createEquityEvent({
+              walletAddress,
+              tradingBotId: botId,
+              eventType: 'auto_topup',
+              amount: String(depositAmount),
+              txSignature: depositResult.signature || null,
+              notes: `Auto top-up: equity $${currentEquity.toFixed(2)} → $${freeCollateral.toFixed(2)} for $${baseCapital.toFixed(2)} position`,
+            });
+
+            console.log(`${logPrefix} Updated equity after top-up: $${freeCollateral.toFixed(2)}`);
+          } else {
+            console.log(`${logPrefix} Auto top-up deposit failed: ${depositResult.error}, will proceed with available margin`);
+          }
+        } else {
+          console.log(`${logPrefix} Agent wallet ($${agentUsdcBalance.toFixed(2)}) insufficient for top-up ($${topUpNeeded.toFixed(2)}), will proceed with available margin`);
+        }
+      } catch (topUpErr: any) {
+        console.log(`${logPrefix} Auto top-up error: ${topUpErr.message}, will proceed with available margin`);
+      }
+    }
+  }
+
+  // STEP 3: Calculate max tradeable value after potential top-up
+  const maxNotionalCapacity = freeCollateral * effectiveLeverage;
+  maxTradeableValue = maxNotionalCapacity * 0.80; // 80% buffer for fees/slippage/oracle drift
+
+  // STEP 4: Calculate trade amount based on mode
+  if (profitReinvestEnabled) {
+    // PROFIT REINVEST MODE: Use full available margin
+    if (maxTradeableValue <= 0) {
+      return {
+        success: false,
+        tradeAmountUsd: 0,
+        finalContractSize: 0,
+        freeCollateral,
+        maxTradeableValue: 0,
+        effectiveLeverage,
+        error: `Cannot trade: profit reinvest enabled but no margin available (freeCollateral=$${freeCollateral.toFixed(2)})`,
+      };
+    }
+    const requestedAmount = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
+    tradeAmountUsd = Math.min(requestedAmount, maxTradeableValue);
+    console.log(`${logPrefix} PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x × 80% = $${maxTradeableValue.toFixed(2)} max`);
+    if (requestedAmount > maxTradeableValue) {
+      console.log(`${logPrefix} Requested $${requestedAmount.toFixed(2)} exceeds available, capped to $${tradeAmountUsd.toFixed(2)}`);
+    } else {
+      console.log(`${logPrefix} ${signalPercent.toFixed(2)}% of $${maxTradeableValue.toFixed(2)} available margin = $${tradeAmountUsd.toFixed(2)} trade`);
+    }
+  } else {
+    // NORMAL MODE: Use fixed maxPositionSize, scale down if needed
+    tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+    console.log(`${logPrefix} ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
+    console.log(`${logPrefix} Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional`);
+
+    // Scale down if needed (use 95% buffer for normal mode)
+    const adjustedMaxTradeable = freeCollateral * effectiveLeverage * 0.95;
+    if (adjustedMaxTradeable <= 0) {
+      console.log(`${logPrefix} No margin available after top-up check, will attempt minimum viable trade`);
+    } else if (tradeAmountUsd > adjustedMaxTradeable) {
+      const originalAmount = tradeAmountUsd;
+      tradeAmountUsd = adjustedMaxTradeable;
+      const scalePercent = ((tradeAmountUsd / originalAmount) * 100).toFixed(1);
+      console.log(`${logPrefix} SCALED: Trade $${originalAmount.toFixed(2)} → $${tradeAmountUsd.toFixed(2)} (${scalePercent}% of requested)`);
+    } else {
+      console.log(`${logPrefix} Full size available: $${tradeAmountUsd.toFixed(2)} within $${adjustedMaxTradeable.toFixed(2)} capacity`);
+    }
+  }
+
+  console.log(`${logPrefix} Final trade amount: $${tradeAmountUsd.toFixed(2)}`);
+
+  // STEP 5: Calculate contract size
+  let contractSize = tradeAmountUsd / oraclePrice;
+  console.log(`${logPrefix} $${tradeAmountUsd.toFixed(2)} / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
+
+  // STEP 6: Handle minimum order size
+  const minOrderSize = getMinOrderSize(market);
+  let finalContractSize = contractSize;
+
+  if (contractSize < minOrderSize) {
+    const minCapitalNeeded = minOrderSize * oraclePrice;
+    const maxCapacity = freeCollateral * effectiveLeverage * 0.9;
+
+    if (minCapitalNeeded <= maxCapacity) {
+      finalContractSize = minOrderSize;
+      console.log(`${logPrefix} BUMPED UP: ${contractSize.toFixed(4)} contracts → ${minOrderSize} minimum (requires $${minCapitalNeeded.toFixed(2)}, you have $${maxCapacity.toFixed(2)} capacity)`);
+    } else {
+      // Cannot meet minimum order size with current margin - try secondary auto top-up
+      const requiredCollateral = (minCapitalNeeded / effectiveLeverage) * 1.2;
+      const shortfall = Math.max(0, requiredCollateral - freeCollateral);
+
+      console.log(`${logPrefix} Insufficient margin: need $${requiredCollateral.toFixed(2)} collateral, have $${freeCollateral.toFixed(2)}, shortfall: $${shortfall.toFixed(2)}`);
+
+      if (autoTopUp) {
+        console.log(`${logPrefix} Auto top-up enabled, attempting to deposit from agent wallet for min order`);
+
+        try {
+          const agentUsdcBalance = await getAgentUsdcBalance(agentPublicKey);
+          console.log(`${logPrefix} Agent wallet USDC balance: $${agentUsdcBalance.toFixed(2)}, shortfall: $${shortfall.toFixed(2)}`);
+
+          if (agentUsdcBalance >= shortfall) {
+            const depositAmount = Math.ceil(shortfall * 100) / 100;
+            const depositResult = await executeAgentDriftDeposit(
+              agentPublicKey,
+              agentPrivateKeyEncrypted,
+              depositAmount,
+              subAccountId,
+              false
+            );
+
+            if (depositResult.success) {
+              console.log(`${logPrefix} Auto top-up successful: deposited $${depositAmount.toFixed(2)}, tx: ${depositResult.signature}`);
+              freeCollateral += depositAmount;
+              finalContractSize = minOrderSize;
+
+              // Record auto top-up event
+              await storage.createEquityEvent({
+                walletAddress,
+                tradingBotId: botId,
+                eventType: 'auto_topup',
+                amount: String(depositAmount),
+                txSignature: depositResult.signature || null,
+                notes: `Auto top-up triggered: margin $${(freeCollateral - depositAmount).toFixed(2)} insufficient for ${minOrderSize} ${market} (need $${requiredCollateral.toFixed(2)})`,
+              });
+
+              console.log(`${logPrefix} Proceeding with trade after auto top-up: ${finalContractSize} contracts`);
+            } else {
+              const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${market}. Auto top-up failed: ${depositResult.error}`;
+              return {
+                success: false,
+                tradeAmountUsd,
+                finalContractSize: contractSize,
+                freeCollateral,
+                maxTradeableValue,
+                effectiveLeverage,
+                error: pauseReason,
+                pauseReason,
+                shouldPauseBot: true,
+              };
+            }
+          } else {
+            const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${market}. Agent wallet only has $${agentUsdcBalance.toFixed(2)} USDC available for top-up.`;
+            return {
+              success: false,
+              tradeAmountUsd,
+              finalContractSize: contractSize,
+              freeCollateral,
+              maxTradeableValue,
+              effectiveLeverage,
+              error: pauseReason,
+              pauseReason,
+              shouldPauseBot: true,
+            };
+          }
+        } catch (topUpErr: any) {
+          const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${market}. Auto top-up failed: ${topUpErr.message}`;
+          return {
+            success: false,
+            tradeAmountUsd,
+            finalContractSize: contractSize,
+            freeCollateral,
+            maxTradeableValue,
+            effectiveLeverage,
+            error: pauseReason,
+            pauseReason,
+            shouldPauseBot: true,
+          };
+        }
+      } else {
+        // Auto top-up disabled - pause the bot
+        const pauseReason = `Insufficient margin: need $${requiredCollateral.toFixed(2)} to trade ${minOrderSize} ${market}, but only $${freeCollateral.toFixed(2)} available. Top up your bot to continue trading.`;
+        return {
+          success: false,
+          tradeAmountUsd,
+          finalContractSize: contractSize,
+          freeCollateral,
+          maxTradeableValue,
+          effectiveLeverage,
+          error: pauseReason,
+          pauseReason,
+          shouldPauseBot: true,
+        };
+      }
+    }
+  }
+
+  return {
+    success: true,
+    tradeAmountUsd,
+    finalContractSize,
+    freeCollateral,
+    maxTradeableValue,
+    effectiveLeverage,
+  };
+}
+
 // Distribute profit share from subscriber bot to signal creator
 // Called after a profitable close trade on subscriber bots
 async function distributeCreatorProfitShare(params: {
