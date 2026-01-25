@@ -96,6 +96,18 @@ function AnimatedBorder({ children, className = "" }: { children: React.ReactNod
   );
 }
 
+function applyMovingAverage(data: { date: string; value: number }[], windowSize: number = 3): { date: string; value: number }[] {
+  if (data.length <= windowSize) return data;
+  
+  return data.map((point, index) => {
+    const start = Math.max(0, index - Math.floor(windowSize / 2));
+    const end = Math.min(data.length, index + Math.floor(windowSize / 2) + 1);
+    const window = data.slice(start, end);
+    const avg = window.reduce((sum, p) => sum + p.value, 0) / window.length;
+    return { date: point.date, value: avg };
+  });
+}
+
 function AreaChart({ data, label, testId }: {
   data: HistoricalDataPoint[];
   label: string;
@@ -107,10 +119,12 @@ function AreaChart({ data, label, testId }: {
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
-  const chartData = sortedData.map(d => ({
+  const rawChartData = sortedData.map(d => ({
     date: formatShortDate(d.timestamp),
     value: d.value,
   }));
+  
+  const chartData = applyMovingAverage(rawChartData, 5);
 
   const gradientId = `gradient-${testId}`;
 
