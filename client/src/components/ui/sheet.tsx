@@ -108,7 +108,7 @@ const SheetContent = React.forwardRef<
       className={cn(sheetVariants({ side }), className)}
       {...props}
     >
-      <SheetPrimitive.Close className="group absolute left-0 top-1/2 -translate-y-1/2 z-50 opacity-70 ring-offset-background transition-all hover:opacity-100 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
+      <SheetPrimitive.Close className="group absolute -left-3 top-1/2 -translate-y-1/2 z-50 opacity-70 ring-offset-background transition-all hover:opacity-100 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
         <SciFiCloseButton />
         <span className="sr-only">Close</span>
       </SheetPrimitive.Close>
