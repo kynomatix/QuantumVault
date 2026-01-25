@@ -514,7 +514,7 @@ export default function Landing() {
                   <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
                     <TrendingUp className="w-5 h-5 text-accent mb-3" />
                     <h4 className="font-semibold text-sm mb-1">Advanced Strategies</h4>
-                    <p className="text-xs text-muted-foreground">Profit reinvestment and dynamic position scaling.</p>
+                    <p className="text-xs text-muted-foreground">Auto top-up, profit reinvestment, and dynamic position scaling.</p>
                   </div>
                   <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
                     <Zap className="w-5 h-5 text-accent mb-3" />
