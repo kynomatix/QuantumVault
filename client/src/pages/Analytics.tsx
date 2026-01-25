@@ -152,9 +152,9 @@ function AreaChart({ data, label, testId }: {
     return { x, y, value: d.value, date: d.timestamp };
   });
 
-  const straightLinePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
   const linePath = createSmoothPath(points);
-  const areaPath = `${straightLinePath} L ${points[points.length - 1].x} ${padding.top + chartHeight} L ${padding.left} ${padding.top + chartHeight} Z`;
+  // Use smooth path for area fill as well (close the path at the bottom for the gradient)
+  const areaPath = `${linePath} L ${points[points.length - 1].x} ${padding.top + chartHeight} L ${padding.left} ${padding.top + chartHeight} Z`;
 
   const yAxisTicks = [min, min + range * 0.5, max];
   
