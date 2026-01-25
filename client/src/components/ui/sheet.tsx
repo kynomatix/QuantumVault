@@ -98,13 +98,13 @@ const SheetContent = React.forwardRef<
       className={cn(sheetVariants({ side }), "overflow-visible", className)}
       {...props}
     >
-      {/* Sci-fi trapezoid close button - left edge aligned to drawer edge */}
+      {/* Sci-fi trapezoid close button - slides out on hover */}
       <button 
         onClick={() => {
           const closeEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true });
           document.dispatchEvent(closeEvent);
         }}
-        className="absolute left-0 top-1/2 -translate-y-1/2 z-[60] text-muted-foreground transition-all duration-300 focus:outline-none cursor-pointer hover:text-purple-400"
+        className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-[10px] hover:translate-x-0 z-[60] text-muted-foreground transition-all duration-300 ease-out focus:outline-none cursor-pointer hover:text-purple-400"
         style={{ filter: 'none' }}
         onMouseEnter={(e) => e.currentTarget.style.filter = 'drop-shadow(0 0 12px rgba(168, 85, 247, 0.8))'}
         onMouseLeave={(e) => e.currentTarget.style.filter = 'none'}
