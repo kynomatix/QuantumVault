@@ -924,7 +924,7 @@ export function BotManagementDrawer({
   const displayBot = localBot || bot;
 
   return (
-    <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>
+    <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()} modal={false}>
       <SheetContent className="w-full sm:max-w-[540px] overflow-y-auto" data-testid="drawer-bot-management">
         {displayBot && (
         <>

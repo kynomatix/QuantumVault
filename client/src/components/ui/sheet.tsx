@@ -96,8 +96,6 @@ const SheetContent = React.forwardRef<
     <SheetPrimitive.Content
       ref={ref}
       className={cn(sheetVariants({ side }), "overflow-visible", className)}
-      onOpenAutoFocus={(e) => e.preventDefault()}
-      onCloseAutoFocus={(e) => e.preventDefault()}
       {...props}
     >
       {/* Sci-fi trapezoid close button - slides out on hover */}
