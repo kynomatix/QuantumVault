@@ -190,6 +190,8 @@ export default function AppPage() {
   const [unpublishConfirmOpen, setUnpublishConfirmOpen] = useState(false);
   const [botToUnpublish, setBotToUnpublish] = useState<{ id: string; name: string } | null>(null);
   const [viewDetailBot, setViewDetailBot] = useState<PublishedBot | null>(null);
+  const [sharePopupBot, setSharePopupBot] = useState<{ id: string; tradingBotId: string; name: string; market: string } | null>(null);
+  const [copiedField, setCopiedField] = useState<'botId' | 'shareLink' | null>(null);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -2495,40 +2497,20 @@ export default function AppPage() {
                                         className="flex-1"
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          navigator.clipboard.writeText(shareUrl);
-                                          toast({
-                                            title: "Link copied!",
-                                            description: "Share URL copied to clipboard",
+                                          setSharePopupBot({ 
+                                            id: bot.id, 
+                                            tradingBotId: bot.tradingBotId, 
+                                            name: bot.name, 
+                                            market: bot.market 
                                           });
+                                          setCopiedField(null);
                                         }}
-                                        data-testid={`button-copy-url-${bot.id}`}
-                                      >
-                                        <Copy className="w-4 h-4" />
-                                      </Button>
-                                    </TooltipTrigger>
-                                    <TooltipContent>Copy Share URL</TooltipContent>
-                                  </Tooltip>
-                                </TooltipProvider>
-
-                                <TooltipProvider>
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <Button
-                                        variant="outline"
-                                        size="sm"
-                                        className="flex-1"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          const tweetText = encodeURIComponent(`Check out my trading bot "${bot.name}" on QuantumVault! 🤖📈`);
-                                          const tweetUrl = encodeURIComponent(shareUrl);
-                                          window.open(`https://twitter.com/intent/tweet?text=${tweetText}&url=${tweetUrl}`, '_blank');
-                                        }}
-                                        data-testid={`button-share-x-${bot.id}`}
+                                        data-testid={`button-share-${bot.id}`}
                                       >
                                         <Share2 className="w-4 h-4" />
                                       </Button>
                                     </TooltipTrigger>
-                                    <TooltipContent>Share to X</TooltipContent>
+                                    <TooltipContent>Share Bot</TooltipContent>
                                   </Tooltip>
                                 </TooltipProvider>
 
@@ -4073,6 +4055,105 @@ export default function AppPage() {
                 ) : (
                   'Unpublish'
                 )}
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {sharePopupBot && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setSharePopupBot(null)}>
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="gradient-border p-6 noise max-w-md w-full mx-4"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="modal-share-bot"
+          >
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-xl bg-primary/20 flex items-center justify-center">
+                  <Share2 className="w-6 h-6 text-primary" />
+                </div>
+                <div>
+                  <h3 className="font-display font-semibold text-lg">Share Bot</h3>
+                  <p className="text-sm text-muted-foreground">{sharePopupBot.name}</p>
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setSharePopupBot(null)}
+                data-testid="button-close-share"
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Bot ID</label>
+                <div className="flex gap-2">
+                  <Input 
+                    value={sharePopupBot.tradingBotId} 
+                    readOnly 
+                    className="font-mono text-sm bg-muted/30"
+                    data-testid="input-bot-id"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      navigator.clipboard.writeText(sharePopupBot.tradingBotId);
+                      setCopiedField('botId');
+                      setTimeout(() => setCopiedField(null), 2000);
+                      toast({ title: "Bot ID copied!" });
+                    }}
+                    data-testid="button-copy-bot-id"
+                  >
+                    {copiedField === 'botId' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  </Button>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Share Link</label>
+                <div className="flex gap-2">
+                  <Input 
+                    value={`https://myquantumvault.com/app?bot=${sharePopupBot.id}&ref=${walletReferralCode || ''}`}
+                    readOnly 
+                    className="font-mono text-sm bg-muted/30"
+                    data-testid="input-share-link"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      const shareUrl = `https://myquantumvault.com/app?bot=${sharePopupBot.id}&ref=${walletReferralCode || ''}`;
+                      navigator.clipboard.writeText(shareUrl);
+                      setCopiedField('shareLink');
+                      setTimeout(() => setCopiedField(null), 2000);
+                      toast({ title: "Share link copied!" });
+                    }}
+                    data-testid="button-copy-share-link"
+                  >
+                    {copiedField === 'shareLink' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  </Button>
+                </div>
+              </div>
+
+              <Button
+                className="w-full bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                onClick={() => {
+                  const shareUrl = `https://myquantumvault.com/app?bot=${sharePopupBot.id}&ref=${walletReferralCode || ''}`;
+                  const tweetText = encodeURIComponent(`Check out my ${sharePopupBot.market} trading bot "${sharePopupBot.name}" on QuantumVault! 🤖📈`);
+                  const tweetUrl = encodeURIComponent(shareUrl);
+                  window.open(`https://twitter.com/intent/tweet?text=${tweetText}&url=${tweetUrl}`, '_blank');
+                }}
+                data-testid="button-share-to-x"
+              >
+                <ExternalLink className="w-4 h-4 mr-2" />
+                Share to X
               </Button>
             </div>
           </motion.div>
