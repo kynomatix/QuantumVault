@@ -104,10 +104,18 @@ const SheetContent = React.forwardRef<
           const closeEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true });
           document.dispatchEvent(closeEvent);
         }}
-        className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-[10px] hover:translate-x-0 z-[60] text-muted-foreground transition-all duration-300 ease-out focus:outline-none cursor-pointer hover:text-purple-400"
-        style={{ filter: 'none' }}
-        onMouseEnter={(e) => e.currentTarget.style.filter = 'drop-shadow(0 0 12px rgba(168, 85, 247, 0.8))'}
-        onMouseLeave={(e) => e.currentTarget.style.filter = 'none'}
+        className="absolute left-0 top-1/2 z-[60] text-muted-foreground transition-all duration-300 ease-out focus:outline-none cursor-pointer"
+        style={{ transform: 'translateY(-50%) translateX(-10px)', filter: 'none' }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.transform = 'translateY(-50%) translateX(0px)';
+          e.currentTarget.style.filter = 'drop-shadow(0 0 12px rgba(168, 85, 247, 0.8))';
+          e.currentTarget.style.color = 'rgb(192, 132, 252)';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.transform = 'translateY(-50%) translateX(-10px)';
+          e.currentTarget.style.filter = 'none';
+          e.currentTarget.style.color = '';
+        }}
       >
         <SciFiCloseButton />
         <span className="sr-only">Close</span>
