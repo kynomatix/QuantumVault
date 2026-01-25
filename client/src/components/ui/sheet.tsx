@@ -60,7 +60,6 @@ const SciFiCloseButton = () => (
     viewBox="0 0 24 72" 
     fill="none" 
     className="transition-all duration-300"
-    style={{ filter: 'var(--glow-filter, none)' }}
   >
     {/* Sci-fi vertical bar shape with triangular tips */}
     <path 
@@ -106,19 +105,18 @@ const SheetContent = React.forwardRef<
     <SheetOverlay />
     <SheetPrimitive.Content
       ref={ref}
-      className={cn(sheetVariants({ side }), className)}
+      className={cn(sheetVariants({ side }), "overflow-visible", className)}
       {...props}
     >
+      {/* Sci-fi close button positioned at left edge */}
+      <SheetPrimitive.Close 
+        className="absolute -left-3 top-1/2 -translate-y-1/2 z-[60] text-muted-foreground transition-all duration-300 focus:outline-none disabled:pointer-events-none hover:text-primary hover:[filter:drop-shadow(0_0_12px_rgba(168,85,247,0.8))]"
+      >
+        <SciFiCloseButton />
+        <span className="sr-only">Close</span>
+      </SheetPrimitive.Close>
       {children}
     </SheetPrimitive.Content>
-    {/* Close button rendered outside content to avoid clipping - positioned at left edge of 540px drawer */}
-    <SheetPrimitive.Close 
-      className="fixed top-1/2 -translate-y-1/2 z-[60] text-muted-foreground transition-all duration-500 ease-in-out animate-in slide-in-from-right focus:outline-none disabled:pointer-events-none hover:text-primary [--glow-filter:none] hover:[--glow-filter:drop-shadow(0_0_12px_rgba(168,85,247,0.8))]"
-      style={{ right: 'calc(min(540px, 100vw) - 12px)' }}
-    >
-      <SciFiCloseButton />
-      <span className="sr-only">Close</span>
-    </SheetPrimitive.Close>
   </SheetPortal>
 ))
 SheetContent.displayName = SheetPrimitive.Content.displayName
