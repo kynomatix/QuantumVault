@@ -446,9 +446,58 @@ async function routeSignalToSubscribers(
           const botLeverage = Math.max(1, subBot.leverage || 1); // Ensure leverage >= 1
           const marketMaxLeverage = getMarketMaxLeverage(subBot.market);
           const effectiveLeverage = Math.min(botLeverage, marketMaxLeverage); // Use the lower of bot's setting or market's limit
+          let freeCollateral = 0;
           try {
             const accountInfo = await getDriftAccountInfo(subWallet.agentPublicKey!, subAccountId);
-            const freeCollateral = Math.max(0, accountInfo.freeCollateral); // Clamp to >= 0
+            freeCollateral = Math.max(0, accountInfo.freeCollateral); // Clamp to >= 0
+            
+            // AUTO TOP-UP: Run FIRST, before any trade size calculations
+            // This ensures subscriber bots can also benefit from auto top-up
+            if (subBot.autoTopUp && maxPos > 0) {
+              const currentEquity = freeCollateral;
+              const targetEquity = maxPos / effectiveLeverage; // Investment amount
+              const topUpNeeded = Math.max(0, targetEquity - currentEquity);
+              
+              console.log(`[Subscriber Routing] Bot ${subBot.id} auto top-up check: current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)}, need $${topUpNeeded.toFixed(2)}`);
+              
+              if (topUpNeeded > 0) {
+                try {
+                  const agentUsdcBalance = await getAgentUsdcBalance(subWallet.agentPublicKey!);
+                  console.log(`[Subscriber Routing] Bot ${subBot.id} agent wallet: $${agentUsdcBalance.toFixed(2)}, need: $${topUpNeeded.toFixed(2)}`);
+                  
+                  if (agentUsdcBalance >= topUpNeeded) {
+                    const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
+                    const depositResult = await executeAgentDriftDeposit(
+                      subWallet.agentPublicKey!,
+                      subWallet.agentPrivateKeyEncrypted,
+                      depositAmount,
+                      subAccountId,
+                      false
+                    );
+                    
+                    if (depositResult.success) {
+                      console.log(`[Subscriber Routing] Bot ${subBot.id} auto top-up successful: deposited $${depositAmount.toFixed(2)}, tx: ${depositResult.signature}`);
+                      freeCollateral += depositAmount;
+                      
+                      await storage.createEquityEvent({
+                        walletAddress: subBot.walletAddress,
+                        tradingBotId: subBot.id,
+                        eventType: 'auto_topup',
+                        amount: String(depositAmount),
+                        txSignature: depositResult.signature || null,
+                        notes: `Auto top-up: equity $${currentEquity.toFixed(2)} → $${freeCollateral.toFixed(2)} (subscriber routing)`,
+                      });
+                    } else {
+                      console.log(`[Subscriber Routing] Bot ${subBot.id} auto top-up failed: ${depositResult.error}`);
+                    }
+                  } else {
+                    console.log(`[Subscriber Routing] Bot ${subBot.id} agent wallet insufficient for top-up`);
+                  }
+                } catch (topUpErr: any) {
+                  console.log(`[Subscriber Routing] Bot ${subBot.id} auto top-up error: ${topUpErr.message}`);
+                }
+              }
+            }
             
             // freeCollateral is margin capacity (USD), multiply by leverage to get max notional position size
             // CRITICAL: Use effectiveLeverage (capped by market's max) to avoid InsufficientCollateral errors
