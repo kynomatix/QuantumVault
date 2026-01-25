@@ -55,44 +55,34 @@ interface SheetContentProps
 
 const SciFiCloseButton = () => (
   <svg 
-    width="24" 
-    height="72" 
-    viewBox="0 0 24 72" 
+    width="28" 
+    height="56" 
+    viewBox="0 0 28 56" 
     fill="none" 
     className="transition-all duration-300"
   >
-    {/* Sci-fi vertical bar shape with triangular tips */}
+    {/* Trapezoid shape - wider on right (inside drawer), narrower on left */}
     <path 
-      d="M4 10 L12 0 L20 10 L20 62 L12 72 L4 62 Z" 
+      d="M0 12 L20 0 L28 0 L28 56 L20 56 L0 44 Z" 
       fill="currentColor" 
-      fillOpacity="0.15"
+      fillOpacity="0.2"
       stroke="currentColor"
-      strokeWidth="1"
-      strokeOpacity="0.5"
+      strokeWidth="1.5"
+      strokeOpacity="0.6"
     />
-    {/* Inner glow line */}
+    {/* Inner accent line */}
     <path 
-      d="M6 12 L12 4 L18 12 L18 60 L12 68 L6 60 Z" 
+      d="M4 14 L20 4 L24 4 L24 52 L20 52 L4 42 Z" 
       fill="none"
       stroke="currentColor"
       strokeWidth="0.5"
-      strokeOpacity="0.3"
+      strokeOpacity="0.4"
     />
     {/* Arrow pointing right */}
     <path 
-      d="M9 32 L15 36 L9 40 Z" 
+      d="M10 24 L18 28 L10 32 Z" 
       fill="currentColor"
-      fillOpacity="0.8"
-    />
-    {/* Arrow stem */}
-    <line 
-      x1="7" 
-      y1="36" 
-      x2="13" 
-      y2="36" 
-      stroke="currentColor" 
-      strokeWidth="2"
-      strokeOpacity="0.8"
+      fillOpacity="0.9"
     />
   </svg>
 )
@@ -108,13 +98,13 @@ const SheetContent = React.forwardRef<
       className={cn(sheetVariants({ side }), "overflow-visible", className)}
       {...props}
     >
-      {/* Sci-fi close button positioned at left edge */}
+      {/* Sci-fi trapezoid close button sitting on left edge */}
       <button 
         onClick={() => {
           const closeEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true });
           document.dispatchEvent(closeEvent);
         }}
-        className="absolute left-2 top-1/2 -translate-y-1/2 z-[60] text-muted-foreground transition-all duration-300 focus:outline-none cursor-pointer hover:text-purple-400"
+        className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-1/2 z-[60] text-muted-foreground transition-all duration-300 focus:outline-none cursor-pointer hover:text-purple-400"
         style={{ filter: 'none' }}
         onMouseEnter={(e) => e.currentTarget.style.filter = 'drop-shadow(0 0 12px rgba(168, 85, 247, 0.8))'}
         onMouseLeave={(e) => e.currentTarget.style.filter = 'none'}
