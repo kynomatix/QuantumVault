@@ -59,7 +59,8 @@ const SciFiCloseButton = () => (
     height="72" 
     viewBox="0 0 24 72" 
     fill="none" 
-    className="text-muted-foreground group-hover:text-primary transition-all duration-300 group-hover:drop-shadow-[0_0_8px_rgba(168,85,247,0.7)]"
+    className="transition-all duration-300"
+    style={{ filter: 'var(--glow-filter, none)' }}
   >
     {/* Sci-fi vertical bar shape with triangular tips */}
     <path 
@@ -112,7 +113,7 @@ const SheetContent = React.forwardRef<
     </SheetPrimitive.Content>
     {/* Close button rendered outside content to avoid clipping - positioned at left edge of 540px drawer */}
     <SheetPrimitive.Close 
-      className="group fixed top-1/2 -translate-y-1/2 z-[60] opacity-70 transition-all duration-500 ease-in-out hover:opacity-100 focus:outline-none disabled:pointer-events-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right"
+      className="fixed top-1/2 -translate-y-1/2 z-[60] text-muted-foreground transition-all duration-500 ease-in-out animate-in slide-in-from-right focus:outline-none disabled:pointer-events-none hover:text-primary [--glow-filter:none] hover:[--glow-filter:drop-shadow(0_0_12px_rgba(168,85,247,0.8))]"
       style={{ right: 'calc(min(540px, 100vw) - 12px)' }}
     >
       <SciFiCloseButton />
