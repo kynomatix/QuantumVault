@@ -56,14 +56,14 @@ interface SheetContentProps
 const SciFiCloseButton = () => (
   <svg 
     width="24" 
-    height="48" 
-    viewBox="0 0 24 48" 
+    height="72" 
+    viewBox="0 0 24 72" 
     fill="none" 
     className="text-muted-foreground group-hover:text-foreground transition-colors"
   >
     {/* Sci-fi vertical bar shape with triangular tips */}
     <path 
-      d="M4 8 L12 0 L20 8 L20 40 L12 48 L4 40 Z" 
+      d="M4 10 L12 0 L20 10 L20 62 L12 72 L4 62 Z" 
       fill="currentColor" 
       fillOpacity="0.15"
       stroke="currentColor"
@@ -72,7 +72,7 @@ const SciFiCloseButton = () => (
     />
     {/* Inner glow line */}
     <path 
-      d="M6 10 L12 4 L18 10 L18 38 L12 44 L6 38 Z" 
+      d="M6 12 L12 4 L18 12 L18 60 L12 68 L6 60 Z" 
       fill="none"
       stroke="currentColor"
       strokeWidth="0.5"
@@ -80,16 +80,16 @@ const SciFiCloseButton = () => (
     />
     {/* Arrow pointing right */}
     <path 
-      d="M9 20 L15 24 L9 28 Z" 
+      d="M9 32 L15 36 L9 40 Z" 
       fill="currentColor"
       fillOpacity="0.8"
     />
     {/* Arrow stem */}
     <line 
       x1="7" 
-      y1="24" 
+      y1="36" 
       x2="13" 
-      y2="24" 
+      y2="36" 
       stroke="currentColor" 
       strokeWidth="2"
       strokeOpacity="0.8"
@@ -105,10 +105,10 @@ const SheetContent = React.forwardRef<
     <SheetOverlay />
     <SheetPrimitive.Content
       ref={ref}
-      className={cn(sheetVariants({ side }), className)}
+      className={cn(sheetVariants({ side }), "overflow-visible", className)}
       {...props}
     >
-      <SheetPrimitive.Close className="group absolute -left-5 top-1/2 -translate-y-1/2 z-50 opacity-70 ring-offset-background transition-all hover:opacity-100 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
+      <SheetPrimitive.Close className="group absolute -left-3 top-1/2 -translate-y-1/2 z-50 opacity-70 ring-offset-background transition-all hover:opacity-100 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
         <SciFiCloseButton />
         <span className="sr-only">Close</span>
       </SheetPrimitive.Close>
