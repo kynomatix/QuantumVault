@@ -671,12 +671,18 @@ async function routeSignalToSubscribers(
 ): Promise<void> {
   try {
     const publishedBot = await storage.getPublishedBotByTradingBotId(sourceBotId);
-    if (!publishedBot || !publishedBot.isActive) {
+    if (!publishedBot) {
+      console.log(`[Subscriber Routing] Source bot ${sourceBotId} is not published, skipping subscriber routing`);
+      return;
+    }
+    if (!publishedBot.isActive) {
+      console.log(`[Subscriber Routing] Published bot ${publishedBot.id} is inactive, skipping subscriber routing`);
       return;
     }
 
     const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
     if (!subscriberBots || subscriberBots.length === 0) {
+      console.log(`[Subscriber Routing] Published bot ${publishedBot.id} has no active subscribers`);
       return;
     }
 
