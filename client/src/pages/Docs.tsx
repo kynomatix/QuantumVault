@@ -384,7 +384,8 @@ function CreatingBotsSection() {
               </div>
               <p className="text-white/50 text-sm leading-relaxed">
                 You set $100 → Bot always trades $100<br/>
-                Even if bot grows to $200, still trades $100
+                Even if bot grows to $200, still trades $100<br/>
+                <span className="text-white/40 text-xs">If margin is low, scales to 95% of available capacity**</span>
               </p>
             </div>
             <div className="p-4 rounded-lg bg-gradient-to-br from-violet-500/10 to-blue-500/10 border border-violet-500/30">
@@ -399,9 +400,12 @@ function CreatingBotsSection() {
             </div>
           </div>
           
-          <div className="mt-4 p-3 rounded-lg bg-white/5 border border-white/10">
+          <div className="mt-4 p-3 rounded-lg bg-white/5 border border-white/10 space-y-2">
             <p className="text-white/50 text-xs leading-relaxed">
-              <strong className="text-white/70">*Safety Buffer:</strong> Trades execute at 90% of available margin to reserve headroom for trading fees, slippage, oracle price drift, and price movement during transaction confirmation. This prevents failed trades due to insufficient collateral.
+              <strong className="text-white/70">*Profit Reinvest Buffer:</strong> Trades execute at 90% of available margin to ensure fills. This reserves headroom for trading fees, slippage, oracle price drift, and price movement during transaction confirmation.
+            </p>
+            <p className="text-white/50 text-xs leading-relaxed">
+              <strong className="text-white/70">**Normal Mode Scaling:</strong> If your bot's margin falls below your investment amount (e.g., after losses), trades scale down to 95% of available capacity until equity recovers.
             </p>
           </div>
           
