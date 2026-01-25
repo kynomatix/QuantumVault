@@ -97,6 +97,7 @@ const SheetContent = React.forwardRef<
       ref={ref}
       className={cn(sheetVariants({ side }), "overflow-visible", className)}
       onOpenAutoFocus={(e) => e.preventDefault()}
+      onCloseAutoFocus={(e) => e.preventDefault()}
       {...props}
     >
       {/* Sci-fi trapezoid close button - slides out on hover */}
@@ -105,6 +106,7 @@ const SheetContent = React.forwardRef<
           const closeEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true });
           document.dispatchEvent(closeEvent);
         }}
+        tabIndex={-1}
         className="absolute left-0 top-1/2 z-[60] text-muted-foreground transition-all duration-300 ease-out focus:outline-none cursor-pointer"
         style={{ transform: 'translateY(-50%) translateX(-10px)', filter: 'none' }}
         onMouseEnter={(e) => {
