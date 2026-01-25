@@ -8138,6 +8138,82 @@ export async function registerRoutes(
     }
   });
 
+  // Debug endpoint to diagnose subscriber routing issues
+  app.get("/api/debug/subscriber-routing/:tradingBotId", requireWallet, async (req, res) => {
+    try {
+      const tradingBotId = req.params.tradingBotId;
+      
+      // Step 1: Check if the trading bot exists
+      const tradingBot = await storage.getTradingBotById(tradingBotId);
+      if (!tradingBot) {
+        return res.json({
+          success: false,
+          step: "trading_bot_lookup",
+          error: "Trading bot not found",
+          tradingBotId,
+        });
+      }
+
+      // Step 2: Check if this bot is published
+      const publishedBot = await storage.getPublishedBotByTradingBotId(tradingBotId);
+      if (!publishedBot) {
+        return res.json({
+          success: false,
+          step: "published_bot_lookup",
+          error: "This trading bot is not published to the marketplace",
+          tradingBot: { id: tradingBot.id, name: tradingBot.name },
+        });
+      }
+
+      // Step 3: Check if published bot is active
+      if (!publishedBot.isActive) {
+        return res.json({
+          success: false,
+          step: "published_bot_active",
+          error: "Published bot is INACTIVE - signals will not route to subscribers",
+          publishedBot: { id: publishedBot.id, name: publishedBot.name, isActive: publishedBot.isActive },
+        });
+      }
+
+      // Step 4: Get all subscriptions for this published bot
+      const subscriptions = await storage.getBotSubscriptionsByPublishedBot(publishedBot.id);
+      
+      // Step 5: Get subscriber bots using the same query as routeSignalToSubscribers
+      const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
+
+      res.json({
+        success: true,
+        tradingBot: { id: tradingBot.id, name: tradingBot.name, market: tradingBot.market },
+        publishedBot: { 
+          id: publishedBot.id, 
+          name: publishedBot.name, 
+          isActive: publishedBot.isActive,
+          subscriberCount: publishedBot.subscriberCount,
+        },
+        subscriptions: subscriptions.map(s => ({
+          id: s.id,
+          status: s.status,
+          subscriberWalletAddress: s.subscriberWalletAddress,
+          subscriberBotId: s.subscriberBotId,
+          capitalInvested: s.capitalInvested,
+        })),
+        subscriberBotsFromQuery: subscriberBots.map(b => ({
+          id: b.id,
+          name: b.name,
+          isActive: b.isActive,
+          sourcePublishedBotId: b.sourcePublishedBotId,
+          walletAddress: b.walletAddress,
+        })),
+        diagnosis: subscriberBots.length === 0 
+          ? "No subscriber bots found - check if subscriptions exist and are active"
+          : `Found ${subscriberBots.length} active subscriber bot(s) ready to receive signals`,
+      });
+    } catch (error) {
+      console.error("Debug subscriber routing error:", error);
+      res.status(500).json({ error: "Failed to debug subscriber routing" });
+    }
+  });
+
   // ==================== TELEGRAM INTEGRATION ====================
 
   // Generate a connection token and return deep link for Telegram
