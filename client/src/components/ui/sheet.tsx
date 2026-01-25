@@ -95,7 +95,7 @@ const SheetContent = React.forwardRef<
     <SheetOverlay />
     <SheetPrimitive.Content
       ref={ref}
-      className={cn(sheetVariants({ side }), "overflow-visible border-l-2 border-l-purple-600", className)}
+      className={cn(sheetVariants({ side }), "overflow-visible border-l border-l-purple-500/30", className)}
       {...props}
     >
       {/* Sci-fi trapezoid close button - slides out on hover */}
