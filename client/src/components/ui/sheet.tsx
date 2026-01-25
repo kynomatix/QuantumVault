@@ -109,12 +109,19 @@ const SheetContent = React.forwardRef<
       {...props}
     >
       {/* Sci-fi close button positioned at left edge */}
-      <SheetPrimitive.Close 
-        className="absolute -left-3 top-1/2 -translate-y-1/2 z-[60] text-muted-foreground transition-all duration-300 focus:outline-none disabled:pointer-events-none hover:text-primary hover:[filter:drop-shadow(0_0_12px_rgba(168,85,247,0.8))]"
+      <button 
+        onClick={() => {
+          const closeEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true });
+          document.dispatchEvent(closeEvent);
+        }}
+        className="absolute left-2 top-1/2 -translate-y-1/2 z-[60] text-muted-foreground transition-all duration-300 focus:outline-none cursor-pointer hover:text-purple-400"
+        style={{ filter: 'none' }}
+        onMouseEnter={(e) => e.currentTarget.style.filter = 'drop-shadow(0 0 12px rgba(168, 85, 247, 0.8))'}
+        onMouseLeave={(e) => e.currentTarget.style.filter = 'none'}
       >
         <SciFiCloseButton />
         <span className="sr-only">Close</span>
-      </SheetPrimitive.Close>
+      </button>
       {children}
     </SheetPrimitive.Content>
   </SheetPortal>
