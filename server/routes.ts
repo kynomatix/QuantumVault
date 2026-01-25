@@ -258,10 +258,12 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
   }
 
   // STEP 2: Auto top-up (run FIRST, before any trade size calculations)
+  // baseCapital from DB is the LEVERAGED maxPositionSize, divide by leverage to get actual investment amount
   // Investment amount IS the target equity - simple: deposit enough to reach it
   if (autoTopUp && baseCapital > 0) {
     const currentEquity = freeCollateral;
-    const targetEquity = baseCapital; // Investment amount = target equity
+    const investmentAmount = baseCapital / effectiveLeverage; // Convert leveraged position to equity target
+    const targetEquity = investmentAmount;
     const topUpNeeded = Math.max(0, targetEquity - currentEquity);
 
     console.log(`${logPrefix} Auto top-up check: current equity $${currentEquity.toFixed(2)}, target equity $${targetEquity.toFixed(2)}, need $${topUpNeeded.toFixed(2)}`);
