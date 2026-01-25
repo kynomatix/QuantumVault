@@ -1751,7 +1751,7 @@ export default function AppPage() {
                         )}
                       </div>
                     )}
-                    <div className={`space-y-3 ${botsData && botsData.length > 7 ? 'max-h-[420px] overflow-y-auto pr-1' : ''}`}>
+                    <div className={`space-y-3 ${botsData && botsData.length > 7 ? 'max-h-[560px] overflow-y-auto pr-1' : ''}`}>
                       {botsData && botsData.length > 0 ? (
                         (() => {
                           const filteredBots = botsData.filter((bot: TradingBot) => 
