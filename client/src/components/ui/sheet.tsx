@@ -55,15 +55,15 @@ interface SheetContentProps
 
 const SciFiCloseButton = () => (
   <svg 
-    width="28" 
-    height="56" 
-    viewBox="0 0 28 56" 
+    width="16" 
+    height="80" 
+    viewBox="0 0 16 80" 
     fill="none" 
     className="transition-all duration-300"
   >
-    {/* Trapezoid shape - wider on left, narrower on right (pointing into drawer) */}
+    {/* Trapezoid shape - narrower, taller */}
     <path 
-      d="M0 0 L8 0 L28 12 L28 44 L8 56 L0 56 Z" 
+      d="M0 0 L6 0 L16 10 L16 70 L6 80 L0 80 Z" 
       fill="currentColor" 
       fillOpacity="0.2"
       stroke="currentColor"
@@ -72,15 +72,15 @@ const SciFiCloseButton = () => (
     />
     {/* Inner accent line */}
     <path 
-      d="M4 4 L8 4 L24 14 L24 42 L8 52 L4 52 Z" 
+      d="M2 4 L6 4 L13 12 L13 68 L6 76 L2 76 Z" 
       fill="none"
       stroke="currentColor"
       strokeWidth="0.5"
       strokeOpacity="0.4"
     />
-    {/* Arrow pointing right */}
+    {/* Small arrow pointing right */}
     <path 
-      d="M8 24 L16 28 L8 32 Z" 
+      d="M4 37 L10 40 L4 43 Z" 
       fill="currentColor"
       fillOpacity="0.9"
     />
