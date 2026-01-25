@@ -192,6 +192,7 @@ export default function AppPage() {
   const [viewDetailBot, setViewDetailBot] = useState<PublishedBot | null>(null);
   const [sharePopupBot, setSharePopupBot] = useState<{ id: string; tradingBotId: string; name: string; market: string } | null>(null);
   const [copiedField, setCopiedField] = useState<'botId' | 'shareLink' | null>(null);
+  const [botSearchQuery, setBotSearchQuery] = useState('');
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -1730,9 +1731,43 @@ export default function AppPage() {
                         Add Bot
                       </Button>
                     </div>
-                    <div className="space-y-3">
+                    {botsData && botsData.length >= 7 && (
+                      <div className="relative mb-3">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                        <Input
+                          placeholder="Search bots..."
+                          value={botSearchQuery}
+                          onChange={(e) => setBotSearchQuery(e.target.value)}
+                          className="pl-9 h-9 text-sm bg-muted/30"
+                          data-testid="input-search-bots"
+                        />
+                        {botSearchQuery && (
+                          <button
+                            onClick={() => setBotSearchQuery('')}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-white"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    <div className={`space-y-3 ${botsData && botsData.length > 7 ? 'max-h-[420px] overflow-y-auto pr-1' : ''}`}>
                       {botsData && botsData.length > 0 ? (
-                        botsData.map((bot: TradingBot) => (
+                        (() => {
+                          const filteredBots = botsData.filter((bot: TradingBot) => 
+                            !botSearchQuery || 
+                            bot.name.toLowerCase().includes(botSearchQuery.toLowerCase()) ||
+                            bot.market.toLowerCase().includes(botSearchQuery.toLowerCase())
+                          );
+                          if (filteredBots.length === 0 && botSearchQuery) {
+                            return (
+                              <div className="text-center py-6 text-muted-foreground">
+                                <Search className="w-6 h-6 mx-auto mb-2 opacity-50" />
+                                <p className="text-sm">No bots match "{botSearchQuery}"</p>
+                              </div>
+                            );
+                          }
+                          return filteredBots.map((bot: TradingBot) => (
                           <div 
                             key={bot.id} 
                             className="p-3 rounded-xl bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer" 
@@ -1766,7 +1801,8 @@ export default function AppPage() {
                               </span>
                             </div>
                           </div>
-                        ))
+                        ));
+                        })()
                       ) : (
                         <div className="text-center py-6 text-muted-foreground">
                           <Bot className="w-8 h-8 mx-auto mb-2 opacity-50" />
