@@ -78,17 +78,17 @@ const SciFiCloseButton = () => (
       strokeWidth="0.5"
       strokeOpacity="0.3"
     />
-    {/* Arrow pointing left */}
+    {/* Arrow pointing right */}
     <path 
-      d="M15 20 L9 24 L15 28 Z" 
+      d="M9 20 L15 24 L9 28 Z" 
       fill="currentColor"
       fillOpacity="0.8"
     />
     {/* Arrow stem */}
     <line 
-      x1="11" 
+      x1="7" 
       y1="24" 
-      x2="17" 
+      x2="13" 
       y2="24" 
       stroke="currentColor" 
       strokeWidth="2"
@@ -108,7 +108,7 @@ const SheetContent = React.forwardRef<
       className={cn(sheetVariants({ side }), className)}
       {...props}
     >
-      <SheetPrimitive.Close className="group absolute -left-3 top-1/2 -translate-y-1/2 z-50 opacity-70 ring-offset-background transition-all hover:opacity-100 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
+      <SheetPrimitive.Close className="group absolute -left-5 top-1/2 -translate-y-1/2 z-50 opacity-70 ring-offset-background transition-all hover:opacity-100 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
         <SciFiCloseButton />
         <span className="sr-only">Close</span>
       </SheetPrimitive.Close>
