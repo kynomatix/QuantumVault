@@ -2886,7 +2886,7 @@ export async function registerRoutes(
         if (isTransientError(result.error || '')) {
           console.log(`[ClosePosition] CRITICAL: Transient error on close order, queueing for priority retry`);
           
-          const retryJobId = queueTradeRetry({
+          const retryJobId = await queueTradeRetry({
             botId: bot.id,
             walletAddress: wallet.address,
             agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
@@ -5549,7 +5549,7 @@ export async function registerRoutes(
           if (isTransientError(closeError.message || String(closeError))) {
             console.log(`[Webhook] CRITICAL: Transient error on close order, queueing for priority retry`);
             
-            const retryJobId = queueTradeRetry({
+            const retryJobId = await queueTradeRetry({
               botId: bot.id,
               walletAddress: wallet.address,
               agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
@@ -5949,7 +5949,7 @@ export async function registerRoutes(
         if (isTransient || isCollateralError) {
           console.log(`[Webhook] Retryable error detected (transient=${isTransient}, collateral=${isCollateralError}), queueing trade for automatic retry`);
           
-          const retryJobId = queueTradeRetry({
+          const retryJobId = await queueTradeRetry({
             botId: bot.id,
             walletAddress: wallet.address,
             agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
