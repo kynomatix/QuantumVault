@@ -1152,8 +1152,8 @@ export default function DocsPage() {
               </Button>
               
               <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
+                <ArrowLeft className="w-4 h-4" />
                 <span className="text-sm">Back</span>
-                <ArrowLeft className="w-4 h-4 rotate-180" />
               </Link>
             </div>
             
