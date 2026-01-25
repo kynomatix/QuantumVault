@@ -339,7 +339,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
     console.log(`${logPrefix} ${signalPercent.toFixed(2)}% of $${baseCapital} maxPositionSize = $${tradeAmountUsd.toFixed(2)} trade (before collateral check)`);
     console.log(`${logPrefix} Dynamic scaling: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x leverage = $${maxNotionalCapacity.toFixed(2)} max notional`);
 
-    // Scale down if needed (use 95% buffer for normal mode)
+    // Scale down if needed (use 95% buffer for normal mode - more aggressive than profit reinvest)
     const adjustedMaxTradeable = freeCollateral * effectiveLeverage * 0.95;
     if (adjustedMaxTradeable <= 0) {
       console.log(`${logPrefix} No margin available after top-up check, will attempt minimum viable trade`);
