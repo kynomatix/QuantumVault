@@ -61,12 +61,12 @@ const SciFiCloseButton = () => (
     fill="none" 
     className="transition-all duration-300"
   >
-    {/* Trapezoid shape - narrower, much taller */}
+    {/* Trapezoid shape - narrower, much taller, purple edge on left */}
     <path 
       d="M0 0 L6 0 L16 12 L16 148 L6 160 L0 160 Z" 
       fill="currentColor" 
       fillOpacity="0.2"
-      stroke="currentColor"
+      stroke="rgb(147, 51, 234)"
       strokeWidth="1.5"
       strokeOpacity="0.6"
     />
@@ -96,6 +96,7 @@ const SheetContent = React.forwardRef<
     <SheetPrimitive.Content
       ref={ref}
       className={cn(sheetVariants({ side }), "overflow-visible", className)}
+      onOpenAutoFocus={(e) => e.preventDefault()}
       {...props}
     >
       {/* Sci-fi trapezoid close button - slides out on hover */}
