@@ -486,7 +486,7 @@ export default function Landing() {
                   <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-primary/30 transition-colors">
                     <KeyRound className="w-5 h-5 text-primary mb-3" />
                     <h4 className="font-semibold text-sm mb-1">Seed Phrase Backup</h4>
-                    <p className="text-xs text-muted-foreground">Export your agent wallet's recovery phrase anytime. Your keys, your backup, full portability.</p>
+                    <p className="text-xs text-muted-foreground">Full user ownership and control. Export your agent wallet's recovery phrase anytime - your keys, your backup.</p>
                   </div>
                 </div>
               </motion.div>
