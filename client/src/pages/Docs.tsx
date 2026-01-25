@@ -393,10 +393,16 @@ function CreatingBotsSection() {
                 <h4 className="font-medium text-violet-300">ON</h4>
               </div>
               <p className="text-white/50 text-sm leading-relaxed">
-                Bot has $100 → Trades $100<br/>
-                Bot grows to $200 → Trades $200
+                Bot has $100 → Trades $90*<br/>
+                Bot grows to $200 → Trades $180*
               </p>
             </div>
+          </div>
+          
+          <div className="mt-4 p-3 rounded-lg bg-white/5 border border-white/10">
+            <p className="text-white/50 text-xs leading-relaxed">
+              <strong className="text-white/70">*Safety Buffer:</strong> Trades execute at 90% of available margin to reserve headroom for trading fees, slippage, oracle price drift, and price movement during transaction confirmation. This prevents failed trades due to insufficient collateral.
+            </p>
           </div>
           
           <p className="mt-4 text-sm text-violet-300/80 flex items-center gap-2">

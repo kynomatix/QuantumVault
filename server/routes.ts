@@ -309,7 +309,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
 
   // STEP 3: Calculate max tradeable value after potential top-up
   const maxNotionalCapacity = freeCollateral * effectiveLeverage;
-  maxTradeableValue = maxNotionalCapacity * 0.80; // 80% buffer for fees/slippage/oracle drift
+  maxTradeableValue = maxNotionalCapacity * 0.90; // 90% buffer for fees/slippage/oracle drift
 
   // STEP 4: Calculate trade amount based on mode
   if (profitReinvestEnabled) {
@@ -327,7 +327,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
     }
     const requestedAmount = signalPercent > 0 ? (signalPercent / 100) * maxTradeableValue : maxTradeableValue;
     tradeAmountUsd = Math.min(requestedAmount, maxTradeableValue);
-    console.log(`${logPrefix} PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x × 80% = $${maxTradeableValue.toFixed(2)} max`);
+    console.log(`${logPrefix} PROFIT REINVEST: freeCollateral=$${freeCollateral.toFixed(2)} × ${effectiveLeverage}x × 90% = $${maxTradeableValue.toFixed(2)} max`);
     if (requestedAmount > maxTradeableValue) {
       console.log(`${logPrefix} Requested $${requestedAmount.toFixed(2)} exceeds available, capped to $${tradeAmountUsd.toFixed(2)}`);
     } else {
