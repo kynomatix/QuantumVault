@@ -199,7 +199,7 @@ export default function AppPage() {
   const { data: positionsData } = usePositions();
   const { data: subscriptionsData } = useSubscriptions();
   const { data: tradesData, refetch: refetchTrades } = useTrades(10);
-  const { data: allTradesData } = useTrades();
+  const { data: allTradesData } = useTrades(500);
   const { data: botsData, refetch: refetchBots } = useTradingBots();
   const { data: leaderboardData } = useLeaderboard(100);
   const { data: pricesData } = usePrices();
