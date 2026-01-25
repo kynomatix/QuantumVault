@@ -105,15 +105,19 @@ const SheetContent = React.forwardRef<
     <SheetOverlay />
     <SheetPrimitive.Content
       ref={ref}
-      className={cn(sheetVariants({ side }), "overflow-visible", className)}
+      className={cn(sheetVariants({ side }), className)}
       {...props}
     >
-      <SheetPrimitive.Close className="group absolute -left-3 top-1/2 -translate-y-1/2 z-50 opacity-70 ring-offset-background transition-all hover:opacity-100 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
-        <SciFiCloseButton />
-        <span className="sr-only">Close</span>
-      </SheetPrimitive.Close>
       {children}
     </SheetPrimitive.Content>
+    {/* Close button rendered outside content to avoid clipping - positioned at left edge of 540px drawer */}
+    <SheetPrimitive.Close 
+      className="group fixed top-1/2 -translate-y-1/2 z-[60] opacity-70 ring-offset-background transition-all hover:opacity-100 hover:scale-105 focus:outline-none disabled:pointer-events-none"
+      style={{ right: 'calc(min(540px, 100vw) - 12px)' }}
+    >
+      <SciFiCloseButton />
+      <span className="sr-only">Close</span>
+    </SheetPrimitive.Close>
   </SheetPortal>
 ))
 SheetContent.displayName = SheetPrimitive.Content.displayName
