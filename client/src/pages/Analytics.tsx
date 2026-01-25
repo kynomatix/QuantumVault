@@ -101,25 +101,24 @@ function createSmoothPath(points: { x: number; y: number }[]): string {
     return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
   }
   
+  // Use Catmull-Rom spline for smoother curves
   let path = `M ${points[0].x} ${points[0].y}`;
   
   for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[i];
-    const p1 = points[i + 1];
+    const p0 = points[Math.max(0, i - 1)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(points.length - 1, i + 2)];
     
-    const midX = (p0.x + p1.x) / 2;
-    const midY = (p0.y + p1.y) / 2;
+    // Catmull-Rom to Cubic Bezier conversion
+    const tension = 0.3; // Lower = smoother curves
+    const cp1x = p1.x + (p2.x - p0.x) * tension;
+    const cp1y = p1.y + (p2.y - p0.y) * tension;
+    const cp2x = p2.x - (p3.x - p1.x) * tension;
+    const cp2y = p2.y - (p3.y - p1.y) * tension;
     
-    if (i === 0) {
-      path += ` Q ${p0.x} ${p0.y}, ${midX} ${midY}`;
-    } else {
-      path += ` Q ${p0.x} ${p0.y}, ${midX} ${midY}`;
-    }
+    path += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
   }
-  
-  const last = points[points.length - 1];
-  const secondLast = points[points.length - 2];
-  path += ` Q ${secondLast.x} ${secondLast.y}, ${last.x} ${last.y}`;
   
   return path;
 }
