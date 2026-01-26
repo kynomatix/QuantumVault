@@ -138,10 +138,50 @@ export function SharePnLCard({
     ctx.fillRect(0, 0, width, height);
 
     if (logoImg) {
-      ctx.globalAlpha = 0.14;
       const logoSize = 280;
-      ctx.drawImage(logoImg, width - logoSize - 20, height / 2 - logoSize / 2 - 25, logoSize, logoSize);
-      ctx.globalAlpha = 1;
+      const logoX = width - logoSize - 20;
+      const logoY = height / 2 - logoSize / 2 - 25;
+      
+      const logoCanvas = document.createElement('canvas');
+      logoCanvas.width = logoSize;
+      logoCanvas.height = logoSize;
+      const logoCtx = logoCanvas.getContext('2d');
+      if (logoCtx) {
+        logoCtx.drawImage(logoImg, 0, 0, logoSize, logoSize);
+        
+        logoCtx.globalCompositeOperation = 'destination-out';
+        const fadeGradient = logoCtx.createLinearGradient(0, 0, logoSize, logoSize);
+        fadeGradient.addColorStop(0, 'rgba(0,0,0,0.7)');
+        fadeGradient.addColorStop(0.4, 'rgba(0,0,0,0.3)');
+        fadeGradient.addColorStop(0.7, 'rgba(0,0,0,0.1)');
+        fadeGradient.addColorStop(1, 'rgba(0,0,0,0)');
+        logoCtx.fillStyle = fadeGradient;
+        logoCtx.fillRect(0, 0, logoSize, logoSize);
+        
+        ctx.globalAlpha = 0.18;
+        ctx.drawImage(logoCanvas, logoX, logoY);
+        ctx.globalAlpha = 1;
+      }
+      
+      ctx.strokeStyle = 'rgba(139, 92, 246, 0.08)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(width - 60, 80, 40, 0, Math.PI * 0.5);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(width - 100, 60, 25, Math.PI * 0.8, Math.PI * 1.3);
+      ctx.stroke();
+      
+      ctx.fillStyle = 'rgba(139, 92, 246, 0.06)';
+      ctx.beginPath();
+      ctx.arc(width - 45, 120, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(width - 80, 45, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(width - 30, 85, 2, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     const padding = 36;
