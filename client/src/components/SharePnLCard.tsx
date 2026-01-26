@@ -34,67 +34,18 @@ export function SharePnLCard({
 }: SharePnLCardProps) {
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [logoImg, setLogoImg] = useState<HTMLImageElement | null>(null);
   const { toast } = useToast();
 
   const isProfit = pnl >= 0;
   const timeframeLabel = timeframe === 'all' ? 'All Time' : timeframe.toUpperCase();
 
-  const drawChevronLogo = (ctx: CanvasRenderingContext2D, x: number, y: number, size: number, color: string) => {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = size * 0.08;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    
-    const w = size * 0.7;
-    const h = size * 0.35;
-    
-    ctx.beginPath();
-    ctx.moveTo(x - w/2, y - h);
-    ctx.lineTo(x, y - h * 0.3);
-    ctx.lineTo(x + w/2, y - h);
-    ctx.stroke();
-    
-    ctx.beginPath();
-    ctx.moveTo(x - w/2, y + h * 0.1);
-    ctx.lineTo(x, y + h * 0.8);
-    ctx.lineTo(x + w/2, y + h * 0.1);
-    ctx.stroke();
-  };
-
-  const drawLargeWatermarkLogo = (ctx: CanvasRenderingContext2D, x: number, y: number, size: number, opacity: number) => {
-    ctx.save();
-    ctx.globalAlpha = opacity;
-    ctx.strokeStyle = 'rgba(100, 100, 120, 1)';
-    ctx.lineWidth = size * 0.045;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    
-    const w = size * 0.55;
-    const h = size * 0.28;
-    const gap = size * 0.22;
-    
-    ctx.beginPath();
-    ctx.moveTo(x - w/2, y - gap - h);
-    ctx.lineTo(x, y - gap);
-    ctx.lineTo(x + w/2, y - gap - h);
-    ctx.stroke();
-    
-    ctx.beginPath();
-    ctx.moveTo(x - w/2, y - h * 0.3);
-    ctx.lineTo(x, y + h * 0.7);
-    ctx.lineTo(x + w/2, y - h * 0.3);
-    ctx.stroke();
-    
-    const innerW = w * 0.5;
-    const innerH = h * 0.5;
-    ctx.beginPath();
-    ctx.moveTo(x - innerW/2, y + h * 0.9);
-    ctx.lineTo(x, y + h * 1.4);
-    ctx.lineTo(x + innerW/2, y + h * 0.9);
-    ctx.stroke();
-    
-    ctx.restore();
-  };
+  useEffect(() => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => setLogoImg(img);
+    img.src = '/images/QV_Logo_02.png';
+  }, []);
 
   const renderToCanvas = (): HTMLCanvasElement | null => {
     const canvas = document.createElement('canvas');
@@ -109,45 +60,64 @@ export function SharePnLCard({
     ctx.scale(scale, scale);
 
     const gradient = ctx.createLinearGradient(0, 0, width, height);
-    gradient.addColorStop(0, '#12101a');
-    gradient.addColorStop(0.5, '#1a1525');
-    gradient.addColorStop(1, '#12101a');
+    gradient.addColorStop(0, '#0f0a1e');
+    gradient.addColorStop(0.3, '#1a0f2e');
+    gradient.addColorStop(0.6, '#2d1b4e');
+    gradient.addColorStop(1, '#1a0f2e');
     ctx.fillStyle = gradient;
     ctx.beginPath();
     ctx.roundRect(0, 0, width, height, 16);
     ctx.fill();
 
-    ctx.strokeStyle = 'rgba(139, 92, 246, 0.08)';
+    ctx.strokeStyle = 'rgba(139, 92, 246, 0.12)';
     ctx.lineWidth = 0.5;
-    for (let x = 0; x <= width; x += 28) {
+    for (let x = 0; x <= width; x += 30) {
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, height);
       ctx.stroke();
     }
-    for (let y = 0; y <= height; y += 28) {
+    for (let y = 0; y <= height; y += 30) {
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(width, y);
       ctx.stroke();
     }
 
-    drawLargeWatermarkLogo(ctx, width - 70, height / 2 + 10, 200, 0.12);
+    const glowGradient = ctx.createRadialGradient(width - 60, height / 2, 0, width - 60, height / 2, 140);
+    glowGradient.addColorStop(0, isProfit ? 'rgba(34, 197, 94, 0.25)' : 'rgba(239, 68, 68, 0.25)');
+    glowGradient.addColorStop(1, 'transparent');
+    ctx.fillStyle = glowGradient;
+    ctx.fillRect(0, 0, width, height);
+
+    if (logoImg) {
+      ctx.globalAlpha = 0.12;
+      const logoSize = 200;
+      ctx.drawImage(logoImg, width - logoSize + 30, height / 2 - logoSize / 2, logoSize, logoSize);
+      ctx.globalAlpha = 1;
+    }
 
     const padding = 28;
 
-    drawChevronLogo(ctx, padding + 14, padding + 16, 28, '#ffffff');
+    if (logoImg) {
+      const smallLogoSize = 32;
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(padding, padding, smallLogoSize, smallLogoSize, 8);
+      ctx.clip();
+      ctx.drawImage(logoImg, padding, padding, smallLogoSize, smallLogoSize);
+      ctx.restore();
+    }
 
     ctx.fillStyle = '#ffffff';
-    ctx.font = '500 18px Inter, system-ui, sans-serif';
-    ctx.fillText('QuantumVault', padding + 38, padding + 22);
+    ctx.font = 'bold 18px Inter, system-ui, sans-serif';
+    ctx.fillText('QuantumVault', padding + 42, padding + 22);
 
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 22px Inter, system-ui, sans-serif';
-    const marketText = market;
-    ctx.fillText(marketText, padding, padding + 70);
+    ctx.fillText(market, padding, padding + 70);
     
-    const marketWidth = ctx.measureText(marketText).width;
+    const marketWidth = ctx.measureText(market).width;
     ctx.fillStyle = isProfit ? '#4ade80' : '#f87171';
     ctx.font = '500 18px Inter, system-ui, sans-serif';
     ctx.fillText(botName, padding + marketWidth + 16, padding + 70);
@@ -156,19 +126,17 @@ export function SharePnLCard({
     ctx.font = 'bold 60px Inter, system-ui, sans-serif';
     const pnlText = `${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}%`;
     
-    ctx.shadowColor = isProfit ? 'rgba(34, 197, 94, 0.4)' : 'rgba(239, 68, 68, 0.4)';
-    ctx.shadowBlur = 25;
+    ctx.shadowColor = isProfit ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)';
+    ctx.shadowBlur = 30;
     ctx.fillText(pnlText, padding, padding + 155);
     ctx.shadowBlur = 0;
 
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
     ctx.font = '15px Inter, system-ui, sans-serif';
     let statsX = padding;
-    
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
     const tradesText = `${tradeCount} trade${tradeCount !== 1 ? 's' : ''}`;
     ctx.fillText(tradesText, statsX, padding + 195);
     statsX += ctx.measureText(tradesText).width + 16;
-    
     ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
     ctx.fillText('•', statsX, padding + 195);
     statsX += 20;
@@ -182,43 +150,42 @@ export function SharePnLCard({
       ctx.fillText('•', statsX, padding + 195);
       statsX += 20;
     }
-    
     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
     ctx.fillText(timeframeLabel, statsX, padding + 195);
 
-    ctx.strokeStyle = 'rgba(139, 92, 246, 0.15)';
+    ctx.strokeStyle = 'rgba(139, 92, 246, 0.2)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(padding, height - 55);
-    ctx.lineTo(width - padding, height - 55);
+    ctx.moveTo(padding, height - 60);
+    ctx.lineTo(width - padding, height - 60);
     ctx.stroke();
 
     if (displayName || xUsername) {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
       ctx.font = '500 15px Inter, system-ui, sans-serif';
       const nameText = displayName || xUsername || '';
-      ctx.fillText(nameText, padding, height - 25);
+      ctx.fillText(nameText, padding, height - 28);
       
       if (xUsername) {
         ctx.fillStyle = '#a78bfa';
         ctx.font = '14px Inter, system-ui, sans-serif';
-        const atText = displayName ? `@${xUsername}` : '';
-        if (atText) {
-          ctx.fillText(atText, padding + ctx.measureText(nameText).width + 8, height - 25);
+        const xText = displayName ? `@${xUsername}` : '';
+        if (xText) {
+          ctx.fillText(xText, padding + ctx.measureText(nameText).width + 8, height - 28);
         }
       }
     } else {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
       ctx.font = '14px Inter, system-ui, sans-serif';
-      ctx.fillText('quantumvault.io', padding, height - 25);
+      ctx.fillText('quantumvault.io', padding, height - 28);
     }
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
     ctx.font = '14px Inter, system-ui, sans-serif';
     const dateText = new Date().toLocaleDateString('en-GB');
-    ctx.fillText(dateText, width - padding - ctx.measureText(dateText).width, height - 25);
+    ctx.fillText(dateText, width - padding - ctx.measureText(dateText).width, height - 28);
 
-    ctx.strokeStyle = 'rgba(139, 92, 246, 0.25)';
+    ctx.strokeStyle = 'rgba(139, 92, 246, 0.3)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.roundRect(0.5, 0.5, width - 1, height - 1, 16);
@@ -356,7 +323,7 @@ export function SharePnLCard({
         </DialogHeader>
         
         <div className="space-y-4">
-          <div className="rounded-2xl overflow-hidden shadow-xl" style={{ border: '1px solid rgba(139, 92, 246, 0.25)' }}>
+          <div className="rounded-2xl overflow-hidden shadow-xl" style={{ border: '1px solid rgba(139, 92, 246, 0.3)' }}>
             {previewCanvas && (
               <img 
                 src={previewCanvas.toDataURL('image/png')} 
