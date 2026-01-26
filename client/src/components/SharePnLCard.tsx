@@ -32,11 +32,9 @@ export function SharePnLCard({
   displayName,
   xUsername,
 }: SharePnLCardProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [logoLoaded, setLogoLoaded] = useState(false);
-  const logoRef = useRef<HTMLImageElement | null>(null);
+  const [logoImg, setLogoImg] = useState<HTMLImageElement | null>(null);
   const { toast } = useToast();
 
   const isProfit = pnl >= 0;
@@ -45,21 +43,15 @@ export function SharePnLCard({
   useEffect(() => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      logoRef.current = img;
-      setLogoLoaded(true);
-    };
-    img.onerror = () => {
-      setLogoLoaded(true);
-    };
+    img.onload = () => setLogoImg(img);
     img.src = '/images/QV_Logo_02.png';
   }, []);
 
   const renderToCanvas = (): HTMLCanvasElement | null => {
     const canvas = document.createElement('canvas');
     const scale = 2;
-    const width = 400;
-    const height = 300;
+    const width = 420;
+    const height = 320;
     canvas.width = width * scale;
     canvas.height = height * scale;
     const ctx = canvas.getContext('2d');
@@ -73,9 +65,11 @@ export function SharePnLCard({
     gradient.addColorStop(0.6, '#2d1b4e');
     gradient.addColorStop(1, '#1a0f2e');
     ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, width, height);
+    ctx.beginPath();
+    ctx.roundRect(0, 0, width, height, 16);
+    ctx.fill();
 
-    ctx.strokeStyle = 'rgba(139, 92, 246, 0.15)';
+    ctx.strokeStyle = 'rgba(139, 92, 246, 0.12)';
     ctx.lineWidth = 0.5;
     for (let x = 0; x <= width; x += 30) {
       ctx.beginPath();
@@ -90,100 +84,106 @@ export function SharePnLCard({
       ctx.stroke();
     }
 
-    const glowGradient = ctx.createRadialGradient(width - 50, 50, 0, width - 50, 50, 100);
-    glowGradient.addColorStop(0, isProfit ? 'rgba(34, 197, 94, 0.4)' : 'rgba(239, 68, 68, 0.4)');
+    const glowGradient = ctx.createRadialGradient(width - 60, height / 2, 0, width - 60, height / 2, 140);
+    glowGradient.addColorStop(0, isProfit ? 'rgba(34, 197, 94, 0.25)' : 'rgba(239, 68, 68, 0.25)');
     glowGradient.addColorStop(1, 'transparent');
     ctx.fillStyle = glowGradient;
     ctx.fillRect(0, 0, width, height);
 
-    if (logoRef.current) {
-      ctx.globalAlpha = 0.2;
-      const logoSize = 120;
-      ctx.drawImage(logoRef.current, width - logoSize - 10, height / 2 - logoSize / 2, logoSize, logoSize);
+    if (logoImg) {
+      ctx.globalAlpha = 0.15;
+      const logoSize = 140;
+      ctx.drawImage(logoImg, width - logoSize - 20, height / 2 - logoSize / 2, logoSize, logoSize);
       ctx.globalAlpha = 1;
     }
 
-    ctx.fillStyle = '#8b5cf6';
-    ctx.beginPath();
-    ctx.roundRect(24, 24, 32, 32, 8);
-    ctx.fill();
-    
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 14px Inter, system-ui, sans-serif';
-    ctx.fillText('QV', 31, 45);
+    const padding = 28;
+
+    if (logoImg) {
+      const smallLogoSize = 32;
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(padding, padding, smallLogoSize, smallLogoSize, 8);
+      ctx.clip();
+      ctx.drawImage(logoImg, padding, padding, smallLogoSize, smallLogoSize);
+      ctx.restore();
+    }
 
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 18px Inter, system-ui, sans-serif';
-    ctx.fillText('QuantumVault', 64, 46);
+    ctx.fillText('QuantumVault', padding + 42, padding + 22);
 
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 18px Inter, system-ui, sans-serif';
-    ctx.fillText(market, 24, 85);
+    ctx.font = 'bold 20px Inter, system-ui, sans-serif';
+    ctx.fillText(market, padding, padding + 65);
 
     ctx.fillStyle = isProfit ? '#4ade80' : '#f87171';
-    ctx.font = '600 14px Inter, system-ui, sans-serif';
-    ctx.fillText(botName, 24 + ctx.measureText(market).width + 12, 85);
+    ctx.font = '500 16px Inter, system-ui, sans-serif';
+    ctx.fillText(botName, padding, padding + 90);
 
     ctx.fillStyle = isProfit ? '#4ade80' : '#f87171';
-    ctx.font = 'bold 56px Inter, system-ui, sans-serif';
+    ctx.font = 'bold 58px Inter, system-ui, sans-serif';
     const pnlText = `${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}%`;
     
-    ctx.shadowColor = isProfit ? 'rgba(34, 197, 94, 0.6)' : 'rgba(239, 68, 68, 0.6)';
-    ctx.shadowBlur = 40;
-    ctx.fillText(pnlText, 24, 160);
+    ctx.shadowColor = isProfit ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)';
+    ctx.shadowBlur = 30;
+    ctx.fillText(pnlText, padding, padding + 165);
     ctx.shadowBlur = 0;
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
     ctx.font = '14px Inter, system-ui, sans-serif';
-    let statsX = 24;
-    const statsText = `${tradeCount} trade${tradeCount !== 1 ? 's' : ''}`;
-    ctx.fillText(statsText, statsX, 195);
-    statsX += ctx.measureText(statsText).width + 8;
-    ctx.fillText('•', statsX, 195);
-    statsX += 16;
+    let statsX = padding;
+    const tradesText = `${tradeCount} trade${tradeCount !== 1 ? 's' : ''}`;
+    ctx.fillText(tradesText, statsX, padding + 200);
+    statsX += ctx.measureText(tradesText).width + 12;
+    ctx.fillText('•', statsX, padding + 200);
+    statsX += 18;
     
     if (winRate !== undefined) {
       ctx.fillStyle = '#4ade80';
       const winText = `${winRate.toFixed(1)}% win`;
-      ctx.fillText(winText, statsX, 195);
-      statsX += ctx.measureText(winText).width + 8;
+      ctx.fillText(winText, statsX, padding + 200);
+      statsX += ctx.measureText(winText).width + 12;
       ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-      ctx.fillText('•', statsX, 195);
-      statsX += 16;
+      ctx.fillText('•', statsX, padding + 200);
+      statsX += 18;
     }
-    ctx.fillText(timeframeLabel, statsX, 195);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.fillText(timeframeLabel, statsX, padding + 200);
 
     ctx.strokeStyle = 'rgba(139, 92, 246, 0.2)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(24, 220);
-    ctx.lineTo(width - 24, 220);
+    ctx.moveTo(padding, height - 60);
+    ctx.lineTo(width - padding, height - 60);
     ctx.stroke();
 
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-    ctx.font = '500 14px Inter, system-ui, sans-serif';
     if (displayName || xUsername) {
-      ctx.fillText(displayName || xUsername || '', 24, 250);
-      if (xUsername) {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.font = '500 14px Inter, system-ui, sans-serif';
+      const nameText = displayName || xUsername || '';
+      ctx.fillText(nameText, padding, height - 30);
+      
+      if (xUsername && displayName) {
         ctx.fillStyle = '#a78bfa';
-        ctx.font = '12px Inter, system-ui, sans-serif';
-        ctx.fillText(`@${xUsername}`, 24 + ctx.measureText(displayName || xUsername || '').width + 8, 250);
+        ctx.font = '13px Inter, system-ui, sans-serif';
+        ctx.fillText(`@${xUsername}`, padding + ctx.measureText(nameText).width + 10, height - 30);
       }
     } else {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-      ctx.font = '12px Inter, system-ui, sans-serif';
-      ctx.fillText('quantumvault.io', 24, 250);
+      ctx.font = '13px Inter, system-ui, sans-serif';
+      ctx.fillText('quantumvault.io', padding, height - 30);
     }
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.font = '12px Inter, system-ui, sans-serif';
+    ctx.font = '13px Inter, system-ui, sans-serif';
     const dateText = new Date().toLocaleDateString();
-    ctx.fillText(dateText, width - 24 - ctx.measureText(dateText).width, 250);
+    ctx.fillText(dateText, width - padding - ctx.measureText(dateText).width, height - 30);
 
     ctx.strokeStyle = 'rgba(139, 92, 246, 0.3)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.roundRect(0, 0, width, height, 16);
+    ctx.roundRect(0.5, 0.5, width - 1, height - 1, 16);
     ctx.stroke();
 
     return canvas;
@@ -309,7 +309,7 @@ export function SharePnLCard({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-[440px]">
+      <DialogContent className="sm:max-w-[460px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Share2 className="w-5 h-5" />
@@ -318,7 +318,7 @@ export function SharePnLCard({
         </DialogHeader>
         
         <div className="space-y-4">
-          <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid rgba(139, 92, 246, 0.3)' }}>
+          <div className="rounded-2xl overflow-hidden shadow-xl" style={{ border: '1px solid rgba(139, 92, 246, 0.3)' }}>
             {previewCanvas && (
               <img 
                 src={previewCanvas.toDataURL('image/png')} 
@@ -344,7 +344,7 @@ export function SharePnLCard({
               ) : (
                 <Copy className="w-4 h-4 mr-2" />
               )}
-              {copied ? 'Copied!' : 'Copy Image'}
+              {copied ? 'Copied!' : 'Copy'}
             </Button>
             <Button
               type="button"
