@@ -84,19 +84,13 @@ export function SharePnLCard({
       ctx.stroke();
     }
 
-    ctx.save();
-    ctx.translate(width + 30, height / 2);
-    ctx.scale(1, 1.3);
-    const glowGradient = ctx.createRadialGradient(0, 0, 0, 0, 0, 260);
-    glowGradient.addColorStop(0, isProfit ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)');
-    glowGradient.addColorStop(0.35, isProfit ? 'rgba(34, 197, 94, 0.10)' : 'rgba(239, 68, 68, 0.10)');
-    glowGradient.addColorStop(0.7, isProfit ? 'rgba(34, 197, 94, 0.04)' : 'rgba(239, 68, 68, 0.04)');
+    const glowGradient = ctx.createLinearGradient(width, height, 0, 0);
+    glowGradient.addColorStop(0, isProfit ? 'rgba(34, 197, 94, 0.18)' : 'rgba(239, 68, 68, 0.18)');
+    glowGradient.addColorStop(0.3, isProfit ? 'rgba(34, 197, 94, 0.08)' : 'rgba(239, 68, 68, 0.08)');
+    glowGradient.addColorStop(0.6, 'transparent');
     glowGradient.addColorStop(1, 'transparent');
     ctx.fillStyle = glowGradient;
-    ctx.beginPath();
-    ctx.arc(0, 0, 260, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+    ctx.fillRect(0, 0, width, height);
 
     if (logoImg) {
       ctx.globalAlpha = 0.12;
