@@ -210,19 +210,14 @@ export function SharePnLCard({
                 </div>
               </div>
               
-              <div className="space-y-1">
+              <div className="space-y-2">
                 <div className="flex items-baseline gap-2">
-                  <span className={`text-4xl font-bold ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
+                  <span className={`text-5xl font-bold ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
                     {isProfit ? '+' : ''}{pnlPercent.toFixed(2)}%
                   </span>
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className={`text-lg font-semibold ${isProfit ? 'text-green-400/80' : 'text-red-400/80'}`}>
-                    {isProfit ? '+' : ''}${pnl.toFixed(2)}
-                  </span>
-                  <span className="text-xs text-white/40">
-                    {tradeCount} trade{tradeCount !== 1 ? 's' : ''}
-                  </span>
+                <div className="text-xs text-white/40">
+                  {tradeCount} trade{tradeCount !== 1 ? 's' : ''}
                 </div>
               </div>
               
