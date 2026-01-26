@@ -65,6 +65,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { PublishBotModal } from './PublishBotModal';
+import { SharePnLCard } from './SharePnLCard';
 import { LineChart, Line, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts';
 
 // Smart price formatting: more decimals for prices under $1
@@ -224,6 +225,7 @@ export function BotManagementDrawer({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshPositionLoading, setRefreshPositionLoading] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
+  const [shareCardOpen, setShareCardOpen] = useState(false);
   const [usdcApy, setUsdcApy] = useState<number | null>(null);
   const [performanceTimeframe, setPerformanceTimeframe] = useState<'7d' | '30d' | '90d' | 'all'>('7d');
   const [performanceView, setPerformanceView] = useState<'dollar' | 'percent'>('dollar');
@@ -1521,6 +1523,21 @@ export function BotManagementDrawer({
                   }
                 </span>
               </div>
+              
+              {performanceData.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-border/50">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full h-8 text-xs gap-2"
+                    onClick={() => setShareCardOpen(true)}
+                    data-testid="button-share-performance"
+                  >
+                    <Share2 className="w-3.5 h-3.5" />
+                    Share Performance Card
+                  </Button>
+                </div>
+              )}
             </div>
           </TabsContent>
 
@@ -2254,6 +2271,20 @@ export function BotManagementDrawer({
           onPublished={() => {
             onBotUpdated();
           }}
+        />
+      )}
+
+      {displayBot && (
+        <SharePnLCard
+          isOpen={shareCardOpen}
+          onClose={() => setShareCardOpen(false)}
+          botName={displayBot.name}
+          market={displayBot.market}
+          pnl={performanceTotalPnl}
+          pnlPercent={netDeposited > 0 ? (performanceTotalPnl / netDeposited) * 100 : 0}
+          timeframe={performanceTimeframe}
+          tradeCount={performanceTradeCount}
+          chartData={performanceData}
         />
       )}
     </Sheet>
