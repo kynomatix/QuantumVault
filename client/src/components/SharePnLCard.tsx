@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Download, Share2, Copy, Check, Loader2 } from 'lucide-react';
@@ -32,78 +32,184 @@ export function SharePnLCard({
   displayName,
   xUsername,
 }: SharePnLCardProps) {
-  const cardRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [logoLoaded, setLogoLoaded] = useState(false);
+  const logoRef = useRef<HTMLImageElement | null>(null);
   const { toast } = useToast();
 
   const isProfit = pnl >= 0;
   const timeframeLabel = timeframe === 'all' ? 'All Time' : timeframe.toUpperCase();
 
-  const captureCard = async (): Promise<Blob | null> => {
-    if (!cardRef.current) return null;
-    
-    try {
-      const html2canvas = (await import('html2canvas')).default;
-      
-      const clonedCard = cardRef.current.cloneNode(true) as HTMLElement;
-      clonedCard.style.position = 'absolute';
-      clonedCard.style.left = '-9999px';
-      clonedCard.style.top = '-9999px';
-      document.body.appendChild(clonedCard);
-      
-      const images = clonedCard.querySelectorAll('img');
-      images.forEach(img => {
-        img.crossOrigin = 'anonymous';
-      });
-      
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      const canvas = await html2canvas(clonedCard, {
-        backgroundColor: '#0f0a1e',
-        scale: 2,
-        logging: false,
-        useCORS: true,
-        allowTaint: false,
-        foreignObjectRendering: false,
-        removeContainer: true,
-        imageTimeout: 5000,
-        onclone: (doc) => {
-          const imgs = doc.querySelectorAll('img');
-          imgs.forEach(img => {
-            if (img.src.includes('QV_Logo')) {
-              img.style.display = 'none';
-            }
-          });
-        }
-      });
-      
-      document.body.removeChild(clonedCard);
-      
-      return new Promise((resolve) => {
-        canvas.toBlob((blob) => {
-          resolve(blob);
-        }, 'image/png', 1.0);
-      });
-    } catch (error) {
-      console.error('Canvas capture error:', error);
-      return null;
+  useEffect(() => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      logoRef.current = img;
+      setLogoLoaded(true);
+    };
+    img.onerror = () => {
+      setLogoLoaded(true);
+    };
+    img.src = '/images/QV_Logo_02.png';
+  }, []);
+
+  const renderToCanvas = (): HTMLCanvasElement | null => {
+    const canvas = document.createElement('canvas');
+    const scale = 2;
+    const width = 400;
+    const height = 300;
+    canvas.width = width * scale;
+    canvas.height = height * scale;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.scale(scale, scale);
+
+    const gradient = ctx.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, '#0f0a1e');
+    gradient.addColorStop(0.3, '#1a0f2e');
+    gradient.addColorStop(0.6, '#2d1b4e');
+    gradient.addColorStop(1, '#1a0f2e');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.strokeStyle = 'rgba(139, 92, 246, 0.15)';
+    ctx.lineWidth = 0.5;
+    for (let x = 0; x <= width; x += 30) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+      ctx.stroke();
     }
+    for (let y = 0; y <= height; y += 30) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+    }
+
+    const glowGradient = ctx.createRadialGradient(width - 50, 50, 0, width - 50, 50, 100);
+    glowGradient.addColorStop(0, isProfit ? 'rgba(34, 197, 94, 0.4)' : 'rgba(239, 68, 68, 0.4)');
+    glowGradient.addColorStop(1, 'transparent');
+    ctx.fillStyle = glowGradient;
+    ctx.fillRect(0, 0, width, height);
+
+    if (logoRef.current) {
+      ctx.globalAlpha = 0.2;
+      const logoSize = 120;
+      ctx.drawImage(logoRef.current, width - logoSize - 10, height / 2 - logoSize / 2, logoSize, logoSize);
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.fillStyle = '#8b5cf6';
+    ctx.beginPath();
+    ctx.roundRect(24, 24, 32, 32, 8);
+    ctx.fill();
+    
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 14px Inter, system-ui, sans-serif';
+    ctx.fillText('QV', 31, 45);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 18px Inter, system-ui, sans-serif';
+    ctx.fillText('QuantumVault', 64, 46);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 18px Inter, system-ui, sans-serif';
+    ctx.fillText(market, 24, 85);
+
+    ctx.fillStyle = isProfit ? '#4ade80' : '#f87171';
+    ctx.font = '600 14px Inter, system-ui, sans-serif';
+    ctx.fillText(botName, 24 + ctx.measureText(market).width + 12, 85);
+
+    ctx.fillStyle = isProfit ? '#4ade80' : '#f87171';
+    ctx.font = 'bold 56px Inter, system-ui, sans-serif';
+    const pnlText = `${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}%`;
+    
+    ctx.shadowColor = isProfit ? 'rgba(34, 197, 94, 0.6)' : 'rgba(239, 68, 68, 0.6)';
+    ctx.shadowBlur = 40;
+    ctx.fillText(pnlText, 24, 160);
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.font = '14px Inter, system-ui, sans-serif';
+    let statsX = 24;
+    const statsText = `${tradeCount} trade${tradeCount !== 1 ? 's' : ''}`;
+    ctx.fillText(statsText, statsX, 195);
+    statsX += ctx.measureText(statsText).width + 8;
+    ctx.fillText('•', statsX, 195);
+    statsX += 16;
+    
+    if (winRate !== undefined) {
+      ctx.fillStyle = '#4ade80';
+      const winText = `${winRate.toFixed(1)}% win`;
+      ctx.fillText(winText, statsX, 195);
+      statsX += ctx.measureText(winText).width + 8;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.fillText('•', statsX, 195);
+      statsX += 16;
+    }
+    ctx.fillText(timeframeLabel, statsX, 195);
+
+    ctx.strokeStyle = 'rgba(139, 92, 246, 0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(24, 220);
+    ctx.lineTo(width - 24, 220);
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+    ctx.font = '500 14px Inter, system-ui, sans-serif';
+    if (displayName || xUsername) {
+      ctx.fillText(displayName || xUsername || '', 24, 250);
+      if (xUsername) {
+        ctx.fillStyle = '#a78bfa';
+        ctx.font = '12px Inter, system-ui, sans-serif';
+        ctx.fillText(`@${xUsername}`, 24 + ctx.measureText(displayName || xUsername || '').width + 8, 250);
+      }
+    } else {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.font = '12px Inter, system-ui, sans-serif';
+      ctx.fillText('quantumvault.io', 24, 250);
+    }
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.font = '12px Inter, system-ui, sans-serif';
+    const dateText = new Date().toLocaleDateString();
+    ctx.fillText(dateText, width - 24 - ctx.measureText(dateText).width, 250);
+
+    ctx.strokeStyle = 'rgba(139, 92, 246, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(0, 0, width, height, 16);
+    ctx.stroke();
+
+    return canvas;
+  };
+
+  const getBlob = async (): Promise<Blob | null> => {
+    const canvas = renderToCanvas();
+    if (!canvas) return null;
+    
+    return new Promise((resolve) => {
+      canvas.toBlob((blob) => resolve(blob), 'image/png', 1.0);
+    });
   };
 
   const handleDownload = async () => {
     setLoading(true);
     try {
-      const blob = await captureCard();
-      
+      const blob = await getBlob();
       if (!blob) {
-        toast({ title: 'Failed to capture card', variant: 'destructive' });
+        toast({ title: 'Failed to create image', variant: 'destructive' });
         return;
       }
-      
+
       const filename = `${botName.replace(/\s+/g, '-')}-pnl-${timeframe}.png`;
       const url = URL.createObjectURL(blob);
-      
+
       const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
       
       if (isMobile && navigator.share && navigator.canShare) {
@@ -115,23 +221,21 @@ export function SharePnLCard({
             return;
           }
         } catch (e) {
-          console.log('Share failed, trying download');
+          console.log('Share not available, downloading');
         }
       }
-      
+
       const link = document.createElement('a');
       link.href = url;
       link.download = filename;
-      link.style.display = 'none';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       
       toast({ title: 'Image downloaded!' });
     } catch (error) {
-      console.error('Download failed:', error);
+      console.error('Download error:', error);
       toast({ title: 'Download failed', variant: 'destructive' });
     } finally {
       setLoading(false);
@@ -141,31 +245,28 @@ export function SharePnLCard({
   const handleCopyImage = async () => {
     setLoading(true);
     try {
-      const blob = await captureCard();
-      
+      const blob = await getBlob();
       if (!blob) {
-        toast({ title: 'Failed to capture card', variant: 'destructive' });
+        toast({ title: 'Failed to create image', variant: 'destructive' });
         return;
       }
-      
+
       if (navigator.clipboard && typeof ClipboardItem !== 'undefined') {
         try {
-          await navigator.clipboard.write([
-            new ClipboardItem({ 'image/png': blob })
-          ]);
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
           setCopied(true);
           setTimeout(() => setCopied(false), 2000);
           toast({ title: 'Image copied to clipboard!' });
           return;
         } catch (e) {
-          console.log('Clipboard write failed, trying download');
+          console.log('Clipboard not available');
         }
       }
       
       await handleDownload();
     } catch (error) {
-      console.error('Copy failed:', error);
-      toast({ title: 'Copy failed - try download instead', variant: 'destructive' });
+      console.error('Copy error:', error);
+      toast({ title: 'Copy failed', variant: 'destructive' });
     } finally {
       setLoading(false);
     }
@@ -174,13 +275,12 @@ export function SharePnLCard({
   const handleShare = async () => {
     setLoading(true);
     try {
-      const blob = await captureCard();
-      
+      const blob = await getBlob();
       if (!blob) {
-        toast({ title: 'Failed to capture card', variant: 'destructive' });
+        toast({ title: 'Failed to create image', variant: 'destructive' });
         return;
       }
-      
+
       const filename = `${botName.replace(/\s+/g, '-')}-pnl.png`;
       
       if (navigator.share && navigator.canShare) {
@@ -198,13 +298,14 @@ export function SharePnLCard({
       await handleDownload();
     } catch (error: any) {
       if (error?.name !== 'AbortError') {
-        console.error('Share failed:', error);
-        toast({ title: 'Share cancelled', variant: 'default' });
+        console.error('Share error:', error);
       }
     } finally {
       setLoading(false);
     }
   };
+
+  const previewCanvas = renderToCanvas();
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -217,104 +318,14 @@ export function SharePnLCard({
         </DialogHeader>
         
         <div className="space-y-4">
-          <div 
-            ref={cardRef}
-            className="relative overflow-hidden rounded-2xl p-6"
-            style={{
-              background: 'linear-gradient(135deg, #0f0a1e 0%, #1a0f2e 30%, #2d1b4e 60%, #1a0f2e 100%)',
-              border: '1px solid rgba(139, 92, 246, 0.3)',
-              boxShadow: '0 0 60px rgba(139, 92, 246, 0.2), inset 0 1px 0 rgba(255,255,255,0.05)',
-            }}
-          >
-            <div className="absolute inset-0">
-              <svg className="absolute inset-0 w-full h-full" xmlns="http://www.w3.org/2000/svg">
-                <defs>
-                  <pattern id="grid-pattern" x="0" y="0" width="30" height="30" patternUnits="userSpaceOnUse">
-                    <path d="M 30 0 L 0 0 0 30" fill="none" stroke="rgba(139, 92, 246, 0.15)" strokeWidth="0.5" />
-                  </pattern>
-                </defs>
-                <rect width="100%" height="100%" fill="url(#grid-pattern)" />
-              </svg>
-            </div>
-            
-            <div 
-              className="absolute -right-6 top-1/2 -translate-y-1/2 w-40 h-40 opacity-20 flex items-center justify-center"
-              style={{
-                background: `radial-gradient(circle at center, ${isProfit ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'} 0%, transparent 70%)`,
-              }}
-            >
-              <span className="text-7xl font-bold text-white/30">QV</span>
-            </div>
-            
-            <div 
-              className="absolute right-0 top-0 w-48 h-48 opacity-30"
-              style={{
-                background: `radial-gradient(circle at center, ${isProfit ? 'rgba(34, 197, 94, 0.4)' : 'rgba(239, 68, 68, 0.4)'} 0%, transparent 70%)`,
-              }}
-            />
-            
-            <div className="relative z-10">
-              <div className="flex items-center gap-2.5 mb-6">
-                <div className="w-8 h-8 rounded-lg bg-purple-600 flex items-center justify-center">
-                  <span className="text-white font-bold text-sm">QV</span>
-                </div>
-                <span className="font-display font-bold text-lg text-white">QuantumVault</span>
-              </div>
-              
-              <div className="mb-2">
-                <div className="flex items-center gap-3">
-                  <h3 className="text-lg font-bold text-white">{market}</h3>
-                  <span className={`text-sm font-semibold ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
-                    {botName}
-                  </span>
-                </div>
-              </div>
-              
-              <div className="py-4">
-                <div 
-                  className={`text-6xl font-bold tracking-tight ${isProfit ? 'text-green-400' : 'text-red-400'}`}
-                  style={{
-                    textShadow: isProfit 
-                      ? '0 0 40px rgba(34, 197, 94, 0.6)' 
-                      : '0 0 40px rgba(239, 68, 68, 0.6)',
-                  }}
-                >
-                  {isProfit ? '+' : ''}{pnlPercent.toFixed(2)}%
-                </div>
-              </div>
-              
-              <div className="flex items-center gap-4 text-sm text-white/50 mb-4">
-                <span>{tradeCount} trade{tradeCount !== 1 ? 's' : ''}</span>
-                <span>•</span>
-                {winRate !== undefined && (
-                  <>
-                    <span className="text-green-400">{winRate.toFixed(1)}% win</span>
-                    <span>•</span>
-                  </>
-                )}
-                <span>{timeframeLabel}</span>
-              </div>
-              
-              <div className="pt-4 border-t border-purple-500/20">
-                <div className="flex items-center justify-between">
-                  {(displayName || xUsername) ? (
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-sm font-medium text-white/80">
-                        {displayName || xUsername}
-                      </span>
-                      {xUsername && (
-                        <span className="text-xs text-purple-400">@{xUsername}</span>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="text-xs text-white/40">quantumvault.io</span>
-                  )}
-                  <span className="text-xs text-white/30">
-                    {new Date().toLocaleDateString()}
-                  </span>
-                </div>
-              </div>
-            </div>
+          <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid rgba(139, 92, 246, 0.3)' }}>
+            {previewCanvas && (
+              <img 
+                src={previewCanvas.toDataURL('image/png')} 
+                alt="PnL Card Preview"
+                className="w-full"
+              />
+            )}
           </div>
           
           <div className="flex gap-2">
