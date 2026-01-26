@@ -177,99 +177,117 @@ export function SharePnLCard({
         <div className="space-y-4">
           <div 
             ref={cardRef}
-            className="relative overflow-hidden rounded-2xl p-5"
+            className="relative overflow-hidden rounded-2xl p-6"
             style={{
-              background: isProfit 
-                ? 'linear-gradient(145deg, #0c1929 0%, #0a2015 40%, #071a12 70%, #0c1929 100%)'
-                : 'linear-gradient(145deg, #0c1929 0%, #1a0a0a 40%, #150707 70%, #0c1929 100%)',
-              border: `1px solid ${isProfit ? 'rgba(34, 197, 94, 0.25)' : 'rgba(239, 68, 68, 0.25)'}`,
-              boxShadow: isProfit 
-                ? '0 0 40px rgba(34, 197, 94, 0.15), inset 0 1px 0 rgba(255,255,255,0.05)'
-                : '0 0 40px rgba(239, 68, 68, 0.15), inset 0 1px 0 rgba(255,255,255,0.05)',
+              background: 'linear-gradient(135deg, #0f0a1e 0%, #1a0f2e 30%, #2d1b4e 60%, #1a0f2e 100%)',
+              border: '1px solid rgba(139, 92, 246, 0.3)',
+              boxShadow: '0 0 60px rgba(139, 92, 246, 0.2), inset 0 1px 0 rgba(255,255,255,0.05)',
             }}
           >
-            <div className="absolute inset-0 opacity-20">
-              <div 
-                className="absolute inset-0"
-                style={{
-                  backgroundImage: `radial-gradient(circle at 80% 20%, ${isProfit ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'} 0%, transparent 50%)`,
-                }}
-              />
-              <svg className="absolute inset-0 w-full h-full opacity-[0.15]" xmlns="http://www.w3.org/2000/svg">
+            {/* Grid background */}
+            <div className="absolute inset-0">
+              <svg className="absolute inset-0 w-full h-full" xmlns="http://www.w3.org/2000/svg">
                 <defs>
-                  <pattern id="vault-pattern" x="0" y="0" width="40" height="40" patternUnits="userSpaceOnUse">
-                    <rect x="0" y="0" width="40" height="40" fill="none" stroke={isProfit ? '#22c55e' : '#ef4444'} strokeWidth="0.5" rx="4" />
-                    <circle cx="20" cy="20" r="8" fill="none" stroke={isProfit ? '#22c55e' : '#ef4444'} strokeWidth="0.3" />
-                    <circle cx="20" cy="20" r="3" fill="none" stroke={isProfit ? '#22c55e' : '#ef4444'} strokeWidth="0.5" />
+                  <pattern id="grid-pattern" x="0" y="0" width="30" height="30" patternUnits="userSpaceOnUse">
+                    <path d="M 30 0 L 0 0 0 30" fill="none" stroke="rgba(139, 92, 246, 0.15)" strokeWidth="0.5" />
                   </pattern>
                 </defs>
-                <rect width="100%" height="100%" fill="url(#vault-pattern)" />
+                <rect width="100%" height="100%" fill="url(#grid-pattern)" />
               </svg>
-              <div className="absolute bottom-0 right-0 w-3/4 h-24 opacity-40">
-                {renderMiniChart()}
-              </div>
             </div>
             
+            {/* Large decorative geometric logo */}
+            <div className="absolute -right-8 top-1/2 -translate-y-1/2 opacity-40">
+              <svg width="200" height="200" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                {/* Outer hexagon layers */}
+                <path d="M50 5 L85 25 L85 65 L50 85 L15 65 L15 25 Z" stroke="url(#logo-gradient)" strokeWidth="2" fill="none" />
+                <path d="M50 15 L75 30 L75 60 L50 75 L25 60 L25 30 Z" stroke="url(#logo-gradient)" strokeWidth="1.5" fill="none" />
+                <path d="M50 25 L65 35 L65 55 L50 65 L35 55 L35 35 Z" stroke="url(#logo-gradient)" strokeWidth="1" fill="none" />
+                {/* Center vault circle */}
+                <circle cx="50" cy="45" r="12" stroke="url(#logo-gradient)" strokeWidth="1.5" fill="none" />
+                <circle cx="50" cy="45" r="6" stroke="url(#logo-gradient)" strokeWidth="1" fill="none" />
+                <circle cx="50" cy="45" r="2" fill="url(#logo-gradient)" />
+                {/* Accent lines */}
+                <line x1="50" y1="5" x2="50" y2="25" stroke="rgba(139, 92, 246, 0.5)" strokeWidth="0.5" />
+                <line x1="50" y1="65" x2="50" y2="85" stroke="rgba(139, 92, 246, 0.5)" strokeWidth="0.5" />
+                <line x1="15" y1="45" x2="35" y2="45" stroke="rgba(139, 92, 246, 0.5)" strokeWidth="0.5" />
+                <line x1="65" y1="45" x2="85" y2="45" stroke="rgba(139, 92, 246, 0.5)" strokeWidth="0.5" />
+                <defs>
+                  <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor={isProfit ? '#22c55e' : '#ef4444'} />
+                    <stop offset="50%" stopColor="#8b5cf6" />
+                    <stop offset="100%" stopColor={isProfit ? '#22c55e' : '#ef4444'} />
+                  </linearGradient>
+                </defs>
+              </svg>
+            </div>
+            
+            {/* Glow effect */}
+            <div 
+              className="absolute right-0 top-0 w-48 h-48 opacity-30"
+              style={{
+                background: `radial-gradient(circle at center, ${isProfit ? 'rgba(34, 197, 94, 0.4)' : 'rgba(239, 68, 68, 0.4)'} 0%, transparent 70%)`,
+              }}
+            />
+            
             <div className="relative z-10">
-              <div className="flex items-center justify-between mb-5">
-                <div className="flex items-center gap-2">
-                  <img 
-                    src="/images/QV_Logo_02.png" 
-                    alt="QuantumVault" 
-                    className="w-7 h-7 rounded-lg"
-                  />
-                  <span className="font-display font-bold text-sm text-white/90">QuantumVault</span>
-                </div>
-                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
-                  isProfit ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
-                }`}>
-                  {isProfit ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
-                  {isProfit ? 'Profit' : 'Loss'}
+              {/* Header */}
+              <div className="flex items-center gap-2.5 mb-6">
+                <img 
+                  src="/images/QV_Logo_02.png" 
+                  alt="QuantumVault" 
+                  className="w-8 h-8 rounded-lg"
+                />
+                <span className="font-display font-bold text-lg text-white">QuantumVault</span>
+              </div>
+              
+              {/* Bot info */}
+              <div className="mb-2">
+                <div className="flex items-center gap-3">
+                  <h3 className="text-lg font-bold text-white">{market}</h3>
+                  <span className={`text-sm font-semibold ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
+                    {botName}
+                  </span>
                 </div>
               </div>
               
-              <div className="mb-4">
-                <h3 className="text-xl font-bold text-white truncate">{botName}</h3>
-                <p className="text-sm text-white/50 mt-0.5">{market} • {timeframeLabel}</p>
-              </div>
-              
-              <div className="py-3">
+              {/* Main PnL */}
+              <div className="py-4">
                 <div 
                   className={`text-6xl font-bold tracking-tight ${isProfit ? 'text-green-400' : 'text-red-400'}`}
                   style={{
                     textShadow: isProfit 
-                      ? '0 0 30px rgba(34, 197, 94, 0.5)' 
-                      : '0 0 30px rgba(239, 68, 68, 0.5)',
+                      ? '0 0 40px rgba(34, 197, 94, 0.6)' 
+                      : '0 0 40px rgba(239, 68, 68, 0.6)',
                   }}
                 >
                   {isProfit ? '+' : ''}{pnlPercent.toFixed(2)}%
                 </div>
-                <div className="text-sm text-white/40 mt-1">
-                  {tradeCount} trade{tradeCount !== 1 ? 's' : ''}
-                </div>
               </div>
               
-              <div className="mt-4 pt-4 border-t border-white/10">
+              {/* Stats row */}
+              <div className="flex items-center gap-4 text-sm text-white/50 mb-4">
+                <span>{tradeCount} trade{tradeCount !== 1 ? 's' : ''}</span>
+                <span>•</span>
+                <span>{timeframeLabel}</span>
+              </div>
+              
+              {/* Footer */}
+              <div className="pt-4 border-t border-purple-500/20">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    {(displayName || xUsername) ? (
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-medium text-white/70">
-                          {displayName || xUsername}
-                        </span>
-                        {xUsername && displayName && (
-                          <span className="text-[10px] text-purple-400/80">@{xUsername}</span>
-                        )}
-                        {xUsername && !displayName && null}
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                        <span className="text-[10px] text-white/40">Automated Trading</span>
-                      </div>
-                    )}
-                  </div>
-                  <span className="text-[10px] text-white/30">
+                  {(displayName || xUsername) ? (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-sm font-medium text-white/80">
+                        {displayName || xUsername}
+                      </span>
+                      {xUsername && (
+                        <span className="text-xs text-purple-400">@{xUsername}</span>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-xs text-white/40">quantumvault.io</span>
+                  )}
+                  <span className="text-xs text-white/30">
                     {new Date().toLocaleDateString()}
                   </span>
                 </div>
