@@ -109,9 +109,9 @@ export function SharePnLCard({
     ctx.fillRect(0, 0, width, height);
 
     if (logoImg) {
-      ctx.globalAlpha = 0.12;
-      const logoSize = 240;
-      ctx.drawImage(logoImg, width - logoSize + 40, height / 2 - logoSize / 2, logoSize, logoSize);
+      ctx.globalAlpha = 0.14;
+      const logoSize = 280;
+      ctx.drawImage(logoImg, width - logoSize - 20, height / 2 - logoSize / 2, logoSize, logoSize);
       ctx.globalAlpha = 1;
     }
 
