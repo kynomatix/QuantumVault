@@ -111,7 +111,7 @@ export function SharePnLCard({
     if (logoImg) {
       ctx.globalAlpha = 0.14;
       const logoSize = 280;
-      ctx.drawImage(logoImg, width - logoSize - 20, height / 2 - logoSize / 2, logoSize, logoSize);
+      ctx.drawImage(logoImg, width - logoSize - 20, height / 2 - logoSize / 2 - 25, logoSize, logoSize);
       ctx.globalAlpha = 1;
     }
 
@@ -297,7 +297,7 @@ export function SharePnLCard({
         toast({ title: 'Image downloaded! Attach it to your X post.' });
       }
 
-      const tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!\n\nPowered by @QuantumVaultIO`;
+      const tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!\n\nPowered by @myQuantumVault`;
       const xUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(tweetText)}`;
       window.open(xUrl, '_blank', 'noopener,noreferrer');
     } catch (error) {
