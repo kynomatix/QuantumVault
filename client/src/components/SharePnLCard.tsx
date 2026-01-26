@@ -196,30 +196,16 @@ export function SharePnLCard({
               </svg>
             </div>
             
-            {/* Large decorative geometric logo */}
-            <div className="absolute -right-8 top-1/2 -translate-y-1/2 opacity-40">
-              <svg width="200" height="200" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                {/* Outer hexagon layers */}
-                <path d="M50 5 L85 25 L85 65 L50 85 L15 65 L15 25 Z" stroke="url(#logo-gradient)" strokeWidth="2" fill="none" />
-                <path d="M50 15 L75 30 L75 60 L50 75 L25 60 L25 30 Z" stroke="url(#logo-gradient)" strokeWidth="1.5" fill="none" />
-                <path d="M50 25 L65 35 L65 55 L50 65 L35 55 L35 35 Z" stroke="url(#logo-gradient)" strokeWidth="1" fill="none" />
-                {/* Center vault circle */}
-                <circle cx="50" cy="45" r="12" stroke="url(#logo-gradient)" strokeWidth="1.5" fill="none" />
-                <circle cx="50" cy="45" r="6" stroke="url(#logo-gradient)" strokeWidth="1" fill="none" />
-                <circle cx="50" cy="45" r="2" fill="url(#logo-gradient)" />
-                {/* Accent lines */}
-                <line x1="50" y1="5" x2="50" y2="25" stroke="rgba(139, 92, 246, 0.5)" strokeWidth="0.5" />
-                <line x1="50" y1="65" x2="50" y2="85" stroke="rgba(139, 92, 246, 0.5)" strokeWidth="0.5" />
-                <line x1="15" y1="45" x2="35" y2="45" stroke="rgba(139, 92, 246, 0.5)" strokeWidth="0.5" />
-                <line x1="65" y1="45" x2="85" y2="45" stroke="rgba(139, 92, 246, 0.5)" strokeWidth="0.5" />
-                <defs>
-                  <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stopColor={isProfit ? '#22c55e' : '#ef4444'} />
-                    <stop offset="50%" stopColor="#8b5cf6" />
-                    <stop offset="100%" stopColor={isProfit ? '#22c55e' : '#ef4444'} />
-                  </linearGradient>
-                </defs>
-              </svg>
+            {/* Large decorative logo */}
+            <div className="absolute -right-6 top-1/2 -translate-y-1/2">
+              <img 
+                src="/images/QV_Logo_02.png" 
+                alt="" 
+                className="w-40 h-40 opacity-20"
+                style={{
+                  filter: `drop-shadow(0 0 30px ${isProfit ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)'})`
+                }}
+              />
             </div>
             
             {/* Glow effect */}
