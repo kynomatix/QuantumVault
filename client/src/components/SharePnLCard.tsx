@@ -84,8 +84,9 @@ export function SharePnLCard({
       ctx.stroke();
     }
 
-    const glowGradient = ctx.createRadialGradient(width - 60, height / 2, 0, width - 60, height / 2, 140);
-    glowGradient.addColorStop(0, isProfit ? 'rgba(34, 197, 94, 0.25)' : 'rgba(239, 68, 68, 0.25)');
+    const glowGradient = ctx.createRadialGradient(width - 40, height / 2, 0, width - 40, height / 2, 200);
+    glowGradient.addColorStop(0, isProfit ? 'rgba(34, 197, 94, 0.08)' : 'rgba(239, 68, 68, 0.08)');
+    glowGradient.addColorStop(0.4, isProfit ? 'rgba(34, 197, 94, 0.05)' : 'rgba(239, 68, 68, 0.05)');
     glowGradient.addColorStop(1, 'transparent');
     ctx.fillStyle = glowGradient;
     ctx.fillRect(0, 0, width, height);
