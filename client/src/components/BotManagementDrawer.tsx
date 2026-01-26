@@ -2280,8 +2280,8 @@ export function BotManagementDrawer({
           onClose={() => setShareCardOpen(false)}
           botName={displayBot.name}
           market={displayBot.market}
-          pnl={performanceTotalPnl}
-          pnlPercent={netDeposited > 0 ? (performanceTotalPnl / netDeposited) * 100 : 0}
+          pnl={driftBalance - netDeposited}
+          pnlPercent={netDeposited > 0 ? ((driftBalance - netDeposited) / netDeposited) * 100 : 0}
           timeframe={performanceTimeframe}
           tradeCount={performanceTradeCount}
           chartData={performanceData}
