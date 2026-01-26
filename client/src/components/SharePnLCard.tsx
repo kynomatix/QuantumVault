@@ -1,7 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Download, Share2, Copy, Check, Loader2 } from 'lucide-react';
+import { Download, Copy, Check, Loader2 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 interface SharePnLCardProps {
@@ -38,7 +38,17 @@ export function SharePnLCard({
   const { toast } = useToast();
 
   const isProfit = pnl >= 0;
-  const timeframeLabel = timeframe === 'all' ? 'All Time' : timeframe.toUpperCase();
+  
+  const getTimeframeLabel = () => {
+    switch (timeframe) {
+      case '7d': return 'Last 7 Days';
+      case '30d': return 'Last 30 Days';
+      case '90d': return 'Last 90 Days';
+      case 'all': return 'All Time';
+      default: return timeframe;
+    }
+  };
+  const timeframeLabel = getTimeframeLabel();
 
   useEffect(() => {
     const img = new Image();
@@ -50,8 +60,8 @@ export function SharePnLCard({
   const renderToCanvas = (): HTMLCanvasElement | null => {
     const canvas = document.createElement('canvas');
     const scale = 2;
-    const width = 420;
-    const height = 320;
+    const width = 640;
+    const height = 360;
     canvas.width = width * scale;
     canvas.height = height * scale;
     const ctx = canvas.getContext('2d');
@@ -69,15 +79,15 @@ export function SharePnLCard({
     ctx.roundRect(0, 0, width, height, 16);
     ctx.fill();
 
-    ctx.strokeStyle = 'rgba(139, 92, 246, 0.12)';
+    ctx.strokeStyle = 'rgba(139, 92, 246, 0.10)';
     ctx.lineWidth = 0.5;
-    for (let x = 0; x <= width; x += 30) {
+    for (let x = 0; x <= width; x += 32) {
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, height);
       ctx.stroke();
     }
-    for (let y = 0; y <= height; y += 30) {
+    for (let y = 0; y <= height; y += 32) {
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(width, y);
@@ -94,15 +104,15 @@ export function SharePnLCard({
 
     if (logoImg) {
       ctx.globalAlpha = 0.12;
-      const logoSize = 200;
-      ctx.drawImage(logoImg, width - logoSize + 30, height / 2 - logoSize / 2, logoSize, logoSize);
+      const logoSize = 240;
+      ctx.drawImage(logoImg, width - logoSize + 40, height / 2 - logoSize / 2, logoSize, logoSize);
       ctx.globalAlpha = 1;
     }
 
-    const padding = 28;
+    const padding = 36;
 
     if (logoImg) {
-      const smallLogoSize = 32;
+      const smallLogoSize = 36;
       ctx.save();
       ctx.beginPath();
       ctx.roundRect(padding, padding, smallLogoSize, smallLogoSize, 8);
@@ -112,80 +122,80 @@ export function SharePnLCard({
     }
 
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 18px Inter, system-ui, sans-serif';
-    ctx.fillText('QuantumVault', padding + 42, padding + 22);
+    ctx.font = 'bold 20px Inter, system-ui, sans-serif';
+    ctx.fillText('QuantumVault', padding + 46, padding + 25);
 
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 22px Inter, system-ui, sans-serif';
-    ctx.fillText(market, padding, padding + 70);
+    ctx.font = 'bold 26px Inter, system-ui, sans-serif';
+    ctx.fillText(market, padding, padding + 80);
     
     const marketWidth = ctx.measureText(market).width;
     ctx.fillStyle = isProfit ? '#4ade80' : '#f87171';
-    ctx.font = '500 18px Inter, system-ui, sans-serif';
-    ctx.fillText(botName, padding + marketWidth + 16, padding + 70);
+    ctx.font = '500 20px Inter, system-ui, sans-serif';
+    ctx.fillText(botName, padding + marketWidth + 20, padding + 80);
 
     ctx.fillStyle = isProfit ? '#4ade80' : '#f87171';
-    ctx.font = 'bold 60px Inter, system-ui, sans-serif';
+    ctx.font = 'bold 72px Inter, system-ui, sans-serif';
     const pnlText = `${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}%`;
     
     ctx.shadowColor = isProfit ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)';
-    ctx.shadowBlur = 30;
-    ctx.fillText(pnlText, padding, padding + 155);
+    ctx.shadowBlur = 35;
+    ctx.fillText(pnlText, padding, padding + 175);
     ctx.shadowBlur = 0;
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.font = '15px Inter, system-ui, sans-serif';
+    ctx.font = '16px Inter, system-ui, sans-serif';
     let statsX = padding;
     const tradesText = `${tradeCount} trade${tradeCount !== 1 ? 's' : ''}`;
-    ctx.fillText(tradesText, statsX, padding + 195);
-    statsX += ctx.measureText(tradesText).width + 16;
+    ctx.fillText(tradesText, statsX, padding + 220);
+    statsX += ctx.measureText(tradesText).width + 18;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-    ctx.fillText('•', statsX, padding + 195);
-    statsX += 20;
+    ctx.fillText('•', statsX, padding + 220);
+    statsX += 22;
     
     if (winRate !== undefined) {
       ctx.fillStyle = '#4ade80';
       const winText = `${winRate.toFixed(1)}% win`;
-      ctx.fillText(winText, statsX, padding + 195);
-      statsX += ctx.measureText(winText).width + 16;
+      ctx.fillText(winText, statsX, padding + 220);
+      statsX += ctx.measureText(winText).width + 18;
       ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-      ctx.fillText('•', statsX, padding + 195);
-      statsX += 20;
+      ctx.fillText('•', statsX, padding + 220);
+      statsX += 22;
     }
     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.fillText(timeframeLabel, statsX, padding + 195);
+    ctx.fillText(timeframeLabel, statsX, padding + 220);
 
     ctx.strokeStyle = 'rgba(139, 92, 246, 0.2)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(padding, height - 60);
-    ctx.lineTo(width - padding, height - 60);
+    ctx.moveTo(padding, height - 65);
+    ctx.lineTo(width - padding, height - 65);
     ctx.stroke();
 
     if (displayName || xUsername) {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-      ctx.font = '500 15px Inter, system-ui, sans-serif';
+      ctx.font = '500 16px Inter, system-ui, sans-serif';
       const nameText = displayName || xUsername || '';
-      ctx.fillText(nameText, padding, height - 28);
+      ctx.fillText(nameText, padding, height - 30);
       
       if (xUsername) {
         ctx.fillStyle = '#a78bfa';
-        ctx.font = '14px Inter, system-ui, sans-serif';
+        ctx.font = '15px Inter, system-ui, sans-serif';
         const xText = displayName ? `@${xUsername}` : '';
         if (xText) {
-          ctx.fillText(xText, padding + ctx.measureText(nameText).width + 8, height - 28);
+          ctx.fillText(xText, padding + ctx.measureText(nameText).width + 10, height - 30);
         }
       }
     } else {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-      ctx.font = '14px Inter, system-ui, sans-serif';
-      ctx.fillText('quantumvault.io', padding, height - 28);
+      ctx.font = '15px Inter, system-ui, sans-serif';
+      ctx.fillText('quantumvault.io', padding, height - 30);
     }
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    ctx.font = '14px Inter, system-ui, sans-serif';
+    ctx.font = '15px Inter, system-ui, sans-serif';
     const dateText = new Date().toLocaleDateString('en-GB');
-    ctx.fillText(dateText, width - padding - ctx.measureText(dateText).width, height - 28);
+    ctx.fillText(dateText, width - padding - ctx.measureText(dateText).width, height - 30);
 
     ctx.strokeStyle = 'rgba(139, 92, 246, 0.3)';
     ctx.lineWidth = 1;
@@ -216,21 +226,6 @@ export function SharePnLCard({
 
       const filename = `${botName.replace(/\s+/g, '-')}-pnl-${timeframe}.png`;
       const url = URL.createObjectURL(blob);
-
-      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-      
-      if (isMobile && navigator.share && navigator.canShare) {
-        try {
-          const file = new File([blob], filename, { type: 'image/png' });
-          if (navigator.canShare({ files: [file] })) {
-            await navigator.share({ files: [file], title: `${botName} Performance` });
-            URL.revokeObjectURL(url);
-            return;
-          }
-        } catch (e) {
-          console.log('Share not available, downloading');
-        }
-      }
 
       const link = document.createElement('a');
       link.href = url;
@@ -266,7 +261,7 @@ export function SharePnLCard({
           toast({ title: 'Image copied to clipboard!' });
           return;
         } catch (e) {
-          console.log('Clipboard not available');
+          console.log('Clipboard not available, downloading instead');
         }
       }
       
@@ -279,34 +274,28 @@ export function SharePnLCard({
     }
   };
 
-  const handleShare = async () => {
+  const handlePostToX = async () => {
     setLoading(true);
     try {
       const blob = await getBlob();
-      if (!blob) {
-        toast({ title: 'Failed to create image', variant: 'destructive' });
-        return;
+      if (blob && navigator.clipboard && typeof ClipboardItem !== 'undefined') {
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+          toast({ title: 'Image copied! Paste it in your post.' });
+        } catch (e) {
+          await handleDownload();
+          toast({ title: 'Image downloaded! Attach it to your post.' });
+        }
+      } else {
+        await handleDownload();
+        toast({ title: 'Image downloaded! Attach it to your post.' });
       }
 
-      const filename = `${botName.replace(/\s+/g, '-')}-pnl.png`;
-      
-      if (navigator.share && navigator.canShare) {
-        const file = new File([blob], filename, { type: 'image/png' });
-        if (navigator.canShare({ files: [file] })) {
-          await navigator.share({
-            title: `${botName} Performance`,
-            text: `Check out my ${market} bot: ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% in ${timeframeLabel}`,
-            files: [file],
-          });
-          return;
-        }
-      }
-      
-      await handleDownload();
-    } catch (error: any) {
-      if (error?.name !== 'AbortError') {
-        console.error('Share error:', error);
-      }
+      const tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!\n\nPowered by @QuantumVaultIO`;
+      const xUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(tweetText)}`;
+      window.open(xUrl, '_blank', 'noopener,noreferrer');
+    } catch (error) {
+      console.error('Post to X error:', error);
     } finally {
       setLoading(false);
     }
@@ -316,10 +305,9 @@ export function SharePnLCard({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-[460px]">
+      <DialogContent className="sm:max-w-[680px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Share2 className="w-5 h-5" />
             Share Performance
           </DialogTitle>
         </DialogHeader>
@@ -368,22 +356,22 @@ export function SharePnLCard({
               )}
               Download
             </Button>
-            {typeof navigator !== 'undefined' && 'share' in navigator && (
-              <Button
-                type="button"
-                className="flex-1"
-                onClick={handleShare}
-                disabled={loading}
-                data-testid="button-share-card"
-              >
-                {loading ? (
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                ) : (
-                  <Share2 className="w-4 h-4 mr-2" />
-                )}
-                Share
-              </Button>
-            )}
+            <Button
+              type="button"
+              className="flex-1 bg-black hover:bg-neutral-800 text-white"
+              onClick={handlePostToX}
+              disabled={loading}
+              data-testid="button-post-x"
+            >
+              {loading ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <svg className="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+                </svg>
+              )}
+              Post to X
+            </Button>
           </div>
         </div>
       </DialogContent>
