@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Download, Share2, Copy, Check, TrendingUp, TrendingDown, Zap } from 'lucide-react';
+import { Download, Share2, Copy, Check, TrendingUp, TrendingDown } from 'lucide-react';
 
 interface SharePnLCardProps {
   isOpen: boolean;
@@ -188,9 +188,11 @@ export function SharePnLCard({
             </div>
             
             <div className="absolute top-3 left-4 flex items-center gap-1.5">
-              <div className="w-5 h-5 rounded bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center">
-                <Zap className="w-3 h-3 text-white" />
-              </div>
+              <img 
+                src="/images/qv_logo.png" 
+                alt="QuantumVault" 
+                className="w-5 h-5 rounded object-contain"
+              />
               <span className="text-[10px] font-semibold text-white/60 tracking-wider uppercase">QuantumVault</span>
             </div>
             
