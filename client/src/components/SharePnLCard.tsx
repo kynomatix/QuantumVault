@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Download, Share2, Copy, Check, TrendingUp, TrendingDown } from 'lucide-react';
+import { Download, Share2, Copy, Check, Loader2 } from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
 
 interface SharePnLCardProps {
   isOpen: boolean;
@@ -28,204 +29,181 @@ export function SharePnLCard({
   timeframe,
   tradeCount,
   winRate,
-  chartData = [],
   displayName,
   xUsername,
 }: SharePnLCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState(false);
-  const [downloading, setDownloading] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const { toast } = useToast();
 
   const isProfit = pnl >= 0;
   const timeframeLabel = timeframe === 'all' ? 'All Time' : timeframe.toUpperCase();
 
-  const handleDownload = async () => {
-    console.log('[SharePnLCard] handleDownload called, cardRef:', cardRef.current);
-    if (!cardRef.current) {
-      console.error('[SharePnLCard] cardRef is null');
-      return;
-    }
+  const captureCard = async (): Promise<Blob | null> => {
+    if (!cardRef.current) return null;
     
-    setDownloading(true);
     try {
-      console.log('[SharePnLCard] Loading html2canvas...');
       const html2canvas = (await import('html2canvas')).default;
-      console.log('[SharePnLCard] html2canvas loaded, capturing...');
-      const canvas = await html2canvas(cardRef.current, {
+      
+      const clonedCard = cardRef.current.cloneNode(true) as HTMLElement;
+      clonedCard.style.position = 'absolute';
+      clonedCard.style.left = '-9999px';
+      clonedCard.style.top = '-9999px';
+      document.body.appendChild(clonedCard);
+      
+      const images = clonedCard.querySelectorAll('img');
+      images.forEach(img => {
+        img.crossOrigin = 'anonymous';
+      });
+      
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      const canvas = await html2canvas(clonedCard, {
         backgroundColor: '#0f0a1e',
         scale: 2,
-        logging: true,
+        logging: false,
         useCORS: true,
-        allowTaint: true,
+        allowTaint: false,
+        foreignObjectRendering: false,
+        removeContainer: true,
+        imageTimeout: 5000,
+        onclone: (doc) => {
+          const imgs = doc.querySelectorAll('img');
+          imgs.forEach(img => {
+            if (img.src.includes('QV_Logo')) {
+              img.style.display = 'none';
+            }
+          });
+        }
       });
-      console.log('[SharePnLCard] Canvas captured:', canvas.width, 'x', canvas.height);
       
-      const dataUrl = canvas.toDataURL('image/png');
+      document.body.removeChild(clonedCard);
+      
+      return new Promise((resolve) => {
+        canvas.toBlob((blob) => {
+          resolve(blob);
+        }, 'image/png', 1.0);
+      });
+    } catch (error) {
+      console.error('Canvas capture error:', error);
+      return null;
+    }
+  };
+
+  const handleDownload = async () => {
+    setLoading(true);
+    try {
+      const blob = await captureCard();
+      
+      if (!blob) {
+        toast({ title: 'Failed to capture card', variant: 'destructive' });
+        return;
+      }
+      
       const filename = `${botName.replace(/\s+/g, '-')}-pnl-${timeframe}.png`;
-      console.log('[SharePnLCard] Data URL length:', dataUrl.length, 'filename:', filename);
+      const url = URL.createObjectURL(blob);
       
-      // Try native share on mobile first (works better on iOS/Android)
-      if (typeof navigator !== 'undefined' && navigator.canShare && typeof navigator.share === 'function') {
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      
+      if (isMobile && navigator.share && navigator.canShare) {
         try {
-          const blob = await (await fetch(dataUrl)).blob();
           const file = new File([blob], filename, { type: 'image/png' });
           if (navigator.canShare({ files: [file] })) {
-            console.log('[SharePnLCard] Using native share...');
-            await navigator.share({
-              files: [file],
-              title: `${botName} Performance`,
-            });
+            await navigator.share({ files: [file], title: `${botName} Performance` });
+            URL.revokeObjectURL(url);
             return;
           }
-        } catch (shareError) {
-          console.log('[SharePnLCard] Share failed, trying download:', shareError);
+        } catch (e) {
+          console.log('Share failed, trying download');
         }
       }
       
-      // Fallback: try download link
-      console.log('[SharePnLCard] Using download link...');
       const link = document.createElement('a');
+      link.href = url;
       link.download = filename;
-      link.href = dataUrl;
+      link.style.display = 'none';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       
-      // If still on mobile and download didn't work, open in new tab
-      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-      if (isMobile) {
-        console.log('[SharePnLCard] Mobile detected, opening in new tab...');
-        setTimeout(() => {
-          window.open(dataUrl, '_blank');
-        }, 500);
-      }
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      
+      toast({ title: 'Image downloaded!' });
     } catch (error) {
-      console.error('[SharePnLCard] Failed to download card:', error);
+      console.error('Download failed:', error);
+      toast({ title: 'Download failed', variant: 'destructive' });
     } finally {
-      setDownloading(false);
+      setLoading(false);
     }
   };
 
   const handleCopyImage = async () => {
-    console.log('[SharePnLCard] handleCopyImage called');
-    if (!cardRef.current) {
-      console.error('[SharePnLCard] cardRef is null');
-      return;
-    }
-    
+    setLoading(true);
     try {
-      const html2canvas = (await import('html2canvas')).default;
-      const canvas = await html2canvas(cardRef.current, {
-        backgroundColor: '#0f0a1e',
-        scale: 2,
-        logging: true,
-        useCORS: true,
-        allowTaint: true,
-      });
-      console.log('[SharePnLCard] Canvas captured for copy');
+      const blob = await captureCard();
       
-      canvas.toBlob(async (blob) => {
-        if (blob) {
-          console.log('[SharePnLCard] Blob created, size:', blob.size);
-          try {
-            await navigator.clipboard.write([
-              new ClipboardItem({ 'image/png': blob })
-            ]);
-            console.log('[SharePnLCard] Image copied to clipboard');
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
-          } catch (clipboardError) {
-            console.log('[SharePnLCard] Clipboard failed, downloading:', clipboardError);
-            const link = document.createElement('a');
-            link.download = `${botName.replace(/\s+/g, '-')}-pnl.png`;
-            link.href = canvas.toDataURL('image/png');
-            link.click();
-          }
+      if (!blob) {
+        toast({ title: 'Failed to capture card', variant: 'destructive' });
+        return;
+      }
+      
+      if (navigator.clipboard && typeof ClipboardItem !== 'undefined') {
+        try {
+          await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': blob })
+          ]);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+          toast({ title: 'Image copied to clipboard!' });
+          return;
+        } catch (e) {
+          console.log('Clipboard write failed, trying download');
         }
-      }, 'image/png');
+      }
+      
+      await handleDownload();
     } catch (error) {
-      console.error('[SharePnLCard] Failed to copy image:', error);
+      console.error('Copy failed:', error);
+      toast({ title: 'Copy failed - try download instead', variant: 'destructive' });
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleShare = async () => {
-    console.log('[SharePnLCard] handleShare called');
-    if (!cardRef.current) {
-      console.error('[SharePnLCard] cardRef is null');
-      return;
-    }
-    
+    setLoading(true);
     try {
-      const html2canvas = (await import('html2canvas')).default;
-      const canvas = await html2canvas(cardRef.current, {
-        backgroundColor: '#0f0a1e',
-        scale: 2,
-        logging: true,
-        useCORS: true,
-        allowTaint: true,
-      });
-      console.log('[SharePnLCard] Canvas captured for share');
+      const blob = await captureCard();
       
-      canvas.toBlob(async (blob) => {
-        if (blob && navigator.share) {
-          console.log('[SharePnLCard] Blob created for share, size:', blob.size);
-          const file = new File([blob], `${botName}-pnl.png`, { type: 'image/png' });
-          try {
-            await navigator.share({
-              title: `${botName} Performance`,
-              text: `Check out my ${market} bot performance: ${isProfit ? '+' : ''}$${pnl.toFixed(2)} (${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}%) in ${timeframeLabel}`,
-              files: [file],
-            });
-            console.log('[SharePnLCard] Share successful');
-          } catch (shareError) {
-            console.log('[SharePnLCard] Share cancelled/failed, downloading:', shareError);
-            handleDownload();
-          }
-        } else {
-          console.log('[SharePnLCard] No native share, falling back to download');
-          handleDownload();
+      if (!blob) {
+        toast({ title: 'Failed to capture card', variant: 'destructive' });
+        return;
+      }
+      
+      const filename = `${botName.replace(/\s+/g, '-')}-pnl.png`;
+      
+      if (navigator.share && navigator.canShare) {
+        const file = new File([blob], filename, { type: 'image/png' });
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({
+            title: `${botName} Performance`,
+            text: `Check out my ${market} bot: ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% in ${timeframeLabel}`,
+            files: [file],
+          });
+          return;
         }
-      }, 'image/png');
-    } catch (error) {
-      console.error('[SharePnLCard] Failed to share:', error);
-      handleDownload();
+      }
+      
+      await handleDownload();
+    } catch (error: any) {
+      if (error?.name !== 'AbortError') {
+        console.error('Share failed:', error);
+        toast({ title: 'Share cancelled', variant: 'default' });
+      }
+    } finally {
+      setLoading(false);
     }
-  };
-
-  const renderMiniChart = () => {
-    if (chartData.length < 2) return null;
-    
-    const values = chartData.map(d => d.cumulativePnl);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const range = max - min || 1;
-    
-    const width = 280;
-    const height = 60;
-    const padding = 4;
-    
-    const points = chartData.map((d, i) => {
-      const x = padding + (i / (chartData.length - 1)) * (width - 2 * padding);
-      const y = height - padding - ((d.cumulativePnl - min) / range) * (height - 2 * padding);
-      return `${x},${y}`;
-    }).join(' ');
-    
-    return (
-      <svg width={width} height={height} className="opacity-40">
-        <defs>
-          <linearGradient id={`gradient-${isProfit ? 'profit' : 'loss'}`} x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stopColor={isProfit ? '#22c55e' : '#ef4444'} stopOpacity="0.3" />
-            <stop offset="100%" stopColor={isProfit ? '#22c55e' : '#ef4444'} stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <polyline
-          fill="none"
-          stroke={isProfit ? '#22c55e' : '#ef4444'}
-          strokeWidth="2"
-          points={points}
-        />
-      </svg>
-    );
   };
 
   return (
@@ -248,7 +226,6 @@ export function SharePnLCard({
               boxShadow: '0 0 60px rgba(139, 92, 246, 0.2), inset 0 1px 0 rgba(255,255,255,0.05)',
             }}
           >
-            {/* Grid background */}
             <div className="absolute inset-0">
               <svg className="absolute inset-0 w-full h-full" xmlns="http://www.w3.org/2000/svg">
                 <defs>
@@ -260,19 +237,15 @@ export function SharePnLCard({
               </svg>
             </div>
             
-            {/* Large decorative logo */}
-            <div className="absolute -right-6 top-1/2 -translate-y-1/2">
-              <img 
-                src="/images/QV_Logo_02.png" 
-                alt="" 
-                className="w-40 h-40 opacity-20"
-                style={{
-                  filter: `drop-shadow(0 0 30px ${isProfit ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)'})`
-                }}
-              />
+            <div 
+              className="absolute -right-6 top-1/2 -translate-y-1/2 w-40 h-40 opacity-20 flex items-center justify-center"
+              style={{
+                background: `radial-gradient(circle at center, ${isProfit ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'} 0%, transparent 70%)`,
+              }}
+            >
+              <span className="text-7xl font-bold text-white/30">QV</span>
             </div>
             
-            {/* Glow effect */}
             <div 
               className="absolute right-0 top-0 w-48 h-48 opacity-30"
               style={{
@@ -281,17 +254,13 @@ export function SharePnLCard({
             />
             
             <div className="relative z-10">
-              {/* Header */}
               <div className="flex items-center gap-2.5 mb-6">
-                <img 
-                  src="/images/QV_Logo_02.png" 
-                  alt="QuantumVault" 
-                  className="w-8 h-8 rounded-lg"
-                />
+                <div className="w-8 h-8 rounded-lg bg-purple-600 flex items-center justify-center">
+                  <span className="text-white font-bold text-sm">QV</span>
+                </div>
                 <span className="font-display font-bold text-lg text-white">QuantumVault</span>
               </div>
               
-              {/* Bot info */}
               <div className="mb-2">
                 <div className="flex items-center gap-3">
                   <h3 className="text-lg font-bold text-white">{market}</h3>
@@ -301,7 +270,6 @@ export function SharePnLCard({
                 </div>
               </div>
               
-              {/* Main PnL */}
               <div className="py-4">
                 <div 
                   className={`text-6xl font-bold tracking-tight ${isProfit ? 'text-green-400' : 'text-red-400'}`}
@@ -315,7 +283,6 @@ export function SharePnLCard({
                 </div>
               </div>
               
-              {/* Stats row */}
               <div className="flex items-center gap-4 text-sm text-white/50 mb-4">
                 <span>{tradeCount} trade{tradeCount !== 1 ? 's' : ''}</span>
                 <span>•</span>
@@ -328,7 +295,6 @@ export function SharePnLCard({
                 <span>{timeframeLabel}</span>
               </div>
               
-              {/* Footer */}
               <div className="pt-4 border-t border-purple-500/20">
                 <div className="flex items-center justify-between">
                   {(displayName || xUsername) ? (
@@ -356,31 +322,47 @@ export function SharePnLCard({
               type="button"
               variant="outline"
               className="flex-1"
-              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleCopyImage(); }}
+              onClick={handleCopyImage}
+              disabled={loading}
               data-testid="button-copy-card"
             >
-              {copied ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
+              {loading ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : copied ? (
+                <Check className="w-4 h-4 mr-2" />
+              ) : (
+                <Copy className="w-4 h-4 mr-2" />
+              )}
               {copied ? 'Copied!' : 'Copy Image'}
             </Button>
             <Button
               type="button"
               variant="outline"
               className="flex-1"
-              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDownload(); }}
-              disabled={downloading}
+              onClick={handleDownload}
+              disabled={loading}
               data-testid="button-download-card"
             >
-              <Download className="w-4 h-4 mr-2" />
+              {loading ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4 mr-2" />
+              )}
               Download
             </Button>
-            {typeof navigator !== 'undefined' && typeof navigator.share === 'function' && (
+            {typeof navigator !== 'undefined' && 'share' in navigator && (
               <Button
                 type="button"
                 className="flex-1"
-                onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleShare(); }}
+                onClick={handleShare}
+                disabled={loading}
                 data-testid="button-share-card"
               >
-                <Share2 className="w-4 h-4 mr-2" />
+                {loading ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <Share2 className="w-4 h-4 mr-2" />
+                )}
                 Share
               </Button>
             )}
