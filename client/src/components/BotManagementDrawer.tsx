@@ -2292,6 +2292,7 @@ export function BotManagementDrawer({
           chartData={performanceData}
           displayName={displayName}
           xUsername={xUsername}
+          onTimeframeChange={setPerformanceTimeframe}
         />
       )}
     </Sheet>

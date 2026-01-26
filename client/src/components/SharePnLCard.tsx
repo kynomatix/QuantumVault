@@ -4,6 +4,8 @@ import { Button } from '@/components/ui/button';
 import { Download, Copy, Check, Loader2 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
+type TimeframeOption = '7d' | '30d' | '90d' | 'all';
+
 interface SharePnLCardProps {
   isOpen: boolean;
   onClose: () => void;
@@ -11,13 +13,21 @@ interface SharePnLCardProps {
   market: string;
   pnl: number;
   pnlPercent: number;
-  timeframe: '7d' | '30d' | '90d' | 'all';
+  timeframe: TimeframeOption;
   tradeCount: number;
   winRate?: number;
   chartData?: { timestamp: string; cumulativePnl: number }[];
   displayName?: string;
   xUsername?: string;
+  onTimeframeChange?: (timeframe: TimeframeOption) => void;
 }
+
+const TIMEFRAME_OPTIONS: { value: TimeframeOption; label: string }[] = [
+  { value: '7d', label: 'Last 7 Days' },
+  { value: '30d', label: 'Last 30 Days' },
+  { value: '90d', label: 'Last 90 Days' },
+  { value: 'all', label: 'All Time' },
+];
 
 export function SharePnLCard({
   isOpen,
@@ -31,6 +41,7 @@ export function SharePnLCard({
   winRate,
   displayName,
   xUsername,
+  onTimeframeChange,
 }: SharePnLCardProps) {
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -39,16 +50,11 @@ export function SharePnLCard({
 
   const isProfit = pnl >= 0;
   
-  const getTimeframeLabel = () => {
-    switch (timeframe) {
-      case '7d': return 'Last 7 Days';
-      case '30d': return 'Last 30 Days';
-      case '90d': return 'Last 90 Days';
-      case 'all': return 'All Time';
-      default: return timeframe;
-    }
+  const getTimeframeLabel = (tf: TimeframeOption) => {
+    const option = TIMEFRAME_OPTIONS.find(o => o.value === tf);
+    return option?.label || tf;
   };
-  const timeframeLabel = getTimeframeLabel();
+  const timeframeLabel = getTimeframeLabel(timeframe);
 
   useEffect(() => {
     const img = new Image();
@@ -153,7 +159,7 @@ export function SharePnLCard({
     ctx.fillText('•', statsX, padding + 220);
     statsX += 22;
     
-    if (winRate !== undefined) {
+    if (winRate !== undefined && !isNaN(winRate)) {
       ctx.fillStyle = '#4ade80';
       const winText = `${winRate.toFixed(1)}% win`;
       ctx.fillText(winText, statsX, padding + 220);
@@ -281,14 +287,14 @@ export function SharePnLCard({
       if (blob && navigator.clipboard && typeof ClipboardItem !== 'undefined') {
         try {
           await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-          toast({ title: 'Image copied! Paste it in your post.' });
+          toast({ title: 'Image copied! Paste it in your X post (Ctrl+V).' });
         } catch (e) {
           await handleDownload();
-          toast({ title: 'Image downloaded! Attach it to your post.' });
+          toast({ title: 'Image downloaded! Attach it to your X post.' });
         }
       } else {
         await handleDownload();
-        toast({ title: 'Image downloaded! Attach it to your post.' });
+        toast({ title: 'Image downloaded! Attach it to your X post.' });
       }
 
       const tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!\n\nPowered by @QuantumVaultIO`;
@@ -307,12 +313,29 @@ export function SharePnLCard({
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-[680px]">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            Share Performance
-          </DialogTitle>
+          <DialogTitle>Share Performance</DialogTitle>
         </DialogHeader>
         
         <div className="space-y-4">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Time Period:</span>
+            <div className="flex gap-1">
+              {TIMEFRAME_OPTIONS.map((option) => (
+                <Button
+                  key={option.value}
+                  type="button"
+                  variant={timeframe === option.value ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => onTimeframeChange?.(option.value)}
+                  className="text-xs px-3"
+                  data-testid={`timeframe-${option.value}`}
+                >
+                  {option.value === 'all' ? 'All' : option.value.toUpperCase()}
+                </Button>
+              ))}
+            </div>
+          </div>
+
           <div className="rounded-2xl overflow-hidden shadow-xl" style={{ border: '1px solid rgba(139, 92, 246, 0.3)' }}>
             {previewCanvas && (
               <img 
@@ -373,6 +396,10 @@ export function SharePnLCard({
               Post to X
             </Button>
           </div>
+          
+          <p className="text-xs text-muted-foreground text-center">
+            Click "Post to X" to copy the image and open X. Then paste (Ctrl+V) the image into your post.
+          </p>
         </div>
       </DialogContent>
     </Dialog>
