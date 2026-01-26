@@ -15,6 +15,7 @@ interface EquityEvent {
   balanceAfter: string | null;
   notes: string | null;
   createdAt: string;
+  botName: string | null;
 }
 
 interface EquityHistoryProps {
@@ -55,7 +56,10 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
       case 'drift_withdraw': return 'Withdraw from Bot';
       case 'sol_deposit': return 'SOL Deposit (Gas)';
       case 'sol_withdraw': return 'SOL Withdraw (Gas)';
-      default: return type.replace(/_/g, ' ');
+      case 'auto_topup': return 'Auto Top-Up';
+      default: 
+        // Convert snake_case to Title Case
+        return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     }
   };
 
@@ -105,7 +109,12 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
                     <ArrowUpFromLine className="h-4 w-4 text-orange-500" />
                   )}
                   <div>
-                    <p className="text-sm font-medium">{formatEventType(event.eventType, event.assetType)}</p>
+                    <p className="text-sm font-medium">
+                      {formatEventType(event.eventType, event.assetType)}
+                      {event.botName && (
+                        <span className="text-muted-foreground font-normal"> → {event.botName}</span>
+                      )}
+                    </p>
                     <p className="text-xs text-muted-foreground">
                       {format(new Date(event.createdAt), 'MMM d, yyyy h:mm a')}
                     </p>

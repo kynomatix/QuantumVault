@@ -3587,7 +3587,16 @@ export async function registerRoutes(
         events = await storage.getEquityEvents(req.walletAddress!, limit);
       }
       
-      res.json(events);
+      // Enrich events with bot names
+      const enrichedEvents = await Promise.all(events.map(async (event: any) => {
+        if (event.tradingBotId) {
+          const bot = await storage.getTradingBotById(event.tradingBotId);
+          return { ...event, botName: bot?.name || null };
+        }
+        return { ...event, botName: null };
+      }));
+      
+      res.json(enrichedEvents);
     } catch (error) {
       console.error("Get equity events error:", error);
       res.status(500).json({ error: "Internal server error" });
