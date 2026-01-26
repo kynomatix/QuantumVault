@@ -12,6 +12,7 @@ interface SharePnLCardProps {
   pnlPercent: number;
   timeframe: '7d' | '30d' | '90d' | 'all';
   tradeCount: number;
+  winRate?: number;
   chartData?: { timestamp: string; cumulativePnl: number }[];
   displayName?: string;
   xUsername?: string;
@@ -26,6 +27,7 @@ export function SharePnLCard({
   pnlPercent,
   timeframe,
   tradeCount,
+  winRate,
   chartData = [],
   displayName,
   xUsername,
@@ -286,6 +288,12 @@ export function SharePnLCard({
               <div className="flex items-center gap-4 text-sm text-white/50 mb-4">
                 <span>{tradeCount} trade{tradeCount !== 1 ? 's' : ''}</span>
                 <span>•</span>
+                {winRate !== undefined && (
+                  <>
+                    <span className="text-green-400">{winRate.toFixed(1)}% win</span>
+                    <span>•</span>
+                  </>
+                )}
                 <span>{timeframeLabel}</span>
               </div>
               

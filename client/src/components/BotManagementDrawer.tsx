@@ -2288,6 +2288,7 @@ export function BotManagementDrawer({
           pnlPercent={netDeposited > 0 ? ((driftBalance - netDeposited) / netDeposited) * 100 : 0}
           timeframe={performanceTimeframe}
           tradeCount={performanceTradeCount}
+          winRate={parseFloat(getWinRate() as string)}
           chartData={performanceData}
           displayName={displayName}
           xUsername={xUsername}
