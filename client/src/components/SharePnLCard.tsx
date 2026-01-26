@@ -187,13 +187,13 @@ export function SharePnLCard({
               </div>
             </div>
             
-            <div className="absolute top-3 left-4 flex items-center gap-1.5">
+            <div className="absolute top-3 left-4 flex items-center gap-2">
               <img 
-                src="/images/qv_logo.png" 
+                src="/images/QV_Logo_02.png" 
                 alt="QuantumVault" 
-                className="w-5 h-5 rounded object-contain"
+                className="w-6 h-6 rounded-lg"
               />
-              <span className="text-[10px] font-semibold text-white/60 tracking-wider uppercase">QuantumVault</span>
+              <span className="font-display font-bold text-sm text-white">QuantumVault</span>
             </div>
             
             <div className="relative z-10 mt-6">
