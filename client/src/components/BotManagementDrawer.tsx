@@ -2293,6 +2293,7 @@ export function BotManagementDrawer({
           displayName={displayName}
           xUsername={xUsername}
           onTimeframeChange={setPerformanceTimeframe}
+          shareUrl={referralCode ? `https://quantumvault.io/?ref=${referralCode}` : 'https://quantumvault.io'}
         />
       )}
     </Sheet>

@@ -20,6 +20,7 @@ interface SharePnLCardProps {
   displayName?: string;
   xUsername?: string;
   onTimeframeChange?: (timeframe: TimeframeOption) => void;
+  shareUrl?: string;
 }
 
 const TIMEFRAME_OPTIONS: { value: TimeframeOption; label: string }[] = [
@@ -42,6 +43,7 @@ export function SharePnLCard({
   displayName,
   xUsername,
   onTimeframeChange,
+  shareUrl,
 }: SharePnLCardProps) {
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -366,7 +368,8 @@ export function SharePnLCard({
         toast({ title: 'Image downloaded! Attach it to your X post.' });
       }
 
-      const tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!\n\nPowered by @myQuantumVault`;
+      const urlText = shareUrl ? `\n\nJoin here: ${shareUrl}` : '';
+      const tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!${urlText}\n\nPowered by @myQuantumVault`;
       const xUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(tweetText)}`;
       window.open(xUrl, '_blank', 'noopener,noreferrer');
     } catch (error) {
