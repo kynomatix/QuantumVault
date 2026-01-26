@@ -50,10 +50,41 @@ export function SharePnLCard({
         useCORS: true,
       });
       
+      const dataUrl = canvas.toDataURL('image/png');
+      const filename = `${botName.replace(/\s+/g, '-')}-pnl-${timeframe}.png`;
+      
+      // Try native share on mobile first (works better on iOS/Android)
+      if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+        try {
+          const blob = await (await fetch(dataUrl)).blob();
+          const file = new File([blob], filename, { type: 'image/png' });
+          await navigator.share({
+            files: [file],
+            title: `${botName} Performance`,
+          });
+          return;
+        } catch (shareError) {
+          // Share cancelled or failed, fall through to download
+          console.log('Share failed, trying download:', shareError);
+        }
+      }
+      
+      // Fallback: try download link
       const link = document.createElement('a');
-      link.download = `${botName.replace(/\s+/g, '-')}-pnl-${timeframe}.png`;
-      link.href = canvas.toDataURL('image/png');
+      link.download = filename;
+      link.href = dataUrl;
+      document.body.appendChild(link);
       link.click();
+      document.body.removeChild(link);
+      
+      // If still on mobile and download didn't work, open in new tab
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      if (isMobile) {
+        // Give download a moment, then open in new tab as backup
+        setTimeout(() => {
+          window.open(dataUrl, '_blank');
+        }, 500);
+      }
     } catch (error) {
       console.error('Failed to download card:', error);
     } finally {
