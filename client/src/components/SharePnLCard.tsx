@@ -85,7 +85,7 @@ export function SharePnLCard({
     ctx.roundRect(0, 0, width, height, 16);
     ctx.fill();
 
-    ctx.strokeStyle = 'rgba(139, 92, 246, 0.10)';
+    ctx.strokeStyle = 'rgba(139, 92, 246, 0.08)';
     ctx.lineWidth = 0.5;
     for (let x = 0; x <= width; x += 32) {
       ctx.beginPath();
@@ -99,6 +99,35 @@ export function SharePnLCard({
       ctx.lineTo(width, y);
       ctx.stroke();
     }
+
+    const topAccent = ctx.createLinearGradient(0, 0, width, 0);
+    topAccent.addColorStop(0, 'transparent');
+    topAccent.addColorStop(0.3, isProfit ? 'rgba(34, 197, 94, 0.6)' : 'rgba(239, 68, 68, 0.6)');
+    topAccent.addColorStop(0.7, 'rgba(139, 92, 246, 0.6)');
+    topAccent.addColorStop(1, 'transparent');
+    ctx.fillStyle = topAccent;
+    ctx.fillRect(0, 0, width, 2);
+
+    ctx.strokeStyle = 'rgba(139, 92, 246, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(16, 50);
+    ctx.lineTo(16, 16);
+    ctx.lineTo(50, 16);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(width - 16, height - 50);
+    ctx.lineTo(width - 16, height - 16);
+    ctx.lineTo(width - 50, height - 16);
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(139, 92, 246, 0.12)';
+    const dots = [[80, 320], [120, 335], [540, 40], [580, 55], [600, 30]];
+    dots.forEach(([dx, dy]) => {
+      ctx.beginPath();
+      ctx.arc(dx, dy, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    });
 
     const glowGradient = ctx.createLinearGradient(width, height, 0, 0);
     glowGradient.addColorStop(0, isProfit ? 'rgba(34, 197, 94, 0.18)' : 'rgba(239, 68, 68, 0.18)');
