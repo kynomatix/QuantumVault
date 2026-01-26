@@ -40,38 +40,50 @@ export function SharePnLCard({
   const timeframeLabel = timeframe === 'all' ? 'All Time' : timeframe.toUpperCase();
 
   const handleDownload = async () => {
-    if (!cardRef.current) return;
+    console.log('[SharePnLCard] handleDownload called, cardRef:', cardRef.current);
+    if (!cardRef.current) {
+      console.error('[SharePnLCard] cardRef is null');
+      return;
+    }
     
     setDownloading(true);
     try {
+      console.log('[SharePnLCard] Loading html2canvas...');
       const html2canvas = (await import('html2canvas')).default;
+      console.log('[SharePnLCard] html2canvas loaded, capturing...');
       const canvas = await html2canvas(cardRef.current, {
-        backgroundColor: null,
+        backgroundColor: '#0f0a1e',
         scale: 2,
-        logging: false,
+        logging: true,
         useCORS: true,
+        allowTaint: true,
       });
+      console.log('[SharePnLCard] Canvas captured:', canvas.width, 'x', canvas.height);
       
       const dataUrl = canvas.toDataURL('image/png');
       const filename = `${botName.replace(/\s+/g, '-')}-pnl-${timeframe}.png`;
+      console.log('[SharePnLCard] Data URL length:', dataUrl.length, 'filename:', filename);
       
       // Try native share on mobile first (works better on iOS/Android)
-      if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      if (typeof navigator !== 'undefined' && navigator.canShare && typeof navigator.share === 'function') {
         try {
           const blob = await (await fetch(dataUrl)).blob();
           const file = new File([blob], filename, { type: 'image/png' });
-          await navigator.share({
-            files: [file],
-            title: `${botName} Performance`,
-          });
-          return;
+          if (navigator.canShare({ files: [file] })) {
+            console.log('[SharePnLCard] Using native share...');
+            await navigator.share({
+              files: [file],
+              title: `${botName} Performance`,
+            });
+            return;
+          }
         } catch (shareError) {
-          // Share cancelled or failed, fall through to download
-          console.log('Share failed, trying download:', shareError);
+          console.log('[SharePnLCard] Share failed, trying download:', shareError);
         }
       }
       
       // Fallback: try download link
+      console.log('[SharePnLCard] Using download link...');
       const link = document.createElement('a');
       link.download = filename;
       link.href = dataUrl;
@@ -82,39 +94,48 @@ export function SharePnLCard({
       // If still on mobile and download didn't work, open in new tab
       const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
       if (isMobile) {
-        // Give download a moment, then open in new tab as backup
+        console.log('[SharePnLCard] Mobile detected, opening in new tab...');
         setTimeout(() => {
           window.open(dataUrl, '_blank');
         }, 500);
       }
     } catch (error) {
-      console.error('Failed to download card:', error);
+      console.error('[SharePnLCard] Failed to download card:', error);
     } finally {
       setDownloading(false);
     }
   };
 
   const handleCopyImage = async () => {
-    if (!cardRef.current) return;
+    console.log('[SharePnLCard] handleCopyImage called');
+    if (!cardRef.current) {
+      console.error('[SharePnLCard] cardRef is null');
+      return;
+    }
     
     try {
       const html2canvas = (await import('html2canvas')).default;
       const canvas = await html2canvas(cardRef.current, {
-        backgroundColor: null,
+        backgroundColor: '#0f0a1e',
         scale: 2,
-        logging: false,
+        logging: true,
         useCORS: true,
+        allowTaint: true,
       });
+      console.log('[SharePnLCard] Canvas captured for copy');
       
       canvas.toBlob(async (blob) => {
         if (blob) {
+          console.log('[SharePnLCard] Blob created, size:', blob.size);
           try {
             await navigator.clipboard.write([
               new ClipboardItem({ 'image/png': blob })
             ]);
+            console.log('[SharePnLCard] Image copied to clipboard');
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
-          } catch {
+          } catch (clipboardError) {
+            console.log('[SharePnLCard] Clipboard failed, downloading:', clipboardError);
             const link = document.createElement('a');
             link.download = `${botName.replace(/\s+/g, '-')}-pnl.png`;
             link.href = canvas.toDataURL('image/png');
@@ -123,24 +144,31 @@ export function SharePnLCard({
         }
       }, 'image/png');
     } catch (error) {
-      console.error('Failed to copy image:', error);
+      console.error('[SharePnLCard] Failed to copy image:', error);
     }
   };
 
   const handleShare = async () => {
-    if (!cardRef.current) return;
+    console.log('[SharePnLCard] handleShare called');
+    if (!cardRef.current) {
+      console.error('[SharePnLCard] cardRef is null');
+      return;
+    }
     
     try {
       const html2canvas = (await import('html2canvas')).default;
       const canvas = await html2canvas(cardRef.current, {
-        backgroundColor: null,
+        backgroundColor: '#0f0a1e',
         scale: 2,
-        logging: false,
+        logging: true,
         useCORS: true,
+        allowTaint: true,
       });
+      console.log('[SharePnLCard] Canvas captured for share');
       
       canvas.toBlob(async (blob) => {
         if (blob && navigator.share) {
+          console.log('[SharePnLCard] Blob created for share, size:', blob.size);
           const file = new File([blob], `${botName}-pnl.png`, { type: 'image/png' });
           try {
             await navigator.share({
@@ -148,15 +176,18 @@ export function SharePnLCard({
               text: `Check out my ${market} bot performance: ${isProfit ? '+' : ''}$${pnl.toFixed(2)} (${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}%) in ${timeframeLabel}`,
               files: [file],
             });
-          } catch {
+            console.log('[SharePnLCard] Share successful');
+          } catch (shareError) {
+            console.log('[SharePnLCard] Share cancelled/failed, downloading:', shareError);
             handleDownload();
           }
         } else {
+          console.log('[SharePnLCard] No native share, falling back to download');
           handleDownload();
         }
       }, 'image/png');
     } catch (error) {
-      console.error('Failed to share:', error);
+      console.error('[SharePnLCard] Failed to share:', error);
       handleDownload();
     }
   };
@@ -322,18 +353,20 @@ export function SharePnLCard({
           
           <div className="flex gap-2">
             <Button
+              type="button"
               variant="outline"
               className="flex-1"
-              onClick={handleCopyImage}
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleCopyImage(); }}
               data-testid="button-copy-card"
             >
               {copied ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
               {copied ? 'Copied!' : 'Copy Image'}
             </Button>
             <Button
+              type="button"
               variant="outline"
               className="flex-1"
-              onClick={handleDownload}
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDownload(); }}
               disabled={downloading}
               data-testid="button-download-card"
             >
@@ -342,8 +375,9 @@ export function SharePnLCard({
             </Button>
             {typeof navigator !== 'undefined' && typeof navigator.share === 'function' && (
               <Button
+                type="button"
                 className="flex-1"
-                onClick={handleShare}
+                onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleShare(); }}
                 data-testid="button-share-card"
               >
                 <Share2 className="w-4 h-4 mr-2" />
