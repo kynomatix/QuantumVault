@@ -195,7 +195,17 @@ export function SharePnLCard({
                   backgroundImage: `radial-gradient(circle at 80% 20%, ${isProfit ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'} 0%, transparent 50%)`,
                 }}
               />
-              <div className="absolute bottom-0 right-0 w-3/4 h-24 opacity-30">
+              <svg className="absolute inset-0 w-full h-full opacity-[0.15]" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                  <pattern id="vault-pattern" x="0" y="0" width="40" height="40" patternUnits="userSpaceOnUse">
+                    <rect x="0" y="0" width="40" height="40" fill="none" stroke={isProfit ? '#22c55e' : '#ef4444'} strokeWidth="0.5" rx="4" />
+                    <circle cx="20" cy="20" r="8" fill="none" stroke={isProfit ? '#22c55e' : '#ef4444'} strokeWidth="0.3" />
+                    <circle cx="20" cy="20" r="3" fill="none" stroke={isProfit ? '#22c55e' : '#ef4444'} strokeWidth="0.5" />
+                  </pattern>
+                </defs>
+                <rect width="100%" height="100%" fill="url(#vault-pattern)" />
+              </svg>
+              <div className="absolute bottom-0 right-0 w-3/4 h-24 opacity-40">
                 {renderMiniChart()}
               </div>
             </div>
@@ -243,19 +253,15 @@ export function SharePnLCard({
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     {(displayName || xUsername) ? (
-                      <>
-                        <div className="w-6 h-6 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-[10px] font-bold text-white">
-                          {(displayName || xUsername || '?').charAt(0).toUpperCase()}
-                        </div>
-                        <div className="flex flex-col">
-                          {displayName && (
-                            <span className="text-xs font-medium text-white/80">{displayName}</span>
-                          )}
-                          {xUsername && (
-                            <span className="text-[10px] text-purple-400">@{xUsername}</span>
-                          )}
-                        </div>
-                      </>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-medium text-white/70">
+                          {displayName || xUsername}
+                        </span>
+                        {xUsername && displayName && (
+                          <span className="text-[10px] text-purple-400/80">@{xUsername}</span>
+                        )}
+                        {xUsername && !displayName && null}
+                      </div>
                     ) : (
                       <div className="flex items-center gap-1.5">
                         <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
