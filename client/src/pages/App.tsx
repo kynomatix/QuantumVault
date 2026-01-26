@@ -4209,6 +4209,8 @@ export default function AppPage() {
           refetchBots();
         }}
         onShowWalletTab={() => setActiveNav('wallet')}
+        displayName={displayName}
+        xUsername={xUsername}
       />
 
       <CreateBotModal

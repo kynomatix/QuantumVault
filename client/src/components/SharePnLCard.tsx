@@ -13,6 +13,8 @@ interface SharePnLCardProps {
   timeframe: '7d' | '30d' | '90d' | 'all';
   tradeCount: number;
   chartData?: { timestamp: string; cumulativePnl: number }[];
+  displayName?: string;
+  xUsername?: string;
 }
 
 export function SharePnLCard({
@@ -25,6 +27,8 @@ export function SharePnLCard({
   timeframe,
   tradeCount,
   chartData = [],
+  displayName,
+  xUsername,
 }: SharePnLCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState(false);
@@ -173,59 +177,91 @@ export function SharePnLCard({
         <div className="space-y-4">
           <div 
             ref={cardRef}
-            className="relative overflow-hidden rounded-2xl p-6"
+            className="relative overflow-hidden rounded-2xl p-5"
             style={{
               background: isProfit 
-                ? 'linear-gradient(135deg, #0a1628 0%, #0d2818 50%, #0a1628 100%)'
-                : 'linear-gradient(135deg, #0a1628 0%, #280d0d 50%, #0a1628 100%)',
-              border: `1px solid ${isProfit ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                ? 'linear-gradient(145deg, #0c1929 0%, #0a2015 40%, #071a12 70%, #0c1929 100%)'
+                : 'linear-gradient(145deg, #0c1929 0%, #1a0a0a 40%, #150707 70%, #0c1929 100%)',
+              border: `1px solid ${isProfit ? 'rgba(34, 197, 94, 0.25)' : 'rgba(239, 68, 68, 0.25)'}`,
+              boxShadow: isProfit 
+                ? '0 0 40px rgba(34, 197, 94, 0.15), inset 0 1px 0 rgba(255,255,255,0.05)'
+                : '0 0 40px rgba(239, 68, 68, 0.15), inset 0 1px 0 rgba(255,255,255,0.05)',
             }}
           >
-            <div className="absolute top-0 right-0 w-full h-full opacity-10">
-              <div className="absolute top-4 right-4">
+            <div className="absolute inset-0 opacity-20">
+              <div 
+                className="absolute inset-0"
+                style={{
+                  backgroundImage: `radial-gradient(circle at 80% 20%, ${isProfit ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'} 0%, transparent 50%)`,
+                }}
+              />
+              <div className="absolute bottom-0 right-0 w-3/4 h-24 opacity-30">
                 {renderMiniChart()}
               </div>
             </div>
             
-            <div className="absolute top-3 left-4 flex items-center gap-2">
-              <img 
-                src="/images/QV_Logo_02.png" 
-                alt="QuantumVault" 
-                className="w-6 h-6 rounded-lg"
-              />
-              <span className="font-display font-bold text-sm text-white">QuantumVault</span>
-            </div>
-            
-            <div className="relative z-10 mt-6">
-              <div className="flex items-start justify-between mb-4">
-                <div>
-                  <h3 className="text-lg font-bold text-white truncate max-w-[180px]">{botName}</h3>
-                  <p className="text-xs text-white/50">{market} • {timeframeLabel}</p>
+            <div className="relative z-10">
+              <div className="flex items-center justify-between mb-5">
+                <div className="flex items-center gap-2">
+                  <img 
+                    src="/images/QV_Logo_02.png" 
+                    alt="QuantumVault" 
+                    className="w-7 h-7 rounded-lg"
+                  />
+                  <span className="font-display font-bold text-sm text-white/90">QuantumVault</span>
                 </div>
-                <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
-                  isProfit ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
+                  isProfit ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
                 }`}>
-                  {isProfit ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                  {isProfit ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
                   {isProfit ? 'Profit' : 'Loss'}
                 </div>
               </div>
               
-              <div className="space-y-2">
-                <div className="flex items-baseline gap-2">
-                  <span className={`text-5xl font-bold ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
-                    {isProfit ? '+' : ''}{pnlPercent.toFixed(2)}%
-                  </span>
+              <div className="mb-4">
+                <h3 className="text-xl font-bold text-white truncate">{botName}</h3>
+                <p className="text-sm text-white/50 mt-0.5">{market} • {timeframeLabel}</p>
+              </div>
+              
+              <div className="py-3">
+                <div 
+                  className={`text-6xl font-bold tracking-tight ${isProfit ? 'text-green-400' : 'text-red-400'}`}
+                  style={{
+                    textShadow: isProfit 
+                      ? '0 0 30px rgba(34, 197, 94, 0.5)' 
+                      : '0 0 30px rgba(239, 68, 68, 0.5)',
+                  }}
+                >
+                  {isProfit ? '+' : ''}{pnlPercent.toFixed(2)}%
                 </div>
-                <div className="text-xs text-white/40">
+                <div className="text-sm text-white/40 mt-1">
                   {tradeCount} trade{tradeCount !== 1 ? 's' : ''}
                 </div>
               </div>
               
-              <div className="mt-6 pt-4 border-t border-white/10">
+              <div className="mt-4 pt-4 border-t border-white/10">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                    <span className="text-[10px] text-white/40">Automated Trading</span>
+                  <div className="flex items-center gap-2">
+                    {(displayName || xUsername) ? (
+                      <>
+                        <div className="w-6 h-6 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-[10px] font-bold text-white">
+                          {(displayName || xUsername || '?').charAt(0).toUpperCase()}
+                        </div>
+                        <div className="flex flex-col">
+                          {displayName && (
+                            <span className="text-xs font-medium text-white/80">{displayName}</span>
+                          )}
+                          {xUsername && (
+                            <span className="text-[10px] text-purple-400">@{xUsername}</span>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                        <span className="text-[10px] text-white/40">Automated Trading</span>
+                      </div>
+                    )}
                   </div>
                   <span className="text-[10px] text-white/30">
                     {new Date().toLocaleDateString()}

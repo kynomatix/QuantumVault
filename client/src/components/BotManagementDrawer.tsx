@@ -173,6 +173,8 @@ interface BotManagementDrawerProps {
   referralCode?: string;
   onBotUpdated: () => void;
   onShowWalletTab?: () => void;
+  displayName?: string;
+  xUsername?: string;
 }
 
 export function BotManagementDrawer({
@@ -183,6 +185,8 @@ export function BotManagementDrawer({
   referralCode,
   onBotUpdated,
   onShowWalletTab,
+  displayName,
+  xUsername,
 }: BotManagementDrawerProps) {
   const { toast } = useToast();
 
@@ -2285,6 +2289,8 @@ export function BotManagementDrawer({
           timeframe={performanceTimeframe}
           tradeCount={performanceTradeCount}
           chartData={performanceData}
+          displayName={displayName}
+          xUsername={xUsername}
         />
       )}
     </Sheet>
