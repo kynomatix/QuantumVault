@@ -178,7 +178,7 @@ function TitleSlide() {
 function ProblemSlide() {
   const items = [
     { problem: "CEX bots lack on-chain accountability", solution: "Fully on-chain, verifiable trades" },
-    { problem: "Pionex is a closed, custodial system", solution: "Non-custodial, open marketplace" },
+    { problem: "CEX platforms are closed, custodial systems", solution: "Non-custodial, open marketplace" },
     { problem: "No way to verify trader performance", solution: "On-chain PnL history anyone can audit" },
     { problem: "Traders can't monetize strategies", solution: "Signal marketplace with profit sharing" },
     { problem: "Manual trading is exhausting", solution: "24/7 automated execution" },
