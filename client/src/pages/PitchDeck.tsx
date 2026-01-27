@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
+import kryptolytixLogo from '../assets/images/kryptolytix-logo.jpg';
 import { useQuery } from '@tanstack/react-query';
 import { 
   ChevronLeft, 
@@ -870,9 +871,11 @@ function TeamSlide() {
       <motion.div variants={fadeIn} className="max-w-md w-full">
         <div className="p-8 rounded-3xl bg-gradient-to-br from-white/[0.04] to-transparent border border-white/[0.08] text-center">
           <div className="w-24 h-24 rounded-full bg-gradient-to-br from-primary via-accent to-primary p-[2px] mx-auto mb-6">
-            <div className="w-full h-full rounded-full bg-background flex items-center justify-center">
-              <span className="text-3xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">K</span>
-            </div>
+            <img 
+              src={kryptolytixLogo} 
+              alt="Kryptolytix" 
+              className="w-full h-full rounded-full object-cover"
+            />
           </div>
           <h3 className="text-2xl font-bold mb-1">Kryptolytix</h3>
           <p className="text-primary mb-1">Founder & Lead Developer</p>
