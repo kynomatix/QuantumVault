@@ -21,6 +21,7 @@ interface SharePnLCardProps {
   xUsername?: string;
   onTimeframeChange?: (timeframe: TimeframeOption) => void;
   shareUrl?: string;
+  isPublishedBot?: boolean;
 }
 
 const TIMEFRAME_OPTIONS: { value: TimeframeOption; label: string }[] = [
@@ -44,6 +45,7 @@ export function SharePnLCard({
   xUsername,
   onTimeframeChange,
   shareUrl,
+  isPublishedBot,
 }: SharePnLCardProps) {
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -384,10 +386,13 @@ export function SharePnLCard({
         toast({ title: 'Image downloaded! Attach it to your X post.' });
       }
 
-      console.log('[SharePnLCard] shareUrl prop:', shareUrl);
-      const urlText = shareUrl ? `\n\nJoin here: ${shareUrl}` : '';
-      const tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!${urlText}\n\nPowered by @myQuantumVault`;
-      console.log('[SharePnLCard] tweetText:', tweetText);
+      let tweetText: string;
+      if (isPublishedBot && shareUrl) {
+        tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!\n\nCopy my trades: ${shareUrl}\n\nPowered by @myQuantumVault`;
+      } else {
+        const urlText = shareUrl ? `\n\nJoin here: ${shareUrl}` : '';
+        tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!${urlText}\n\nPowered by @myQuantumVault`;
+      }
       const xUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(tweetText)}`;
       window.open(xUrl, '_blank', 'noopener,noreferrer');
     } catch (error) {

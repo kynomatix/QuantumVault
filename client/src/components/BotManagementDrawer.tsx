@@ -231,6 +231,7 @@ export function BotManagementDrawer({
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [shareCardOpen, setShareCardOpen] = useState(false);
   const [usdcApy, setUsdcApy] = useState<number | null>(null);
+  const [publishedBotId, setPublishedBotId] = useState<string | null>(null);
   const [performanceTimeframe, setPerformanceTimeframe] = useState<'7d' | '30d' | '90d' | 'all'>('7d');
   const [performanceView, setPerformanceView] = useState<'dollar' | 'percent'>('dollar');
   const [performanceData, setPerformanceData] = useState<{ timestamp: string; pnl: number; cumulativePnl: number }[]>([]);
@@ -252,11 +253,31 @@ export function BotManagementDrawer({
     }
   };
 
+  // Fetch published bot status
+  const fetchPublishedStatus = async () => {
+    if (!bot?.id) return;
+    try {
+      const response = await fetch(`/api/trading-bots/${bot.id}/published`, { credentials: 'include' });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.isPublished && data.publishedBot?.id) {
+          setPublishedBotId(data.publishedBot.id);
+        } else {
+          setPublishedBotId(null);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch published status:', error);
+      setPublishedBotId(null);
+    }
+  };
+
   useEffect(() => {
     if (isOpen) {
       fetchUsdcApy();
+      fetchPublishedStatus();
     }
-  }, [isOpen]);
+  }, [isOpen, bot?.id]);
 
   const fetchPerformanceData = async () => {
     if (!bot) return;
@@ -2293,7 +2314,10 @@ export function BotManagementDrawer({
           displayName={displayName}
           xUsername={xUsername}
           onTimeframeChange={setPerformanceTimeframe}
-          shareUrl={referralCode ? `https://quantumvault.io/?ref=${referralCode}` : 'https://quantumvault.io'}
+          shareUrl={publishedBotId 
+            ? `https://quantumvault.io/marketplace/${publishedBotId}` 
+            : (referralCode ? `https://quantumvault.io/?ref=${referralCode}` : 'https://quantumvault.io')}
+          isPublishedBot={!!publishedBotId}
         />
       )}
     </Sheet>
