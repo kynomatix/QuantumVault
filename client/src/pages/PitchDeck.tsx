@@ -295,43 +295,43 @@ function ProductFeaturesSlide() {
       icon: <Bot className="w-6 h-6" />,
       title: "Automated Trading Bots",
       description: "Deploy perpetual futures bots that execute 24/7 on 80+ markets",
-      gradient: "from-violet-500/20 to-fuchsia-500/10",
+      gradient: "from-violet-500/20 to-purple-500/10",
       border: "border-violet-500/30"
     },
     {
       icon: <Zap className="w-6 h-6" />,
       title: "TradingView Integration",
       description: "Connect any Pine Script strategy via webhooks for instant execution",
-      gradient: "from-fuchsia-500/20 to-pink-500/10",
-      border: "border-fuchsia-500/30"
+      gradient: "from-sky-500/20 to-blue-500/10",
+      border: "border-sky-500/30"
     },
     {
       icon: <ShieldCheck className="w-6 h-6" />,
       title: "Agent Wallet Security",
       description: "Non-custodial with AES-256 encryption. Users control their funds.",
-      gradient: "from-sky-500/20 to-cyan-500/10",
-      border: "border-sky-500/30"
+      gradient: "from-indigo-500/20 to-violet-500/10",
+      border: "border-indigo-500/30"
     },
     {
       icon: <Store className="w-6 h-6" />,
       title: "Signal Marketplace",
       description: "Creators publish strategies, subscribers copy and share profits",
-      gradient: "from-purple-500/20 to-pink-500/10",
-      border: "border-purple-500/30"
+      gradient: "from-pink-500/20 to-fuchsia-500/10",
+      border: "border-pink-500/30"
     },
     {
       icon: <TrendingUp className="w-6 h-6" />,
       title: "Real-Time Analytics",
       description: "Track PnL, positions, and performance with on-chain verification",
-      gradient: "from-primary/20 to-accent/10",
-      border: "border-primary/30"
+      gradient: "from-blue-500/20 to-cyan-500/10",
+      border: "border-blue-500/30"
     },
     {
       icon: <Layers className="w-6 h-6" />,
       title: "Vaults (Coming)",
       description: "Multi-asset collateral and intelligent borrowing for capital efficiency",
-      gradient: "from-rose-500/20 to-red-500/10",
-      border: "border-rose-500/30"
+      gradient: "from-purple-500/20 to-indigo-500/10",
+      border: "border-purple-500/30"
     }
   ];
 
