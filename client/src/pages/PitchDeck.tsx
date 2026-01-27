@@ -176,45 +176,46 @@ function TitleSlide() {
 }
 
 function ProblemSlide() {
-  const problems = [
-    { problem: "Manual trading is exhausting and inefficient", solution: "24/7 automated bot execution" },
-    { problem: "DeFi perpetual trading is too complex for retail", solution: "Simple TradingView webhook integration" },
-    { problem: "Existing bots require sharing private keys", solution: "Server-managed agent wallets" },
-    { problem: "Good traders can't monetize their strategies", solution: "Signal marketplace with profit sharing" },
-    { problem: "No transparent, verifiable performance tracking", solution: "On-chain verified PnL history" },
-    { problem: "Capital sits idle between trades", solution: "Multi-asset vault collateral (coming)" },
+  const items = [
+    { problem: "Manual trading is exhausting", solution: "24/7 automated execution" },
+    { problem: "DeFi perps too complex", solution: "Simple TradingView webhooks" },
+    { problem: "Bots require sharing keys", solution: "Server-managed wallets" },
+    { problem: "Traders can't monetize", solution: "Signal marketplace" },
+    { problem: "No verifiable tracking", solution: "On-chain PnL history" },
   ];
 
   return (
     <Slide>
       <SectionBadge>The Challenge</SectionBadge>
       
-      <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
-        The Problem
+      <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-12 text-center">
+        Problem & Solution
       </motion.h2>
-      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-12 text-center max-w-2xl">
-        DeFi trading is broken for retail users
-      </motion.p>
       
-      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-5xl w-full">
-        {problems.map((item, i) => (
-          <motion.div 
-            key={i}
-            variants={fadeIn}
-            className="flex items-start gap-4 p-5 rounded-2xl bg-gradient-to-br from-white/[0.03] to-transparent border border-white/[0.06] hover:border-white/10 transition-colors"
-          >
-            <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-destructive/10 flex items-center justify-center text-destructive">
-              <X className="w-4 h-4" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm text-muted-foreground mb-2">{item.problem}</p>
-              <div className="flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-violet-500 flex-shrink-0" />
-                <span className="text-sm font-medium text-violet-400">{item.solution}</span>
+      <motion.div variants={fadeIn} className="grid grid-cols-2 gap-8 max-w-4xl w-full">
+        <div>
+          <div className="text-sm uppercase tracking-wider text-muted-foreground mb-4 text-center">Problems</div>
+          <div className="space-y-3">
+            {items.map((item, i) => (
+              <div key={i} className="flex items-center gap-3 p-4 rounded-xl bg-slate-800/30 border border-slate-700/40">
+                <X className="w-4 h-4 text-red-400/70 flex-shrink-0" />
+                <span className="text-sm text-slate-300">{item.problem}</span>
               </div>
-            </div>
-          </motion.div>
-        ))}
+            ))}
+          </div>
+        </div>
+        
+        <div>
+          <div className="text-sm uppercase tracking-wider text-muted-foreground mb-4 text-center">Solutions</div>
+          <div className="space-y-3">
+            {items.map((item, i) => (
+              <div key={i} className="flex items-center gap-3 p-4 rounded-xl bg-violet-900/20 border border-violet-700/30">
+                <CheckCircle2 className="w-4 h-4 text-violet-400 flex-shrink-0" />
+                <span className="text-sm text-violet-200">{item.solution}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </motion.div>
     </Slide>
   );
