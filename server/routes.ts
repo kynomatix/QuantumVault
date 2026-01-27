@@ -3135,18 +3135,8 @@ export async function registerRoutes(
         }).catch(err => console.error('[ClosePosition] Profit share error:', err));
       }
       
-      // Route CLOSE signal to subscribers if this bot is published
-      if (bot.isPublished) {
-        console.log(`[ClosePosition] Bot is published, routing CLOSE signal to subscribers...`);
-        routeSignalToSubscribers(bot.id, {
-          action: 'close',
-          contracts: closeSize,
-          ticker: bot.market,
-          isClose: true,
-        }).catch(err => {
-          console.error(`[ClosePosition] Failed to route close signal to subscribers:`, err);
-        });
-      }
+      // NOTE: Manual close positions are NOT routed to subscribers - only webhook signals are
+      // This prevents creators from accidentally affecting subscribers with test/personal actions
 
       res.json({ 
         success: true,
@@ -3366,18 +3356,8 @@ export async function registerRoutes(
 
       console.log(`[ManualTrade] Trade executed: ${side.toUpperCase()} ${contractSize.toFixed(4)} @ $${fillPrice.toFixed(2)}`);
       
-      // Route signal to subscribers if this bot is published
-      if (bot.isPublished) {
-        console.log(`[ManualTrade] Bot is published, routing signal to subscribers...`);
-        routeSignalToSubscribers(bot.id, {
-          action: side === 'long' ? 'buy' : 'sell',
-          contracts: contractSize,
-          ticker: bot.market,
-          isClose: false,
-        }).catch(err => {
-          console.error(`[ManualTrade] Failed to route signal to subscribers:`, err);
-        });
-      }
+      // NOTE: Manual trades are NOT routed to subscribers - only webhook signals are
+      // This prevents creators from accidentally affecting subscribers with test/personal trades
       
       res.json({
         success: true,
