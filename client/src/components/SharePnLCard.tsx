@@ -144,12 +144,33 @@ export function SharePnLCard({
       const logoX = width - logoSize + 10;
       const logoY = height / 2 - logoSize / 2 - 25;
       
+      ctx.save();
+      ctx.shadowColor = isProfit ? 'rgba(74, 222, 128, 0.25)' : 'rgba(248, 113, 113, 0.25)';
+      ctx.shadowBlur = 40;
+      ctx.globalAlpha = 0.12;
+      ctx.drawImage(logoImg, logoX + 15, logoY + 15, logoSize - 30, logoSize - 30);
+      ctx.restore();
+      
       const logoCanvas = document.createElement('canvas');
       logoCanvas.width = logoSize;
       logoCanvas.height = logoSize;
       const logoCtx = logoCanvas.getContext('2d');
       if (logoCtx) {
         logoCtx.drawImage(logoImg, 0, 0, logoSize, logoSize);
+        
+        logoCtx.globalCompositeOperation = 'source-atop';
+        const colorGradient = logoCtx.createLinearGradient(logoSize, 0, 0, logoSize);
+        if (isProfit) {
+          colorGradient.addColorStop(0, 'rgba(74, 222, 128, 0.15)');
+          colorGradient.addColorStop(0.5, 'rgba(139, 92, 246, 0.1)');
+          colorGradient.addColorStop(1, 'rgba(168, 85, 247, 0.05)');
+        } else {
+          colorGradient.addColorStop(0, 'rgba(248, 113, 113, 0.15)');
+          colorGradient.addColorStop(0.5, 'rgba(139, 92, 246, 0.1)');
+          colorGradient.addColorStop(1, 'rgba(168, 85, 247, 0.05)');
+        }
+        logoCtx.fillStyle = colorGradient;
+        logoCtx.fillRect(0, 0, logoSize, logoSize);
         
         logoCtx.globalCompositeOperation = 'destination-out';
         const fadeGradient = logoCtx.createLinearGradient(0, 0, logoSize, logoSize);
@@ -160,24 +181,26 @@ export function SharePnLCard({
         logoCtx.fillStyle = fadeGradient;
         logoCtx.fillRect(0, 0, logoSize, logoSize);
         
-        ctx.globalAlpha = 0.18;
+        ctx.globalAlpha = 0.2;
         ctx.drawImage(logoCanvas, logoX, logoY);
         ctx.globalAlpha = 1;
       }
       
-      ctx.strokeStyle = 'rgba(139, 92, 246, 0.08)';
+      ctx.strokeStyle = isProfit ? 'rgba(74, 222, 128, 0.06)' : 'rgba(248, 113, 113, 0.06)';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.arc(width - 60, 80, 40, 0, Math.PI * 0.5);
       ctx.stroke();
+      ctx.strokeStyle = 'rgba(139, 92, 246, 0.06)';
       ctx.beginPath();
       ctx.arc(width - 100, 60, 25, Math.PI * 0.8, Math.PI * 1.3);
       ctx.stroke();
       
-      ctx.fillStyle = 'rgba(139, 92, 246, 0.06)';
+      ctx.fillStyle = isProfit ? 'rgba(74, 222, 128, 0.05)' : 'rgba(248, 113, 113, 0.05)';
       ctx.beginPath();
       ctx.arc(width - 45, 120, 3, 0, Math.PI * 2);
       ctx.fill();
+      ctx.fillStyle = 'rgba(139, 92, 246, 0.05)';
       ctx.beginPath();
       ctx.arc(width - 80, 45, 2, 0, Math.PI * 2);
       ctx.fill();
