@@ -690,19 +690,10 @@ function BusinessModelSlide() {
           <FeeCurveSVG />
         </div>
         
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="p-5 rounded-2xl bg-gradient-to-br from-sky-500/10 to-blue-500/5 border border-sky-500/20 text-center">
-            <div className="text-2xl font-bold text-sky-400 mb-1">0.1% - 1.0%</div>
-            <div className="text-xs text-muted-foreground">Performance Fee Range</div>
-          </div>
-          <div className="p-5 rounded-2xl bg-gradient-to-br from-violet-500/10 to-purple-500/5 border border-violet-500/20 text-center">
-            <div className="text-2xl font-bold text-violet-400 mb-1">10-20%</div>
-            <div className="text-xs text-muted-foreground">Creator Profit Share Cut</div>
-          </div>
-          <div className="p-5 rounded-2xl bg-gradient-to-br from-pink-500/10 to-fuchsia-500/5 border border-pink-500/20 text-center">
-            <div className="text-2xl font-bold text-pink-400 mb-1">Rebates</div>
-            <div className="text-xs text-muted-foreground">Drift Referral Program</div>
-          </div>
+        <div className="p-4 rounded-xl bg-violet-500/5 border border-violet-500/20 text-center">
+          <p className="text-sm text-violet-300">
+            Performance fees from 0.1% to 1.0% per trade, scaling with network size
+          </p>
         </div>
       </motion.div>
     </Slide>
