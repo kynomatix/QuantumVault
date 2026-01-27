@@ -9,6 +9,7 @@ import Landing from "@/pages/Landing";
 import AppPage from "@/pages/App";
 import DocsPage from "@/pages/Docs";
 import Analytics from "@/pages/Analytics";
+import PitchDeck from "@/pages/PitchDeck";
 
 function Router() {
   return (
@@ -17,6 +18,7 @@ function Router() {
       <Route path="/app" component={AppPage} />
       <Route path="/docs" component={DocsPage} />
       <Route path="/analytics" component={Analytics} />
+      <Route path="/pitch-deck" component={PitchDeck} />
       <Route component={NotFound} />
     </Switch>
   );
