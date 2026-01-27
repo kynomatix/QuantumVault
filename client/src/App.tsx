@@ -10,6 +10,7 @@ import AppPage from "@/pages/App";
 import DocsPage from "@/pages/Docs";
 import Analytics from "@/pages/Analytics";
 import PitchDeck from "@/pages/PitchDeck";
+import Admin from "@/pages/Admin";
 
 function Router() {
   return (
@@ -19,6 +20,7 @@ function Router() {
       <Route path="/docs" component={DocsPage} />
       <Route path="/analytics" component={Analytics} />
       <Route path="/pitch-deck" component={PitchDeck} />
+      <Route path="/admin" component={Admin} />
       <Route component={NotFound} />
     </Switch>
   );
