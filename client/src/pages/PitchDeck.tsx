@@ -539,52 +539,82 @@ function MarketplaceSlide() {
 }
 
 function BusinessModelSlide() {
+  const feePhases = [
+    { phase: "0", name: "Developer Preview", users: "Current", fee: "0%", color: "text-white/40" },
+    { phase: "A", name: "Bootstrapping", users: "0-100", fee: "0.1%", color: "text-blue-400" },
+    { phase: "B", name: "Sustainability", users: "101-200", fee: "0.3%", color: "text-cyan-400" },
+    { phase: "C", name: "Maturity", users: "201-300", fee: "1.0%", color: "text-emerald-400" },
+    { phase: "D", name: "Network Mode", users: "300+", fee: "Dynamic", color: "text-primary" }
+  ];
+
   return (
     <Slide>
       <SectionBadge><DollarSign className="w-4 h-4" /> Revenue</SectionBadge>
       
       <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
-        Business Model
+        Fee Schedule
       </motion.h2>
-      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-12 text-center">
-        Multiple sustainable revenue streams
+      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-10 text-center">
+        Progressive fees aligned with platform growth
       </motion.p>
       
       <motion.div variants={fadeIn} className="max-w-4xl w-full">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
-          {[
-            { icon: <Percent className="w-5 h-5" />, title: "Trading Fees", desc: "% of trade volume" },
-            { icon: <Users className="w-5 h-5" />, title: "Profit Share Cut", desc: "% of creator earnings" },
-            { icon: <Globe className="w-5 h-5" />, title: "Drift Referrals", desc: "Volume rebates" },
-            { icon: <Sparkles className="w-5 h-5" />, title: "Premium Tiers", desc: "Advanced features" }
-          ].map((item, i) => (
+        <div className="grid grid-cols-5 gap-2 mb-6">
+          {feePhases.map((phase, i) => (
             <motion.div 
               key={i}
               variants={fadeIn}
-              className="p-5 rounded-2xl bg-white/[0.02] border border-white/[0.06] text-center"
+              className={`p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] text-center ${i === 0 ? 'ring-2 ring-primary/50' : ''}`}
             >
-              <div className="text-primary mb-3 flex justify-center">{item.icon}</div>
-              <div className="font-bold text-sm mb-1">{item.title}</div>
-              <div className="text-xs text-muted-foreground">{item.desc}</div>
+              <div className={`text-2xl font-bold mb-1 ${phase.color}`}>{phase.fee}</div>
+              <div className="text-xs font-medium mb-1">Phase {phase.phase}</div>
+              <div className="text-[10px] text-muted-foreground">{phase.name}</div>
+              <div className="text-[10px] text-muted-foreground/60 mt-1">{phase.users} users</div>
             </motion.div>
           ))}
         </div>
         
-        <div className="p-6 rounded-2xl bg-gradient-to-r from-emerald-500/10 to-emerald-500/5 border border-emerald-500/20">
-          <h3 className="font-bold text-lg mb-4 text-center">Revenue Projections</h3>
-          <div className="grid grid-cols-3 gap-4 text-center">
-            {[
-              { year: "Year 1", revenue: "$50K", users: "100 bots" },
-              { year: "Year 2", revenue: "$500K", users: "1,000 bots" },
-              { year: "Year 3", revenue: "$5M", users: "10,000 bots" }
-            ].map((item, i) => (
-              <div key={i}>
-                <div className="text-sm font-bold text-emerald-400 mb-1">{item.year}</div>
-                <div className="text-2xl font-bold mb-1">{item.revenue}</div>
-                <div className="text-xs text-muted-foreground">{item.users}</div>
-              </div>
-            ))}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+          <div className="p-5 rounded-xl bg-gradient-to-br from-primary/10 to-primary/5 border border-primary/20">
+            <h4 className="font-bold text-sm mb-3 flex items-center gap-2">
+              <Activity className="w-4 h-4 text-primary" />
+              Network Efficiency Formula
+            </h4>
+            <div className="font-mono text-xs bg-black/30 rounded-lg p-3 mb-2">
+              fee = max(0.3%, 1% × (300 ÷ active_users))
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              Bell curve: fees decrease as network grows, rewarding early adopters while maintaining sustainability
+            </p>
           </div>
+          
+          <div className="p-5 rounded-xl bg-white/[0.02] border border-white/[0.06]">
+            <h4 className="font-bold text-sm mb-3">Additional Revenue</h4>
+            <ul className="space-y-2 text-xs text-muted-foreground">
+              <li className="flex items-center gap-2">
+                <Users className="w-3 h-3 text-primary" />
+                Creator profit share cut (10-20%)
+              </li>
+              <li className="flex items-center gap-2">
+                <Globe className="w-3 h-3 text-primary" />
+                Drift referral rebates
+              </li>
+              <li className="flex items-center gap-2">
+                <Sparkles className="w-3 h-3 text-primary" />
+                Premium features (future)
+              </li>
+            </ul>
+          </div>
+        </div>
+        
+        <div className="p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 text-center">
+          <div className="flex items-center justify-center gap-2 text-xs text-emerald-400 mb-1">
+            <CheckCircle2 className="w-3 h-3" />
+            Active Traders = users with trades in last 30 days
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            Fair, transparent, and defensible fee structure that grows with the community
+          </p>
         </div>
       </motion.div>
     </Slide>
