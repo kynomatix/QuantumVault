@@ -129,11 +129,11 @@ function TitleSlide() {
       </motion.div>
       
       <motion.div variants={fadeInScale} className="mb-6 relative z-10">
-        <div className="w-24 h-24 md:w-32 md:h-32 rounded-3xl bg-gradient-to-br from-primary via-accent to-primary p-1 mx-auto">
-          <div className="w-full h-full rounded-3xl bg-background flex items-center justify-center">
-            <Zap className="w-12 h-12 md:w-16 md:h-16 text-primary" />
-          </div>
-        </div>
+        <img 
+          src="/images/QV_Logo_02.png" 
+          alt="QuantumVault Logo" 
+          className="w-32 h-32 md:w-40 md:h-40 object-contain mx-auto"
+        />
       </motion.div>
       
       <motion.h1 
@@ -848,11 +848,11 @@ function ClosingSlide() {
       <GradientOrb className="w-96 h-96 bg-accent -bottom-48 -left-48" />
       
       <motion.div variants={fadeInScale} className="mb-6 relative z-10">
-        <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-primary to-accent p-1 mx-auto">
-          <div className="w-full h-full rounded-2xl bg-background flex items-center justify-center">
-            <Zap className="w-10 h-10 text-primary" />
-          </div>
-        </div>
+        <img 
+          src="/images/QV_Logo_02.png" 
+          alt="QuantumVault Logo" 
+          className="w-24 h-24 md:w-32 md:h-32 object-contain mx-auto"
+        />
       </motion.div>
       
       <motion.h1 
