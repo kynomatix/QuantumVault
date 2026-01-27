@@ -371,20 +371,20 @@ function ProductFeaturesSlide() {
 
 function HowItWorksSlide() {
   const steps = [
-    { num: "01", title: "Connect", desc: "Link Phantom wallet", icon: <Wallet className="w-6 h-6" />, color: "violet" },
-    { num: "02", title: "Fund", desc: "Deposit USDC", icon: <Coins className="w-6 h-6" />, color: "sky" },
-    { num: "03", title: "Create", desc: "Build bot or subscribe", icon: <Bot className="w-6 h-6" />, color: "indigo" },
-    { num: "04", title: "Configure", desc: "Set webhook URL", icon: <Zap className="w-6 h-6" />, color: "pink" },
-    { num: "05", title: "Trade", desc: "Automated 24/7", icon: <TrendingUp className="w-6 h-6" />, color: "blue" }
+    { num: "01", title: "Connect", desc: "Link Phantom wallet", icon: <Wallet className="w-6 h-6" /> },
+    { num: "02", title: "Fund", desc: "Deposit USDC", icon: <Coins className="w-6 h-6" /> },
+    { num: "03", title: "Create", desc: "Build bot or subscribe", icon: <Bot className="w-6 h-6" /> },
+    { num: "04", title: "Configure", desc: "Set webhook URL", icon: <Zap className="w-6 h-6" /> },
+    { num: "05", title: "Trade", desc: "Automated 24/7", icon: <TrendingUp className="w-6 h-6" /> }
   ];
 
-  const colorClasses: Record<string, { gradient: string; border: string; text: string; iconBg: string }> = {
-    violet: { gradient: "from-violet-500/20 to-violet-500/5", border: "border-violet-500/30", text: "text-violet-400", iconBg: "from-violet-500 to-purple-600" },
-    sky: { gradient: "from-sky-500/20 to-sky-500/5", border: "border-sky-500/30", text: "text-sky-400", iconBg: "from-sky-500 to-blue-600" },
-    indigo: { gradient: "from-indigo-500/20 to-indigo-500/5", border: "border-indigo-500/30", text: "text-indigo-400", iconBg: "from-indigo-500 to-violet-600" },
-    pink: { gradient: "from-pink-500/20 to-pink-500/5", border: "border-pink-500/30", text: "text-pink-400", iconBg: "from-pink-500 to-fuchsia-600" },
-    blue: { gradient: "from-blue-500/20 to-blue-500/5", border: "border-blue-500/30", text: "text-blue-400", iconBg: "from-blue-500 to-cyan-600" },
-  };
+  const stepStyles = [
+    { bg: "bg-slate-700/20", border: "border-slate-600/30", text: "text-slate-400", iconBg: "from-slate-500 to-slate-600" },
+    { bg: "bg-slate-600/20", border: "border-slate-500/30", text: "text-slate-300", iconBg: "from-slate-400 to-indigo-600" },
+    { bg: "bg-indigo-900/20", border: "border-indigo-700/30", text: "text-indigo-400", iconBg: "from-indigo-500 to-indigo-600" },
+    { bg: "bg-indigo-800/25", border: "border-indigo-600/35", text: "text-indigo-300", iconBg: "from-indigo-400 to-violet-600" },
+    { bg: "bg-violet-800/30", border: "border-violet-600/40", text: "text-violet-300", iconBg: "from-violet-500 to-violet-600" },
+  ];
 
   return (
     <Slide>
@@ -399,17 +399,17 @@ function HowItWorksSlide() {
       
       <motion.div variants={fadeIn} className="grid grid-cols-5 gap-3 max-w-5xl w-full mb-10">
         {steps.map((step, i) => {
-          const colors = colorClasses[step.color];
+          const style = stepStyles[i];
           return (
             <motion.div 
               key={i} 
               variants={fadeIn}
-              className={`relative p-5 rounded-2xl bg-gradient-to-br ${colors.gradient} border ${colors.border} text-center group hover:scale-105 transition-transform`}
+              className={`relative p-5 rounded-2xl ${style.bg} border ${style.border} text-center group hover:scale-105 transition-transform`}
             >
-              <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${colors.iconBg} flex items-center justify-center text-white mx-auto mb-4 shadow-lg`}>
+              <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${style.iconBg} flex items-center justify-center text-white mx-auto mb-4 shadow-lg`}>
                 {step.icon}
               </div>
-              <div className={`text-xs ${colors.text} font-bold mb-1 tracking-wider`}>{step.num}</div>
+              <div className={`text-xs ${style.text} font-bold mb-1 tracking-wider`}>{step.num}</div>
               <h3 className="font-bold text-lg mb-1">{step.title}</h3>
               <p className="text-xs text-muted-foreground">{step.desc}</p>
               {i < steps.length - 1 && (
@@ -424,18 +424,18 @@ function HowItWorksSlide() {
         })}
       </motion.div>
       
-      <motion.div variants={fadeIn} className="p-6 rounded-2xl bg-gradient-to-r from-violet-500/10 via-indigo-500/10 to-blue-500/10 border border-violet-500/20 max-w-4xl">
+      <motion.div variants={fadeIn} className="p-6 rounded-2xl bg-slate-800/30 border border-slate-700/40 max-w-4xl">
         <h3 className="font-bold mb-4 text-center">Signal Flow</h3>
         <div className="flex flex-wrap items-center justify-center gap-3 text-sm">
-          <span className="px-4 py-2 rounded-xl bg-violet-500/20 border border-violet-500/30 text-violet-300 font-medium">TradingView Alert</span>
-          <ArrowRight className="w-5 h-5 text-violet-400" />
-          <span className="px-4 py-2 rounded-xl bg-sky-500/20 border border-sky-500/30 text-sky-300 font-medium">Webhook</span>
-          <ArrowRight className="w-5 h-5 text-sky-400" />
-          <span className="px-4 py-2 rounded-xl bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 font-medium">QuantumVault</span>
-          <ArrowRight className="w-5 h-5 text-indigo-400" />
-          <span className="px-4 py-2 rounded-xl bg-pink-500/20 border border-pink-500/30 text-pink-300 font-medium">Drift Protocol</span>
-          <ArrowRight className="w-5 h-5 text-pink-400" />
-          <span className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-500/30 to-cyan-500/30 border border-blue-500/40 text-blue-300 font-medium shadow-lg shadow-blue-500/20">Position Executed</span>
+          <span className="px-4 py-2 rounded-xl bg-slate-700/30 border border-slate-600/40 text-slate-300 font-medium">TradingView Alert</span>
+          <ArrowRight className="w-5 h-5 text-slate-500" />
+          <span className="px-4 py-2 rounded-xl bg-slate-600/30 border border-slate-500/40 text-slate-200 font-medium">Webhook</span>
+          <ArrowRight className="w-5 h-5 text-indigo-500/60" />
+          <span className="px-4 py-2 rounded-xl bg-indigo-800/30 border border-indigo-600/40 text-indigo-300 font-medium">QuantumVault</span>
+          <ArrowRight className="w-5 h-5 text-indigo-400/60" />
+          <span className="px-4 py-2 rounded-xl bg-violet-800/30 border border-violet-600/40 text-violet-300 font-medium">Drift Protocol</span>
+          <ArrowRight className="w-5 h-5 text-violet-400/60" />
+          <span className="px-4 py-2 rounded-xl bg-violet-700/40 border border-violet-500/50 text-violet-200 font-medium">Position Executed</span>
         </div>
       </motion.div>
     </Slide>
