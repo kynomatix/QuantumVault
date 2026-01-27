@@ -98,7 +98,7 @@ function Slide({ children, className = '' }: SlideProps) {
 }
 
 function GradientOrb({ className, color = "primary" }: { className?: string; color?: string }) {
-  const colorClass = color === "accent" ? "bg-accent" : color === "emerald" ? "bg-emerald-500" : "bg-primary";
+  const colorClass = color === "accent" ? "bg-fuchsia-500" : color === "sky" ? "bg-sky-500" : "bg-violet-500";
   return (
     <div className={`absolute rounded-full blur-[100px] opacity-30 ${colorClass} ${className}`} />
   );
@@ -106,9 +106,9 @@ function GradientOrb({ className, color = "primary" }: { className?: string; col
 
 function SectionBadge({ children, color = "primary" }: { children: React.ReactNode; color?: string }) {
   const colorClasses: Record<string, string> = {
-    primary: "bg-primary/10 border-primary/30 text-primary",
-    accent: "bg-accent/10 border-accent/30 text-accent",
-    emerald: "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+    primary: "bg-violet-500/10 border-violet-500/30 text-violet-400",
+    accent: "bg-fuchsia-500/10 border-fuchsia-500/30 text-fuchsia-400",
+    sky: "bg-sky-500/10 border-sky-500/30 text-sky-400"
   };
   return (
     <motion.div variants={fadeIn} className="mb-8">
@@ -204,8 +204,8 @@ function ProblemSlide() {
             <div className="flex-1 min-w-0">
               <p className="text-sm text-muted-foreground mb-2">{item.problem}</p>
               <div className="flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
-                <span className="text-sm font-medium text-emerald-400">{item.solution}</span>
+                <CheckCircle2 className="w-4 h-4 text-violet-500 flex-shrink-0" />
+                <span className="text-sm font-medium text-violet-400">{item.solution}</span>
               </div>
             </div>
           </motion.div>
@@ -295,22 +295,22 @@ function ProductFeaturesSlide() {
       icon: <Bot className="w-6 h-6" />,
       title: "Automated Trading Bots",
       description: "Deploy perpetual futures bots that execute 24/7 on 80+ markets",
-      gradient: "from-blue-500/20 to-cyan-500/10",
-      border: "border-blue-500/30"
+      gradient: "from-violet-500/20 to-fuchsia-500/10",
+      border: "border-violet-500/30"
     },
     {
       icon: <Zap className="w-6 h-6" />,
       title: "TradingView Integration",
       description: "Connect any Pine Script strategy via webhooks for instant execution",
-      gradient: "from-amber-500/20 to-orange-500/10",
-      border: "border-amber-500/30"
+      gradient: "from-fuchsia-500/20 to-pink-500/10",
+      border: "border-fuchsia-500/30"
     },
     {
       icon: <ShieldCheck className="w-6 h-6" />,
       title: "Agent Wallet Security",
       description: "Non-custodial with AES-256 encryption. Users control their funds.",
-      gradient: "from-emerald-500/20 to-green-500/10",
-      border: "border-emerald-500/30"
+      gradient: "from-sky-500/20 to-cyan-500/10",
+      border: "border-sky-500/30"
     },
     {
       icon: <Store className="w-6 h-6" />,
@@ -413,7 +413,7 @@ function HowItWorksSlide() {
           <ArrowRight className="w-4 h-4 text-primary" />
           <span className="px-3 py-1 rounded-full bg-white/5">Drift Protocol</span>
           <ArrowRight className="w-4 h-4 text-primary" />
-          <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400">Position Executed</span>
+          <span className="px-3 py-1 rounded-full bg-violet-500/20 text-violet-400">Position Executed</span>
         </div>
       </motion.div>
     </Slide>
@@ -430,7 +430,7 @@ function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
 
   return (
     <Slide>
-      <SectionBadge color="emerald"><BarChart3 className="w-4 h-4" /> Traction</SectionBadge>
+      <SectionBadge color="sky"><BarChart3 className="w-4 h-4" /> Traction</SectionBadge>
       
       <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
         Live on Mainnet
@@ -444,12 +444,12 @@ function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
           <motion.div 
             key={i}
             variants={fadeIn}
-            className="p-6 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-emerald-500/5 border border-emerald-500/20 text-center"
+            className="p-6 rounded-2xl bg-gradient-to-br from-violet-500/10 to-fuchsia-500/5 border border-violet-500/20 text-center"
           >
-            <div className="flex items-center justify-center text-emerald-400 mb-3">
+            <div className="flex items-center justify-center text-violet-400 mb-3">
               {stat.icon}
             </div>
-            <div className="text-3xl md:text-4xl font-bold text-emerald-400 mb-1" data-testid={stat.testId}>
+            <div className="text-3xl md:text-4xl font-bold text-violet-400 mb-1" data-testid={stat.testId}>
               {stat.value}
             </div>
             <div className="text-xs text-muted-foreground">{stat.label}</div>
@@ -458,15 +458,15 @@ function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
       </motion.div>
       
       <motion.div variants={fadeIn} className="flex flex-wrap gap-3 justify-center">
-        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm" data-testid="status-live">
-          <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-violet-500/10 border border-violet-500/30 text-violet-400 text-sm" data-testid="status-live">
+          <div className="w-2 h-2 rounded-full bg-violet-500 animate-pulse" />
           Live on Mainnet
         </div>
-        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-sm" data-testid="status-revenue">
+        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-sky-500/10 border border-sky-500/30 text-sky-400 text-sm" data-testid="status-revenue">
           <CheckCircle2 className="w-4 h-4" />
           Revenue Generating
         </div>
-        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-purple-500/10 border border-purple-500/30 text-purple-400 text-sm" data-testid="status-audited">
+        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-fuchsia-500/10 border border-fuchsia-500/30 text-fuchsia-400 text-sm" data-testid="status-audited">
           <Shield className="w-4 h-4" />
           Security Audited
         </div>
@@ -492,8 +492,8 @@ function MarketplaceSlide() {
       </motion.p>
       
       <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-4xl w-full">
-        <div className="p-8 rounded-3xl bg-gradient-to-br from-blue-500/10 to-cyan-500/5 border border-blue-500/20">
-          <div className="w-14 h-14 rounded-2xl bg-blue-500/20 flex items-center justify-center text-blue-400 mb-6">
+        <div className="p-8 rounded-3xl bg-gradient-to-br from-violet-500/10 to-fuchsia-500/5 border border-violet-500/20">
+          <div className="w-14 h-14 rounded-2xl bg-violet-500/20 flex items-center justify-center text-violet-400 mb-6">
             <TrendingUp className="w-7 h-7" />
           </div>
           <h3 className="text-2xl font-bold mb-4">For Creators</h3>
@@ -506,7 +506,7 @@ function MarketplaceSlide() {
               "Verified on-chain performance"
             ].map((item, i) => (
               <li key={i} className="flex items-start gap-3 text-sm text-muted-foreground">
-                <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5" />
+                <CheckCircle2 className="w-4 h-4 text-violet-500 flex-shrink-0 mt-0.5" />
                 <span>{item}</span>
               </li>
             ))}
@@ -527,7 +527,7 @@ function MarketplaceSlide() {
               "Pay only on profitable trades"
             ].map((item, i) => (
               <li key={i} className="flex items-start gap-3 text-sm text-muted-foreground">
-                <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5" />
+                <CheckCircle2 className="w-4 h-4 text-violet-500 flex-shrink-0 mt-0.5" />
                 <span>{item}</span>
               </li>
             ))}
@@ -541,9 +541,9 @@ function MarketplaceSlide() {
 function BusinessModelSlide() {
   const feePhases = [
     { phase: "0", name: "Developer Preview", users: "Current", fee: "0%", color: "text-white/40" },
-    { phase: "A", name: "Bootstrapping", users: "0-100", fee: "0.1%", color: "text-blue-400" },
+    { phase: "A", name: "Bootstrapping", users: "0-100", fee: "0.1%", color: "text-sky-400" },
     { phase: "B", name: "Sustainability", users: "101-200", fee: "0.3%", color: "text-cyan-400" },
-    { phase: "C", name: "Maturity", users: "201-300", fee: "1.0%", color: "text-emerald-400" },
+    { phase: "C", name: "Maturity", users: "201-300", fee: "1.0%", color: "text-violet-400" },
     { phase: "D", name: "Network Mode", users: "300+", fee: "Dynamic", color: "text-primary" }
   ];
 
@@ -607,8 +607,8 @@ function BusinessModelSlide() {
           </div>
         </div>
         
-        <div className="p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 text-center">
-          <div className="flex items-center justify-center gap-2 text-xs text-emerald-400 mb-1">
+        <div className="p-4 rounded-xl bg-violet-500/5 border border-violet-500/20 text-center">
+          <div className="flex items-center justify-center gap-2 text-xs text-violet-400 mb-1">
             <CheckCircle2 className="w-3 h-3" />
             Active Traders = users with trades in last 30 days
           </div>
@@ -658,7 +658,7 @@ function CompetitiveSlide() {
                 {row.map((cell, j) => (
                   <td key={j} className={`py-3 px-4 ${j === 0 ? 'text-left font-medium' : 'text-center'} ${j === 1 ? 'bg-primary/5' : ''}`}>
                     {typeof cell === 'boolean' ? (
-                      cell ? <CheckCircle2 className="w-5 h-5 text-emerald-500 mx-auto" /> : <X className="w-5 h-5 text-white/20 mx-auto" />
+                      cell ? <CheckCircle2 className="w-5 h-5 text-violet-500 mx-auto" /> : <X className="w-5 h-5 text-white/20 mx-auto" />
                     ) : cell}
                   </td>
                 ))}
@@ -727,15 +727,15 @@ function TechStackSlide() {
         </div>
         <ul className="space-y-2 text-sm text-muted-foreground">
           <li className="flex items-start gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+            <CheckCircle2 className="w-4 h-4 text-violet-500 mt-0.5 flex-shrink-0" />
             <span>Non-custodial agent wallets with user-controlled funds</span>
           </li>
           <li className="flex items-start gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+            <CheckCircle2 className="w-4 h-4 text-violet-500 mt-0.5 flex-shrink-0" />
             <span>AES-256-GCM encryption with per-user derived keys</span>
           </li>
           <li className="flex items-start gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+            <CheckCircle2 className="w-4 h-4 text-violet-500 mt-0.5 flex-shrink-0" />
             <span>Signature-verified execution authorization</span>
           </li>
         </ul>
@@ -787,14 +787,14 @@ function RoadmapSlide() {
             variants={fadeIn}
             className={`p-5 rounded-2xl border ${
               phase.status === 'complete' 
-                ? 'bg-emerald-500/5 border-emerald-500/30' 
+                ? 'bg-violet-500/5 border-violet-500/30' 
                 : phase.status === 'current'
                 ? 'bg-primary/10 border-primary/40'
                 : 'bg-white/[0.02] border-white/[0.06]'
             }`}
           >
             <div className="flex items-center gap-2 mb-3">
-              {phase.status === 'complete' && <CheckCircle2 className="w-4 h-4 text-emerald-500" />}
+              {phase.status === 'complete' && <CheckCircle2 className="w-4 h-4 text-violet-500" />}
               {phase.status === 'current' && <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />}
               {phase.status === 'upcoming' && <Circle className="w-4 h-4 text-white/30" />}
               <span className="text-xs font-medium text-muted-foreground">{phase.quarter}</span>
@@ -901,7 +901,7 @@ function TeamSlide() {
 function AskSlide() {
   return (
     <Slide>
-      <SectionBadge color="emerald"><Rocket className="w-4 h-4" /> Investment</SectionBadge>
+      <SectionBadge color="sky"><Rocket className="w-4 h-4" /> Investment</SectionBadge>
       
       <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
         Join the Journey
