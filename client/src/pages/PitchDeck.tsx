@@ -572,6 +572,107 @@ function MarketplaceSlide() {
   );
 }
 
+function FeeCurveSVG() {
+  const points = [
+    { x: 0, y: 85, label: "0-100 Users", fee: "0.1%", phase: "Intro Phase" },
+    { x: 20, y: 60, label: "100-200 Users", fee: "0.3%", phase: "Sustainability" },
+    { x: 40, y: 15, label: "200-300 Users", fee: "1.0%", phase: "Platform Maturity" },
+    { x: 60, y: 45, label: "300-500 Users", fee: "0.6%", phase: "Efficiency Mode" },
+    { x: 85, y: 75, label: "500+ Users", fee: "0.3%", phase: "Network Optimized" },
+  ];
+  
+  const pathD = "M 0 85 Q 10 72 20 60 Q 30 30 40 15 Q 50 15 55 30 Q 65 55 85 75";
+  
+  return (
+    <div className="relative w-full h-72 bg-gradient-to-b from-slate-900/50 to-slate-950/80 rounded-2xl border border-violet-500/20 overflow-hidden">
+      <div className="absolute inset-0 opacity-20">
+        {[...Array(8)].map((_, i) => (
+          <div key={i} className="absolute w-full border-t border-violet-500/20" style={{ top: `${(i + 1) * 12}%` }} />
+        ))}
+        {[...Array(10)].map((_, i) => (
+          <div key={i} className="absolute h-full border-l border-violet-500/20" style={{ left: `${(i + 1) * 10}%` }} />
+        ))}
+      </div>
+      
+      <svg viewBox="0 0 100 100" className="absolute inset-0 w-full h-full" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="lineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#818cf8" />
+            <stop offset="50%" stopColor="#a78bfa" />
+            <stop offset="100%" stopColor="#c084fc" />
+          </linearGradient>
+          <filter id="glow">
+            <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+            <feMerge>
+              <feMergeNode in="coloredBlur"/>
+              <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+          </filter>
+        </defs>
+        
+        <path 
+          d={pathD}
+          fill="none" 
+          stroke="url(#lineGradient)" 
+          strokeWidth="0.8" 
+          filter="url(#glow)"
+          strokeLinecap="round"
+        />
+        
+        {points.map((p, i) => (
+          <circle 
+            key={i}
+            cx={p.x} 
+            cy={p.y} 
+            r="1.5" 
+            fill="#a78bfa"
+            filter="url(#glow)"
+          />
+        ))}
+      </svg>
+      
+      <div className="absolute top-4 left-4 text-[10px] text-violet-400/60 uppercase tracking-widest">Platform Performance Fee</div>
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-[10px] text-violet-400/60">Active Users (with at least 1 active bot)</div>
+      
+      <div className="absolute" style={{ left: '2%', top: '70%' }}>
+        <div className="text-[10px] font-medium text-sky-400">0-100 Active Users</div>
+        <div className="text-xs font-bold text-sky-300">0.1% Fee</div>
+        <div className="text-[9px] text-muted-foreground">Intro Phase</div>
+      </div>
+      
+      <div className="absolute" style={{ left: '18%', top: '40%' }}>
+        <div className="text-[10px] font-medium text-indigo-400">100-200 Users</div>
+        <div className="text-xs font-bold text-indigo-300">0.3% Fee</div>
+        <div className="text-[9px] text-muted-foreground">Sustainability</div>
+      </div>
+      
+      <div className="absolute" style={{ left: '35%', top: '5%' }}>
+        <div className="text-[10px] font-medium text-violet-400">200-300 Users</div>
+        <div className="text-xs font-bold text-violet-300">1.0% Fee</div>
+        <div className="text-[9px] text-muted-foreground">Platform Maturity</div>
+      </div>
+      
+      <div className="absolute" style={{ left: '58%', top: '28%' }}>
+        <div className="text-[10px] font-medium text-purple-400">300-500 Users</div>
+        <div className="text-xs font-bold text-purple-300">0.6% Fee</div>
+        <div className="text-[9px] text-muted-foreground">Efficiency Mode</div>
+      </div>
+      
+      <div className="absolute" style={{ left: '78%', top: '55%' }}>
+        <div className="text-[10px] font-medium text-pink-400">500+ Users</div>
+        <div className="text-xs font-bold text-pink-300">0.3% Floor</div>
+        <div className="text-[9px] text-muted-foreground">Network Optimized</div>
+      </div>
+      
+      <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-slate-950/90 to-transparent">
+        <p className="text-center text-xs text-violet-300/80">
+          Fees Rise to Stabilize Infrastructure, Then Compress as Network Scales
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function BusinessModelSlide() {
   return (
     <Slide>
@@ -585,12 +686,8 @@ function BusinessModelSlide() {
       </motion.p>
       
       <motion.div variants={fadeIn} className="max-w-5xl w-full">
-        <div className="rounded-2xl overflow-hidden border border-violet-500/20 mb-6">
-          <img 
-            src="/images/fee-scaling-chart.png" 
-            alt="Performance Fee Scaling by Active Users" 
-            className="w-full h-auto"
-          />
+        <div className="mb-6">
+          <FeeCurveSVG />
         </div>
         
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
