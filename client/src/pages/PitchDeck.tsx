@@ -367,53 +367,71 @@ function ProductFeaturesSlide() {
 
 function HowItWorksSlide() {
   const steps = [
-    { num: "01", title: "Connect", desc: "Link Phantom wallet", icon: <Wallet className="w-5 h-5" /> },
-    { num: "02", title: "Fund", desc: "Deposit USDC", icon: <Coins className="w-5 h-5" /> },
-    { num: "03", title: "Create", desc: "Build bot or subscribe", icon: <Bot className="w-5 h-5" /> },
-    { num: "04", title: "Configure", desc: "Set webhook URL", icon: <Zap className="w-5 h-5" /> },
-    { num: "05", title: "Trade", desc: "Automated 24/7", icon: <TrendingUp className="w-5 h-5" /> }
+    { num: "01", title: "Connect", desc: "Link Phantom wallet", icon: <Wallet className="w-6 h-6" />, color: "violet" },
+    { num: "02", title: "Fund", desc: "Deposit USDC", icon: <Coins className="w-6 h-6" />, color: "sky" },
+    { num: "03", title: "Create", desc: "Build bot or subscribe", icon: <Bot className="w-6 h-6" />, color: "indigo" },
+    { num: "04", title: "Configure", desc: "Set webhook URL", icon: <Zap className="w-6 h-6" />, color: "pink" },
+    { num: "05", title: "Trade", desc: "Automated 24/7", icon: <TrendingUp className="w-6 h-6" />, color: "blue" }
   ];
+
+  const colorClasses: Record<string, { gradient: string; border: string; text: string; iconBg: string }> = {
+    violet: { gradient: "from-violet-500/20 to-violet-500/5", border: "border-violet-500/30", text: "text-violet-400", iconBg: "from-violet-500 to-purple-600" },
+    sky: { gradient: "from-sky-500/20 to-sky-500/5", border: "border-sky-500/30", text: "text-sky-400", iconBg: "from-sky-500 to-blue-600" },
+    indigo: { gradient: "from-indigo-500/20 to-indigo-500/5", border: "border-indigo-500/30", text: "text-indigo-400", iconBg: "from-indigo-500 to-violet-600" },
+    pink: { gradient: "from-pink-500/20 to-pink-500/5", border: "border-pink-500/30", text: "text-pink-400", iconBg: "from-pink-500 to-fuchsia-600" },
+    blue: { gradient: "from-blue-500/20 to-blue-500/5", border: "border-blue-500/30", text: "text-blue-400", iconBg: "from-blue-500 to-cyan-600" },
+  };
 
   return (
     <Slide>
-      <SectionBadge><ArrowRight className="w-4 h-4" /> Flow</SectionBadge>
+      <SectionBadge color="sky"><ArrowRight className="w-4 h-4" /> Flow</SectionBadge>
       
-      <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-12 text-center">
+      <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
         How It Works
       </motion.h2>
+      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-10 text-center">
+        From wallet connection to automated trading in minutes
+      </motion.p>
       
-      <motion.div variants={fadeIn} className="flex flex-col md:flex-row items-center gap-2 max-w-5xl w-full mb-10">
-        {steps.map((step, i) => (
-          <motion.div key={i} variants={fadeIn} className="flex-1 flex items-center w-full md:w-auto">
-            <div className="flex-1 p-4 md:p-5 rounded-2xl bg-gradient-to-br from-white/[0.04] to-transparent border border-white/[0.08] text-center">
-              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center text-white mx-auto mb-3">
+      <motion.div variants={fadeIn} className="grid grid-cols-5 gap-3 max-w-5xl w-full mb-10">
+        {steps.map((step, i) => {
+          const colors = colorClasses[step.color];
+          return (
+            <motion.div 
+              key={i} 
+              variants={fadeIn}
+              className={`relative p-5 rounded-2xl bg-gradient-to-br ${colors.gradient} border ${colors.border} text-center group hover:scale-105 transition-transform`}
+            >
+              <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${colors.iconBg} flex items-center justify-center text-white mx-auto mb-4 shadow-lg`}>
                 {step.icon}
               </div>
-              <div className="text-[10px] text-primary font-bold mb-1">{step.num}</div>
-              <h3 className="font-bold mb-1">{step.title}</h3>
+              <div className={`text-xs ${colors.text} font-bold mb-1 tracking-wider`}>{step.num}</div>
+              <h3 className="font-bold text-lg mb-1">{step.title}</h3>
               <p className="text-xs text-muted-foreground">{step.desc}</p>
-            </div>
-            {i < steps.length - 1 && (
-              <div className="hidden md:block px-1">
-                <ArrowRight className="w-4 h-4 text-primary/40" />
-              </div>
-            )}
-          </motion.div>
-        ))}
+              {i < steps.length - 1 && (
+                <div className="absolute -right-2 top-1/2 -translate-y-1/2 hidden md:block z-10">
+                  <div className="w-4 h-4 rounded-full bg-white/10 flex items-center justify-center">
+                    <ArrowRight className="w-3 h-3 text-white/50" />
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          );
+        })}
       </motion.div>
       
-      <motion.div variants={fadeIn} className="p-5 rounded-2xl bg-primary/5 border border-primary/20 max-w-3xl text-center">
-        <h3 className="font-bold mb-2">Signal Flow</h3>
-        <div className="flex flex-wrap items-center justify-center gap-2 text-sm text-muted-foreground">
-          <span className="px-3 py-1 rounded-full bg-white/5">TradingView Alert</span>
-          <ArrowRight className="w-4 h-4 text-primary" />
-          <span className="px-3 py-1 rounded-full bg-white/5">Webhook</span>
-          <ArrowRight className="w-4 h-4 text-primary" />
-          <span className="px-3 py-1 rounded-full bg-white/5">QuantumVault</span>
-          <ArrowRight className="w-4 h-4 text-primary" />
-          <span className="px-3 py-1 rounded-full bg-white/5">Drift Protocol</span>
-          <ArrowRight className="w-4 h-4 text-primary" />
-          <span className="px-3 py-1 rounded-full bg-violet-500/20 text-violet-400">Position Executed</span>
+      <motion.div variants={fadeIn} className="p-6 rounded-2xl bg-gradient-to-r from-violet-500/10 via-indigo-500/10 to-blue-500/10 border border-violet-500/20 max-w-4xl">
+        <h3 className="font-bold mb-4 text-center">Signal Flow</h3>
+        <div className="flex flex-wrap items-center justify-center gap-3 text-sm">
+          <span className="px-4 py-2 rounded-xl bg-violet-500/20 border border-violet-500/30 text-violet-300 font-medium">TradingView Alert</span>
+          <ArrowRight className="w-5 h-5 text-violet-400" />
+          <span className="px-4 py-2 rounded-xl bg-sky-500/20 border border-sky-500/30 text-sky-300 font-medium">Webhook</span>
+          <ArrowRight className="w-5 h-5 text-sky-400" />
+          <span className="px-4 py-2 rounded-xl bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 font-medium">QuantumVault</span>
+          <ArrowRight className="w-5 h-5 text-indigo-400" />
+          <span className="px-4 py-2 rounded-xl bg-pink-500/20 border border-pink-500/30 text-pink-300 font-medium">Drift Protocol</span>
+          <ArrowRight className="w-5 h-5 text-pink-400" />
+          <span className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-500/30 to-cyan-500/30 border border-blue-500/40 text-blue-300 font-medium shadow-lg shadow-blue-500/20">Position Executed</span>
         </div>
       </motion.div>
     </Slide>
