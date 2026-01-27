@@ -573,19 +573,6 @@ function MarketplaceSlide() {
 }
 
 function BusinessModelSlide() {
-  const feeData = [
-    { users: 50, fee: 1.0 },
-    { users: 100, fee: 1.0 },
-    { users: 150, fee: 1.0 },
-    { users: 200, fee: 1.0 },
-    { users: 300, fee: 1.0 },
-    { users: 400, fee: 0.75 },
-    { users: 500, fee: 0.6 },
-    { users: 600, fee: 0.5 },
-    { users: 800, fee: 0.375 },
-    { users: 1000, fee: 0.3 },
-  ];
-
   return (
     <Slide>
       <SectionBadge><DollarSign className="w-4 h-4" /> Revenue</SectionBadge>
@@ -593,70 +580,32 @@ function BusinessModelSlide() {
       <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
         Revenue Model
       </motion.h2>
-      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-10 text-center">
-        Fees decrease as the network grows
+      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-8 text-center">
+        Performance fees that scale with network growth
       </motion.p>
       
       <motion.div variants={fadeIn} className="max-w-5xl w-full">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          <div className="p-6 rounded-2xl bg-gradient-to-br from-violet-500/10 to-indigo-500/5 border border-violet-500/20">
-            <h4 className="font-bold mb-4 flex items-center gap-2">
-              <Activity className="w-5 h-5 text-violet-400" />
-              Dynamic Fee Curve
-            </h4>
-            <div className="h-48 flex items-end justify-between gap-1 px-2">
-              {feeData.map((d, i) => (
-                <div key={i} className="flex-1 flex flex-col items-center gap-1">
-                  <div 
-                    className="w-full bg-gradient-to-t from-violet-500 to-indigo-400 rounded-t-md transition-all hover:from-violet-400 hover:to-indigo-300"
-                    style={{ height: `${(d.fee / 1.0) * 100}%` }}
-                  />
-                  <span className="text-[9px] text-muted-foreground">{d.users >= 1000 ? '1K' : d.users}</span>
-                </div>
-              ))}
-            </div>
-            <div className="flex justify-between mt-3 text-xs text-muted-foreground">
-              <span>Active Users</span>
-              <span className="text-violet-400">Fee: 1.0% → 0.3%</span>
-            </div>
-          </div>
-          
-          <div className="space-y-4">
-            <div className="p-5 rounded-2xl bg-gradient-to-br from-sky-500/10 to-blue-500/5 border border-sky-500/20">
-              <h4 className="font-bold text-sm mb-3 text-sky-400">Platform Fee</h4>
-              <div className="flex items-baseline gap-2 mb-2">
-                <span className="text-3xl font-bold">0.3% - 1.0%</span>
-                <span className="text-sm text-muted-foreground">per trade</span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Scales with network size. Early adopters pay less as community grows.
-              </p>
-            </div>
-            
-            <div className="p-5 rounded-2xl bg-gradient-to-br from-pink-500/10 to-fuchsia-500/5 border border-pink-500/20">
-              <h4 className="font-bold text-sm mb-3 text-pink-400">Additional Revenue</h4>
-              <ul className="space-y-2 text-xs text-muted-foreground">
-                <li className="flex items-center gap-2">
-                  <div className="w-1.5 h-1.5 rounded-full bg-pink-400" />
-                  Creator profit share cut (10-20%)
-                </li>
-                <li className="flex items-center gap-2">
-                  <div className="w-1.5 h-1.5 rounded-full bg-pink-400" />
-                  Drift referral rebates
-                </li>
-                <li className="flex items-center gap-2">
-                  <div className="w-1.5 h-1.5 rounded-full bg-pink-400" />
-                  Premium features (future)
-                </li>
-              </ul>
-            </div>
-          </div>
+        <div className="rounded-2xl overflow-hidden border border-violet-500/20 mb-6">
+          <img 
+            src="/images/fee-scaling-chart.png" 
+            alt="Performance Fee Scaling by Active Users" 
+            className="w-full h-auto"
+          />
         </div>
         
-        <div className="p-4 rounded-xl bg-indigo-500/5 border border-indigo-500/20 text-center">
-          <p className="text-sm text-indigo-300">
-            Fair, transparent fees that reward early adopters and scale with growth
-          </p>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="p-5 rounded-2xl bg-gradient-to-br from-sky-500/10 to-blue-500/5 border border-sky-500/20 text-center">
+            <div className="text-2xl font-bold text-sky-400 mb-1">0.1% - 1.0%</div>
+            <div className="text-xs text-muted-foreground">Performance Fee Range</div>
+          </div>
+          <div className="p-5 rounded-2xl bg-gradient-to-br from-violet-500/10 to-purple-500/5 border border-violet-500/20 text-center">
+            <div className="text-2xl font-bold text-violet-400 mb-1">10-20%</div>
+            <div className="text-xs text-muted-foreground">Creator Profit Share Cut</div>
+          </div>
+          <div className="p-5 rounded-2xl bg-gradient-to-br from-pink-500/10 to-fuchsia-500/5 border border-pink-500/20 text-center">
+            <div className="text-2xl font-bold text-pink-400 mb-1">Rebates</div>
+            <div className="text-xs text-muted-foreground">Drift Referral Program</div>
+          </div>
         </div>
       </motion.div>
     </Slide>
