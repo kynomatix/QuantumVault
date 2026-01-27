@@ -121,13 +121,6 @@ function TitleSlide() {
       <GradientOrb className="w-96 h-96 bg-primary -top-48 -left-48" />
       <GradientOrb className="w-96 h-96 bg-accent -bottom-48 -right-48" />
       
-      <motion.div variants={fadeIn} className="mb-6 relative z-10">
-        <div className="inline-flex items-center gap-3 px-5 py-2.5 rounded-full bg-primary/10 border border-primary/30 backdrop-blur-sm">
-          <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-          <span className="text-sm font-medium text-primary">Live on Solana Mainnet</span>
-        </div>
-      </motion.div>
-      
       <motion.div variants={fadeInScale} className="mb-6 relative z-10">
         <img 
           src="/images/QV_Logo_02.png" 
