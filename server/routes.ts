@@ -7,7 +7,10 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { encrypt as legacyEncrypt } from "./crypto";
 import { storage } from "./storage";
-import { insertUserSchema, insertTradingBotSchema, type TradingBot } from "@shared/schema";
+import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets } from "@shared/schema";
+import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
+import { db } from "./db";
+import { desc, eq, sql } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices, forceRefreshPrices } from "./drift-price";
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, getBatchDriftAccountInfo, getBatchPerpPositions, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
@@ -8907,6 +8910,145 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[Portfolio] Error fetching portfolio performance:", error);
       res.status(500).json({ error: "Failed to fetch portfolio performance" });
+    }
+  });
+
+  // ===== ADMIN LOGS ENDPOINTS =====
+  const ADMIN_PASSWORD = "XZUqowCfywUpTBHAYPWp83wJTTxl8Zzc";
+  
+  // Middleware to check admin password
+  const requireAdminAuth = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || authHeader !== `Bearer ${ADMIN_PASSWORD}`) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    next();
+  };
+  
+  // Get all webhook logs (most recent first)
+  app.get("/api/admin/webhook-logs", requireAdminAuth, async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 100;
+      const logs = await db.select().from(webhookLogs).orderBy(desc(webhookLogs.receivedAt)).limit(limit);
+      res.json(logs);
+    } catch (error) {
+      console.error("[Admin] Webhook logs error:", error);
+      res.status(500).json({ error: "Failed to fetch webhook logs" });
+    }
+  });
+  
+  // Get all bot trades (most recent first)
+  app.get("/api/admin/trades", requireAdminAuth, async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 100;
+      const trades = await db.select().from(botTrades).orderBy(desc(botTrades.executedAt)).limit(limit);
+      res.json(trades);
+    } catch (error) {
+      console.error("[Admin] Trades error:", error);
+      res.status(500).json({ error: "Failed to fetch trades" });
+    }
+  });
+  
+  // Get all bots with their config
+  app.get("/api/admin/bots", requireAdminAuth, async (req, res) => {
+    try {
+      const bots = await db.select().from(tradingBots).orderBy(desc(tradingBots.createdAt));
+      res.json(bots);
+    } catch (error) {
+      console.error("[Admin] Bots error:", error);
+      res.status(500).json({ error: "Failed to fetch bots" });
+    }
+  });
+  
+  // Get all subscriptions
+  app.get("/api/admin/subscriptions", requireAdminAuth, async (req, res) => {
+    try {
+      const subs = await db.select({
+        subscription: botSubscriptions,
+        subscriberBot: tradingBots,
+        publishedBot: publishedBots,
+      })
+        .from(botSubscriptions)
+        .leftJoin(tradingBots, eq(botSubscriptions.subscriberBotId, tradingBots.id))
+        .leftJoin(publishedBots, eq(botSubscriptions.publishedBotId, publishedBots.id))
+        .orderBy(desc(botSubscriptions.subscribedAt));
+      res.json(subs);
+    } catch (error) {
+      console.error("[Admin] Subscriptions error:", error);
+      res.status(500).json({ error: "Failed to fetch subscriptions" });
+    }
+  });
+  
+  // Get all published bots
+  app.get("/api/admin/published-bots", requireAdminAuth, async (req, res) => {
+    try {
+      const pubs = await db.select({
+        publishedBot: publishedBots,
+        sourceBot: tradingBots,
+      })
+        .from(publishedBots)
+        .leftJoin(tradingBots, eq(publishedBots.tradingBotId, tradingBots.id))
+        .orderBy(desc(publishedBots.publishedAt));
+      res.json(pubs);
+    } catch (error) {
+      console.error("[Admin] Published bots error:", error);
+      res.status(500).json({ error: "Failed to fetch published bots" });
+    }
+  });
+  
+  // Get pending profit shares
+  app.get("/api/admin/pending-profit-shares", requireAdminAuth, async (req, res) => {
+    try {
+      const shares = await db.select().from(pendingProfitShares).orderBy(desc(pendingProfitShares.createdAt));
+      res.json(shares);
+    } catch (error) {
+      console.error("[Admin] Pending profit shares error:", error);
+      res.status(500).json({ error: "Failed to fetch pending profit shares" });
+    }
+  });
+  
+  // Get wallets summary (without sensitive keys)
+  app.get("/api/admin/wallets", requireAdminAuth, async (req, res) => {
+    try {
+      const walletList = await db.select({
+        address: wallets.address,
+        agentPublicKey: wallets.agentPublicKey,
+        slippageBps: wallets.slippageBps,
+        createdAt: wallets.createdAt,
+      }).from(wallets).orderBy(desc(wallets.createdAt));
+      res.json(walletList);
+    } catch (error) {
+      console.error("[Admin] Wallets error:", error);
+      res.status(500).json({ error: "Failed to fetch wallets" });
+    }
+  });
+  
+  // System stats summary
+  app.get("/api/admin/stats", requireAdminAuth, async (req, res) => {
+    try {
+      const [totalBots] = await db.select({ count: sql<number>`count(*)::int` }).from(tradingBots);
+      const [activeBots] = await db.select({ count: sql<number>`count(*)::int` }).from(tradingBots).where(eq(tradingBots.isActive, true));
+      const [totalTrades] = await db.select({ count: sql<number>`count(*)::int` }).from(botTrades);
+      const [totalWebhooks] = await db.select({ count: sql<number>`count(*)::int` }).from(webhookLogs);
+      const [processedWebhooks] = await db.select({ count: sql<number>`count(*)::int` }).from(webhookLogs).where(eq(webhookLogs.processed, true));
+      const [activeSubscriptions] = await db.select({ count: sql<number>`count(*)::int` }).from(botSubscriptions).where(eq(botSubscriptions.status, 'active'));
+      const [totalUsers] = await db.select({ count: sql<number>`count(*)::int` }).from(wallets);
+      const [pendingShares] = await db.select({ count: sql<number>`count(*)::int` }).from(pendingProfitShares).where(eq(pendingProfitShares.status, 'pending'));
+      
+      res.json({
+        totalBots: totalBots?.count || 0,
+        activeBots: activeBots?.count || 0,
+        totalTrades: totalTrades?.count || 0,
+        totalWebhooks: totalWebhooks?.count || 0,
+        processedWebhooks: processedWebhooks?.count || 0,
+        activeSubscriptions: activeSubscriptions?.count || 0,
+        totalUsers: totalUsers?.count || 0,
+        pendingProfitShares: pendingShares?.count || 0,
+        serverTime: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error("[Admin] Stats error:", error);
+      res.status(500).json({ error: "Failed to fetch stats" });
     }
   });
 
