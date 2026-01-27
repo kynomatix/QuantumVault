@@ -8044,9 +8044,17 @@ export async function registerRoutes(
       }
       
       // Get wallet to check for agent wallet and available balance
-      const wallet = await storage.getWallet(req.walletAddress!);
+      let wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncrypted) {
         return res.status(400).json({ error: "Agent wallet not set up. Please set up your agent wallet first." });
+      }
+      
+      // AUTO-REFERRAL: Attribute referral to the bot creator if subscriber doesn't already have a referrer
+      // This ensures creators get credit for users who subscribe via marketplace URLs
+      if (!wallet.referredBy && publishedBot.creatorWalletAddress !== req.walletAddress) {
+        await storage.updateWallet(req.walletAddress!, { referredBy: publishedBot.creatorWalletAddress });
+        wallet = (await storage.getWallet(req.walletAddress!))!;
+        console.log(`[Referral] Auto-attributed: ${req.walletAddress} referred by ${publishedBot.creatorWalletAddress} (via marketplace subscription)`);
       }
       
       // Check available balance in agent wallet (SPL USDC token account, not Drift subaccount)
