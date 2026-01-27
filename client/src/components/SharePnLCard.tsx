@@ -141,8 +141,17 @@ export function SharePnLCard({
 
     if (logoImg) {
       const logoSize = 280;
-      const logoX = width - logoSize - 20;
+      const logoX = width - logoSize - 36;
       const logoY = height / 2 - logoSize / 2 - 25;
+      
+      ctx.save();
+      ctx.shadowColor = 'rgba(139, 92, 246, 0.4)';
+      ctx.shadowBlur = 60;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 0;
+      ctx.globalAlpha = 0.15;
+      ctx.drawImage(logoImg, logoX + 10, logoY + 10, logoSize - 20, logoSize - 20);
+      ctx.restore();
       
       const logoCanvas = document.createElement('canvas');
       logoCanvas.width = logoSize;
@@ -153,36 +162,67 @@ export function SharePnLCard({
         
         logoCtx.globalCompositeOperation = 'destination-out';
         const fadeGradient = logoCtx.createLinearGradient(0, 0, logoSize, logoSize);
-        fadeGradient.addColorStop(0, 'rgba(0,0,0,0.7)');
-        fadeGradient.addColorStop(0.4, 'rgba(0,0,0,0.3)');
-        fadeGradient.addColorStop(0.7, 'rgba(0,0,0,0.1)');
+        fadeGradient.addColorStop(0, 'rgba(0,0,0,0.75)');
+        fadeGradient.addColorStop(0.3, 'rgba(0,0,0,0.4)');
+        fadeGradient.addColorStop(0.6, 'rgba(0,0,0,0.15)');
         fadeGradient.addColorStop(1, 'rgba(0,0,0,0)');
         logoCtx.fillStyle = fadeGradient;
         logoCtx.fillRect(0, 0, logoSize, logoSize);
         
-        ctx.globalAlpha = 0.18;
+        ctx.globalAlpha = 0.22;
         ctx.drawImage(logoCanvas, logoX, logoY);
         ctx.globalAlpha = 1;
       }
       
-      ctx.strokeStyle = 'rgba(139, 92, 246, 0.08)';
-      ctx.lineWidth = 1;
+      const tintCanvas = document.createElement('canvas');
+      tintCanvas.width = logoSize;
+      tintCanvas.height = logoSize;
+      const tintCtx = tintCanvas.getContext('2d');
+      if (tintCtx) {
+        tintCtx.drawImage(logoImg, 0, 0, logoSize, logoSize);
+        tintCtx.globalCompositeOperation = 'source-atop';
+        const tintGradient = tintCtx.createLinearGradient(0, logoSize, logoSize, 0);
+        tintGradient.addColorStop(0, 'rgba(139, 92, 246, 0.6)');
+        tintGradient.addColorStop(0.5, 'rgba(168, 85, 247, 0.3)');
+        tintGradient.addColorStop(1, 'rgba(139, 92, 246, 0.1)');
+        tintCtx.fillStyle = tintGradient;
+        tintCtx.fillRect(0, 0, logoSize, logoSize);
+        
+        tintCtx.globalCompositeOperation = 'destination-out';
+        const tintFade = tintCtx.createLinearGradient(0, 0, logoSize, logoSize);
+        tintFade.addColorStop(0, 'rgba(0,0,0,0.9)');
+        tintFade.addColorStop(0.5, 'rgba(0,0,0,0.3)');
+        tintFade.addColorStop(1, 'rgba(0,0,0,0)');
+        tintCtx.fillStyle = tintFade;
+        tintCtx.fillRect(0, 0, logoSize, logoSize);
+        
+        ctx.globalAlpha = 0.35;
+        ctx.drawImage(tintCanvas, logoX - 5, logoY - 5, logoSize + 10, logoSize + 10);
+        ctx.globalAlpha = 1;
+      }
+      
+      ctx.strokeStyle = 'rgba(139, 92, 246, 0.1)';
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(width - 60, 80, 40, 0, Math.PI * 0.5);
+      ctx.arc(width - 50, 75, 45, 0, Math.PI * 0.6);
       ctx.stroke();
       ctx.beginPath();
-      ctx.arc(width - 100, 60, 25, Math.PI * 0.8, Math.PI * 1.3);
+      ctx.arc(width - 95, 55, 30, Math.PI * 0.7, Math.PI * 1.4);
       ctx.stroke();
       
-      ctx.fillStyle = 'rgba(139, 92, 246, 0.06)';
+      ctx.fillStyle = 'rgba(168, 85, 247, 0.08)';
       ctx.beginPath();
-      ctx.arc(width - 45, 120, 3, 0, Math.PI * 2);
+      ctx.arc(width - 40, 115, 4, 0, Math.PI * 2);
       ctx.fill();
       ctx.beginPath();
-      ctx.arc(width - 80, 45, 2, 0, Math.PI * 2);
+      ctx.arc(width - 75, 40, 3, 0, Math.PI * 2);
       ctx.fill();
       ctx.beginPath();
-      ctx.arc(width - 30, 85, 2, 0, Math.PI * 2);
+      ctx.arc(width - 25, 80, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(139, 92, 246, 0.12)';
+      ctx.beginPath();
+      ctx.arc(width - 130, 70, 2, 0, Math.PI * 2);
       ctx.fill();
     }
 
