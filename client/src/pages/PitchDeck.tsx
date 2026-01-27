@@ -581,35 +581,45 @@ function BusinessModelSlide() {
       <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
         Revenue Model
       </motion.h2>
-      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-8 text-center">
+      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-4 text-center">
         Performance fees that scale with network growth
       </motion.p>
       
-      <motion.div variants={fadeIn} className="max-w-3xl w-full">
-        <div className="text-center mb-8">
-          <div className="text-6xl md:text-7xl font-bold bg-gradient-to-r from-violet-400 to-fuchsia-400 bg-clip-text text-transparent">
-            0.1% - 1.0%
-          </div>
-          <div className="text-xl text-muted-foreground mt-2">
-            Performance Fee Per Trade
-          </div>
+      <motion.p variants={fadeIn} className="text-xs text-muted-foreground mb-6 text-center">
+        Active user = at least 1 bot running in last 30 days
+      </motion.p>
+      
+      <motion.div variants={fadeIn} className="grid grid-cols-5 gap-3 max-w-4xl w-full">
+        <div className="p-4 rounded-xl bg-slate-500/10 border border-slate-500/30 text-center">
+          <div className="text-2xl font-bold text-slate-400">0%</div>
+          <div className="text-xs text-white/80 mt-1 font-medium">Preview</div>
+          <div className="text-[10px] text-muted-foreground mt-1">Dev Only</div>
         </div>
-        
-        <div className="grid grid-cols-3 gap-4 text-center">
-          <div className="p-4 rounded-xl bg-slate-800/50 border border-slate-700/50">
-            <div className="text-2xl font-bold text-violet-400">0.1%</div>
-            <div className="text-xs text-muted-foreground mt-1">Early Adopters</div>
-          </div>
-          <div className="p-4 rounded-xl bg-slate-800/50 border border-violet-500/30">
-            <div className="text-2xl font-bold text-fuchsia-400">1.0%</div>
-            <div className="text-xs text-muted-foreground mt-1">At Scale</div>
-          </div>
-          <div className="p-4 rounded-xl bg-slate-800/50 border border-slate-700/50">
-            <div className="text-2xl font-bold text-sky-400">0.3%</div>
-            <div className="text-xs text-muted-foreground mt-1">Long-Term Floor</div>
-          </div>
+        <div className="p-4 rounded-xl bg-sky-500/10 border border-sky-500/30 text-center">
+          <div className="text-2xl font-bold text-sky-400">0.1%</div>
+          <div className="text-xs text-white/80 mt-1 font-medium">Bootstrapping</div>
+          <div className="text-[10px] text-muted-foreground mt-1">0-100 users</div>
+        </div>
+        <div className="p-4 rounded-xl bg-violet-500/10 border border-violet-500/30 text-center">
+          <div className="text-2xl font-bold text-violet-400">0.3%</div>
+          <div className="text-xs text-white/80 mt-1 font-medium">Sustainability</div>
+          <div className="text-[10px] text-muted-foreground mt-1">101-200 users</div>
+        </div>
+        <div className="p-4 rounded-xl bg-fuchsia-500/10 border border-fuchsia-500/30 text-center">
+          <div className="text-2xl font-bold text-fuchsia-400">1.0%</div>
+          <div className="text-xs text-white/80 mt-1 font-medium">Maturity</div>
+          <div className="text-[10px] text-muted-foreground mt-1">201-300 users</div>
+        </div>
+        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-center">
+          <div className="text-2xl font-bold text-emerald-400">0.3%</div>
+          <div className="text-xs text-white/80 mt-1 font-medium">Efficiency</div>
+          <div className="text-[10px] text-muted-foreground mt-1">300+ (floor)</div>
         </div>
       </motion.div>
+      
+      <motion.p variants={fadeIn} className="text-xs text-violet-300/70 mt-6 text-center">
+        Bring users, lower fees - growth benefits everyone
+      </motion.p>
     </Slide>
   );
 }
