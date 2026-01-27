@@ -368,8 +368,10 @@ export function SharePnLCard({
         toast({ title: 'Image downloaded! Attach it to your X post.' });
       }
 
+      console.log('[SharePnLCard] shareUrl prop:', shareUrl);
       const urlText = shareUrl ? `\n\nJoin here: ${shareUrl}` : '';
       const tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!${urlText}\n\nPowered by @myQuantumVault`;
+      console.log('[SharePnLCard] tweetText:', tweetText);
       const xUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(tweetText)}`;
       window.open(xUrl, '_blank', 'noopener,noreferrer');
     } catch (error) {
