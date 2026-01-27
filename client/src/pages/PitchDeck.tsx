@@ -619,8 +619,9 @@ function CompetitiveSlide() {
     ["Feature", "QuantumVault", "Pionex", "3Commas"],
     ["Non-Custodial", true, false, false],
     ["DeFi Perpetuals", true, false, false],
-    ["Signal Marketplace", true, false, false],
-    ["Profit Sharing", true, false, false],
+    ["Open Marketplace (Anyone Can Post)", true, false, false],
+    ["Signal Marketplace", true, true, false],
+    ["Profit Sharing", true, true, false],
     ["TradingView Webhooks", true, true, true],
     ["Free Bots", true, true, false],
     ["On-Chain Verification", true, false, false]
