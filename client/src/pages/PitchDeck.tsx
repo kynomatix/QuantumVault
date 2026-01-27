@@ -620,10 +620,10 @@ function CompetitiveSlide() {
     ["Non-Custodial", true, false, false],
     ["DeFi Perpetuals", true, false, false],
     ["Open Marketplace (Anyone Can Post)", true, false, false],
+    ["AI Portfolio Management", "Coming Soon", false, false],
     ["Signal Marketplace", true, true, false],
     ["Profit Sharing", true, true, false],
     ["TradingView Webhooks", true, true, true],
-    ["Free Bots", true, true, false],
     ["On-Chain Verification", true, false, false]
   ];
 
@@ -653,6 +653,8 @@ function CompetitiveSlide() {
                   <td key={j} className={`py-3 px-4 ${j === 0 ? 'text-left font-medium' : 'text-center'} ${j === 1 ? 'bg-primary/5' : ''}`}>
                     {typeof cell === 'boolean' ? (
                       cell ? <CheckCircle2 className="w-5 h-5 text-violet-500 mx-auto" /> : <X className="w-5 h-5 text-white/20 mx-auto" />
+                    ) : cell === "Coming Soon" ? (
+                      <span className="text-xs text-fuchsia-400 font-medium">Coming Soon</span>
                     ) : cell}
                   </td>
                 ))}
@@ -754,15 +756,15 @@ function RoadmapSlide() {
     },
     {
       quarter: "Q3 2026",
-      title: "Vaults",
+      title: "AI Integration",
       status: "upcoming",
-      items: ["Multi-asset collateral", "Intelligent borrowing", "DRIFT rewards", "Yield optimization"]
+      items: ["AI portfolio management", "Smart bot optimization", "Predictive analytics", "Auto risk adjustment"]
     },
     {
       quarter: "Q4 2026",
       title: "Scale",
       status: "upcoming",
-      items: ["External yield", "Institutional API", "Cross-chain", "DAO governance"]
+      items: ["Multi-asset vaults", "Institutional API", "Cross-chain", "DAO governance"]
     }
   ];
 
