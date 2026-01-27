@@ -277,6 +277,14 @@ function MarketOpportunitySlide() {
           </ul>
         </div>
       </motion.div>
+      
+      <motion.div variants={fadeIn} className="mt-8 flex flex-wrap gap-3 justify-center text-[10px] text-muted-foreground/60">
+        <a href="https://defillama.com/protocol/drift-trade" target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors underline" data-testid="link-defillama">DefiLlama</a>
+        <span>|</span>
+        <a href="https://www.drift.trade/updates" target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors underline" data-testid="link-drift-blog">Drift Blog (Jan 2025)</a>
+        <span>|</span>
+        <a href="https://coinbureau.com/review/pionex-review/" target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors underline" data-testid="link-pionex-review">CoinBureau Pionex Review</a>
+      </motion.div>
     </Slide>
   );
 }
@@ -414,10 +422,10 @@ function HowItWorksSlide() {
 
 function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
   const stats = [
-    { label: "Total Value Locked", value: metrics?.tvl ? `$${(metrics.tvl / 1000).toFixed(1)}K` : "$20+", icon: <PiggyBank className="w-5 h-5" /> },
-    { label: "Active Trading Bots", value: "7", icon: <Bot className="w-5 h-5" /> },
-    { label: "Platform Users", value: "5", icon: <Users className="w-5 h-5" /> },
-    { label: "Total Trades", value: "177", icon: <Activity className="w-5 h-5" /> }
+    { label: "Total Value Locked", value: metrics?.tvl ? `$${(metrics.tvl / 1000).toFixed(1)}K` : "...", icon: <PiggyBank className="w-5 h-5" />, testId: "metric-tvl" },
+    { label: "Active Trading Bots", value: metrics?.activeBots?.toString() ?? "...", icon: <Bot className="w-5 h-5" />, testId: "metric-bots" },
+    { label: "Platform Users", value: metrics?.activeUsers?.toString() ?? "...", icon: <Users className="w-5 h-5" />, testId: "metric-users" },
+    { label: "Total Trades", value: metrics?.totalTrades?.toString() ?? "...", icon: <Activity className="w-5 h-5" />, testId: "metric-trades" }
   ];
 
   return (
@@ -441,7 +449,7 @@ function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
             <div className="flex items-center justify-center text-emerald-400 mb-3">
               {stat.icon}
             </div>
-            <div className="text-3xl md:text-4xl font-bold text-emerald-400 mb-1">
+            <div className="text-3xl md:text-4xl font-bold text-emerald-400 mb-1" data-testid={stat.testId}>
               {stat.value}
             </div>
             <div className="text-xs text-muted-foreground">{stat.label}</div>
@@ -450,19 +458,23 @@ function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
       </motion.div>
       
       <motion.div variants={fadeIn} className="flex flex-wrap gap-3 justify-center">
-        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm">
+        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm" data-testid="status-live">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           Live on Mainnet
         </div>
-        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-sm">
+        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-sm" data-testid="status-revenue">
           <CheckCircle2 className="w-4 h-4" />
           Revenue Generating
         </div>
-        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-purple-500/10 border border-purple-500/30 text-purple-400 text-sm">
+        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-purple-500/10 border border-purple-500/30 text-purple-400 text-sm" data-testid="status-audited">
           <Shield className="w-4 h-4" />
           Security Audited
         </div>
       </motion.div>
+      
+      <motion.p variants={fadeIn} className="text-xs text-muted-foreground mt-6 text-center">
+        Real-time data from Solana mainnet via QuantumVault API
+      </motion.p>
     </Slide>
   );
 }
@@ -834,11 +846,13 @@ function TeamSlide() {
           </p>
           <div className="flex justify-center gap-3">
             <a href="https://twitter.com/kryptolytix" target="_blank" rel="noopener noreferrer" 
-               className="p-3 rounded-xl bg-white/5 hover:bg-white/10 transition-colors">
+               className="p-3 rounded-xl bg-white/5 hover:bg-white/10 transition-colors"
+               data-testid="link-team-twitter">
               <Twitter className="w-5 h-5" />
             </a>
             <a href="mailto:invest@myquantumvault.com" 
-               className="p-3 rounded-xl bg-white/5 hover:bg-white/10 transition-colors">
+               className="p-3 rounded-xl bg-white/5 hover:bg-white/10 transition-colors"
+               data-testid="link-team-email">
               <Mail className="w-5 h-5" />
             </a>
           </div>
@@ -890,6 +904,7 @@ function AskSlide() {
         <a 
           href="mailto:invest@myquantumvault.com" 
           className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-primary to-accent text-white font-medium hover:opacity-90 transition-opacity"
+          data-testid="link-contact-email"
         >
           <Mail className="w-5 h-5" />
           invest@myquantumvault.com
@@ -931,6 +946,7 @@ function ClosingSlide() {
           size="lg" 
           className="bg-gradient-to-r from-primary to-accent hover:opacity-90 px-8"
           onClick={() => navigate('/app')}
+          data-testid="button-try-platform"
         >
           Try the Platform
           <ArrowUpRight className="w-4 h-4 ml-2" />
@@ -939,6 +955,7 @@ function ClosingSlide() {
           size="lg" 
           variant="outline"
           onClick={() => window.open('https://myquantumvault.com', '_blank')}
+          data-testid="button-visit-website"
         >
           Visit Website
           <ExternalLink className="w-4 h-4 ml-2" />
@@ -947,12 +964,14 @@ function ClosingSlide() {
       
       <motion.div variants={fadeIn} className="flex flex-wrap gap-6 justify-center text-sm text-muted-foreground relative z-10">
         <a href="https://twitter.com/kryptolytix" target="_blank" rel="noopener noreferrer" 
-           className="flex items-center gap-2 hover:text-primary transition-colors">
+           className="flex items-center gap-2 hover:text-primary transition-colors"
+           data-testid="link-closing-twitter">
           <Twitter className="w-4 h-4" />
           @kryptolytix
         </a>
         <a href="mailto:invest@myquantumvault.com" 
-           className="flex items-center gap-2 hover:text-primary transition-colors">
+           className="flex items-center gap-2 hover:text-primary transition-colors"
+           data-testid="link-closing-email">
           <Mail className="w-4 h-4" />
           invest@myquantumvault.com
         </a>
@@ -968,11 +987,12 @@ export default function PitchDeck() {
   const { data: metrics } = useQuery<PlatformMetrics>({
     queryKey: ['platform-metrics'],
     queryFn: async () => {
-      const res = await fetch('/api/analytics/metrics');
+      const res = await fetch('/api/metrics');
       if (!res.ok) throw new Error('Failed to fetch metrics');
       return res.json();
     },
-    staleTime: 60000
+    staleTime: 60000,
+    retry: 2
   });
 
   const slides = [
