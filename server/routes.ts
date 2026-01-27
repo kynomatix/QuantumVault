@@ -986,7 +986,16 @@ export async function registerRoutes(
   // Public API: Platform metrics (no auth required) - for landing page
   app.get("/api/metrics", async (req, res) => {
     try {
-      const metrics = await getMetrics();
+      const forceRefresh = req.query.refresh === 'true';
+      let metrics;
+      
+      if (forceRefresh) {
+        const { calculateAndStoreMetrics } = await import("./analytics-indexer");
+        metrics = await calculateAndStoreMetrics();
+      } else {
+        metrics = await getMetrics();
+      }
+      
       res.json({
         tvl: metrics.tvl,
         totalVolume: metrics.totalVolume,

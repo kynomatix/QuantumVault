@@ -420,12 +420,24 @@ function HowItWorksSlide() {
   );
 }
 
+function formatCurrency(value: number): string {
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(2)}K`;
+  return `$${value.toFixed(2)}`;
+}
+
+function formatNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return value.toString();
+}
+
 function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
   const stats = [
-    { label: "Total Value Locked", value: metrics?.tvl ? `$${(metrics.tvl / 1000).toFixed(1)}K` : "...", icon: <PiggyBank className="w-5 h-5" />, testId: "metric-tvl" },
+    { label: "Total Value Locked", value: metrics?.tvl ? formatCurrency(metrics.tvl) : "...", icon: <PiggyBank className="w-5 h-5" />, testId: "metric-tvl" },
     { label: "Active Trading Bots", value: metrics?.activeBots?.toString() ?? "...", icon: <Bot className="w-5 h-5" />, testId: "metric-bots" },
     { label: "Platform Users", value: metrics?.activeUsers?.toString() ?? "...", icon: <Users className="w-5 h-5" />, testId: "metric-users" },
-    { label: "Total Trades", value: metrics?.totalTrades?.toString() ?? "...", icon: <Activity className="w-5 h-5" />, testId: "metric-trades" }
+    { label: "Total Trades", value: metrics?.totalTrades ? formatNumber(metrics.totalTrades) : "...", icon: <Activity className="w-5 h-5" />, testId: "metric-trades" }
   ];
 
   return (
@@ -1017,11 +1029,11 @@ export default function PitchDeck() {
   const { data: metrics } = useQuery<PlatformMetrics>({
     queryKey: ['platform-metrics'],
     queryFn: async () => {
-      const res = await fetch('/api/metrics');
+      const res = await fetch('/api/metrics?refresh=true');
       if (!res.ok) throw new Error('Failed to fetch metrics');
       return res.json();
     },
-    staleTime: 60000,
+    staleTime: 30000,
     retry: 2
   });
 
