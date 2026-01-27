@@ -104,19 +104,23 @@ function GradientOrb({ className, color = "primary" }: { className?: string; col
   );
 }
 
-function SectionBadge({ children, color = "primary" }: { children: React.ReactNode; color?: string }) {
+function SectionLabel({ children, color = "primary" }: { children: React.ReactNode; color?: string }) {
   const colorClasses: Record<string, string> = {
-    primary: "bg-violet-500/10 border-violet-500/30 text-violet-400",
-    accent: "bg-fuchsia-500/10 border-fuchsia-500/30 text-fuchsia-400",
-    sky: "bg-sky-500/10 border-sky-500/30 text-sky-400"
+    primary: "text-violet-400",
+    accent: "text-fuchsia-400",
+    sky: "text-sky-400"
   };
   return (
-    <motion.div variants={fadeIn} className="mb-8">
-      <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-full border backdrop-blur-sm text-sm font-medium ${colorClasses[color]}`}>
+    <motion.div variants={fadeIn} className="mb-6">
+      <div className={`inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-widest ${colorClasses[color]}`}>
         {children}
       </div>
     </motion.div>
   );
+}
+
+function SectionBadge({ children, color = "primary" }: { children: React.ReactNode; color?: string }) {
+  return <SectionLabel color={color}>{children}</SectionLabel>;
 }
 
 function TitleSlide() {
@@ -569,12 +573,17 @@ function MarketplaceSlide() {
 }
 
 function BusinessModelSlide() {
-  const feePhases = [
-    { phase: "0", name: "Developer Preview", users: "Current", fee: "0%", color: "text-white/40" },
-    { phase: "A", name: "Bootstrapping", users: "0-100", fee: "0.1%", color: "text-sky-400" },
-    { phase: "B", name: "Sustainability", users: "101-200", fee: "0.3%", color: "text-cyan-400" },
-    { phase: "C", name: "Maturity", users: "201-300", fee: "1.0%", color: "text-violet-400" },
-    { phase: "D", name: "Network Mode", users: "300+", fee: "Dynamic", color: "text-primary" }
+  const feeData = [
+    { users: 50, fee: 1.0 },
+    { users: 100, fee: 1.0 },
+    { users: 150, fee: 1.0 },
+    { users: 200, fee: 1.0 },
+    { users: 300, fee: 1.0 },
+    { users: 400, fee: 0.75 },
+    { users: 500, fee: 0.6 },
+    { users: 600, fee: 0.5 },
+    { users: 800, fee: 0.375 },
+    { users: 1000, fee: 0.3 },
   ];
 
   return (
@@ -582,68 +591,71 @@ function BusinessModelSlide() {
       <SectionBadge><DollarSign className="w-4 h-4" /> Revenue</SectionBadge>
       
       <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
-        Fee Schedule
+        Revenue Model
       </motion.h2>
       <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-10 text-center">
-        Progressive fees aligned with platform growth
+        Fees decrease as the network grows
       </motion.p>
       
-      <motion.div variants={fadeIn} className="max-w-4xl w-full">
-        <div className="grid grid-cols-5 gap-2 mb-6">
-          {feePhases.map((phase, i) => (
-            <motion.div 
-              key={i}
-              variants={fadeIn}
-              className={`p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] text-center ${i === 0 ? 'ring-2 ring-primary/50' : ''}`}
-            >
-              <div className={`text-2xl font-bold mb-1 ${phase.color}`}>{phase.fee}</div>
-              <div className="text-xs font-medium mb-1">Phase {phase.phase}</div>
-              <div className="text-[10px] text-muted-foreground">{phase.name}</div>
-              <div className="text-[10px] text-muted-foreground/60 mt-1">{phase.users} users</div>
-            </motion.div>
-          ))}
-        </div>
-        
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-          <div className="p-5 rounded-xl bg-gradient-to-br from-primary/10 to-primary/5 border border-primary/20">
-            <h4 className="font-bold text-sm mb-3 flex items-center gap-2">
-              <Activity className="w-4 h-4 text-primary" />
-              Network Efficiency Formula
+      <motion.div variants={fadeIn} className="max-w-5xl w-full">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          <div className="p-6 rounded-2xl bg-gradient-to-br from-violet-500/10 to-indigo-500/5 border border-violet-500/20">
+            <h4 className="font-bold mb-4 flex items-center gap-2">
+              <Activity className="w-5 h-5 text-violet-400" />
+              Dynamic Fee Curve
             </h4>
-            <div className="font-mono text-xs bg-black/30 rounded-lg p-3 mb-2">
-              fee = max(0.3%, 1% × (300 ÷ active_users))
+            <div className="h-48 flex items-end justify-between gap-1 px-2">
+              {feeData.map((d, i) => (
+                <div key={i} className="flex-1 flex flex-col items-center gap-1">
+                  <div 
+                    className="w-full bg-gradient-to-t from-violet-500 to-indigo-400 rounded-t-md transition-all hover:from-violet-400 hover:to-indigo-300"
+                    style={{ height: `${(d.fee / 1.0) * 100}%` }}
+                  />
+                  <span className="text-[9px] text-muted-foreground">{d.users >= 1000 ? '1K' : d.users}</span>
+                </div>
+              ))}
             </div>
-            <p className="text-[10px] text-muted-foreground">
-              Bell curve: fees decrease as network grows, rewarding early adopters while maintaining sustainability
-            </p>
+            <div className="flex justify-between mt-3 text-xs text-muted-foreground">
+              <span>Active Users</span>
+              <span className="text-violet-400">Fee: 1.0% → 0.3%</span>
+            </div>
           </div>
           
-          <div className="p-5 rounded-xl bg-white/[0.02] border border-white/[0.06]">
-            <h4 className="font-bold text-sm mb-3">Additional Revenue</h4>
-            <ul className="space-y-2 text-xs text-muted-foreground">
-              <li className="flex items-center gap-2">
-                <Users className="w-3 h-3 text-primary" />
-                Creator profit share cut (10-20%)
-              </li>
-              <li className="flex items-center gap-2">
-                <Globe className="w-3 h-3 text-primary" />
-                Drift referral rebates
-              </li>
-              <li className="flex items-center gap-2">
-                <Sparkles className="w-3 h-3 text-primary" />
-                Premium features (future)
-              </li>
-            </ul>
+          <div className="space-y-4">
+            <div className="p-5 rounded-2xl bg-gradient-to-br from-sky-500/10 to-blue-500/5 border border-sky-500/20">
+              <h4 className="font-bold text-sm mb-3 text-sky-400">Platform Fee</h4>
+              <div className="flex items-baseline gap-2 mb-2">
+                <span className="text-3xl font-bold">0.3% - 1.0%</span>
+                <span className="text-sm text-muted-foreground">per trade</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Scales with network size. Early adopters pay less as community grows.
+              </p>
+            </div>
+            
+            <div className="p-5 rounded-2xl bg-gradient-to-br from-pink-500/10 to-fuchsia-500/5 border border-pink-500/20">
+              <h4 className="font-bold text-sm mb-3 text-pink-400">Additional Revenue</h4>
+              <ul className="space-y-2 text-xs text-muted-foreground">
+                <li className="flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-pink-400" />
+                  Creator profit share cut (10-20%)
+                </li>
+                <li className="flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-pink-400" />
+                  Drift referral rebates
+                </li>
+                <li className="flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-pink-400" />
+                  Premium features (future)
+                </li>
+              </ul>
+            </div>
           </div>
         </div>
         
-        <div className="p-4 rounded-xl bg-violet-500/5 border border-violet-500/20 text-center">
-          <div className="flex items-center justify-center gap-2 text-xs text-violet-400 mb-1">
-            <CheckCircle2 className="w-3 h-3" />
-            Active Traders = users with trades in last 30 days
-          </div>
-          <p className="text-[10px] text-muted-foreground">
-            Fair, transparent, and defensible fee structure that grows with the community
+        <div className="p-4 rounded-xl bg-indigo-500/5 border border-indigo-500/20 text-center">
+          <p className="text-sm text-indigo-300">
+            Fair, transparent fees that reward early adopters and scale with growth
           </p>
         </div>
       </motion.div>
