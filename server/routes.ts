@@ -3841,11 +3841,12 @@ export async function registerRoutes(
       const bots = await storage.getTradingBots(req.walletAddress!);
       const wallet = await storage.getWallet(req.walletAddress!);
       
-      // Enrich with actual trade counts, position data, and net PnL from database
+      // Enrich with actual trade counts, position data, net PnL, and publish status from database
       const enrichedBots = await Promise.all(bots.map(async (bot) => {
-        const [tradeCount, position] = await Promise.all([
+        const [tradeCount, position, publishedBot] = await Promise.all([
           storage.getBotTradeCount(bot.id),
           storage.getBotPosition(bot.id, bot.market),
+          storage.getPublishedBotByTradingBotId(bot.id),
         ]);
         
         // Calculate net deposited from equity events for this bot's subaccount
@@ -3881,6 +3882,8 @@ export async function registerRoutes(
           netDeposited,
           netPnl,
           netPnlPercent,
+          isPublished: !!publishedBot && publishedBot.isActive,
+          publishedBotId: publishedBot?.id || null,
         };
       }));
       
@@ -7903,6 +7906,18 @@ export async function registerRoutes(
       // Check if already published
       const existing = await storage.getPublishedBotByTradingBotId(id);
       if (existing) {
+        // If previously unpublished (inactive), allow republishing
+        if (!existing.isActive) {
+          await storage.updatePublishedBot(existing.id, { 
+            isActive: true,
+            name: name || tradingBot.name,
+            description: description || existing.description,
+            profitSharePercent: String(Math.min(10, Math.max(0, Number(profitSharePercent) || 0))),
+          });
+          console.log(`[Marketplace] Bot ${id} republished (reactivated)`);
+          const updated = await storage.getPublishedBotById(existing.id);
+          return res.json(updated);
+        }
         return res.status(400).json({ error: "Bot is already published" });
       }
 
