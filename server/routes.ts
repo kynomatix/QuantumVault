@@ -9042,6 +9042,114 @@ export async function registerRoutes(
     }
   });
   
+  // Subscription routing diagnostics - shows why signals might not be routing
+  app.get("/api/admin/subscription-diagnostics", requireAdminAuth, async (req, res) => {
+    try {
+      // Get all active subscriptions with full details
+      const subscriptions = await db.select()
+        .from(botSubscriptions)
+        .where(eq(botSubscriptions.status, 'active'));
+      
+      const diagnostics = await Promise.all(subscriptions.map(async (sub) => {
+        // Get subscriber bot
+        const [subscriberBot] = await db.select().from(tradingBots).where(eq(tradingBots.id, sub.subscriberBotId || ''));
+        
+        // Get published bot
+        const [publishedBot] = await db.select().from(publishedBots).where(eq(publishedBots.id, sub.publishedBotId));
+        
+        // Get source trading bot
+        const [sourceBot] = publishedBot 
+          ? await db.select().from(tradingBots).where(eq(tradingBots.id, publishedBot.tradingBotId))
+          : [null];
+        
+        // Get subscriber wallet if subscriber bot exists
+        let subscriberWallet = null;
+        if (subscriberBot) {
+          [subscriberWallet] = await db.select({
+            address: wallets.address,
+            hasAgentPublicKey: sql<boolean>`agent_public_key IS NOT NULL`,
+            hasAgentPrivateKey: sql<boolean>`agent_private_key_encrypted IS NOT NULL`,
+          }).from(wallets).where(eq(wallets.address, subscriberBot.walletAddress));
+        }
+        
+        // Check if subscriber would be found by the routing query
+        let wouldBeRouted = false;
+        if (publishedBot && subscriberBot) {
+          const routingResult = await storage.getSubscriberBotsBySourceId(publishedBot.id);
+          wouldBeRouted = routingResult.some(b => b.id === subscriberBot.id);
+        }
+        
+        // Compute routing issues
+        const issues: string[] = [];
+        if (!subscriberBot) issues.push('Subscriber bot is NULL');
+        if (!publishedBot) issues.push('Published bot not found');
+        if (!sourceBot) issues.push('Source trading bot not found');
+        if (subscriberBot && !subscriberBot.isActive) issues.push('Subscriber bot is inactive');
+        if (publishedBot && !publishedBot.isActive) issues.push('Published bot is inactive');
+        if (subscriberBot && !subscriberBot.sourcePublishedBotId) issues.push('Subscriber bot missing sourcePublishedBotId');
+        if (subscriberBot && subscriberBot.sourcePublishedBotId !== sub.publishedBotId) issues.push('Subscriber sourcePublishedBotId mismatch');
+        if (!subscriberWallet) issues.push('Subscriber wallet not found');
+        if (subscriberWallet && !subscriberWallet.hasAgentPublicKey) issues.push('Subscriber wallet missing agentPublicKey');
+        if (subscriberWallet && !subscriberWallet.hasAgentPrivateKey) issues.push('Subscriber wallet missing agentPrivateKeyEncrypted');
+        if (!wouldBeRouted) issues.push('Would NOT be found by routing query');
+        
+        return {
+          subscriptionId: sub.id,
+          status: sub.status,
+          subscribedAt: sub.subscribedAt,
+          
+          // Source bot info
+          sourceBot: sourceBot ? {
+            id: sourceBot.id,
+            name: sourceBot.name,
+            market: sourceBot.market,
+            isActive: sourceBot.isActive,
+          } : null,
+          
+          // Published bot info  
+          publishedBot: publishedBot ? {
+            id: publishedBot.id,
+            name: publishedBot.name,
+            isActive: publishedBot.isActive,
+            totalTrades: publishedBot.totalTrades,
+          } : null,
+          
+          // Subscriber bot info
+          subscriberBot: subscriberBot ? {
+            id: subscriberBot.id,
+            name: subscriberBot.name,
+            market: subscriberBot.market,
+            isActive: subscriberBot.isActive,
+            driftSubaccountId: subscriberBot.driftSubaccountId,
+            sourcePublishedBotId: subscriberBot.sourcePublishedBotId,
+            totalTrades: (subscriberBot.stats as any)?.totalTrades || 0,
+          } : null,
+          
+          // Wallet info
+          subscriberWallet: subscriberWallet ? {
+            address: subscriberWallet.address.slice(0, 8) + '...',
+            hasAgentPublicKey: subscriberWallet.hasAgentPublicKey,
+            hasAgentPrivateKey: subscriberWallet.hasAgentPrivateKey,
+          } : null,
+          
+          // Routing status
+          wouldBeRouted,
+          issues,
+          canRoute: issues.length === 0,
+        };
+      }));
+      
+      res.json({
+        totalSubscriptions: subscriptions.length,
+        routableCount: diagnostics.filter(d => d.canRoute).length,
+        diagnostics,
+      });
+    } catch (error) {
+      console.error("[Admin] Subscription diagnostics error:", error);
+      res.status(500).json({ error: "Failed to fetch subscription diagnostics" });
+    }
+  });
+
   // System stats summary
   app.get("/api/admin/stats", requireAdminAuth, async (req, res) => {
     try {
