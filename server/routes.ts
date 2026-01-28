@@ -8914,10 +8914,16 @@ export async function registerRoutes(
   });
 
   // ===== ADMIN LOGS ENDPOINTS =====
-  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "XZUqowCfywUpTBHAYPWp83wJTTxl8Zzc";
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+  if (!ADMIN_PASSWORD) {
+    console.warn("[Admin] ADMIN_PASSWORD not set - admin endpoints will be disabled");
+  }
   
   // Middleware to check admin password
   const requireAdminAuth = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+    if (!ADMIN_PASSWORD) {
+      return res.status(503).json({ error: "Admin endpoints disabled - ADMIN_PASSWORD not configured" });
+    }
     const authHeader = req.headers.authorization;
     if (!authHeader || authHeader !== `Bearer ${ADMIN_PASSWORD}`) {
       return res.status(401).json({ error: "Unauthorized" });

@@ -136,6 +136,13 @@ function AdminPage() {
     }
   };
 
+  const handleLogout = () => {
+    sessionStorage.removeItem(ADMIN_KEY);
+    sessionStorage.removeItem('admin_token');
+    setAuthenticated(false);
+    setPassword('');
+  };
+
   const handleRefresh = () => {
     switch (activeTab) {
       case 'stats': refetchStats(); break;
@@ -207,6 +214,9 @@ function AdminPage() {
             </span>
             <Button variant="outline" size="sm" onClick={handleRefresh} className="border-zinc-700 text-zinc-300">
               <RefreshCw className="w-4 h-4" />
+            </Button>
+            <Button variant="outline" size="sm" onClick={handleLogout} className="border-red-700 text-red-400 hover:bg-red-500/10" data-testid="button-admin-logout">
+              Logout
             </Button>
           </div>
         </div>
