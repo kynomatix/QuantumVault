@@ -120,13 +120,16 @@ function AdminPage() {
 
   const handleLogin = async () => {
     setError('');
+    sessionStorage.removeItem(ADMIN_KEY);
+    sessionStorage.removeItem('admin_token');
+    
     try {
       const res = await fetch('/api/admin/stats', {
-        headers: { 'Authorization': `Bearer ${password}` }
+        headers: { 'Authorization': `Bearer ${password.trim()}` }
       });
       if (res.ok) {
         sessionStorage.setItem(ADMIN_KEY, 'true');
-        sessionStorage.setItem('admin_token', password);
+        sessionStorage.setItem('admin_token', password.trim());
         setAuthenticated(true);
       } else {
         setError('Invalid password');

@@ -8914,10 +8914,8 @@ export async function registerRoutes(
   });
 
   // ===== ADMIN LOGS ENDPOINTS =====
-  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
-  if (!ADMIN_PASSWORD) {
-    console.warn("[Admin] ADMIN_PASSWORD not set - admin endpoints will be disabled");
-  }
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim();
+  console.log(`[Admin] ADMIN_PASSWORD configured: ${ADMIN_PASSWORD ? 'yes' : 'no'}, length: ${ADMIN_PASSWORD?.length || 0}`);
   
   // Middleware to check admin password
   const requireAdminAuth = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
@@ -8925,7 +8923,10 @@ export async function registerRoutes(
       return res.status(503).json({ error: "Admin endpoints disabled - ADMIN_PASSWORD not configured" });
     }
     const authHeader = req.headers.authorization;
-    if (!authHeader || authHeader !== `Bearer ${ADMIN_PASSWORD}`) {
+    const providedToken = authHeader?.replace('Bearer ', '').trim();
+    
+    if (!providedToken || providedToken !== ADMIN_PASSWORD) {
+      console.log(`[Admin] Auth failed - provided length: ${providedToken?.length || 0}, expected length: ${ADMIN_PASSWORD.length}`);
       return res.status(401).json({ error: "Unauthorized" });
     }
     next();
