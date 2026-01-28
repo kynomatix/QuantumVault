@@ -8914,7 +8914,7 @@ export async function registerRoutes(
   });
 
   // ===== ADMIN LOGS ENDPOINTS =====
-  const ADMIN_PASSWORD = "XZUqowCfywUpTBHAYPWp83wJTTxl8Zzc";
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "XZUqowCfywUpTBHAYPWp83wJTTxl8Zzc";
   
   // Middleware to check admin password
   const requireAdminAuth = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
