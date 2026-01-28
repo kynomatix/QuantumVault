@@ -9150,6 +9150,85 @@ export async function registerRoutes(
     }
   });
 
+  // Test routing endpoint - directly tests the routing function
+  app.post("/api/admin/test-routing/:botId", requireAdminAuth, async (req, res) => {
+    const { botId } = req.params;
+    const { dryRun = true } = req.body;
+    
+    try {
+      console.log(`[Admin] Test routing for bot ${botId}, dryRun=${dryRun}`);
+      
+      // Step 1: Find the published bot
+      const publishedBot = await storage.getPublishedBotByTradingBotId(botId);
+      if (!publishedBot) {
+        return res.json({
+          success: false,
+          step: "getPublishedBot",
+          error: "Bot is not published - cannot route signals",
+          botId,
+        });
+      }
+      
+      // Step 2: Check if published bot is active
+      if (!publishedBot.isActive) {
+        return res.json({
+          success: false,
+          step: "checkActive",
+          error: "Published bot is inactive",
+          publishedBotId: publishedBot.id,
+        });
+      }
+      
+      // Step 3: Get subscriber bots
+      const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
+      if (!subscriberBots || subscriberBots.length === 0) {
+        return res.json({
+          success: false,
+          step: "getSubscribers",
+          error: "No subscriber bots found",
+          publishedBotId: publishedBot.id,
+        });
+      }
+      
+      // Step 4: Check each subscriber
+      const subscriberDetails = await Promise.all(subscriberBots.map(async (subBot) => {
+        const subWallet = await storage.getWallet(subBot.walletAddress);
+        return {
+          botId: subBot.id,
+          name: subBot.name,
+          isActive: subBot.isActive,
+          market: subBot.market,
+          walletFound: !!subWallet,
+          hasAgentKey: subWallet ? !!(subWallet.agentPublicKey && subWallet.agentPrivateKeyEncrypted) : false,
+          wouldExecute: subBot.isActive && !!subWallet?.agentPublicKey && !!subWallet?.agentPrivateKeyEncrypted,
+        };
+      }));
+      
+      const routableCount = subscriberDetails.filter(s => s.wouldExecute).length;
+      
+      res.json({
+        success: true,
+        step: "complete",
+        sourceBotId: botId,
+        publishedBotId: publishedBot.id,
+        publishedBotActive: publishedBot.isActive,
+        totalSubscribers: subscriberBots.length,
+        routableSubscribers: routableCount,
+        subscribers: subscriberDetails,
+        message: dryRun 
+          ? `Dry run complete. Found ${routableCount} routable subscribers.`
+          : "Live routing not implemented in test endpoint",
+      });
+    } catch (error: any) {
+      console.error("[Admin] Test routing error:", error);
+      res.status(500).json({ 
+        success: false,
+        error: error.message,
+        stack: error.stack?.split('\n').slice(0, 5),
+      });
+    }
+  });
+
   // System stats summary
   app.get("/api/admin/stats", requireAdminAuth, async (req, res) => {
     try {
