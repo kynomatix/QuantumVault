@@ -86,3 +86,30 @@ Preferred communication style: Simple, everyday language.
 -   **Token-based Connection Flow**: User connects via deep link, token validates and links `telegramChatId` to wallet.
 -   **Multi-wallet Support**: Multiple wallets can share a `telegramChatId`.
 -   **Notification Types**: Configurable notifications for trade executions, failed trades, and position closures.
+
+## Admin Dashboard & Production Debugging
+
+### Production Admin Access
+-   **Admin URL**: `https://myquantumvault.com/admin`
+-   **Authentication**: Password stored in `ADMIN_PASSWORD` secret
+-   **API Access**: Bearer token auth with password for programmatic access
+
+### Admin API Endpoints
+-   `GET /api/admin/stats` - Dashboard stats (bots, trades, webhooks, subscriptions)
+-   `GET /api/admin/webhook-logs?limit=N` - Recent webhook logs
+-   `GET /api/admin/trades?limit=N` - Recent trade history
+-   `GET /api/admin/bots` - All trading bots with stats
+-   `GET /api/admin/subscriptions` - All marketplace subscriptions
+-   `GET /api/admin/subscription-diagnostics` - Deep subscription routing diagnostics
+-   `GET /api/admin/pending-profit-shares` - Pending IOU profit shares
+
+### Debugging Commands
+To check production data via curl:
+```bash
+curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/api/admin/subscription-diagnostics"
+```
+
+### Known Issues (Jan 2026)
+-   **Subscription routing not working**: AVAX/RNDR subscriptions show `canRoute=true` but 0 subscriber trades
+-   **DOGE subscription broken**: `subscriberBotId` is NULL
+-   **Debug logging added**: Next webhook will show detailed routing logs in production
