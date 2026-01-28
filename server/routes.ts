@@ -673,17 +673,23 @@ async function routeSignalToSubscribers(
   }
 ): Promise<void> {
   try {
+    console.log(`[Subscriber Routing] Starting routing for source bot ${sourceBotId}, signal: ${signal.action}, close=${signal.isCloseSignal}`);
+    
     const publishedBot = await storage.getPublishedBotByTradingBotId(sourceBotId);
     if (!publishedBot) {
       console.log(`[Subscriber Routing] Source bot ${sourceBotId} is not published, skipping subscriber routing`);
       return;
     }
+    console.log(`[Subscriber Routing] Found published bot: ${publishedBot.id}, active=${publishedBot.isActive}`);
+    
     if (!publishedBot.isActive) {
       console.log(`[Subscriber Routing] Published bot ${publishedBot.id} is inactive, skipping subscriber routing`);
       return;
     }
 
     const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
+    console.log(`[Subscriber Routing] Found ${subscriberBots?.length || 0} subscriber bots for published bot ${publishedBot.id}`);
+    
     if (!subscriberBots || subscriberBots.length === 0) {
       console.log(`[Subscriber Routing] Published bot ${publishedBot.id} has no active subscribers`);
       return;
@@ -698,11 +704,17 @@ async function routeSignalToSubscribers(
       }
 
       try {
+        console.log(`[Subscriber Routing] Processing subscriber bot ${subBot.id} (${subBot.name}), wallet=${subBot.walletAddress.slice(0,8)}...`);
         const subWallet = await storage.getWallet(subBot.walletAddress);
-        if (!subWallet?.agentPrivateKeyEncrypted || !subWallet?.agentPublicKey) {
-          console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} has no agent wallet configured`);
+        if (!subWallet) {
+          console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} wallet not found in database`);
           continue;
         }
+        if (!subWallet.agentPrivateKeyEncrypted || !subWallet.agentPublicKey) {
+          console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} has no agent wallet - pubKey=${!!subWallet.agentPublicKey}, encKey=${!!subWallet.agentPrivateKeyEncrypted}`);
+          continue;
+        }
+        console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} has agent wallet configured, proceeding with trade`);
 
         const subAccountId = subBot.driftSubaccountId ?? 0;
 
