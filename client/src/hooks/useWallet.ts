@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useRef } from 'react';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import bs58 from 'bs58';
+import { queryClient } from '@/lib/queryClient';
 
 export { useConnection };
 
@@ -118,6 +119,13 @@ export function useWallet() {
   useEffect(() => {
     const registerWallet = async () => {
       if (publicKeyString && publicKeyString !== lastConnectedWallet.current) {
+        // CRITICAL: Clear all cached queries when switching wallets
+        // This prevents stale data from the previous wallet from being displayed
+        if (lastConnectedWallet.current !== null) {
+          console.log('[Wallet] Wallet changed, clearing query cache');
+          queryClient.clear();
+        }
+        
         // Already authenticated successfully in this session - just restore state
         if (authSucceeded.current.has(publicKeyString)) {
           lastConnectedWallet.current = publicKeyString;
@@ -206,6 +214,10 @@ export function useWallet() {
           setSessionConnected(true);
         }
       } else if (!publicKeyString) {
+        // Clear query cache when wallet disconnects
+        console.log('[Wallet] Wallet disconnected, clearing query cache');
+        queryClient.clear();
+        
         lastConnectedWallet.current = null;
         setSessionConnected(false);
         setReferralCode(null);
