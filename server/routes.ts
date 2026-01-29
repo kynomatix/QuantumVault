@@ -4960,8 +4960,9 @@ export async function registerRoutes(
       }
       
       // VERBOSE DIAGNOSTIC: Log bot details including publish status
+      const botPublishedInfo = await storage.getPublishedBotByTradingBotId(botId);
       console.log(`[WEBHOOK-TRACE] Bot found: name="${bot.name}", market=${bot.market}`);
-      console.log(`[WEBHOOK-TRACE] Bot publish status: isPublished=${bot.isPublished}, publishedBotId=${bot.publishedBotId || 'none'}`);
+      console.log(`[WEBHOOK-TRACE] Bot publish status: isPublished=${!!botPublishedInfo}, publishedBotId=${botPublishedInfo?.id || 'none'}`);
       console.log(`[WEBHOOK-TRACE] Bot active: ${bot.isActive}`);
 
       // Validate secret
@@ -5197,7 +5198,7 @@ export async function registerRoutes(
       // VERBOSE DIAGNOSTIC: Log branching decision
       console.log(`[WEBHOOK-TRACE] ========== SIGNAL BRANCHING ==========`);
       console.log(`[WEBHOOK-TRACE] isCloseSignal=${isCloseSignal} (will take ${isCloseSignal ? 'CLOSE' : 'OPEN/REGULAR'} path)`);
-      console.log(`[WEBHOOK-TRACE] Bot isPublished=${bot.isPublished} - routing ${bot.isPublished ? 'WILL' : 'will NOT'} be attempted`);
+      console.log(`[WEBHOOK-TRACE] Bot isPublished=${!!botPublishedInfo} - routing ${botPublishedInfo ? 'WILL' : 'will NOT'} be attempted`);
       
       // CRITICAL FIX: Wrap entire close signal handling in outer try/catch to guarantee no fallthrough
       // to open-order logic. Any exception inside this block MUST return, not continue to open-order flow.
