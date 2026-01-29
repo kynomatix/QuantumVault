@@ -698,9 +698,14 @@ async function routeSignalToSubscribers(
     console.log(`[Subscriber Routing] Source bot ${sourceBotId} is published, routing signal to ${subscriberBots.length} subscribers`);
 
     for (const subBot of subscriberBots) {
-      if (!subBot.isActive) {
-        console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id}`);
+      // CRITICAL FIX: Allow close signals to route to inactive (paused) bots
+      // to prevent orphaned positions when bots get paused due to insufficient funds
+      if (!subBot.isActive && !signal.isCloseSignal) {
+        console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
         continue;
+      }
+      if (!subBot.isActive && signal.isCloseSignal) {
+        console.log(`[Subscriber Routing] Routing CLOSE signal to inactive bot ${subBot.id} to prevent orphaned position`);
       }
 
       try {
