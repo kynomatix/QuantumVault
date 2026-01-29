@@ -4915,6 +4915,12 @@ export async function registerRoutes(
   app.post("/api/webhook/tradingview/:botId", async (req, res) => {
     const { botId } = req.params;
     const { secret } = req.query;
+    
+    // VERBOSE DIAGNOSTIC: Log webhook entry
+    console.log(`[WEBHOOK-TRACE] ========== WEBHOOK RECEIVED ==========`);
+    console.log(`[WEBHOOK-TRACE] Bot ID: ${botId}`);
+    console.log(`[WEBHOOK-TRACE] Timestamp: ${new Date().toISOString()}`);
+    console.log(`[WEBHOOK-TRACE] Payload: ${JSON.stringify(req.body).slice(0, 500)}`);
 
     // Generate signal hash for deduplication
     const signalHash = generateSignalHash(botId, req.body);
