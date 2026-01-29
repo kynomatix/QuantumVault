@@ -4954,9 +4954,15 @@ export async function registerRoutes(
       // Get bot
       const bot = await storage.getTradingBotById(botId);
       if (!bot) {
+        console.log(`[WEBHOOK-TRACE] EXIT: Bot not found`);
         await storage.updateWebhookLog(log.id, { errorMessage: "Bot not found" });
         return res.status(404).json({ error: "Bot not found" });
       }
+      
+      // VERBOSE DIAGNOSTIC: Log bot details including publish status
+      console.log(`[WEBHOOK-TRACE] Bot found: name="${bot.name}", market=${bot.market}`);
+      console.log(`[WEBHOOK-TRACE] Bot publish status: isPublished=${bot.isPublished}, publishedBotId=${bot.publishedBotId || 'none'}`);
+      console.log(`[WEBHOOK-TRACE] Bot active: ${bot.isActive}`);
 
       // Validate secret
       if (secret !== bot.webhookSecret) {
@@ -5187,6 +5193,11 @@ export async function registerRoutes(
         (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
       
       console.log(`[Webhook] Signal analysis: action=${action}, contracts=${contracts}, strategyPositionSize=${strategyPositionSize}, isCloseSignal=${isCloseSignal}`);
+      
+      // VERBOSE DIAGNOSTIC: Log branching decision
+      console.log(`[WEBHOOK-TRACE] ========== SIGNAL BRANCHING ==========`);
+      console.log(`[WEBHOOK-TRACE] isCloseSignal=${isCloseSignal} (will take ${isCloseSignal ? 'CLOSE' : 'OPEN/REGULAR'} path)`);
+      console.log(`[WEBHOOK-TRACE] Bot isPublished=${bot.isPublished} - routing ${bot.isPublished ? 'WILL' : 'will NOT'} be attempted`);
       
       // CRITICAL FIX: Wrap entire close signal handling in outer try/catch to guarantee no fallthrough
       // to open-order logic. Any exception inside this block MUST return, not continue to open-order flow.
@@ -5482,7 +5493,10 @@ export async function registerRoutes(
             }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
             
             // Route close signal to subscriber bots (async, don't block response)
-            console.log(`[Webhook] ROUTING DEBUG: About to call routeSignalToSubscribers for CLOSE bot ${botId}, action=${action}`);
+            console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS (CLOSE) ==========`);
+            console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for CLOSE signal`);
+            console.log(`[WEBHOOK-TRACE] Bot ID: ${botId}, action=${action}`);
+            console.log(`[WEBHOOK-TRACE] isCloseSignal=true (close signal path)`);
             routeSignalToSubscribers(botId, {
               action: action as 'buy' | 'sell',
               contracts,
@@ -6106,7 +6120,11 @@ export async function registerRoutes(
       }).catch(err => console.error('[Notifications] Failed to send trade_executed notification:', err));
 
       // Route signal to subscriber bots (async, don't block response)
-      console.log(`[Webhook] ROUTING DEBUG: About to call routeSignalToSubscribers for bot ${botId}, action=${action}, contracts=${contracts}, positionSize=${positionSize}, signalPrice=${signalPrice}, fillPrice=${fillPrice}`);
+      console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS ==========`);
+      console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for bot ${botId}`);
+      console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, positionSize=${positionSize}`);
+      console.log(`[WEBHOOK-TRACE] Prices: signalPrice=${signalPrice}, fillPrice=${fillPrice}`);
+      console.log(`[WEBHOOK-TRACE] isCloseSignal=false (regular open signal path)`);
       routeSignalToSubscribers(botId, {
         action: action as 'buy' | 'sell',
         contracts,
