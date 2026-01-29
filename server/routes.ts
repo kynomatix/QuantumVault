@@ -5476,6 +5476,7 @@ export async function registerRoutes(
             }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
             
             // Route close signal to subscriber bots (async, don't block response)
+            console.log(`[Webhook] ROUTING DEBUG: About to call routeSignalToSubscribers for CLOSE bot ${botId}, action=${action}`);
             routeSignalToSubscribers(botId, {
               action: action as 'buy' | 'sell',
               contracts,
@@ -5483,6 +5484,8 @@ export async function registerRoutes(
               price: signalPrice || closeFillPrice.toString(),
               isCloseSignal: true,
               strategyPositionSize,
+            }).then(() => {
+              console.log(`[Webhook] ROUTING DEBUG: routeSignalToSubscribers CLOSE completed for bot ${botId}`);
             }).catch(err => console.error('[Subscriber Routing] Error routing close to subscribers:', err));
             
             // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
@@ -6097,6 +6100,7 @@ export async function registerRoutes(
       }).catch(err => console.error('[Notifications] Failed to send trade_executed notification:', err));
 
       // Route signal to subscriber bots (async, don't block response)
+      console.log(`[Webhook] ROUTING DEBUG: About to call routeSignalToSubscribers for bot ${botId}, action=${action}, contracts=${contracts}, positionSize=${positionSize}, signalPrice=${signalPrice}, fillPrice=${fillPrice}`);
       routeSignalToSubscribers(botId, {
         action: action as 'buy' | 'sell',
         contracts,
@@ -6104,7 +6108,11 @@ export async function registerRoutes(
         price: signalPrice || fillPrice.toString(),
         isCloseSignal: false,
         strategyPositionSize,
-      }).catch(err => console.error('[Subscriber Routing] Error routing to subscribers:', err));
+      }).then(() => {
+        console.log(`[Webhook] ROUTING DEBUG: routeSignalToSubscribers completed successfully for bot ${botId}`);
+      }).catch(err => {
+        console.error(`[Subscriber Routing] Error routing to subscribers for bot ${botId}:`, err);
+      });
 
       // Mark signal as executed (unique index prevents concurrent duplicates)
       try {
@@ -9225,6 +9233,170 @@ export async function registerRoutes(
         success: false,
         error: error.message,
         stack: error.stack?.split('\n').slice(0, 5),
+      });
+    }
+  });
+
+  // Debug endpoint: Execute actual routing with full error capture
+  app.post("/api/admin/debug-routing/:botId", requireAdminAuth, async (req, res) => {
+    const { botId } = req.params;
+    const logs: string[] = [];
+    const log = (msg: string) => {
+      console.log(msg);
+      logs.push(msg);
+    };
+    
+    try {
+      log(`[Debug Routing] Starting for bot ${botId}`);
+      
+      // Step 1: Get published bot
+      const publishedBot = await storage.getPublishedBotByTradingBotId(botId);
+      if (!publishedBot) {
+        return res.json({ success: false, error: "Bot not published", logs });
+      }
+      log(`[Debug Routing] Published bot: ${publishedBot.id}, active=${publishedBot.isActive}`);
+      
+      // Step 2: Get subscribers
+      const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
+      log(`[Debug Routing] Found ${subscriberBots?.length || 0} subscribers`);
+      
+      if (!subscriberBots || subscriberBots.length === 0) {
+        return res.json({ success: false, error: "No subscribers", logs });
+      }
+      
+      const results: any[] = [];
+      
+      for (const subBot of subscriberBots) {
+        const subResult: any = {
+          botId: subBot.id,
+          name: subBot.name,
+          isActive: subBot.isActive,
+          market: subBot.market,
+          maxPositionSize: subBot.maxPositionSize,
+          leverage: subBot.leverage,
+          driftSubaccountId: subBot.driftSubaccountId,
+          profitReinvest: subBot.profitReinvest,
+        };
+        
+        try {
+          if (!subBot.isActive) {
+            subResult.error = "Bot inactive";
+            results.push(subResult);
+            continue;
+          }
+          
+          const subWallet = await storage.getWallet(subBot.walletAddress);
+          subResult.walletFound = !!subWallet;
+          subResult.hasAgentPublicKey = !!subWallet?.agentPublicKey;
+          subResult.hasAgentPrivateKey = !!subWallet?.agentPrivateKeyEncrypted;
+          
+          if (!subWallet?.agentPublicKey || !subWallet?.agentPrivateKeyEncrypted) {
+            subResult.error = "Missing agent wallet keys";
+            results.push(subResult);
+            continue;
+          }
+          
+          const subAccountId = subBot.driftSubaccountId ?? 0;
+          const oraclePrice = await getMarketPrice(subBot.market);
+          subResult.oraclePrice = oraclePrice;
+          
+          if (!oraclePrice) {
+            subResult.error = "Could not get oracle price";
+            results.push(subResult);
+            continue;
+          }
+          
+          const maxPos = parseFloat(subBot.maxPositionSize || '0');
+          const profitReinvestEnabled = subBot.profitReinvest === true;
+          subResult.maxPositionParsed = maxPos;
+          subResult.profitReinvestEnabled = profitReinvestEnabled;
+          
+          if (maxPos <= 0 && !profitReinvestEnabled) {
+            subResult.error = "No maxPositionSize and profit reinvest disabled";
+            results.push(subResult);
+            continue;
+          }
+          
+          // Use 50% signal for testing
+          const signalPercent = 50;
+          
+          log(`[Debug Routing] Calling computeTradeSizingAndTopUp for ${subBot.id}`);
+          
+          try {
+            const sizingResult = await computeTradeSizingAndTopUp({
+              agentPublicKey: subWallet.agentPublicKey!,
+              agentPrivateKeyEncrypted: subWallet.agentPrivateKeyEncrypted,
+              subAccountId,
+              botId: subBot.id,
+              walletAddress: subBot.walletAddress,
+              market: subBot.market,
+              baseCapital: maxPos,
+              leverage: subBot.leverage || 1,
+              autoTopUp: subBot.autoTopUp ?? false,
+              profitReinvestEnabled,
+              signalPercent,
+              oraclePrice,
+              logPrefix: `[Debug Routing] Bot ${subBot.id}`,
+            });
+            
+            subResult.sizingSuccess = sizingResult.success;
+            subResult.sizingError = sizingResult.error;
+            subResult.finalContractSize = sizingResult.finalContractSize;
+            subResult.tradeAmountUsd = sizingResult.tradeAmountUsd;
+            subResult.freeCollateral = sizingResult.freeCollateral;
+            
+            if (!sizingResult.success) {
+              subResult.error = `Trade sizing failed: ${sizingResult.error}`;
+              results.push(subResult);
+              continue;
+            }
+            
+            if (sizingResult.finalContractSize < 0.001) {
+              subResult.error = `Trade size too small: ${sizingResult.finalContractSize}`;
+              results.push(subResult);
+              continue;
+            }
+            
+            subResult.wouldExecuteTrade = true;
+            subResult.tradeDetails = {
+              side: 'long',
+              contractSize: sizingResult.finalContractSize,
+              subAccountId,
+              slippageBps: subWallet.slippageBps ?? 50,
+            };
+            
+            // Don't actually execute the trade in debug mode
+            subResult.status = "Ready to trade (dry run - no execution)";
+            
+          } catch (sizingError: any) {
+            subResult.error = `Sizing exception: ${sizingError.message}`;
+            subResult.sizingStack = sizingError.stack?.split('\n').slice(0, 3);
+          }
+          
+        } catch (subError: any) {
+          subResult.error = `Exception: ${subError.message}`;
+          subResult.stack = subError.stack?.split('\n').slice(0, 3);
+        }
+        
+        results.push(subResult);
+      }
+      
+      res.json({
+        success: true,
+        sourceBotId: botId,
+        publishedBotId: publishedBot.id,
+        subscriberCount: subscriberBots.length,
+        results,
+        logs,
+      });
+      
+    } catch (error: any) {
+      log(`[Debug Routing] Error: ${error.message}`);
+      res.status(500).json({
+        success: false,
+        error: error.message,
+        stack: error.stack?.split('\n').slice(0, 5),
+        logs,
       });
     }
   });
