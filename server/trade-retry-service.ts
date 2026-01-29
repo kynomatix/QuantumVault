@@ -259,15 +259,22 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         // Update original trade if it exists, otherwise create new
         let tradeId: string;
         if (job.originalTradeId) {
+          // Get the original trade to preserve the error message
+          const originalTrade = await storage.getBotTrade(job.originalTradeId);
+          const originalError = originalTrade?.errorMessage || 'Unknown error';
+          
+          // Mark as "recovered" instead of "executed" to show there was an issue that was fixed
           await storage.updateBotTrade(job.originalTradeId, {
-            status: 'executed',
+            status: 'recovered',
             price: fillPrice.toString(),
             fee: fee.toString(),
             txSignature: result.signature || null,
-            errorMessage: `Auto-retry succeeded after ${job.attempts} attempt(s)`,
+            errorMessage: null, // Clear the error message since we recovered
+            recoveredFromError: originalError, // Preserve original error for UX
+            retryAttempts: job.attempts,
           });
           tradeId = job.originalTradeId;
-          console.log(`[TradeRetry] Updated original trade ${tradeId} to executed`);
+          console.log(`[TradeRetry] Updated original trade ${tradeId} to RECOVERED (was: ${originalError.slice(0, 50)}...)`);
         } else {
           const newTrade = await storage.createBotTrade({
             tradingBotId: job.botId,

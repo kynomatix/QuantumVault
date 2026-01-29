@@ -169,10 +169,12 @@ export const botTrades = pgTable("bot_trades", {
   price: decimal("price", { precision: 20, scale: 6 }).notNull(),
   fee: decimal("fee", { precision: 20, scale: 6 }).default("0"),
   pnl: decimal("pnl", { precision: 20, scale: 2 }),
-  status: text("status").notNull().default("pending"),
+  status: text("status").notNull().default("pending"), // pending, executed, failed, recovered
   txSignature: text("tx_signature"),
   webhookPayload: jsonb("webhook_payload"),
   errorMessage: text("error_message"),
+  recoveredFromError: text("recovered_from_error"), // Stores original error when trade recovered via retry
+  retryAttempts: integer("retry_attempts"), // Number of retry attempts before success
   executedAt: timestamp("executed_at").defaultNow().notNull(),
 });
 

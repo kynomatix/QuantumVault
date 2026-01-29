@@ -22,6 +22,8 @@ interface Trade {
   executedAt: string;
   botName?: string;
   errorMessage?: string | null;
+  recoveredFromError?: string | null;
+  retryAttempts?: number | null;
   webhookPayload?: {
     position_size?: string | number;
     data?: {
@@ -76,10 +78,11 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
     const isLong = trade.side?.toUpperCase() === 'LONG';
     const isFailed = trade.status === 'failed';
     const isExecuted = trade.status === 'executed';
+    const isRecovered = trade.status === 'recovered';
     const feeValue = trade.fee ? Number(trade.fee) : 0;
     const pnlValue = trade.pnl ? Number(trade.pnl) : null;
 
-    return { isCloseSignal, isLong, isFailed, isExecuted, feeValue, pnlValue };
+    return { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue };
   };
 
   const getSideColor = (isCloseSignal: boolean, isLong: boolean) => {
@@ -99,8 +102,9 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
     return trade.side?.toUpperCase();
   };
 
-  const getStatusStyle = (isFailed: boolean, isExecuted: boolean) => {
+  const getStatusStyle = (isFailed: boolean, isExecuted: boolean, isRecovered: boolean = false) => {
     if (isFailed) return 'bg-red-500/20 text-red-400';
+    if (isRecovered) return 'bg-blue-500/20 text-blue-400';
     if (isExecuted) return 'bg-emerald-500/20 text-emerald-400';
     return 'bg-yellow-500/20 text-yellow-400';
   };
@@ -109,8 +113,14 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
     alert(`Trade Failed:\n\n${errorMessage}`);
   };
 
+  const showRecoveryInfo = (trade: Trade) => {
+    const attempts = trade.retryAttempts || '?';
+    const originalError = trade.recoveredFromError || 'Unknown error';
+    alert(`Trade Recovered!\n\nOriginal error: ${originalError}\n\nRecovered after ${attempts} retry attempt(s).`);
+  };
+
   const renderMobileTradeCard = (trade: Trade, index: number) => {
-    const { isCloseSignal, isLong, isFailed, isExecuted, feeValue, pnlValue } = getTradeInfo(trade);
+    const { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue } = getTradeInfo(trade);
 
     return (
       <div 
@@ -129,13 +139,21 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
           {isFailed && trade.errorMessage ? (
             <button
               onClick={() => showErrorMessage(trade.errorMessage!)}
-              className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)} cursor-pointer active:opacity-70`}
+              className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted, isRecovered)} cursor-pointer active:opacity-70`}
               data-testid={`button-error-${index}`}
             >
               {trade.status} ⓘ
             </button>
+          ) : isRecovered ? (
+            <button
+              onClick={() => showRecoveryInfo(trade)}
+              className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted, isRecovered)} cursor-pointer active:opacity-70`}
+              data-testid={`button-recovered-${index}`}
+            >
+              {trade.status} ⓘ
+            </button>
           ) : (
-            <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)}`}>
+            <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted, isRecovered)}`}>
               {trade.status}
             </span>
           )}
@@ -182,7 +200,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
   };
 
   const renderDesktopTradeRow = (trade: Trade, index: number) => {
-    const { isCloseSignal, isLong, isFailed, isExecuted, feeValue, pnlValue } = getTradeInfo(trade);
+    const { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue } = getTradeInfo(trade);
 
     return (
       <tr key={trade.id || index} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-history-trade-${index}`}>
@@ -215,14 +233,23 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
           {isFailed && trade.errorMessage ? (
             <button
               onClick={() => showErrorMessage(trade.errorMessage!)}
-              className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)} cursor-pointer hover:opacity-80`}
+              className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted, isRecovered)} cursor-pointer hover:opacity-80`}
               title={trade.errorMessage}
               data-testid={`button-error-desktop-${index}`}
             >
               {trade.status} ⓘ
             </button>
+          ) : isRecovered ? (
+            <button
+              onClick={() => showRecoveryInfo(trade)}
+              className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted, isRecovered)} cursor-pointer hover:opacity-80`}
+              title={`Recovered from: ${trade.recoveredFromError}`}
+              data-testid={`button-recovered-desktop-${index}`}
+            >
+              {trade.status} ⓘ
+            </button>
           ) : (
-            <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted)}`}>
+            <span className={`px-2 py-0.5 rounded text-xs ${getStatusStyle(isFailed, isExecuted, isRecovered)}`}>
               {trade.status}
             </span>
           )}

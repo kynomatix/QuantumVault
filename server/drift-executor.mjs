@@ -49,9 +49,46 @@ const FAILOVER_STATE = {
   // Count of consecutive primary failures
   consecutivePrimaryFailures: 0,
   
+  // Count of 429 rate limit errors on primary (triggers failover when threshold hit)
+  consecutive429Errors: 0,
+  
+  // Threshold: switch to backup after this many 429 errors
+  rateLimit429Threshold: 2,
+  
   // Cooldown: 3 minutes before trying primary again
   cooldownMs: 3 * 60 * 1000,
 };
+
+// Call this when a 429 rate limit error is detected to trigger failover
+function report429Error() {
+  if (FAILOVER_STATE.activeRpc !== 'primary') {
+    // Already on backup, nothing to do
+    return;
+  }
+  
+  FAILOVER_STATE.consecutive429Errors++;
+  console.error(`[Executor] 429 rate limit detected (count: ${FAILOVER_STATE.consecutive429Errors}/${FAILOVER_STATE.rateLimit429Threshold})`);
+  
+  if (FAILOVER_STATE.consecutive429Errors >= FAILOVER_STATE.rateLimit429Threshold) {
+    const backupUrl = getBackupRpcUrl();
+    if (backupUrl) {
+      FAILOVER_STATE.activeRpc = 'backup';
+      FAILOVER_STATE.switchedToBackupAt = Date.now();
+      FAILOVER_STATE.consecutive429Errors = 0;
+      console.error(`[Executor] FAILOVER: Switching to backup RPC (Triton) due to ${FAILOVER_STATE.rateLimit429Threshold}x 429 errors. Will retry primary in ${FAILOVER_STATE.cooldownMs / 1000}s`);
+    } else {
+      console.error(`[Executor] WARNING: 429 errors but no backup RPC configured!`);
+    }
+  }
+}
+
+// Reset 429 counter when operations succeed
+function reset429Counter() {
+  if (FAILOVER_STATE.consecutive429Errors > 0) {
+    console.error(`[Executor] Resetting 429 counter (was: ${FAILOVER_STATE.consecutive429Errors})`);
+    FAILOVER_STATE.consecutive429Errors = 0;
+  }
+}
 
 // Try to get a working connection - simple failover on actual failure only
 async function getWorkingConnection() {
@@ -1038,6 +1075,7 @@ async function executeTrade(command) {
             } catch (fetchErr) {
               if (fetchErr.message?.includes('429') && attempt < 3) {
                 console.error(`[Executor] RPC rate limited, retrying in ${attempt * 500}ms...`);
+                report429Error(); // Track for failover
                 await new Promise(r => setTimeout(r, attempt * 500));
               } else {
                 throw fetchErr;
@@ -1203,6 +1241,10 @@ async function executeTrade(command) {
     } catch (orderError) {
       console.error(`[Executor] Order failed:`, orderError.message);
       console.error(`[Executor] Order error stack:`, orderError.stack);
+      // Check for 429 rate limit and trigger failover
+      if (orderError.message?.includes('429') || orderError.message?.toLowerCase().includes('rate limit')) {
+        report429Error();
+      }
       // Check if this is a simulation error with logs
       if (orderError.logs) {
         console.error(`[Executor] Transaction logs:`, orderError.logs.join('\n'));
@@ -1211,6 +1253,7 @@ async function executeTrade(command) {
     }
     
     console.error(`[Executor] Trade executed: ${txSig}`);
+    reset429Counter(); // Trade succeeded, reset rate limit counter
     
     // Get oracle price as fallback
     let oracleFillPrice = null;
@@ -1355,6 +1398,8 @@ async function closePosition(command) {
       console.error(`[Executor] Could not get exit price: ${e.message}`);
     }
     
+    reset429Counter(); // Close succeeded, reset rate limit counter
+    
     return { 
       success: true, 
       signature: txSig, 
@@ -1365,6 +1410,10 @@ async function closePosition(command) {
       actualFee 
     };
   } catch (error) {
+    // Check for 429 rate limit and trigger failover
+    if (error.message?.includes('429') || error.message?.toLowerCase().includes('rate limit')) {
+      report429Error();
+    }
     throw error;
   }
 }
