@@ -203,7 +203,7 @@ const MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const DEVNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
 const USDC_MINT = IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
 
-const MIN_SOL_FOR_FEES = 0.01 * LAMPORTS_PER_SOL;
+const MIN_SOL_FOR_FEES = 0.002 * LAMPORTS_PER_SOL; // ~0.002 SOL is enough for deposit/withdrawal transactions
 const AIRDROP_AMOUNT = 1 * LAMPORTS_PER_SOL;
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
