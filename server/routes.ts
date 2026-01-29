@@ -747,6 +747,11 @@ async function routeSignalToSubscribers(
           if (closeResult.success) {
             const fillPrice = parseFloat(signal.price);
             const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
+            
+            // Estimate fee from notional (closePerpPosition doesn't return actualFee)
+            const closeNotional = Math.abs(position.size) * fillPrice;
+            const closeFee = closeNotional * 0.00045; // Drift taker fee ~0.045%
+            
             await storage.createBotTrade({
               tradingBotId: subBot.id,
               walletAddress: subBot.walletAddress,
@@ -755,7 +760,7 @@ async function routeSignalToSubscribers(
               size: Math.abs(position.size).toFixed(8),
               price: fillPrice.toFixed(6),
               status: 'executed',
-              fee: '0',
+              fee: closeFee.toFixed(6),
               txSignature: closeResult.signature || null,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
             });
@@ -848,6 +853,10 @@ async function routeSignalToSubscribers(
             const fillPrice = orderResult.fillPrice ?? oraclePrice;
             const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
 
+            // Calculate fee from actual result or estimate from notional
+            const tradeNotional = contractSize * fillPrice;
+            const tradeFee = orderResult.actualFee ?? (tradeNotional * 0.00045); // Drift taker fee ~0.045%
+            
             await storage.createBotTrade({
               tradingBotId: subBot.id,
               walletAddress: subBot.walletAddress,
@@ -856,7 +865,7 @@ async function routeSignalToSubscribers(
               size: contractSize.toFixed(8),
               price: fillPrice.toFixed(6),
               status: 'executed',
-              fee: '0',
+              fee: tradeFee.toFixed(6),
               txSignature: orderResult.txSignature || orderResult.signature || null,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
             });
