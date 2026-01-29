@@ -9401,6 +9401,74 @@ export async function registerRoutes(
     }
   });
 
+  // Live routing test - actually executes routeSignalToSubscribers
+  app.post("/api/admin/live-routing-test/:botId", requireAdminAuth, async (req, res) => {
+    const { botId } = req.params;
+    const { action = 'buy', contracts = '0.5', positionSize = '1', price = '100' } = req.body;
+    
+    console.log(`[Admin] Live routing test for bot ${botId}: action=${action}, contracts=${contracts}`);
+    
+    try {
+      // First verify the bot is published and has subscribers
+      const publishedBot = await storage.getPublishedBotByTradingBotId(botId);
+      if (!publishedBot) {
+        return res.json({ success: false, error: "Bot is not published" });
+      }
+      
+      const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
+      if (!subscriberBots || subscriberBots.length === 0) {
+        return res.json({ success: false, error: "No subscriber bots found", publishedBotId: publishedBot.id });
+      }
+      
+      console.log(`[Admin] Calling routeSignalToSubscribers for ${subscriberBots.length} subscribers`);
+      
+      // Actually call the routing function
+      const startTime = Date.now();
+      await routeSignalToSubscribers(botId, {
+        action: action as 'buy' | 'sell',
+        contracts,
+        positionSize,
+        price,
+        isCloseSignal: false,
+        strategyPositionSize: null,
+      });
+      const elapsed = Date.now() - startTime;
+      
+      console.log(`[Admin] routeSignalToSubscribers completed in ${elapsed}ms`);
+      
+      // Check if any trades were created for subscribers
+      const subscriberTradeChecks = await Promise.all(subscriberBots.map(async (subBot) => {
+        const recentTrades = await storage.getBotTrades(subBot.id);
+        const latestTrade = recentTrades[0];
+        const isRecent = latestTrade && (Date.now() - new Date(latestTrade.createdAt).getTime()) < 60000; // Within last minute
+        return {
+          botId: subBot.id,
+          name: subBot.name,
+          totalTrades: recentTrades.length,
+          latestTradeTime: latestTrade?.createdAt,
+          likelyNewTrade: isRecent,
+        };
+      }));
+      
+      res.json({
+        success: true,
+        message: `Routing executed for ${subscriberBots.length} subscribers in ${elapsed}ms`,
+        sourceBotId: botId,
+        publishedBotId: publishedBot.id,
+        subscriberCount: subscriberBots.length,
+        subscriberTradeResults: subscriberTradeChecks,
+      });
+      
+    } catch (error: any) {
+      console.error("[Admin] Live routing test error:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message,
+        stack: error.stack?.split('\n').slice(0, 5),
+      });
+    }
+  });
+
   // System stats summary
   app.get("/api/admin/stats", requireAdminAuth, async (req, res) => {
     try {
