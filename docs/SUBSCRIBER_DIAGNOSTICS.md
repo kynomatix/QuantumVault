@@ -4,9 +4,16 @@
 Subscribers to marketplace signal bots show 0 trades despite source bots actively trading.
 
 ## Current Status (Jan 30, 2026)
-**Routing mechanism works when manually triggered** - confirmed via admin live-routing-test endpoint. 
+**BREAKTHROUGH FINDING (Jan 30 02:40 UTC):**
+- **Jan 29 09:05:22** - Subscriber 2afe9363 LONG was a REAL webhook routing (source=marketplace_routing, status=executed)
+- This proves OPEN signals CAN route via webhooks successfully
+- **BUT** CLOSE signals are failing silently:
+  - Jan 29 22:00:12 source CLOSE - NO subscriber trade record
+  - Jan 30 02:16:31 source CLOSE - NO subscriber trade record
 
-**CRITICAL**: No real webhook has ever been confirmed to successfully route to subscribers. All "successful" subscriber trades were from manual tests, NOT from actual TradingView webhooks.
+**Root cause hypothesis**: CLOSE signal routing path has a silent failure point that OPEN signals don't hit.
+
+**Still undeployed**: The visibility fix is in dev but NOT in production yet.
 
 ---
 
@@ -46,11 +53,11 @@ Subscribers to marketplace signal bots show 0 trades despite source bots activel
 ## Timeline of Events
 
 ### Jan 29
-- 09:05:33-34: Both RNDR subscribers opened LONG positions (UNCLEAR if this was webhook or manual test - needs verification)
+- 09:05:22-34: Both RNDR subscribers opened LONG positions via REAL webhook routing (CONFIRMED - source=marketplace_routing)
 - 19:54:06: c57d65fb closed position successfully
 - 22:00:12: Source RNDR bot sent CLOSE signal
-  - 2afe9363 closed successfully
-  - c57d65fb already closed earlier
+  - **2afe9363: NO CLOSE trade record exists** (silent failure)
+  - c57d65fb already closed earlier (at 19:54:06)
 - After close: c57d65fb paused due to insufficient funds for next trade
 
 ### Jan 30
@@ -62,6 +69,10 @@ Subscribers to marketplace signal bots show 0 trades despite source bots activel
   - Created failed trade for 2afe9363: "Insufficient capital"
 - 00:41:23: Another live routing test
   - Created failed trade for 2afe9363: "Insufficient capital"
+- **02:16:31: Source RNDR bot CLOSE (lost -$15.48)**
+  - Source bot closed successfully
+  - **2afe9363: NO CLOSE trade record exists** (silent failure - visibility fix not deployed)
+  - c57d65fb: paused, but might have had position from Jan 29 09:05
 
 ---
 
