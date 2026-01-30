@@ -113,7 +113,7 @@ curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/a
 -   **RNDR subscribers have funding problems** - routing works but:
     - Subscriber c57d65fb is PAUSED (wallet only has $0.18 USDC)
     - Subscriber 2afe9363 has autoTopUp=false and insufficient subaccount collateral
--   See `SUBSCRIBER_DIAGNOSTICS.md` for detailed investigation log
+-   See `docs/SUBSCRIBER_DIAGNOSTICS.md` for detailed investigation log
 
 ### Subscriber Routing Visibility (Jan 30 2026)
 -   **Failed trade records** now created for all routing failure scenarios
