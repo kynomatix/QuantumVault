@@ -87,9 +87,23 @@ Added visibility for all routing failure scenarios:
 
 | Time | Type | Source Bot | Result |
 |------|------|------------|--------|
-| 00:22:49 | Admin test | dee5703c | 2afe9363 failed: "Insufficient capital" |
-| 00:23:00 | Admin test | dee5703c | 2afe9363 failed: "Insufficient capital" |
-| 00:41:23 | Admin test | dee5703c | 2afe9363 failed: "Insufficient capital" |
+| 00:22:49 | Admin test (manual) | dee5703c | 2afe9363 failed: "Insufficient capital" |
+| 00:23:00 | Admin test (manual) | dee5703c | 2afe9363 failed: "Insufficient capital" |
+| 00:41:23 | Admin test (manual) | dee5703c | 2afe9363 failed: "Insufficient capital" |
+
+**IMPORTANT**: These are all MANUAL tests via admin endpoint. They prove the code path works when called directly, but do NOT prove webhooks work end-to-end.
+
+---
+
+## Still Need to Verify
+
+**Waiting for real webhook** to confirm:
+1. Webhook handler correctly calls `routeSignalToSubscribers`
+2. Async fire-and-forget pattern completes (doesn't get interrupted)
+3. Summary log appears in production logs
+4. Failed/success trade records are created from real signals
+
+Next real RNDR webhook will be the true test.
 
 ---
 
