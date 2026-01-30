@@ -115,7 +115,10 @@ curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/a
     - Subscriber 2afe9363 has autoTopUp=false and insufficient subaccount collateral
 -   See `docs/SUBSCRIBER_DIAGNOSTICS.md` for detailed investigation log
 
-### Subscriber Routing Visibility (Jan 30 2026)
+### Subscriber Routing Fix (Jan 30 2026)
+-   **Root cause identified**: Fire-and-forget async routing calls (`routeSignalToSubscribers(...).then().catch()`) in webhook handler were not executing - the Promise was created but never completed
+-   **Fix applied**: Changed both OPEN and CLOSE signal routing calls to use `await routeSignalToSubscribers(...)` with try/catch, ensuring routing executes before webhook response is sent
+-   **Verification**: Manual admin routing test (`/api/admin/live-routing-test/:botId`) works correctly, creating subscriber trades
 -   **Failed trade records** now created for all routing failure scenarios
 -   **Summary log** added: shows skipped/success/failed counts per routing call
 -   **Counters tracked**: skippedInactive, tradeSuccess, tradeFailed, closeSuccess, closeFailed

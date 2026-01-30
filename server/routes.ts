@@ -5600,21 +5600,24 @@ export async function registerRoutes(
               pnl: closeTradePnl,
             }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
             
-            // Route close signal to subscriber bots (async, don't block response)
+            // Route close signal to subscriber bots (awaited to ensure execution)
             console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS (CLOSE) ==========`);
             console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for CLOSE signal`);
             console.log(`[WEBHOOK-TRACE] Bot ID: ${botId}, action=${action}`);
             console.log(`[WEBHOOK-TRACE] isCloseSignal=true (close signal path)`);
-            routeSignalToSubscribers(botId, {
-              action: action as 'buy' | 'sell',
-              contracts,
-              positionSize,
-              price: signalPrice || closeFillPrice.toString(),
-              isCloseSignal: true,
-              strategyPositionSize,
-            }).then(() => {
+            try {
+              await routeSignalToSubscribers(botId, {
+                action: action as 'buy' | 'sell',
+                contracts,
+                positionSize,
+                price: signalPrice || closeFillPrice.toString(),
+                isCloseSignal: true,
+                strategyPositionSize,
+              });
               console.log(`[Webhook] ROUTING DEBUG: routeSignalToSubscribers CLOSE completed for bot ${botId}`);
-            }).catch(err => console.error('[Subscriber Routing] Error routing close to subscribers:', err));
+            } catch (routingErr) {
+              console.error('[Subscriber Routing] Error routing close to subscribers:', routingErr);
+            }
             
             // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
             // This must happen BEFORE auto-withdraw to ensure creator gets their share
@@ -6227,24 +6230,25 @@ export async function registerRoutes(
         price: fillPrice,
       }).catch(err => console.error('[Notifications] Failed to send trade_executed notification:', err));
 
-      // Route signal to subscriber bots (async, don't block response)
+      // Route signal to subscriber bots (awaited to ensure execution)
       console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS ==========`);
       console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for bot ${botId}`);
       console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, positionSize=${positionSize}`);
       console.log(`[WEBHOOK-TRACE] Prices: signalPrice=${signalPrice}, fillPrice=${fillPrice}`);
       console.log(`[WEBHOOK-TRACE] isCloseSignal=false (regular open signal path)`);
-      routeSignalToSubscribers(botId, {
-        action: action as 'buy' | 'sell',
-        contracts,
-        positionSize,
-        price: signalPrice || fillPrice.toString(),
-        isCloseSignal: false,
-        strategyPositionSize,
-      }).then(() => {
+      try {
+        await routeSignalToSubscribers(botId, {
+          action: action as 'buy' | 'sell',
+          contracts,
+          positionSize,
+          price: signalPrice || fillPrice.toString(),
+          isCloseSignal: false,
+          strategyPositionSize,
+        });
         console.log(`[Webhook] ROUTING DEBUG: routeSignalToSubscribers completed successfully for bot ${botId}`);
-      }).catch(err => {
-        console.error(`[Subscriber Routing] Error routing to subscribers for bot ${botId}:`, err);
-      });
+      } catch (routingErr) {
+        console.error(`[Subscriber Routing] Error routing to subscribers for bot ${botId}:`, routingErr);
+      }
 
       // Mark signal as executed (unique index prevents concurrent duplicates)
       try {
