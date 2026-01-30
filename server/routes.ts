@@ -797,6 +797,21 @@ async function routeSignalToSubscribers(
           // (they'll use available collateral instead)
           if (maxPos <= 0 && !profitReinvestEnabled) {
             console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} has no maxPositionSize configured and profit reinvest is disabled`);
+            
+            // Create a failed trade record for visibility
+            const oraclePriceForLog = parseFloat(signal.price);
+            await storage.createBotTrade({
+              tradingBotId: subBot.id,
+              walletAddress: subBot.walletAddress,
+              market: subBot.market,
+              side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+              size: '0',
+              price: oraclePriceForLog.toFixed(6),
+              status: 'failed',
+              fee: '0',
+              errorMessage: 'Bot has no Max Position Size configured',
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'no_max_position_size' },
+            });
             continue;
           }
 
@@ -825,6 +840,21 @@ async function routeSignalToSubscribers(
 
           if (!sizingResult.success) {
             console.log(`[Subscriber Routing] Bot ${subBot.id} trade sizing failed: ${sizingResult.error}`);
+            
+            // Create a failed trade record for visibility
+            await storage.createBotTrade({
+              tradingBotId: subBot.id,
+              walletAddress: subBot.walletAddress,
+              market: subBot.market,
+              side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+              size: '0',
+              price: oraclePrice.toFixed(6),
+              status: 'failed',
+              fee: '0',
+              errorMessage: sizingResult.error || 'Trade sizing failed',
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'sizing_failed' },
+            });
+            
             if (sizingResult.shouldPauseBot && sizingResult.pauseReason) {
               await storage.updateTradingBot(subBot.id, { isActive: false, pauseReason: sizingResult.pauseReason } as any);
               console.log(`[Subscriber Routing] Bot ${subBot.id} paused: ${sizingResult.pauseReason}`);
@@ -836,6 +866,20 @@ async function routeSignalToSubscribers(
 
           if (contractSize < 0.001) {
             console.log(`[Subscriber Routing] Trade size too small for subscriber bot ${subBot.id} (${contractSize.toFixed(6)} contracts)`);
+            
+            // Create a failed trade record for visibility
+            await storage.createBotTrade({
+              tradingBotId: subBot.id,
+              walletAddress: subBot.walletAddress,
+              market: subBot.market,
+              side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+              size: contractSize.toFixed(8),
+              price: oraclePrice.toFixed(6),
+              status: 'failed',
+              fee: '0',
+              errorMessage: 'Trade size too small (minimum 0.001 contracts)',
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'size_too_small' },
+            });
             continue;
           }
 
