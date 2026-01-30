@@ -110,6 +110,12 @@ curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/a
 ```
 
 ### Known Issues (Jan 2026)
--   **Subscription routing not working**: AVAX/RNDR subscriptions show `canRoute=true` but 0 subscriber trades
--   **DOGE subscription broken**: `subscriberBotId` is NULL
--   **Debug logging added**: Next webhook will show detailed routing logs in production
+-   **RNDR subscribers have funding problems** - routing works but:
+    - Subscriber c57d65fb is PAUSED (wallet only has $0.18 USDC)
+    - Subscriber 2afe9363 has autoTopUp=false and insufficient subaccount collateral
+-   See `SUBSCRIBER_DIAGNOSTICS.md` for detailed investigation log
+
+### Subscriber Routing Visibility (Jan 30 2026)
+-   **Failed trade records** now created for all routing failure scenarios
+-   **Summary log** added: shows skipped/success/failed counts per routing call
+-   **Counters tracked**: skippedInactive, tradeSuccess, tradeFailed, closeSuccess, closeFailed
