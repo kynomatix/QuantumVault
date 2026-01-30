@@ -4,7 +4,9 @@
 Subscribers to marketplace signal bots show 0 trades despite source bots actively trading.
 
 ## Current Status (Jan 30, 2026)
-**Routing mechanism works correctly** - confirmed via multiple live tests. The problem is subscriber funding.
+**Routing mechanism works when manually triggered** - confirmed via admin live-routing-test endpoint. 
+
+**CRITICAL**: No real webhook has ever been confirmed to successfully route to subscribers. All "successful" subscriber trades were from manual tests, NOT from actual TradingView webhooks.
 
 ---
 
@@ -44,7 +46,7 @@ Subscribers to marketplace signal bots show 0 trades despite source bots activel
 ## Timeline of Events
 
 ### Jan 29
-- 09:05:33-34: Both RNDR subscribers successfully opened LONG positions (routing worked)
+- 09:05:33-34: Both RNDR subscribers opened LONG positions (UNCLEAR if this was webhook or manual test - needs verification)
 - 19:54:06: c57d65fb closed position successfully
 - 22:00:12: Source RNDR bot sent CLOSE signal
   - 2afe9363 closed successfully
@@ -92,6 +94,8 @@ Added visibility for all routing failure scenarios:
 | 00:41:23 | Admin test (manual) | dee5703c | 2afe9363 failed: "Insufficient capital" |
 
 **IMPORTANT**: These are all MANUAL tests via admin endpoint. They prove the code path works when called directly, but do NOT prove webhooks work end-to-end.
+
+**Bottom line**: We have NEVER confirmed a real TradingView webhook successfully routing to a subscriber. This is the core issue that remains unverified.
 
 ---
 
