@@ -234,3 +234,69 @@ curl -s -X POST -H "Authorization: Bearer $ADMIN_PASSWORD" -H "Content-Type: app
   -d '{"action":"buy","contracts":"57","positionSize":"57","price":"1.75"}' \
   "https://myquantumvault.com/api/admin/live-routing-test/dee5703c-31f2-40f8-9ce5-ddd84bc12f7b"
 ```
+
+---
+
+## Debug Logging Reference (Added Jan 29)
+
+All trace logs use prefix `[WEBHOOK-TRACE]` for easy filtering.
+
+### Log Points in server/routes.ts
+
+| Location | Prefix | What it shows |
+|----------|--------|---------------|
+| Webhook entry (~4922) | `[WEBHOOK-TRACE]` | Confirms webhook received, shows payload |
+| Bot lookup (~4965) | `[WEBHOOK-TRACE]` | Bot name, market, publish status |
+| Signal branching (~5200) | `[WEBHOOK-TRACE]` | Which path (CLOSE vs OPEN) signal takes |
+| Routing call - Open (~6240) | `[WEBHOOK-TRACE]` | Confirms routing function called for opens |
+| Routing call - Close (~5609) | `[WEBHOOK-TRACE]` | Confirms routing function called for closes |
+| Inside routeSignalToSubscribers (~676) | `[Subscriber Routing]` | Function internals, subscriber count, processing |
+
+### Expected Log Flow (Working Routing)
+```
+[WEBHOOK-TRACE] ========== WEBHOOK RECEIVED ==========
+[WEBHOOK-TRACE] Bot ID: abc123...
+[WEBHOOK-TRACE] Bot found: name="My Bot", market=SOL-PERP
+[WEBHOOK-TRACE] Bot publish status: isPublished=true, publishedBotId=def456...
+[WEBHOOK-TRACE] ========== SIGNAL BRANCHING ==========
+[WEBHOOK-TRACE] isCloseSignal=false (will take OPEN/REGULAR path)
+... (trade execution) ...
+[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS ==========
+[WEBHOOK-TRACE] Routing status: completed
+[Subscriber Routing] Starting routing for source bot abc123...
+[Subscriber Routing] Found 2 subscriber bots for published bot def456...
+```
+
+### Failure Patterns to Look For
+- Missing `========== ROUTING SUBSCRIBER BOTS ==========` → function never called
+- `Bot publish status: isPublished=false` → bot not published
+- `Found 0 subscriber bots` → no active subscribers
+- `Routing status: error:` → exception thrown
+
+### Admin Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/admin/live-routing-test/:botId` | POST | Execute actual routing with test signal |
+| `/api/admin/debug-routing/:botId` | GET | Simulate routing, return diagnostics |
+| `/api/admin/subscription-diagnostics` | GET | Show all subscriptions with status |
+
+### Security Notes
+**Logged:** Bot IDs, names, markets, signal actions/amounts, timestamps, publish status  
+**NOT logged:** Private keys, wallet secrets, admin passwords, encrypted keys
+
+---
+
+## Cleanup Instructions (After Issue Resolved)
+
+Remove all diagnostic logging:
+```bash
+# Find WEBHOOK-TRACE logs
+grep -n "WEBHOOK-TRACE" server/routes.ts
+
+# Find routing debug logs
+grep -n "Subscriber Routing" server/routes.ts
+```
+
+Files to edit: `server/routes.ts`  
+Delete this file: `docs/SUBSCRIBER_DIAGNOSTICS.md` (after issue resolved)
