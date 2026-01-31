@@ -3,17 +3,50 @@
 ## Issue Summary
 Subscribers to marketplace signal bots show 0 trades despite source bots actively trading.
 
-## Current Status (Jan 30, 2026)
-**BREAKTHROUGH FINDING (Jan 30 02:40 UTC):**
+## Current Status (Jan 31, 2026)
+
+### Update Jan 31 22:29 UTC
+**CRITICAL: 0 subscriber trades created despite multiple deployments of await fix**
+
+Production analysis confirmed:
+- SUI bot (c2ee8a25) is actively trading (most recent: Jan 31 22:00:05 LONG)
+- 1 active subscriber (5a63edc8) correctly configured
+- Subscription status: 'active' (verified via hex dump)
+- Database structure: correct
+- **BUT: 0 subscriber trades exist**
+
+**Routing Status Tracking Added** (Commit 1973dccb):
+- Added `routingStatus` variable to both OPEN and CLOSE signal paths
+- Status values: 'not_attempted' → 'started' → 'completed' or 'error: [message]'
+- Status now included in webhook JSON response
+- Next webhook will reveal what's happening inside the routing function
+
+**Previous Finding (Jan 30 02:40 UTC):**
 - **Jan 29 09:05:22** - Subscriber 2afe9363 LONG was a REAL webhook routing (source=marketplace_routing, status=executed)
 - This proves OPEN signals CAN route via webhooks successfully
-- **BUT** CLOSE signals are failing silently:
-  - Jan 29 22:00:12 source CLOSE - NO subscriber trade record
-  - Jan 30 02:16:31 source CLOSE - NO subscriber trade record
+- **BUT** subsequent signals show no routing
 
-**Root cause hypothesis**: CLOSE signal routing path has a silent failure point that OPEN signals don't hit.
+**Hypothesis**: Either the await fix isn't reaching production, or there's an exception inside `routeSignalToSubscribers` that we're not seeing.
 
-**Still undeployed**: The visibility fix is in dev but NOT in production yet.
+---
+
+## SUI Subscribers (Source Bot: c2ee8a25 "SUI 1H OI Skalpa")
+
+### Published Bot Info
+- **Published Bot ID**: d7004bb1-4e85-4112-a0da-26e9273c43a9
+- **Status**: Active, trading hourly
+- **Market**: SUI-PERP
+- **Recent trades**: Jan 31 22:00:05 (LONG), many prior
+
+### Subscriber: 5a63edc8 ("SUI subscription test")
+- **Wallet**: AqTTQQaj...
+- **Subaccount**: 1
+- **Status**: ACTIVE
+- **autoTopUp**: true
+- **maxPositionSize**: $5
+- **Subscription**: 4749e188 (status='active')
+- **source_published_bot_id**: d7004bb1 ✓ (correctly linked)
+- **Trades**: 0 (NONE routed despite source bot trading)
 
 ---
 
@@ -130,12 +163,61 @@ The routing IS working. The subscribers have FUNDING PROBLEMS:
 ---
 
 ## Next Steps
-1. Deploy changes to production
-2. Wait for next real webhook to verify summary logs appear
-3. Users need to either:
-   - Add USDC to agent wallets
-   - Deposit collateral to bot subaccounts
-   - Enable autoTopUp with sufficient wallet funds
+
+### Immediate (Jan 31)
+1. ✅ Deploy routing status tracking (commit 1973dccb)
+2. Wait for next SUI hourly signal (~23:00 UTC)
+3. Check webhook response for `routingStatus` field
+4. If status is 'completed' but no trade, issue is inside subscriber execution
+5. If status is 'error', we'll see the exception message
+
+### If Routing Status Shows 'completed' But No Trade
+- Check `getSubscriberBotsBySourceId` returns the subscriber
+- Check subscriber bot wallet has agent keys
+- Check trade sizing calculation
+
+### If Routing Status Never Appears
+- The webhook response doesn't include routingStatus = code not deployed
+- Check production deployment pipeline
+
+### Previous Funding Issues (RNDR subscribers)
+- c57d65fb: needs wallet funds ($0.18 USDC)
+- 2afe9363: needs collateral in Drift subaccount 4 OR enable autoTopUp
+
+---
+
+## Code Changes Log
+
+### Commit 1973dccb (Jan 31 22:29 UTC) - Routing Status Tracking
+Added to both OPEN and CLOSE signal paths in `server/routes.ts`:
+```javascript
+let routingStatus = 'not_attempted';
+try {
+  routingStatus = 'started';
+  await routeSignalToSubscribers(...);
+  routingStatus = 'completed';
+} catch (routingErr) {
+  routingStatus = `error: ${String(routingErr).slice(0, 100)}`;
+}
+console.log(`[WEBHOOK-TRACE] Routing status: ${routingStatus}`);
+```
+Response JSON now includes `routingStatus` field.
+
+### Commit 659ec850 (Jan 30) - Visibility Fix
+- Failed trade records created for all routing failure scenarios
+- Counter tracking with summary log
+- Counters: skippedInactive, tradeSuccess, tradeFailed, closeSuccess, closeFailed
+
+### Previous Fix - Await Pattern
+Changed fire-and-forget pattern to awaited calls:
+```javascript
+// Before (broken):
+routeSignalToSubscribers(...).then().catch();
+
+// After (fixed):
+await routeSignalToSubscribers(...);
+```
+Applied to both OPEN (line ~6240) and CLOSE (line ~5609) signal paths.
 
 ---
 
