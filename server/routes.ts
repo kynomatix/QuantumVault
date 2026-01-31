@@ -5605,7 +5605,9 @@ export async function registerRoutes(
             console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for CLOSE signal`);
             console.log(`[WEBHOOK-TRACE] Bot ID: ${botId}, action=${action}`);
             console.log(`[WEBHOOK-TRACE] isCloseSignal=true (close signal path)`);
+            let closeRoutingStatus = 'not_attempted';
             try {
+              closeRoutingStatus = 'started';
               await routeSignalToSubscribers(botId, {
                 action: action as 'buy' | 'sell',
                 contracts,
@@ -5614,10 +5616,13 @@ export async function registerRoutes(
                 isCloseSignal: true,
                 strategyPositionSize,
               });
+              closeRoutingStatus = 'completed';
               console.log(`[Webhook] ROUTING DEBUG: routeSignalToSubscribers CLOSE completed for bot ${botId}`);
             } catch (routingErr) {
+              closeRoutingStatus = `error: ${String(routingErr).slice(0, 100)}`;
               console.error('[Subscriber Routing] Error routing close to subscribers:', routingErr);
             }
+            console.log(`[WEBHOOK-TRACE] Close routing status: ${closeRoutingStatus}`);
             
             // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
             // This must happen BEFORE auto-withdraw to ensure creator gets their share
@@ -6236,7 +6241,9 @@ export async function registerRoutes(
       console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, positionSize=${positionSize}`);
       console.log(`[WEBHOOK-TRACE] Prices: signalPrice=${signalPrice}, fillPrice=${fillPrice}`);
       console.log(`[WEBHOOK-TRACE] isCloseSignal=false (regular open signal path)`);
+      let routingStatus = 'not_attempted';
       try {
+        routingStatus = 'started';
         await routeSignalToSubscribers(botId, {
           action: action as 'buy' | 'sell',
           contracts,
@@ -6245,10 +6252,13 @@ export async function registerRoutes(
           isCloseSignal: false,
           strategyPositionSize,
         });
+        routingStatus = 'completed';
         console.log(`[Webhook] ROUTING DEBUG: routeSignalToSubscribers completed successfully for bot ${botId}`);
       } catch (routingErr) {
+        routingStatus = `error: ${String(routingErr).slice(0, 100)}`;
         console.error(`[Subscriber Routing] Error routing to subscribers for bot ${botId}:`, routingErr);
       }
+      console.log(`[WEBHOOK-TRACE] Routing status: ${routingStatus}`);
 
       // Mark signal as executed (unique index prevents concurrent duplicates)
       try {
@@ -6270,6 +6280,7 @@ export async function registerRoutes(
         market: bot.market,
         size: positionSize,
         signalHash,
+        routingStatus,
       });
       } finally {
         // PHASE 6.2: Ensure agent key is cleaned up after execution
