@@ -186,7 +186,33 @@ Display when enabling:
 Running a monitor every 30 seconds that fetches data for every bot with protection enabled could generate excessive RPC calls:
 - Per bot: oracle price + account data + liquidation calculation = 2-3 RPC calls
 - 10 bots with protection = 20-30 RPC calls every 30 seconds
-- 60 calls/minute × 60 minutes = 3,600 calls/hour (can hit rate limits)
+- 60 calls/minute × 60 minutes = 3,600 calls/hour
+
+### Rate Limiting Reality
+**This is the primary concern** - not just cost, but service reliability:
+
+| RPC Provider | Rate Limit | Risk |
+|--------------|------------|------|
+| Helius Free | 10 req/sec | High - easily exceeded |
+| Helius Paid | 50-100 req/sec | Medium - spikes can hit |
+| Public RPC | Variable | Very High - unreliable |
+
+**When rate limited:**
+- `-32429` errors cascade across all services
+- Trade execution fails
+- Position reconciliation stops
+- Webhooks fail to process
+- **Liquidation protection becomes unreliable exactly when needed most**
+
+**Current RPC consumers competing for budget:**
+1. DriftPrice service (every 10s)
+2. Reconciliation service (every 60s)
+3. Trade execution (on-demand)
+4. Account info queries (on-demand)
+5. Portfolio snapshots (every 12h)
+6. **NEW: Liquidation protection monitoring**
+
+**Critical Rule:** Protection monitoring must NOT compete with trade execution. If we're rate-limited during a liquidation crisis, we can't deposit protection funds.
 
 ### Optimization Strategies
 
@@ -229,7 +255,55 @@ accountInfos.forEach((info, i) => {
 
 **RPC Savings:** N calls → 1 call
 
-#### 3. Staggered Monitoring
+#### 3. Rate Limit Backoff & Recovery
+When rate limited, back off gracefully:
+
+```typescript
+class RateLimitAwareMonitor {
+  private backoffMs = 0;
+  private consecutiveErrors = 0;
+  
+  async checkWithBackoff() {
+    if (this.backoffMs > 0) {
+      await sleep(this.backoffMs);
+    }
+    
+    try {
+      await this.doCheck();
+      // Success - reduce backoff
+      this.backoffMs = Math.max(0, this.backoffMs - 1000);
+      this.consecutiveErrors = 0;
+    } catch (err) {
+      if (isRateLimitError(err)) {
+        this.consecutiveErrors++;
+        // Exponential backoff: 2s, 4s, 8s, 16s, max 60s
+        this.backoffMs = Math.min(60000, 2000 * Math.pow(2, this.consecutiveErrors));
+        console.warn(`[LiquidationProtection] Rate limited, backing off ${this.backoffMs}ms`);
+      }
+    }
+  }
+}
+```
+
+**Priority Queue for RPC Calls:**
+```typescript
+// Trade execution gets priority over monitoring
+const RPC_PRIORITY = {
+  TRADE_EXECUTION: 1,      // Highest - never delay
+  PROTECTION_DEPOSIT: 2,   // High - time sensitive
+  RECONCILIATION: 3,       // Medium
+  PROTECTION_CHECK: 4,     // Lower - can wait
+  ANALYTICS: 5,            // Lowest
+};
+
+// If RPC budget is tight, skip lower priority calls
+if (rpcBudgetRemaining < 10 && priority > RPC_PRIORITY.PROTECTION_DEPOSIT) {
+  console.log(`[RPC] Skipping ${taskName} - budget tight, saving for critical ops`);
+  return;
+}
+```
+
+#### 4. Staggered Monitoring
 Instead of checking all bots simultaneously every 30s, stagger checks:
 
 ```typescript
