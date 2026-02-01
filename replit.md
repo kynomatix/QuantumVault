@@ -63,7 +63,7 @@ Preferred communication style: Simple, everyday language.
 -   **Solana Web3.js**: Core Solana blockchain interactions.
 -   **Drift Protocol SDK**: Perpetual futures trading on Drift.
 -   **SPL Token**: Solana Program Library token interactions.
--   **RPC Endpoint**: Configurable via `SOLANA_RPC_URL` (defaults to Helius API key with public mainnet RPC fallback).
+-   **RPC Endpoint**: Configurable via `SOLANA_RPC_URL`. Uses Helius as primary (10 req/sec free tier) with Triton as fallback when rate-limited or unavailable.
 -   **Drift Protocol Configuration**: Solana Mainnet-Beta.
 
 ### Database

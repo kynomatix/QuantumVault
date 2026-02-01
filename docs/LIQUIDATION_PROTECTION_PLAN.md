@@ -20,10 +20,18 @@ A dynamic collateral management system that protects higher-timeframe (HTF) swin
 | Position closes | handleCloseSignal hooks | New close handlers |
 
 ### 2. Rate Limit First
-RPC rate limiting is the primary constraint (10 req/sec on Helius Free). All design decisions must minimize RPC calls:
+RPC rate limiting is the primary constraint. All design decisions must minimize RPC calls:
 - **0 new scheduled RPC calls** - piggyback on existing reconciliation
 - **Priority queue** - protect trade execution budget
 - **Exponential backoff** - graceful degradation under pressure
+
+**RPC Providers:**
+| Provider | Rate Limit | Role |
+|----------|------------|------|
+| Helius | 10 req/sec (free) / 50-100 (paid) | Primary |
+| Triton | Varies | Fallback |
+
+Triton fallback activates when Helius is rate-limited or unavailable. Protection logic should work with either provider.
 
 ### 3. Minimize Code Surface
 - Add fields to existing `trading_bots` table, not new tables
