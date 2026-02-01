@@ -3,6 +3,35 @@
 ## Overview
 A dynamic collateral management system that protects higher-timeframe (HTF) swing trading bots from liquidation during temporary adverse price moves. When price approaches liquidation, the system automatically deposits additional collateral to push the liquidation price further away. When price recovers to safety, it withdraws the extra collateral.
 
+## Design Principles
+
+### 1. Maximize Infrastructure Reuse
+**NO new scheduled services or polling loops.** Integrate with existing infrastructure:
+
+| Requirement | Reuse This | Instead Of |
+|-------------|------------|------------|
+| Position monitoring | Reconciliation service (60s) | New monitoring service |
+| Oracle prices | DriftPrice cache (10s) | New price fetching |
+| Account data | decodeUser in reconciliation | New account queries |
+| Deposits | executeAgentDriftDeposit | New deposit logic |
+| Withdrawals | sweepSubaccountFunds pattern | New withdrawal logic |
+| Event tracking | equity_events table | New tracking table |
+| Notifications | sendTradeNotification | New notification system |
+| Position closes | handleCloseSignal hooks | New close handlers |
+
+### 2. Rate Limit First
+RPC rate limiting is the primary constraint (10 req/sec on Helius Free). All design decisions must minimize RPC calls:
+- **0 new scheduled RPC calls** - piggyback on existing reconciliation
+- **Priority queue** - protect trade execution budget
+- **Exponential backoff** - graceful degradation under pressure
+
+### 3. Minimize Code Surface
+- Add fields to existing `trading_bots` table, not new tables
+- Add logic to existing `reconciliation-service.ts`, not new files
+- Hook into existing close/pause/delete flows, not new handlers
+
+**Total new files: 0** (all logic added to existing files)
+
 ## Problem Statement
 HTF swing trades (1H, 2H, 4H+ timeframes) can experience significant drawdowns before reaching their stop-loss or profit target. During volatile market conditions:
 - Price may spike toward liquidation price temporarily
@@ -59,58 +88,147 @@ New equity event types:
 - `protection_deposit` - Collateral added for liquidation protection
 - `protection_withdrawal` - Extra collateral removed after price recovery
 
-### Phase 2: Monitoring Service
+### Phase 2: Integrate with Existing Reconciliation Service (NO NEW SERVICE)
 
-Create `server/liquidation-protection-service.ts`:
+**DO NOT create a new monitoring service.** Instead, extend `server/reconciliation-service.ts`:
 
 ```typescript
-interface ProtectionState {
-  botId: string;
-  currentPrice: number;
-  liquidationPrice: number;
-  distancePercent: number;
-  isInDanger: boolean;
-  protectionDeposited: number;
-  lastActionAt: Date | null;
+// In reconciliation-service.ts - already runs every 60s with account data
+
+async function reconcileBot(bot: TradingBot, accountData: DecodedUser, prices: PriceCache) {
+  // ... existing reconciliation logic ...
+  
+  // ADD: Liquidation protection check (0 new RPC calls - uses existing data)
+  if (bot.liquidationProtectionEnabled && accountData.positions.length > 0) {
+    await checkLiquidationProtection(bot, accountData, prices);
+  }
+}
+```
+
+**Existing infrastructure to reuse:**
+
+| What We Need | Existing Service | RPC Cost |
+|--------------|------------------|----------|
+| Oracle prices | `DriftPrice` service (10s cache) | 0 |
+| Account data | `reconciliation-service` (60s) | 0 |
+| Liquidation price | `decodeUser` already calculates | 0 |
+| Deposit execution | `executeAgentDriftDeposit` | 1 call |
+| Withdraw execution | `executeAgentDriftWithdraw` | 1 call |
+| Event tracking | `storage.createEquityEvent` | 0 |
+| Notifications | `sendTradeNotification` | 0 |
+
+### Phase 3: Protection Logic (Added to Reconciliation)
+
+```typescript
+// Add to reconciliation-service.ts
+async function checkLiquidationProtection(
+  bot: TradingBot, 
+  accountData: DecodedUser, 
+  prices: PriceCache
+) {
+  // All data already fetched by reconciliation - 0 new RPC calls
+  const currentPrice = prices[bot.market];
+  const liquidationPrice = accountData.liquidationPrice; // Already decoded
+  const distancePercent = Math.abs(currentPrice - liquidationPrice) / liquidationPrice * 100;
+  
+  // Check cooldown using bot.lpLastActionAt
+  const cooldownOk = !bot.lpLastActionAt || 
+    (Date.now() - bot.lpLastActionAt.getTime()) > (bot.lpCooldownSeconds * 1000);
+  
+  if (!cooldownOk) return;
+  
+  if (distancePercent < bot.lpTriggerDistance && 
+      bot.lpCurrentProtectionAmount < bot.lpMaxProtectionDeposit) {
+    // DANGER ZONE - need to deposit
+    await executeProtectionDeposit(bot);
+  } else if (distancePercent > bot.lpSafeDistance && 
+             bot.lpCurrentProtectionAmount > 0) {
+    // SAFE ZONE - can withdraw extra
+    await executeProtectionWithdrawal(bot);
+  }
 }
 
-// Core functions:
-async function checkProtectionNeeded(botId: string): Promise<ProtectionAction>
-async function executeProtectionDeposit(botId: string, amount: number): Promise<void>
-async function executeProtectionWithdrawal(botId: string, amount: number): Promise<void>
-async function startProtectionMonitor(): void  // Runs every 30s
-```
-
-### Phase 3: Monitoring Logic
-
-```
-Every 30 seconds for each bot with open position and protection enabled:
-  1. Get current oracle price for market
-  2. Get liquidation price from Drift SDK (already available via decodeUser)
-  3. Calculate distance: distancePercent = abs(currentPrice - liquidationPrice) / liquidationPrice * 100
+async function executeProtectionDeposit(bot: TradingBot) {
+  // Reuse existing deposit infrastructure
+  const depositAmount = Math.min(
+    bot.lpDepositIncrement,
+    bot.lpMaxProtectionDeposit - bot.lpCurrentProtectionAmount
+  );
   
-  IF distancePercent < triggerDistance AND protectionDeposited < maxProtectionDeposit:
-    - Check cooldown (lastActionAt + cooldownSeconds < now)
-    - Check agent wallet has funds
-    - Deposit min(depositIncrement, maxProtectionDeposit - protectionDeposited)
-    - Update lp_current_protection_amount
-    - Create equity_event with type 'protection_deposit'
-    - Log: "[LiquidationProtection] Bot {name}: deposited ${amount} (price {dist}% from liquidation)"
+  // Uses existing executeAgentDriftDeposit from agent-wallet.ts
+  const result = await executeAgentDriftDeposit(
+    bot.agentPublicKey,
+    wallet.agentPrivateKeyEncrypted,
+    depositAmount,
+    bot.driftSubaccountId
+  );
+  
+  if (result.success) {
+    // Uses existing storage.createEquityEvent
+    await storage.createEquityEvent({
+      walletAddress: bot.walletAddress,
+      tradingBotId: bot.id,
+      eventType: 'protection_deposit',
+      amount: String(depositAmount),
+      txSignature: result.signature,
+    });
     
-  ELSE IF distancePercent > safeDistance AND protectionDeposited > 0:
-    - Check cooldown
-    - Withdraw min(depositIncrement, protectionDeposited)
-    - Update lp_current_protection_amount
-    - Create equity_event with type 'protection_withdrawal'
-    - Log: "[LiquidationProtection] Bot {name}: withdrew ${amount} (price now {dist}% from liquidation)"
+    // Uses existing notification service
+    await sendTradeNotification(bot.walletAddress, {
+      type: 'protection_deposit',
+      botName: bot.name,
+      amount: depositAmount,
+      distancePercent,
+    });
+  }
+}
 ```
 
-### Phase 4: Integration Points
+### Phase 4: Integration Points (Reusing Existing Flows)
 
-1. **Position Close**: When position closes (manually, stop loss, or signal), automatically withdraw all protection deposits
-2. **Bot Pause/Delete**: Return all protection deposits to agent wallet
-3. **Reconciliation**: Include protection amounts in position equity calculations
-4. **UI Display**: Show protection status, current protection amount, distance to liquidation
+Hook into existing code paths - NO new endpoints or services:
+
+| Trigger | Existing Code Location | Action |
+|---------|------------------------|--------|
+| Position Close | `handleCloseSignal()` in routes.ts | Withdraw all protection deposits |
+| Bot Pause | `pauseBot()` in routes.ts | Withdraw protection before closing position |
+| Bot Delete | `deleteBot()` in routes.ts | Withdraw protection as part of sweep |
+| Manual Trade Close | `manualTrade()` route | Withdraw protection after close |
+| Reconciliation | `reconcileBot()` | Already integrated in Phase 2 |
+
+```typescript
+// Example: Add to existing handleCloseSignal in routes.ts
+async function handleCloseSignal(bot, signal) {
+  // ... existing close logic ...
+  
+  // ADD: Withdraw protection deposits after position closed
+  if (bot.lpCurrentProtectionAmount > 0) {
+    await withdrawAllProtection(bot);
+  }
+}
+
+// Reuse existing sweepSubaccountFunds logic for withdrawals
+async function withdrawAllProtection(bot: TradingBot) {
+  // Uses same pattern as sweepSubaccountFunds in bot deletion
+  const result = await executeAgentDriftWithdraw(
+    bot.agentPublicKey,
+    wallet.agentPrivateKeyEncrypted,
+    bot.lpCurrentProtectionAmount,
+    bot.driftSubaccountId
+  );
+  
+  if (result.success) {
+    await storage.updateBot(bot.id, { lpCurrentProtectionAmount: 0 });
+    await storage.createEquityEvent({
+      eventType: 'protection_withdrawal',
+      amount: String(bot.lpCurrentProtectionAmount),
+      // ...
+    });
+  }
+}
+```
+
+**No new scheduled jobs** - piggybacks on existing 60s reconciliation cycle.
 
 ### Phase 5: Frontend UI
 
