@@ -33,6 +33,27 @@ export interface RetryJob {
 const retryQueue: Map<string, RetryJob> = new Map();
 let workerInterval: NodeJS.Timeout | null = null;
 
+// Callback for routing signals to subscribers after successful retry
+// This allows routes.ts to register the routing function without circular dependencies
+type RoutingCallback = (
+  botId: string,
+  signal: {
+    action: 'buy' | 'sell';
+    contracts: string;
+    positionSize: string;
+    price: string;
+    isCloseSignal: boolean;
+    strategyPositionSize: string | null;
+  }
+) => Promise<void>;
+
+let routingCallback: RoutingCallback | null = null;
+
+export function registerRoutingCallback(callback: RoutingCallback): void {
+  routingCallback = callback;
+  console.log('[TradeRetry] Routing callback registered');
+}
+
 const BACKOFF_BASE_MS = 5000;
 const BACKOFF_MAX_MS = 60000;
 const MAX_ATTEMPTS_NORMAL = 5;
@@ -309,6 +330,34 @@ async function processRetryJob(job: RetryJob): Promise<void> {
           );
         } catch (syncErr) {
           console.warn(`[TradeRetry] Position sync failed:`, syncErr);
+        }
+        
+        // ROUTING: Route signal to subscribers after successful source bot trade
+        // This is critical for the marketplace feature - subscribers need to copy the trade
+        // Routes both OPEN (long/short) and CLOSE signals
+        if (routingCallback && job.webhookPayload) {
+          try {
+            const payload = job.webhookPayload as { action?: string; contracts?: string | number; market?: string; positionSize?: string | number };
+            const isCloseSignal = job.side === 'close';
+            if (payload.action && (payload.contracts !== undefined || isCloseSignal)) {
+              console.log(`[TradeRetry] Routing ${isCloseSignal ? 'CLOSE' : 'OPEN'} signal to subscribers for source bot ${job.botId}: ${payload.action}`);
+              await routingCallback(job.botId, {
+                action: payload.action as 'buy' | 'sell',
+                contracts: isCloseSignal ? '0' : String(payload.contracts),
+                positionSize: String(payload.positionSize ?? '100'),
+                price: String(fillPrice),
+                isCloseSignal,
+                strategyPositionSize: null,
+              });
+              console.log(`[TradeRetry] Routing completed for bot ${job.botId}`);
+            } else {
+              console.log(`[TradeRetry] Skipping routing: incomplete webhook payload (action=${payload.action}, contracts=${payload.contracts})`);
+            }
+          } catch (routingErr: any) {
+            console.error(`[TradeRetry] Routing to subscribers failed (non-blocking): ${routingErr.message}`);
+          }
+        } else if (!routingCallback) {
+          console.warn(`[TradeRetry] Routing callback not registered - subscribers may not receive signal for bot ${job.botId}`);
         }
         
         // PROFIT SHARE: Distribute creator's share of realized profit for subscriber bots

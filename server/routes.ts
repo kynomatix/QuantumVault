@@ -20,7 +20,7 @@ import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransactio
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMarketMaxLeverage } from "./market-liquidity-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
-import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus } from "./trade-retry-service";
+import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
@@ -1104,6 +1104,10 @@ export async function registerRoutes(
 
   // Start analytics indexer for platform metrics
   startAnalyticsIndexer();
+  
+  // Register routing callback for trade retry service
+  // This allows successful retries to route signals to subscribers
+  registerRoutingCallback(routeSignalToSubscribers);
 
   // Public API: Platform metrics (no auth required) - for landing page
   app.get("/api/metrics", async (req, res) => {

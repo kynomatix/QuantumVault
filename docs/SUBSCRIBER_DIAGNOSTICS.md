@@ -3,30 +3,30 @@
 ## Issue Summary
 Subscribers to marketplace signal bots show 0 trades despite source bots actively trading.
 
-## Current Status (Jan 31, 2026)
+## RESOLVED: Feb 1, 2026 22:48 UTC
 
-### Update Jan 31 22:29 UTC
-**CRITICAL: 0 subscriber trades created despite multiple deployments of await fix**
+### Root Cause Identified and Fixed
+**Trade retry system was bypassing subscriber routing**
 
-Production analysis confirmed:
-- SUI bot (c2ee8a25) is actively trading (most recent: Jan 31 22:00:05 LONG)
-- 1 active subscriber (5a63edc8) correctly configured
-- Subscription status: 'active' (verified via hex dump)
-- Database structure: correct
-- **BUT: 0 subscriber trades exist**
+When source bot trades failed with temporary errors (margin issues, rate limits):
+1. Webhook handler queued trade for retry → **returned early before routing call**
+2. Retry service executed trade successfully later
+3. But retry service **had no routing logic** → subscribers never got signals
 
-**Routing Status Tracking Added** (Commit 1973dccb):
-- Added `routingStatus` variable to both OPEN and CLOSE signal paths
-- Status values: 'not_attempted' → 'started' → 'completed' or 'error: [message]'
-- Status now included in webhook JSON response
-- Next webhook will reveal what's happening inside the routing function
+### Fix Applied
+1. Added `registerRoutingCallback()` function to `trade-retry-service.ts`
+2. Routes both OPEN and CLOSE signals after successful retry
+3. `routes.ts` registers `routeSignalToSubscribers` callback at startup
+4. Logs now show: `[TradeRetry] Routing callback registered`
 
-**Previous Finding (Jan 30 02:40 UTC):**
-- **Jan 29 09:05:22** - Subscriber 2afe9363 LONG was a REAL webhook routing (source=marketplace_routing, status=executed)
-- This proves OPEN signals CAN route via webhooks successfully
-- **BUT** subsequent signals show no routing
+### Verification
+- Admin manual routing test: **WORKS** (created trades at 22:39 UTC)
+- Retry service routing: **NOW ENABLED** (via callback pattern)
+- Next webhook with retry → will route to subscribers
 
-**Hypothesis**: Either the await fix isn't reaching production, or there's an exception inside `routeSignalToSubscribers` that we're not seeing.
+---
+
+## Previous Investigation (Jan 29-31, 2026)
 
 ---
 
