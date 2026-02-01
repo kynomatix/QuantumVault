@@ -569,3 +569,191 @@ Add to Telegram notifications:
 2. **Volatility-Aware Triggers**: Adjust thresholds based on market volatility
 3. **Cross-Bot Protection Pool**: Shared protection fund across multiple bots
 4. **Auto-Stop-Loss Trigger**: If protection exhausted, auto-close position at reduced loss vs full liquidation
+
+---
+
+## Implementation Audit (Feb 2026)
+
+### CRITICAL GAPS IDENTIFIED
+
+#### 1. Reconciliation Service Does NOT Fetch Liquidation Data
+
+**Plan Assumption:**
+> "Piggyback on reconciliation's account data with 0 new RPC calls"
+
+**Reality:**
+The reconciliation service (`server/reconciliation-service.ts`) only calls `getPerpPositions()` which returns:
+- baseAssetAmount
+- entryPrice
+- unrealizedPnl
+- markPrice
+
+**It does NOT fetch:**
+- freeCollateral (required for liquidation calculation)
+- Account health metrics
+- Liquidation price
+
+```typescript
+// Current reconciliation - only syncs position size
+await reconcileBotPosition(bot.id, walletAddress, wallet.agentPublicKey, subAccountId, bot.market);
+// Internally calls: getPerpPositions(agentPublicKey, subAccountId)
+// Returns: PerpPosition[] with baseAssetAmount, entryPrice, etc.
+// MISSING: freeCollateral, liquidation price
+```
+
+**IMPACT:** Cannot achieve 0 RPC calls for monitoring. Each protection check needs `getDriftAccountInfo()`.
+
+#### 2. Liquidation Price Requires Separate getDriftAccountInfo Call
+
+**Plan Assumption:**
+> "liquidationPrice = accountData.liquidationPrice; // Already decoded"
+
+**Reality:**
+Liquidation price is calculated in `getDriftAccountInfo()` (server/drift-service.ts) using:
+- freeCollateral
+- position size
+- mark price  
+- maintenance margin weight
+
+This function makes **at least 1 RPC call** to fetch the user account buffer.
+
+```typescript
+// From position-service.ts - liquidation price calculation
+const accountInfo = await getDriftAccountInfo(agentPublicKey, subAccountId); // 1 RPC call
+const liquidationPrice = calculateLiquidationPrice(
+  accountInfo.freeCollateral,
+  onChainPos.markPrice,
+  onChainSize,
+  maintenanceWeight
+);
+```
+
+**REVISED RPC ESTIMATE:**
+| Action | RPC Calls |
+|--------|-----------|
+| Protection check per bot | 1 (getDriftAccountInfo) |
+| 10 bots with protection | 10 calls/check cycle |
+| 60 checks/hour (every 60s) | 600 calls/hour |
+
+#### 3. No Batch getDriftAccountInfo Exists
+
+**Plan Assumption:**
+> "Single `getMultipleAccountsInfo` for all protected bots"
+
+**Reality:**
+`getBatchDriftAccountInfo()` does exist in drift-service.ts, but:
+- It's used for specific batch scenarios
+- Each account still needs decoding and liquidation calculation
+- We CAN batch the RPC call, but need to verify it works for this use case
+
+**SOLUTION:** Extend reconciliation to use `getBatchDriftAccountInfo()` for all active bots, then share that data with protection checks.
+
+#### 4. DriftPrice Service Uses External APIs (GOOD)
+
+**Finding:**
+DriftPrice service fetches from:
+- Drift Data API (`https://data.api.drift.trade/contracts`) - primary
+- CoinGecko API - fallback for major markets
+
+**These are NOT RPC calls** - they don't count against Helius/Triton rate limits.
+
+**CONCLUSION:** Price fetching is safe, no changes needed.
+
+#### 5. equity_events Table Ready
+
+**Finding:**
+The table structure supports new event types:
+```typescript
+export const equityEvents = pgTable("equity_events", {
+  eventType: text("event_type").notNull(), // Can add 'protection_deposit', 'protection_withdrawal'
+  amount: decimal("amount"),
+  txSignature: text("tx_signature"),
+  notes: text("notes"),
+});
+```
+
+**CONCLUSION:** No schema changes needed for event tracking.
+
+#### 6. executeAgentDriftWithdraw Exists
+
+**Finding:**
+Function exists in `server/drift-service.ts`:
+```typescript
+export async function executeAgentDriftWithdraw(...)
+```
+
+Also related: `sweepSubaccountFunds` pattern in `resetDriftAccount` route shows how to transfer between subaccounts.
+
+**CONCLUSION:** Withdrawal infrastructure exists, can be reused.
+
+---
+
+### REVISED IMPLEMENTATION APPROACH
+
+Given the gaps, here's the corrected approach:
+
+#### Option A: Extend Reconciliation (Preferred)
+
+Modify reconciliation service to:
+1. Use `getBatchDriftAccountInfo()` instead of individual `getPerpPositions()` calls
+2. Store liquidation-relevant data in memory/cache per bot
+3. Protection check runs on cached data (0 additional RPC)
+
+```typescript
+// Modified reconciliation - batch fetch with account info
+async function reconcileAllBots() {
+  const botsToReconcile = await getActiveBotsWithPositions();
+  
+  // BATCH: Single RPC for all accounts
+  const accountInfos = await getBatchDriftAccountInfo(
+    botsToReconcile.map(b => ({ wallet: b.agentPublicKey, subaccount: b.driftSubaccountId }))
+  );
+  
+  for (let i = 0; i < botsToReconcile.length; i++) {
+    const bot = botsToReconcile[i];
+    const accountInfo = accountInfos[i];
+    
+    // Existing reconciliation
+    await syncPositionData(bot, accountInfo);
+    
+    // NEW: Protection check using same data (0 extra RPC)
+    if (bot.liquidationProtectionEnabled) {
+      await checkLiquidationProtection(bot, accountInfo);
+    }
+  }
+}
+```
+
+**RPC Impact:** Same as current reconciliation (batched), just adds protection logic.
+
+#### Option B: Separate Monitoring with Smart Batching
+
+If we can't modify reconciliation:
+1. Create separate protection monitor that runs every 60s (offset from reconciliation by 30s)
+2. Use `getBatchDriftAccountInfo()` for all protected bots in single call
+3. Accept ~10 additional RPC calls per check cycle
+
+**RPC Impact:** +10 calls/minute for 10 protected bots (batched).
+
+---
+
+### UPDATED IMPLEMENTATION CHECKLIST
+
+- [ ] **Verify getBatchDriftAccountInfo works for this use case**
+- [ ] **Modify reconciliation to fetch full account info, not just positions**
+- [ ] **Add liquidation distance calculation to reconciliation loop**
+- [ ] **Add protection deposit/withdrawal logic to reconciliation**
+- [ ] **Add schema fields to trading_bots table**
+- [ ] **Add new equity_event types**
+- [ ] **Add hooks to close handlers for protection withdrawal**
+- [ ] **Frontend UI for settings and status**
+- [ ] **Telegram notifications**
+
+### RISK ASSESSMENT UPDATE
+
+| Risk | Original Assessment | Revised Assessment |
+|------|---------------------|-------------------|
+| RPC calls | 0 new scheduled | ~10/minute (batched) or 0 if reconciliation modified |
+| Rate limiting | Low | Medium - depends on implementation choice |
+| Complexity | Low (piggyback) | Medium (requires reconciliation refactor) |
+| Time to implement | 2-3 days | 4-5 days |
