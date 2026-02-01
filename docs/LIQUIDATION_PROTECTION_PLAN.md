@@ -180,6 +180,163 @@ Display when enabling:
 - [ ] Add Telegram notifications for protection events
 - [ ] Documentation
 
+## RPC Optimization Strategy
+
+### Problem
+Running a monitor every 30 seconds that fetches data for every bot with protection enabled could generate excessive RPC calls:
+- Per bot: oracle price + account data + liquidation calculation = 2-3 RPC calls
+- 10 bots with protection = 20-30 RPC calls every 30 seconds
+- 60 calls/minute × 60 minutes = 3,600 calls/hour (can hit rate limits)
+
+### Optimization Strategies
+
+#### 1. Leverage Existing Cached Data
+**Already available without new RPC calls:**
+- `DriftPrice` service caches all oracle prices (refreshes every 10s)
+- Reconciliation service already fetches account data every 60s
+- Portfolio snapshots already decode user accounts
+
+**Implementation:**
+```typescript
+// Use cached price from DriftPrice service (0 RPC calls)
+const cachedPrices = await getPricesFromCache();
+const currentPrice = cachedPrices[market];
+
+// Share account data with reconciliation service
+// Instead of: individual getAccountInfo per bot
+// Do: piggyback on reconciliation's batch fetch
+```
+
+#### 2. Batch Account Fetches
+**Instead of:** N individual `getAccountInfo` calls
+**Do:** Single `getMultipleAccountsInfo` for all protected bots
+
+```typescript
+// Collect all user account pubkeys for bots with protection enabled
+const userAccountPubkeys = protectedBots.map(bot => 
+  deriveUserAccountPubkey(bot.agentPublicKey, bot.driftSubaccountId)
+);
+
+// Single RPC call for all accounts
+const accountInfos = await connection.getMultipleAccountsInfo(userAccountPubkeys);
+
+// Decode all in memory (no RPC)
+accountInfos.forEach((info, i) => {
+  const decoded = decodeUser(info.data);
+  // Calculate liquidation for each
+});
+```
+
+**RPC Savings:** N calls → 1 call
+
+#### 3. Staggered Monitoring
+Instead of checking all bots simultaneously every 30s, stagger checks:
+
+```typescript
+// Spread checks across the interval
+const botsPerSecond = Math.ceil(protectedBots.length / 30);
+let offset = 0;
+
+setInterval(() => {
+  const batch = protectedBots.slice(offset, offset + botsPerSecond);
+  checkProtectionForBatch(batch);
+  offset = (offset + botsPerSecond) % protectedBots.length;
+}, 1000); // Check small batch every second
+```
+
+**Benefits:** 
+- Smoother RPC load distribution
+- Less likely to hit rate limits
+- Faster response for first bots in queue
+
+#### 4. Smart Polling Frequency
+Adjust check frequency based on distance to liquidation:
+
+| Distance from Liquidation | Check Frequency |
+|---------------------------|-----------------|
+| > 20%                     | Every 5 minutes |
+| 10-20%                    | Every 60 seconds|
+| 5-10%                     | Every 30 seconds|
+| < 5%                      | Every 10 seconds|
+
+```typescript
+function getCheckInterval(distancePercent: number): number {
+  if (distancePercent > 20) return 300_000;  // 5 min
+  if (distancePercent > 10) return 60_000;   // 1 min  
+  if (distancePercent > 5) return 30_000;    // 30 sec
+  return 10_000;                              // 10 sec (danger zone)
+}
+```
+
+#### 5. Position-Aware Filtering
+Only monitor bots that actually need monitoring:
+
+```typescript
+// Skip bots with no position (FLAT)
+const botsToMonitor = await storage.getBotsWithOpenPositions({
+  liquidationProtectionEnabled: true
+});
+
+// Skip bots already at max protection
+const needsMonitoring = botsToMonitor.filter(bot => 
+  bot.lpCurrentProtectionAmount < bot.lpMaxProtectionDeposit ||
+  bot.lpCurrentProtectionAmount > 0 // Need to check for withdrawal
+);
+```
+
+#### 6. Shared Service Architecture
+Integrate with existing reconciliation service instead of separate monitor:
+
+```typescript
+// In reconciliation-service.ts (already runs every 60s)
+async function reconcilePosition(bot, accountData) {
+  // Existing reconciliation logic...
+  
+  // Add liquidation protection check (uses same accountData, 0 extra RPC)
+  if (bot.liquidationProtectionEnabled) {
+    await checkLiquidationProtection(bot, accountData, cachedPrices);
+  }
+}
+```
+
+**Benefits:**
+- Zero additional RPC calls for account data
+- Reuses existing infrastructure
+- Single point of account state management
+
+### RPC Budget Estimate (Optimized)
+
+| Component | Calls/Minute | Notes |
+|-----------|--------------|-------|
+| Oracle prices | 6 | Already cached by DriftPrice (shared) |
+| Account batch fetch | 1 | Single getMultipleAccountsInfo |
+| Protection deposits | 0-2 | Only when triggered |
+| Protection withdrawals | 0-2 | Only when triggered |
+| **Total new RPC** | **~3-5/min** | vs 60+/min unoptimized |
+
+### Implementation Priority
+
+1. **Phase 1**: Piggyback on reconciliation service (0 new scheduled RPC)
+2. **Phase 2**: Use cached prices from DriftPrice (0 new price RPC)
+3. **Phase 3**: Batch any remaining fetches with getMultipleAccountsInfo
+4. **Phase 4**: Add smart polling for danger-zone bots only
+
+### Monitoring & Alerts
+
+Track RPC usage:
+```typescript
+// Log RPC stats periodically
+console.log(`[LiquidationProtection] Stats: checked=${botsChecked}, deposits=${depositsTriggered}, withdrawals=${withdrawalsTriggered}, rpcCalls=${rpcCallsThisCycle}`);
+```
+
+Alert if RPC budget exceeded:
+```typescript
+if (rpcCallsThisMinute > RPC_BUDGET_PER_MINUTE) {
+  console.warn(`[LiquidationProtection] RPC budget exceeded: ${rpcCallsThisMinute}/${RPC_BUDGET_PER_MINUTE}`);
+  // Reduce check frequency temporarily
+}
+```
+
 ## API Endpoints
 
 ```
