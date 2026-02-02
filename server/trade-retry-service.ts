@@ -208,6 +208,13 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   job.attempts++;
   console.log(`[TradeRetry] Processing ${job.priority} job ${job.id}: ${job.side} ${job.market} (attempt ${job.attempts}/${job.maxAttempts})`);
   
+  // CRITICAL: Persist attempts to database to prevent infinite retries across server restarts
+  try {
+    await storage.updateTradeRetryJob(job.id, { attempts: job.attempts });
+  } catch (dbErr) {
+    console.warn(`[TradeRetry] Failed to persist attempts count:`, dbErr);
+  }
+  
   try {
     let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number };
     let actualCloseSide: 'long' | 'short' = 'short';
@@ -549,8 +556,25 @@ async function processQueue(): Promise<void> {
     return a.nextRetryAt - b.nextRetryAt;
   });
   
-  for (const job of readyJobs) {
+  // Limit concurrent processing to prevent RPC bunching
+  // Process max 2 jobs per cycle with staggered delays
+  const maxJobsPerCycle = 2;
+  const jobsToProcess = readyJobs.slice(0, maxJobsPerCycle);
+  
+  for (let i = 0; i < jobsToProcess.length; i++) {
+    const job = jobsToProcess[i];
+    
+    // Add 3-second delay between jobs to prevent RPC rate limiting
+    if (i > 0) {
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    
     await processRetryJob(job);
+  }
+  
+  // If more jobs are waiting, they'll be picked up in the next cycle
+  if (readyJobs.length > maxJobsPerCycle) {
+    console.log(`[TradeRetry] ${readyJobs.length - maxJobsPerCycle} more jobs waiting, will process next cycle`);
   }
 }
 

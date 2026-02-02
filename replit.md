@@ -115,6 +115,15 @@ curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/a
     - Subscriber 2afe9363 has autoTopUp=false and insufficient subaccount collateral
 -   See `docs/SUBSCRIBER_DIAGNOSTICS.md` for detailed investigation log
 
+### Trade Retry Rate Limit Fix (Feb 2 2026)
+-   **Root cause identified**: Trade retry attempts counter was only stored in-memory, never persisted to database. On server restart, jobs reloaded with attempts=0, allowing infinite retries (30-100+ attempts observed).
+-   **Fix applied**: 
+    1. Persist `attempts` counter to database after each retry attempt
+    2. Limit to 2 jobs processed per retry cycle with 3-second stagger delay
+    3. Added queue depth logging
+-   **RPC bunching issue**: Multiple bots receiving signals at same time (e.g., 1H signals at :00) overwhelmed Helius rate limits (10 req/sec free tier)
+-   **Files changed**: `server/trade-retry-service.ts`
+
 ### Subscriber Routing Fix (Feb 1 2026)
 -   **Root cause identified**: Trade retry system was bypassing subscriber routing. When source bot trades failed with temporary errors (margin, rate limits), webhook handler returned early BEFORE the routing call. Retry service successfully executed trades but had NO routing logic.
 -   **Fix applied**: Added `registerRoutingCallback()` to `trade-retry-service.ts`. After successful retry, calls the registered routing function for both OPEN and CLOSE signals.
