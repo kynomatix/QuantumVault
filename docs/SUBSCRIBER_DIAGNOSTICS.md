@@ -82,6 +82,67 @@ The following should be reviewed before public launch:
 
 ---
 
+## Removed Logging (Re-enable for Debugging)
+
+If subscriber routing stops working, add these logs back to `server/routes.ts`:
+
+### Webhook Entry Logs (around line 5030)
+```javascript
+// Add after: const { secret } = req.query;
+console.log(`[WEBHOOK-TRACE] ========== WEBHOOK RECEIVED ==========`);
+console.log(`[WEBHOOK-TRACE] Bot ID: ${botId}`);
+console.log(`[WEBHOOK-TRACE] Timestamp: ${new Date().toISOString()}`);
+console.log(`[WEBHOOK-TRACE] Payload: ${JSON.stringify(req.body).slice(0, 500)}`);
+```
+
+### Bot Lookup Logs (around line 5070)
+```javascript
+// Add after: const botPublishedInfo = await storage.getPublishedBotByTradingBotId(botId);
+console.log(`[WEBHOOK-TRACE] Bot found: name="${bot.name}", market=${bot.market}`);
+console.log(`[WEBHOOK-TRACE] Bot publish status: isPublished=${!!botPublishedInfo}, publishedBotId=${botPublishedInfo?.id || 'none'}`);
+console.log(`[WEBHOOK-TRACE] Bot active: ${bot.isActive}`);
+```
+
+### Signal Branching Logs (around line 5300)
+```javascript
+// Add after: const isCloseSignal = ...
+console.log(`[WEBHOOK-TRACE] ========== SIGNAL BRANCHING ==========`);
+console.log(`[WEBHOOK-TRACE] isCloseSignal=${isCloseSignal} (will take ${isCloseSignal ? 'CLOSE' : 'OPEN/REGULAR'} path)`);
+console.log(`[WEBHOOK-TRACE] Bot isPublished=${!!botPublishedInfo} - routing ${botPublishedInfo ? 'WILL' : 'will NOT'} be attempted`);
+```
+
+### Routing Call Logs (around line 5600 for CLOSE, line 6220 for OPEN)
+```javascript
+// Add before: await routeSignalToSubscribers(...)
+console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS ==========`);
+console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for bot ${botId}`);
+console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, isCloseSignal=${isCloseSignal}`);
+
+// Add after routing completes:
+console.log(`[WEBHOOK-TRACE] Routing status: ${routingStatus}`);
+```
+
+### Per-Subscriber Verbose Logs (in routeSignalToSubscribers function, around line 680)
+```javascript
+// Add at start of function:
+console.log(`[Subscriber Routing] Starting routing for source bot ${sourceBotId}, signal: ${signal.action}, close=${signal.isCloseSignal}`);
+console.log(`[Subscriber Routing] Found published bot: ${publishedBot.id}, active=${publishedBot.isActive}`);
+console.log(`[Subscriber Routing] Found ${subscriberBots?.length || 0} subscriber bots`);
+
+// Add inside for loop for each subscriber:
+console.log(`[Subscriber Routing] Processing subscriber bot ${subBot.id} (${subBot.name})`);
+console.log(`[Subscriber Routing] Subscriber has agent wallet: pubKey=${!!subWallet.agentPublicKey}, encKey=${!!subWallet.agentPrivateKeyEncrypted}`);
+console.log(`[Subscriber Routing] Executing ${signal.action} for subscriber bot ${subBot.id}: $${sizingResult.tradeAmountUsd.toFixed(2)}`);
+```
+
+### Quick Re-enable Command
+```bash
+# Find all removed log locations:
+grep -n "routeSignalToSubscribers\|isCloseSignal\|botPublishedInfo" server/routes.ts
+```
+
+---
+
 ## Archive: Previous Investigation
 
 See git history for full investigation log (Jan 29-31, 2026).
