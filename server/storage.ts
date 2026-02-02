@@ -466,6 +466,7 @@ export class DatabaseStorage implements IStorage {
       .select({
         executedAt: botTrades.executedAt,
         pnl: botTrades.pnl,
+        fee: botTrades.fee,
       })
       .from(botTrades)
       .where(and(...conditions))
@@ -473,11 +474,14 @@ export class DatabaseStorage implements IStorage {
 
     let cumulativePnl = 0;
     return trades.map((trade) => {
-      const pnl = parseFloat(trade.pnl || '0');
-      cumulativePnl += pnl;
+      // Calculate NET PnL: gross pnl minus fee
+      const grossPnl = parseFloat(trade.pnl || '0');
+      const fee = parseFloat(trade.fee || '0');
+      const netPnl = grossPnl - fee;
+      cumulativePnl += netPnl;
       return {
         timestamp: trade.executedAt,
-        pnl,
+        pnl: netPnl,
         cumulativePnl,
       };
     });

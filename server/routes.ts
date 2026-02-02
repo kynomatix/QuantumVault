@@ -8026,11 +8026,9 @@ export async function registerRoutes(
       let netDeposited = 0;
       if (tradingBot) {
         const equityEvents = await storage.getBotEquityEvents(publishedBot.tradingBotId, 1000);
-        netDeposited = equityEvents.reduce((sum, e) => {
-          const amount = parseFloat(e.amount || '0');
-          const isDeposit = e.eventType === 'deposit' || e.eventType === 'drift_deposit';
-          return isDeposit ? sum + amount : sum - amount;
-        }, 0);
+        // Amounts in equity_events are already signed (+ for deposits, - for withdrawals)
+        // Just sum all amounts to get net deposited
+        netDeposited = equityEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
       }
       
       // Build chart data showing performance since publish (starts at 0%)

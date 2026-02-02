@@ -2157,7 +2157,7 @@ export function BotManagementDrawer({
                 {/* Auto Top-Up Toggle */}
                 <div className="flex items-center justify-between py-3 border-t border-border/50">
                   <div className="space-y-0.5">
-                    <label className={`text-sm font-medium ${mainAccountBalance <= 0 ? 'text-muted-foreground' : ''}`}>Auto Top-Up</label>
+                    <label className={`text-sm font-medium ${mainAccountBalance <= 0 ? 'text-muted-foreground' : ''}`}>Auto top-up</label>
                     <p className="text-xs text-muted-foreground">
                       Automatically deposit from your agent wallet when margin is too low to trade
                     </p>
@@ -2172,7 +2172,7 @@ export function BotManagementDrawer({
                 {mainAccountBalance <= 0 && !editAutoTopUp && (
                   <p className="text-xs text-amber-500 flex items-center gap-1 -mt-2 pb-2">
                     <AlertTriangle className="w-3 h-3" />
-                    Agent wallet has no USDC balance - deposit funds to enable Auto Top-Up
+                    Agent wallet has no USDC balance - deposit funds to enable auto top-up
                   </p>
                 )}
                 {editAutoTopUp && (
