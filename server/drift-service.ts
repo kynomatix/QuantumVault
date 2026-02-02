@@ -3047,15 +3047,15 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     child.stdin.write(JSON.stringify(command));
     child.stdin.end();
     
-    // Timeout after 30 seconds - mark as rate limit to enable retry faster
+    // Timeout after 10 seconds - faster failover to backup RPC
     setTimeout(() => {
       child.kill();
-      console.log('[Drift] Subprocess timed out after 30s - will trigger auto-retry');
+      console.log('[Drift] Subprocess timed out after 10s - will trigger auto-retry');
       resolve({
         success: false,
-        error: '429 rate limit (timeout): Operation timed out after 30 seconds',
+        error: '429 rate limit (timeout): Operation timed out after 10 seconds',
       });
-    }, 30000);
+    }, 10000);
   });
 }
 
@@ -3121,9 +3121,9 @@ export async function executePerpOrder(
           console.warn('[Drift] Could not get oracle price for slippage calc, proceeding without limit');
         }
         
-        // Add 30-second timeout to prevent hanging (matches subprocess timeout)
+        // Add 10-second timeout to prevent hanging (matches subprocess timeout)
         const tradeTimeout = new Promise<never>((_, reject) => 
-          setTimeout(() => reject(new Error('429 rate limit (timeout): Trade execution timed out after 30 seconds')), 30000)
+          setTimeout(() => reject(new Error('429 rate limit (timeout): Trade execution timed out after 10 seconds')), 10000)
         );
         
         const txSig = await Promise.race([
@@ -3271,9 +3271,9 @@ export async function closePerpPosition(
           console.warn('[Drift] Could not get oracle price for close slippage calc, proceeding without limit');
         }
         
-        // Add 30-second timeout to prevent hanging (matches subprocess timeout)
+        // Add 10-second timeout to prevent hanging (matches subprocess timeout)
         const closeTimeout = new Promise<never>((_, reject) => 
-          setTimeout(() => reject(new Error('429 rate limit (timeout): Close execution timed out after 30 seconds')), 30000)
+          setTimeout(() => reject(new Error('429 rate limit (timeout): Close execution timed out after 10 seconds')), 10000)
         );
         
         const txSig = await Promise.race([

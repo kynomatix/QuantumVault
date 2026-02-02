@@ -124,6 +124,15 @@ curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/a
     2. Fixed marketplace netDeposited calculation to properly sum signed amounts (including auto_topup events)
 -   **Files changed**: `server/storage.ts`, `server/routes.ts`
 
+### RPC Failover Persistence Fix (Feb 2 2026)
+-   **Root cause identified**: CLOSE trades failing with "429 rate limit (timeout)" after 12-29 retry attempts. Each trade spawns a new subprocess, and `FAILOVER_STATE` resets, so backup RPC (Triton) was never used effectively.
+-   **Fix applied**: 
+    1. Persist failover state to `/tmp/drift_rpc_failover_state.json` - all processes now share rate limit awareness
+    2. Reduced execution timeout from 30s to 10s for faster failover to backup RPC
+    3. Failover state includes: activeRpc, switchedToBackupAt, consecutive429Errors, and lastErrorAt
+-   **Behavior**: After 2 consecutive 429 errors, switches to Triton backup RPC for 3 minutes. New subprocesses immediately use backup if within cooldown window.
+-   **Files changed**: `server/drift-executor.mjs`, `server/drift-service.ts`
+
 ### Trade Retry Rate Limit Fix (Feb 2 2026)
 -   **Root cause identified**: Trade retry attempts counter was only stored in-memory, never persisted to database. On server restart, jobs reloaded with attempts=0, allowing infinite retries (30-100+ attempts observed).
 -   **Fix applied**: 

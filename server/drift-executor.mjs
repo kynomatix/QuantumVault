@@ -6,6 +6,11 @@ import { DriftClient, Wallet, PositionDirection, OrderType, MarketType, getMarke
 import { Connection, Keypair, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
 import bs58 from 'bs58';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+
+// File path for persisting failover state across subprocess invocations
+const FAILOVER_STATE_FILE = '/tmp/drift_rpc_failover_state.json';
 
 // Drift Program constants for raw transaction building
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
@@ -39,7 +44,83 @@ function getBackupRpcUrl() {
 // Feature flag - set to false to disable failover entirely (use only primary)
 const ENABLE_FAILOVER = process.env.DISABLE_RPC_FAILOVER !== 'true';
 
-const FAILOVER_STATE = {
+// Default values for failover state
+const DEFAULT_FAILOVER_STATE = {
+  activeRpc: 'primary',
+  switchedToBackupAt: null,
+  consecutivePrimaryFailures: 0,
+  consecutive429Errors: 0,
+  rateLimit429Threshold: 2,
+  cooldownMs: 3 * 60 * 1000,
+  lastErrorAt: null,
+};
+
+// Load persisted failover state from file (survives subprocess restarts)
+function loadFailoverState() {
+  try {
+    if (fs.existsSync(FAILOVER_STATE_FILE)) {
+      const rawData = fs.readFileSync(FAILOVER_STATE_FILE, 'utf8');
+      let parsed;
+      try {
+        parsed = JSON.parse(rawData);
+      } catch (parseErr) {
+        // Corrupted file - delete and fallback to defaults
+        console.error(`[Executor] Corrupted failover state file, deleting: ${parseErr.message}`);
+        try { fs.unlinkSync(FAILOVER_STATE_FILE); } catch (_) {}
+        return null;
+      }
+      // Merge with defaults to handle missing/incomplete fields
+      const data = { ...DEFAULT_FAILOVER_STATE, ...parsed };
+      
+      // Check if still within cooldown period
+      if (data.activeRpc === 'backup' && data.switchedToBackupAt) {
+        const elapsed = Date.now() - data.switchedToBackupAt;
+        if (elapsed < data.cooldownMs) {
+          console.error(`[Executor] Loaded persisted failover state: using backup RPC (${Math.round((data.cooldownMs - elapsed)/1000)}s remaining)`);
+          return data;
+        } else {
+          console.error(`[Executor] Persisted failover cooldown expired - resetting to primary`);
+        }
+      } else if (data.consecutive429Errors > 0) {
+        // Recent 429 errors detected - check if within tracking window (30s)
+        const trackingAge = Date.now() - (data.lastErrorAt || 0);
+        if (trackingAge < 30000) {
+          console.error(`[Executor] Loaded 429 error count: ${data.consecutive429Errors} (tracking recent rate limits)`);
+          return data;
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[Executor] Failed to load failover state: ${err.message}`);
+  }
+  // Return default state
+  return null;
+}
+
+// Save failover state to file for cross-process persistence (atomic write via temp+rename)
+function saveFailoverState() {
+  try {
+    const data = {
+      activeRpc: FAILOVER_STATE.activeRpc,
+      switchedToBackupAt: FAILOVER_STATE.switchedToBackupAt,
+      consecutivePrimaryFailures: FAILOVER_STATE.consecutivePrimaryFailures,
+      consecutive429Errors: FAILOVER_STATE.consecutive429Errors,
+      rateLimit429Threshold: FAILOVER_STATE.rateLimit429Threshold,
+      cooldownMs: FAILOVER_STATE.cooldownMs,
+      lastErrorAt: Date.now(),
+    };
+    // Atomic write: write to temp file then rename
+    const tempFile = `${FAILOVER_STATE_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify(data), 'utf8');
+    fs.renameSync(tempFile, FAILOVER_STATE_FILE);
+  } catch (err) {
+    console.error(`[Executor] Failed to save failover state: ${err.message}`);
+  }
+}
+
+// Initialize state from persisted file or defaults
+const persistedState = loadFailoverState();
+const FAILOVER_STATE = persistedState || {
   // Current active RPC ('primary' or 'backup')
   activeRpc: 'primary',
   
@@ -69,6 +150,9 @@ function report429Error() {
   FAILOVER_STATE.consecutive429Errors++;
   console.error(`[Executor] 429 rate limit detected (count: ${FAILOVER_STATE.consecutive429Errors}/${FAILOVER_STATE.rateLimit429Threshold})`);
   
+  // Persist the 429 count immediately so other processes know about it
+  saveFailoverState();
+  
   if (FAILOVER_STATE.consecutive429Errors >= FAILOVER_STATE.rateLimit429Threshold) {
     const backupUrl = getBackupRpcUrl();
     if (backupUrl) {
@@ -76,6 +160,8 @@ function report429Error() {
       FAILOVER_STATE.switchedToBackupAt = Date.now();
       FAILOVER_STATE.consecutive429Errors = 0;
       console.error(`[Executor] FAILOVER: Switching to backup RPC (Triton) due to ${FAILOVER_STATE.rateLimit429Threshold}x 429 errors. Will retry primary in ${FAILOVER_STATE.cooldownMs / 1000}s`);
+      // Persist the switch to backup RPC
+      saveFailoverState();
     } else {
       console.error(`[Executor] WARNING: 429 errors but no backup RPC configured!`);
     }
@@ -87,6 +173,7 @@ function reset429Counter() {
   if (FAILOVER_STATE.consecutive429Errors > 0) {
     console.error(`[Executor] Resetting 429 counter (was: ${FAILOVER_STATE.consecutive429Errors})`);
     FAILOVER_STATE.consecutive429Errors = 0;
+    saveFailoverState();
   }
 }
 
@@ -113,6 +200,7 @@ async function getWorkingConnection() {
       FAILOVER_STATE.activeRpc = 'primary';
       FAILOVER_STATE.switchedToBackupAt = null;
       FAILOVER_STATE.consecutivePrimaryFailures = 0;
+      saveFailoverState();
     }
   }
   
@@ -130,9 +218,14 @@ async function getWorkingConnection() {
     ]);
     const latency = Date.now() - start;
     
-    // Success - reset failure counter if primary
+    // Success - reset failure counter and persist healthy state
     if (FAILOVER_STATE.activeRpc === 'primary') {
+      const hadFailures = FAILOVER_STATE.consecutivePrimaryFailures > 0 || FAILOVER_STATE.consecutive429Errors > 0;
       FAILOVER_STATE.consecutivePrimaryFailures = 0;
+      FAILOVER_STATE.consecutive429Errors = 0;
+      if (hadFailures) {
+        saveFailoverState();
+      }
     }
     
     console.error(`[Executor] ${activeName} RPC healthy (${latency}ms)`);
@@ -157,6 +250,7 @@ async function getWorkingConnection() {
         // Switch to backup
         FAILOVER_STATE.activeRpc = 'backup';
         FAILOVER_STATE.switchedToBackupAt = Date.now();
+        saveFailoverState();
         console.error(`[Executor] Switched to backup RPC (Triton) - ${latency}ms. Will try primary again in ${FAILOVER_STATE.cooldownMs / 1000}s`);
         return { connection: backupConn, rpcUrl: backupUrl, usingBackup: true };
       } catch (backupErr) {
@@ -180,6 +274,7 @@ async function getWorkingConnection() {
         FAILOVER_STATE.activeRpc = 'primary';
         FAILOVER_STATE.switchedToBackupAt = null;
         FAILOVER_STATE.consecutivePrimaryFailures = 0;
+        saveFailoverState();
         console.error(`[Executor] Primary RPC recovered (${latency}ms) - switching back`);
         return { connection: primaryConn, rpcUrl: primaryUrl, usingBackup: false };
       } catch (primaryErr) {
