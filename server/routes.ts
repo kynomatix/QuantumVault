@@ -673,29 +673,13 @@ async function routeSignalToSubscribers(
   }
 ): Promise<void> {
   try {
-    console.log(`[Subscriber Routing] Starting routing for source bot ${sourceBotId}, signal: ${signal.action}, close=${signal.isCloseSignal}`);
-    
     const publishedBot = await storage.getPublishedBotByTradingBotId(sourceBotId);
-    if (!publishedBot) {
-      console.log(`[Subscriber Routing] Source bot ${sourceBotId} is not published, skipping subscriber routing`);
-      return;
-    }
-    console.log(`[Subscriber Routing] Found published bot: ${publishedBot.id}, active=${publishedBot.isActive}`);
-    
-    if (!publishedBot.isActive) {
-      console.log(`[Subscriber Routing] Published bot ${publishedBot.id} is inactive, skipping subscriber routing`);
-      return;
-    }
+    if (!publishedBot || !publishedBot.isActive) return;
 
     const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
-    console.log(`[Subscriber Routing] Found ${subscriberBots?.length || 0} subscriber bots for published bot ${publishedBot.id}`);
-    
-    if (!subscriberBots || subscriberBots.length === 0) {
-      console.log(`[Subscriber Routing] Published bot ${publishedBot.id} has no active subscribers`);
-      return;
-    }
+    if (!subscriberBots || subscriberBots.length === 0) return;
 
-    console.log(`[Subscriber Routing] Source bot ${sourceBotId} is published, routing signal to ${subscriberBots.length} subscribers`);
+    console.log(`[Subscriber Routing] Routing ${signal.action} (close=${signal.isCloseSignal}) to ${subscriberBots.length} subscribers`);
 
     // Track outcomes for summary log
     let skippedInactive = 0;
@@ -705,22 +689,15 @@ async function routeSignalToSubscribers(
     let closeFailed = 0;
 
     for (const subBot of subscriberBots) {
-      // CRITICAL FIX: Allow close signals to route to inactive (paused) bots
-      // to prevent orphaned positions when bots get paused due to insufficient funds
+      // Allow close signals to route to inactive (paused) bots to prevent orphaned positions
       if (!subBot.isActive && !signal.isCloseSignal) {
-        console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
         skippedInactive++;
         continue;
       }
-      if (!subBot.isActive && signal.isCloseSignal) {
-        console.log(`[Subscriber Routing] Routing CLOSE signal to inactive bot ${subBot.id} to prevent orphaned position`);
-      }
 
       try {
-        console.log(`[Subscriber Routing] Processing subscriber bot ${subBot.id} (${subBot.name}), wallet=${subBot.walletAddress.slice(0,8)}...`);
         const subWallet = await storage.getWallet(subBot.walletAddress);
         if (!subWallet) {
-          console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} wallet not found in database`);
           // Create failed trade record for visibility
           await storage.createBotTrade({
             tradingBotId: subBot.id,
@@ -738,7 +715,6 @@ async function routeSignalToSubscribers(
           continue;
         }
         if (!subWallet.agentPrivateKeyEncrypted || !subWallet.agentPublicKey) {
-          console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} has no agent wallet - pubKey=${!!subWallet.agentPublicKey}, encKey=${!!subWallet.agentPrivateKeyEncrypted}`);
           // Create failed trade record for visibility
           await storage.createBotTrade({
             tradingBotId: subBot.id,
@@ -755,7 +731,6 @@ async function routeSignalToSubscribers(
           tradeFailed++;
           continue;
         }
-        console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} has agent wallet configured, proceeding with trade`);
 
         const subAccountId = subBot.driftSubaccountId ?? 0;
 
@@ -769,11 +744,8 @@ async function routeSignalToSubscribers(
           );
 
           if (position.side === 'FLAT' || Math.abs(position.size) < 0.0001) {
-            console.log(`[Subscriber Routing] No position to close for subscriber bot ${subBot.id}`);
             continue;
           }
-
-          console.log(`[Subscriber Routing] Closing position for subscriber bot ${subBot.id}: size=${position.size}`);
           
           // NOTE: Uses legacy encrypted key - subscriber wallet's UMK not available (see function header comment)
           const subCloseSlippageBps = subWallet.slippageBps ?? 50;
@@ -832,9 +804,7 @@ async function routeSignalToSubscribers(
           const profitReinvestEnabled = subBot.profitReinvest === true;
           
           // Allow profit reinvest bots to proceed even without maxPositionSize
-          // (they'll use available collateral instead)
           if (maxPos <= 0 && !profitReinvestEnabled) {
-            console.log(`[Subscriber Routing] Subscriber bot ${subBot.id} has no maxPositionSize configured and profit reinvest is disabled`);
             
             // Create a failed trade record for visibility
             const oraclePriceForLog = parseFloat(signal.price);
@@ -878,7 +848,6 @@ async function routeSignalToSubscribers(
           });
 
           if (!sizingResult.success) {
-            console.log(`[Subscriber Routing] Bot ${subBot.id} trade sizing failed: ${sizingResult.error}`);
             
             // Create a failed trade record for visibility
             await storage.createBotTrade({
@@ -905,7 +874,6 @@ async function routeSignalToSubscribers(
           const contractSize = sizingResult.finalContractSize;
 
           if (contractSize < 0.001) {
-            console.log(`[Subscriber Routing] Trade size too small for subscriber bot ${subBot.id} (${contractSize.toFixed(6)} contracts)`);
             
             // Create a failed trade record for visibility
             await storage.createBotTrade({
@@ -924,7 +892,6 @@ async function routeSignalToSubscribers(
             continue;
           }
 
-          console.log(`[Subscriber Routing] Executing ${signal.action} for subscriber bot ${subBot.id}: $${sizingResult.tradeAmountUsd.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
           // NOTE: Uses legacy encrypted key - subscriber wallet's UMK not available (see function header comment)
           const side = signal.action === 'buy' ? 'long' : 'short';
@@ -5027,12 +4994,6 @@ export async function registerRoutes(
     const { botId } = req.params;
     const { secret } = req.query;
     
-    // VERBOSE DIAGNOSTIC: Log webhook entry
-    console.log(`[WEBHOOK-TRACE] ========== WEBHOOK RECEIVED ==========`);
-    console.log(`[WEBHOOK-TRACE] Bot ID: ${botId}`);
-    console.log(`[WEBHOOK-TRACE] Timestamp: ${new Date().toISOString()}`);
-    console.log(`[WEBHOOK-TRACE] Payload: ${JSON.stringify(req.body).slice(0, 500)}`);
-
     // Generate signal hash for deduplication
     const signalHash = generateSignalHash(botId, req.body);
     
@@ -5065,16 +5026,11 @@ export async function registerRoutes(
       // Get bot
       const bot = await storage.getTradingBotById(botId);
       if (!bot) {
-        console.log(`[WEBHOOK-TRACE] EXIT: Bot not found`);
         await storage.updateWebhookLog(log.id, { errorMessage: "Bot not found" });
         return res.status(404).json({ error: "Bot not found" });
       }
       
-      // VERBOSE DIAGNOSTIC: Log bot details including publish status
       const botPublishedInfo = await storage.getPublishedBotByTradingBotId(botId);
-      console.log(`[WEBHOOK-TRACE] Bot found: name="${bot.name}", market=${bot.market}`);
-      console.log(`[WEBHOOK-TRACE] Bot publish status: isPublished=${!!botPublishedInfo}, publishedBotId=${botPublishedInfo?.id || 'none'}`);
-      console.log(`[WEBHOOK-TRACE] Bot active: ${bot.isActive}`);
 
       // Validate secret
       if (secret !== bot.webhookSecret) {
@@ -5304,12 +5260,7 @@ export async function registerRoutes(
       const isCloseSignal = strategyPositionSize !== null && 
         (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
       
-      console.log(`[Webhook] Signal analysis: action=${action}, contracts=${contracts}, strategyPositionSize=${strategyPositionSize}, isCloseSignal=${isCloseSignal}`);
-      
-      // VERBOSE DIAGNOSTIC: Log branching decision
-      console.log(`[WEBHOOK-TRACE] ========== SIGNAL BRANCHING ==========`);
-      console.log(`[WEBHOOK-TRACE] isCloseSignal=${isCloseSignal} (will take ${isCloseSignal ? 'CLOSE' : 'OPEN/REGULAR'} path)`);
-      console.log(`[WEBHOOK-TRACE] Bot isPublished=${!!botPublishedInfo} - routing ${botPublishedInfo ? 'WILL' : 'will NOT'} be attempted`);
+      console.log(`[Webhook] Signal: action=${action}, contracts=${contracts}, close=${isCloseSignal}, published=${!!botPublishedInfo}`);
       
       // CRITICAL FIX: Wrap entire close signal handling in outer try/catch to guarantee no fallthrough
       // to open-order logic. Any exception inside this block MUST return, not continue to open-order flow.
@@ -5605,10 +5556,6 @@ export async function registerRoutes(
             }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
             
             // Route close signal to subscriber bots (awaited to ensure execution)
-            console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS (CLOSE) ==========`);
-            console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for CLOSE signal`);
-            console.log(`[WEBHOOK-TRACE] Bot ID: ${botId}, action=${action}`);
-            console.log(`[WEBHOOK-TRACE] isCloseSignal=true (close signal path)`);
             let closeRoutingStatus = 'not_attempted';
             try {
               closeRoutingStatus = 'started';
@@ -5621,12 +5568,10 @@ export async function registerRoutes(
                 strategyPositionSize,
               });
               closeRoutingStatus = 'completed';
-              console.log(`[Webhook] ROUTING DEBUG: routeSignalToSubscribers CLOSE completed for bot ${botId}`);
             } catch (routingErr) {
               closeRoutingStatus = `error: ${String(routingErr).slice(0, 100)}`;
               console.error('[Subscriber Routing] Error routing close to subscribers:', routingErr);
             }
-            console.log(`[WEBHOOK-TRACE] Close routing status: ${closeRoutingStatus}`);
             
             // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
             // This must happen BEFORE auto-withdraw to ensure creator gets their share
@@ -6240,11 +6185,6 @@ export async function registerRoutes(
       }).catch(err => console.error('[Notifications] Failed to send trade_executed notification:', err));
 
       // Route signal to subscriber bots (awaited to ensure execution)
-      console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS ==========`);
-      console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for bot ${botId}`);
-      console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, positionSize=${positionSize}`);
-      console.log(`[WEBHOOK-TRACE] Prices: signalPrice=${signalPrice}, fillPrice=${fillPrice}`);
-      console.log(`[WEBHOOK-TRACE] isCloseSignal=false (regular open signal path)`);
       let routingStatus = 'not_attempted';
       try {
         routingStatus = 'started';
@@ -6257,12 +6197,10 @@ export async function registerRoutes(
           strategyPositionSize,
         });
         routingStatus = 'completed';
-        console.log(`[Webhook] ROUTING DEBUG: routeSignalToSubscribers completed successfully for bot ${botId}`);
       } catch (routingErr) {
         routingStatus = `error: ${String(routingErr).slice(0, 100)}`;
         console.error(`[Subscriber Routing] Error routing to subscribers for bot ${botId}:`, routingErr);
       }
-      console.log(`[WEBHOOK-TRACE] Routing status: ${routingStatus}`);
 
       // Mark signal as executed (unique index prevents concurrent duplicates)
       try {

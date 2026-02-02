@@ -109,11 +109,13 @@ To check production data via curl:
 curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/api/admin/subscription-diagnostics"
 ```
 
-### Known Issues (Jan 2026)
--   **RNDR subscribers have funding problems** - routing works but:
-    - Subscriber c57d65fb is PAUSED (wallet only has $0.18 USDC)
-    - Subscriber 2afe9363 has autoTopUp=false and insufficient subaccount collateral
--   See `docs/SUBSCRIBER_DIAGNOSTICS.md` for detailed investigation log
+### Logging Cleanup (Feb 2 2026)
+-   Removed all `[WEBHOOK-TRACE]` verbose diagnostic logs
+-   Reduced `[Subscriber Routing]` to essential logs only:
+    - Entry: routing action + subscriber count
+    - Errors: close failures, order failures, processing errors
+    - Summary: counts of success/failure/skipped
+-   See `docs/SUBSCRIBER_DIAGNOSTICS.md` for Phase 2 security considerations (deferred)
 
 ### Performance Chart PnL Fix (Feb 2 2026)
 -   **Root cause identified**: Performance chart showed GROSS PnL (+$1.88) without subtracting trading FEES (-$2.00), making it appear bots were profitable when actual net result was -$0.12.
@@ -131,10 +133,10 @@ curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/a
 -   **RPC bunching issue**: Multiple bots receiving signals at same time (e.g., 1H signals at :00) overwhelmed Helius rate limits (10 req/sec free tier)
 -   **Files changed**: `server/trade-retry-service.ts`
 
-### Subscriber Routing Fix (Feb 1 2026)
+### Subscriber Routing Fix (Feb 1 2026) - VERIFIED WORKING
 -   **Root cause identified**: Trade retry system was bypassing subscriber routing. When source bot trades failed with temporary errors (margin, rate limits), webhook handler returned early BEFORE the routing call. Retry service successfully executed trades but had NO routing logic.
 -   **Fix applied**: Added `registerRoutingCallback()` to `trade-retry-service.ts`. After successful retry, calls the registered routing function for both OPEN and CLOSE signals.
--   **Verification**: Logs now show `[TradeRetry] Routing callback registered` on startup.
+-   **Verification**: Trade f3f4939f confirmed subscriber 2afe9363 received marketplace_routing signal from source dee5703c, executed RENDER-PERP LONG on-chain at 2026-02-01T22:39:21Z.
 -   **Callback pattern**: Avoids circular dependencies - `routes.ts` registers `routeSignalToSubscribers` at startup.
 
 ### Previous Fixes
