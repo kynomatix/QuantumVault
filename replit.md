@@ -130,6 +130,9 @@ curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/a
     1. Persist failover state to `/tmp/drift_rpc_failover_state.json` - all processes now share rate limit awareness
     2. Reduced execution timeout from 30s to 10s for faster failover to backup RPC
     3. Failover state includes: activeRpc, switchedToBackupAt, consecutive429Errors, and lastErrorAt
+    4. Atomic write pattern: temp file + rename to prevent corruption
+    5. Corruption handling: detects and deletes malformed state files
+    6. Healthy state persistence: resets counters when primary RPC recovers
 -   **Behavior**: After 2 consecutive 429 errors, switches to Triton backup RPC for 3 minutes. New subprocesses immediately use backup if within cooldown window.
 -   **Files changed**: `server/drift-executor.mjs`, `server/drift-service.ts`
 
