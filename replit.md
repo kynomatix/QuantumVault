@@ -115,6 +115,13 @@ curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/a
     - Subscriber 2afe9363 has autoTopUp=false and insufficient subaccount collateral
 -   See `docs/SUBSCRIBER_DIAGNOSTICS.md` for detailed investigation log
 
+### Performance Chart PnL Fix (Feb 2 2026)
+-   **Root cause identified**: Performance chart showed GROSS PnL (+$1.88) without subtracting trading FEES (-$2.00), making it appear bots were profitable when actual net result was -$0.12.
+-   **Fix applied**: 
+    1. `getBotPerformanceSeries` in storage.ts now calculates net PnL = gross pnl - fee
+    2. Fixed marketplace netDeposited calculation to properly sum signed amounts (including auto_topup events)
+-   **Files changed**: `server/storage.ts`, `server/routes.ts`
+
 ### Trade Retry Rate Limit Fix (Feb 2 2026)
 -   **Root cause identified**: Trade retry attempts counter was only stored in-memory, never persisted to database. On server restart, jobs reloaded with attempts=0, allowing infinite retries (30-100+ attempts observed).
 -   **Fix applied**: 
