@@ -589,7 +589,41 @@ export async function startRetryWorker(): Promise<void> {
     const pendingJobs = await storage.getPendingTradeRetryJobs();
     if (pendingJobs.length > 0) {
       console.log(`[TradeRetry] Loading ${pendingJobs.length} pending jobs from database`);
+      
+      const now = Date.now();
+      const MAX_JOB_AGE_MS = 60 * 60 * 1000; // 1 hour TTL for retry jobs
+      
       for (const dbJob of pendingJobs) {
+        // CLEANUP: Check if job is too old (stale)
+        const jobAge = now - new Date(dbJob.createdAt).getTime();
+        if (jobAge > MAX_JOB_AGE_MS) {
+          console.warn(`[TradeRetry] Job ${dbJob.id} expired (age: ${Math.round(jobAge / 60000)}min) - marking as failed`);
+          await storage.markTradeRetryJobFailed(dbJob.id, `Job expired after ${Math.round(jobAge / 60000)} minutes`);
+          
+          // Update original trade if exists
+          if (dbJob.originalTradeId) {
+            await storage.updateBotTrade(dbJob.originalTradeId, {
+              status: 'failed',
+              errorMessage: `Auto-retry expired after ${Math.round(jobAge / 60000)} minutes`,
+            });
+          }
+          continue;
+        }
+        
+        // CLEANUP: Check if job has already exceeded max attempts
+        if (dbJob.attempts >= dbJob.maxAttempts) {
+          console.warn(`[TradeRetry] Job ${dbJob.id} already at max attempts (${dbJob.attempts}/${dbJob.maxAttempts}) - marking as failed`);
+          await storage.markTradeRetryJobFailed(dbJob.id, `Max attempts reached: ${dbJob.lastError || 'Unknown error'}`);
+          
+          if (dbJob.originalTradeId) {
+            await storage.updateBotTrade(dbJob.originalTradeId, {
+              status: 'failed',
+              errorMessage: `Auto-retry exhausted after ${dbJob.attempts} attempts: ${dbJob.lastError || 'Unknown error'}`,
+            });
+          }
+          continue;
+        }
+        
         // Get the bot to retrieve agent keys for execution
         const bot = await storage.getTradingBotById(dbJob.botId);
         const wallet = await storage.getWallet(dbJob.walletAddress);
@@ -621,13 +655,15 @@ export async function startRetryWorker(): Promise<void> {
         };
         retryQueue.set(dbJob.id, fullJob);
       }
-      console.log(`[TradeRetry] Restored ${retryQueue.size} jobs from database`);
+      const loadedCount = retryQueue.size;
+      const cleanedCount = pendingJobs.length - loadedCount;
+      console.log(`[TradeRetry] Startup: loaded ${loadedCount} jobs, cleaned up ${cleanedCount} stale/expired jobs`);
     }
   } catch (dbErr) {
     console.warn('[TradeRetry] Failed to load pending jobs from database:', dbErr);
   }
   
-  console.log('[TradeRetry] Starting retry worker (checking every 2s)');
+  console.log('[TradeRetry] Starting retry worker (checking every 2s, max 2 jobs/cycle, 3s stagger)');
   workerInterval = setInterval(() => {
     processQueue().catch(err => {
       console.error('[TradeRetry] Queue processing error:', err);
