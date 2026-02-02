@@ -63,7 +63,7 @@ Preferred communication style: Simple, everyday language.
 -   **Solana Web3.js**: Core Solana blockchain interactions.
 -   **Drift Protocol SDK**: Perpetual futures trading on Drift.
 -   **SPL Token**: Solana Program Library token interactions.
--   **RPC Endpoint**: Configurable via `SOLANA_RPC_URL`. Uses Helius as primary (10 req/sec free tier) with Triton as fallback when rate-limited or unavailable.
+-   **RPC Endpoint**: Configurable via `SOLANA_RPC_URL`. Uses Helius as primary (Developer tier: 50 req/sec) with Triton as fallback when rate-limited or unavailable.
 -   **Drift Protocol Configuration**: Solana Mainnet-Beta.
 
 ### Database
@@ -142,7 +142,7 @@ curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/a
     1. Persist `attempts` counter to database after each retry attempt
     2. Limit to 2 jobs processed per retry cycle with 3-second stagger delay
     3. Added queue depth logging
--   **RPC bunching issue**: Multiple bots receiving signals at same time (e.g., 1H signals at :00) overwhelmed Helius rate limits (10 req/sec free tier)
+-   **RPC bunching issue**: Multiple bots receiving signals at same time (e.g., 1H signals at :00) can cause burst traffic that triggers temporary 429s even at Developer tier (50 req/sec)
 -   **Files changed**: `server/trade-retry-service.ts`
 
 ### Subscriber Routing Fix (Feb 1 2026) - VERIFIED WORKING
