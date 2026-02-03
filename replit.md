@@ -119,3 +119,26 @@ Preferred communication style: Simple, everyday language.
     4. Skip unnecessary retry attempts
 -   **Result**: Trades that timed out but succeeded will now show "Recovered" instead of "Failed"
 -   **Files changed**: `server/trade-retry-service.ts`
+
+### Error Categories & RPC Failover Fix (Feb 3 2026)
+-   **Problem identified**: Timeout errors were misleadingly labeled as "429 rate limit" regardless of actual cause. RPC failover wasn't triggering because 429 errors weren't being tracked at the TypeScript level (only in subprocess).
+-   **Error Categories defined** in `server/drift-service.ts`:
+    - `TIMEOUT_TRADE`: Trade execution timed out after 10 seconds
+    - `TIMEOUT_CLOSE`: Close execution timed out after 10 seconds
+    - `TIMEOUT_SUBPROCESS`: Subprocess operation timed out after 10 seconds
+    - `RPC_RATE_LIMIT`: RPC provider returned 429 rate limit error
+    - `RPC_CONNECTION`: Failed to connect to RPC endpoint
+    - `INSUFFICIENT_MARGIN`: Not enough collateral for trade
+    - `INSUFFICIENT_FREE_COLLATERAL`: Free collateral below requirement
+    - `NO_POSITION`: No open position found to close
+    - `REDUCE_ONLY_VIOLATION`: Reduce-only order would increase position
+    - `UNKNOWN_MARKET`: Market index not found
+    - `MARKET_PAUSED`: Market is currently paused
+-   **RPC Failover fixes**:
+    1. Added `report429Error()` and `reset429Counter()` functions to drift-service.ts (TypeScript level)
+    2. Failover state now tracked at TypeScript level, shared with subprocess via `/tmp/drift_rpc_failover_state.json`
+    3. 429 errors detected and reported from both in-process DriftClient AND subprocess result paths
+    4. Successful trades reset the 429 counter
+    5. Threshold: 2 consecutive 429 errors → switch to Triton backup for 3 minutes
+-   **Result**: Accurate error reporting enables proper RPC failover when rate limiting occurs
+-   **Files changed**: `server/drift-service.ts`

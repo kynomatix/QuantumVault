@@ -4,9 +4,175 @@ import { createRequire } from 'module';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import * as fs from 'fs';
 import BN from 'bn.js';
 import { getAgentKeypair } from './agent-wallet';
 import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
+
+// ============================================================================
+// ERROR CATEGORIES - Clear, distinguishable error prefixes for debugging
+// ============================================================================
+export const TradeErrors = {
+  // Timeout errors (operation took too long)
+  TIMEOUT_TRADE: 'TIMEOUT_TRADE: Trade execution timed out after 10 seconds',
+  TIMEOUT_CLOSE: 'TIMEOUT_CLOSE: Close execution timed out after 10 seconds',
+  TIMEOUT_SUBPROCESS: 'TIMEOUT_SUBPROCESS: Subprocess operation timed out after 10 seconds',
+  
+  // RPC errors (blockchain network issues)
+  RPC_RATE_LIMIT: 'RPC_RATE_LIMIT: RPC provider returned 429 rate limit error',
+  RPC_CONNECTION: 'RPC_CONNECTION: Failed to connect to RPC endpoint',
+  RPC_TIMEOUT: 'RPC_TIMEOUT: RPC request timed out',
+  
+  // Margin/collateral errors
+  INSUFFICIENT_MARGIN: 'INSUFFICIENT_MARGIN: Not enough collateral for this trade',
+  INSUFFICIENT_FREE_COLLATERAL: 'INSUFFICIENT_FREE_COLLATERAL: Free collateral below requirement',
+  
+  // Position errors
+  NO_POSITION: 'NO_POSITION: No open position found to close',
+  POSITION_ALREADY_EXISTS: 'POSITION_ALREADY_EXISTS: Position already exists in requested direction',
+  REDUCE_ONLY_VIOLATION: 'REDUCE_ONLY_VIOLATION: Reduce-only order would increase position',
+  
+  // Market errors
+  UNKNOWN_MARKET: 'UNKNOWN_MARKET: Market index not found',
+  MARKET_PAUSED: 'MARKET_PAUSED: Market is currently paused or unavailable',
+  
+  // SDK/System errors
+  SDK_NOT_AVAILABLE: 'SDK_NOT_AVAILABLE: Drift SDK could not be loaded',
+  SUBPROCESS_FAILED: 'SUBPROCESS_FAILED: Executor subprocess crashed or returned error',
+} as const;
+
+// Helper to categorize errors
+export function categorizeError(error: Error | string): string {
+  const msg = typeof error === 'string' ? error : error.message;
+  const msgLower = msg.toLowerCase();
+  
+  if (msgLower.includes('429') || msgLower.includes('rate limit')) {
+    return TradeErrors.RPC_RATE_LIMIT;
+  }
+  if (msgLower.includes('insufficient') && msgLower.includes('collateral')) {
+    return TradeErrors.INSUFFICIENT_FREE_COLLATERAL;
+  }
+  if (msgLower.includes('insufficient') || msgLower.includes('margin')) {
+    return TradeErrors.INSUFFICIENT_MARGIN;
+  }
+  if (msgLower.includes('reduceonly') || msgLower.includes('reduce only') || msgLower.includes('increased risk')) {
+    return TradeErrors.REDUCE_ONLY_VIOLATION;
+  }
+  if (msgLower.includes('market') && (msgLower.includes('pause') || msgLower.includes('unavailable'))) {
+    return TradeErrors.MARKET_PAUSED;
+  }
+  if (msgLower.includes('connection') || msgLower.includes('econnrefused') || msgLower.includes('network')) {
+    return TradeErrors.RPC_CONNECTION;
+  }
+  if (msgLower.includes('timeout') || msgLower.includes('timed out')) {
+    return TradeErrors.TIMEOUT_SUBPROCESS;
+  }
+  
+  return msg; // Return original if no match
+}
+
+// ============================================================================
+// RPC FAILOVER STATE - Shared with subprocess via file
+// ============================================================================
+const FAILOVER_STATE_FILE = '/tmp/drift_rpc_failover_state.json';
+const FAILOVER_COOLDOWN_MS = 3 * 60 * 1000; // 3 minutes
+const RATE_LIMIT_THRESHOLD = 2; // Switch after 2 consecutive 429s
+
+interface FailoverState {
+  activeRpc: 'primary' | 'backup';
+  switchedToBackupAt: number | null;
+  consecutive429Errors: number;
+  lastErrorAt: number | null;
+}
+
+function loadFailoverState(): FailoverState {
+  try {
+    if (fs.existsSync(FAILOVER_STATE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(FAILOVER_STATE_FILE, 'utf8'));
+      
+      // Check if cooldown expired (should switch back to primary)
+      if (data.activeRpc === 'backup' && data.switchedToBackupAt) {
+        const elapsed = Date.now() - data.switchedToBackupAt;
+        if (elapsed >= FAILOVER_COOLDOWN_MS) {
+          console.log('[Drift] Failover cooldown expired - resetting to primary RPC');
+          return { activeRpc: 'primary', switchedToBackupAt: null, consecutive429Errors: 0, lastErrorAt: null };
+        }
+      }
+      
+      // Check if 429 tracking window expired (30 seconds)
+      if (data.consecutive429Errors > 0 && data.lastErrorAt) {
+        const trackingAge = Date.now() - data.lastErrorAt;
+        if (trackingAge >= 30000) {
+          data.consecutive429Errors = 0;
+        }
+      }
+      
+      return data as FailoverState;
+    }
+  } catch (err) {
+    console.error('[Drift] Failed to load failover state:', err);
+  }
+  return { activeRpc: 'primary', switchedToBackupAt: null, consecutive429Errors: 0, lastErrorAt: null };
+}
+
+function saveFailoverState(state: FailoverState): void {
+  try {
+    const tempFile = `${FAILOVER_STATE_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify(state));
+    fs.renameSync(tempFile, FAILOVER_STATE_FILE);
+  } catch (err) {
+    console.error('[Drift] Failed to save failover state:', err);
+  }
+}
+
+export function report429Error(): void {
+  const state = loadFailoverState();
+  
+  if (state.activeRpc !== 'primary') {
+    return; // Already on backup
+  }
+  
+  state.consecutive429Errors++;
+  state.lastErrorAt = Date.now();
+  
+  console.log(`[Drift] 429 rate limit detected (count: ${state.consecutive429Errors}/${RATE_LIMIT_THRESHOLD})`);
+  
+  if (state.consecutive429Errors >= RATE_LIMIT_THRESHOLD) {
+    const backupUrl = process.env.TRITON_ONE_RPC;
+    if (backupUrl) {
+      state.activeRpc = 'backup';
+      state.switchedToBackupAt = Date.now();
+      state.consecutive429Errors = 0;
+      console.log(`[Drift] FAILOVER: Switching to backup RPC (Triton) due to ${RATE_LIMIT_THRESHOLD}x 429 errors. Will retry primary in ${FAILOVER_COOLDOWN_MS / 1000}s`);
+    } else {
+      console.warn('[Drift] WARNING: 429 errors but no TRITON_ONE_RPC backup configured!');
+    }
+  }
+  
+  saveFailoverState(state);
+}
+
+export function reset429Counter(): void {
+  const state = loadFailoverState();
+  if (state.consecutive429Errors > 0) {
+    console.log(`[Drift] Resetting 429 counter (was: ${state.consecutive429Errors})`);
+    state.consecutive429Errors = 0;
+    saveFailoverState(state);
+  }
+}
+
+export function getActiveRpcUrl(): string {
+  const state = loadFailoverState();
+  const primaryUrl = process.env.SOLANA_RPC_URL || process.env.HELIUS_RPC_URL;
+  const backupUrl = process.env.TRITON_ONE_RPC;
+  
+  if (state.activeRpc === 'backup' && backupUrl) {
+    console.log('[Drift] Using backup RPC (Triton)');
+    return backupUrl;
+  }
+  
+  return primaryUrl || 'https://api.mainnet-beta.solana.com';
+}
 
 // ESM/CJS compatibility for bundled production builds
 // In esbuild CJS bundle, __ESBUILD_CJS_BUNDLE__ is defined as true
@@ -3053,7 +3219,7 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
       console.log('[Drift] Subprocess timed out after 10s - will trigger auto-retry');
       resolve({
         success: false,
-        error: '429 rate limit (timeout): Operation timed out after 10 seconds',
+        error: TradeErrors.TIMEOUT_SUBPROCESS,
       });
     }, 10000);
   });
@@ -3123,7 +3289,7 @@ export async function executePerpOrder(
         
         // Add 10-second timeout to prevent hanging (matches subprocess timeout)
         const tradeTimeout = new Promise<never>((_, reject) => 
-          setTimeout(() => reject(new Error('429 rate limit (timeout): Trade execution timed out after 10 seconds')), 10000)
+          setTimeout(() => reject(new Error(TradeErrors.TIMEOUT_TRADE)), 10000)
         );
         
         const txSig = await Promise.race([
@@ -3140,6 +3306,7 @@ export async function executePerpOrder(
         ]);
         
         console.log(`[Drift] Order executed: ${txSig}`);
+        reset429Counter(); // Trade succeeded
         
         let fillPrice: number | undefined;
         try {
@@ -3151,11 +3318,21 @@ export async function executePerpOrder(
         
         await cleanup();
         return { success: true, signature: txSig, txSignature: txSig, fillPrice };
-      } catch (orderError) {
+      } catch (orderError: any) {
         await cleanup();
+        // Check for 429 errors in in-process path
+        const errMsg = orderError?.message || String(orderError);
+        if (errMsg.toLowerCase().includes('429') || errMsg.toLowerCase().includes('rate limit')) {
+          report429Error();
+        }
         throw orderError;
       }
-    } catch (driftClientError) {
+    } catch (driftClientError: any) {
+      // Check for 429 errors before falling through to subprocess
+      const errMsg = driftClientError?.message || String(driftClientError);
+      if (errMsg.toLowerCase().includes('429') || errMsg.toLowerCase().includes('rate limit')) {
+        report429Error();
+      }
       console.error('[Drift] In-process DriftClient failed, falling back to subprocess:', driftClientError);
       // Fall through to subprocess
     }
@@ -3178,6 +3355,18 @@ export async function executePerpOrder(
       slippageBps,
     });
     
+    // Check if subprocess returned a 429/rate limit error
+    if (!result.success && result.error) {
+      const errLower = result.error.toLowerCase();
+      if (errLower.includes('429') || errLower.includes('rate limit')) {
+        report429Error();
+        result.error = TradeErrors.RPC_RATE_LIMIT;
+      }
+    } else if (result.success) {
+      // Trade succeeded - reset 429 counter
+      reset429Counter();
+    }
+    
     return result;
   } catch (error) {
     console.error('[Drift] Subprocess execution error:', error);
@@ -3187,7 +3376,7 @@ export async function executePerpOrder(
       errorMessage = error.message;
       
       if (errorMessage.includes('6010')) {
-        errorMessage = 'Insufficient collateral to open position. Please deposit more funds to Drift.';
+        errorMessage = TradeErrors.INSUFFICIENT_FREE_COLLATERAL + ' (Error 6010)';
       } else if (errorMessage.includes('6001')) {
         errorMessage = 'User account not initialized. Please deposit funds first.';
       } else if (errorMessage.includes('6040')) {
@@ -3195,6 +3384,12 @@ export async function executePerpOrder(
       }
     } else {
       errorMessage = String(error);
+    }
+    
+    // Detect and report 429 errors for failover tracking
+    if (errorMessage.toLowerCase().includes('429') || errorMessage.toLowerCase().includes('rate limit')) {
+      report429Error();
+      errorMessage = TradeErrors.RPC_RATE_LIMIT;
     }
     
     // Normalize rate limit errors to ensure they're detectable by isRateLimitError
@@ -3273,7 +3468,7 @@ export async function closePerpPosition(
         
         // Add 10-second timeout to prevent hanging (matches subprocess timeout)
         const closeTimeout = new Promise<never>((_, reject) => 
-          setTimeout(() => reject(new Error('429 rate limit (timeout): Close execution timed out after 10 seconds')), 10000)
+          setTimeout(() => reject(new Error(TradeErrors.TIMEOUT_CLOSE)), 10000)
         );
         
         const txSig = await Promise.race([
@@ -3290,13 +3485,24 @@ export async function closePerpPosition(
         ]);
         
         console.log(`[Drift] Position closed: ${txSig}`);
+        reset429Counter(); // Close succeeded
         await cleanup();
         return { success: true, signature: txSig };
-      } catch (closeError) {
+      } catch (closeError: any) {
         await cleanup();
+        // Check for 429 errors in in-process path
+        const errMsg = closeError?.message || String(closeError);
+        if (errMsg.toLowerCase().includes('429') || errMsg.toLowerCase().includes('rate limit')) {
+          report429Error();
+        }
         throw closeError;
       }
-    } catch (driftClientError) {
+    } catch (driftClientError: any) {
+      // Check for 429 errors before falling through to subprocess
+      const errMsg = driftClientError?.message || String(driftClientError);
+      if (errMsg.toLowerCase().includes('429') || errMsg.toLowerCase().includes('rate limit')) {
+        report429Error();
+      }
       console.error('[Drift] In-process DriftClient close failed, falling back to subprocess:', driftClientError);
       // Fall through to subprocess
     }
@@ -3317,12 +3523,30 @@ export async function closePerpPosition(
       slippageBps,
     });
     
+    // Check if subprocess returned a 429/rate limit error
+    if (!result.success && result.error) {
+      const errLower = result.error.toLowerCase();
+      if (errLower.includes('429') || errLower.includes('rate limit')) {
+        report429Error();
+        result.error = TradeErrors.RPC_RATE_LIMIT;
+      }
+    } else if (result.success) {
+      // Close succeeded - reset 429 counter
+      reset429Counter();
+    }
+    
     return result;
   } catch (error) {
     console.error('[Drift] Close position error:', error);
-    const errorMsg = normalizeRateLimitError(
-      error instanceof Error ? error.message : String(error)
-    );
+    let errorMsg = error instanceof Error ? error.message : String(error);
+    
+    // Detect and report 429 errors for failover tracking
+    if (errorMsg.toLowerCase().includes('429') || errorMsg.toLowerCase().includes('rate limit')) {
+      report429Error();
+      errorMsg = TradeErrors.RPC_RATE_LIMIT;
+    }
+    
+    errorMsg = normalizeRateLimitError(errorMsg);
     return {
       success: false,
       error: errorMsg,
