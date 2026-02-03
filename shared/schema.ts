@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb, unique, json } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb, unique, json, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -8,7 +8,9 @@ export const userSessions = pgTable("user_sessions", {
   sid: varchar("sid").primaryKey(),
   sess: json("sess").notNull(),
   expire: timestamp("expire", { withTimezone: false }).notNull(),
-});
+}, (table) => [
+  index("IDX_session_expire").on(table.expire),
+]);
 
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
