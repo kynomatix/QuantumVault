@@ -103,24 +103,16 @@ function calculateBackoff(attempts: number, priority: 'critical' | 'normal'): nu
 }
 
 export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'maxAttempts' | 'nextRetryAt' | 'createdAt'>): Promise<string> {
-  const id = generateJobId();
   const maxAttempts = job.priority === 'critical' ? MAX_ATTEMPTS_CRITICAL : MAX_ATTEMPTS_NORMAL;
   const backoff = calculateBackoff(0, job.priority);
+  const nextRetryAt = Date.now() + backoff;
+  const createdAt = Date.now();
   
-  const fullJob: RetryJob = {
-    ...job,
-    id,
-    attempts: 0,
-    maxAttempts,
-    nextRetryAt: Date.now() + backoff,
-    createdAt: Date.now(),
-  };
-  
-  retryQueue.set(id, fullJob);
-  
-  // Persist to database for survival across server restarts
+  // Persist to database FIRST to get the database-generated ID
+  // This ensures in-memory and database IDs match for updates/restarts
+  let dbJobId: string;
   try {
-    await storage.createTradeRetryJob({
+    const dbJob = await storage.createTradeRetryJob({
       originalTradeId: job.originalTradeId || '',
       botId: job.botId,
       walletAddress: job.walletAddress,
@@ -131,19 +123,33 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
       priority: job.priority,
       attempts: 0,
       maxAttempts,
-      nextRetryAt: new Date(fullJob.nextRetryAt),
+      nextRetryAt: new Date(nextRetryAt),
       status: 'pending',
     });
-    console.log(`[TradeRetry] Persisted job ${id} to database`);
+    dbJobId = dbJob.id;
+    console.log(`[TradeRetry] Persisted job ${dbJobId} to database`);
   } catch (dbErr) {
-    console.warn(`[TradeRetry] Failed to persist job to database:`, dbErr);
+    // Fallback to generated ID if database fails (job won't survive restart)
+    dbJobId = generateJobId();
+    console.warn(`[TradeRetry] Failed to persist job to database, using fallback ID ${dbJobId}:`, dbErr);
   }
   
-  console.log(`[TradeRetry] Queued ${job.priority} ${job.side} ${job.market} retry, first attempt in ${Math.round(backoff / 1000)}s (job ${id})`);
+  const fullJob: RetryJob = {
+    ...job,
+    id: dbJobId,
+    attempts: 0,
+    maxAttempts,
+    nextRetryAt,
+    createdAt,
+  };
+  
+  retryQueue.set(dbJobId, fullJob);
+  
+  console.log(`[TradeRetry] Queued ${job.priority} ${job.side} ${job.market} retry, first attempt in ${Math.round(backoff / 1000)}s (job ${dbJobId})`);
   
   notifyRetryQueued(fullJob);
   
-  return id;
+  return dbJobId;
 }
 
 async function notifyRetryQueued(job: RetryJob): Promise<void> {
@@ -586,7 +592,9 @@ export async function startRetryWorker(): Promise<void> {
   
   // Load pending jobs from database on startup (survive server restarts)
   try {
+    console.log('[TradeRetry] Checking database for pending retry jobs...');
     const pendingJobs = await storage.getPendingTradeRetryJobs();
+    console.log(`[TradeRetry] Database query returned ${pendingJobs.length} pending jobs`);
     if (pendingJobs.length > 0) {
       console.log(`[TradeRetry] Loading ${pendingJobs.length} pending jobs from database`);
       

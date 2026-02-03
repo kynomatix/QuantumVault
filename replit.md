@@ -1,7 +1,7 @@
 # QuantumVault - Solana Bot Trading Platform
 
 ## Overview
-QuantumVault is a Solana-based bot trading platform for deploying and managing perpetual futures trading bots on the Drift Protocol. It automates trade execution via TradingView webhooks, provides real-time position tracking, and integrates with Phantom Wallet. The platform aims to offer a user-friendly experience for automated DeFi trading, leveraging Solana for high-speed, low-cost transactions. Key features include real-time PnL tracking, automated position management, and robust error handling. It also incorporates a referral system for Drift Protocol and a marketplace for users to publish and subscribe to trading signals, fostering a community-driven environment.
+QuantumVault is a Solana-based bot trading platform designed for deploying and managing perpetual futures trading bots on the Drift Protocol. It automates trade execution via TradingView webhooks, provides real-time position tracking, and integrates with Phantom Wallet. The platform aims to deliver a user-friendly experience for automated DeFi trading, leveraging Solana for high-speed, low-cost transactions. Key capabilities include real-time PnL tracking, automated position management, robust error handling, a referral system for Drift Protocol, and a marketplace for trading signals to foster a community-driven environment.
 
 ## User Preferences
 Preferred communication style: Simple, everyday language.
@@ -11,50 +11,40 @@ Preferred communication style: Simple, everyday language.
 ### Core Architecture
 -   **Monorepo Structure**: Organized into `client/`, `server/`, and `shared/` directories.
 -   **Agent Wallet Architecture**: Server-managed Solana wallet per user for autonomous trading, with encrypted private keys and simplified capital flow.
--   **On-Chain-First Architecture**: On-chain Drift positions are the single source of truth, with the database acting as a cache and automated reconciliation.
+-   **On-Chain-First Architecture**: Drift positions on-chain are the single source of truth, with the database acting as a cache and automated reconciliation.
 -   **Drift Subaccounts**: Each bot operates on a unique `driftSubaccountId` for isolation, with auto-initialization upon user deposits.
--   **Referral Integration**: All new Drift accounts created are attributed to the platform's referral code (`kryptolytix`).
+-   **Referral Integration**: All new Drift accounts created are attributed to the platform's referral code.
 
 ### Technical Stack
 -   **Frontend**: React 18 (TypeScript), Wouter for routing, TanStack React Query, Tailwind CSS v4 with shadcn/ui, Framer Motion, Solana Wallet Adapter, Vite.
 -   **Backend**: Node.js with Express.js (TypeScript, ESM modules), Express-session, RESTful API design, esbuild.
 -   **Data Storage**: PostgreSQL via Drizzle ORM.
 
-### SDK Loading Architecture
--   **Lazy ESM Import**: DriftClient is loaded lazily via dynamic `import()`.
--   **Trade Execution**: Uses `drift-executor.mjs` subprocess for trade execution.
--   **SDK Version**: `@drift-labs/sdk@2.146.0-beta.7` is the current stable version.
--   **Market Index Mapping**: CRITICAL - `PERP_MARKET_INDICES` and `PERP_MARKET_NAMES` must be sourced from the official Drift SDK (`PerpMarkets['mainnet-beta']`). Drift adds prediction market BETs between regular PERPs (indices 36-41, 43, 46, 48-50, 57-58, 67-68), causing non-sequential indexing. Run `node -e "require('@drift-labs/sdk').PerpMarkets['mainnet-beta'].forEach(m => console.log(m.marketIndex + ': ' + m.symbol))"` to get authoritative values.
--   **Referrer Account Handling**: The executor fetches the user's referrer from their on-chain UserStats account and passes it to the SDK. Fallback to deriving referrer PDAs directly from the known wallet address is implemented for "kryptolytix".
--   **Idempotent Account Initialization**: Gracefully handles Drift errors 6214 ("Account Already Initialized") and Anchor error 3007 ("AccountOwnedByWrongProgram") by logging warnings and proceeding, preventing blocking of deposits/bot creation due to RPC staleness.
--   **Batch Account Verification**: Replaced individual `getAccountInfo` calls with `getMultipleAccountsInfo` for atomic account state checking and verifies account ownership to prevent false negatives from corrupted account data.
--   **UserStats `numberOfSubAccountsCreated` Counter**: Uses `numberOfSubAccountsCreated` from UserStats as the authoritative source for assigning the next subaccount ID, fixing "Invalid sub account id N, must be M" errors.
-
 ### Key Features
--   **Automated Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol, with logic for converting `contracts` to a percentage of `bot.maxPositionSize`.
+-   **Automated Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol, with dynamic sizing based on `bot.maxPositionSize`.
 -   **Robust Position Management**: Includes close signal detection, position flip detection, and precise close order execution with dust cleanup.
--   **Bot Lifecycle Management**: Bots can be paused (closes open positions) and deleted (includes safety checks, auto-sweep, and subaccount closure).
--   **Unified Trade Execution**: All 4 trade paths (webhook, user webhook, manual trade, subscriber routing) use the shared `computeTradeSizingAndTopUp` helper for consistent auto top-up, profit reinvest, trade sizing, and minimum order handling.
--   **Dynamic Order Scaling**: Trades are automatically scaled down to 80% of available margin capacity (accounting for fees/slippage/oracle drift) and scaled up with equity recovery.
--   **Profit Management**: Supports profit reinvestment (with automatic PnL settlement after position closes) and automatic withdrawal of excess profits.
+-   **Bot Lifecycle Management**: Supports pausing and deleting bots, including safety checks and subaccount closure.
+-   **Unified Trade Execution**: All trade paths (webhook, user webhook, manual trade, subscriber routing) use a shared helper for consistent auto top-up, profit reinvestment, trade sizing, and minimum order handling.
+-   **Dynamic Order Scaling**: Trades are automatically scaled based on available margin capacity and equity recovery.
+-   **Profit Management**: Supports profit reinvestment and automatic withdrawal of excess profits.
 -   **Dynamic USDC Deposit APY**: Fetches real-time USDC lending APY from Drift Data API.
--   **Reset Drift Account Feature**: A one-click solution to fully reset a user's Drift account, preserving the main Drift account (subaccount 0).
+-   **Reset Drift Account Feature**: A one-click solution to fully reset a user's Drift account, preserving the main Drift account.
 -   **Single Page Architecture**: All functionality under `/app` with tab-based navigation.
--   **Real-Time Data**: Tracks running positions, PnL, and fees using `PositionService` and SDK's `decodeUser`.
+-   **Real-Time Data**: Tracks running positions, PnL, and fees.
 -   **Account Health Metrics**: Uses SDK `decodeUser` for accurate account health, collateral, and liquidation price estimates.
--   **Webhook Deduplication**: `webhook_logs` table prevents duplicate processing of TradingView signals.
--   **Automatic Trade Retry**: Failed trades due to rate limiting are automatically queued for retry with exponential backoff. CLOSE orders get critical priority (10 attempts, shorter backoff) to prevent losses from failed position closures. On-chain position verification prevents duplicate closes.
--   **Auto Top-Up on Retry**: When retrying trades that failed with InsufficientCollateral, uses simple equity-based formula: `deposit = target equity - current equity`. Target equity = Investment Amount (maxPositionSize / leverage). Leverage is irrelevant for deposit calculations - only equity matters.
+-   **Webhook Deduplication**: Prevents duplicate processing of TradingView signals.
+-   **Automatic Trade Retry**: Failed trades are automatically queued for retry with exponential backoff and critical priority for CLOSE orders. On-chain verification prevents duplicate closes.
+-   **Auto Top-Up on Retry**: When retrying trades that failed due to insufficient collateral, an equity-based formula determines the deposit amount.
 -   **Equity Event Tracking**: Monitors deposits and withdrawals for transaction history.
 -   **Marketplace Feature**: Users can publish signal bots and subscribe to others' trading signals, with proportional trade sizing and PnL snapshots.
--   **Creator Profit Sharing**: Signal bot creators earn 0-10% of subscriber profits on each profitable trade close. Uses immediate on-chain USDC transfers with IOU failover system for failed transactions. Background retry job processes pending IOUs every 5 minutes with TTL enforcement (50 retries or 7 days max). Hostage prevention blocks withdrawal/deletion until IOUs are paid.
--   **Referral System**: Unique 6-character alphanumeric referral codes for each user, tracked via `ref` parameter in share URLs.
+-   **Creator Profit Sharing**: Signal bot creators earn a percentage of subscriber profits on profitable trade closes, handled via immediate on-chain USDC transfers with an IOU failover system.
+-   **Referral System**: Unique 6-character alphanumeric referral codes for each user.
 
 ### Security Architecture
 -   **Key Management**: User Master Key (UMK) derived per-user, encrypting secrets with AES-256-GCM, and session-based decryption.
--   **Execution Authorization**: Permanent execution authorization enabled via wallet signature, persisting until manually revoked. Includes an emergency stop feature and policy HMAC for bot configuration tamper detection.
+-   **Execution Authorization**: Permanent execution authorization via wallet signature, with emergency stop and policy HMAC for bot configuration tamper detection.
 -   **Agent Wallet Backup**: Seed phrase reveal in Settings, signature-gated, rate-limited, and auto-hiding.
--   **Production Deployment Security**: Disabling core dumps, protecting environment variables, and memory security measures like buffer zeroization.
+-   **Production Deployment Security**: Measures include disabling core dumps, protecting environment variables, and memory security.
 -   **Key Logging Policy**: Strict policy to never log sensitive key material.
 
 ## External Dependencies
@@ -63,7 +53,7 @@ Preferred communication style: Simple, everyday language.
 -   **Solana Web3.js**: Core Solana blockchain interactions.
 -   **Drift Protocol SDK**: Perpetual futures trading on Drift.
 -   **SPL Token**: Solana Program Library token interactions.
--   **RPC Endpoint**: Configurable via `SOLANA_RPC_URL`. Uses Helius as primary (Developer tier: 50 req/sec) with Triton as fallback when rate-limited or unavailable.
+-   **RPC Endpoint**: Configurable via `SOLANA_RPC_URL`. Uses Helius as primary with Triton as fallback.
 -   **Drift Protocol Configuration**: Solana Mainnet-Beta.
 
 ### Database
@@ -82,76 +72,6 @@ Preferred communication style: Simple, everyday language.
 -   `TELEGRAM_BOT_USERNAME`
 
 ### Telegram Notifications
--   **Direct API Integration**: Uses Telegram Bot API directly.
--   **Token-based Connection Flow**: User connects via deep link, token validates and links `telegramChatId` to wallet.
+-   **Direct API Integration**: Uses Telegram Bot API directly for configurable notifications (trade executions, failed trades, position closures).
+-   **Token-based Connection Flow**: User connects via deep link to link `telegramChatId` to wallet.
 -   **Multi-wallet Support**: Multiple wallets can share a `telegramChatId`.
--   **Notification Types**: Configurable notifications for trade executions, failed trades, and position closures.
-
-## Admin Dashboard & Production Debugging
-
-### Production Admin Access
--   **Admin URL**: `https://myquantumvault.com/admin`
--   **Authentication**: Password stored in `ADMIN_PASSWORD` secret
--   **API Access**: Bearer token auth with password for programmatic access
-
-### Admin API Endpoints
--   `GET /api/admin/stats` - Dashboard stats (bots, trades, webhooks, subscriptions)
--   `GET /api/admin/webhook-logs?limit=N` - Recent webhook logs
--   `GET /api/admin/trades?limit=N` - Recent trade history
--   `GET /api/admin/bots` - All trading bots with stats
--   `GET /api/admin/subscriptions` - All marketplace subscriptions
--   `GET /api/admin/subscription-diagnostics` - Deep subscription routing diagnostics
--   `GET /api/admin/pending-profit-shares` - Pending IOU profit shares
-
-### Debugging Commands
-To check production data via curl:
-```bash
-curl -s -H "Authorization: Bearer $ADMIN_PASSWORD" "https://myquantumvault.com/api/admin/subscription-diagnostics"
-```
-
-### Logging Cleanup (Feb 2 2026)
--   Removed all `[WEBHOOK-TRACE]` verbose diagnostic logs
--   Reduced `[Subscriber Routing]` to essential logs only:
-    - Entry: routing action + subscriber count
-    - Errors: close failures, order failures, processing errors
-    - Summary: counts of success/failure/skipped
--   See `docs/SUBSCRIBER_DIAGNOSTICS.md` for Phase 2 security considerations (deferred)
-
-### Performance Chart PnL Fix (Feb 2 2026)
--   **Root cause identified**: Performance chart showed GROSS PnL (+$1.88) without subtracting trading FEES (-$2.00), making it appear bots were profitable when actual net result was -$0.12.
--   **Fix applied**: 
-    1. `getBotPerformanceSeries` in storage.ts now calculates net PnL = gross pnl - fee
-    2. Fixed marketplace netDeposited calculation to properly sum signed amounts (including auto_topup events)
--   **Files changed**: `server/storage.ts`, `server/routes.ts`
-
-### RPC Failover Persistence Fix (Feb 2 2026)
--   **Root cause identified**: CLOSE trades failing with "429 rate limit (timeout)" after 12-29 retry attempts. Each trade spawns a new subprocess, and `FAILOVER_STATE` resets, so backup RPC (Triton) was never used effectively.
--   **Fix applied**: 
-    1. Persist failover state to `/tmp/drift_rpc_failover_state.json` - all processes now share rate limit awareness
-    2. Reduced execution timeout from 30s to 10s for faster failover to backup RPC
-    3. Failover state includes: activeRpc, switchedToBackupAt, consecutive429Errors, and lastErrorAt
-    4. Atomic write pattern: temp file + rename to prevent corruption
-    5. Corruption handling: detects and deletes malformed state files
-    6. Healthy state persistence: resets counters when primary RPC recovers
--   **Behavior**: After 2 consecutive 429 errors, switches to Triton backup RPC for 3 minutes. New subprocesses immediately use backup if within cooldown window.
--   **Files changed**: `server/drift-executor.mjs`, `server/drift-service.ts`
-
-### Trade Retry Rate Limit Fix (Feb 2 2026)
--   **Root cause identified**: Trade retry attempts counter was only stored in-memory, never persisted to database. On server restart, jobs reloaded with attempts=0, allowing infinite retries (30-100+ attempts observed).
--   **Fix applied**: 
-    1. Persist `attempts` counter to database after each retry attempt
-    2. Limit to 2 jobs processed per retry cycle with 3-second stagger delay
-    3. Added queue depth logging
--   **RPC bunching issue**: Multiple bots receiving signals at same time (e.g., 1H signals at :00) can cause burst traffic that triggers temporary 429s even at Developer tier (50 req/sec)
--   **Files changed**: `server/trade-retry-service.ts`
-
-### Subscriber Routing Fix (Feb 1 2026) - VERIFIED WORKING
--   **Root cause identified**: Trade retry system was bypassing subscriber routing. When source bot trades failed with temporary errors (margin, rate limits), webhook handler returned early BEFORE the routing call. Retry service successfully executed trades but had NO routing logic.
--   **Fix applied**: Added `registerRoutingCallback()` to `trade-retry-service.ts`. After successful retry, calls the registered routing function for both OPEN and CLOSE signals.
--   **Verification**: Trade f3f4939f confirmed subscriber 2afe9363 received marketplace_routing signal from source dee5703c, executed RENDER-PERP LONG on-chain at 2026-02-01T22:39:21Z.
--   **Callback pattern**: Avoids circular dependencies - `routes.ts` registers `routeSignalToSubscribers` at startup.
-
-### Previous Fixes
--   **Jan 30**: Changed fire-and-forget async routing calls to `await routeSignalToSubscribers(...)` 
--   **Jan 29**: Added failed trade records for all routing failure scenarios
--   **Counters tracked**: skippedInactive, tradeSuccess, tradeFailed, closeSuccess, closeFailed
