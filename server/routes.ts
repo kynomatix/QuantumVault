@@ -2968,9 +2968,25 @@ export async function registerRoutes(
 
       console.log(`[ClosePosition] Closing ${closeSize} ${bot.market} (${closeSide}) with closePerpPosition (exact BN precision)`);
 
+      // Create trade record BEFORE attempting close (with pending status)
+      // This ensures we can track and update status whether trade succeeds or needs retry
+      const closeSlippageBps = wallet.slippageBps ?? 50;
+      const closeEntryPrice = onChainPosition.entryPrice || 0;
+      const pendingCloseTrade = await storage.createBotTrade({
+        tradingBotId: bot.id,
+        walletAddress: bot.walletAddress,
+        market: bot.market,
+        side: "CLOSE",
+        size: String(closeSize),
+        price: "0",
+        fee: "0",
+        status: "pending",
+        webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice },
+      });
+      console.log(`[ClosePosition] Created pending trade record: ${pendingCloseTrade.id}`);
+
       // Execute close order using closePerpPosition for exact BN precision
       // This prevents JavaScript float precision issues (e.g., 0.4374 → 437399999 instead of 437400000)
-      const closeSlippageBps = wallet.slippageBps ?? 50;
       const result = await closePerpPosition(
         wallet.agentPrivateKeyEncrypted,
         bot.market,
@@ -2999,22 +3015,36 @@ export async function registerRoutes(
             subAccountId,
             reduceOnly: true,
             slippageBps: closeSlippageBps,
-            priority: 'critical', // CLOSE orders get highest priority
+            priority: 'critical',
             lastError: result.error,
-            entryPrice: onChainPosition.entryPrice || 0, // For profit share calculation on retry success
+            entryPrice: closeEntryPrice,
+            originalTradeId: pendingCloseTrade.id,
+          });
+          
+          await storage.updateBotTrade(pendingCloseTrade.id, {
+            status: "pending",
+            errorMessage: `Rate limited - CRITICAL auto-retry queued (job: ${retryJobId})`,
           });
           
           return res.status(202).json({ 
             status: "queued_for_retry",
             retryJobId,
+            tradeId: pendingCloseTrade.id,
             message: "Close order rate limited - CRITICAL auto-retry scheduled (priority queue)",
             warning: "Position may remain open until retry succeeds"
           });
         }
         
+        // Permanent failure - mark trade as failed
+        await storage.updateBotTrade(pendingCloseTrade.id, {
+          status: "failed",
+          errorMessage: result.error || "Unknown error",
+        });
+        
         return res.status(500).json({ 
           error: "Failed to execute close order",
-          details: result.error || "Unknown error"
+          details: result.error || "Unknown error",
+          tradeId: pendingCloseTrade.id,
         });
       }
       
@@ -3048,10 +3078,7 @@ export async function registerRoutes(
       }
 
       console.log(`[ClosePosition] Close order executed: ${txSignature}`);
-
-      // Get entry price FIRST from on-chain position (captured before close)
-      const entryPrice = onChainPosition.entryPrice || 0;
-      console.log(`[ClosePosition] Entry price from on-chain: $${entryPrice}`);
+      console.log(`[ClosePosition] Entry price from on-chain: $${closeEntryPrice}`);
 
       // Fetch current ticker price for accurate exit price
       let fillPrice = 0;
@@ -3074,8 +3101,8 @@ export async function registerRoutes(
       }
       
       // Fallback: use entry price if ticker fetch failed (price will be close enough for PnL estimate)
-      if (!fillPrice && entryPrice > 0) {
-        fillPrice = entryPrice;
+      if (!fillPrice && closeEntryPrice > 0) {
+        fillPrice = closeEntryPrice;
         console.log(`[ClosePosition] Using entry price as fallback exit price: $${fillPrice}`);
       }
 
@@ -3087,17 +3114,17 @@ export async function registerRoutes(
       // closeSide = 'short' means we're closing a LONG (bought low, selling high)
       // closeSide = 'long' means we're closing a SHORT (sold high, buying low)
       let tradePnl = 0;
-      if (entryPrice > 0 && fillPrice > 0) {
+      if (closeEntryPrice > 0 && fillPrice > 0) {
         if (closeSide === 'short') {
           // Closing LONG: profit if exitPrice > entryPrice
-          tradePnl = (fillPrice - entryPrice) * closeSize - closeFee;
+          tradePnl = (fillPrice - closeEntryPrice) * closeSize - closeFee;
         } else {
           // Closing SHORT: profit if entryPrice > exitPrice
-          tradePnl = (entryPrice - fillPrice) * closeSize - closeFee;
+          tradePnl = (closeEntryPrice - fillPrice) * closeSize - closeFee;
         }
-        console.log(`[ClosePosition] Trade PnL: entry=$${entryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${tradePnl.toFixed(4)}`);
+        console.log(`[ClosePosition] Trade PnL: entry=$${closeEntryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${tradePnl.toFixed(4)}`);
       } else {
-        console.warn(`[ClosePosition] Cannot calculate PnL - entryPrice=$${entryPrice}, fillPrice=$${fillPrice}`);
+        console.warn(`[ClosePosition] Cannot calculate PnL - entryPrice=$${closeEntryPrice}, fillPrice=$${fillPrice}`);
       }
 
       // CRITICAL: Verify on-chain that position is actually closed and retry if dust remains
@@ -3176,19 +3203,14 @@ export async function registerRoutes(
         console.warn(`[ClosePosition] Could not perform final position verification:`, finalVerifyErr);
       }
 
-      // Create trade record for the close with PnL
-      const closeTrade = await storage.createBotTrade({
-        tradingBotId: bot.id,
-        walletAddress: bot.walletAddress,
-        market: bot.market,
-        side: "CLOSE",
-        size: String(closeSize),
+      // Update the pending trade record to executed status with PnL
+      await storage.updateBotTrade(pendingCloseTrade.id, {
         price: String(fillPrice),
         fee: String(closeFee),
         pnl: tradePnl !== 0 ? String(tradePnl) : null,
         status: "executed",
         txSignature: finalTxSignature,
-        webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice, exitPrice: fillPrice },
+        webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice, exitPrice: fillPrice },
         errorMessage: verificationWarning,
       });
 
@@ -3199,7 +3221,7 @@ export async function registerRoutes(
         wallet.agentPublicKey,
         subAccountId,
         bot.market,
-        closeTrade.id,
+        pendingCloseTrade.id,
         closeFee,
         fillPrice,
         closeSide,
@@ -3240,7 +3262,7 @@ export async function registerRoutes(
         fillPrice,
         fee: closeFee,
         txSignature: finalTxSignature,
-        tradeId: closeTrade.id
+        tradeId: pendingCloseTrade.id
       });
     } catch (error) {
       console.error("Close position error:", error);

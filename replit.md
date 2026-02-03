@@ -98,3 +98,13 @@ Preferred communication style: Simple, everyday language.
     - Cooldown logic correctly switches back to primary after 3 minutes
     - Note: State is per-instance (not shared across multiple server instances)
 -   **Files changed**: `server/trade-retry-service.ts`, `shared/schema.ts`
+
+### Manual Close Endpoint Trade History Fix (Feb 3 2026)
+-   **Root cause identified**: Manual close endpoint (`/api/trading-bots/:id/close-position`) created trade record ONLY on success. When close failed with transient error and was queued for retry, no trade record existed and no `originalTradeId` was passed to retry queue. When retry succeeded, the original "failed" status couldn't be updated because there was no linked trade.
+-   **Fix applied**:
+    1. Create pending trade record BEFORE attempting close execution
+    2. Pass `originalTradeId: pendingCloseTrade.id` to retry queue
+    3. Update existing trade record on success (instead of creating new one)
+    4. Mark trade as "failed" on permanent failure (not transient)
+-   **Result**: When retry succeeds, trade status updates from "pending" to "recovered", showing correct history
+-   **Files changed**: `server/routes.ts`
