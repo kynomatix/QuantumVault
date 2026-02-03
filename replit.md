@@ -127,7 +127,7 @@ Preferred communication style: Simple, everyday language.
     - `TIMEOUT_CLOSE`: Close execution timed out after 10 seconds
     - `TIMEOUT_SUBPROCESS`: Subprocess operation timed out after 10 seconds
     - `RPC_RATE_LIMIT`: RPC provider returned 429 rate limit error
-    - `RPC_CONNECTION`: Failed to connect to RPC endpoint
+    - `RPC_CONNECTION`: Failed to connect to RPC endpoint (includes "Connection terminated unexpectedly")
     - `INSUFFICIENT_MARGIN`: Not enough collateral for trade
     - `INSUFFICIENT_FREE_COLLATERAL`: Free collateral below requirement
     - `NO_POSITION`: No open position found to close
@@ -135,10 +135,22 @@ Preferred communication style: Simple, everyday language.
     - `UNKNOWN_MARKET`: Market index not found
     - `MARKET_PAUSED`: Market is currently paused
 -   **RPC Failover fixes**:
-    1. Added `report429Error()` and `reset429Counter()` functions to drift-service.ts (TypeScript level)
+    1. Added `reportRPCError()` function that handles both rate limits and connection errors
     2. Failover state now tracked at TypeScript level, shared with subprocess via `/tmp/drift_rpc_failover_state.json`
-    3. 429 errors detected and reported from both in-process DriftClient AND subprocess result paths
-    4. Successful trades reset the 429 counter
-    5. Threshold: 2 consecutive 429 errors → switch to Triton backup for 3 minutes
--   **Result**: Accurate error reporting enables proper RPC failover when rate limiting occurs
--   **Files changed**: `server/drift-service.ts`
+    3. Both 429 errors AND connection errors (terminated unexpectedly, econnreset, socket hang up) trigger failover
+    4. Successful trades reset the error counter
+    5. Threshold: 2 consecutive RPC errors → switch to Triton backup for 3 minutes
+-   **Result**: Accurate error reporting enables proper RPC failover for both rate limiting AND connection drops
+-   **Files changed**: `server/drift-service.ts`, `server/trade-retry-service.ts`
+
+### Connection Error Handling Fix (Feb 3 2026)
+-   **Root cause identified**: "Connection terminated unexpectedly" errors were not triggering RPC failover, causing trades to fail repeatedly on the same dead RPC endpoint.
+-   **Scenario observed**: FART 4H OI Skalpa bot failed 32 retry attempts at 12:00 UTC with "Connection terminated unexpectedly", but manual retry at 12:16 UTC succeeded.
+-   **Fixes applied**:
+    1. Removed misleading `normalizeRateLimitError()` that labeled all timeouts as "429 rate limit"
+    2. Added connection errors to `isTransientError()`: connection terminated, terminated unexpectedly, econnreset, econnrefused, socket hang up
+    3. Added timeout errors to `isTransientError()`: TIMEOUT_SUBPROCESS, TIMEOUT_TRADE, TIMEOUT_CLOSE, timed out
+    4. Connection errors now trigger `reportRPCError('connection')` which increments failover counter
+    5. Error categorization via `categorizeError()` now catches "terminated unexpectedly" as RPC_CONNECTION
+-   **Result**: Connection drops now trigger RPC failover to Triton backup, preventing repeated failures on dead primary RPC
+-   **Files changed**: `server/drift-service.ts`, `server/trade-retry-service.ts`

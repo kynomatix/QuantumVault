@@ -74,7 +74,7 @@ export function isRateLimitError(error: string | Error | unknown): boolean {
   );
 }
 
-// Transient errors that should be retried (price feed issues, oracle staleness)
+// Transient errors that should be retried (price feed issues, oracle staleness, RPC issues)
 export function isTransientError(error: string | Error | unknown): boolean {
   const errorStr = error instanceof Error ? error.message : String(error);
   const lowerError = errorStr.toLowerCase();
@@ -86,6 +86,17 @@ export function isTransientError(error: string | Error | unknown): boolean {
     lowerError.includes('price feed') ||
     lowerError.includes('invalid oracle') ||
     lowerError.includes('invalidoracle') ||
+    // RPC connection issues (temporary, may resolve with retry or failover)
+    lowerError.includes('connection terminated') ||
+    lowerError.includes('terminated unexpectedly') ||
+    lowerError.includes('econnrefused') ||
+    lowerError.includes('econnreset') ||
+    lowerError.includes('socket hang up') ||
+    // Timeout errors (may succeed on retry)
+    lowerError.includes('timeout_subprocess') ||
+    lowerError.includes('timeout_trade') ||
+    lowerError.includes('timeout_close') ||
+    lowerError.includes('timed out') ||
     // Also check for rate limit errors
     isRateLimitError(error)
   );

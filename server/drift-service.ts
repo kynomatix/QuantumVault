@@ -61,7 +61,7 @@ export function categorizeError(error: Error | string): string {
   if (msgLower.includes('market') && (msgLower.includes('pause') || msgLower.includes('unavailable'))) {
     return TradeErrors.MARKET_PAUSED;
   }
-  if (msgLower.includes('connection') || msgLower.includes('econnrefused') || msgLower.includes('network')) {
+  if (msgLower.includes('connection') || msgLower.includes('econnrefused') || msgLower.includes('network') || msgLower.includes('terminated unexpectedly')) {
     return TradeErrors.RPC_CONNECTION;
   }
   if (msgLower.includes('timeout') || msgLower.includes('timed out')) {
@@ -125,7 +125,8 @@ function saveFailoverState(state: FailoverState): void {
   }
 }
 
-export function report429Error(): void {
+// Report RPC errors that should trigger failover (429, connection drops, etc.)
+export function reportRPCError(errorType: 'rate_limit' | 'connection' = 'rate_limit'): void {
   const state = loadFailoverState();
   
   if (state.activeRpc !== 'primary') {
@@ -135,7 +136,8 @@ export function report429Error(): void {
   state.consecutive429Errors++;
   state.lastErrorAt = Date.now();
   
-  console.log(`[Drift] 429 rate limit detected (count: ${state.consecutive429Errors}/${RATE_LIMIT_THRESHOLD})`);
+  const errorLabel = errorType === 'rate_limit' ? '429 rate limit' : 'RPC connection error';
+  console.log(`[Drift] ${errorLabel} detected (count: ${state.consecutive429Errors}/${RATE_LIMIT_THRESHOLD})`);
   
   if (state.consecutive429Errors >= RATE_LIMIT_THRESHOLD) {
     const backupUrl = process.env.TRITON_ONE_RPC;
@@ -143,13 +145,18 @@ export function report429Error(): void {
       state.activeRpc = 'backup';
       state.switchedToBackupAt = Date.now();
       state.consecutive429Errors = 0;
-      console.log(`[Drift] FAILOVER: Switching to backup RPC (Triton) due to ${RATE_LIMIT_THRESHOLD}x 429 errors. Will retry primary in ${FAILOVER_COOLDOWN_MS / 1000}s`);
+      console.log(`[Drift] FAILOVER: Switching to backup RPC (Triton) due to ${RATE_LIMIT_THRESHOLD}x ${errorLabel}s. Will retry primary in ${FAILOVER_COOLDOWN_MS / 1000}s`);
     } else {
-      console.warn('[Drift] WARNING: 429 errors but no TRITON_ONE_RPC backup configured!');
+      console.warn(`[Drift] WARNING: ${errorLabel} but no TRITON_ONE_RPC backup configured!`);
     }
   }
   
   saveFailoverState(state);
+}
+
+// Legacy wrapper for backward compatibility
+export function report429Error(): void {
+  reportRPCError('rate_limit');
 }
 
 export function reset429Counter(): void {
@@ -3080,25 +3087,10 @@ const PERP_MARKET_INDICES: Record<string, number> = {
   'LIT': 84, 'LIT-PERP': 84, 'LITUSD': 84,
 };
 
-// Helper: Normalize error messages to ensure rate limit patterns are detectable
+// Helper: Normalize error messages - now uses proper error categories
+// DEPRECATED: No longer adds misleading "429 rate limit" prefix to timeouts
 function normalizeRateLimitError(errorMsg: string): string {
-  const lower = errorMsg.toLowerCase();
-  // Check for rate limit patterns that might be missed by isRateLimitError
-  const hasRateLimitPattern = 
-    lower.includes('429') || 
-    lower.includes('too many requests') || 
-    lower.includes('-32429') ||
-    lower.includes('rate limit') ||
-    lower.includes('timed out') ||
-    lower.includes('timeout');
-  
-  // If it has a pattern but doesn't have the canonical "429" prefix, add it
-  if (hasRateLimitPattern && !errorMsg.includes('429')) {
-    if (lower.includes('timeout') || lower.includes('timed out')) {
-      return `429 rate limit (timeout): ${errorMsg}`;
-    }
-    return `429 rate limit: ${errorMsg}`;
-  }
+  // Just return the message as-is - error categorization is handled by categorizeError()
   return errorMsg;
 }
 
@@ -3320,18 +3312,24 @@ export async function executePerpOrder(
         return { success: true, signature: txSig, txSignature: txSig, fillPrice };
       } catch (orderError: any) {
         await cleanup();
-        // Check for 429 errors in in-process path
+        // Check for RPC errors in in-process path
         const errMsg = orderError?.message || String(orderError);
-        if (errMsg.toLowerCase().includes('429') || errMsg.toLowerCase().includes('rate limit')) {
-          report429Error();
+        const errLower = errMsg.toLowerCase();
+        if (errLower.includes('429') || errLower.includes('rate limit')) {
+          reportRPCError('rate_limit');
+        } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
+          reportRPCError('connection');
         }
         throw orderError;
       }
     } catch (driftClientError: any) {
-      // Check for 429 errors before falling through to subprocess
+      // Check for RPC errors before falling through to subprocess
       const errMsg = driftClientError?.message || String(driftClientError);
-      if (errMsg.toLowerCase().includes('429') || errMsg.toLowerCase().includes('rate limit')) {
-        report429Error();
+      const errLower = errMsg.toLowerCase();
+      if (errLower.includes('429') || errLower.includes('rate limit')) {
+        reportRPCError('rate_limit');
+      } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
+        reportRPCError('connection');
       }
       console.error('[Drift] In-process DriftClient failed, falling back to subprocess:', driftClientError);
       // Fall through to subprocess
@@ -3355,15 +3353,18 @@ export async function executePerpOrder(
       slippageBps,
     });
     
-    // Check if subprocess returned a 429/rate limit error
+    // Check if subprocess returned an RPC error
     if (!result.success && result.error) {
       const errLower = result.error.toLowerCase();
       if (errLower.includes('429') || errLower.includes('rate limit')) {
-        report429Error();
+        reportRPCError('rate_limit');
         result.error = TradeErrors.RPC_RATE_LIMIT;
+      } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
+        reportRPCError('connection');
+        result.error = TradeErrors.RPC_CONNECTION;
       }
     } else if (result.success) {
-      // Trade succeeded - reset 429 counter
+      // Trade succeeded - reset error counter
       reset429Counter();
     }
     
@@ -3386,10 +3387,15 @@ export async function executePerpOrder(
       errorMessage = String(error);
     }
     
-    // Detect and report 429 errors for failover tracking
-    if (errorMessage.toLowerCase().includes('429') || errorMessage.toLowerCase().includes('rate limit')) {
-      report429Error();
+    const errLower = errorMessage.toLowerCase();
+    
+    // Detect and report RPC errors for failover tracking
+    if (errLower.includes('429') || errLower.includes('rate limit')) {
+      reportRPCError('rate_limit');
       errorMessage = TradeErrors.RPC_RATE_LIMIT;
+    } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
+      reportRPCError('connection');
+      errorMessage = TradeErrors.RPC_CONNECTION;
     }
     
     // Normalize rate limit errors to ensure they're detectable by isRateLimitError
@@ -3490,18 +3496,24 @@ export async function closePerpPosition(
         return { success: true, signature: txSig };
       } catch (closeError: any) {
         await cleanup();
-        // Check for 429 errors in in-process path
+        // Check for RPC errors in in-process path
         const errMsg = closeError?.message || String(closeError);
-        if (errMsg.toLowerCase().includes('429') || errMsg.toLowerCase().includes('rate limit')) {
-          report429Error();
+        const errLower = errMsg.toLowerCase();
+        if (errLower.includes('429') || errLower.includes('rate limit')) {
+          reportRPCError('rate_limit');
+        } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
+          reportRPCError('connection');
         }
         throw closeError;
       }
     } catch (driftClientError: any) {
-      // Check for 429 errors before falling through to subprocess
+      // Check for RPC errors before falling through to subprocess
       const errMsg = driftClientError?.message || String(driftClientError);
-      if (errMsg.toLowerCase().includes('429') || errMsg.toLowerCase().includes('rate limit')) {
-        report429Error();
+      const errLower = errMsg.toLowerCase();
+      if (errLower.includes('429') || errLower.includes('rate limit')) {
+        reportRPCError('rate_limit');
+      } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
+        reportRPCError('connection');
       }
       console.error('[Drift] In-process DriftClient close failed, falling back to subprocess:', driftClientError);
       // Fall through to subprocess
@@ -3523,15 +3535,18 @@ export async function closePerpPosition(
       slippageBps,
     });
     
-    // Check if subprocess returned a 429/rate limit error
+    // Check if subprocess returned an RPC error
     if (!result.success && result.error) {
       const errLower = result.error.toLowerCase();
       if (errLower.includes('429') || errLower.includes('rate limit')) {
-        report429Error();
+        reportRPCError('rate_limit');
         result.error = TradeErrors.RPC_RATE_LIMIT;
+      } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
+        reportRPCError('connection');
+        result.error = TradeErrors.RPC_CONNECTION;
       }
     } else if (result.success) {
-      // Close succeeded - reset 429 counter
+      // Close succeeded - reset error counter
       reset429Counter();
     }
     
@@ -3539,11 +3554,15 @@ export async function closePerpPosition(
   } catch (error) {
     console.error('[Drift] Close position error:', error);
     let errorMsg = error instanceof Error ? error.message : String(error);
+    const errLower = errorMsg.toLowerCase();
     
-    // Detect and report 429 errors for failover tracking
-    if (errorMsg.toLowerCase().includes('429') || errorMsg.toLowerCase().includes('rate limit')) {
-      report429Error();
+    // Detect and report RPC errors for failover tracking
+    if (errLower.includes('429') || errLower.includes('rate limit')) {
+      reportRPCError('rate_limit');
       errorMsg = TradeErrors.RPC_RATE_LIMIT;
+    } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
+      reportRPCError('connection');
+      errorMsg = TradeErrors.RPC_CONNECTION;
     }
     
     errorMsg = normalizeRateLimitError(errorMsg);
