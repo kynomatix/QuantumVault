@@ -268,6 +268,49 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         job.slippageBps
       );
     } else {
+      // For OPEN trades (long/short): Check on-chain if position already exists
+      // This prevents marking trades as "failed" when a previous timeout actually succeeded
+      try {
+        const positions = await getPerpPositions(job.agentPublicKey, job.subAccountId);
+        const normalizedMarket = job.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
+        const position = positions.find(p => {
+          const posMarket = p.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
+          return posMarket === normalizedMarket;
+        });
+        
+        // Check if position exists and matches the intended direction
+        if (position && Math.abs(position.baseAssetAmount) >= 0.0001) {
+          const positionSide = position.side.toLowerCase();
+          const intendedSide = job.side.toLowerCase();
+          
+          // If position exists in the same direction, trade was already executed
+          if (positionSide === intendedSide) {
+            console.log(`[TradeRetry] Position already exists: ${position.side} ${Math.abs(position.baseAssetAmount).toFixed(6)} ${job.market} - previous attempt likely succeeded`);
+            
+            // Update original trade to recovered since it actually succeeded
+            if (job.originalTradeId) {
+              await storage.updateBotTrade(job.originalTradeId, {
+                status: 'recovered',
+                errorMessage: null,
+                recoveredFromError: 'Trade succeeded on-chain despite timeout (verified on retry)',
+                retryAttempts: job.attempts,
+              });
+            }
+            
+            await notifyRetryResult(job, true);
+            retryQueue.delete(job.id);
+            try {
+              await storage.markTradeRetryJobCompleted(job.id);
+            } catch (dbErr) {
+              console.warn(`[TradeRetry] Failed to mark job as completed in DB:`, dbErr);
+            }
+            return;
+          }
+        }
+      } catch (posCheckErr) {
+        console.warn(`[TradeRetry] Could not verify existing position, proceeding with trade attempt:`, posCheckErr);
+      }
+      
       result = await executePerpOrder(
         job.agentPrivateKeyEncrypted,
         job.market,

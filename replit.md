@@ -108,3 +108,14 @@ Preferred communication style: Simple, everyday language.
     4. Mark trade as "failed" on permanent failure (not transient)
 -   **Result**: When retry succeeds, trade status updates from "pending" to "recovered", showing correct history
 -   **Files changed**: `server/routes.ts`
+
+### Trade Retry On-Chain Verification for OPEN Trades (Feb 3 2026)
+-   **Root cause identified**: When a trade attempt times out but actually succeeds on-chain, the retry system marks it as failed. The retry service already verified on-chain positions for CLOSE orders (to prevent duplicate closes), but not for OPEN orders (long/short).
+-   **Scenario**: Trade submitted → SDK times out → marked as "failed" → but transaction actually confirmed on-chain → position exists
+-   **Fix applied**: Added on-chain position verification BEFORE retrying OPEN trades:
+    1. Query existing positions via `getPerpPositions()`
+    2. If position exists in the intended direction, recognize trade as already executed
+    3. Update trade status to "recovered" with message "Trade succeeded on-chain despite timeout"
+    4. Skip unnecessary retry attempts
+-   **Result**: Trades that timed out but succeeded will now show "Recovered" instead of "Failed"
+-   **Files changed**: `server/trade-retry-service.ts`
