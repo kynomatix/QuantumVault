@@ -75,3 +75,26 @@ Preferred communication style: Simple, everyday language.
 -   **Direct API Integration**: Uses Telegram Bot API directly for configurable notifications (trade executions, failed trades, position closures).
 -   **Token-based Connection Flow**: User connects via deep link to link `telegramChatId` to wallet.
 -   **Multi-wallet Support**: Multiple wallets can share a `telegramChatId`.
+
+## Recent Fixes
+
+### Trade Retry System Audit & Fix (Feb 3 2026)
+-   **Root cause identified**: In-memory retry queue used custom-generated IDs (`retry_XXXXX`) while database used auto-generated UUIDs. This ID mismatch caused database updates to fail silently, and jobs loaded on restart had different IDs than what was originally queued.
+-   **Fixes applied**: 
+    1. Persist job to database FIRST to obtain database-generated ID
+    2. Use database ID for in-memory queue (instead of custom ID)
+    3. Fallback to generated ID only if database persistence fails
+    4. Added `webhookPayload` (jsonb) and `entryPrice` (decimal) columns to `trade_retry_queue` schema
+    5. Updated `queueTradeRetry()` to persist these fields for restart survival
+    6. Updated `startRetryWorker()` to restore these fields when loading from database
+-   **Benefits**: 
+    - Database updates now work correctly with matching IDs
+    - Jobs loaded on restart match their original IDs
+    - Routing to subscribers works after restart (webhookPayload preserved)
+    - Profit share calculation works after restart (entryPrice preserved)
+-   **RPC Failover Audit**: File-based persistence at `/tmp/drift_rpc_failover_state.json` verified working:
+    - Atomic write pattern (temp file + rename) prevents corruption
+    - State shared across subprocess invocations
+    - Cooldown logic correctly switches back to primary after 3 minutes
+    - Note: State is per-instance (not shared across multiple server instances)
+-   **Files changed**: `server/trade-retry-service.ts`, `shared/schema.ts`

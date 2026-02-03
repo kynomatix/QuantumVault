@@ -518,6 +518,8 @@ export const tradeRetryQueue = pgTable("trade_retry_queue", {
   lastError: text("last_error"),
   status: text("status").default("pending").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  webhookPayload: jsonb("webhook_payload"),
+  entryPrice: decimal("entry_price", { precision: 20, scale: 8 }),
 });
 
 export const insertTradeRetryQueueSchema = createInsertSchema(tradeRetryQueue).omit({

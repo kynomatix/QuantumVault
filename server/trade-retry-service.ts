@@ -125,6 +125,8 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
       maxAttempts,
       nextRetryAt: new Date(nextRetryAt),
       status: 'pending',
+      webhookPayload: job.webhookPayload || null,
+      entryPrice: job.entryPrice?.toString() || null,
     });
     dbJobId = dbJob.id;
     console.log(`[TradeRetry] Persisted job ${dbJobId} to database`);
@@ -660,6 +662,8 @@ export async function startRetryWorker(): Promise<void> {
           createdAt: new Date(dbJob.createdAt).getTime(),
           lastError: dbJob.lastError || undefined,
           originalTradeId: dbJob.originalTradeId,
+          webhookPayload: dbJob.webhookPayload || undefined,
+          entryPrice: dbJob.entryPrice ? parseFloat(dbJob.entryPrice) : undefined,
         };
         retryQueue.set(dbJob.id, fullJob);
       }
