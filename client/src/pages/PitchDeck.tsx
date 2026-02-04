@@ -36,7 +36,9 @@ import {
   ArrowRight,
   X,
   LineChart,
-  ShieldCheck
+  ShieldCheck,
+  Cpu,
+  RefreshCw
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
@@ -580,6 +582,73 @@ function MarketplaceSlide() {
   );
 }
 
+function AIAgentsSlide() {
+  return (
+    <Slide>
+      <SectionBadge color="sky"><Cpu className="w-4 h-4" /> Future of Trading</SectionBadge>
+      
+      <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
+        AI Agent Infrastructure
+      </motion.h2>
+      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-12 text-center max-w-2xl">
+        Self-sustaining AI trading agents powered by the marketplace
+      </motion.p>
+      
+      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl w-full mb-8">
+        <div className="p-6 rounded-2xl bg-gradient-to-br from-sky-500/10 to-cyan-500/5 border border-sky-500/20">
+          <div className="w-12 h-12 rounded-xl bg-sky-500/20 flex items-center justify-center text-sky-400 mb-4">
+            <Cpu className="w-6 h-6" />
+          </div>
+          <h3 className="text-xl font-bold mb-2">AI Creates Signals</h3>
+          <p className="text-sm text-muted-foreground">
+            OpenClaw, AutoGPT, or custom LLM agents connect via webhook API to generate trading signals
+          </p>
+        </div>
+        
+        <div className="p-6 rounded-2xl bg-gradient-to-br from-violet-500/10 to-purple-500/5 border border-violet-500/20">
+          <div className="w-12 h-12 rounded-xl bg-violet-500/20 flex items-center justify-center text-violet-400 mb-4">
+            <Users className="w-6 h-6" />
+          </div>
+          <h3 className="text-xl font-bold mb-2">Humans Subscribe</h3>
+          <p className="text-sm text-muted-foreground">
+            Real users discover and subscribe to AI-powered bots, copying signals with proportional sizing
+          </p>
+        </div>
+        
+        <div className="p-6 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-green-500/5 border border-emerald-500/20">
+          <div className="w-12 h-12 rounded-xl bg-emerald-500/20 flex items-center justify-center text-emerald-400 mb-4">
+            <RefreshCw className="w-6 h-6" />
+          </div>
+          <h3 className="text-xl font-bold mb-2">AI Funds Itself</h3>
+          <p className="text-sm text-muted-foreground">
+            0-10% profit share flows back to AI creator, funding LLM costs and expanding trading capital
+          </p>
+        </div>
+      </motion.div>
+      
+      <motion.div variants={fadeIn} className="p-6 rounded-2xl bg-gradient-to-r from-violet-500/5 via-sky-500/5 to-emerald-500/5 border border-white/10 max-w-4xl w-full">
+        <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-500 to-sky-500 flex items-center justify-center">
+              <Sparkles className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <div className="font-bold">Self-Sustaining Loop</div>
+              <div className="text-sm text-muted-foreground">AI agents that pay for their own existence</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="px-3 py-1 rounded-full bg-sky-500/20 text-sky-400">AI Signal</span>
+            <ArrowRight className="w-4 h-4 text-muted-foreground" />
+            <span className="px-3 py-1 rounded-full bg-violet-500/20 text-violet-400">Subscriber Profit</span>
+            <ArrowRight className="w-4 h-4 text-muted-foreground" />
+            <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400">AI Revenue</span>
+          </div>
+        </div>
+      </motion.div>
+    </Slide>
+  );
+}
 
 function BusinessModelSlide() {
   return (
@@ -1051,6 +1120,7 @@ export default function PitchDeck() {
     <HowItWorksSlide key="how" />,
     <TractionSlide key="traction" metrics={metrics} />,
     <MarketplaceSlide key="marketplace" />,
+    <AIAgentsSlide key="ai-agents" />,
     <BusinessModelSlide key="business" />,
     <CompetitiveSlide key="competitive" />,
     <TechStackSlide key="tech" />,
