@@ -6,7 +6,7 @@ import {
   ChevronRight, ArrowLeft, Zap, DollarSign,
   Copy, Check, Menu, X,
   AlertTriangle, Info, CheckCircle2, ArrowDown, ArrowUp,
-  Shield, Lock, Key, RefreshCw, Sparkles, TrendingUp, TrendingDown
+  Shield, Lock, Key, RefreshCw, Sparkles, TrendingUp, TrendingDown, Cpu
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -21,7 +21,8 @@ type DocSection =
   | 'bot-management'
   | 'marketplace'
   | 'settings'
-  | 'security';
+  | 'security'
+  | 'ai-agents';
 
 interface NavItem {
   id: DocSection;
@@ -39,6 +40,7 @@ const navItems: NavItem[] = [
   { id: 'marketplace', label: 'Marketplace', icon: Users },
   { id: 'settings', label: 'Settings & Referrals', icon: Zap },
   { id: 'security', label: 'Security', icon: Shield },
+  { id: 'ai-agents', label: 'AI Agent Integration', icon: Cpu },
 ];
 
 function CopyButton({ text }: { text: string }) {
@@ -1101,6 +1103,284 @@ function SecuritySection() {
   );
 }
 
+function AIAgentsSection() {
+  const webhookExample = `{
+  "botId": "your-bot-uuid",
+  "action": "buy",
+  "contracts": "50",
+  "position_size": "100",
+  "price": "1.15"
+}`;
+
+  const closeExample = `{
+  "botId": "your-bot-uuid",
+  "action": "sell",
+  "contracts": "0",
+  "position_size": "0"
+}`;
+
+  const responseExample = `{
+  "success": true,
+  "action": "buy",
+  "side": "long",
+  "tradeId": "trade-uuid",
+  "market": "SUI-PERP",
+  "size": "43.47",
+  "price": "1.15",
+  "txSignature": "5xYz..."
+}`;
+
+  const openclawSkill = `# QuantumVault Trader Skill
+
+## Commands
+
+### Go Long
+POST {{QUANTUMVAULT_URL}}/api/webhook/{{BOT_ID}}
+{
+  "botId": "{{BOT_ID}}",
+  "action": "buy",
+  "contracts": "{{AMOUNT}}",
+  "position_size": "100"
+}
+
+### Go Short
+POST {{QUANTUMVAULT_URL}}/api/webhook/{{BOT_ID}}
+{
+  "botId": "{{BOT_ID}}",
+  "action": "sell",
+  "contracts": "{{AMOUNT}}",
+  "position_size": "100"
+}
+
+### Close Position
+POST {{QUANTUMVAULT_URL}}/api/webhook/{{BOT_ID}}
+{
+  "botId": "{{BOT_ID}}",
+  "action": "sell",
+  "contracts": "0",
+  "position_size": "0"
+}`;
+
+  return (
+    <div>
+      <SectionHeading>AI Agent Integration</SectionHeading>
+      <Paragraph>
+        Connect AI trading agents like OpenClaw, AutoGPT, or custom LLM-powered bots to QuantumVault 
+        for automated perpetual futures trading on Drift Protocol. Your AI handles the intelligence, 
+        QuantumVault handles safe execution.
+      </Paragraph>
+      
+      <Alert type="info">
+        AI agents send webhook signals just like TradingView. QuantumVault executes trades on Drift 
+        Protocol with automatic retry, RPC failover, and position management.
+      </Alert>
+      
+      <SubHeading>Why Use QuantumVault as Your Execution Layer?</SubHeading>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <Cpu className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Your AI Agent</h4>
+          </div>
+          <ul className="text-white/60 text-sm space-y-1">
+            <li>• Market analysis & signals</li>
+            <li>• Sentiment monitoring</li>
+            <li>• On-chain tracking</li>
+            <li>• Decision making</li>
+          </ul>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <Zap className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">QuantumVault</h4>
+          </div>
+          <ul className="text-white/60 text-sm space-y-1">
+            <li>• Drift Protocol execution</li>
+            <li>• Position management</li>
+            <li>• Auto retry & failover</li>
+            <li>• Secure key handling</li>
+          </ul>
+        </div>
+      </div>
+      
+      <SubHeading>Webhook API Endpoint</SubHeading>
+      <Paragraph>
+        Send HTTP POST requests to trigger trades:
+      </Paragraph>
+      <div className="mb-4 p-3 rounded-lg bg-black/40 border border-white/10 font-mono text-sm text-white/80">
+        POST /api/webhook/{'{'}botId{'}'}
+      </div>
+      
+      <SubHeading>Open Position (Long/Short)</SubHeading>
+      <Paragraph>
+        Send <code className="text-violet-400">action: "buy"</code> for long positions or <code className="text-violet-400">action: "sell"</code> for short:
+      </Paragraph>
+      <CodeBlock code={webhookExample} language="json" />
+      
+      <div className="mt-4 mb-6 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-white/10">
+              <th className="text-left py-2 text-white/60 font-medium">Field</th>
+              <th className="text-left py-2 text-white/60 font-medium">Description</th>
+            </tr>
+          </thead>
+          <tbody className="text-white/70">
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-mono text-violet-400">botId</td>
+              <td className="py-2">Your bot's UUID (must match URL)</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-mono text-violet-400">action</td>
+              <td className="py-2">"buy" for long, "sell" for short</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-mono text-violet-400">contracts</td>
+              <td className="py-2">Position size (used for proportional sizing)</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-mono text-violet-400">position_size</td>
+              <td className="py-2">Strategy's max position (for ratio calculation)</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-mono text-violet-400">price</td>
+              <td className="py-2">Current price (optional, for logging)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      
+      <SubHeading>Close Position</SubHeading>
+      <Paragraph>
+        Set <code className="text-violet-400">position_size: "0"</code> to close the entire position:
+      </Paragraph>
+      <CodeBlock code={closeExample} language="json" />
+      
+      <SubHeading>Response Format</SubHeading>
+      <Paragraph>
+        Successful trades return details including the Solana transaction signature:
+      </Paragraph>
+      <CodeBlock code={responseExample} language="json" />
+      
+      <SubHeading>Position Sizing</SubHeading>
+      <Paragraph>
+        QuantumVault calculates trade size proportionally based on your bot's max position:
+      </Paragraph>
+      <div className="p-4 rounded-lg bg-black/40 border border-white/10 mb-4">
+        <code className="text-white/80">
+          Trade Size = (contracts / position_size) × Bot's Max Position
+        </code>
+      </div>
+      <Paragraph>
+        <strong className="text-white">Example:</strong> If your bot's max position is $100 and you send 
+        <code className="text-violet-400 mx-1">contracts: "50", position_size: "100"</code>, 
+        QuantumVault will execute a $50 trade (50% of max).
+      </Paragraph>
+      
+      <SubHeading>OpenClaw Skill Example</SubHeading>
+      <Paragraph>
+        Create a skill file for OpenClaw to send signals to QuantumVault:
+      </Paragraph>
+      <CodeBlock code={openclawSkill} language="markdown" />
+      
+      <SubHeading>Error Handling</SubHeading>
+      <Paragraph>
+        Common error codes your agent may receive:
+      </Paragraph>
+      <div className="overflow-x-auto mb-6">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-white/10">
+              <th className="text-left py-2 text-white/60 font-medium">Error</th>
+              <th className="text-left py-2 text-white/60 font-medium">Cause</th>
+            </tr>
+          </thead>
+          <tbody className="text-white/70">
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-mono text-red-400">BOT_NOT_FOUND</td>
+              <td className="py-2">Invalid botId in URL or payload</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-mono text-red-400">BOT_PAUSED</td>
+              <td className="py-2">Bot is paused in QuantumVault</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-mono text-red-400">INSUFFICIENT_MARGIN</td>
+              <td className="py-2">Not enough USDC for trade</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-mono text-red-400">EXECUTION_DISABLED</td>
+              <td className="py-2">Execution not enabled in settings</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-mono text-red-400">DUPLICATE_SIGNAL</td>
+              <td className="py-2">Same signal sent twice (auto-deduplicated)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      
+      <Alert type="success">
+        QuantumVault automatically retries failed trades with exponential backoff. 
+        Your AI agent doesn't need to implement retry logic.
+      </Alert>
+      
+      <SubHeading>Security Best Practices</SubHeading>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Separate Concerns</h4>
+          <p className="text-white/60 text-sm">
+            Your AI agent only sends signals - it never holds private keys. 
+            QuantumVault manages wallet security separately.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Set Position Limits</h4>
+          <p className="text-white/60 text-sm">
+            Configure max position size in QuantumVault to limit exposure 
+            regardless of what signals your AI sends.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Test with Small Amounts</h4>
+          <p className="text-white/60 text-sm">
+            Start with $10-50 max position until you've verified your AI's logic works correctly.
+          </p>
+        </div>
+      </div>
+      
+      <SubHeading>Supported Markets</SubHeading>
+      <Paragraph>
+        QuantumVault supports all Drift Protocol perpetual markets including:
+      </Paragraph>
+      <div className="flex flex-wrap gap-2 mb-6">
+        {['SOL-PERP', 'BTC-PERP', 'ETH-PERP', 'SUI-PERP', 'APT-PERP', 'ARB-PERP', 
+          'DOGE-PERP', 'WIF-PERP', 'BONK-PERP', 'PEPE-PERP', 'JUP-PERP', 'RENDER-PERP'].map(market => (
+          <span key={market} className="px-3 py-1 rounded-full bg-white/10 text-white/70 text-sm font-mono">
+            {market}
+          </span>
+        ))}
+      </div>
+      
+      <SubHeading>Copy Trading Integration</SubHeading>
+      <Paragraph>
+        Turn your AI trading signals into a subscription service:
+      </Paragraph>
+      <StepList steps={[
+        'Publish your bot in the Marketplace',
+        'Set your creator fee percentage (e.g., 10% of profits)',
+        'Others subscribe and copy your AI-generated trades',
+        'Earn automatically when subscribers profit',
+      ]} />
+      
+      <Alert type="info">
+        For full API documentation including all endpoints, see the detailed integration 
+        guide at <code className="text-violet-400">/docs/OPENCLAW_INTEGRATION.md</code> in the repository.
+      </Alert>
+    </div>
+  );
+}
+
 export default function DocsPage() {
   const [activeSection, setActiveSection] = useState<DocSection>('getting-started');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -1125,6 +1405,8 @@ export default function DocsPage() {
         return <SettingsSection />;
       case 'security':
         return <SecuritySection />;
+      case 'ai-agents':
+        return <AIAgentsSection />;
       default:
         return <GettingStartedSection />;
     }
