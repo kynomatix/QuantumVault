@@ -782,6 +782,20 @@ async function routeSignalToSubscribers(
             const closeNotional = Math.abs(position.size) * fillPrice;
             const closeFee = closeNotional * 0.00045; // Drift taker fee ~0.045%
             
+            // Calculate PnL for subscriber close
+            const closeEntryPrice = position.entryPrice || 0;
+            let closeTradePnl = 0;
+            if (closeEntryPrice > 0 && fillPrice > 0) {
+              if (position.side === 'LONG') {
+                // Closing LONG: profit if exitPrice > entryPrice
+                closeTradePnl = (fillPrice - closeEntryPrice) * Math.abs(position.size) - closeFee;
+              } else {
+                // Closing SHORT: profit if entryPrice > exitPrice
+                closeTradePnl = (closeEntryPrice - fillPrice) * Math.abs(position.size) - closeFee;
+              }
+              console.log(`[Subscriber Routing] PnL calculated for ${subBot.id}: entry=$${closeEntryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, pnl=$${closeTradePnl.toFixed(4)}`);
+            }
+            
             await storage.createBotTrade({
               tradingBotId: subBot.id,
               walletAddress: subBot.walletAddress,
@@ -791,25 +805,49 @@ async function routeSignalToSubscribers(
               price: fillPrice.toFixed(6),
               status: 'executed',
               fee: closeFee.toFixed(6),
+              pnl: closeTradePnl !== 0 ? closeTradePnl.toFixed(6) : null,
               txSignature: closeResult.signature || null,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
             });
             closeSuccess++;
             
+            // Update stats with PnL
             await storage.updateTradingBotStats(subBot.id, {
               ...stats,
               totalTrades: (stats.totalTrades || 0) + 1,
-              totalVolume: (stats.totalVolume || 0) + Math.abs(position.size) * fillPrice,
+              winningTrades: closeTradePnl > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
+              losingTrades: closeTradePnl < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
+              totalPnl: (stats.totalPnl || 0) + closeTradePnl,
+              totalVolume: (stats.totalVolume || 0) + closeNotional,
               lastTradeAt: new Date().toISOString(),
             });
 
+            // PROFIT SHARE: Distribute to creator if subscriber closed with profit
+            if (closeTradePnl > 0) {
+              const tradeId = `${subBot.id}-${Date.now()}`;
+              console.log(`[Subscriber Routing] Initiating profit share for ${subBot.id}: pnl=$${closeTradePnl.toFixed(4)}`);
+              distributeCreatorProfitShare({
+                subscriberBotId: subBot.id,
+                subscriberWalletAddress: subBot.walletAddress,
+                subscriberAgentPublicKey: subWallet.agentPublicKey!,
+                subscriberEncryptedPrivateKey: subWallet.agentPrivateKeyEncrypted,
+                driftSubaccountId: subAccountId,
+                realizedPnl: closeTradePnl,
+                tradeId,
+              }).then(result => {
+                if (result.success && result.amount) {
+                  console.log(`[Subscriber Routing] Profit share distributed: $${result.amount.toFixed(4)} from ${subBot.id}`);
+                } else if (!result.success && result.error) {
+                  console.error(`[Subscriber Routing] Profit share failed for ${subBot.id}: ${result.error}`);
+                }
+              }).catch(err => console.error(`[Subscriber Routing] Profit share error for ${subBot.id}:`, err));
+            }
+
             sendTradeNotification(subWallet.address, {
-              type: 'trade_executed',
+              type: 'position_closed',
               botName: subBot.name,
               market: subBot.market,
-              side: position.side === 'LONG' ? 'SHORT' : 'LONG',
-              size: Math.abs(position.size) * fillPrice,
-              price: fillPrice,
+              pnl: closeTradePnl,
             }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
           } else {
             console.error(`[Subscriber Routing] Close failed for subscriber bot ${subBot.id}:`, closeResult.error);

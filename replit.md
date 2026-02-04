@@ -90,6 +90,17 @@ Preferred communication style: Simple, everyday language.
 -   **Result**: Live routing test confirmed working - subscriber bots now receive routed trades
 -   **Files changed**: `server/routes.ts`
 
+### Subscriber Profit Share Fix (Feb 4 2026)
+-   **Root cause identified**: When subscriber bots closed positions via `routeSignalToSubscribers()`, profit share was **never distributed** to creators. The close executed successfully but no money flowed to the signal creator.
+-   **Impact**: Creators earned $0 from subscriber profits even though copy trading was working. The profit share system only worked for direct webhook closes, not routed closes.
+-   **Fixes applied**:
+    1. Added PnL calculation for subscriber closes using entry price from position data
+    2. Added `distributeCreatorProfitShare()` call after successful subscriber close
+    3. Added PnL tracking to trade records and bot stats (winningTrades, losingTrades, totalPnl)
+    4. Changed notification type from `trade_executed` to `position_closed` with PnL info
+-   **Result**: When subscriber bots close profitable positions, creators now automatically receive their profit share percentage via on-chain USDC transfer (with IOU failover).
+-   **Files changed**: `server/routes.ts`
+
 ### Subprocess Timeout RPC Failover Fix (Feb 4 2026)
 -   **Root cause identified**: Subprocess timeouts (TIMEOUT_SUBPROCESS) weren't triggering RPC failover because timeout errors weren't being detected in the error handler.
 -   **Fixes applied**: Added timeout detection (`timeout` and `timed out` keywords) to subprocess result handlers and catch blocks in 4 locations.
