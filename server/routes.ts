@@ -673,11 +673,24 @@ async function routeSignalToSubscribers(
   }
 ): Promise<void> {
   try {
+    console.log(`[Subscriber Routing] Starting routing for source bot ${sourceBotId}, signal: ${signal.action}, close=${signal.isCloseSignal}`);
+    
     const publishedBot = await storage.getPublishedBotByTradingBotId(sourceBotId);
-    if (!publishedBot || !publishedBot.isActive) return;
+    if (!publishedBot) {
+      console.log(`[Subscriber Routing] Source bot ${sourceBotId} is not published - skipping routing`);
+      return;
+    }
+    if (!publishedBot.isActive) {
+      console.log(`[Subscriber Routing] Published bot ${publishedBot.id} (${publishedBot.name}) is not active - skipping routing`);
+      return;
+    }
+    console.log(`[Subscriber Routing] Found published bot: ${publishedBot.id} (${publishedBot.name}), active=${publishedBot.isActive}`);
 
     const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
-    if (!subscriberBots || subscriberBots.length === 0) return;
+    if (!subscriberBots || subscriberBots.length === 0) {
+      console.log(`[Subscriber Routing] No active subscriber bots found for published bot ${publishedBot.id} - skipping routing`);
+      return;
+    }
 
     console.log(`[Subscriber Routing] Routing ${signal.action} (close=${signal.isCloseSignal}) to ${subscriberBots.length} subscribers`);
 
@@ -689,14 +702,18 @@ async function routeSignalToSubscribers(
     let closeFailed = 0;
 
     for (const subBot of subscriberBots) {
+      console.log(`[Subscriber Routing] Processing subscriber bot ${subBot.id} (${subBot.name}), isActive=${subBot.isActive}, market=${subBot.market}`);
+      
       // Allow close signals to route to inactive (paused) bots to prevent orphaned positions
       if (!subBot.isActive && !signal.isCloseSignal) {
+        console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
         skippedInactive++;
         continue;
       }
 
       try {
         const subWallet = await storage.getWallet(subBot.walletAddress);
+        console.log(`[Subscriber Routing] Wallet lookup for ${subBot.walletAddress}: found=${!!subWallet}, hasAgentKey=${!!subWallet?.agentPublicKey}`);
         if (!subWallet) {
           // Create failed trade record for visibility
           await storage.createBotTrade({
