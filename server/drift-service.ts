@@ -3362,6 +3362,10 @@ export async function executePerpOrder(
       } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
         reportRPCError('connection');
         result.error = TradeErrors.RPC_CONNECTION;
+      } else if (errLower.includes('timeout') || errLower.includes('timed out')) {
+        // CRITICAL: Subprocess timeouts should trigger RPC failover
+        reportRPCError('connection');
+        console.log('[Drift] Subprocess timeout detected - reported as RPC connection error for failover');
       }
     } else if (result.success) {
       // Trade succeeded - reset error counter
@@ -3396,6 +3400,10 @@ export async function executePerpOrder(
     } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
       reportRPCError('connection');
       errorMessage = TradeErrors.RPC_CONNECTION;
+    } else if (errLower.includes('timeout') || errLower.includes('timed out')) {
+      // CRITICAL: Timeouts should trigger RPC failover
+      reportRPCError('connection');
+      console.log('[Drift] Timeout error detected - reported as RPC connection error for failover');
     }
     
     // Normalize rate limit errors to ensure they're detectable by isRateLimitError
@@ -3544,6 +3552,10 @@ export async function closePerpPosition(
       } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
         reportRPCError('connection');
         result.error = TradeErrors.RPC_CONNECTION;
+      } else if (errLower.includes('timeout') || errLower.includes('timed out')) {
+        // CRITICAL: Subprocess timeouts should trigger RPC failover
+        reportRPCError('connection');
+        console.log('[Drift] Subprocess timeout detected - reported as RPC connection error for failover');
       }
     } else if (result.success) {
       // Close succeeded - reset error counter
@@ -3563,6 +3575,10 @@ export async function closePerpPosition(
     } else if (errLower.includes('connection terminated') || errLower.includes('terminated unexpectedly') || errLower.includes('econnreset') || errLower.includes('socket hang up')) {
       reportRPCError('connection');
       errorMsg = TradeErrors.RPC_CONNECTION;
+    } else if (errLower.includes('timeout') || errLower.includes('timed out')) {
+      // CRITICAL: Timeouts should trigger RPC failover
+      reportRPCError('connection');
+      console.log('[Drift] Timeout error detected - reported as RPC connection error for failover');
     }
     
     errorMsg = normalizeRateLimitError(errorMsg);

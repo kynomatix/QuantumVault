@@ -154,3 +154,20 @@ Preferred communication style: Simple, everyday language.
     5. Error categorization via `categorizeError()` now catches "terminated unexpectedly" as RPC_CONNECTION
 -   **Result**: Connection drops now trigger RPC failover to Triton backup, preventing repeated failures on dead primary RPC
 -   **Files changed**: `server/drift-service.ts`, `server/trade-retry-service.ts`
+
+### CRITICAL: Subprocess Timeout Not Triggering Failover (Feb 4 2026)
+-   **Root cause identified**: Previous fix added timeout detection but only in the in-process DriftClient path. When subprocess times out after 10 seconds and returns `TIMEOUT_SUBPROCESS` error, the error handler checked for `429`, `connection terminated`, `econnreset`, `socket hang up` - but NOT for `timeout` or `timed out`.
+-   **Impact**: 145 trades failed overnight with `TIMEOUT_SUBPROCESS` errors. Triton backup was never triggered because timeouts didn't increment the failover counter.
+-   **Production data**: Retry queue showed jobs with 20-57 attempts (max should be 5-10), all with `TIMEOUT_SUBPROCESS` error, all hitting the same dead Helius RPC.
+-   **Fixes applied**:
+    1. Added timeout detection to subprocess result handler: `errLower.includes('timeout') || errLower.includes('timed out')`
+    2. Added same detection to subprocess catch blocks (both trade and close paths)
+    3. Timeout errors now call `reportRPCError('connection')` to increment failover counter
+    4. After 2 consecutive timeout errors, system will now switch to Triton backup for 3 minutes
+-   **Key code locations fixed** (4 places in `server/drift-service.ts`):
+    - Line ~3368: Subprocess result handler for trades
+    - Line ~3406: Catch block for trades
+    - Line ~3540: Subprocess result handler for closes
+    - Line ~3581: Catch block for closes
+-   **Result**: Subprocess timeouts now properly trigger RPC failover to Triton, preventing the overnight failure scenario
+-   **Files changed**: `server/drift-service.ts`
