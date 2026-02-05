@@ -118,6 +118,96 @@ export function isTimeoutError(error: string | Error | unknown): boolean {
   );
 }
 
+// Check if error is an insufficient margin/balance error
+export function isInsufficientMarginError(error: string | Error | unknown): boolean {
+  const errorStr = error instanceof Error ? error.message : String(error);
+  const lowerError = errorStr.toLowerCase();
+  return (
+    lowerError.includes('insufficient margin') ||
+    lowerError.includes('insufficient collateral') ||
+    lowerError.includes('insufficient balance') ||
+    lowerError.includes('not enough') ||
+    lowerError.includes('below minimum')
+  );
+}
+
+// Check if error is a Drift protocol error (usually non-retryable)
+export function isDriftProtocolError(error: string | Error | unknown): boolean {
+  const errorStr = error instanceof Error ? error.message : String(error);
+  const lowerError = errorStr.toLowerCase();
+  return (
+    lowerError.includes('referrernotfound') ||
+    lowerError.includes('usernotfound') ||
+    lowerError.includes('marketnotfound') ||
+    lowerError.includes('orderdoesnotexist') ||
+    lowerError.includes('positiondoesnotexist')
+  );
+}
+
+// Error category types for clear logging
+export type ErrorCategory = 
+  | 'TIMEOUT'      // Timeout errors - eligible for cooldown re-queue
+  | 'RATE_LIMIT'   // Rate limit / 429 errors - eligible for retry
+  | 'ORACLE'       // Oracle/price feed issues - transient, retryable
+  | 'RPC'          // RPC connection issues - transient, retryable
+  | 'MARGIN'       // Insufficient margin/balance - usually non-retryable
+  | 'PROTOCOL'     // Drift protocol errors - usually non-retryable
+  | 'UNKNOWN';     // Unknown errors
+
+// Categorize an error for clear logging
+// Priority: TIMEOUT > ORACLE > RPC > RATE_LIMIT > MARGIN > PROTOCOL > UNKNOWN
+// Timeout is checked first because it's eligible for cooldown re-queue
+export function categorizeError(error: string | Error | unknown): { category: ErrorCategory; emoji: string; retryable: boolean } {
+  const errorStr = error instanceof Error ? error.message : String(error);
+  const lowerError = errorStr.toLowerCase();
+  
+  // TIMEOUT: Check first - eligible for cooldown re-queue (highest priority)
+  if (isTimeoutError(error)) {
+    return { category: 'TIMEOUT', emoji: '⏱️', retryable: true };
+  }
+  
+  // ORACLE: All oracle/price feed issues (aligns with isTransientError patterns)
+  if (lowerError.includes('oraclenotfound') || 
+      lowerError.includes('oracle not found') ||
+      lowerError.includes('invalidoracle') ||
+      lowerError.includes('invalid oracle') ||
+      lowerError.includes('price feed') || 
+      lowerError.includes('stale')) {
+    return { category: 'ORACLE', emoji: '📡', retryable: true };
+  }
+  
+  // RPC: All connection issues (aligns with isTransientError patterns)
+  if (lowerError.includes('econnrefused') || 
+      lowerError.includes('econnreset') || 
+      lowerError.includes('socket hang up') || 
+      lowerError.includes('connection terminated') ||
+      lowerError.includes('terminated unexpectedly')) {
+    return { category: 'RPC', emoji: '🔌', retryable: true };
+  }
+  
+  // RATE_LIMIT: 429 errors and rate limiting (excluding timeout which is checked above)
+  if (lowerError.includes('-32429') ||
+      lowerError.includes('rate limit') ||
+      lowerError.includes('429') ||
+      lowerError.includes('too many requests') ||
+      lowerError.includes('please wait') ||
+      lowerError.includes('credit')) {
+    return { category: 'RATE_LIMIT', emoji: '🚦', retryable: true };
+  }
+  
+  // MARGIN: Insufficient funds (usually non-retryable without top-up)
+  if (isInsufficientMarginError(error)) {
+    return { category: 'MARGIN', emoji: '💰', retryable: false };
+  }
+  
+  // PROTOCOL: Drift protocol errors (usually non-retryable)
+  if (isDriftProtocolError(error)) {
+    return { category: 'PROTOCOL', emoji: '⚠️', retryable: false };
+  }
+  
+  return { category: 'UNKNOWN', emoji: '❓', retryable: false };
+}
+
 function generateJobId(): string {
   return `retry_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
@@ -194,13 +284,17 @@ async function notifyRetryQueued(job: RetryJob): Promise<void> {
     const sideLabel = job.side === 'close' ? 'CLOSE' : job.side.toUpperCase();
     const nextRetrySeconds = Math.round((job.nextRetryAt - Date.now()) / 1000);
     
+    // Use error categorization for consistent messaging
+    const errorInfo = job.lastError ? categorizeError(job.lastError) : { category: 'UNKNOWN', emoji: '❓' };
+    const errorReason = job.lastError ? `[${errorInfo.category}]` : 'Transient error';
+    
     await sendTradeNotification(job.walletAddress, {
       type: 'trade_failed',
       botName,
       market: job.market,
       side: sideLabel as 'LONG' | 'SHORT',
       size: job.size,
-      error: `Rate limited - auto-retry scheduled in ${nextRetrySeconds}s ${priorityEmoji}`,
+      error: `${errorReason} - auto-retry scheduled in ${nextRetrySeconds}s ${priorityEmoji}`,
     });
   } catch (err) {
     console.warn('[TradeRetry] Failed to send retry notification:', err);
@@ -226,13 +320,17 @@ async function notifyRetryResult(job: RetryJob, success: boolean, error?: string
         price: 0,
       });
     } else {
+      // Use error categorization for consistent messaging
+      const errorInfo = error ? categorizeError(error) : { category: 'UNKNOWN', emoji: '❓' };
+      const cooldownNote = (job.cooldownRetries || 0) > 0 ? ` (+${job.cooldownRetries} cooldowns)` : '';
+      
       await sendTradeNotification(job.walletAddress, {
         type: 'trade_failed',
         botName,
         market: job.market,
         side: sideLabel as 'LONG' | 'SHORT',
         size: job.size,
-        error: `❌ Auto-retry exhausted after ${job.attempts} attempts: ${error || 'Unknown error'}`,
+        error: `❌ [${errorInfo.category}] Auto-retry exhausted after ${job.attempts} attempts${cooldownNote}: ${error || 'Unknown error'}`,
       });
     }
   } catch (err) {
@@ -559,12 +657,13 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     }
     
     job.lastError = result.error || 'Unknown error';
+    const errorInfo = categorizeError(job.lastError);
     
     // Retry if transient error (rate limit, price feed, oracle issues) and attempts remaining
     if (isTransientError(job.lastError) && job.attempts < job.maxAttempts) {
       const backoff = calculateBackoff(job.attempts, job.priority);
       job.nextRetryAt = Date.now() + backoff;
-      console.log(`[TradeRetry] Job ${job.id} transient error, retry in ${Math.round(backoff / 1000)}s`);
+      console.log(`[TradeRetry] ${errorInfo.emoji} [${errorInfo.category}] Job ${job.id} error (retryable=${errorInfo.retryable}), retry #${job.attempts + 1} in ${Math.round(backoff / 1000)}s: ${job.lastError.slice(0, 100)}`);
       return;
     }
     
@@ -575,7 +674,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       job.cooldownRetries = cooldownRetries + 1;
       job.attempts = 0; // Reset attempts for fresh retry cycle
       job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
-      console.log(`[TradeRetry] 🔄 Job ${job.id} timeout - scheduling cooldown re-queue #${job.cooldownRetries}/${MAX_COOLDOWN_RETRIES} in 2 minutes`);
+      console.log(`[TradeRetry] ${errorInfo.emoji} [${errorInfo.category}] Job ${job.id} - scheduling cooldown re-queue #${job.cooldownRetries}/${MAX_COOLDOWN_RETRIES} in 2min`);
       
       // Persist cooldown state to database (including cooldownRetries)
       try {
@@ -592,7 +691,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     }
     
     // Mark as permanently failed
-    console.error(`[TradeRetry] ❌ Job ${job.id} failed permanently: ${job.lastError}`);
+    console.error(`[TradeRetry] ❌ [${errorInfo.category}] Job ${job.id} FAILED PERMANENTLY after ${job.attempts} attempts: ${job.lastError}`);
     
     // Update original trade to failed if exists
     if (job.originalTradeId) {
@@ -614,15 +713,16 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     job.lastError = errorMsg;
+    const catchErrorInfo = categorizeError(errorMsg);
     
     if (isTransientError(errorMsg) && job.attempts < job.maxAttempts) {
       const backoff = calculateBackoff(job.attempts, job.priority);
       job.nextRetryAt = Date.now() + backoff;
-      console.log(`[TradeRetry] Job ${job.id} threw transient error, retry in ${Math.round(backoff / 1000)}s`);
+      console.log(`[TradeRetry] ${catchErrorInfo.emoji} [${catchErrorInfo.category}] Job ${job.id} threw error (retryable=${catchErrorInfo.retryable}), retry #${job.attempts + 1} in ${Math.round(backoff / 1000)}s: ${errorMsg.slice(0, 100)}`);
       return;
     }
     
-    console.error(`[TradeRetry] ❌ Job ${job.id} threw error: ${errorMsg}`);
+    console.error(`[TradeRetry] ❌ [${catchErrorInfo.category}] Job ${job.id} threw error: ${errorMsg}`);
     
     if (job.attempts >= job.maxAttempts) {
       // DELAYED RE-QUEUE: If this is a timeout error and we haven't exhausted cooldown retries,
@@ -632,7 +732,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         job.cooldownRetries = cooldownRetries + 1;
         job.attempts = 0; // Reset attempts for fresh retry cycle
         job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
-        console.log(`[TradeRetry] 🔄 Job ${job.id} timeout - scheduling cooldown re-queue #${job.cooldownRetries}/${MAX_COOLDOWN_RETRIES} in 2 minutes`);
+        console.log(`[TradeRetry] ${catchErrorInfo.emoji} [${catchErrorInfo.category}] Job ${job.id} - scheduling cooldown re-queue #${job.cooldownRetries}/${MAX_COOLDOWN_RETRIES} in 2min`);
         
         // Persist cooldown state to database (including cooldownRetries)
         try {
