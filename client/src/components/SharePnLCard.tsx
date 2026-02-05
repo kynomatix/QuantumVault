@@ -284,7 +284,7 @@ export function SharePnLCard({
     } else {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
       ctx.font = '15px Inter, system-ui, sans-serif';
-      ctx.fillText('quantumvault.io', padding, height - 30);
+      ctx.fillText('myquantumvault.com', padding, height - 30);
     }
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
