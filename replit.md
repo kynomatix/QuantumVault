@@ -121,3 +121,13 @@ Preferred communication style: Simple, everyday language.
     4. Cooldown state (attempts reset, cooldownRetries count) persisted to DB and hydrated on startup
 -   **Result**: Timeout errors now trigger backup RPC switch + trades get up to 2 additional 2-minute cooldown retry cycles, significantly improving trade success rates during RPC congestion.
 -   **Files changed**: `server/drift-executor.mjs`, `server/trade-retry-service.ts`, `shared/schema.ts`
+
+### Webhook Timing Instrumentation + Parallel Subscriber Execution (Feb 5 2026)
+-   **Goal**: Improve trade reliability debugging and reduce copy trading latency.
+-   **Fixes applied**:
+    1. Added millisecond timing logs to webhook flow with `⏱️` markers showing time since request start
+    2. Added timing logs at key checkpoints: bot lookup, security checks, position checks, trade execution start/end
+    3. Converted `routeSignalToSubscribers()` from sequential to **parallel execution** using `Promise.all`
+    4. Summary logs now include total execution time for parallel subscriber processing
+-   **Result**: Webhook logs now show precise timing (e.g., `OPEN EXEC START at +245ms (took 1823ms)`). Copy trading routes all subscribers simultaneously instead of one-by-one, dramatically reducing latency when multiple subscribers exist.
+-   **Files changed**: `server/routes.ts`

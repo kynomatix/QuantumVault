@@ -692,23 +692,19 @@ async function routeSignalToSubscribers(
       return;
     }
 
-    console.log(`[Subscriber Routing] Routing ${signal.action} (close=${signal.isCloseSignal}) to ${subscriberBots.length} subscribers`);
+    console.log(`[Subscriber Routing] Routing ${signal.action} (close=${signal.isCloseSignal}) to ${subscriberBots.length} subscribers IN PARALLEL`);
 
-    // Track outcomes for summary log
-    let skippedInactive = 0;
-    let tradeSuccess = 0;
-    let tradeFailed = 0;
-    let closeSuccess = 0;
-    let closeFailed = 0;
+    // Result type for per-subscriber processing - collected and reduced after Promise.all
+    type SubscriberResult = 'skippedInactive' | 'skippedFlat' | 'tradeSuccess' | 'tradeFailed' | 'closeSuccess' | 'closeFailed' | 'error';
 
-    for (const subBot of subscriberBots) {
+    // Process subscriber function - returns result for aggregation after parallel execution
+    const processSubscriber = async (subBot: typeof subscriberBots[0]): Promise<SubscriberResult> => {
       console.log(`[Subscriber Routing] Processing subscriber bot ${subBot.id} (${subBot.name}), isActive=${subBot.isActive}, market=${subBot.market}`);
       
       // Allow close signals to route to inactive (paused) bots to prevent orphaned positions
       if (!subBot.isActive && !signal.isCloseSignal) {
         console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
-        skippedInactive++;
-        continue;
+        return 'skippedInactive';
       }
 
       try {
@@ -728,8 +724,7 @@ async function routeSignalToSubscribers(
             errorMessage: 'Wallet not found in database',
             webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'wallet_not_found' },
           });
-          tradeFailed++;
-          continue;
+          return 'tradeFailed';
         }
         if (!subWallet.agentPrivateKeyEncrypted || !subWallet.agentPublicKey) {
           // Create failed trade record for visibility
@@ -745,8 +740,7 @@ async function routeSignalToSubscribers(
             errorMessage: 'No agent wallet configured for trading',
             webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'no_agent_keys' },
           });
-          tradeFailed++;
-          continue;
+          return 'tradeFailed';
         }
 
         const subAccountId = subBot.driftSubaccountId ?? 0;
@@ -761,7 +755,7 @@ async function routeSignalToSubscribers(
           );
 
           if (position.side === 'FLAT' || Math.abs(position.size) < 0.0001) {
-            continue;
+            return 'skippedFlat';
           }
           
           // NOTE: Uses legacy encrypted key - subscriber wallet's UMK not available (see function header comment)
@@ -809,8 +803,6 @@ async function routeSignalToSubscribers(
               txSignature: closeResult.signature || null,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
             });
-            closeSuccess++;
-            
             // Update stats with PnL
             await storage.updateTradingBotStats(subBot.id, {
               ...stats,
@@ -849,9 +841,11 @@ async function routeSignalToSubscribers(
               market: subBot.market,
               pnl: closeTradePnl,
             }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
+            
+            return 'closeSuccess';
           } else {
             console.error(`[Subscriber Routing] Close failed for subscriber bot ${subBot.id}:`, closeResult.error);
-            closeFailed++;
+            return 'closeFailed';
           }
         } else {
           const oraclePrice = parseFloat(signal.price);
@@ -875,8 +869,7 @@ async function routeSignalToSubscribers(
               errorMessage: 'Bot has no Max Position Size configured',
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'no_max_position_size' },
             });
-            tradeFailed++;
-            continue;
+            return 'tradeFailed';
           }
 
           // Calculate signal percentage from source signal
@@ -917,13 +910,12 @@ async function routeSignalToSubscribers(
               errorMessage: sizingResult.error || 'Trade sizing failed',
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'sizing_failed' },
             });
-            tradeFailed++;
             
             if (sizingResult.shouldPauseBot && sizingResult.pauseReason) {
               await storage.updateTradingBot(subBot.id, { isActive: false, pauseReason: sizingResult.pauseReason } as any);
               console.log(`[Subscriber Routing] Bot ${subBot.id} paused: ${sizingResult.pauseReason}`);
             }
-            continue;
+            return 'tradeFailed';
           }
 
           const contractSize = sizingResult.finalContractSize;
@@ -943,8 +935,7 @@ async function routeSignalToSubscribers(
               errorMessage: 'Trade size too small (minimum 0.001 contracts)',
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'size_too_small' },
             });
-            tradeFailed++;
-            continue;
+            return 'tradeFailed';
           }
 
 
@@ -981,7 +972,6 @@ async function routeSignalToSubscribers(
               txSignature: orderResult.txSignature || orderResult.signature || null,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
             });
-            tradeSuccess++;
 
             await storage.updateTradingBotStats(subBot.id, {
               ...stats,
@@ -998,6 +988,8 @@ async function routeSignalToSubscribers(
               size: contractSize * fillPrice,
               price: fillPrice,
             }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
+            
+            return 'tradeSuccess';
           } else {
             console.error(`[Subscriber Routing] Order failed for subscriber bot ${subBot.id}:`, orderResult.error);
             
@@ -1013,7 +1005,6 @@ async function routeSignalToSubscribers(
               errorMessage: parseDriftError(orderResult.error),
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
             });
-            tradeFailed++;
 
             sendTradeNotification(subWallet.address, {
               type: 'trade_failed',
@@ -1024,18 +1015,39 @@ async function routeSignalToSubscribers(
               price: oraclePrice,
               error: parseDriftError(orderResult.error),
             }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
+            
+            return 'tradeFailed';
           }
         }
+        // Should never reach here, but return error just in case
+        return 'error';
       } catch (subError) {
         console.error(`[Subscriber Routing] Error processing subscriber bot ${subBot.id}:`, subError);
-        tradeFailed++;
+        return 'error';
       }
-    }
+    };
+
+    // Execute all subscriber processing in parallel for maximum speed
+    const startTime = Date.now();
+    const results = await Promise.all(subscriberBots.map(subBot => processSubscriber(subBot)));
+    const elapsed = Date.now() - startTime;
+
+    // Aggregate results from all subscribers (thread-safe reduction)
+    const outcomes = results.reduce((acc, result) => {
+      if (result === 'skippedInactive') acc.skippedInactive++;
+      else if (result === 'skippedFlat') acc.skippedFlat++;
+      else if (result === 'tradeSuccess') acc.tradeSuccess++;
+      else if (result === 'tradeFailed') acc.tradeFailed++;
+      else if (result === 'closeSuccess') acc.closeSuccess++;
+      else if (result === 'closeFailed') acc.closeFailed++;
+      else if (result === 'error') acc.errors++;
+      return acc;
+    }, { skippedInactive: 0, skippedFlat: 0, tradeSuccess: 0, tradeFailed: 0, closeSuccess: 0, closeFailed: 0, errors: 0 });
 
     // Summary log for debugging
     const total = subscriberBots.length;
-    const processed = tradeSuccess + tradeFailed + closeSuccess + closeFailed;
-    console.log(`[Subscriber Routing] SUMMARY for source ${sourceBotId}: ${total} subscribers, ${skippedInactive} skipped (inactive), ${tradeSuccess} trades OK, ${tradeFailed} trades FAILED, ${closeSuccess} closes OK, ${closeFailed} closes FAILED`);
+    const processed = outcomes.tradeSuccess + outcomes.tradeFailed + outcomes.closeSuccess + outcomes.closeFailed;
+    console.log(`[Subscriber Routing] SUMMARY for source ${sourceBotId}: ${total} subscribers processed in ${elapsed}ms (PARALLEL), ${outcomes.skippedInactive} skipped (inactive), ${outcomes.skippedFlat} skipped (flat), ${outcomes.tradeSuccess} trades OK, ${outcomes.tradeFailed} trades FAILED, ${outcomes.closeSuccess} closes OK, ${outcomes.closeFailed} closes FAILED, ${outcomes.errors} errors`);
   } catch (error) {
     console.error('[Subscriber Routing] Error:', error);
   }
@@ -5068,8 +5080,11 @@ export async function registerRoutes(
 
   // TradingView Webhook endpoint - receives signals from TradingView strategy alerts
   app.post("/api/webhook/tradingview/:botId", async (req, res) => {
+    const webhookStartTime = Date.now();
     const { botId } = req.params;
     const { secret } = req.query;
+    
+    console.log(`[Webhook] ⏱️ START botId=${botId.slice(0, 8)}... at ${new Date().toISOString()}`);
     
     // Generate signal hash for deduplication
     const signalHash = generateSignalHash(botId, req.body);
@@ -5419,7 +5434,8 @@ export async function registerRoutes(
           // This prevents JavaScript float precision loss (e.g., 0.4374 → 437399999 instead of 437400000)
           const subAccountId = bot.driftSubaccountId ?? 0;
           const closeSlippageBps2 = wallet.slippageBps ?? 50;
-          console.log(`[Webhook] Using closePerpPosition (exact BN precision) for closeSize=${closeSize}, slippage=${closeSlippageBps2}bps`);
+          const execStartTime = Date.now();
+          console.log(`[Webhook] ⏱️ CLOSE EXEC START at +${execStartTime - webhookStartTime}ms, closeSize=${closeSize}, slippage=${closeSlippageBps2}bps`);
           const result = await closePerpPosition(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
@@ -5430,6 +5446,8 @@ export async function registerRoutes(
           );
           
           // closePerpPosition returns { success, signature, error } - map to expected format
+          const execEndTime = Date.now();
+          console.log(`[Webhook] ⏱️ CLOSE EXEC END at +${execEndTime - webhookStartTime}ms (took ${execEndTime - execStartTime}ms), success=${result.success}`);
           const txSignature = result.signature || null;
           
           // Handle case where subprocess found no position to close (success=true, signature=null)
@@ -6130,6 +6148,8 @@ export async function registerRoutes(
 
       // Execute on Drift using the subAccountId already declared for position check
       const userSlippageBps = wallet.slippageBps ?? 50;
+      const openExecStartTime = Date.now();
+      console.log(`[Webhook] ⏱️ OPEN EXEC START at +${openExecStartTime - webhookStartTime}ms, ${side} ${finalContractSize} ${bot.market}`);
       const orderResult = await executePerpOrder(
         wallet.agentPrivateKeyEncrypted,
         bot.market,
@@ -6141,6 +6161,8 @@ export async function registerRoutes(
         privateKeyBase58,
         wallet.agentPublicKey || undefined
       );
+      const openExecEndTime = Date.now();
+      console.log(`[Webhook] ⏱️ OPEN EXEC END at +${openExecEndTime - webhookStartTime}ms (took ${openExecEndTime - openExecStartTime}ms), success=${orderResult.success}`);
 
       if (!orderResult.success) {
         const userFriendlyError = parseDriftError(orderResult.error);
