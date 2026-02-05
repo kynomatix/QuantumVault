@@ -50,7 +50,7 @@ const DEFAULT_FAILOVER_STATE = {
   switchedToBackupAt: null,
   consecutivePrimaryFailures: 0,
   consecutive429Errors: 0,
-  rateLimit429Threshold: 2,
+  rateLimit429Threshold: 1, // Immediate failover on first timeout/429
   cooldownMs: 3 * 60 * 1000,
   lastErrorAt: null,
 };
@@ -133,8 +133,8 @@ const FAILOVER_STATE = persistedState || {
   // Count of 429 rate limit errors on primary (triggers failover when threshold hit)
   consecutive429Errors: 0,
   
-  // Threshold: switch to backup after this many 429 errors
-  rateLimit429Threshold: 2,
+  // Threshold: switch to backup after this many 429 errors (1 = immediate failover)
+  rateLimit429Threshold: 1,
   
   // Cooldown: 3 minutes before trying primary again
   cooldownMs: 3 * 60 * 1000,

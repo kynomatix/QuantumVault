@@ -14,9 +14,9 @@ import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 // ============================================================================
 export const TradeErrors = {
   // Timeout errors (operation took too long)
-  TIMEOUT_TRADE: 'TIMEOUT_TRADE: Trade execution timed out after 10 seconds',
-  TIMEOUT_CLOSE: 'TIMEOUT_CLOSE: Close execution timed out after 10 seconds',
-  TIMEOUT_SUBPROCESS: 'TIMEOUT_SUBPROCESS: Subprocess operation timed out after 10 seconds',
+  TIMEOUT_TRADE: 'TIMEOUT_TRADE: Trade execution timed out after 20 seconds',
+  TIMEOUT_CLOSE: 'TIMEOUT_CLOSE: Close execution timed out after 20 seconds',
+  TIMEOUT_SUBPROCESS: 'TIMEOUT_SUBPROCESS: Subprocess operation timed out after 20 seconds',
   
   // RPC errors (blockchain network issues)
   RPC_RATE_LIMIT: 'RPC_RATE_LIMIT: RPC provider returned 429 rate limit error',
@@ -76,7 +76,7 @@ export function categorizeError(error: Error | string): string {
 // ============================================================================
 const FAILOVER_STATE_FILE = '/tmp/drift_rpc_failover_state.json';
 const FAILOVER_COOLDOWN_MS = 3 * 60 * 1000; // 3 minutes
-const RATE_LIMIT_THRESHOLD = 2; // Switch after 2 consecutive 429s
+const RATE_LIMIT_THRESHOLD = 1; // Switch after 1 timeout/429 - immediate failover
 
 interface FailoverState {
   activeRpc: 'primary' | 'backup';
@@ -3205,15 +3205,15 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     child.stdin.write(JSON.stringify(command));
     child.stdin.end();
     
-    // Timeout after 10 seconds - faster failover to backup RPC
+    // Timeout after 20 seconds - give more time for network congestion
     setTimeout(() => {
       child.kill();
-      console.log('[Drift] Subprocess timed out after 10s - will trigger auto-retry');
+      console.log('[Drift] Subprocess timed out after 20s - will trigger auto-retry');
       resolve({
         success: false,
         error: TradeErrors.TIMEOUT_SUBPROCESS,
       });
-    }, 10000);
+    }, 20000);
   });
 }
 
