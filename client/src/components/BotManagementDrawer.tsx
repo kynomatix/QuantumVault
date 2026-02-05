@@ -2315,8 +2315,8 @@ export function BotManagementDrawer({
           xUsername={xUsername}
           onTimeframeChange={setPerformanceTimeframe}
           shareUrl={publishedBotId 
-            ? `https://quantumvault.io/marketplace/${publishedBotId}` 
-            : (referralCode ? `https://quantumvault.io/?ref=${referralCode}` : 'https://quantumvault.io')}
+            ? `https://myquantumvault.com/marketplace/${publishedBotId}` 
+            : (referralCode ? `https://myquantumvault.com/?ref=${referralCode}` : 'https://myquantumvault.com')}
           isPublishedBot={!!publishedBotId}
         />
       )}
