@@ -131,3 +131,22 @@ Preferred communication style: Simple, everyday language.
     4. Summary logs now include total execution time for parallel subscriber processing
 -   **Result**: Webhook logs now show precise timing (e.g., `OPEN EXEC START at +245ms (took 1823ms)`). Copy trading routes all subscribers simultaneously instead of one-by-one, dramatically reducing latency when multiple subscribers exist.
 -   **Files changed**: `server/routes.ts`
+
+### Error Categorization for Trade Retry Logging (Feb 5 2026)
+-   **Goal**: Improve debugging by making error types immediately visible in logs.
+-   **Fixes applied**:
+    1. Added `categorizeError()` function that classifies errors into 7 categories: TIMEOUT, ORACLE, RPC, RATE_LIMIT, MARGIN, PROTOCOL, UNKNOWN
+    2. Each category has an emoji identifier for quick visual parsing in logs (⏱️, 📡, 🔌, 🚦, 💰, ⚠️, ❓)
+    3. Priority order documented and enforced: TIMEOUT > ORACLE > RPC > RATE_LIMIT > MARGIN > PROTOCOL > UNKNOWN
+    4. All retry service logs now include `[CATEGORY]` labels with retryable status
+    5. User notifications (Telegram) now include error category for transparency
+-   **Error categories**:
+    - `TIMEOUT`: Timeout errors - eligible for cooldown re-queue
+    - `ORACLE`: Oracle/price feed issues - transient, retryable
+    - `RPC`: Connection issues (ECONNREFUSED, socket hang up) - transient, retryable
+    - `RATE_LIMIT`: 429 errors and rate limiting - retryable
+    - `MARGIN`: Insufficient funds - usually non-retryable
+    - `PROTOCOL`: Drift protocol errors (ReferrerNotFound, etc.) - non-retryable
+    - `UNKNOWN`: Unrecognized errors - non-retryable
+-   **Result**: Log output now shows `[TradeRetry] ⏱️ [TIMEOUT] Job xyz error (retryable=true)...` making it easy to grep by category and quickly understand retry behavior.
+-   **Files changed**: `server/trade-retry-service.ts`
