@@ -6,6 +6,11 @@ QuantumVault is a Solana-based bot trading platform for deploying and managing p
 ## User Preferences
 Preferred communication style: Simple, everyday language.
 
+### RPC Configuration
+-   **Primary RPC**: Helius Dev Tier (PAID - not free tier)
+-   **Backup RPC**: Triton (funded and available for failover)
+-   Both RPCs are paid tiers with higher rate limits than free tier.
+
 ## System Architecture
 
 ### Core Architecture
