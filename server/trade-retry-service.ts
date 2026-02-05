@@ -28,6 +28,7 @@ export interface RetryJob {
   originalTradeId?: string;
   webhookPayload?: unknown;
   entryPrice?: number; // For close orders: entry price to calculate PnL for profit sharing
+  cooldownRetries?: number; // Number of delayed re-queue attempts after exhausting normal retries
 }
 
 const retryQueue: Map<string, RetryJob> = new Map();
@@ -58,6 +59,8 @@ const BACKOFF_BASE_MS = 5000;
 const BACKOFF_MAX_MS = 60000;
 const MAX_ATTEMPTS_NORMAL = 5;
 const MAX_ATTEMPTS_CRITICAL = 10;
+const COOLDOWN_DELAY_MS = 2 * 60 * 1000; // 2 minutes cooldown before re-queue
+const MAX_COOLDOWN_RETRIES = 2; // Max times to re-queue after exhausting normal retries
 
 export function isRateLimitError(error: string | Error | unknown): boolean {
   const errorStr = error instanceof Error ? error.message : String(error);
@@ -102,6 +105,19 @@ export function isTransientError(error: string | Error | unknown): boolean {
   );
 }
 
+// Check if error is specifically a timeout error (eligible for cooldown re-queue)
+export function isTimeoutError(error: string | Error | unknown): boolean {
+  const errorStr = error instanceof Error ? error.message : String(error);
+  const lowerError = errorStr.toLowerCase();
+  return (
+    lowerError.includes('timeout') ||
+    lowerError.includes('timed out') ||
+    lowerError.includes('timeout_subprocess') ||
+    lowerError.includes('timeout_trade') ||
+    lowerError.includes('timeout_close')
+  );
+}
+
 function generateJobId(): string {
   return `retry_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
@@ -134,6 +150,7 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
       priority: job.priority,
       attempts: 0,
       maxAttempts,
+      cooldownRetries: 0,
       nextRetryAt: new Date(nextRetryAt),
       status: 'pending',
       webhookPayload: job.webhookPayload || null,
@@ -551,6 +568,29 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       return;
     }
     
+    // DELAYED RE-QUEUE: If this is a timeout error and we haven't exhausted cooldown retries,
+    // schedule a delayed re-queue after 2 minutes instead of marking as permanently failed
+    const cooldownRetries = job.cooldownRetries || 0;
+    if (isTimeoutError(job.lastError) && cooldownRetries < MAX_COOLDOWN_RETRIES) {
+      job.cooldownRetries = cooldownRetries + 1;
+      job.attempts = 0; // Reset attempts for fresh retry cycle
+      job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
+      console.log(`[TradeRetry] 🔄 Job ${job.id} timeout - scheduling cooldown re-queue #${job.cooldownRetries}/${MAX_COOLDOWN_RETRIES} in 2 minutes`);
+      
+      // Persist cooldown state to database (including cooldownRetries)
+      try {
+        await storage.updateTradeRetryJob(job.id, { 
+          attempts: job.attempts,
+          cooldownRetries: job.cooldownRetries,
+          nextRetryAt: new Date(job.nextRetryAt),
+          lastError: job.lastError,
+        });
+      } catch (dbErr) {
+        console.warn(`[TradeRetry] Failed to persist cooldown state:`, dbErr);
+      }
+      return;
+    }
+    
     // Mark as permanently failed
     console.error(`[TradeRetry] ❌ Job ${job.id} failed permanently: ${job.lastError}`);
     
@@ -558,7 +598,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     if (job.originalTradeId) {
       await storage.updateBotTrade(job.originalTradeId, {
         status: 'failed',
-        errorMessage: `Auto-retry exhausted after ${job.attempts} attempts: ${job.lastError}`,
+        errorMessage: `Auto-retry exhausted after ${job.attempts} attempts (${cooldownRetries} cooldown retries): ${job.lastError}`,
       });
     }
     
@@ -585,11 +625,34 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     console.error(`[TradeRetry] ❌ Job ${job.id} threw error: ${errorMsg}`);
     
     if (job.attempts >= job.maxAttempts) {
+      // DELAYED RE-QUEUE: If this is a timeout error and we haven't exhausted cooldown retries,
+      // schedule a delayed re-queue after 2 minutes instead of marking as permanently failed
+      const cooldownRetries = job.cooldownRetries || 0;
+      if (isTimeoutError(errorMsg) && cooldownRetries < MAX_COOLDOWN_RETRIES) {
+        job.cooldownRetries = cooldownRetries + 1;
+        job.attempts = 0; // Reset attempts for fresh retry cycle
+        job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
+        console.log(`[TradeRetry] 🔄 Job ${job.id} timeout - scheduling cooldown re-queue #${job.cooldownRetries}/${MAX_COOLDOWN_RETRIES} in 2 minutes`);
+        
+        // Persist cooldown state to database (including cooldownRetries)
+        try {
+          await storage.updateTradeRetryJob(job.id, { 
+            attempts: job.attempts,
+            cooldownRetries: job.cooldownRetries,
+            nextRetryAt: new Date(job.nextRetryAt),
+            lastError: errorMsg,
+          });
+        } catch (dbErr) {
+          console.warn(`[TradeRetry] Failed to persist cooldown state:`, dbErr);
+        }
+        return;
+      }
+      
       // Update original trade to failed
       if (job.originalTradeId) {
         await storage.updateBotTrade(job.originalTradeId, {
           status: 'failed',
-          errorMessage: `Auto-retry exhausted after ${job.attempts} attempts: ${errorMsg}`,
+          errorMessage: `Auto-retry exhausted after ${job.attempts} attempts (${cooldownRetries} cooldown retries): ${errorMsg}`,
         });
       }
       await notifyRetryResult(job, false, errorMsg);
@@ -712,6 +775,7 @@ export async function startRetryWorker(): Promise<void> {
           priority: dbJob.priority as 'critical' | 'normal',
           attempts: dbJob.attempts,
           maxAttempts: dbJob.maxAttempts,
+          cooldownRetries: dbJob.cooldownRetries || 0,
           nextRetryAt: new Date(dbJob.nextRetryAt).getTime(),
           createdAt: new Date(dbJob.createdAt).getTime(),
           lastError: dbJob.lastError || undefined,

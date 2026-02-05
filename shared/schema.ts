@@ -523,6 +523,7 @@ export const tradeRetryQueue = pgTable("trade_retry_queue", {
   priority: text("priority").default("normal").notNull(),
   attempts: integer("attempts").default(0).notNull(),
   maxAttempts: integer("max_attempts").default(5).notNull(),
+  cooldownRetries: integer("cooldown_retries").default(0).notNull(),
   nextRetryAt: timestamp("next_retry_at").notNull(),
   lastError: text("last_error"),
   status: text("status").default("pending").notNull(),

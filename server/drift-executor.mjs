@@ -1340,6 +1340,12 @@ async function executeTrade(command) {
       if (orderError.message?.includes('429') || orderError.message?.toLowerCase().includes('rate limit')) {
         report429Error();
       }
+      // Check for timeout errors and trigger failover
+      const errLower = orderError.message?.toLowerCase() || '';
+      if (errLower.includes('timeout') || errLower.includes('timed out')) {
+        console.error('[Executor] Timeout detected - triggering RPC failover');
+        report429Error();
+      }
       // Check if this is a simulation error with logs
       if (orderError.logs) {
         console.error(`[Executor] Transaction logs:`, orderError.logs.join('\n'));
@@ -1507,6 +1513,12 @@ async function closePosition(command) {
   } catch (error) {
     // Check for 429 rate limit and trigger failover
     if (error.message?.includes('429') || error.message?.toLowerCase().includes('rate limit')) {
+      report429Error();
+    }
+    // Check for timeout errors and trigger failover
+    const errLower = error.message?.toLowerCase() || '';
+    if (errLower.includes('timeout') || errLower.includes('timed out')) {
+      console.error('[Executor] Timeout detected in closePosition - triggering RPC failover');
       report429Error();
     }
     throw error;
