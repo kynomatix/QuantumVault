@@ -106,3 +106,13 @@ Preferred communication style: Simple, everyday language.
 -   **Fixes applied**: Added timeout detection (`timeout` and `timed out` keywords) to subprocess result handlers and catch blocks in 4 locations.
 -   **Result**: After 2 consecutive timeout errors, system now switches to Triton backup RPC for 3 minutes.
 -   **Files changed**: `server/drift-service.ts`
+
+### Drift Executor Timeout Failover + Delayed Re-Queue (Feb 5 2026)
+-   **Root cause identified**: `drift-executor.mjs` only triggered RPC failover for 429 rate limits, not timeout errors. Failed timeout trades had no recovery path beyond standard retries.
+-   **Fixes applied**:
+    1. Added timeout detection in `drift-executor.mjs` - timeouts now call `report429Error()` to trigger RPC failover to Triton
+    2. Added delayed re-queue system in `trade-retry-service.ts`: After exhausting max attempts on timeout, job waits 2 minutes then retries fresh (up to 2 cooldown cycles)
+    3. Added `cooldownRetries` column to `tradeRetryQueue` schema for persistence across restarts
+    4. Cooldown state (attempts reset, cooldownRetries count) persisted to DB and hydrated on startup
+-   **Result**: Timeout errors now trigger backup RPC switch + trades get up to 2 additional 2-minute cooldown retry cycles, significantly improving trade success rates during RPC congestion.
+-   **Files changed**: `server/drift-executor.mjs`, `server/trade-retry-service.ts`, `shared/schema.ts`
