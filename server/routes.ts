@@ -313,6 +313,28 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
     }
   }
 
+  // GUARD: Minimum equity check - prevent submitting trades that will fail on-chain
+  // Calculate the minimum equity needed: (minOrderSize * oraclePrice) / leverage, with 20% buffer
+  const minOrderSize = getMinOrderSize(market);
+  const minEquityNeeded = (minOrderSize * oraclePrice / effectiveLeverage) * 1.2;
+  const minEquityThreshold = Math.max(0.50, minEquityNeeded);
+  
+  if (freeCollateral < minEquityThreshold) {
+    const pauseReason = `Bot underfunded: $${freeCollateral.toFixed(2)} equity available but need $${minEquityThreshold.toFixed(2)} minimum for ${market} (${minOrderSize} min order at ${effectiveLeverage}x leverage). Top up your bot to continue trading.`;
+    console.log(`${logPrefix} ${pauseReason}`);
+    return {
+      success: false,
+      tradeAmountUsd: 0,
+      finalContractSize: 0,
+      freeCollateral,
+      maxTradeableValue: 0,
+      effectiveLeverage,
+      error: pauseReason,
+      pauseReason,
+      shouldPauseBot: true,
+    };
+  }
+
   // STEP 3: Calculate max tradeable value after potential top-up
   const maxNotionalCapacity = freeCollateral * effectiveLeverage;
   maxTradeableValue = maxNotionalCapacity * 0.90; // 90% buffer for fees/slippage/oracle drift
@@ -365,8 +387,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
   let contractSize = tradeAmountUsd / oraclePrice;
   console.log(`${logPrefix} $${tradeAmountUsd.toFixed(2)} / $${oraclePrice.toFixed(2)} = ${contractSize.toFixed(6)} contracts`);
 
-  // STEP 6: Handle minimum order size
-  const minOrderSize = getMinOrderSize(market);
+  // STEP 6: Handle minimum order size (minOrderSize already computed in equity guard above)
   let finalContractSize = contractSize;
 
   if (contractSize < minOrderSize) {
@@ -6261,6 +6282,42 @@ export async function registerRoutes(
             side,
             finalContractSize
           );
+
+          // CRITICAL: Verify trade tx actually succeeded on-chain
+          // Check the tx signature confirmation status rather than position state
+          // (position state could change if another signal arrives between execution and verification)
+          if (syncResult && syncResult.success) {
+            try {
+              const tradeTxSig = orderResult.txSignature || orderResult.signature;
+              if (tradeTxSig) {
+                const { Connection } = await import('@solana/web3.js');
+                const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+                const conn = new Connection(rpcUrl, 'confirmed');
+                const txStatus = await conn.getSignatureStatus(tradeTxSig);
+                const confirmationStatus = txStatus?.value?.confirmationStatus;
+                const txErr = txStatus?.value?.err;
+                
+                if (txErr) {
+                  console.error(`[Webhook] ON-CHAIN TX FAILED: Trade ${trade.id} tx ${tradeTxSig.slice(0,12)}... had error: ${JSON.stringify(txErr)}`);
+                  console.error(`[Webhook] Correcting trade status to 'failed'`);
+                  await storage.updateBotTrade(trade.id, {
+                    status: 'failed',
+                    errorMessage: `On-chain verification: Transaction failed (${JSON.stringify(txErr)}). Likely insufficient collateral.`,
+                  });
+                } else if (!confirmationStatus) {
+                  console.warn(`[Webhook] Trade ${trade.id} tx ${tradeTxSig.slice(0,12)}... not found on-chain (may have expired)`);
+                  await storage.updateBotTrade(trade.id, {
+                    status: 'failed',
+                    errorMessage: 'On-chain verification: Transaction not found. May have expired or failed to land.',
+                  });
+                } else {
+                  console.log(`[Webhook] Trade ${trade.id} tx confirmed on-chain: ${confirmationStatus}`);
+                }
+              }
+            } catch (verifyErr: any) {
+              console.warn(`[Webhook] Post-trade tx verification failed (non-blocking): ${verifyErr.message}`);
+            }
+          }
 
           const stats = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
           await storage.updateTradingBotStats(botId, {
