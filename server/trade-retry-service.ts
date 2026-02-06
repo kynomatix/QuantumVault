@@ -818,13 +818,17 @@ export async function startRetryWorker(): Promise<void> {
       console.log(`[TradeRetry] Loading ${pendingJobs.length} pending jobs from database`);
       
       const now = Date.now();
-      const MAX_JOB_AGE_MS = 60 * 60 * 1000; // 1 hour TTL for retry jobs
+      const MAX_JOB_AGE_MS = 60 * 60 * 1000; // 1 hour TTL for OPEN retry jobs
+      const MAX_CLOSE_JOB_AGE_MS = 5 * 60 * 1000; // 5 minute TTL for CLOSE retry jobs (stale closes are useless after market moves)
       
       for (const dbJob of pendingJobs) {
         // CLEANUP: Check if job is too old (stale)
+        // CLOSE orders get a much shorter TTL - after 5 min the market has moved and retrying is pointless
+        const isCloseJob = dbJob.side === 'close';
+        const maxAge = isCloseJob ? MAX_CLOSE_JOB_AGE_MS : MAX_JOB_AGE_MS;
         const jobAge = now - new Date(dbJob.createdAt).getTime();
-        if (jobAge > MAX_JOB_AGE_MS) {
-          console.warn(`[TradeRetry] Job ${dbJob.id} expired (age: ${Math.round(jobAge / 60000)}min) - marking as failed`);
+        if (jobAge > maxAge) {
+          console.warn(`[TradeRetry] Job ${dbJob.id} expired (age: ${Math.round(jobAge / 60000)}min, side: ${dbJob.side || 'unknown'}) - marking as failed`);
           await storage.markTradeRetryJobFailed(dbJob.id, `Job expired after ${Math.round(jobAge / 60000)} minutes`);
           
           // Update original trade if exists

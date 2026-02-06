@@ -150,3 +150,17 @@ Preferred communication style: Simple, everyday language.
     - `UNKNOWN`: Unrecognized errors - non-retryable
 -   **Result**: Log output now shows `[TradeRetry] ⏱️ [TIMEOUT] Job xyz error (retryable=true)...` making it easy to grep by category and quickly understand retry behavior.
 -   **Files changed**: `server/trade-retry-service.ts`
+
+### Trade Reliability & RPC Optimization (Feb 6 2026)
+-   **Goal**: Improve CLOSE order success rate (was 60% vs 87% for OPEN), reduce RPC calls per trade, eliminate "Unknown error" blind spots, and prevent RPC burst overload from concurrent bots.
+-   **Fixes applied**:
+    1. **Referrer caching**: Static referrer info (never changes after Drift account creation) now cached in-memory per wallet pubkey. Saves 2-3 RPC calls per trade.
+    2. **Connection reuse**: Referrer lookups reuse `driftClient.connection` instead of creating new `Connection` objects. Eliminates redundant RPC handshakes.
+    3. **Skip post-trade fetchAccounts()**: Use oracle price (already loaded during subscribe) as fill price estimate instead of fetching post-trade account state. Saves 1-2 RPC calls per trade.
+    4. **Better stderr error capture**: When subprocess returns `{success: false}` with empty error, last 3 lines of stderr are extracted as fallback. Eliminates "Unknown error" diagnostic blind spots.
+    5. **Dynamic CLOSE timeout**: Subprocess timeout increased from 20s to 30s for CLOSE orders (more sequential work needed). OPEN orders keep 20s.
+    6. **CLOSE retry TTL reduction**: Retry TTL for CLOSE orders reduced from 1 hour to 5 minutes. Stale close retries are useless after market moves.
+    7. **Concurrent subprocess staggering**: 2-second delay enforced between subprocess spawns to prevent RPC burst when multiple bots fire simultaneously (e.g., TNSR 5-min bots).
+    8. **Bug fix**: Fixed `dbJob.action` (non-existent field) to `dbJob.side` in retry TTL check for CLOSE jobs.
+-   **RPC calls per trade**: Reduced from ~12 to ~5-6 through caching, connection reuse, and eliminating redundant calls.
+-   **Files changed**: `server/drift-executor.mjs`, `server/drift-service.ts`, `server/trade-retry-service.ts`

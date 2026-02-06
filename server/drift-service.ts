@@ -3094,8 +3094,25 @@ function normalizeRateLimitError(errorMsg: string): string {
   return errorMsg;
 }
 
+// Stagger concurrent subprocess spawns to prevent RPC burst overload
+// When multiple bots fire simultaneously (e.g., TNSR 5-min bots), this adds 2s delay between spawns
+let lastSubprocessSpawnTime = 0;
+const SUBPROCESS_STAGGER_MS = 2000; // 2 seconds between subprocess spawns
+
+async function getSubprocessSpawnDelay(): Promise<void> {
+  const now = Date.now();
+  const timeSinceLast = now - lastSubprocessSpawnTime;
+  if (timeSinceLast < SUBPROCESS_STAGGER_MS) {
+    const delay = SUBPROCESS_STAGGER_MS - timeSinceLast;
+    console.log(`[Drift] Staggering subprocess spawn by ${delay}ms to avoid RPC burst`);
+    await new Promise(r => setTimeout(r, delay));
+  }
+  lastSubprocessSpawnTime = Date.now();
+}
+
 // Execute trade/close via subprocess to avoid ESM/CJS issues with Drift SDK
 async function executeDriftCommandViaSubprocess(command: Record<string, any>): Promise<any> {
+  await getSubprocessSpawnDelay();
   return new Promise((resolve) => {
     // Always use server/drift-executor.mjs relative to project root
     // In CJS bundle mode, currentDirname is process.cwd() (project root), not server/
@@ -3158,13 +3175,21 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
               result.error = `${rateLimit} - ${result.error}`;
             }
           }
+          // Fix "Unknown error" blind spot: if result has no error message, extract from stderr
+          if (!result.success && !result.error && stderr) {
+            const lastLines = stderr.split('\n').filter(l => l.trim()).slice(-3).join(' | ');
+            result.error = `Subprocess failed (no error returned). stderr: ${lastLines.slice(0, 200)}`;
+            console.log(`[Drift] Captured missing error from stderr: ${result.error}`);
+          }
           resolve(result);
         } else {
           // Check stderr for rate limit errors
           const rateLimit = checkForRateLimit(stderr);
+          // Extract meaningful error info from stderr when stdout is empty
+          const stderrSummary = stderr ? stderr.split('\n').filter(l => l.trim()).slice(-3).join(' | ').slice(0, 200) : '';
           resolve({
             success: false,
-            error: rateLimit || stderr || `Subprocess exited with code ${code}`,
+            error: rateLimit || stderrSummary || `Subprocess exited with code ${code} (no output)`,
           });
         }
       } catch (parseErr) {
@@ -3205,15 +3230,18 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     child.stdin.write(JSON.stringify(command));
     child.stdin.end();
     
-    // Timeout after 20 seconds - give more time for network congestion
+    // CLOSE orders get 30s timeout (more sequential work: subscribe + position check + referrer + order)
+    // OPEN orders keep 20s timeout (less pre-trade work needed)
+    const isCloseAction = command.action === 'close';
+    const timeoutMs = isCloseAction ? 30000 : 20000;
     setTimeout(() => {
       child.kill();
-      console.log('[Drift] Subprocess timed out after 20s - will trigger auto-retry');
+      console.log(`[Drift] Subprocess timed out after ${timeoutMs / 1000}s (${command.action || 'trade'}) - will trigger auto-retry`);
       resolve({
         success: false,
         error: TradeErrors.TIMEOUT_SUBPROCESS,
       });
-    }, 20000);
+    }, timeoutMs);
   });
 }
 

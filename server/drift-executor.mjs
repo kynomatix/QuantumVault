@@ -12,6 +12,14 @@ import path from 'path';
 // File path for persisting failover state across subprocess invocations
 const FAILOVER_STATE_FILE = '/tmp/drift_rpc_failover_state.json';
 
+// Referrer cache - referrer info is static per wallet and never changes after Drift account creation
+// Keyed by wallet pubkey base58, value is { referrer, referrerStats } or null
+const referrerCache = new Map();
+
+// RPC health cache - avoid redundant getSlot() calls when RPC was recently verified healthy
+let lastHealthCheckAt = 0;
+const HEALTH_CHECK_CACHE_MS = 30000; // Skip health check if verified within last 30 seconds
+
 // Drift Program constants for raw transaction building
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 
@@ -210,6 +218,14 @@ async function getWorkingConnection() {
   
   try {
     const conn = new Connection(activeUrl, { commitment: 'confirmed' });
+    
+    // Skip health check if RPC was verified healthy recently (saves 1 RPC call per trade)
+    const timeSinceLastCheck = Date.now() - lastHealthCheckAt;
+    if (timeSinceLastCheck < HEALTH_CHECK_CACHE_MS) {
+      console.error(`[Executor] ${activeName} RPC health cached (${Math.round(timeSinceLastCheck / 1000)}s ago) - skipping getSlot()`);
+      return { connection: conn, rpcUrl: activeUrl, usingBackup: FAILOVER_STATE.activeRpc === 'backup' };
+    }
+    
     // Quick health check - getSlot is fast
     const start = Date.now();
     await Promise.race([
@@ -217,6 +233,7 @@ async function getWorkingConnection() {
       new Promise((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), 5000))
     ]);
     const latency = Date.now() - start;
+    lastHealthCheckAt = Date.now();
     
     // Success - reset failure counter and persist healthy state
     if (FAILOVER_STATE.activeRpc === 'primary') {
@@ -798,7 +815,17 @@ async function getReferrerFromWalletAddress(connection) {
 // Fetch the user's actual referrer from their on-chain UserStats account
 // This is needed because if a user has a referrer set in their UserStats,
 // the Drift protocol expects the referrer accounts to be passed in transactions
+// Uses in-memory cache since referrer info is static per wallet (never changes)
 async function fetchUserReferrerFromStats(connection, userPubkey) {
+  const pubkeyStr = userPubkey.toBase58();
+  
+  // Check cache first - referrer info never changes after Drift account creation
+  if (referrerCache.has(pubkeyStr)) {
+    const cached = referrerCache.get(pubkeyStr);
+    console.error(`[Executor] Referrer info from cache for ${pubkeyStr.slice(0, 8)}...: ${cached ? 'has referrer' : 'no referrer'}`);
+    return cached;
+  }
+  
   try {
     const userStatsPDA = getUserStatsPDA(userPubkey);
     console.error(`[Executor] Fetching user's referrer from UserStats: ${userStatsPDA.toBase58()}`);
@@ -806,6 +833,7 @@ async function fetchUserReferrerFromStats(connection, userPubkey) {
     const accountInfo = await connection.getAccountInfo(userStatsPDA);
     if (!accountInfo) {
       console.error('[Executor] UserStats account not found');
+      referrerCache.set(pubkeyStr, null);
       return null;
     }
     
@@ -818,6 +846,7 @@ async function fetchUserReferrerFromStats(connection, userPubkey) {
     
     if (accountInfo.data.length < REFERRER_OFFSET + 32) {
       console.error('[Executor] UserStats data too short');
+      referrerCache.set(pubkeyStr, null);
       return null;
     }
     
@@ -826,6 +855,7 @@ async function fetchUserReferrerFromStats(connection, userPubkey) {
     // Check if referrer is system program (meaning no referrer set)
     if (referrerWallet.equals(PublicKey.default)) {
       console.error('[Executor] No referrer set in UserStats');
+      referrerCache.set(pubkeyStr, null);
       return null;
     }
     
@@ -842,11 +872,15 @@ async function fetchUserReferrerFromStats(connection, userPubkey) {
     
     if (!refUserInfo || !refStatsInfo) {
       console.error('[Executor] Referrer accounts not found on-chain, skipping referrer');
+      referrerCache.set(pubkeyStr, null);
       return null;
     }
     
     // SDK expects { referrer, referrerStats } field names
-    return { referrer: referrerUser, referrerStats: referrerUserStats };
+    const result = { referrer: referrerUser, referrerStats: referrerUserStats };
+    referrerCache.set(pubkeyStr, result);
+    console.error(`[Executor] Referrer info cached for ${pubkeyStr.slice(0, 8)}...`);
+    return result;
   } catch (error) {
     console.error('[Executor] Error fetching user referrer:', error.message);
     return null;
@@ -1303,14 +1337,11 @@ async function executeTrade(command) {
     console.error(`[Executor] Placing order: direction=${side}, baseAssetAmount=${baseAssetAmount.toString()}, marketIndex=${marketIndex}`);
     
     // Fetch user's on-chain referrer to pass to SDK (fixes ReferrerNotFound error)
+    // Reuse driftClient.connection instead of creating a new Connection (saves RPC handshake overhead)
     let referrerInfo = null;
     try {
-      const rpcUrl = process.env.SOLANA_RPC_URL || 
-        (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
-        'https://api.mainnet-beta.solana.com');
-      const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
       const userPubkey = driftClient.wallet.publicKey;
-      referrerInfo = await fetchUserReferrerFromStats(connection, userPubkey);
+      referrerInfo = await fetchUserReferrerFromStats(driftClient.connection, userPubkey);
       if (referrerInfo) {
         console.error(`[Executor] Will include referrer accounts in order`);
       }
@@ -1356,45 +1387,24 @@ async function executeTrade(command) {
     console.error(`[Executor] Trade executed: ${txSig}`);
     reset429Counter(); // Trade succeeded, reset rate limit counter
     
-    // Get oracle price as fallback
-    let oracleFillPrice = null;
+    // Use oracle price for fill price estimation (saves 1-2 RPC calls by skipping fetchAccounts)
+    // Oracle price is already loaded during subscribe() and is very close to actual fill price
+    let fillPrice = null;
+    let actualFee = null;
     try {
       const oracleData = driftClient.getOracleDataForPerpMarket(marketIndex);
-      oracleFillPrice = oracleData?.price?.toNumber() / 1e6;
+      fillPrice = oracleData?.price?.toNumber() / 1e6;
+      console.error(`[Executor] Fill price (oracle): $${fillPrice?.toFixed(6) || 'unknown'}`);
     } catch (e) {
       console.error('[Executor] Could not get oracle price');
     }
     
-    // Try to get actual fill price from refreshed account state
-    let actualFillPrice = null;
-    let actualFee = null;
-    try {
-      const user = driftClient.getUser();
-      await user.fetchAccounts(); // Refresh to get post-trade state
-      
-      const perpPosition = user.getPerpPosition(marketIndex);
-      if (perpPosition && !perpPosition.baseAssetAmount.isZero()) {
-        // Calculate average entry price from position
-        // quoteAssetAmount is cumulative quote value, baseAssetAmount is cumulative base
-        const quoteAbs = Math.abs(perpPosition.quoteAssetAmount.toNumber()) / 1e6;
-        const baseAbs = Math.abs(perpPosition.baseAssetAmount.toNumber()) / 1e9;
-        if (baseAbs > 0) {
-          actualFillPrice = quoteAbs / baseAbs;
-          console.error(`[Executor] Actual fill price from position: $${actualFillPrice.toFixed(6)}`);
-        }
-      }
-      
-      // Try to get actual fee from user stats or recent orders
-      // For now, estimate fee more accurately: 0.05% base - 10% referral discount = 0.045%
-      const notional = (actualFillPrice || oracleFillPrice || 0) * sizeInBase;
-      actualFee = notional * 0.00045; // 0.045% after referral discount
+    // Estimate fee: 0.05% base - 10% referral discount = 0.045%
+    if (fillPrice) {
+      const notional = fillPrice * sizeInBase;
+      actualFee = notional * 0.00045;
       console.error(`[Executor] Estimated fee (with referral): $${actualFee?.toFixed(6) || 'unknown'}`);
-      
-    } catch (fetchErr) {
-      console.error(`[Executor] Could not fetch actual fill data: ${fetchErr.message}`);
     }
-    
-    const fillPrice = actualFillPrice || oracleFillPrice;
     
     // Skip unsubscribe - subprocess exits anyway and SDK's cleanup floods logs with errors
     // The OS will forcefully close WebSocket connections when process exits
@@ -1421,7 +1431,17 @@ async function closePosition(command) {
   const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId);
   
   try {
-    await driftClient.subscribe();
+    // Add subscribe timeout matching executeTrade() - prevents hanging on SDK subscribe
+    try {
+      const subscribeTimeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('SDK subscribe timed out after 15 seconds (CLOSE)')), 15000)
+      );
+      await Promise.race([driftClient.subscribe(), subscribeTimeout]);
+      console.error(`[Executor] Subscribed successfully (close path)`);
+    } catch (subscribeError) {
+      console.error(`[Executor] subscribe() failed in closePosition: ${subscribeError.message}`);
+      throw subscribeError;
+    }
     
     const BN = (await import('bn.js')).default;
     
@@ -1451,15 +1471,11 @@ async function closePosition(command) {
     
     console.error(`[Executor] Closing ${isLong ? 'long' : 'short'} position with placeAndTakePerpOrder (reduceOnly=true)`);
     
-    // Fetch referrer info (same as trade execution)
+    // Fetch referrer info - reuse driftClient.connection (saves RPC handshake + uses cache)
     let referrerInfo = null;
     try {
-      const rpcUrl = process.env.SOLANA_RPC_URL || 
-        (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
-        'https://api.mainnet-beta.solana.com');
-      const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
       const userPubkey = driftClient.wallet.publicKey;
-      referrerInfo = await fetchUserReferrerFromStats(connection, userPubkey);
+      referrerInfo = await fetchUserReferrerFromStats(driftClient.connection, userPubkey);
       if (referrerInfo) {
         console.error(`[Executor] Will include referrer accounts in close order`);
       }
