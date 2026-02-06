@@ -1178,7 +1178,7 @@ async function executeTrade(command) {
     // Try to subscribe with timeout - SDK can hang on subscription
     try {
       const subscribeTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('SDK subscribe timed out after 15 seconds')), 15000)
+        setTimeout(() => reject(new Error('SDK subscribe timed out after 12 seconds')), 12000)
       );
       await Promise.race([driftClient.subscribe(), subscribeTimeout]);
       console.error(`[Executor] Subscribed successfully`);
@@ -1434,10 +1434,74 @@ async function closePosition(command) {
     // Add subscribe timeout matching executeTrade() - prevents hanging on SDK subscribe
     try {
       const subscribeTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('SDK subscribe timed out after 15 seconds (CLOSE)')), 15000)
+        setTimeout(() => reject(new Error('SDK subscribe timed out after 12 seconds (CLOSE)')), 12000)
       );
       await Promise.race([driftClient.subscribe(), subscribeTimeout]);
       console.error(`[Executor] Subscribed successfully (close path)`);
+
+      // For non-zero subaccounts, inject user account data (same workaround as executeTrade)
+      if (subAccountId > 0) {
+        console.error(`[Executor] Subaccount ${subAccountId} requires direct RPC fetch for close (SDK bug workaround)`);
+        try {
+          const userAccountPubKey = await driftClient.getUserAccountPublicKey(subAccountId);
+          console.error(`[Executor] User PDA for subaccount ${subAccountId}: ${userAccountPubKey.toBase58().slice(0,8)}...`);
+          
+          const conn = driftClient.connection;
+          let accountInfo = null;
+          
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              accountInfo = await conn.getAccountInfo(userAccountPubKey);
+              if (accountInfo) break;
+            } catch (fetchErr) {
+              if (fetchErr.message?.includes('429') && attempt < 3) {
+                console.error(`[Executor] RPC rate limited, retrying in ${attempt * 500}ms...`);
+                report429Error();
+                await new Promise(r => setTimeout(r, attempt * 500));
+              } else {
+                throw fetchErr;
+              }
+            }
+          }
+          
+          if (accountInfo && accountInfo.data) {
+            console.error(`[Executor] Direct RPC fetch succeeded for close: ${accountInfo.data.length} bytes`);
+            
+            const user = driftClient.getUser(subAccountId) || driftClient.users.get(subAccountId);
+            if (user && user.accountSubscriber) {
+              try {
+                const decoded = driftClient.program.account.user.coder.accounts.decode('User', accountInfo.data);
+                console.error(`[Executor] Decoded user account for close: authority=${decoded.authority?.toBase58().slice(0,8)}..., subAccountId=${decoded.subAccountId}`);
+                
+                if (!user.accountSubscriber.userDataAccountPublicKey) {
+                  user.accountSubscriber.userDataAccountPublicKey = {};
+                }
+                user.accountSubscriber.userDataAccountPublicKey.data = accountInfo.data;
+                user.accountSubscriber.userDataAccountPublicKey.slot = 0;
+                
+                const originalGetUserAccountAndSlot = user.accountSubscriber.getUserAccountAndSlot?.bind(user.accountSubscriber);
+                user.accountSubscriber.getUserAccountAndSlot = () => {
+                  return {
+                    data: decoded,
+                    slot: 0
+                  };
+                };
+                console.error(`[Executor] Monkey-patched getUserAccountAndSlot() for close subaccount ${subAccountId}`);
+                
+              } catch (decodeErr) {
+                console.error(`[Executor] Warning: Could not decode user account for close: ${decodeErr.message}`);
+              }
+            } else {
+              console.error(`[Executor] Warning: No user or accountSubscriber found for close data injection`);
+            }
+          } else {
+            console.error(`[Executor] WARNING: Direct RPC fetch returned no data for close subaccount ${subAccountId}`);
+          }
+        } catch (userInitErr) {
+          console.error(`[Executor] Direct RPC fetch failed for close: ${userInitErr.message}`);
+        }
+      }
+
     } catch (subscribeError) {
       console.error(`[Executor] subscribe() failed in closePosition: ${subscribeError.message}`);
       throw subscribeError;
@@ -1985,9 +2049,44 @@ process.stdin.on('end', async () => {
     console.log(JSON.stringify(result));
     process.exit(0);
   } catch (error) {
+    let errorMsg = error.message || String(error);
+    
+    // Map Drift program error codes to actionable messages
+    if (errorMsg.includes('0x1770') || errorMsg.includes('6000')) {
+      errorMsg = 'InvalidSpotMarketAuthority: ' + errorMsg;
+    } else if (errorMsg.includes('0x1771') || errorMsg.includes('6001')) {
+      errorMsg = 'User account not initialized. Deposit funds first to create the account.';
+    } else if (errorMsg.includes('0x177a') || errorMsg.includes('6010')) {
+      errorMsg = 'Insufficient free collateral for this trade. Top up your bot or reduce order size.';
+    } else if (errorMsg.includes('0x1788') || errorMsg.includes('6024')) {
+      errorMsg = 'Insufficient collateral after trade. Reduce order size or add more funds.';
+    } else if (errorMsg.includes('0x1798') || errorMsg.includes('6040')) {
+      errorMsg = 'Max position size exceeded for this market. Reduce order size.';
+    } else if (errorMsg.includes('0x17df') || errorMsg.includes('6111')) {
+      errorMsg = 'Oracle price not available or stale. Market oracle may be temporarily offline.';
+    } else if (errorMsg.includes('0x17e0') || errorMsg.includes('6112')) {
+      errorMsg = 'Oracle price is too volatile. Wait for market conditions to stabilize.';
+    } else if (errorMsg.includes('0x17c7') || errorMsg.includes('6087')) {
+      errorMsg = 'Market is in reduce-only mode. Can only close existing positions.';
+    } else if (errorMsg.includes('0x17c8') || errorMsg.includes('6088')) {
+      errorMsg = 'Market trading is paused. Try again later.';
+    } else if (errorMsg.includes('ReferrerNotFound')) {
+      errorMsg = 'Referrer account not found. This may resolve on retry.';
+    }
+    
+    // Also check for transaction simulation errors with logs
+    if (error.logs && Array.isArray(error.logs)) {
+      const logStr = error.logs.join(' ');
+      // Extract program error from simulation logs
+      const progErrMatch = logStr.match(/Program log: AnchorError.*Error Code: (\w+)/);
+      if (progErrMatch) {
+        errorMsg = `${progErrMatch[1]}: ${errorMsg}`;
+      }
+    }
+    
     console.log(JSON.stringify({ 
       success: false, 
-      error: error.message || String(error)
+      error: errorMsg
     }));
     process.exit(1);
   }

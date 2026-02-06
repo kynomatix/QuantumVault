@@ -15,8 +15,8 @@ import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 export const TradeErrors = {
   // Timeout errors (operation took too long)
   TIMEOUT_TRADE: 'TIMEOUT_TRADE: Trade execution timed out after 20 seconds',
-  TIMEOUT_CLOSE: 'TIMEOUT_CLOSE: Close execution timed out after 20 seconds',
-  TIMEOUT_SUBPROCESS: 'TIMEOUT_SUBPROCESS: Subprocess operation timed out after 20 seconds',
+  TIMEOUT_CLOSE: 'TIMEOUT_CLOSE: Close execution timed out after 30 seconds',
+  TIMEOUT_SUBPROCESS: 'TIMEOUT_SUBPROCESS: Subprocess operation timed out',
   
   // RPC errors (blockchain network issues)
   RPC_RATE_LIMIT: 'RPC_RATE_LIMIT: RPC provider returned 429 rate limit error',
