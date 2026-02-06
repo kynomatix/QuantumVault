@@ -5613,158 +5613,145 @@ export async function registerRoutes(
               pnl: closeTradePnl !== 0 ? String(closeTradePnl) : null,
             });
             
-            // Sync position from on-chain (replaces client-side math with actual Drift state)
-            const syncResult = await syncPositionFromOnChain(
-              botId,
-              bot.walletAddress,
-              wallet.agentPublicKey!,
-              subAccountId,
-              bot.market,
-              closeTrade.id,
-              closeFee,
-              closeFillPrice,
-              closeSide,
-              closeSize
-            );
-            
-            // Update bot stats (including volume for FUEL tracking)
-            const closeNotionalVolume = closeSize * closeFillPrice;
-            const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-            await storage.updateTradingBotStats(botId, {
-              ...stats,
-              totalTrades: (stats.totalTrades || 0) + 1,
-              winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
-              losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
-              totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
-              totalVolume: (stats.totalVolume || 0) + closeNotionalVolume,
-              lastTradeAt: new Date().toISOString(),
-            });
-            
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
             
-            // Send position closed notification
-            sendTradeNotification(wallet.address, {
-              type: 'position_closed',
-              botName: bot.name,
-              market: bot.market,
-              pnl: closeTradePnl,
-            }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
-            
-            // Route close signal to subscriber bots (awaited to ensure execution)
-            let closeRoutingStatus = 'not_attempted';
-            try {
-              closeRoutingStatus = 'started';
-              await routeSignalToSubscribers(botId, {
-                action: action as 'buy' | 'sell',
-                contracts,
-                positionSize,
-                price: signalPrice || closeFillPrice.toString(),
-                isCloseSignal: true,
-                strategyPositionSize,
-              });
-              closeRoutingStatus = 'completed';
-            } catch (routingErr) {
-              closeRoutingStatus = `error: ${String(routingErr).slice(0, 100)}`;
-              console.error('[Subscriber Routing] Error routing close to subscribers:', routingErr);
-            }
-            
-            // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
-            // This must happen BEFORE auto-withdraw to ensure creator gets their share
-            if (closeTradePnl > 0) {
-              const tradeId = `${botId}-${Date.now()}`;
-              distributeCreatorProfitShare({
-                subscriberBotId: botId,
-                subscriberWalletAddress: wallet.address,
-                subscriberAgentPublicKey: wallet.agentPublicKey!,
-                subscriberEncryptedPrivateKey: wallet.agentPrivateKeyEncrypted,
-                driftSubaccountId: subAccountId,
-                realizedPnl: closeTradePnl,
-                tradeId,
-              }).then(result => {
-                if (result.success && result.amount) {
-                  console.log(`[Webhook] Profit share distributed: $${result.amount.toFixed(4)}`);
-                } else if (!result.success && result.error) {
-                  console.error(`[Webhook] Profit share failed: ${result.error}`);
-                  // IOU is now created inside distributeCreatorProfitShare
-                }
-              }).catch(err => console.error('[Webhook] Profit share error:', err));
-            }
-            
-            // SETTLE PNL: Convert realized PnL to usable USDC balance for profit reinvest
-            // This must happen after close so profits can be used as margin for the next trade
-            if (bot.profitReinvest) {
-              try {
-                console.log(`[Webhook] Settling PnL for subaccount ${subAccountId} (profit reinvest enabled)`);
-                const settleResult = await settleAllPnl(wallet.agentPublicKey!, subAccountId);
-                if (settleResult.success) {
-                  console.log(`[Webhook] PnL settled for ${settleResult.settledMarkets?.length || 0} market(s)`);
-                } else {
-                  console.warn(`[Webhook] PnL settlement failed (non-blocking): ${settleResult.error}`);
-                }
-              } catch (settleErr: any) {
-                console.warn(`[Webhook] PnL settlement error (non-blocking): ${settleErr.message}`);
-              }
-            }
-            
-            // AUTO-WITHDRAW: Check if equity exceeds threshold and withdraw excess profits
-            let autoWithdrawInfo = null;
-            const autoWithdrawThreshold = parseFloat(bot.autoWithdrawThreshold || "0");
-            if (autoWithdrawThreshold > 0) {
-              try {
-                const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
-                const currentEquity = accountInfo.totalCollateral;
-                
-                if (currentEquity > autoWithdrawThreshold) {
-                  const excessAmount = currentEquity - autoWithdrawThreshold;
-                  // Leave a small buffer to avoid rounding issues
-                  const withdrawAmount = Math.max(0, excessAmount - 0.01);
-                  
-                  if (withdrawAmount > 0.1) { // Minimum $0.10 to avoid dust withdrawals
-                    console.log(`[Webhook] AUTO-WITHDRAW: Equity $${currentEquity.toFixed(2)} exceeds threshold $${autoWithdrawThreshold.toFixed(2)}, withdrawing $${withdrawAmount.toFixed(2)}`);
-                    
-                    const withdrawResult = await executeAgentDriftWithdraw(
-                      wallet.agentPublicKey!,
-                      wallet.agentPrivateKeyEncrypted,
-                      withdrawAmount,
-                      subAccountId
-                    );
-                    
-                    if (withdrawResult.success) {
-                      console.log(`[Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn, tx: ${withdrawResult.signature}`);
-                      autoWithdrawInfo = {
-                        amount: withdrawAmount,
-                        txSignature: withdrawResult.signature,
-                      };
-                      
-                      // Record the withdrawal as an equity event
-                      await storage.createEquityEvent({
-                        walletAddress: bot.walletAddress,
-                        tradingBotId: botId,
-                        eventType: 'auto_withdraw',
-                        amount: String(withdrawAmount),
-                        txSignature: withdrawResult.signature || null,
-                        notes: `Auto-withdraw triggered: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)}`,
-                      });
-                    } else {
-                      console.error(`[Webhook] AUTO-WITHDRAW FAILED: ${withdrawResult.error}`);
-                    }
-                  }
-                }
-              } catch (autoWithdrawErr: any) {
-                console.error(`[Webhook] AUTO-WITHDRAW check error (non-blocking):`, autoWithdrawErr.message);
-              }
-            }
-            
             console.log(`[Webhook] Position closed successfully: ${closeSize} ${bot.market} ${closeSide.toUpperCase()}`);
-            return res.json({
+            res.json({
               status: "success",
               type: "close",
               trade: closeTrade.id,
               txSignature: finalTxSignature,
               closedSize: closeSize,
               side: closeSide,
-              ...(autoWithdrawInfo && { autoWithdraw: autoWithdrawInfo }),
             });
+
+            // --- Deferred post-trade work (fire-and-forget, non-blocking) ---
+            console.log('[Webhook] Response sent, deferring post-trade work...');
+            (async () => {
+              try {
+                const syncResult = await syncPositionFromOnChain(
+                  botId,
+                  bot.walletAddress,
+                  wallet.agentPublicKey!,
+                  subAccountId,
+                  bot.market,
+                  closeTrade.id,
+                  closeFee,
+                  closeFillPrice,
+                  closeSide,
+                  closeSize
+                );
+
+                const closeNotionalVolume = closeSize * closeFillPrice;
+                const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
+                await storage.updateTradingBotStats(botId, {
+                  ...stats,
+                  totalTrades: (stats.totalTrades || 0) + 1,
+                  winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
+                  losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
+                  totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
+                  totalVolume: (stats.totalVolume || 0) + closeNotionalVolume,
+                  lastTradeAt: new Date().toISOString(),
+                });
+              } catch (err) {
+                console.error(`[Webhook] Deferred post-trade sync/stats failed (non-blocking): ${err}`);
+              }
+
+              try {
+                await routeSignalToSubscribers(botId, {
+                  action: action as 'buy' | 'sell',
+                  contracts,
+                  positionSize,
+                  price: signalPrice || closeFillPrice.toString(),
+                  isCloseSignal: true,
+                  strategyPositionSize,
+                });
+              } catch (routingErr) {
+                console.error(`[Subscriber Routing] Deferred routing error for bot ${botId}:`, routingErr);
+              }
+
+              if (closeTradePnl > 0) {
+                const tradeId = `${botId}-${Date.now()}`;
+                distributeCreatorProfitShare({
+                  subscriberBotId: botId,
+                  subscriberWalletAddress: wallet.address,
+                  subscriberAgentPublicKey: wallet.agentPublicKey!,
+                  subscriberEncryptedPrivateKey: wallet.agentPrivateKeyEncrypted,
+                  driftSubaccountId: subAccountId,
+                  realizedPnl: closeTradePnl,
+                  tradeId,
+                }).then(result => {
+                  if (result.success && result.amount) {
+                    console.log(`[Webhook] Profit share distributed: $${result.amount.toFixed(4)}`);
+                  } else if (!result.success && result.error) {
+                    console.error(`[Webhook] Profit share failed: ${result.error}`);
+                  }
+                }).catch(err => console.error('[Webhook] Profit share error:', err));
+              }
+
+              if (bot.profitReinvest) {
+                try {
+                  console.log(`[Webhook] Settling PnL for subaccount ${subAccountId} (profit reinvest enabled)`);
+                  const settleResult = await settleAllPnl(wallet.agentPublicKey!, subAccountId);
+                  if (settleResult.success) {
+                    console.log(`[Webhook] PnL settled for ${settleResult.settledMarkets?.length || 0} market(s)`);
+                  } else {
+                    console.warn(`[Webhook] PnL settlement failed (non-blocking): ${settleResult.error}`);
+                  }
+                } catch (settleErr: any) {
+                  console.warn(`[Webhook] PnL settlement error (non-blocking): ${settleErr.message}`);
+                }
+              }
+
+              const autoWithdrawThreshold = parseFloat(bot.autoWithdrawThreshold || "0");
+              if (autoWithdrawThreshold > 0) {
+                try {
+                  const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
+                  const currentEquity = accountInfo.totalCollateral;
+
+                  if (currentEquity > autoWithdrawThreshold) {
+                    const excessAmount = currentEquity - autoWithdrawThreshold;
+                    const withdrawAmount = Math.max(0, excessAmount - 0.01);
+
+                    if (withdrawAmount > 0.1) {
+                      console.log(`[Webhook] AUTO-WITHDRAW: Equity $${currentEquity.toFixed(2)} exceeds threshold $${autoWithdrawThreshold.toFixed(2)}, withdrawing $${withdrawAmount.toFixed(2)}`);
+
+                      const withdrawResult = await executeAgentDriftWithdraw(
+                        wallet.agentPublicKey!,
+                        wallet.agentPrivateKeyEncrypted,
+                        withdrawAmount,
+                        subAccountId
+                      );
+
+                      if (withdrawResult.success) {
+                        console.log(`[Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn, tx: ${withdrawResult.signature}`);
+                        await storage.createEquityEvent({
+                          walletAddress: bot.walletAddress,
+                          tradingBotId: botId,
+                          eventType: 'auto_withdraw',
+                          amount: String(withdrawAmount),
+                          txSignature: withdrawResult.signature || null,
+                          notes: `Auto-withdraw triggered: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)}`,
+                        });
+                      } else {
+                        console.error(`[Webhook] AUTO-WITHDRAW FAILED: ${withdrawResult.error}`);
+                      }
+                    }
+                  }
+                } catch (autoWithdrawErr: any) {
+                  console.error(`[Webhook] AUTO-WITHDRAW check error (non-blocking):`, autoWithdrawErr.message);
+                }
+              }
+
+              sendTradeNotification(wallet.address, {
+                type: 'position_closed',
+                botName: bot.name,
+                market: bot.market,
+                pnl: closeTradePnl,
+              }).catch(err => console.error('[Notifications] Failed to send position_closed notification:', err));
+            })();
+
+            return;
           } else {
             throw new Error(result.error || "Close order execution failed");
           }
@@ -5973,19 +5960,14 @@ export async function registerRoutes(
               errorMessage: "Position was already closed (no trade executed)"
             });
             
-            // Sync position from on-chain to keep DB aligned
-            await syncPositionFromOnChain(
-              botId,
-              bot.walletAddress,
-              wallet.agentPublicKey!,
-              subAccountId,
-              bot.market,
-              closeTrade.id,
-              closeFee,
-              closeFillPrice,
-              closeSide,
-              closeSize
-            );
+            // Defer sync for no-signature case (fire-and-forget)
+            (async () => {
+              try {
+                await syncPositionFromOnChain(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market, closeTrade.id, closeFee, closeFillPrice, closeSide, closeSize);
+              } catch (err) {
+                console.error(`[Webhook] Deferred flip close sync failed (non-blocking): ${err}`);
+              }
+            })();
             
             // Continue to execute the new position anyway
             console.log(`[Webhook] Proceeding to open ${side.toUpperCase()} position despite no close signature`);
@@ -5999,23 +5981,10 @@ export async function registerRoutes(
               pnl: flipClosePnl !== 0 ? String(flipClosePnl) : null,
             });
           
-            // Sync position from on-chain (replaces client-side math with actual Drift state)
-            await syncPositionFromOnChain(
-              botId,
-              bot.walletAddress,
-              wallet.agentPublicKey!,
-              subAccountId,
-              bot.market,
-              closeTrade.id,
-              closeFee,
-              closeFillPrice,
-              closeSide,
-              closeSize
-            );
-          
             console.log(`[Webhook] Position closed successfully. Now proceeding to open ${side.toUpperCase()} position.`);
             
             // SETTLE PNL after flip close to make profits available for the new position
+            // This MUST stay blocking - profits need to be available as margin for the new OPEN
             if (bot.profitReinvest) {
               try {
                 console.log(`[Webhook] Settling PnL for subaccount ${subAccountId} after flip close (profit reinvest enabled)`);
@@ -6030,15 +5999,23 @@ export async function registerRoutes(
               }
             }
           
-            // Update stats for close trade (including volume for FUEL tracking)
-            const flipCloseVolume = closeSize * closeFillPrice;
-            const stats1 = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-            await storage.updateTradingBotStats(botId, {
-              ...stats1,
-              totalTrades: (stats1.totalTrades || 0) + 1,
-              totalVolume: (stats1.totalVolume || 0) + flipCloseVolume,
-              lastTradeAt: new Date().toISOString(),
-            });
+            // Defer sync and stats for flip close (fire-and-forget, non-blocking)
+            (async () => {
+              try {
+                await syncPositionFromOnChain(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market, closeTrade.id, closeFee, closeFillPrice, closeSide, closeSize);
+                
+                const flipCloseVolume = closeSize * closeFillPrice;
+                const stats1 = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
+                await storage.updateTradingBotStats(botId, {
+                  ...stats1,
+                  totalTrades: (stats1.totalTrades || 0) + 1,
+                  totalVolume: (stats1.totalVolume || 0) + flipCloseVolume,
+                  lastTradeAt: new Date().toISOString(),
+                });
+              } catch (err) {
+                console.error(`[Webhook] Deferred flip close sync/stats failed (non-blocking): ${err}`);
+              }
+            })();
           }
           
         } catch (closeError: any) {
@@ -6247,65 +6224,10 @@ export async function registerRoutes(
         size: finalContractSize.toFixed(8), // Store calculated size, not raw TradingView value
       });
 
-      // Sync position from on-chain (replaces client-side math with actual Drift state)
-      const syncResult = await syncPositionFromOnChain(
-        botId,
-        bot.walletAddress,
-        wallet.agentPublicKey!,
-        subAccountId,
-        bot.market,
-        trade.id,
-        tradeFee,
-        fillPrice,
-        side,
-        finalContractSize
-      );
-
-      // Update bot stats (including volume for FUEL tracking)
-      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-      await storage.updateTradingBotStats(botId, {
-        ...stats,
-        totalTrades: (stats.totalTrades || 0) + 1,
-        winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
-        losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
-        totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
-        totalVolume: (stats.totalVolume || 0) + tradeNotional,
-        lastTradeAt: new Date().toISOString(),
-      });
-
-      // Send trade notification (async, don't block response)
-      sendTradeNotification(wallet.address, {
-        type: 'trade_executed',
-        botName: bot.name,
-        market: bot.market,
-        side: side === 'long' ? 'LONG' : 'SHORT',
-        size: tradeNotional,
-        price: fillPrice,
-      }).catch(err => console.error('[Notifications] Failed to send trade_executed notification:', err));
-
-      // Route signal to subscriber bots (awaited to ensure execution)
-      let routingStatus = 'not_attempted';
-      try {
-        routingStatus = 'started';
-        await routeSignalToSubscribers(botId, {
-          action: action as 'buy' | 'sell',
-          contracts,
-          positionSize,
-          price: signalPrice || fillPrice.toString(),
-          isCloseSignal: false,
-          strategyPositionSize,
-        });
-        routingStatus = 'completed';
-      } catch (routingErr) {
-        routingStatus = `error: ${String(routingErr).slice(0, 100)}`;
-        console.error(`[Subscriber Routing] Error routing to subscribers for bot ${botId}:`, routingErr);
-      }
-
       // Mark signal as executed (unique index prevents concurrent duplicates)
       try {
         await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
       } catch (dbError: any) {
-        // Unique constraint violation means another request already executed this signal
         if (dbError?.code === '23505') {
           console.log(`[Webhook] Concurrent duplicate detected at DB level, signal already executed: hash=${signalHash}`);
           return res.status(200).json({ status: "skipped", reason: "concurrent duplicate" });
@@ -6321,8 +6243,61 @@ export async function registerRoutes(
         market: bot.market,
         size: positionSize,
         signalHash,
-        routingStatus,
       });
+
+      // --- Deferred post-trade work (fire-and-forget, non-blocking) ---
+      console.log('[Webhook] Response sent, deferring post-trade work...');
+      (async () => {
+        try {
+          const syncResult = await syncPositionFromOnChain(
+            botId,
+            bot.walletAddress,
+            wallet.agentPublicKey!,
+            subAccountId,
+            bot.market,
+            trade.id,
+            tradeFee,
+            fillPrice,
+            side,
+            finalContractSize
+          );
+
+          const stats = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
+          await storage.updateTradingBotStats(botId, {
+            ...stats,
+            totalTrades: (stats.totalTrades || 0) + 1,
+            winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
+            losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
+            totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
+            totalVolume: (stats.totalVolume || 0) + tradeNotional,
+            lastTradeAt: new Date().toISOString(),
+          });
+        } catch (err) {
+          console.error(`[Webhook] Deferred post-trade sync/stats failed (non-blocking): ${err}`);
+        }
+
+        try {
+          await routeSignalToSubscribers(botId, {
+            action: action as 'buy' | 'sell',
+            contracts,
+            positionSize,
+            price: signalPrice || fillPrice.toString(),
+            isCloseSignal: false,
+            strategyPositionSize,
+          });
+        } catch (routingErr) {
+          console.error(`[Subscriber Routing] Deferred routing error for bot ${botId}:`, routingErr);
+        }
+
+        sendTradeNotification(wallet.address, {
+          type: 'trade_executed',
+          botName: bot.name,
+          market: bot.market,
+          side: side === 'long' ? 'LONG' : 'SHORT',
+          size: tradeNotional,
+          price: fillPrice,
+        }).catch(err => console.error('[Notifications] Failed:', err));
+      })();
       } finally {
         // PHASE 6.2: Ensure agent key is cleaned up after execution
         cleanupAgentKey();

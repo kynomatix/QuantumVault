@@ -121,6 +121,102 @@ In `BotManagementDrawer.tsx`:
 
 ---
 
+## Post-Trade Deferred Processing (Feb 6 2026)
+
+**Date:** February 2026  
+**Status:** Complete
+
+### Problem
+After a successful trade execution (via webhook), the webhook handler performed 4-5 additional RPC-heavy operations **before** returning the HTTP response. This:
+- Added 3-8 seconds latency to webhook responses
+- Consumed RPC quota on non-critical operations
+- Created timeout risk when combined with trade execution RPC calls
+- Made subscriber routing block the source bot's webhook response
+
+### Previous Post-Trade Flow (all blocking/awaited)
+| Operation | RPC Calls | Purpose | Critical? |
+|-----------|-----------|---------|-----------|
+| `updateBotTrade()` | 0 (DB) | Record trade result | YES |
+| `syncPositionFromOnChain()` | 1 | Update DB position cache | NO - drawer refresh does this |
+| `updateTradingBotStats()` | 0 (DB) | Update win/loss/PnL stats | NO - depends on sync result |
+| `routeSignalToSubscribers()` | N (subprocess per subscriber) | Copy trading | NO - can run async |
+| `settleAllPnl()` | 1 | Convert PnL to USDC | NO (except flip close) |
+| `distributeCreatorProfitShare()` | 1-2 | Pay creator | Already async |
+| `updateWebhookLog()` | 0 (DB) | Mark webhook processed | YES |
+| `sendTradeNotification()` | 0 (HTTP) | Telegram notification | Already async |
+
+### Solution: Fire-and-Forget Post-Trade
+Moved non-critical operations to fire-and-forget async blocks. Webhook response returns immediately after critical DB writes.
+
+**Kept blocking (critical path):**
+1. `storage.updateBotTrade()` - Must persist trade result
+2. `storage.updateWebhookLog()` - Must mark signal as processed (dedup)
+
+**Deferred (fire-and-forget with error logging):**
+1. `syncPositionFromOnChain()` - Position data refreshes on drawer open
+2. `storage.updateTradingBotStats()` - Stats update with PnL from sync result
+3. `routeSignalToSubscribers()` - Copy trading runs independently
+4. `settleAllPnl()` - PnL settlement (except during position flip)
+5. `distributeCreatorProfitShare()` - Already was async, moved into deferred block
+6. Auto-withdraw logic - Runs after PnL settlement
+
+**Exception: FLIP close path**
+When profitReinvest is enabled and a position flip occurs (CLOSE then OPEN), `settleAllPnl()` stays blocking between the close and open. This ensures realized profits are available as margin for the new position.
+
+### Applied to All 3 Webhook Paths
+1. **OPEN trade** - sync, stats, routing, notification deferred
+2. **CLOSE trade** - sync, stats, routing, profit share, settle, auto-withdraw deferred
+3. **FLIP trade** - close sync/stats deferred; settleAllPnl kept blocking; open sync/stats/routing deferred
+
+### RPC Budget Impact
+| Before (blocking) | After (deferred) |
+|-------------------|------------------|
+| Trade execution + 2-3 RPC calls in critical path | Trade execution only in critical path |
+| Webhook response: 5-15s | Webhook response: 2-5s |
+| Subscriber routing blocks response | Subscriber routing runs independently |
+
+---
+
+## Trade Execution RPC Optimization (Feb 6 2026)
+
+**Date:** February 2026  
+**Status:** Complete
+
+### Problem
+Each trade execution (subprocess) made ~12 RPC calls, creating rate limit risk on Helius Dev tier (50 calls/sec).
+
+### Optimizations Applied
+| Optimization | RPC Calls Saved | Details |
+|-------------|----------------|---------|
+| Referrer caching | 2-3 per trade | Static per wallet, cached in-memory `Map` |
+| Connection reuse | 1 per trade | Use `driftClient.connection` instead of new `Connection` |
+| Skip `fetchAccounts()` | 1-2 per trade | Use oracle price (loaded during subscribe) as fill estimate |
+| Health check caching | 0-1 per trade | Skip `getSlot()` if RPC verified healthy within 30s |
+| Dynamic CLOSE timeout | N/A | 30s for CLOSE (was 20s), keeps 20s for OPEN |
+| Subprocess staggering | Prevents burst | 2s delay between concurrent subprocess spawns |
+
+### RPC Calls Per Trade
+| Before | After |
+|--------|-------|
+| ~12 calls | ~5-6 calls |
+
+### Error Capture Improvements
+- Subprocess returns `{success: false}` with empty error: last 3 stderr lines extracted as fallback
+- Empty stdout: last 3 stderr lines used instead of raw dump
+- Eliminates "Unknown error" diagnostic blind spots
+
+### Retry TTL for CLOSE Orders
+- Reduced from 1 hour to 5 minutes
+- Stale close retries are useless after market moves
+- Fixed bug: `dbJob.action` (non-existent field) corrected to `dbJob.side`
+
+### Files Changed
+- `server/drift-executor.mjs` - Referrer cache, connection reuse, oracle price fill
+- `server/drift-service.ts` - Error capture, dynamic timeout, subprocess stagger
+- `server/trade-retry-service.ts` - CLOSE TTL reduction, field name fix
+
+---
+
 ## Change Log
 
 | Date | Change | Files Modified |
@@ -130,3 +226,7 @@ In `BotManagementDrawer.tsx`:
 | Jan 2025 | Replaced all individual fetch calls with fetchBotOverview() | `client/src/components/BotManagementDrawer.tsx` |
 | Jan 2025 | Added Promise.allSettled for graceful degradation | `server/routes.ts` |
 | Jan 2025 | Added partialData flag and UI indicator | `server/routes.ts`, `client/src/components/BotManagementDrawer.tsx` |
+| Feb 2026 | Deferred post-trade processing (sync, stats, routing) to fire-and-forget | `server/routes.ts` |
+| Feb 2026 | RPC optimization: referrer cache, connection reuse, oracle fill, health cache | `server/drift-executor.mjs`, `server/drift-service.ts` |
+| Feb 2026 | Error capture improvements: stderr fallback, CLOSE timeout/TTL | `server/drift-service.ts`, `server/trade-retry-service.ts` |
+| Feb 2026 | Subprocess staggering: 2s delay between concurrent spawns | `server/drift-service.ts` |
