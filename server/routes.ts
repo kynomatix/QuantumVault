@@ -676,6 +676,41 @@ async function distributeCreatorProfitShare(params: {
   };
 }
 
+function parseSignalForRouting(body: any): { action: string | null; contracts: string; isCloseSignal: boolean; price: string; strategyPositionSize: string | null } {
+  let action: string | null = null;
+  let contracts = "0";
+  let strategyPositionSize: string | null = null;
+  let price = "0";
+  
+  if (typeof body === 'object' && body !== null) {
+    if (body.position_size !== undefined) strategyPositionSize = String(body.position_size);
+    if (body.data?.position_size !== undefined) strategyPositionSize = String(body.data.position_size);
+    if (body.action) action = String(body.action).toLowerCase();
+    if (body.contracts) contracts = String(body.contracts);
+    if (body.price) price = String(body.price);
+    
+    if (body.signalType === 'trade' && body.data) {
+      if (body.data.action) action = body.data.action.toLowerCase();
+      if (body.data.contracts) contracts = String(body.data.contracts);
+      if (body.data.position_size !== undefined) strategyPositionSize = String(body.data.position_size);
+    }
+  }
+  
+  if (!action && typeof body === 'object' && body !== null) {
+    const message = body.message;
+    if (typeof message === 'string') {
+      const regex = /order\s+(buy|sell)/i;
+      const match = message.match(regex);
+      if (match) action = match[1].toLowerCase();
+    }
+  }
+  
+  const isCloseSignal = strategyPositionSize !== null && 
+    (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
+  
+  return { action, contracts, isCloseSignal, price, strategyPositionSize };
+}
+
 // PHASE 6.2 SECURITY NOTE: Subscriber Routing uses LEGACY encrypted key path
 // This is INTENTIONAL because subscriber wallets belong to DIFFERENT users who do not have
 // active sessions during webhook processing. The source bot's owner has an active session,
@@ -1069,6 +1104,20 @@ async function routeSignalToSubscribers(
     const total = subscriberBots.length;
     const processed = outcomes.tradeSuccess + outcomes.tradeFailed + outcomes.closeSuccess + outcomes.closeFailed;
     console.log(`[Subscriber Routing] SUMMARY for source ${sourceBotId}: ${total} subscribers processed in ${elapsed}ms (PARALLEL), ${outcomes.skippedInactive} skipped (inactive), ${outcomes.skippedFlat} skipped (flat), ${outcomes.tradeSuccess} trades OK, ${outcomes.tradeFailed} trades FAILED, ${outcomes.closeSuccess} closes OK, ${outcomes.closeFailed} closes FAILED, ${outcomes.errors} errors`);
+
+      // Store routing audit trail in webhook log for visibility
+      try {
+        const routingSummary = {
+          publishedBotId: publishedBot.id,
+          publishedBotName: publishedBot.name,
+          subscriberCount: subscriberBots.length,
+          results: { success: results.filter(r => r === 'tradeSuccess' || r === 'closeSuccess').length, failed: results.filter(r => r === 'tradeFailed' || r === 'closeFailed').length, skipped: results.filter(r => r === 'skippedInactive' || r === 'skippedFlat').length, errors: results.filter(r => r === 'error').length },
+          timestamp: new Date().toISOString(),
+        };
+        console.log(`[Subscriber Routing] AUDIT: ${JSON.stringify(routingSummary)}`);
+      } catch (auditErr) {
+        console.error(`[Subscriber Routing] Failed to log audit trail:`, auditErr);
+      }
   } catch (error) {
     console.error('[Subscriber Routing] Error:', error);
   }
@@ -5153,7 +5202,25 @@ export async function registerRoutes(
 
       // Check if bot is active
       if (!bot.isActive) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused" });
+        // DECOUPLED ROUTING: If source bot is published, still route signal to subscribers
+        // Subscribers should trade independently even if creator's bot is paused/underfunded
+        if (botPublishedInfo && botPublishedInfo.isActive) {
+          const routingSignal = parseSignalForRouting(req.body);
+          if (routingSignal.action) {
+            console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... is paused but published - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
+            routeSignalToSubscribers(botId, {
+              action: routingSignal.action as 'buy' | 'sell',
+              contracts: routingSignal.contracts,
+              positionSize: routingSignal.contracts,
+              price: routingSignal.price,
+              isCloseSignal: routingSignal.isCloseSignal,
+              strategyPositionSize: routingSignal.strategyPositionSize,
+            }).catch(err => console.error(`[Subscriber Routing] Error routing from paused source ${botId.slice(0, 8)}...:`, err));
+          }
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused (subscribers routed)" });
+        } else {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused" });
+        }
         return res.status(400).json({ error: "Bot is paused" });
       }
 
@@ -5170,18 +5237,49 @@ export async function registerRoutes(
       }
       
       if (!ownerWallet.executionEnabled) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required" });
+        if (botPublishedInfo && botPublishedInfo.isActive) {
+          const routingSignal = parseSignalForRouting(req.body);
+          if (routingSignal.action) {
+            console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... execution disabled but published - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
+            routeSignalToSubscribers(botId, {
+              action: routingSignal.action as 'buy' | 'sell',
+              contracts: routingSignal.contracts,
+              positionSize: routingSignal.contracts,
+              price: routingSignal.price,
+              isCloseSignal: routingSignal.isCloseSignal,
+              strategyPositionSize: routingSignal.strategyPositionSize,
+            }).catch(err => console.error(`[Subscriber Routing] Error routing from auth-disabled source ${botId.slice(0, 8)}...:`, err));
+          }
+          await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required (subscribers routed)" });
+        } else {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required" });
+        }
         return res.status(403).json({ error: "Trade execution disabled. Please enable automated trading in the app." });
       }
       
       if (ownerWallet.executionExpiresAt && new Date() > ownerWallet.executionExpiresAt) {
-        // Clear expired execution authorization
+        if (botPublishedInfo && botPublishedInfo.isActive) {
+          const routingSignal = parseSignalForRouting(req.body);
+          if (routingSignal.action) {
+            console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... execution expired but published - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
+            routeSignalToSubscribers(botId, {
+              action: routingSignal.action as 'buy' | 'sell',
+              contracts: routingSignal.contracts,
+              positionSize: routingSignal.contracts,
+              price: routingSignal.price,
+              isCloseSignal: routingSignal.isCloseSignal,
+              strategyPositionSize: routingSignal.strategyPositionSize,
+            }).catch(err => console.error(`[Subscriber Routing] Error routing from expired-auth source ${botId.slice(0, 8)}...:`, err));
+          }
+          await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization expired (subscribers routed)" });
+        } else {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization expired" });
+        }
         await storage.updateWalletExecution(bot.walletAddress, {
           executionEnabled: false,
           umkEncryptedForExecution: null,
           executionExpiresAt: null,
         });
-        await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization expired" });
         return res.status(403).json({ error: "Trade execution authorization expired. Please re-enable automated trading." });
       }
 

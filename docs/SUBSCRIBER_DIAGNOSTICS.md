@@ -1,24 +1,44 @@
 # Subscriber Routing Diagnostics
 
-## FULLY RESOLVED: Feb 2, 2026
+## Architecture: Decoupled Subscriber Routing (Feb 7, 2026)
 
-### Verification Complete
-**Subscriber routing is CONFIRMED WORKING in production.**
+Subscriber routing is **fully decoupled** from source bot execution status. When a published source bot receives a webhook signal, subscribers receive the signal and can trade independently, even if the source bot is paused, underfunded, or otherwise unable to execute.
 
-**Evidence:**
-- Trade ID: `f3f4939f-a615-47e8-b01d-b88675c68d11`
-- Subscriber Bot: `2afe9363` (RNDR 2H OI Skalpa Copy)
-- Source Bot: `dee5703c` (RNDR 2H OI Skalpa)
-- Market: RENDER-PERP
-- Side: LONG, 30.005 contracts @ $1.71
-- Status: **EXECUTED**
-- Source: `marketplace_routing`
-- TX: `4Eg1gax2Ekx5aApLScByTT5Q51edtycyerzw2qhUFjLhruFynCD93eTEtgk6HKPHRZEy6xauBacYvnMG92fZdSDj`
-- Executed: 2026-02-01 22:39:21 UTC
+### How It Works
+
+1. **Webhook arrives** for a published source bot
+2. **If source bot is active**: Normal flow - source executes trade, then routes to subscribers in deferred block
+3. **If source bot is paused**: Signal is parsed via `parseSignalForRouting()`, routed to subscribers immediately, then returns "Bot is paused (subscribers routed)"
+4. **Trade retry path**: Successful retries also route to subscribers via registered callback
+
+### Signal Routing Entry Points
+
+| Path | When | Location |
+|------|------|----------|
+| Paused bot routing | Source bot is paused but published | Webhook handler, bot-active check |
+| Execution disabled routing | Source wallet execution auth disabled but published | Webhook handler, executionEnabled check |
+| Execution expired routing | Source wallet execution auth expired but published | Webhook handler, executionExpiresAt check |
+| Close signal deferred | Successful close trade execution | After close response sent |
+| Open signal deferred | Successful open trade execution | After open response sent |
+| Retry callback | Successful retry execution | `trade-retry-service.ts` |
+
+**Not routed:** Emergency stop (safety mechanism - blocks everything including subscribers), invalid webhook secret, wallet/bot not found.
+
+### Routing Audit Trail
+
+Every routing batch produces a structured JSON audit log:
+```
+[Subscriber Routing] AUDIT: {"publishedBotId":"...","publishedBotName":"...","subscriberCount":2,"results":{"success":1,"failed":0,"skipped":1,"errors":0},"timestamp":"..."}
+```
 
 ---
 
-## Root Causes (Fixed)
+## Previous Issues (Fixed)
+
+### Issue 3: Source Bot Pause Blocked All Subscribers (Fixed Feb 7)
+When a source bot was paused, the webhook handler returned "Bot is paused" at line 5155 before routing logic ever ran. All subscribers were blocked from receiving signals.
+
+**Fix:** Added `parseSignalForRouting()` helper and decoupled routing at the pause check. Published bots now route signals to subscribers before returning the paused error.
 
 ### Issue 1: Trade Retry Bypassed Routing (Fixed Feb 1)
 When source bot trades failed with temporary errors (margin issues, rate limits):
@@ -38,8 +58,11 @@ Trade retry attempts counter was only stored in-memory. On server restart, jobs 
 ## Retained Logging (For Future Debugging)
 
 ### [Subscriber Routing] logs
-- Entry: `Routing {action} (close={bool}) to N subscribers`
+- Entry: `Starting routing for source bot X, signal: action, close=bool`
+- Per-subscriber: `Processing subscriber bot X (name), isActive=bool, market=X`
+- Wallet lookup: `Wallet lookup for X: found=bool, hasAgentKey=bool`
 - Summary: `SUMMARY for source X: N subscribers, X skipped, X trades OK, X trades FAILED`
+- Audit: `AUDIT: {structured JSON with results}`
 - Errors: Close failures, order failures, processing exceptions
 
 ### [TradeRetry] logs
