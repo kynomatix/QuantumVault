@@ -3300,8 +3300,8 @@ export async function executePerpOrder(
         oraclePrice: oraclePrice || undefined,
       });
 
-      if (swiftResult.success) {
-        console.log(`[Drift] Swift execution succeeded for ${market}: tx=${swiftResult.txSignature}, latency=${swiftResult.auctionDurationMs}ms`);
+      if (swiftResult.success && swiftResult.txSignature) {
+        console.log(`[Drift] Swift execution succeeded with tx for ${market}: tx=${swiftResult.txSignature}, latency=${swiftResult.auctionDurationMs}ms`);
         recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
         return {
           success: true,
@@ -3312,6 +3312,69 @@ export async function executePerpOrder(
           executionMethod: 'swift' as const,
           swiftOrderId: swiftResult.swiftOrderId,
         };
+      }
+
+      if (swiftResult.success && !swiftResult.txSignature) {
+        console.log(`[Drift] Swift open accepted (Order processed) but no tx signature — waiting for auction fill verification...`);
+        const AUCTION_WAIT_MS = 8000;
+        await new Promise(resolve => setTimeout(resolve, AUCTION_WAIT_MS));
+        try {
+          let verifyPubkey = expectedAgentPubkey;
+          if (!verifyPubkey) {
+            try {
+              const kp = getAgentKeypair(encryptedPrivateKey);
+              verifyPubkey = kp.publicKey.toBase58();
+            } catch {}
+          }
+          if (verifyPubkey) {
+            const rpcUrl = process.env.SOLANA_RPC_URL || (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : '');
+            const conn = new Connection(rpcUrl);
+            const userPubkey = new PublicKey(verifyPubkey);
+            const [userAccountKey] = PublicKey.findProgramAddressSync(
+              [
+                Buffer.from('user'),
+                new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH').toBuffer(),
+                userPubkey.toBuffer(),
+                new BN(subAccountId).toArrayLike(Buffer, 'le', 2),
+              ],
+              new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH')
+            );
+            const acctInfo = await conn.getAccountInfo(userAccountKey);
+            let positionFound = false;
+            if (acctInfo?.data) {
+              const decoded = decodeUser(acctInfo.data);
+              const perpPositions = decoded?.perpPositions || [];
+              for (const p of perpPositions) {
+                if (p.marketIndex === marketIndex) {
+                  const baseAmount = typeof p.baseAssetAmount?.toNumber === 'function' ? p.baseAssetAmount.toNumber() : Number(p.baseAssetAmount || 0);
+                  if (Math.abs(baseAmount) > 0) {
+                    positionFound = true;
+                  }
+                }
+              }
+            }
+            if (positionFound) {
+              console.log(`[Drift] Swift open VERIFIED: position found on-chain after ${AUCTION_WAIT_MS}ms auction wait`);
+              recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
+              return {
+                success: true,
+                signature: 'swift-auction-fill',
+                txSignature: 'swift-auction-fill',
+                fillPrice: swiftResult.fillPrice,
+                actualFee: undefined,
+                executionMethod: 'swift' as const,
+                swiftOrderId: swiftResult.swiftOrderId,
+              };
+            }
+            console.log(`[Drift] Swift open NOT filled after ${AUCTION_WAIT_MS}ms wait (no position found), falling back to legacy`);
+          } else {
+            console.log(`[Drift] Swift open: cannot verify (no agent pubkey), falling back to legacy`);
+          }
+        } catch (verifyErr: any) {
+          console.warn(`[Drift] Swift open verification failed, falling back to legacy:`, verifyErr?.message);
+        }
+        recordSwiftMetricFailure(market, 'auction_not_filled');
+        recordSwiftFallback(market);
       }
 
       if (swiftResult.errorClassification === 'permanent') {
@@ -3563,8 +3626,8 @@ export async function closePerpPosition(
       }
 
       if (swiftResult.success && !swiftResult.txSignature) {
-        console.log(`[Drift] Swift close accepted (Order processed) but no tx signature — Swift auction may not have filled. Waiting 5s then verifying...`);
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        console.log(`[Drift] Swift close accepted (Order processed) but no tx signature — Swift auction may not have filled. Waiting 8s then verifying...`);
+        await new Promise(resolve => setTimeout(resolve, 8000));
         try {
           let verifyPubkey = expectedAgentPubkey || agentPubkey;
           if (!verifyPubkey) {
