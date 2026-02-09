@@ -1508,6 +1508,40 @@ These columns/branches/classifications intentionally do not exist in the current
 
 ---
 
+## External Code Review #3 (February 9, 2026)
+
+**Audit Source:** External automated code review (ChatGPT), February 2026
+**Scope:** Second pass comparison of migration plan against live codebase
+
+### Review Summary
+
+This review identified 8 items. **7 of 8 are duplicates of findings already addressed in v4.0/v4.1.** One new item was identified regarding slippage tracking schema alignment.
+
+| # | Finding | Status | Already Addressed In |
+|---|---------|--------|---------------------|
+| 1 | Fee model mismatch (gasless vs current fee accounting) | Duplicate | v4.0 — External Auditor Response #4 (Fee Calculation) |
+| 2 | Close paths bypass `executePerpOrder` | Duplicate | v4.1 — closePerpPosition Coverage section in Step 4 |
+| 3 | Swift error classification missing from retry service | Duplicate | v4.1 — External Code Review #2, Finding #5 → Step 6 |
+| 4 | `executePerpOrder` only has SDK/subprocess paths | Duplicate | v4.1 — External Code Review #2, Finding #2 → Step 4 |
+| 5 | PnL uses estimates not actual fills | Duplicate | v4.1 — Fill Price Accuracy section in Step 4 |
+| 6 | Subaccount subscription quirks could break Swift | Duplicate | v4.0 — External Auditor Response #2 (Subaccount SDK Workaround) |
+| 7 | Subscriber routing has multiple entry points | Duplicate | Step 4 verify criteria — all 4+1 routing trigger points explicitly listed |
+| 8 | Schema for slippage tracking not in place | **New — Noted** | See response below |
+
+### Response to Finding 8: PnL Refinement Schema Alignment
+
+A separate `docs/pnl-refinement-plan.md` describes future schema fields (`actualFillPrice`, `slippageBps`, `slippageAmount`, `expectedPrice`) that are not yet in the schema. The reviewer notes that Swift will surface this data (fill price, price improvement) and it should be stored.
+
+**Response:** This is a valid forward-looking observation. The Swift schema additions in Step 1 already include `priceImprovement` (decimal). The `fillPrice` from Swift responses will be stored via the existing `price` column in `bot_trades`. However, the PnL refinement plan's additional fields (`slippageBps`, `slippageAmount`, `expectedPrice`) are out of scope for the Swift migration — they belong to a separate improvement initiative.
+
+**Recommendation:** After Swift integration is stable, the PnL refinement schema can be implemented as a follow-on. Swift will make this easier because it provides actual fill data instead of oracle estimates. This is noted in Section 13 ("What This Plan Does NOT Cover") as future work.
+
+### Note on Duplicate Findings
+
+Seven of eight findings in this review were previously identified and addressed. This indicates the plan's documentation of prior reviews is comprehensive — auditors can verify that each concern has a documented response by checking the External Auditor Responses section (Part 4) and External Code Review #2 above.
+
+---
+
 # Part 5: Appendices
 
 ---
@@ -1638,6 +1672,7 @@ ADD COLUMN IF NOT EXISTS swift_attempts INTEGER DEFAULT 0;
 | 3.0 | 2026-02-09 | Engineering + AI Audit | Codebase audit: decoupled routing, computeTradeSizingAndTopUp, PositionService, all-market support, SDK methods, cooldown retries, subprocess architecture, Builder Codes |
 | 4.0 | 2026-02-09 | Engineering | Merged research + integration plan into single document; added external auditor responses; corrected reduce-only, subaccount, fee calculation, and key signing sections |
 | 4.1 | 2026-02-09 | Engineering | Addressed Codex 5.2 code review: added closePerpPosition Swift coverage to Step 4; added fill price accuracy section; documented 5 review findings with responses |
+| 4.2 | 2026-02-09 | Engineering | Addressed ChatGPT code review: 7/8 findings confirmed as duplicates of v4.0/v4.1; 1 new finding (PnL refinement schema alignment) noted as future work |
 
 ---
 
