@@ -1,0 +1,47 @@
+It looks like you have successfully implemented the core Swift logic in `server/drift-service.ts`, `server/swift-executor.ts`, and `server/swift-config.ts`. The implementation of `executePerpOrder` and `closePerpPosition` correctly follows the "Swift First -> Fallback" pattern described in your plan.
+
+However, based on your description of "market makers not picking up trades" and "hiccups," here are the critical gaps and potential flaws I found in your implementation:
+
+### 1. Critical Gap: Missing Database Schema Updates
+**Severity: High**
+Your plan requires tracking `executionMethod` ('swift' or 'legacy') and `swiftOrderId` in the database, but your `shared/schema.ts` file **does not contain these columns** in the `bot_trades` table.
+
+*   **The Issue:** When `executePerpOrder` returns successfully with `{ executionMethod: 'swift' }`, the code that saves this trade to the database (likely in `server/routes.ts` or `server/bot-service.ts`) will try to write fields that don't exist, or it will silently discard this data.
+*   **Fix:** You must run a database migration to add these columns to `bot_trades`:
+    ```typescript
+    // shared/schema.ts (add these to botTrades)
+    executionMethod: text("execution_method").default("legacy"),
+    swiftOrderId: text("swift_order_id"),
+    auctionDurationMs: integer("auction_duration_ms"),
+    priceImprovement: decimal("price_improvement"),
+    ```
+
+### 2. The "8-Second Wait" is Blocking
+**Severity: Medium (Operational)**
+In `server/drift-service.ts`, you have this code:
+```typescript
+const AUCTION_WAIT_MS = 8000;
+await new Promise(resolve => setTimeout(resolve, AUCTION_WAIT_MS));
+```
+*   **The Issue:** This effectively pauses your entire API request for 8 seconds. If you are calling this from a webhook (e.g., TradingView) or a UI that expects a sub-5-second response, the client will likely **timeout** and assume the trade failed, even if it actually succeeds.
+*   **Fix:** Ideally, the verification should happen in the background. If you must keep it blocking for verification, ensure your webhook sources have a timeout setting > 10 seconds.
+
+### 3. "Market Makers Not Picking Up Trades" (Likely Cause)
+**Severity: Medium**
+You mentioned trades aren't filling. This is almost certainly due to **Swift's Minimum Notional** requirement.
+*   **The Check:** Your `shouldUseSwift` function enforces a minimum trade size (default $100).
+*   **The Reality:** If you are testing with small amounts (e.g., $10 or $50), the code explicitly skips Swift and logs `shouldUseSwift()=false`.
+*   **Fix:** For testing, set `SWIFT_MIN_NOTIONAL=1` in your `.env` file to force Swift execution on small test trades.
+*   **Auction Parameters:** Also check `server/swift-executor.ts`. If your auction `startPrice` is too aggressive (too far below market for shorts, too high for longs) or `duration` is too short (e.g., < 3 slots), Market Makers may simply ignore the order because they can't fill it profitably in time.
+
+### 4. Race Condition in Close Logic
+**Severity: Low**
+In `closePerpPosition`, you calculate the close size based on arguments passed *into* the function (`positionSizeBase`).
+*   **The Issue:** If the position changes (e.g., partial fill or funding payment) between the time you fetched the position and the time you call `closePerpPosition`, Swift might try to close slightly more than you have, which could fail or flip the position if not handled perfectly by `reduceOnly`.
+*   **Fix:** Ensure `executeSwiftOrder` always passes `reduceOnly: true` (which you seem to be doing), but double-check that the Swift API respects this flag strictly.
+
+### Summary Checklist for Auditors
+To get this fully "Auditor Ready," you need to:
+1.  [ ] **Update `shared/schema.ts`** and run the migration.
+2.  [ ] **Set `SWIFT_MIN_NOTIONAL=1`** in your environment to verify if MMs pick up small trades.
+3.  [ ] **Verify Webhook Timeouts** can handle the 8-second delay.
