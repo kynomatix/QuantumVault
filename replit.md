@@ -8,9 +8,11 @@ Preferred communication style: Simple, everyday language.
 
 ### Active Implementation Directive — Swift Protocol Migration
 **STATUS: STEPS 1-8 COMPLETED (Feb 9, 2026) — SWIFT_ENABLED=true, ready for live testing**
-All Swift Protocol integration work follows `docs/SWIFT_PROTOCOL_MIGRATION_PLAN.md` step by step.
+All Swift Protocol integration work follows `docs/SWIFT_PROTOCOL_MIGRATION_PLAN.md` (v4.4) step by step.
 - Steps 1-8: COMPLETED — Swift integration fully implemented with automatic fallback to legacy
 - Step 9 (Builder Code Registration): OPTIONAL, deferred — does not block Swift usage
+- **Critical prerequisite (discovered post-implementation):** SignedMsg user account PDA must be initialized on-chain per agent wallet. Without it, MMs cannot fill Swift orders. See migration plan Section 24.
+- **SignedMsg init:** Handled automatically — lazy preflight in `swift-executor.ts` (existing users) + proactive init in `drift-executor.mjs` (new users). Cached after first check.
 - **Key files**: `server/swift-config.ts`, `server/swift-executor.ts`, `server/swift-metrics.ts`, `server/drift-service.ts`
 - **Monitoring**: `GET /api/admin/swift-metrics` for real-time Swift performance data
 - **Emergency rollback**: Set `SWIFT_ENABLED=false` in env vars for instant return to legacy-only

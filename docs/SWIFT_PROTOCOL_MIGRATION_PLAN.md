@@ -2,8 +2,8 @@
 
 **Created:** January 21, 2026  
 **Last Updated:** February 9, 2026  
-**Version:** 4.3  
-**Status:** Ready for External Audit  
+**Version:** 4.4  
+**Status:** Post-Implementation — Steps 1-8 Complete, Live Testing Pending  
 **V4 Changelog:** Merged research + integration plan into single document; addressed external auditor feedback on reduce-only, subaccount workarounds, fee calculation, and key signing
 
 ---
@@ -41,6 +41,10 @@
 20. [Appendix D: Configuration Reference](#20-appendix-d-configuration-reference)
 21. [Appendix E: Database Migration Script](#21-appendix-e-database-migration-script)
 22. [Document History](#22-document-history)
+
+### Part 6: Post-Implementation Findings
+24. [Post-Implementation Findings](#24-post-implementation-findings)
+25. [Post-Implementation Cleanup Checklist](#25-post-implementation-cleanup-checklist)
 
 ---
 
@@ -1405,6 +1409,10 @@ Before starting Step 1:
 - [ ] Subscriber routing fix is deployed to production (currently blocked)
   - **Reason:** Steps 4-6 need subscriber routing working to verify end-to-end
 - [ ] External audit of this plan is complete
+- [ ] SignedMsg user account PDA initialized on-chain for each agent wallet
+  - **Required for:** Market makers to fill Swift orders on-chain
+  - **Check:** `getAccountInfo` on PDA derived from `["SIGNED_MSG", authority]` should return non-null
+  - **Init:** One-time call to `driftClient.getInitializeSignedMsgUserOrdersAccountIx(authority, 16)` — handled automatically by Swift preflight
 
 ---
 
@@ -1736,17 +1744,89 @@ ADD COLUMN IF NOT EXISTS swift_attempts INTEGER DEFAULT 0;
 | 4.1 | 2026-02-09 | Engineering | Addressed Codex 5.2 code review: added closePerpPosition Swift coverage to Step 4; added fill price accuracy section; documented 5 review findings with responses |
 | 4.2 | 2026-02-09 | Engineering | Addressed ChatGPT code review: 7/8 findings confirmed as duplicates of v4.0/v4.1; 1 new finding (PnL refinement schema alignment) noted as future work |
 | 4.3 | 2026-02-09 | Engineering (Internal Audit) | Internal audit: clarified DriftClient initialization for Swift signing; added getSlot failure handling; listed all closePerpPosition callers; updated retry fee calculation; added position flip timing as accepted risk |
+| 4.4 | 2026-02-09 | Engineering | Post-implementation findings: SignedMsg PDA prerequisite (critical undocumented requirement), oracle price safety guard, message encoding confirmation. Added lazy migration + proactive init for SignedMsg account. |
 
 ---
 
 **Document Maintained By:** Engineering Team  
 **Last Updated:** February 9, 2026  
 **Next Review:** Before implementation kickoff  
-**Status:** Ready for External Audit — Single Source of Truth
+**Status:** Post-Implementation — Steps 1-8 Complete, Live Testing Pending
 
 ---
 
-## 23. Post-Implementation Cleanup Checklist
+# Part 6: Post-Implementation Findings
+
+---
+
+## 24. Post-Implementation Findings
+
+**Discovery Date:** February 9, 2026
+**Status:** Resolved — SignedMsg PDA initialization implemented
+
+#### Finding: SignedMsg User Account PDA Prerequisite (Critical — Undocumented)
+
+**Problem:** After completing Steps 1-8 of the integration plan, Swift orders were accepted by the API (`https://swift.drift.trade/orders` returned 200 OK with "Order processed") but market makers never filled any orders. All orders timed out after 8 seconds and fell back to legacy execution.
+
+**Root Cause:** Swift requires a one-time on-chain initialization of a `SignedMsg` user orders account (a PDA derived from `["SIGNED_MSG", authority_pubkey]` with the Drift program ID). This PDA at `CNquLziNQKTvdxAuTGZ71sdRQsmZepdtBenSpY1UmeVP` did not exist on-chain for the agent wallet `FLGNeFscYwp4MDmHuRfhEFsQYTq3jiLPrxMFJfwMYRXN`.
+
+Without this account, keepers/market makers attempting to execute the order on-chain via `placeSwiftTakerOrder` cannot find the required `signedMsgUserOrders` account in the instruction's accounts list, so they skip the order entirely.
+
+**Why It Was Missed:**
+1. **Not documented** in Drift's public Swift integration guides or v2-teacher docs
+2. **Silent failure** — the Swift API accepts orders without error even when this account doesn't exist. There is no validation or error message indicating the prerequisite is missing.
+3. **The Drift web UI handles it invisibly** — when trading through `app.drift.trade`, the frontend likely initializes this PDA automatically during onboarding
+4. **All auditors focused on code correctness** — message encoding, signature format, auction parameters, and error handling were all verified as correct. The missing piece was an on-chain prerequisite external to the codebase.
+5. **Test results were misleading** — two test trades ($92 and $175 notional) both received "Order processed" from the API, suggesting a liquidity or auction parameter issue rather than a missing account
+
+**How It Was Found:** By tracing the on-chain execution path — asking "what accounts does the `placeSwiftTakerOrder` instruction require?" Led to the `signedMsgUserOrders` PDA. Checked on-chain via RPC `getAccountInfo` — returned `null`. The SDK method `getInitializeSignedMsgUserOrdersAccountIx(authority, numOrders)` in `driftClient.ts` and the PDA derivation in `addresses/pda.ts` confirmed the prerequisite.
+
+**Resolution:** Two-pronged initialization strategy:
+
+1. **Existing users (lazy migration in `swift-executor.ts`):**
+   - `ensureSignedMsgAccount()` runs as a preflight before every Swift order
+   - Checks on-chain if the PDA exists, creates it if missing via the SDK's `getInitializeSignedMsgUserOrdersAccountIx(authority, 16)`
+   - Results cached in memory: success for 24 hours, failure for 10 minutes (then retries)
+   - After first successful check, zero overhead on subsequent Swift orders
+   - If init fails, gracefully falls back to legacy — never blocks trading
+
+2. **New users (proactive init in `drift-executor.mjs`):**
+   - `initializeSignedMsgAccountSafe()` runs as a fire-and-forget background task after successful Drift account creation (when SA0 is first created)
+   - Uses a **separate transaction** — completely isolated from the account creation flow
+   - Non-blocking: failure does not gate deposits or delay the onboarding flow
+   - The Swift preflight catch handles the case if proactive init fails
+
+**Technical Details:**
+- PDA derivation: `PublicKey.findProgramAddressSync([Buffer.from("SIGNED_MSG"), authority.toBuffer()], DRIFT_PROGRAM_ID)`
+- Init method: `driftClient.getInitializeSignedMsgUserOrdersAccountIx(authority, numOrders)` — returns `[PublicKey, TransactionInstruction]`
+- `numOrders` set to 16 (sufficient for all subaccounts, recommended >8 by Drift docs)
+- Per-authority (not per-subaccount) — one init covers all subaccounts under the wallet
+- Costs a small amount of SOL for account rent (~0.002 SOL)
+- "Already initialized" errors (6214/3007) are handled gracefully as success (stale RPC scenario)
+
+**Key Files Modified:**
+- `server/swift-executor.ts` — Added `ensureSignedMsgAccount()`, `getSignedMsgPda()`, `signedMsgCache`, cache TTL constants
+- `server/drift-executor.mjs` — Added `initializeSignedMsgAccountSafe()`, `getSignedMsgPDA()`, fire-and-forget call after `initializeDriftAccountsRaw()`
+
+#### Additional Finding: Message Encoding Confirmation
+
+During debugging, the message encoding was independently verified as correct:
+- The Drift SDK's `signSignedMsgOrderParamsMessage()` internally converts the Borsh-serialized buffer to a hex string, then wraps it in a `Buffer`
+- Using `.toString()` on this buffer correctly returns the hex representation
+- Using `.toString('base64')` would double-encode and produce incorrect output
+- This was initially flagged as a potential issue by external audit but confirmed correct via SDK source code analysis
+
+#### Additional Finding: Oracle Price Safety Guard
+
+An oracle price safety guard was added to prevent Swift orders with zero/missing oracle prices:
+- `computeAuctionParams()` returns `null` if `oraclePrice` is missing or zero
+- `buildSwiftMessage()` returns `null` if auction params cannot be computed
+- `executeSwiftOrder()` returns `fallback_legacy` classification when message cannot be built
+- This prevents submitting Swift orders with invalid auction parameters (start/end price of 0)
+
+---
+
+## 25. Post-Implementation Cleanup Checklist
 
 When all 10 implementation steps are completed and validated in production:
 
