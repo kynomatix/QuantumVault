@@ -3566,13 +3566,40 @@ export async function closePerpPosition(
         console.log(`[Drift] Swift close accepted (Order processed) but no tx signature — Swift auction may not have filled. Waiting 5s then verifying...`);
         await new Promise(resolve => setTimeout(resolve, 5000));
         try {
-          const { PositionService } = await import('./position-service.js');
-          const verifyPos = await PositionService.getPositionForExecution(
-            expectedAgentPubkey || '',
-            market,
-            subAccountId
+          let verifyPubkey = expectedAgentPubkey || agentPubkey;
+          if (!verifyPubkey) {
+            try {
+              const kp = getAgentKeypair(encryptedPrivateKey);
+              verifyPubkey = kp.publicKey.toBase58();
+            } catch {}
+          }
+          const rpcUrl = process.env.SOLANA_RPC_URL || process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : '';
+          const conn = new Connection(rpcUrl);
+          const userPubkey = new PublicKey(verifyPubkey);
+          const [userAccountKey] = PublicKey.findProgramAddressSync(
+            [
+              Buffer.from('user'),
+              new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH').toBuffer(),
+              userPubkey.toBuffer(),
+              new BN(subAccountId).toArrayLike(Buffer, 'le', 2),
+            ],
+            new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH')
           );
-          if (!verifyPos || verifyPos.size === 0) {
+          const acctInfo = await conn.getAccountInfo(userAccountKey);
+          let posStillOpen = false;
+          if (acctInfo?.data) {
+            const decoded = decodeUser(acctInfo.data);
+            const perpPositions = decoded?.perpPositions || [];
+            for (const p of perpPositions) {
+              if (p.marketIndex === marketIndex) {
+                const baseAmount = typeof p.baseAssetAmount?.toNumber === 'function' ? p.baseAssetAmount.toNumber() : Number(p.baseAssetAmount || 0);
+                if (Math.abs(baseAmount) > 0) {
+                  posStillOpen = true;
+                }
+              }
+            }
+          }
+          if (!posStillOpen) {
             console.log(`[Drift] Swift close verified: position is closed after auction wait`);
             recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
             return {
@@ -3582,7 +3609,7 @@ export async function closePerpPosition(
               fillPrice: swiftResult.fillPrice,
             };
           }
-          console.log(`[Drift] Swift close NOT filled after 5s wait (position still open: ${verifyPos.size} ${verifyPos.side}), falling back to legacy`);
+          console.log(`[Drift] Swift close NOT filled after 5s wait (position still open), falling back to legacy`);
         } catch (verifyErr: any) {
           console.warn(`[Drift] Swift close verification failed, falling back to legacy:`, verifyErr?.message);
         }
