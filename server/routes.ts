@@ -23,6 +23,7 @@ import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSec
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { getSwiftMetrics } from "./swift-metrics";
+import { getSwiftDiagnostics } from "./swift-config";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
@@ -9302,6 +9303,15 @@ export async function registerRoutes(
     next();
   };
   
+  app.get("/api/admin/swift-diagnostics", requireAdminAuth, async (req, res) => {
+    try {
+      const diag = getSwiftDiagnostics();
+      res.json(diag);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch Swift diagnostics" });
+    }
+  });
+
   app.get("/api/admin/swift-metrics", requireAdminAuth, async (req, res) => {
     try {
       const metrics = getSwiftMetrics();

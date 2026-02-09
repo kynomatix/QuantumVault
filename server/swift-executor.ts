@@ -7,6 +7,7 @@ import {
   OrderType,
   PositionDirection,
   MarketType,
+  PostOnlyParams,
   generateSignedMsgUuid,
   BASE_PRECISION,
 } from '@drift-labs/sdk';
@@ -74,17 +75,17 @@ function buildSwiftMessage(params: {
     reduceOnly: params.reduceOnly,
     userOrderId: 0,
     price: new BN(0),
-    auctionDuration: 0,
-    auctionStartPrice: new BN(0),
-    auctionEndPrice: new BN(0),
+    bitFlags: 0,
+    auctionDuration: null,
+    auctionStartPrice: null,
+    auctionEndPrice: null,
     maxTs: params.slippageBps !== undefined
       ? new BN(Math.floor(Date.now() / 1000) + 60)
-      : new BN(0),
-    triggerPrice: new BN(0),
+      : null,
+    triggerPrice: null,
     triggerCondition: { above: {} },
-    oraclePriceOffset: 0,
-    postOnly: false,
-    immediateOrCancel: false,
+    oraclePriceOffset: null,
+    postOnly: PostOnlyParams.NONE,
   };
 
   return {
@@ -129,22 +130,40 @@ async function submitToSwiftApi(params: {
   }
 }
 
+function swiftLog(msg: string) {
+  console.log(`[Swift Executor] ${msg}`);
+  try {
+    const fs = require('fs');
+    const logPath = '/tmp/swift-debug.log';
+    const stats = fs.existsSync(logPath) ? fs.statSync(logPath) : null;
+    if (stats && stats.size > 1024 * 1024) {
+      fs.writeFileSync(logPath, `[${new Date().toISOString()}] [executor] Log rotated\n`);
+    }
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] [executor] ${msg}\n`);
+  } catch {}
+}
+
 export async function executeSwiftOrder(params: SwiftOrderParams): Promise<SwiftOrderResult> {
   const startTime = Date.now();
+  swiftLog(`START: market=${params.market} side=${params.side} size=${params.sizeInBase} reduceOnly=${params.reduceOnly} subAccount=${params.subAccountId}`);
 
   try {
     const keyBytes = bs58.decode(params.privateKeyBase58);
     const keypair = Keypair.fromSecretKey(keyBytes);
 
     const rpcUrl = getPrimaryRpcUrl();
+    swiftLog(`RPC URL: ${rpcUrl?.substring(0, 50)}...`);
     const connection = new Connection(rpcUrl, 'confirmed');
 
     const slot = await connection.getSlot('confirmed');
+    swiftLog(`Got slot: ${slot}`);
 
     const driftClient = createLightweightDriftClient(keypair, connection);
+    swiftLog(`DriftClient created`);
 
     const uuid = generateSignedMsgUuid();
     const swiftOrderId = Buffer.from(uuid).toString('hex');
+    swiftLog(`Generated UUID: ${swiftOrderId}`);
 
     const swiftMessage = buildSwiftMessage({
       marketIndex: params.marketIndex,
@@ -157,8 +176,10 @@ export async function executeSwiftOrder(params: SwiftOrderParams): Promise<Swift
       slippageBps: params.slippageBps,
     });
 
+    swiftLog(`Built Swift message, signing...`);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK OrderParams type has many optional fields filled at runtime
     const signed = driftClient.signSignedMsgOrderParamsMessage(swiftMessage as any);
+    swiftLog(`Message signed, submitting to Swift API at ${SWIFT_CONFIG.apiUrl}${SWIFT_CONFIG.orderEndpoint}`);
 
     const response = await submitToSwiftApi({
       orderParams: signed.orderParams,
@@ -169,8 +190,11 @@ export async function executeSwiftOrder(params: SwiftOrderParams): Promise<Swift
 
     const latencyMs = Date.now() - startTime;
 
+    swiftLog(`Swift API response: status=${response.status} ok=${response.ok}`);
+
     if (!response.ok) {
       const errorText = await response.text().catch(() => `HTTP ${response.status}`);
+      swiftLog(`Swift API ERROR: ${response.status} - ${errorText}`);
       const classification = classifySwiftError(errorText);
       recordSwiftFailure(errorText);
 
@@ -184,6 +208,7 @@ export async function executeSwiftOrder(params: SwiftOrderParams): Promise<Swift
     }
 
     const data = await response.json() as Record<string, unknown>;
+    swiftLog(`Swift API SUCCESS: ${JSON.stringify(data)}`);
     recordSwiftSuccess(latencyMs);
 
     return {
@@ -199,6 +224,7 @@ export async function executeSwiftOrder(params: SwiftOrderParams): Promise<Swift
   } catch (error: unknown) {
     const latencyMs = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : String(error);
+    swiftLog(`EXCEPTION after ${latencyMs}ms: ${errorMessage}`);
 
     let classification: SwiftErrorClassification;
 

@@ -77,6 +77,15 @@ export function shouldUseSwift(): boolean {
   return isSwiftAvailable();
 }
 
+export function getSwiftDiagnostics() {
+  return {
+    config: { ...SWIFT_CONFIG },
+    health: { ...swiftHealth },
+    shouldUseSwift: isSwiftAvailable(),
+    envVar: process.env.SWIFT_ENABLED,
+  };
+}
+
 export type SwiftErrorClassification = 'retry_swift' | 'fallback_legacy' | 'permanent';
 
 const RETRYABLE_SWIFT_PATTERNS = [
