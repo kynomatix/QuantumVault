@@ -24,6 +24,7 @@ export interface SwiftOrderParams {
   subAccountId: number;
   reduceOnly: boolean;
   slippageBps?: number;
+  oraclePrice?: number;
 }
 
 export interface SwiftOrderResult {
@@ -50,6 +51,34 @@ function createLightweightDriftClient(keypair: Keypair, connection: Connection):
   });
 }
 
+const PRICE_PRECISION = new BN(1_000_000);
+
+function computeAuctionParams(params: {
+  side: 'long' | 'short';
+  oraclePrice?: number;
+  slippageBps?: number;
+}) {
+  if (!params.oraclePrice || params.oraclePrice <= 0) {
+    return { auctionDuration: 10, auctionStartPrice: new BN(0), auctionEndPrice: new BN(0) };
+  }
+
+  const slipBps = params.slippageBps || 50;
+  const pricePrecision = Number(PRICE_PRECISION);
+  const oracleBn = Math.round(params.oraclePrice * pricePrecision);
+
+  const auctionDuration = 10;
+
+  if (params.side === 'long') {
+    const startPrice = new BN(oracleBn);
+    const endPrice = new BN(Math.round(oracleBn * (1 + slipBps / 10000)));
+    return { auctionDuration, auctionStartPrice: startPrice, auctionEndPrice: endPrice };
+  } else {
+    const startPrice = new BN(oracleBn);
+    const endPrice = new BN(Math.round(oracleBn * (1 - slipBps / 10000)));
+    return { auctionDuration, auctionStartPrice: startPrice, auctionEndPrice: endPrice };
+  }
+}
+
 function buildSwiftMessage(params: {
   marketIndex: number;
   side: 'long' | 'short';
@@ -59,12 +88,19 @@ function buildSwiftMessage(params: {
   slot: number;
   uuid: Uint8Array;
   slippageBps?: number;
+  oraclePrice?: number;
 }) {
   const direction = params.side === 'long' ? PositionDirection.LONG : PositionDirection.SHORT;
 
   const baseAmount = new BN(
     Math.round(params.sizeInBase * Number(BASE_PRECISION))
   );
+
+  const auction = computeAuctionParams({
+    side: params.side,
+    oraclePrice: params.oraclePrice,
+    slippageBps: params.slippageBps,
+  });
 
   const orderParams = {
     orderType: OrderType.MARKET,
@@ -76,12 +112,10 @@ function buildSwiftMessage(params: {
     userOrderId: 0,
     price: new BN(0),
     bitFlags: 0,
-    auctionDuration: null,
-    auctionStartPrice: null,
-    auctionEndPrice: null,
-    maxTs: params.slippageBps !== undefined
-      ? new BN(Math.floor(Date.now() / 1000) + 60)
-      : null,
+    auctionDuration: auction.auctionDuration,
+    auctionStartPrice: auction.auctionStartPrice,
+    auctionEndPrice: auction.auctionEndPrice,
+    maxTs: new BN(Math.floor(Date.now() / 1000) + 60),
     triggerPrice: null,
     triggerCondition: { above: {} },
     oraclePriceOffset: null,
@@ -145,7 +179,7 @@ function swiftLog(msg: string) {
 
 export async function executeSwiftOrder(params: SwiftOrderParams): Promise<SwiftOrderResult> {
   const startTime = Date.now();
-  swiftLog(`START: market=${params.market} side=${params.side} size=${params.sizeInBase} reduceOnly=${params.reduceOnly} subAccount=${params.subAccountId}`);
+  swiftLog(`START: market=${params.market} side=${params.side} size=${params.sizeInBase} reduceOnly=${params.reduceOnly} subAccount=${params.subAccountId} oraclePrice=${params.oraclePrice || 'none'}`);
 
   try {
     const keyBytes = bs58.decode(params.privateKeyBase58);
@@ -174,6 +208,7 @@ export async function executeSwiftOrder(params: SwiftOrderParams): Promise<Swift
       slot,
       uuid,
       slippageBps: params.slippageBps,
+      oraclePrice: params.oraclePrice,
     });
 
     swiftLog(`Built Swift message, signing...`);

@@ -114,10 +114,7 @@ const FALLBACK_TO_LEGACY_PATTERNS = [
 
 const PERMANENT_ERROR_PATTERNS = [
   'invalid signature',
-  'invalid order',
   'invalid parameters',
-  '400',
-  'bad request',
   '401',
   'unauthorized',
   '403',

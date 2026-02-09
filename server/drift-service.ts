@@ -12,6 +12,7 @@ import { shouldUseSwift } from './swift-config';
 import { executeSwiftOrder, type SwiftOrderResult } from './swift-executor';
 import { recordSwiftAttempt, recordSwiftSuccess as recordSwiftMetricSuccess, recordSwiftFailure as recordSwiftMetricFailure, recordSwiftFallback } from './swift-metrics';
 import { decrypt } from './crypto';
+import { getMarketPrice } from './drift-price';
 
 // ============================================================================
 // ERROR CATEGORIES - Clear, distinguishable error prefixes for debugging
@@ -3283,6 +3284,9 @@ export async function executePerpOrder(
       const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
       const agentPubkey = expectedAgentPubkey || '';
 
+      const oraclePrice = await getMarketPrice(market).catch(() => null);
+      console.log(`[Drift] Swift oracle price for ${market}: ${oraclePrice}`);
+
       const swiftResult = await executeSwiftOrder({
         privateKeyBase58: rawKey,
         agentPublicKey: agentPubkey,
@@ -3293,6 +3297,7 @@ export async function executePerpOrder(
         subAccountId,
         reduceOnly,
         slippageBps,
+        oraclePrice: oraclePrice || undefined,
       });
 
       if (swiftResult.success) {
@@ -3530,6 +3535,9 @@ export async function closePerpPosition(
       const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
       const agentPubkey = expectedAgentPubkey || '';
 
+      const oraclePrice = await getMarketPrice(market).catch(() => null);
+      console.log(`[Drift] Swift close oracle price for ${market}: ${oraclePrice}`);
+
       const swiftResult = await executeSwiftOrder({
         privateKeyBase58: rawKey,
         agentPublicKey: agentPubkey,
@@ -3540,6 +3548,7 @@ export async function closePerpPosition(
         subAccountId,
         reduceOnly: true,
         slippageBps,
+        oraclePrice: oraclePrice || undefined,
       });
 
       if (swiftResult.success) {
@@ -3553,17 +3562,7 @@ export async function closePerpPosition(
         };
       }
 
-      if (swiftResult.errorClassification === 'permanent') {
-        console.error(`[Drift] Swift close permanent error for ${market}: ${swiftResult.error}`);
-        recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
-        return {
-          success: false,
-          error: swiftResult.error,
-          executionMethod: 'swift',
-        };
-      }
-
-      console.log(`[Drift] Swift close failed (${swiftResult.errorClassification}), falling back to legacy: ${swiftResult.error}`);
+      console.log(`[Drift] Swift close failed (${swiftResult.errorClassification}), ALWAYS falling back to legacy for close orders: ${swiftResult.error}`);
       recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
       recordSwiftFallback(market);
     } catch (swiftError: any) {
