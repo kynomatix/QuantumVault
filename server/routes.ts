@@ -3113,6 +3113,7 @@ export async function registerRoutes(
       const closeSide: 'long' | 'short' = onChainPosition.side === 'LONG' ? 'short' : 'long';
       const closeSize = Math.abs(onChainPosition.size);
 
+      const positionSide: 'long' | 'short' = onChainPosition.side === 'LONG' ? 'long' : 'short';
       console.log(`[ClosePosition] Closing ${closeSize} ${bot.market} (${closeSide}) with closePerpPosition (exact BN precision)`);
 
       // Create trade record BEFORE attempting close (with pending status)
@@ -3134,13 +3135,16 @@ export async function registerRoutes(
       console.log(`[ClosePosition] Created pending trade record: ${pendingCloseTrade.id}`);
 
       // Execute close order using closePerpPosition for exact BN precision
-      // This prevents JavaScript float precision issues (e.g., 0.4374 → 437399999 instead of 437400000)
+      // Pass positionSizeBase and positionSide so Swift can be used for closes
       const result = await closePerpPosition(
         wallet.agentPrivateKeyEncrypted,
         bot.market,
         subAccountId,
+        closeSize,
+        closeSlippageBps,
         undefined,
-        closeSlippageBps
+        wallet.agentPublicKey,
+        positionSide
       );
 
       // Map closePerpPosition result format (signature) to expected format (txSignature)
@@ -3353,13 +3357,14 @@ export async function registerRoutes(
 
       // Update the pending trade record to executed status with PnL
       await storage.updateBotTrade(pendingCloseTrade.id, {
-        price: String(fillPrice),
+        price: result.fillPrice ? String(result.fillPrice) : String(fillPrice),
         fee: String(closeFee),
         pnl: tradePnl !== 0 ? String(tradePnl) : null,
         status: "executed",
         txSignature: finalTxSignature,
-        webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice, exitPrice: fillPrice },
+        webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice, exitPrice: result.fillPrice || fillPrice },
         errorMessage: verificationWarning,
+        executionMethod: result.executionMethod || 'legacy',
       });
 
       // Sync position from on-chain (updates database with actual Drift state)
@@ -5547,6 +5552,7 @@ export async function registerRoutes(
         // Determine close side (opposite of current position)
         const closeSide = onChainPosition.side === 'LONG' ? 'short' : 'long';
         const closeSize = Math.abs(currentPositionSize);
+        const webhookPositionSide: 'long' | 'short' = onChainPosition.side === 'LONG' ? 'long' : 'short';
         
         // Capture entry price BEFORE trying to close (needed for retry queue if close fails)
         const closeEntryPrice = onChainPosition.entryPrice || 0;
@@ -5566,8 +5572,7 @@ export async function registerRoutes(
         
         try {
           // Execute close order on Drift using closePerpPosition
-          // CRITICAL: Do NOT pass closeSize - let the subprocess query exact BN from DriftClient
-          // This prevents JavaScript float precision loss (e.g., 0.4374 → 437399999 instead of 437400000)
+          // Pass closeSize and positionSide so Swift can be used for closes
           const subAccountId = bot.driftSubaccountId ?? 0;
           const closeSlippageBps2 = wallet.slippageBps ?? 50;
           const execStartTime = Date.now();
@@ -5576,9 +5581,11 @@ export async function registerRoutes(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
             subAccountId,
-            undefined,
+            closeSize,
             closeSlippageBps2,
-            privateKeyBase58
+            privateKeyBase58,
+            wallet.agentPublicKey!,
+            webhookPositionSide
           );
           
           // closePerpPosition returns { success, signature, error } - map to expected format
@@ -5716,10 +5723,11 @@ export async function registerRoutes(
               await storage.updateBotTrade(closeTrade.id, {
                 status: "executed",
                 txSignature: finalTxSignature,
-                price: signalPrice,
+                price: result.fillPrice ? String(result.fillPrice) : signalPrice,
                 fee: String(closeFee),
                 pnl: closeTradePnl !== 0 ? String(closeTradePnl) : null,
                 errorMessage: `WARNING: Position not fully closed after ${maxRetries} attempts. Remaining: ${finalPositionRemaining.side} ${finalPositionRemaining.size}`,
+                executionMethod: result.executionMethod || 'legacy',
               });
               
               await storage.updateWebhookLog(log.id, { 
@@ -5744,9 +5752,10 @@ export async function registerRoutes(
             await storage.updateBotTrade(closeTrade.id, {
               status: "executed",
               txSignature: finalTxSignature,
-              price: signalPrice,
+              price: result.fillPrice ? String(result.fillPrice) : signalPrice,
               fee: String(closeFee),
               pnl: closeTradePnl !== 0 ? String(closeTradePnl) : null,
+              executionMethod: result.executionMethod || 'legacy',
             });
             
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
