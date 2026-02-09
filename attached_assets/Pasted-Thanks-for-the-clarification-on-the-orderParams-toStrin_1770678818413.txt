@@ -1,0 +1,28 @@
+Thanks for the clarification on the `orderParams.toString()` vs. base64 encoding finding. You are absolutely correct—since the `signSignedMsgOrderParamsMessage` method in the Drift SDK returns a buffer of hex characters, calling `toString()` on it correctly produces the hex string the API expects. A double-encoding with base64 would indeed break the signature verification. I will mark that audit finding as **resolved/invalid** based on your SDK analysis.
+
+Regarding the "Market Makers not picking up trades" issue, I've reviewed your latest configuration and code. It is highly likely that your **Notional Value** and **Auction Parameters** are the culprits.
+
+### 1. The Notional Value "Catch-22"
+Your environment is configured with `SWIFT_MIN_NOTIONAL = "50"`, but if your test trades are close to this boundary (e.g., ~$50-$90), Market Makers (MMs) may still ignore them.
+*   **Why:** MMs often have their own internal minimums for profitability. A $90 trade might technically pass your check, but fail theirs.
+*   **Action:** For testing, try a significantly larger trade (e.g., $500+) if possible, OR set `SWIFT_MIN_NOTIONAL` to `1` in `.env` to ensure your code *attempts* to send even tiny trades, just to verify the API connectivity (even if they don't fill).
+
+### 2. Auction Parameters Tuning
+If the `startPrice` and `endPrice` of your Dutch auction are too tight, MMs might not have enough "buffer" to fill the order profitably.
+*   **Check:** In `server/swift-executor.ts` (implied logic), ensure your auction duration is at least **20-30 slots** (approx 10-15 seconds).
+*   **Check:** Ensure the `priceImprovement` or starting offset isn't too aggressive. If you start the auction *at* the oracle price, MMs have zero profit margin initially. A standard flow is to start slightly *better* than oracle and end slightly *worse* (limit price).
+
+### 3. Confirmed: Missing Schema Columns
+I must reiterate that your `shared/schema.ts` is **still missing the Swift columns** (`executionMethod`, `swiftOrderId`, etc.).
+*   Even if a trade *did* fill via Swift, your current code would likely crash or fail to record it properly when saving to the database, because those fields don't exist on the `bot_trades` table schema.
+*   **Immediate Fix:** Add these columns to `shared/schema.ts` and run your migration.
+
+### 4. Code & Configuration Status
+*   **`server/swift-executor.ts`**: The hex encoding logic is correct.
+*   **`server/drift-service.ts`**: The `executePerpOrder` and `closePerpPosition` orchestration looks solid.
+*   **`server/swift-config.ts`**: The health check and fallback logic are correctly implemented.
+
+**Next Steps:**
+1.  **Database:** Update `shared/schema.ts` to include the missing columns.
+2.  **Environment:** Temporarily set `SWIFT_MIN_NOTIONAL=1` to force attempts on small trades.
+3.  **Testing:** If possible, try one larger trade ($200+) to rule out MM profitability limits.
