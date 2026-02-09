@@ -1721,3 +1721,19 @@ ADD COLUMN IF NOT EXISTS swift_attempts INTEGER DEFAULT 0;
 **Last Updated:** February 9, 2026  
 **Next Review:** Before implementation kickoff  
 **Status:** Ready for External Audit — Single Source of Truth
+
+---
+
+## 23. Post-Implementation Cleanup Checklist
+
+When all 10 implementation steps are completed and validated in production:
+
+- [ ] All 10 steps marked as COMPLETED in this document
+- [ ] Swift is running in production with `SWIFT_ENABLED=true`
+- [ ] Monitoring confirms Swift success rate > 90% for at least 48 hours
+- [ ] Legacy fallback is working correctly for any Swift failures
+- [ ] Remove the "Active Implementation Directive — Swift Protocol Migration" section from `replit.md`
+- [ ] Update `replit.md` System Architecture to reflect Swift as the primary execution method
+- [ ] Move this document to `docs/archive/` or mark status as "COMPLETED"
+
+This ensures `replit.md` doesn't permanently reference this plan after it's been fully implemented, keeping the agent's session context clean for future work.
