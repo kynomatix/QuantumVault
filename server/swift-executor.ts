@@ -59,23 +59,27 @@ function computeAuctionParams(params: {
   slippageBps?: number;
 }) {
   if (!params.oraclePrice || params.oraclePrice <= 0) {
-    return { auctionDuration: 10, auctionStartPrice: new BN(0), auctionEndPrice: new BN(0) };
+    return { auctionDuration: 20, auctionStartPrice: new BN(0), auctionEndPrice: new BN(0), limitPrice: new BN(0) };
   }
 
   const slipBps = params.slippageBps || 50;
   const pricePrecision = Number(PRICE_PRECISION);
   const oracleBn = Math.round(params.oraclePrice * pricePrecision);
 
-  const auctionDuration = 10;
+  const auctionDuration = 20;
+
+  const startBufferBps = 5;
 
   if (params.side === 'long') {
-    const startPrice = new BN(oracleBn);
+    const startPrice = new BN(Math.round(oracleBn * (1 - startBufferBps / 10000)));
     const endPrice = new BN(Math.round(oracleBn * (1 + slipBps / 10000)));
-    return { auctionDuration, auctionStartPrice: startPrice, auctionEndPrice: endPrice };
+    const limitPrice = new BN(Math.round(oracleBn * (1 + slipBps * 2 / 10000)));
+    return { auctionDuration, auctionStartPrice: startPrice, auctionEndPrice: endPrice, limitPrice };
   } else {
-    const startPrice = new BN(oracleBn);
+    const startPrice = new BN(Math.round(oracleBn * (1 + startBufferBps / 10000)));
     const endPrice = new BN(Math.round(oracleBn * (1 - slipBps / 10000)));
-    return { auctionDuration, auctionStartPrice: startPrice, auctionEndPrice: endPrice };
+    const limitPrice = new BN(Math.round(oracleBn * (1 - slipBps * 2 / 10000)));
+    return { auctionDuration, auctionStartPrice: startPrice, auctionEndPrice: endPrice, limitPrice };
   }
 }
 
@@ -110,7 +114,7 @@ function buildSwiftMessage(params: {
     baseAssetAmount: baseAmount,
     reduceOnly: params.reduceOnly,
     userOrderId: 0,
-    price: new BN(0),
+    price: auction.limitPrice,
     bitFlags: 0,
     auctionDuration: auction.auctionDuration,
     auctionStartPrice: auction.auctionStartPrice,
@@ -211,6 +215,8 @@ export async function executeSwiftOrder(params: SwiftOrderParams): Promise<Swift
       oraclePrice: params.oraclePrice,
     });
 
+    const ap = swiftMessage.signedMsgOrderParams;
+    swiftLog(`Auction params: side=${params.side} start=${ap.auctionStartPrice?.toString()} end=${ap.auctionEndPrice?.toString()} limit=${ap.price?.toString()} duration=${ap.auctionDuration} oracle=${params.oraclePrice}`);
     swiftLog(`Built Swift message, signing...`);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK OrderParams type has many optional fields filled at runtime
     const signed = driftClient.signSignedMsgOrderParamsMessage(swiftMessage as any);
