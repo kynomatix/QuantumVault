@@ -1,11 +1,12 @@
 # Swift Protocol Migration Plan
 
 **Document Created:** January 21, 2026  
-**Last Updated:** January 26, 2026  
+**Last Updated:** February 9, 2026  
 **Priority:** Medium (Roadmap V2)  
 **Estimated Effort:** 3-4 weeks development + 2 weeks testing  
-**Status:** Planning (Pending 3rd Party Audit)  
-**Version:** 2.0
+**Status:** Planning (Audited - V3 Updated)  
+**Version:** 3.0  
+**V3 Changelog:** Codebase audit against production system, Swift API research, SDK method verification, market support validation
 
 ---
 
@@ -29,6 +30,7 @@
 16. [Rollback Plan](#rollback-plan)
 17. [Success Metrics](#success-metrics)
 18. [Appendices](#appendices)
+19. [V3 Audit Findings & Corrections](#v3-audit-findings--corrections)
 
 ---
 
@@ -47,6 +49,18 @@ This document outlines the comprehensive migration plan to integrate Swift into 
 | Slippage | Market order instant fill | Dutch auction (better prices) |
 | MEV Protection | None | Built-in |
 | SOL Balance Required | Yes (agent wallet) | No (for trading, still needed for withdrawals) |
+
+### RPC Impact Analysis (V3 Updated)
+
+Swift's primary advantage for QuantumVault is **massive RPC usage reduction**, especially for subscriber routing:
+
+| Scenario | Current RPC Calls | With Swift | Reduction |
+|----------|------------------|------------|-----------|
+| Single trade | ~2 heavy (simulate + send) | 1 light (getSlot) | ~90% |
+| 10 subscribers | ~20 heavy calls | 1 getSlot + 10 HTTP POSTs to swift.drift.trade | ~95% |
+| 15 subscribers | ~30 heavy calls | 1 getSlot + 15 HTTP POSTs to swift.drift.trade | ~97% |
+
+**Key insight:** Swift POST requests go to `swift.drift.trade`, NOT to Helius/Triton RPC. They do not count against the 50 req/sec Helius Dev tier limit. Only position checks and getSlot still use RPC.
 
 ### Cost Savings Projection
 
@@ -142,28 +156,47 @@ POST /api/trading-bots/:id/manual-trade
 
 **File:** `server/routes.ts` (lines ~3210-3400)
 
-#### Path 3: Subscriber Routing (`routeSignalToSubscribers()`)
+#### Path 3: Subscriber Routing (`routeSignalToSubscribers()`) — V3 UPDATED
+
+**V3 CORRECTION:** Subscriber routing is now **decoupled** from source bot execution status. The plan originally described routing as happening only after a successful source bot trade. The current system has **4 routing trigger points**:
 
 ```
-Published Bot Webhook Received
+Signal Received at Webhook
        │
-       ▼
+       ├─▶ Source bot PAUSED? ─────▶ parseSignalForRouting() ─▶ routeSignalToSubscribers() ─▶ return 400
+       │
+       ├─▶ Auth DISABLED? ─────────▶ parseSignalForRouting() ─▶ routeSignalToSubscribers() ─▶ return 403
+       │
+       ├─▶ Auth EXPIRED? ─────────▶ parseSignalForRouting() ─▶ routeSignalToSubscribers() ─▶ return 403
+       │
+       ├─▶ Source bot executes OK ─▶ routeSignalToSubscribers() ─▶ continue
+       │
+       └─▶ Retry worker succeeds ──▶ routeSignalToSubscribers() (via registerRoutingCallback)
+```
+
+**Key design feature:** `parseSignalForRouting()` extracts signal data (action, contracts, price, isCloseSignal) **without decrypting the agent key**, enabling routing at early-exit points before key decryption.
+
+The routing function itself:
+```
 ┌─────────────────────────────────────┐
 │ 1. Find all active subscribers      │
 │ 2. For each subscriber bot:         │
 │    a. Get subscriber wallet         │
 │    b. Compute proportional sizing   │
+│       via computeTradeSizingAndTopUp│
 │    c. Decrypt subscriber agent key  │  ◀── Uses LEGACY path (not UMK)
 │    d. Call executePerpOrder()       │
 │    e. Log trade                     │
 │    f. If close + profit → share     │
-│ 3. Execute in parallel (batched)    │
+│ 3. Execute in parallel              │
 └─────────────────────────────────────┘
 ```
 
-**File:** `server/routes.ts` (lines ~650-900)
+**File:** `server/routes.ts` (lines ~650-1100)
 
 **CRITICAL NOTE:** Subscriber routing uses the **legacy encrypted key path** because subscriber wallet owners don't have active sessions. Their UMK is not available. This is documented in `PHASE 6.2 SECURITY NOTE`.
+
+**Swift integration must support all 4 routing trigger points.** The Swift executor wrapper should work identically regardless of which trigger point initiated routing.
 
 #### Path 4: Trade Retry Worker (`trade-retry-service.ts`)
 
@@ -199,6 +232,14 @@ Failed Trade (rate limit, transient error)
 - Critical priority (closes): 10 max attempts, 2.5s base backoff
 - Max backoff: 60 seconds
 - Queue persisted to `trade_retry_queue` table
+
+**V3 UPDATE - Cooldown Retry System:** The retry service now includes a cooldown re-queue mechanism not covered in the original plan:
+- After exhausting normal retries (5 or 10 attempts), timeout errors trigger a **cooldown re-queue**
+- `cooldownRetries` field tracks delayed re-queue count (max 2)
+- `COOLDOWN_DELAY_MS` = 2 minutes between cooldown re-queues
+- Swift retry strategy must integrate with this: Swift failures should count toward cooldown eligibility
+
+**V3 UPDATE - Routing on Retry Success:** The retry worker routes signals to subscribers on successful retry via `registerRoutingCallback`. Swift retries that succeed must also trigger this routing callback.
 
 ### RPC Failover Architecture
 
@@ -341,7 +382,62 @@ Client                    Swift API                Market Makers        Solana
 | Fill Price | AMM price | Auction-determined (usually better) |
 | Latency | 400-800ms (block time) | Sub-second |
 | Failure Mode | RPC/blockchain errors | API errors + no liquidity |
-| Reduce-Only | Native flag | Different semantics (TBD) |
+| Reduce-Only | Native flag | Native flag (confirmed supported) |
+
+### Market Support (V3 Updated - February 2026)
+
+**Swift supports ALL perpetual futures markets on Drift.** This was confirmed via official Drift documentation and the March 2025 launch announcement. The original plan's assumption that only SOL/BTC/ETH were supported is incorrect.
+
+All 85+ markets in QuantumVault's `PERP_MARKET_INDICES` are Swift-eligible, including:
+- Major pairs: SOL, BTC, ETH
+- Currently traded: RENDER, FARTCOIN, PENGU, TNSR, AVAX, IP, XPL
+- All other listed perpetual futures
+
+**No market allowlist is needed.** The `supportedMarkets` config proposed in the original plan should be removed or replaced with a dynamic check.
+
+Spot market Swift support was announced as "coming soon" in March 2025 but has not been confirmed as live.
+
+### SDK Integration (V3 Updated)
+
+The Drift SDK (`@drift-labs/sdk`) has built-in Swift methods on `DriftClient`:
+
+| Method | Purpose |
+|--------|---------|
+| `encodeSwiftOrderParamsMessage()` | Encode order params for signing |
+| `decodeSwiftOrderParamsMessage()` | Decode Swift order messages |
+| `encodeSwiftServerMessage()` | Encode server-side Swift messages |
+| `decodeSwiftServerMessage()` | Decode server responses |
+| `placeAndMakeSwiftPerpOrder()` | Full Swift perp order (maker side) |
+
+**Swift Order Flow (from official v2-teacher docs):**
+
+```typescript
+// 1. Build order message with current slot and UUID
+const swiftMessage = SignedMsgOrderParamsMessage({
+  signed_msg_order_params: orderParams,
+  sub_account_id: subAccountId,
+  slot: currentSlot,           // 1 RPC call: getSlot
+  uuid: generateSignedMsgUUID(),
+  stop_loss_order_params: null,
+  take_profit_order_params: null
+});
+
+// 2. Sign with agent keypair (same key used for legacy transactions)
+const signed = driftClient.signSignedMsgOrderParamsMessage(swiftMessage);
+
+// 3. POST to Swift API (NOT RPC - does not count against Helius rate limit)
+const response = await axios.post('https://swift.drift.trade/orders', {
+  market_index: marketIndex,
+  market_type: 'perp',
+  message: signed.message,       // base64-encoded
+  signature: signed.signature,   // base64-encoded
+  taker_authority: agentPublicKey
+});
+```
+
+**Builder Codes:** Swift orders exclusively support Drift Builder Codes for revenue sharing. Registering as a builder would earn a fee on every Swift trade the platform executes - potential additional revenue stream.
+
+**Drift v3 Context:** Drift v3 launched December 2025 with 85% of orders filling within 400ms. Swift is being made the default trading method platform-wide.
 
 ---
 
@@ -483,8 +579,9 @@ export const SWIFT_CONFIG = {
   retryDelayMs: 500,
   fallbackOnError: true,
   
-  // Markets that support Swift (update as liquidity improves)
-  supportedMarkets: ['SOL-PERP', 'BTC-PERP', 'ETH-PERP'],
+  // V3 UPDATE: Swift supports ALL perp markets on Drift (confirmed Feb 2026).
+  // No market allowlist needed. All 85+ markets in PERP_MARKET_INDICES are eligible.
+  // Removed hardcoded supportedMarkets - all perps use Swift by default.
   
   // Error classification
   retryableErrors: [
@@ -1385,19 +1482,18 @@ Swift integration maintains this behavior - subscriber trades use the legacy key
 
 ## Swift-Specific Limitations
 
-### Reduce-Only Semantics
+### Reduce-Only Semantics (V3 Updated)
 
 **Legacy behavior:** `reduceOnly: true` ensures order only reduces position.
 
-**Swift considerations:**
-- Verify Swift API supports `reduceOnly` flag
-- If not, must verify position exists before submitting close order
-- May need to fetch on-chain position state first
+**V3 CONFIRMED:** Swift natively supports the `reduceOnly` flag with identical semantics to legacy orders. The `immediateOrCancel` (IOC) flag is also supported. No special handling needed for reduce-only Swift orders.
+
+**Position verification before close:** Even though `reduceOnly` is supported, the system should still verify position existence via `PositionService.getPositionForExecution()` before submitting close orders, consistent with current behavior:
 
 ```typescript
 async function executeSwiftClose(params: CloseParams): Promise<SwiftOrderResult> {
   // First verify position exists
-  const position = await getOnChainPosition(params.subAccountId, params.marketIndex);
+  const position = await PositionService.getPositionForExecution(params.botId, params.agentPublicKey, params.subAccountId, params.market);
   
   if (!position || position.baseAssetAmount.isZero()) {
     return {
@@ -1505,26 +1601,18 @@ if (positionSize < MINIMUM_SWIFT_ORDER_SIZE) {
 }
 ```
 
-### Market Liquidity Variations
+### Market Liquidity Variations (V3 Updated)
 
-Not all markets have equal Swift liquidity.
+**V3 CORRECTION:** The original plan assumed only 3 markets (SOL, BTC, ETH) had Swift liquidity. As of February 2026, Swift is live for **all perpetual futures markets** on Drift. The tiered liquidity model is no longer needed.
 
-**Implementation:**
+**Recommended approach:** Use Swift for all markets with automatic fallback to legacy. Monitor per-market fill rates and auction durations via the metrics system. If a specific market consistently fails on Swift (>10% failure rate over 24h), log a warning but continue attempting Swift with fallback.
+
 ```typescript
-const SWIFT_MARKET_TIERS = {
-  HIGH_LIQUIDITY: ['SOL-PERP', 'BTC-PERP', 'ETH-PERP'],
-  MEDIUM_LIQUIDITY: ['DOGE-PERP', 'AVAX-PERP', 'MATIC-PERP'],
-  LOW_LIQUIDITY: ['BONK-PERP', 'PYTH-PERP', 'JTO-PERP'],
-};
-
-function getSwiftRecommendation(market: string): 'swift' | 'legacy' | 'swift_with_fallback' {
-  if (SWIFT_MARKET_TIERS.HIGH_LIQUIDITY.includes(market)) {
-    return 'swift';
-  }
-  if (SWIFT_MARKET_TIERS.MEDIUM_LIQUIDITY.includes(market)) {
-    return 'swift_with_fallback';
-  }
-  return 'legacy'; // Low liquidity, prefer on-chain
+// V3: No market tier system needed. All markets use Swift with fallback.
+function shouldUseSwift(market: string): boolean {
+  if (!isSwiftAvailable()) return false;
+  // All perp markets are Swift-eligible
+  return true;
 }
 ```
 
@@ -1742,8 +1830,8 @@ const SWIFT_FEATURE_FLAGS = {
   SWIFT_GLOBALLY_ENABLED: true,
   SWIFT_PERCENTAGE_ROLLOUT: 10, // 10% of requests use Swift
   
-  // Per-market controls
-  SWIFT_MARKETS_ENABLED: ['SOL-PERP', 'BTC-PERP', 'ETH-PERP'],
+  // V3 UPDATE: All perp markets support Swift. No market allowlist needed.
+  // SWIFT_MARKETS_ENABLED removed - all markets eligible by default.
   
   // Behavioral controls
   SWIFT_FALLBACK_ENABLED: true,
@@ -1834,6 +1922,102 @@ WHERE id = 'affected-bot-id';
 | Fallback rate | < 5% | Fallback / Swift attempts |
 | User satisfaction | Positive feedback | Reduced SOL top-up requests |
 | Retry reduction | 30% fewer retries | Compare retry queue size |
+
+---
+
+---
+
+## V3 Audit Findings & Corrections
+
+**Audit Date:** February 9, 2026  
+**Scope:** Full codebase audit against production system + Swift API research
+
+### Finding 1: Decoupled Subscriber Routing (Critical)
+
+**Original assumption:** Routing happens only after successful source bot trade.  
+**Reality:** System now has 4 routing trigger points using `parseSignalForRouting()` for lightweight signal extraction without key decryption. Routing works when source bot is paused, auth disabled, auth expired, or executing normally. Retry worker also routes via `registerRoutingCallback`.  
+**Impact:** Swift integration must work at all 4 trigger points, not just post-trade.  
+**Status:** Updated in Path 3 documentation above.
+
+### Finding 2: Unified Trade Sizing (`computeTradeSizingAndTopUp`)
+
+**Original assumption:** Plan's Swift execution paths bypass trade sizing.  
+**Reality:** A 300+ line unified helper handles auto top-up, profit reinvestment mode, dynamic leverage capping, minimum order enforcement, and bot auto-pause on insufficient funds. All trade execution paths go through this.  
+**Impact:** Swift trades MUST route through `computeTradeSizingAndTopUp` before order submission. Do not bypass it.  
+**Status:** Updated in subscriber routing code examples.
+
+### Finding 3: PositionService for Close Verification
+
+**Original assumption:** Plan references generic "getOnChainPosition" for reduce-only checks.  
+**Reality:** `PositionService.getPositionForExecution()` is the established path. Uses byte-parsing (not SDK) to avoid WebSocket memory leaks.  
+**Impact:** Swift close orders should use `PositionService`, not build a new position check.  
+**Status:** Updated in Reduce-Only Semantics section.
+
+### Finding 4: All Perp Markets Support Swift
+
+**Original assumption:** Only SOL, BTC, ETH supported.  
+**Reality:** Swift launched March 2025 for ALL perpetual futures markets on Drift. All 85+ markets in QuantumVault's `PERP_MARKET_INDICES` are eligible.  
+**Impact:** Remove `supportedMarkets` allowlist. No market tiering needed.  
+**Status:** Updated throughout document.
+
+### Finding 5: Reduce-Only Natively Supported
+
+**Original assumption:** "Different semantics (TBD)" for reduce-only.  
+**Reality:** Swift natively supports `reduceOnly` flag with identical semantics to legacy orders.  
+**Impact:** No special reduce-only handling needed.  
+**Status:** Updated in Swift-Specific Limitations section.
+
+### Finding 6: Cooldown Retry System
+
+**Original assumption:** Plan doesn't account for cooldown retries.  
+**Reality:** Retry service has `cooldownRetries` field and 2-minute cooldown re-queue for timeout errors (max 2 cooldown retries).  
+**Impact:** Swift retry strategy must integrate with cooldown system.  
+**Status:** Updated in Path 4 documentation.
+
+### Finding 7: Subprocess Architecture Decision
+
+**Original assumption:** Not addressed.  
+**Reality:** Current trades run in `drift-executor.mjs` subprocess via stdin/stdout JSON. Swift is sign-message + HTTP POST (no heavy transaction building).  
+**Recommendation:** Run Swift in main Node process (lighter weight), keep legacy subprocess as fallback. This avoids modifying `drift-executor.mjs` and is architecturally cleaner since Swift doesn't need process isolation.  
+**Status:** New architectural recommendation.
+
+### Finding 8: SDK Has Built-in Swift Methods
+
+**Original assumption:** Plan proposes custom HTTP client for Swift API.  
+**Reality:** `@drift-labs/sdk` DriftClient has `encodeSwiftOrderParamsMessage()`, `decodeSwiftServerMessage()`, `placeAndMakeSwiftPerpOrder()`, and related methods.  
+**Impact:** Can leverage SDK methods instead of building from scratch.  
+**Status:** Updated in Swift Protocol Overview section.
+
+### Finding 9: Builder Codes Revenue Opportunity
+
+**Original assumption:** Not mentioned.  
+**Reality:** Builder Codes are limited to Swift orders only. Registering as a Drift builder would earn platform fees on every Swift trade executed.  
+**Impact:** Additional revenue stream worth exploring during implementation.  
+**Status:** Noted in SDK Integration section.
+
+### Finding 10: Latency Budget Gap
+
+**Original assumption:** Plan doesn't specify total timeout for Swift attempt + fallback.  
+**Reality:** Need aggressive Swift timeout (recommended 3 seconds) so Swift + fallback total stays under 5 seconds. Current webhook response time is 1-2 seconds.  
+**Impact:** Add `SWIFT_ORDER_TIMEOUT_MS: 3000` config (not 5000 as originally proposed).  
+**Status:** Recommended config change.
+
+### Finding 11: Subscriber Batch Efficiency
+
+**Original assumption:** Each subscriber independently discovers Swift failure and falls back.  
+**Reality:** For batches of N subscribers, if Swift goes unhealthy mid-batch, remaining subscribers should skip Swift proactively.  
+**Impact:** Add shared `swiftHealthy` flag checked at start of each subscriber execution within a batch.  
+**Status:** New recommendation for subscriber routing.
+
+### Finding 12: Database Schema - No Swift Fields Exist Yet
+
+**Original assumption:** Plan proposes adding `swiftEnabled` per bot and `executionMethod` per trade.  
+**Reality:** Neither `tradingBots` nor `bot_trades` schemas have any Swift-related columns. Current `trade_retry_queue` also lacks Swift fields.  
+**Impact:** Schema migration needed before implementation. Fields to add:
+- `bot_trades`: `executionMethod` (text, 'swift' | 'legacy')
+- `trade_retry_queue`: Consider adding `swiftAttempts`, `lastSwiftError` columns
+- `tradingBots`: Consider global Swift config vs per-bot `swiftEnabled` flag  
+**Status:** Schema migration required as Phase 1 prerequisite.
 
 ---
 
@@ -1986,10 +2170,11 @@ CREATE INDEX IF NOT EXISTS idx_swift_order_logs_event_type ON swift_order_logs(e
 |---------|------|--------|---------|
 | 1.0 | 2026-01-21 | Engineering | Initial draft |
 | 2.0 | 2026-01-26 | Engineering | Comprehensive gap analysis update; added detailed architecture documentation, all 4 execution paths, profit sharing integration, retry service integration, security V3 compatibility, Swift limitations, observability requirements, comprehensive testing plan |
+| 3.0 | 2026-02-09 | Engineering + AI Audit | Codebase audit: decoupled routing, computeTradeSizingAndTopUp, PositionService, all-market support, SDK methods, cooldown retries, subprocess architecture, Builder Codes |
 
 ---
 
 **Document Maintained By:** Engineering Team  
-**Last Updated:** January 26, 2026  
+**Last Updated:** February 9, 2026  
 **Next Review:** Before implementation kickoff  
-**Status:** Ready for 3rd Party Audit
+**Status:** Planning (Audited - V3 Updated)
