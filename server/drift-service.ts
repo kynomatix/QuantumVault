@@ -600,10 +600,11 @@ async function getAgentDriftClient(
   // CRITICAL FIX: Create BulkAccountLoader for polling mode
   // The SDK requires an accountLoader when using polling subscription type
   // Without this, PollingUserAccountSubscriber.addAccount() fails with "undefined" error
-  const accountLoader = new BulkAccountLoader(connection, 'confirmed', 1000);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Connection type mismatch between project and SDK-bundled @solana/web3.js versions
+  const accountLoader = new BulkAccountLoader(connection as any, 'confirmed', 1000);
   
   const driftClient = new DriftClient({
-    connection,
+    connection: connection as any,
     wallet,
     programID: new PublicKey(sdkConfig.DRIFT_PROGRAM_ID),
     env: sdkEnv,
@@ -2934,11 +2935,11 @@ export async function executeAgentTransferBetweenSubaccounts(
     const sdkEnv = IS_MAINNET ? 'mainnet-beta' : 'devnet';
     const sdkConfig = initialize({ env: sdkEnv });
     
-    // CRITICAL FIX: Create BulkAccountLoader for polling mode
-    const accountLoader = new BulkAccountLoader(connection, 'confirmed', 1000);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Connection type mismatch between project and SDK-bundled @solana/web3.js versions
+    const accountLoader = new BulkAccountLoader(connection as any, 'confirmed', 1000);
     
     const driftClient = new DriftClient({
-      connection,
+      connection: connection as any,
       wallet,
       programID: new PublicKey(sdkConfig.DRIFT_PROGRAM_ID),
       env: sdkEnv,

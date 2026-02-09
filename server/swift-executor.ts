@@ -59,7 +59,8 @@ function computeAuctionParams(params: {
   slippageBps?: number;
 }) {
   if (!params.oraclePrice || params.oraclePrice <= 0) {
-    return { auctionDuration: 20, auctionStartPrice: new BN(0), auctionEndPrice: new BN(0), limitPrice: new BN(0) };
+    swiftLog(`SKIP: oracle price missing or zero (${params.oraclePrice}), cannot build valid auction`);
+    return null;
   }
 
   const slipBps = params.slippageBps || 50;
@@ -105,6 +106,10 @@ function buildSwiftMessage(params: {
     oraclePrice: params.oraclePrice,
     slippageBps: params.slippageBps,
   });
+
+  if (!auction) {
+    return null;
+  }
 
   const orderParams = {
     orderType: OrderType.MARKET,
@@ -214,6 +219,16 @@ export async function executeSwiftOrder(params: SwiftOrderParams): Promise<Swift
       slippageBps: params.slippageBps,
       oraclePrice: params.oraclePrice,
     });
+
+    if (!swiftMessage) {
+      swiftLog(`SKIP: cannot build Swift message (oracle price missing/zero), falling back to legacy`);
+      return {
+        success: false,
+        executionMethod: 'swift' as const,
+        error: 'Oracle price unavailable, cannot build valid auction parameters',
+        errorClassification: 'fallback_legacy',
+      };
+    }
 
     const ap = swiftMessage.signedMsgOrderParams;
     swiftLog(`Auction params: side=${params.side} start=${ap.auctionStartPrice?.toString()} end=${ap.auctionEndPrice?.toString()} limit=${ap.price?.toString()} duration=${ap.auctionDuration} oracle=${params.oraclePrice}`);
