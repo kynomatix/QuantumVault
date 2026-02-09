@@ -1,4 +1,4 @@
-import { Connection, Keypair } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import BN from 'bn.js';
 import bs58 from 'bs58';
 import {
@@ -13,6 +13,101 @@ import {
 } from '@drift-labs/sdk';
 import { SWIFT_CONFIG, classifySwiftError, recordSwiftSuccess, recordSwiftFailure, type SwiftErrorClassification } from './swift-config';
 import { getPrimaryRpcUrl } from './rpc-config';
+
+const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
+const SIGNED_MSG_NUM_ORDERS = 16;
+
+interface SignedMsgCacheEntry {
+  initialized: boolean;
+  checkedAt: number;
+}
+
+const signedMsgCache = new Map<string, SignedMsgCacheEntry>();
+const CACHE_TTL_SUCCESS_MS = 24 * 60 * 60 * 1000;
+const CACHE_TTL_FAILURE_MS = 10 * 60 * 1000;
+
+function getSignedMsgPda(authority: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from('SIGNED_MSG'), authority.toBuffer()],
+    DRIFT_PROGRAM_ID
+  )[0];
+}
+
+async function ensureSignedMsgAccount(
+  keypair: Keypair,
+  connection: Connection,
+  driftClient: DriftClient
+): Promise<boolean> {
+  const authorityStr = keypair.publicKey.toBase58();
+  const cached = signedMsgCache.get(authorityStr);
+
+  if (cached) {
+    const ttl = cached.initialized ? CACHE_TTL_SUCCESS_MS : CACHE_TTL_FAILURE_MS;
+    if (Date.now() - cached.checkedAt < ttl) {
+      if (cached.initialized) {
+        return true;
+      }
+      swiftLog(`SignedMsg PDA init previously failed for ${authorityStr.slice(0, 8)}..., retrying after cooldown`);
+    }
+  }
+
+  try {
+    const pda = getSignedMsgPda(keypair.publicKey);
+    const accountInfo = await connection.getAccountInfo(pda);
+
+    if (accountInfo && accountInfo.owner?.toBase58() === DRIFT_PROGRAM_ID.toBase58()) {
+      swiftLog(`SignedMsg PDA exists for ${authorityStr.slice(0, 8)}..., caching`);
+      signedMsgCache.set(authorityStr, { initialized: true, checkedAt: Date.now() });
+      return true;
+    }
+
+    swiftLog(`SignedMsg PDA missing for ${authorityStr.slice(0, 8)}..., initializing (numOrders=${SIGNED_MSG_NUM_ORDERS})`);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK bundles its own @solana/web3.js
+    const [, initIx] = await driftClient.getInitializeSignedMsgUserOrdersAccountIx(
+      keypair.publicKey as any,
+      SIGNED_MSG_NUM_ORDERS
+    );
+
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    const tx = new Transaction({ feePayer: keypair.publicKey, blockhash, lastValidBlockHeight });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK TransactionInstruction type mismatch
+    tx.add(initIx as any);
+    tx.sign(keypair);
+
+    const sig = await connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: true,
+      preflightCommitment: 'confirmed',
+    });
+    swiftLog(`SignedMsg init tx sent: ${sig}`);
+
+    const confirmation = await connection.confirmTransaction(
+      { signature: sig, blockhash, lastValidBlockHeight },
+      'confirmed'
+    );
+
+    if (confirmation.value.err) {
+      const errStr = JSON.stringify(confirmation.value.err);
+      if (errStr.includes('6214') || errStr.includes('3007')) {
+        swiftLog(`SignedMsg init got 6214/3007 - account already exists (stale RPC), caching as success`);
+        signedMsgCache.set(authorityStr, { initialized: true, checkedAt: Date.now() });
+        return true;
+      }
+      swiftLog(`SignedMsg init tx FAILED: ${errStr}`);
+      signedMsgCache.set(authorityStr, { initialized: false, checkedAt: Date.now() });
+      return false;
+    }
+
+    swiftLog(`SignedMsg PDA initialized successfully: ${sig}`);
+    signedMsgCache.set(authorityStr, { initialized: true, checkedAt: Date.now() });
+    return true;
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    swiftLog(`SignedMsg preflight error (non-fatal): ${msg}`);
+    signedMsgCache.set(authorityStr, { initialized: false, checkedAt: Date.now() });
+    return false;
+  }
+}
 
 export interface SwiftOrderParams {
   privateKeyBase58: string;
@@ -203,6 +298,17 @@ export async function executeSwiftOrder(params: SwiftOrderParams): Promise<Swift
 
     const driftClient = createLightweightDriftClient(keypair, connection);
     swiftLog(`DriftClient created`);
+
+    const signedMsgReady = await ensureSignedMsgAccount(keypair, connection, driftClient);
+    if (!signedMsgReady) {
+      swiftLog(`SignedMsg PDA not ready, falling back to legacy`);
+      return {
+        success: false,
+        executionMethod: 'swift' as const,
+        error: 'SignedMsg user account not initialized on-chain, falling back to legacy',
+        errorClassification: 'fallback_legacy' as SwiftErrorClassification,
+      };
+    }
 
     const uuid = generateSignedMsgUuid();
     const swiftOrderId = Buffer.from(uuid).toString('hex');

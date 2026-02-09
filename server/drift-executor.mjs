@@ -746,6 +746,79 @@ async function initializeDriftAccountsRaw(connection, keypair, subAccountId) {
   return true;
 }
 
+// Initialize SignedMsg user orders PDA (required for Swift Protocol)
+// This is per-authority (not per-subaccount) and only needs to be done once per wallet.
+// Uses DriftClient SDK method to build the instruction safely.
+// Non-blocking: failure here does NOT prevent account creation or legacy trading.
+const SIGNED_MSG_NUM_ORDERS = 16;
+
+function getSignedMsgPDA(authority) {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('SIGNED_MSG'), authority.toBuffer()],
+    DRIFT_PROGRAM_ID
+  );
+  return pda;
+}
+
+async function initializeSignedMsgAccountSafe(connection, keypair) {
+  try {
+    const authority = keypair.publicKey;
+    const pda = getSignedMsgPDA(authority);
+
+    const accountInfo = await connection.getAccountInfo(pda);
+    if (accountInfo && accountInfo.owner?.toBase58() === DRIFT_PROGRAM_ID.toBase58()) {
+      console.error('[Executor] SignedMsg PDA already exists, skipping init');
+      return true;
+    }
+
+    console.error(`[Executor] Initializing SignedMsg PDA for Swift (numOrders=${SIGNED_MSG_NUM_ORDERS})...`);
+
+    const wallet = new Wallet(keypair);
+    const driftClient = new DriftClient({
+      connection,
+      wallet,
+      env: process.env.DRIFT_ENV || 'mainnet-beta',
+    });
+
+    const [, initIx] = await driftClient.getInitializeSignedMsgUserOrdersAccountIx(
+      authority,
+      SIGNED_MSG_NUM_ORDERS
+    );
+
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    const tx = new Transaction({ feePayer: authority, blockhash, lastValidBlockHeight });
+    tx.add(initIx);
+    tx.sign(keypair);
+
+    const sig = await connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: true,
+      preflightCommitment: 'confirmed',
+    });
+    console.error(`[Executor] SignedMsg init tx sent: ${sig}`);
+
+    const confirmation = await connection.confirmTransaction(
+      { signature: sig, blockhash, lastValidBlockHeight },
+      'confirmed'
+    );
+
+    if (confirmation.value.err) {
+      const errStr = JSON.stringify(confirmation.value.err);
+      if (errStr.includes('6214') || errStr.includes('3007')) {
+        console.error('[Executor] SignedMsg init got 6214/3007 - account already exists (stale RPC)');
+        return true;
+      }
+      console.error(`[Executor] SignedMsg init tx FAILED (non-fatal): ${errStr}`);
+      return false;
+    }
+
+    console.error(`[Executor] SignedMsg PDA initialized successfully for Swift`);
+    return true;
+  } catch (err) {
+    console.error(`[Executor] SignedMsg init error (non-fatal, Swift will retry lazily): ${err.message}`);
+    return false;
+  }
+}
+
 // Known platform referrer wallet address (kryptolytix owner)
 // Used as fallback when ReferrerName account lookup fails
 const PLATFORM_REFERRER_WALLET = 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41';
@@ -1903,6 +1976,14 @@ async function depositToDrift(command) {
     
     // Wait for RPC to catch up
     await new Promise(resolve => setTimeout(resolve, 2500));
+    
+    // Proactively initialize SignedMsg PDA for Swift Protocol (non-blocking)
+    // Only attempt when SA0 was just created (first-time wallet setup)
+    if (!mainExists) {
+      initializeSignedMsgAccountSafe(connection, keypair)
+        .then(ok => console.error(`[Executor] SignedMsg proactive init: ${ok ? 'success' : 'deferred to Swift preflight'}`))
+        .catch(err => console.error(`[Executor] SignedMsg proactive init error (non-fatal): ${err.message}`));
+    }
   }
   
   // CRITICAL: Verify account ownership BEFORE deposit
