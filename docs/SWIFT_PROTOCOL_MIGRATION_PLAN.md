@@ -1001,6 +1001,44 @@ executePerpOrder()
 - If Swift fails with `permanent` classification, return the error immediately — don't waste time on legacy
 - The `executionMethod` ('swift' or 'legacy') is added to the return object so callers can log it
 
+**`closePerpPosition` Coverage (V4.1 — February 2026):**
+
+An external code review identified that `closePerpPosition()` in `drift-service.ts` is a **separate function** from `executePerpOrder()` — it has its own independent SDK/subprocess execution path. Close orders throughout the codebase call `closePerpPosition()` directly:
+
+- Subscriber routing close (`routes.ts` ~line 819)
+- Retry service close (`trade-retry-service.ts` ~line 356)
+- Webhook close (`routes.ts` ~line 5558)
+- Manual close (`routes.ts` ~line 3127)
+- Position flip close (`routes.ts` ~line 6030)
+- Dust cleanup retry (`routes.ts` ~line 3301, 5652)
+
+**Resolution:** `closePerpPosition()` must receive the same Swift-first orchestration as `executePerpOrder()`. The approach:
+
+1. Add the same `shouldUseSwift()` → `executeSwiftOrder()` → fallback logic to `closePerpPosition()`
+2. Swift close orders use `reduceOnly: true` (natively supported, per Finding #5)
+3. The `closePerpPosition` return type gains `executionMethod`, `fillPrice`, and `actualFee` fields
+4. All callers that currently use `signal.price` as a fill estimate should use the actual `fillPrice` from the result when available (see "Fill Price Accuracy" below)
+
+This is included in Step 4's implementation scope. Both `executePerpOrder` and `closePerpPosition` are orchestration points.
+
+**Fill Price Accuracy (Pre-existing Issue, Swift-Amplified):**
+
+The current codebase uses the signal price as the fill price for close orders in several places (most notably subscriber routing at `routes.ts` ~line 828: `const fillPrice = parseFloat(signal.price)`). This is inaccurate because:
+- Legacy fills can slip from the signal price due to slippage
+- Swift fills go through a Dutch auction and may fill at a different price
+
+This is a pre-existing issue (not introduced by Swift), but Swift's auction mechanism makes it more important to fix. When Swift is integrated, the `closePerpPosition` result will include the actual `fillPrice` from the Swift API response or the on-chain fill. Callers should prefer this over the signal price:
+
+```typescript
+// BEFORE (current — uses signal price as estimate):
+const fillPrice = parseFloat(signal.price);
+
+// AFTER (Swift integration — uses actual fill when available):
+const fillPrice = closeResult.fillPrice || parseFloat(signal.price);
+```
+
+This change is included in Step 5 (Trade Logging Updates) scope.
+
 **What stays the same:**
 - `computeTradeSizingAndTopUp` is called BEFORE `executePerpOrder` — sizing logic unchanged
 - `PositionService.getPositionForExecution()` is called BEFORE close orders — position checks unchanged
@@ -1428,6 +1466,48 @@ The Drift SDK's `signSignedMsgOrderParamsMessage` internally uses the same `Keyp
 
 ---
 
+## External Code Review #2 (February 9, 2026)
+
+**Audit Source:** External automated code review (Codex 5.2), February 2026
+**Scope:** Comparison of migration plan against live codebase for implementation readiness
+
+### Review Summary
+
+The review identified 5 items by comparing the plan's described architecture against the current production code. Three of these are expected pre-implementation gaps (the plan describes work that hasn't been done yet). Two required plan updates:
+
+| # | Finding | Status | Action |
+|---|---------|--------|--------|
+| 1 | Schema changes not in current schema | Expected | Step 1 adds these columns. No schema changes should exist before implementation begins. |
+| 2 | `executePerpOrder` has no Swift branch | Expected | Step 4 adds the Swift branch. This is the core implementation step. |
+| 3 | `closePerpPosition` bypasses `executePerpOrder` | **Valid — Plan Updated** | `closePerpPosition()` is a separate function with its own execution path. Step 4 updated to cover both orchestration points. See "closePerpPosition Coverage (V4.1)" in Step 4. |
+| 4 | Subscriber-close PnL uses signal price, not actual fill | **Valid — Pre-existing issue** | Not Swift-specific, but Swift amplifies it. Step 4 updated with "Fill Price Accuracy" section. Step 5 scope includes using actual fill prices. |
+| 5 | Retry logic not Swift-aware | Expected | Step 6 adds Swift error classification and Swift retry counters. |
+
+### Response to Finding 3: closePerpPosition Separate Execution Path
+
+The reviewer correctly identified that `closePerpPosition()` has its own independent SDK/subprocess flow — it does NOT call `executePerpOrder()`. This means Swift integration at `executePerpOrder()` alone would leave all close orders on legacy.
+
+**Resolution:** Step 4 has been updated (V4.1) to explicitly include `closePerpPosition()` as a second orchestration point. Both functions will receive the `shouldUseSwift() → executeSwiftOrder() → fallback` pattern. All 6 call sites for `closePerpPosition` are documented in Step 4.
+
+### Response to Finding 4: Signal Price vs Fill Price
+
+The reviewer correctly identified that subscriber routing uses `parseFloat(signal.price)` as the fill price for PnL calculations, regardless of actual execution fill price. This is inaccurate today (legacy fills can slip) and will be more inaccurate with Swift (auction fills).
+
+**Resolution:** Step 4 now includes a "Fill Price Accuracy" section. When Swift (or enhanced legacy) returns an actual `fillPrice`, callers should use it: `closeResult.fillPrice || parseFloat(signal.price)`. This is included in Step 5's scope for trade logging updates.
+
+**Note:** This is a pre-existing accuracy issue, not a Swift regression. Fixing it during Swift integration is a natural improvement.
+
+### Response to Findings 1, 2, 5: Expected Pre-Implementation State
+
+These findings describe work that the integration plan explicitly schedules:
+- **Finding 1 (Schema):** Step 1 is "Database Schema Migration" — adding `executionMethod`, `swiftOrderId`, etc.
+- **Finding 2 (Swift branch):** Step 4 is "Integration Point — executePerpOrder Wrapper" — adding the Swift-first orchestration
+- **Finding 5 (Retry logic):** Step 6 is "Retry Service Integration" — adding Swift error classification
+
+These columns/branches/classifications intentionally do not exist in the current codebase. The plan is a pre-implementation document awaiting audit approval before any code changes begin. The absence of these changes confirms the plan accurately describes what needs to be built.
+
+---
+
 # Part 5: Appendices
 
 ---
@@ -1557,6 +1637,7 @@ ADD COLUMN IF NOT EXISTS swift_attempts INTEGER DEFAULT 0;
 | 2.0 | 2026-01-26 | Engineering | Comprehensive gap analysis, all 4 execution paths, profit sharing, retry service, security V3, Swift limitations, observability, testing plan |
 | 3.0 | 2026-02-09 | Engineering + AI Audit | Codebase audit: decoupled routing, computeTradeSizingAndTopUp, PositionService, all-market support, SDK methods, cooldown retries, subprocess architecture, Builder Codes |
 | 4.0 | 2026-02-09 | Engineering | Merged research + integration plan into single document; added external auditor responses; corrected reduce-only, subaccount, fee calculation, and key signing sections |
+| 4.1 | 2026-02-09 | Engineering | Addressed Codex 5.2 code review: added closePerpPosition Swift coverage to Step 4; added fill price accuracy section; documented 5 review findings with responses |
 
 ---
 
