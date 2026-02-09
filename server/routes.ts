@@ -3593,6 +3593,8 @@ export async function registerRoutes(
         fee: tradeFee.toString(),
         txSignature: orderResult.txSignature || orderResult.signature || null,
         size: contractSize.toFixed(8),
+        executionMethod: orderResult.executionMethod || 'legacy',
+        swiftOrderId: orderResult.swiftOrderId || null,
       });
 
       // Sync position
@@ -3618,7 +3620,7 @@ export async function registerRoutes(
         lastTradeAt: new Date().toISOString(),
       });
 
-      console.log(`[ManualTrade] Trade executed: ${side.toUpperCase()} ${contractSize.toFixed(4)} @ $${fillPrice.toFixed(2)}`);
+      console.log(`[ManualTrade] Trade executed via ${orderResult.executionMethod || 'legacy'}: ${side.toUpperCase()} ${contractSize.toFixed(4)} @ $${fillPrice.toFixed(2)}`);
       
       // NOTE: Manual trades are NOT routed to subscribers - only webhook signals are
       // This prevents creators from accidentally affecting subscribers with test/personal trades
@@ -6357,7 +6359,9 @@ export async function registerRoutes(
         price: fillPrice.toString(),
         fee: tradeFee.toString(),
         txSignature: orderResult.txSignature || orderResult.signature || null,
-        size: finalContractSize.toFixed(8), // Store calculated size, not raw TradingView value
+        size: finalContractSize.toFixed(8),
+        executionMethod: orderResult.executionMethod || 'legacy',
+        swiftOrderId: orderResult.swiftOrderId || null,
       });
 
       // Mark signal as executed (unique index prevents concurrent duplicates)
