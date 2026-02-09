@@ -1,44 +1,58 @@
-# Swift Protocol Migration Plan
+# Swift Protocol Migration & Integration Plan
 
-**Document Created:** January 21, 2026  
+**Created:** January 21, 2026  
 **Last Updated:** February 9, 2026  
-**Priority:** Medium (Roadmap V2)  
-**Estimated Effort:** 3-4 weeks development + 2 weeks testing  
-**Status:** Planning (Audited - V3 Updated)  
-**Version:** 3.0  
-**V3 Changelog:** Codebase audit against production system, Swift API research, SDK method verification, market support validation
+**Version:** 4.0  
+**Status:** Ready for External Audit  
+**V4 Changelog:** Merged research + integration plan into single document; addressed external auditor feedback on reduce-only, subaccount workarounds, fee calculation, and key signing
 
 ---
 
 ## Table of Contents
 
-1. [Executive Summary](#executive-summary)
-2. [Current System Architecture (Detailed)](#current-system-architecture-detailed)
-3. [Swift Protocol Overview](#swift-protocol-overview)
-4. [Gap Analysis](#gap-analysis)
-5. [Implementation Plan](#implementation-plan)
-6. [Database Schema Changes](#database-schema-changes)
-7. [Execution Path Integration](#execution-path-integration)
-8. [Profit Sharing Integration](#profit-sharing-integration)
-9. [Retry Service Integration](#retry-service-integration)
-10. [Security V3 Integration](#security-v3-integration)
-11. [Swift-Specific Limitations](#swift-specific-limitations)
-12. [Observability & Monitoring](#observability--monitoring)
-13. [Testing Plan](#testing-plan)
-14. [Migration Strategy](#migration-strategy)
-15. [Risks & Mitigations](#risks--mitigations)
-16. [Rollback Plan](#rollback-plan)
-17. [Success Metrics](#success-metrics)
-18. [Appendices](#appendices)
-19. [V3 Audit Findings & Corrections](#v3-audit-findings--corrections)
+### Part 1: System Architecture & Research
+1. [Executive Summary](#1-executive-summary)
+2. [Current System Architecture](#2-current-system-architecture)
+3. [Swift Protocol Overview](#3-swift-protocol-overview)
+
+### Part 2: Gap Analysis & Audit Findings
+4. [Gap Analysis](#4-gap-analysis)
+5. [V3 Audit Findings & Corrections](#5-v3-audit-findings--corrections)
+6. [Swift-Specific Limitations](#6-swift-specific-limitations)
+
+### Part 3: Integration Plan
+7. [Architecture Decision: Where Swift Lives](#7-architecture-decision-where-swift-lives)
+8. [Step-by-Step Integration Path (Steps 1–9)](#8-step-by-step-integration-path)
+9. [Security V3 Compatibility](#9-security-v3-compatibility)
+10. [Audit Findings Coverage Map](#10-audit-findings-coverage-map)
+11. [File Change Summary](#11-file-change-summary)
+12. [Risk Summary](#12-risk-summary)
+13. [What This Plan Does NOT Cover](#13-what-this-plan-does-not-cover)
+14. [Dependencies & Prerequisites](#14-dependencies--prerequisites)
+15. [Timeline Estimate](#15-timeline-estimate)
+
+### Part 4: External Auditor Responses
+16. [External Auditor Responses](#16-external-auditor-responses)
+
+### Part 5: Appendices
+17. [Appendix A: Swift API Reference](#17-appendix-a-swift-api-reference)
+18. [Appendix B: Error Code Reference](#18-appendix-b-error-code-reference)
+19. [Appendix C: SDK Methods](#19-appendix-c-sdk-methods)
+20. [Appendix D: Configuration Reference](#20-appendix-d-configuration-reference)
+21. [Appendix E: Database Migration Script](#21-appendix-e-database-migration-script)
+22. [Document History](#22-document-history)
 
 ---
 
-## Executive Summary
+# Part 1: System Architecture & Research
+
+---
+
+## 1. Executive Summary
 
 Swift Protocol is Drift's next-generation execution layer that enables **gasless trading with better execution prices** through off-chain order signing and market maker competition via Dutch auctions.
 
-This document outlines the comprehensive migration plan to integrate Swift into QuantumVault, operating **in parallel** with the current on-chain `placeAndTakePerpOrder` execution method, with automatic fallback capabilities.
+This document is the **single source of truth** for the Swift Protocol integration into QuantumVault. It contains the research, architecture, gap analysis, audit findings, step-by-step implementation plan, and external auditor responses. Swift operates **in parallel** with the current on-chain `placeAndTakePerpOrder` execution method, with automatic fallback capabilities.
 
 ### Key Benefits
 
@@ -81,7 +95,7 @@ This migration affects:
 
 ---
 
-## Current System Architecture (Detailed)
+## 2. Current System Architecture
 
 ### High-Level Architecture
 
@@ -340,7 +354,7 @@ With Swift, fill confirmation is async. Must ensure PnL calculation happens afte
 
 ---
 
-## Swift Protocol Overview
+## 3. Swift Protocol Overview
 
 ### What is Swift?
 
@@ -384,7 +398,7 @@ Client                    Swift API                Market Makers        Solana
 | Failure Mode | RPC/blockchain errors | API errors + no liquidity |
 | Reduce-Only | Native flag | Native flag (confirmed supported) |
 
-### Market Support (V3 Updated - February 2026)
+### Market Support (V3 Updated — February 2026)
 
 **Swift supports ALL perpetual futures markets on Drift.** This was confirmed via official Drift documentation and the March 2025 launch announcement. The original plan's assumption that only SOL/BTC/ETH were supported is incorrect.
 
@@ -435,13 +449,17 @@ const response = await axios.post('https://swift.drift.trade/orders', {
 });
 ```
 
-**Builder Codes:** Swift orders exclusively support Drift Builder Codes for revenue sharing. Registering as a builder would earn a fee on every Swift trade the platform executes - potential additional revenue stream.
+**Builder Codes:** Swift orders exclusively support Drift Builder Codes for revenue sharing. Registering as a builder would earn a fee on every Swift trade the platform executes — potential additional revenue stream.
 
 **Drift v3 Context:** Drift v3 launched December 2025 with 85% of orders filling within 400ms. Swift is being made the default trading method platform-wide.
 
 ---
 
-## Gap Analysis
+# Part 2: Gap Analysis & Audit Findings
+
+---
+
+## 4. Gap Analysis
 
 ### Summary of Gaps in Original Plan
 
@@ -480,8 +498,6 @@ const response = await axios.post('https://swift.drift.trade/orders', {
 - Fallback handling if one fails
 - Uses legacy encrypted key (not UMK)
 
-**Solution:** See [Execution Path Integration](#execution-path-integration) section.
-
 #### Gap 3: Retry Service Integration
 
 **Problem:** Retry service doesn't track Swift-specific data.
@@ -492,8 +508,6 @@ const response = await axios.post('https://swift.drift.trade/orders', {
 - Retry strategy: retry Swift → fallback → legacy retry
 - Critical priority handling for Swift close failures
 
-**Solution:** See [Retry Service Integration](#retry-service-integration) section.
-
 #### Gap 4: Profit Sharing Flow
 
 **Problem:** Profit sharing depends on synchronous close detection.
@@ -503,8 +517,6 @@ const response = await axios.post('https://swift.drift.trade/orders', {
 - Need to wait for on-chain settlement
 - Partial fills complicate PnL calculation
 
-**Solution:** See [Profit Sharing Integration](#profit-sharing-integration) section.
-
 #### Gap 5: Database Schema Gaps
 
 **Problem:** Original schema changes insufficient.
@@ -513,8 +525,6 @@ const response = await axios.post('https://swift.drift.trade/orders', {
 - Swift order tracking (UUID, status, timestamps)
 - Audit trail for debugging
 - Retry queue enhancements
-
-**Solution:** See [Database Schema Changes](#database-schema-changes) section.
 
 #### Gap 6: Swift-Specific Limitations
 
@@ -527,8 +537,6 @@ const response = await axios.post('https://swift.drift.trade/orders', {
 - Position flip handling
 - Dust position cleanup
 - Market liquidity variations
-
-**Solution:** See [Swift-Specific Limitations](#swift-specific-limitations) section.
 
 #### Gap 7: Observability Gaps
 
@@ -543,956 +551,114 @@ const response = await axios.post('https://swift.drift.trade/orders', {
 - Per-market liquidity monitoring
 - Alerting on degradation
 
-**Solution:** See [Observability & Monitoring](#observability--monitoring) section.
+---
+
+## 5. V3 Audit Findings & Corrections
+
+**Audit Date:** February 9, 2026  
+**Scope:** Full codebase audit against production system + Swift API research
+
+### Finding 1: Decoupled Subscriber Routing (Critical)
+
+**Original assumption:** Routing happens only after successful source bot trade.  
+**Reality:** System now has 4 routing trigger points using `parseSignalForRouting()` for lightweight signal extraction without key decryption. Routing works when source bot is paused, auth disabled, auth expired, or executing normally. Retry worker also routes via `registerRoutingCallback`.  
+**Impact:** Swift integration must work at all 4 trigger points, not just post-trade.  
+**Status:** Addressed in Integration Plan Step 4 verification gates.
+
+### Finding 2: Unified Trade Sizing (`computeTradeSizingAndTopUp`)
+
+**Original assumption:** Plan's Swift execution paths bypass trade sizing.  
+**Reality:** A 300+ line unified helper handles auto top-up, profit reinvestment mode, dynamic leverage capping, minimum order enforcement, and bot auto-pause on insufficient funds. All trade execution paths go through this.  
+**Impact:** Swift trades MUST route through `computeTradeSizingAndTopUp` before order submission. Do not bypass it.  
+**Status:** Addressed in Integration Plan Step 4 critical rules.
+
+### Finding 3: PositionService for Close Verification
+
+**Original assumption:** Plan references generic "getOnChainPosition" for reduce-only checks.  
+**Reality:** `PositionService.getPositionForExecution()` is the established path. Uses byte-parsing (not SDK) to avoid WebSocket memory leaks.  
+**Impact:** Swift close orders should use `PositionService`, not build a new position check.  
+**Status:** Addressed in Integration Plan Step 4 critical rules.
+
+### Finding 4: All Perp Markets Support Swift
+
+**Original assumption:** Only SOL, BTC, ETH supported.  
+**Reality:** Swift launched March 2025 for ALL perpetual futures markets on Drift. All 85+ markets in QuantumVault's `PERP_MARKET_INDICES` are eligible.  
+**Impact:** Remove `supportedMarkets` allowlist. No market tiering needed.  
+**Status:** Addressed in Integration Plan Step 2 config.
+
+### Finding 5: Reduce-Only Natively Supported
+
+**Original assumption:** "Different semantics (TBD)" for reduce-only.  
+**Reality:** Swift natively supports `reduceOnly` flag with identical semantics to legacy orders.  
+**Impact:** No special reduce-only handling needed.  
+**Status:** Addressed in Section 6 (Swift-Specific Limitations) and Integration Plan Step 4.
+
+### Finding 6: Cooldown Retry System
+
+**Original assumption:** Plan doesn't account for cooldown retries.  
+**Reality:** Retry service has `cooldownRetries` field and 2-minute cooldown re-queue for timeout errors (max 2 cooldown retries).  
+**Impact:** Swift retry strategy must integrate with cooldown system.  
+**Status:** Addressed in Integration Plan Step 6.
+
+### Finding 7: Subprocess Architecture Decision
+
+**Original assumption:** Not addressed.  
+**Reality:** Current trades run in `drift-executor.mjs` subprocess via stdin/stdout JSON. Swift is sign-message + HTTP POST (no heavy transaction building).  
+**Recommendation:** Run Swift in main Node process (lighter weight), keep legacy subprocess as fallback. This avoids modifying `drift-executor.mjs` and is architecturally cleaner since Swift doesn't need process isolation.  
+**Status:** Addressed in Integration Plan Section 7 (Architecture Decision).
+
+### Finding 8: SDK Has Built-in Swift Methods
+
+**Original assumption:** Plan proposes custom HTTP client for Swift API.  
+**Reality:** `@drift-labs/sdk` DriftClient has `encodeSwiftOrderParamsMessage()`, `decodeSwiftServerMessage()`, `placeAndMakeSwiftPerpOrder()`, and related methods.  
+**Impact:** Can leverage SDK methods instead of building from scratch.  
+**Status:** Addressed in Integration Plan Step 3.
+
+### Finding 9: Builder Codes Revenue Opportunity
+
+**Original assumption:** Not mentioned.  
+**Reality:** Builder Codes are limited to Swift orders only. Registering as a Drift builder would earn platform fees on every Swift trade executed.  
+**Impact:** Additional revenue stream worth exploring during implementation.  
+**Status:** Addressed in Integration Plan Step 9 (optional).
+
+### Finding 10: Latency Budget Gap
+
+**Original assumption:** Plan doesn't specify total timeout for Swift attempt + fallback.  
+**Reality:** Need aggressive Swift timeout (recommended 3 seconds) so Swift + fallback total stays under 5 seconds. Current webhook response time is 1-2 seconds.  
+**Impact:** Add `SWIFT_ORDER_TIMEOUT_MS: 3000` config (not 5000 as originally proposed).  
+**Status:** Addressed in Integration Plan Step 2 config.
+
+### Finding 11: Subscriber Batch Efficiency
+
+**Original assumption:** Each subscriber independently discovers Swift failure and falls back.  
+**Reality:** For batches of N subscribers, if Swift goes unhealthy mid-batch, remaining subscribers should skip Swift proactively.  
+**Impact:** Add shared `swiftHealthy` flag checked at start of each subscriber execution within a batch.  
+**Status:** Addressed in Integration Plan Step 4.
+
+### Finding 12: Database Schema — No Swift Fields Exist Yet
+
+**Original assumption:** Plan proposes adding `swiftEnabled` per bot and `executionMethod` per trade.  
+**Reality:** Neither `tradingBots` nor `bot_trades` schemas have any Swift-related columns. Current `trade_retry_queue` also lacks Swift fields.  
+**Impact:** Schema migration needed before implementation.  
+**Status:** Addressed in Integration Plan Step 1.
 
 ---
 
-## Implementation Plan
+## 6. Swift-Specific Limitations
 
-### Phase 0: Documentation & Preparation (Days 1-3)
-
-- [x] Comprehensive architecture documentation (this document)
-- [ ] Swift API research and testing
-- [ ] SDK method verification
-- [ ] Define error taxonomy
-- [ ] Set up development environment with Swift testnet (if available)
-
-### Phase 1: Infrastructure Setup (Week 1)
-
-#### 1.1 Database Migrations
-
-```sql
--- See Database Schema Changes section for full SQL
-```
-
-#### 1.2 Swift Configuration Module
-
-Create `server/swift-config.ts`:
-
-```typescript
-export const SWIFT_CONFIG = {
-  enabled: process.env.SWIFT_ENABLED !== 'false',
-  apiUrl: process.env.SWIFT_API_URL || 'https://swift.drift.trade',
-  orderTimeoutMs: parseInt(process.env.SWIFT_ORDER_TIMEOUT_MS || '5000'),
-  healthCheckIntervalMs: 30000,
-  maxRetriesBeforeFallback: 2,
-  retryDelayMs: 500,
-  fallbackOnError: true,
-  
-  // V3 UPDATE: Swift supports ALL perp markets on Drift (confirmed Feb 2026).
-  // No market allowlist needed. All 85+ markets in PERP_MARKET_INDICES are eligible.
-  // Removed hardcoded supportedMarkets - all perps use Swift by default.
-  
-  // Error classification
-  retryableErrors: [
-    'timeout',
-    'temporarily unavailable',
-    '429',
-    '503',
-    '504',
-    'stale slot',
-  ],
-  
-  // Metrics
-  metricsEnabled: true,
-};
-```
-
-#### 1.3 Swift Health Monitor
-
-Create `server/swift-health.ts`:
-
-```typescript
-interface SwiftHealthState {
-  isHealthy: boolean;
-  lastCheckAt: Date;
-  lastHealthyAt: Date | null;
-  consecutiveFailures: number;
-  latencyMs: number | null;
-}
-
-let swiftHealth: SwiftHealthState = {
-  isHealthy: true,
-  lastCheckAt: new Date(),
-  lastHealthyAt: null,
-  consecutiveFailures: 0,
-  latencyMs: null,
-};
-
-export function isSwiftAvailable(): boolean {
-  return SWIFT_CONFIG.enabled && swiftHealth.isHealthy;
-}
-
-export async function checkSwiftHealth(): Promise<boolean> {
-  const start = Date.now();
-  try {
-    const response = await fetch(`${SWIFT_CONFIG.apiUrl}/health`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    
-    const latency = Date.now() - start;
-    
-    if (response.ok) {
-      swiftHealth = {
-        isHealthy: true,
-        lastCheckAt: new Date(),
-        lastHealthyAt: new Date(),
-        consecutiveFailures: 0,
-        latencyMs: latency,
-      };
-      return true;
-    }
-  } catch (error) {
-    swiftHealth.consecutiveFailures++;
-    swiftHealth.lastCheckAt = new Date();
-    
-    // Disable after 3 consecutive failures
-    if (swiftHealth.consecutiveFailures >= 3) {
-      swiftHealth.isHealthy = false;
-      console.warn('[Swift] Marked unhealthy after 3 failures');
-    }
-  }
-  
-  return false;
-}
-
-// Start health check interval
-setInterval(checkSwiftHealth, SWIFT_CONFIG.healthCheckIntervalMs);
-```
-
-### Phase 2: Swift Executor Module (Week 1)
-
-#### 2.1 Create Swift Executor
-
-Create `server/swift-executor.ts` (or add to `drift-executor.mjs`):
-
-```typescript
-import { DriftClient, OrderType, PositionDirection, MarketType } from '@drift-labs/sdk';
-import { Keypair } from '@solana/web3.js';
-import BN from 'bn.js';
-import crypto from 'crypto';
-
-const SWIFT_API_URL = process.env.SWIFT_API_URL || 'https://swift.drift.trade';
-
-export interface SwiftOrderParams {
-  marketIndex: number;
-  direction: 'long' | 'short';
-  baseAssetAmount: BN;
-  price?: BN;
-  reduceOnly?: boolean;
-  subAccountId: number;
-}
-
-export interface SwiftOrderResult {
-  success: boolean;
-  executionMethod: 'swift' | 'legacy';
-  swiftOrderId?: string;
-  txSignature?: string;
-  fillPrice?: number;
-  fillAmount?: number;
-  auctionDurationMs?: number;
-  keeperPubkey?: string;
-  priceImprovement?: number;
-  error?: string;
-  errorCode?: string;
-  isRetryable?: boolean;
-}
-
-export function generateSwiftUuid(): Uint8Array {
-  const uuid = new Uint8Array(8);
-  crypto.getRandomValues(uuid);
-  return uuid;
-}
-
-export async function executeSwiftOrder(
-  driftClient: DriftClient,
-  params: SwiftOrderParams
-): Promise<SwiftOrderResult> {
-  const startTime = Date.now();
-  const uuid = generateSwiftUuid();
-  const uuidHex = Buffer.from(uuid).toString('hex');
-  
-  try {
-    // 1. Get current slot for order timing
-    const slot = await driftClient.connection.getSlot();
-    
-    // 2. Build Swift order message
-    const orderMessage = {
-      signedMsgOrderParams: {
-        orderType: OrderType.MARKET,
-        marketType: MarketType.PERP,
-        marketIndex: params.marketIndex,
-        direction: params.direction === 'long' 
-          ? PositionDirection.LONG 
-          : PositionDirection.SHORT,
-        baseAssetAmount: params.baseAssetAmount,
-        reduceOnly: params.reduceOnly ?? false,
-      },
-      subAccountId: params.subAccountId,
-      slot: new BN(slot),
-      uuid,
-      stopLossOrderParams: null,
-      takeProfitOrderParams: null,
-    };
-    
-    // 3. Sign the message off-chain
-    const { orderParams, signature } = 
-      driftClient.signSignedMsgOrderParamsMessage(orderMessage);
-    
-    // 4. Submit to Swift API
-    const response = await fetch(SWIFT_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        orderParams: Buffer.from(orderParams).toString('base64'),
-        signature: Buffer.from(signature).toString('base64'),
-        publicKey: driftClient.wallet.publicKey.toString(),
-      }),
-      signal: AbortSignal.timeout(SWIFT_CONFIG.orderTimeoutMs),
-    });
-    
-    const auctionDurationMs = Date.now() - startTime;
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      const isRetryable = isSwiftRetryableError(response.status, errorText);
-      
-      return {
-        success: false,
-        executionMethod: 'swift',
-        swiftOrderId: uuidHex,
-        error: `Swift API error (${response.status}): ${errorText}`,
-        errorCode: String(response.status),
-        isRetryable,
-        auctionDurationMs,
-      };
-    }
-    
-    const result = await response.json();
-    
-    return {
-      success: true,
-      executionMethod: 'swift',
-      swiftOrderId: uuidHex,
-      txSignature: result.txSignature,
-      fillPrice: result.fillPrice,
-      fillAmount: result.fillAmount,
-      auctionDurationMs,
-      keeperPubkey: result.makerPubkey,
-      priceImprovement: result.priceImprovement,
-    };
-    
-  } catch (error) {
-    const errorStr = error instanceof Error ? error.message : String(error);
-    const isRetryable = isSwiftRetryableError(0, errorStr);
-    
-    return {
-      success: false,
-      executionMethod: 'swift',
-      swiftOrderId: uuidHex,
-      error: errorStr,
-      isRetryable,
-    };
-  }
-}
-
-function isSwiftRetryableError(status: number, error: string): boolean {
-  if (status === 429 || status === 503 || status === 504) return true;
-  
-  const lowerError = error.toLowerCase();
-  return (
-    lowerError.includes('timeout') ||
-    lowerError.includes('temporarily unavailable') ||
-    lowerError.includes('stale slot') ||
-    lowerError.includes('no liquidity') ||
-    lowerError.includes('auction timeout')
-  );
-}
-```
-
-#### 2.2 Execution Router with Fallback
-
-Add to `server/drift-service.ts`:
-
-```typescript
-import { executeSwiftOrder, SwiftOrderResult } from './swift-executor';
-import { isSwiftAvailable } from './swift-health';
-
-export interface TradeExecutionOptions {
-  useSwift?: boolean;
-  fallbackToLegacy?: boolean;
-  priority?: 'normal' | 'critical';
-}
-
-export async function executeTradeWithSwift(
-  params: TradeParams,
-  options: TradeExecutionOptions = {}
-): Promise<TradeResult> {
-  const useSwift = options.useSwift ?? isSwiftAvailable();
-  const fallbackToLegacy = options.fallbackToLegacy ?? true;
-  
-  // Check if market supports Swift
-  const marketSupportsSwift = SWIFT_CONFIG.supportedMarkets.includes(params.market);
-  
-  if (useSwift && marketSupportsSwift) {
-    const swiftResult = await executeSwiftOrder(driftClient, {
-      marketIndex: params.marketIndex,
-      direction: params.side,
-      baseAssetAmount: params.baseAssetAmount,
-      reduceOnly: params.reduceOnly,
-      subAccountId: params.subAccountId,
-    });
-    
-    if (swiftResult.success) {
-      return {
-        ...swiftResult,
-        executionMethod: 'swift',
-      };
-    }
-    
-    // Log Swift failure
-    console.warn(`[Trade] Swift failed: ${swiftResult.error}`);
-    recordSwiftFailure(params.market, swiftResult.error);
-    
-    if (!fallbackToLegacy) {
-      return swiftResult;
-    }
-    
-    // Fallback to legacy
-    console.log('[Trade] Falling back to legacy execution');
-  }
-  
-  // Legacy execution
-  const legacyResult = await executeLegacyTrade(params);
-  return {
-    ...legacyResult,
-    executionMethod: 'legacy',
-    swiftAttempted: useSwift && marketSupportsSwift,
-    swiftError: useSwift ? 'Fallback triggered' : undefined,
-  };
-}
-```
-
-### Phase 3: Integration with Execution Paths (Week 2)
-
-See [Execution Path Integration](#execution-path-integration) section for detailed implementation.
-
-### Phase 4: Profit Sharing & Retry Integration (Week 2-3)
-
-See:
-- [Profit Sharing Integration](#profit-sharing-integration)
-- [Retry Service Integration](#retry-service-integration)
-
-### Phase 5: Observability & Testing (Week 3-4)
-
-See:
-- [Observability & Monitoring](#observability--monitoring)
-- [Testing Plan](#testing-plan)
-
-### Phase 6: Staged Rollout (Week 4+)
-
-See [Migration Strategy](#migration-strategy) section.
-
----
-
-## Database Schema Changes
-
-### trading_bots Table Additions
-
-```sql
-ALTER TABLE trading_bots 
-ADD COLUMN swift_enabled BOOLEAN DEFAULT true NOT NULL,
-ADD COLUMN swift_fallback_enabled BOOLEAN DEFAULT true NOT NULL;
-```
-
-### bot_trades Table Additions
-
-```sql
-ALTER TABLE bot_trades
-ADD COLUMN execution_method VARCHAR(20) DEFAULT 'legacy' NOT NULL,
-ADD COLUMN swift_order_id VARCHAR(64),
-ADD COLUMN swift_status VARCHAR(20),  -- 'submitted', 'filled', 'failed', 'fallback'
-ADD COLUMN swift_submitted_at TIMESTAMP,
-ADD COLUMN swift_filled_at TIMESTAMP,
-ADD COLUMN auction_duration_ms INTEGER,
-ADD COLUMN keeper_pubkey TEXT,
-ADD COLUMN price_improvement DECIMAL(10, 4),  -- percentage vs oracle
-ADD COLUMN fallback_reason TEXT;
-```
-
-### trade_retry_queue Table Additions
-
-```sql
-ALTER TABLE trade_retry_queue
-ADD COLUMN swift_order_id VARCHAR(64),
-ADD COLUMN original_execution_method VARCHAR(20) DEFAULT 'legacy',
-ADD COLUMN swift_attempts INTEGER DEFAULT 0,
-ADD COLUMN last_swift_error TEXT;
-```
-
-### New Table: swift_order_logs
-
-```sql
-CREATE TABLE swift_order_logs (
-  id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid(),
-  trade_id VARCHAR(255) REFERENCES bot_trades(id) ON DELETE CASCADE,
-  swift_order_id VARCHAR(64) NOT NULL,
-  event_type VARCHAR(30) NOT NULL,  -- 'submitted', 'accepted', 'filled', 'failed', 'expired'
-  timestamp TIMESTAMP DEFAULT NOW() NOT NULL,
-  request_payload JSONB,
-  response_payload JSONB,
-  error_code VARCHAR(20),
-  error_message TEXT,
-  latency_ms INTEGER,
-  created_at TIMESTAMP DEFAULT NOW() NOT NULL
-);
-
-CREATE INDEX idx_swift_order_logs_trade_id ON swift_order_logs(trade_id);
-CREATE INDEX idx_swift_order_logs_swift_order_id ON swift_order_logs(swift_order_id);
-CREATE INDEX idx_swift_order_logs_event_type ON swift_order_logs(event_type);
-```
-
-### Drizzle Schema Updates
-
-```typescript
-// shared/schema.ts
-
-// Add to tradingBots
-swiftEnabled: boolean("swift_enabled").default(true).notNull(),
-swiftFallbackEnabled: boolean("swift_fallback_enabled").default(true).notNull(),
-
-// Add to botTrades
-executionMethod: text("execution_method").default("legacy").notNull(),
-swiftOrderId: text("swift_order_id"),
-swiftStatus: text("swift_status"),
-swiftSubmittedAt: timestamp("swift_submitted_at"),
-swiftFilledAt: timestamp("swift_filled_at"),
-auctionDurationMs: integer("auction_duration_ms"),
-keeperPubkey: text("keeper_pubkey"),
-priceImprovement: decimal("price_improvement", { precision: 10, scale: 4 }),
-fallbackReason: text("fallback_reason"),
-
-// Add to tradeRetryQueue
-swiftOrderId: text("swift_order_id"),
-originalExecutionMethod: text("original_execution_method").default("legacy"),
-swiftAttempts: integer("swift_attempts").default(0),
-lastSwiftError: text("last_swift_error"),
-
-// New table
-export const swiftOrderLogs = pgTable("swift_order_logs", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  tradeId: varchar("trade_id").references(() => botTrades.id, { onDelete: "cascade" }),
-  swiftOrderId: text("swift_order_id").notNull(),
-  eventType: text("event_type").notNull(),
-  timestamp: timestamp("timestamp").defaultNow().notNull(),
-  requestPayload: jsonb("request_payload"),
-  responsePayload: jsonb("response_payload"),
-  errorCode: text("error_code"),
-  errorMessage: text("error_message"),
-  latencyMs: integer("latency_ms"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
-```
-
----
-
-## Execution Path Integration
-
-### Path 1: Webhook Handler
-
-**File:** `server/routes.ts`
-
-**Changes Required:**
-
-```typescript
-// In /api/webhook/tradingview/:botId handler
-
-// 1. Check Swift configuration
-const useSwift = bot.swiftEnabled ?? true;
-const fallbackEnabled = bot.swiftFallbackEnabled ?? true;
-
-// 2. Execute with Swift support
-const tradeResult = await executeTradeWithSwift({
-  privateKeyBase58,
-  market: bot.market,
-  side: orderSide,
-  sizeInBase,
-  subAccountId: bot.driftSubaccountId,
-  reduceOnly: isCloseSignal,
-}, {
-  useSwift,
-  fallbackToLegacy: fallbackEnabled,
-  priority: isCloseSignal ? 'critical' : 'normal',
-});
-
-// 3. Log with Swift metadata
-const trade = await storage.createBotTrade({
-  tradingBotId: bot.id,
-  walletAddress: bot.walletAddress,
-  market: bot.market,
-  side: orderSide,
-  size: sizeInBase.toString(),
-  price: tradeResult.fillPrice?.toString() || '0',
-  status: tradeResult.success ? 'completed' : 'failed',
-  txSignature: tradeResult.txSignature,
-  errorMessage: tradeResult.error,
-  // Swift fields
-  executionMethod: tradeResult.executionMethod,
-  swiftOrderId: tradeResult.swiftOrderId,
-  swiftStatus: tradeResult.success ? 'filled' : 'failed',
-  auctionDurationMs: tradeResult.auctionDurationMs,
-  keeperPubkey: tradeResult.keeperPubkey,
-  priceImprovement: tradeResult.priceImprovement?.toString(),
-  fallbackReason: tradeResult.swiftError,
-});
-```
-
-### Path 2: Manual Trade
-
-**File:** `server/routes.ts`
-
-**Changes Required:**
-
-Same pattern as webhook, but respecting user's real-time decision:
-
-```typescript
-// In /api/trading-bots/:id/manual-trade handler
-
-// Allow override via request body
-const useSwift = req.body.useSwift ?? bot.swiftEnabled ?? true;
-
-const tradeResult = await executeTradeWithSwift(params, {
-  useSwift,
-  fallbackToLegacy: true,
-  priority: 'normal',
-});
-```
-
-### Path 3: Subscriber Routing
-
-**File:** `server/routes.ts` - `routeSignalToSubscribers()`
-
-**Challenges:**
-1. N subscribers = N Swift submissions
-2. Different wallets, different subaccounts
-3. Uses legacy encrypted key (not UMK)
-4. Partial failures (some Swift, some legacy)
-
-**Changes Required:**
-
-```typescript
-async function routeSignalToSubscribers(
-  publishedBot: PublishedBot,
-  signal: Signal,
-  options: { useSwift?: boolean } = {}
-): Promise<RoutingResult[]> {
-  const subscribers = await storage.getActiveSubscriptions(publishedBot.id);
-  
-  // Determine Swift usage per subscriber bot
-  const results: RoutingResult[] = [];
-  
-  // Process in batches to avoid overwhelming Swift API
-  const BATCH_SIZE = 5;
-  for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
-    const batch = subscribers.slice(i, i + BATCH_SIZE);
-    
-    const batchResults = await Promise.allSettled(
-      batch.map(async (sub) => {
-        const subBot = await storage.getTradingBotById(sub.subscriberBotId);
-        if (!subBot || !subBot.isActive) return null;
-        
-        // Subscriber bot's Swift preference
-        const useSwift = options.useSwift ?? subBot.swiftEnabled ?? true;
-        
-        // Execute trade for subscriber
-        // NOTE: Uses legacy key path (agentPrivateKeyEncrypted)
-        const result = await executeTradeWithSwift({
-          encryptedPrivateKey: subBot.agentPrivateKeyEncrypted,
-          market: subBot.market,
-          side: signal.action === 'buy' ? 'long' : 'short',
-          sizeInBase: calculateSubscriberSize(sub, signal),
-          subAccountId: subBot.driftSubaccountId,
-          reduceOnly: signal.isClose,
-        }, {
-          useSwift,
-          fallbackToLegacy: true,
-          priority: signal.isClose ? 'critical' : 'normal',
-        });
-        
-        return {
-          subscriberBotId: subBot.id,
-          ...result,
-        };
-      })
-    );
-    
-    results.push(...batchResults.filter(r => r.status === 'fulfilled').map(r => r.value));
-    
-    // Small delay between batches
-    if (i + BATCH_SIZE < subscribers.length) {
-      await new Promise(r => setTimeout(r, 100));
-    }
-  }
-  
-  return results;
-}
-```
-
-### Path 4: Trade Retry Worker
-
-**File:** `server/trade-retry-service.ts`
-
-See [Retry Service Integration](#retry-service-integration) section.
-
----
-
-## Profit Sharing Integration
-
-### Current Profit Share Flow
-
-```
-Position Close Detected
-       │
-       ├─▶ Calculate realizedPnl from fill
-       │
-       ├─▶ If pnl > 0 && isSubscriberBot:
-       │      profitShare = pnl × profitSharePercent
-       │
-       ├─▶ Withdraw profitShare from Drift subaccount
-       │
-       ├─▶ Transfer USDC to creator wallet
-       │      └─▶ On failure: Create IOU
-       │
-       └─▶ Log profit share event
-```
-
-### Swift Integration Challenges
-
-1. **Async Fill Confirmation:** Swift fills may not be immediately confirmed
-2. **Fill Price Source:** Need to use Swift-reported fill price, not oracle
-3. **Partial Fills:** May receive partial fill → need to handle proportional profit share
-4. **Settlement Timing:** On-chain PnL settlement happens after keeper execution
-
-### Updated Flow with Swift
-
-```typescript
-async function handleSubscriberClose(
-  subscriberBot: TradingBot,
-  closeResult: TradeResult
-): Promise<void> {
-  if (!closeResult.success) return;
-  
-  const publishedBot = await storage.getPublishedBotByTradingBotId(
-    subscriberBot.sourcePublishedBotId
-  );
-  if (!publishedBot || parseFloat(publishedBot.profitSharePercent) <= 0) return;
-  
-  // Use the fill price from execution result
-  // For Swift: this is the auction fill price
-  // For Legacy: this is calculated from position or oracle
-  const fillPrice = closeResult.fillPrice;
-  if (!fillPrice) {
-    console.warn('[ProfitShare] No fill price available, skipping');
-    return;
-  }
-  
-  // Get entry price from position tracking
-  const entryPrice = await getPositionEntryPrice(subscriberBot);
-  if (!entryPrice) return;
-  
-  // Calculate realized PnL
-  const realizedPnl = calculateRealizedPnl({
-    entryPrice,
-    exitPrice: fillPrice,
-    size: closeResult.fillAmount || closeResult.size,
-    direction: subscriberBot.side,
-  });
-  
-  if (realizedPnl <= 0) return;
-  
-  // Calculate profit share
-  const profitSharePercent = parseFloat(publishedBot.profitSharePercent);
-  const profitShareAmount = realizedPnl * (profitSharePercent / 100);
-  
-  // Execute profit share transfer
-  await executeProfitShareTransfer({
-    subscriberBot,
-    creatorWallet: publishedBot.creatorWalletAddress,
-    amount: profitShareAmount,
-    realizedPnl,
-    profitSharePercent,
-    tradeId: closeResult.tradeId,
-    publishedBotId: publishedBot.id,
-  });
-}
-```
-
-### Handling Swift Partial Fills
-
-If Swift returns a partial fill:
-
-```typescript
-if (swiftResult.fillAmount && swiftResult.fillAmount < requestedAmount) {
-  console.log(`[Swift] Partial fill: ${swiftResult.fillAmount}/${requestedAmount}`);
-  
-  // For profit share, use actual fill amount
-  const partialPnl = calculateRealizedPnl({
-    entryPrice,
-    exitPrice: swiftResult.fillPrice,
-    size: swiftResult.fillAmount,  // Use partial amount
-    direction,
-  });
-  
-  // May need to queue remainder for retry
-  const remainder = requestedAmount - swiftResult.fillAmount;
-  if (remainder > minimumOrderSize) {
-    await queueTradeRetry({
-      ...originalParams,
-      size: remainder,
-      isRemainder: true,
-    });
-  }
-}
-```
-
----
-
-## Retry Service Integration
-
-### Current Retry Service
-
-- Handles rate limits and transient errors
-- `priority: 'critical'` for close orders (10 attempts, 2.5s base backoff)
-- `priority: 'normal'` for open orders (5 attempts, 5s base backoff)
-- Persists to `trade_retry_queue` table
-
-### Swift-Specific Requirements
-
-1. **Track Swift Order ID:** Allow correlation across retries
-2. **Different Error Classification:** Swift API errors vs RPC errors
-3. **Retry Strategy Options:**
-   - Retry Swift first, then fallback to legacy
-   - Immediate fallback on certain errors
-   - Always use legacy on retry
-4. **Entry Price for Close Retries:** Required for profit share calculation
-
-### Updated Retry Job Interface
-
-```typescript
-export interface RetryJob {
-  id: string;
-  botId: string;
-  walletAddress: string;
-  agentPrivateKeyEncrypted: string;
-  agentPublicKey: string;
-  market: string;
-  side: 'long' | 'short' | 'close';
-  size: number;
-  subAccountId: number;
-  reduceOnly: boolean;
-  slippageBps: number;
-  privateKeyBase58?: string;
-  priority: 'critical' | 'normal';
-  attempts: number;
-  maxAttempts: number;
-  nextRetryAt: number;
-  createdAt: number;
-  lastError?: string;
-  originalTradeId?: string;
-  webhookPayload?: unknown;
-  entryPrice?: number;
-  
-  // Swift-specific
-  swiftOrderId?: string;
-  originalExecutionMethod: 'swift' | 'legacy';
-  swiftAttempts: number;
-  lastSwiftError?: string;
-  useSwiftOnRetry: boolean;
-}
-```
-
-### Updated Retry Execution
-
-```typescript
-async function executeRetry(job: RetryJob): Promise<RetryResult> {
-  // Decide whether to try Swift on retry
-  let useSwift = job.useSwiftOnRetry;
-  
-  // Don't use Swift on retry if:
-  // 1. Original Swift failure was non-retryable
-  // 2. Already exceeded Swift retry limit (2 attempts)
-  // 3. Swift globally unavailable
-  if (job.swiftAttempts >= 2) {
-    useSwift = false;
-    console.log(`[Retry] Job ${job.id}: Switching to legacy after ${job.swiftAttempts} Swift failures`);
-  }
-  
-  if (!isSwiftAvailable()) {
-    useSwift = false;
-  }
-  
-  // Execute with appropriate method
-  const result = await executeTradeWithSwift({
-    encryptedPrivateKey: job.agentPrivateKeyEncrypted,
-    market: job.market,
-    side: job.side,
-    sizeInBase: job.size,
-    subAccountId: job.subAccountId,
-    reduceOnly: job.reduceOnly,
-  }, {
-    useSwift,
-    fallbackToLegacy: true,
-    priority: job.priority,
-  });
-  
-  // Update job with Swift attempt info
-  if (result.executionMethod === 'swift') {
-    job.swiftAttempts++;
-    job.swiftOrderId = result.swiftOrderId;
-    if (!result.success) {
-      job.lastSwiftError = result.error;
-    }
-  }
-  
-  return result;
-}
-```
-
-### Swift Error Classification
-
-```typescript
-const SWIFT_ERROR_CLASSIFICATION = {
-  // Retryable with Swift
-  RETRYABLE_SWIFT: [
-    'timeout',
-    'temporarily unavailable',
-    '429',
-    '503',
-    '504',
-    'stale slot',
-  ],
-  
-  // Retryable with legacy only
-  FALLBACK_TO_LEGACY: [
-    'no liquidity',
-    'auction timeout',
-    'market not supported',
-  ],
-  
-  // Non-retryable
-  PERMANENT: [
-    'invalid signature',
-    'invalid order parameters',
-    '400',
-    '401',
-  ],
-};
-
-function classifySwiftError(error: string): 'retry_swift' | 'fallback_legacy' | 'permanent' {
-  const lowerError = error.toLowerCase();
-  
-  if (SWIFT_ERROR_CLASSIFICATION.PERMANENT.some(e => lowerError.includes(e))) {
-    return 'permanent';
-  }
-  
-  if (SWIFT_ERROR_CLASSIFICATION.FALLBACK_TO_LEGACY.some(e => lowerError.includes(e))) {
-    return 'fallback_legacy';
-  }
-  
-  return 'retry_swift';
-}
-```
-
----
-
-## Security V3 Integration
-
-### UMK Access for Swift Signing
-
-Swift order signing requires the agent keypair. Current security architecture:
-
-```
-UMK (User Master Key)
-    │
-    ├─▶ Derive key_privkey
-    │       │
-    │       └─▶ Decrypt agentPrivateKeyEncryptedV3
-    │               │
-    │               └─▶ Agent Keypair (for signing)
-```
-
-**No changes required** - Swift uses the same keypair for signing messages as legacy uses for transaction signing.
-
-### Policy HMAC Verification
-
-Before executing any trade (Swift or legacy), verify bot policy hasn't been tampered:
-
-```typescript
-async function verifyBotPolicy(bot: TradingBot): Promise<boolean> {
-  if (!bot.policyHmac) {
-    console.warn(`[Security] Bot ${bot.id} has no policy HMAC`);
-    return true; // Allow for migration period
-  }
-  
-  const expectedHmac = computePolicyHmac({
-    market: bot.market,
-    leverage: bot.leverage,
-    maxPositionSize: bot.maxPositionSize,
-  });
-  
-  if (bot.policyHmac !== expectedHmac) {
-    console.error(`[Security] Bot ${bot.id} policy HMAC mismatch - possible tampering`);
-    return false;
-  }
-  
-  return true;
-}
-```
-
-### Emergency Stop Handling
-
-Check emergency stop before Swift submission:
-
-```typescript
-async function canExecuteTrade(walletAddress: string): Promise<boolean> {
-  const wallet = await storage.getWallet(walletAddress);
-  
-  if (wallet?.emergencyStopTriggered) {
-    console.log(`[Security] Emergency stop active for ${walletAddress}`);
-    return false;
-  }
-  
-  return true;
-}
-```
-
-### Subscriber Routing Security Note
-
-**IMPORTANT:** Subscriber routing uses the **legacy encrypted key path** (`agentPrivateKeyEncrypted`), not UMK-based encryption.
-
-This is documented in `PHASE 6.2 SECURITY NOTE`:
-
-> Subscriber Routing uses LEGACY encrypted key path. This is INTENTIONAL because subscriber wallet owners belong to DIFFERENT users who do not have active sessions during webhook processing.
-
-Swift integration maintains this behavior - subscriber trades use the legacy key for signing.
-
----
-
-## Swift-Specific Limitations
-
-### Reduce-Only Semantics (V3 Updated)
+### Reduce-Only Semantics (V3 Updated — Confirmed Resolved)
 
 **Legacy behavior:** `reduceOnly: true` ensures order only reduces position.
 
-**V3 CONFIRMED:** Swift natively supports the `reduceOnly` flag with identical semantics to legacy orders. The `immediateOrCancel` (IOC) flag is also supported. No special handling needed for reduce-only Swift orders.
+**Swift behavior:** Swift natively supports the `reduceOnly` flag with identical semantics to legacy orders. The `immediateOrCancel` (IOC) flag is also supported. No special handling needed for reduce-only Swift orders.
+
+**AUDITOR NOTE (February 2026):** An external audit flagged concern about a race condition in a "check-then-submit" pattern for reduce-only orders. This concern was based on an earlier version of this document that was uncertain about Swift's reduce-only support. **This has been resolved:** Swift natively supports the `reduceOnly` flag with identical semantics to legacy `placeAndTakePerpOrder`. No "check-then-submit" pattern is needed. The `reduceOnly` flag is passed directly in the Swift order parameters. The only pre-submission position check is via `PositionService.getPositionForExecution()` to determine IF a close is needed (i.e., does a position exist to close), not to enforce reduce-only behavior — that's handled by the protocol.
 
 **Position verification before close:** Even though `reduceOnly` is supported, the system should still verify position existence via `PositionService.getPositionForExecution()` before submitting close orders, consistent with current behavior:
 
 ```typescript
 async function executeSwiftClose(params: CloseParams): Promise<SwiftOrderResult> {
-  // First verify position exists
+  // First verify position exists (determines IF we need to close — NOT enforcing reduce-only)
   const position = await PositionService.getPositionForExecution(params.botId, params.agentPublicKey, params.subAccountId, params.market);
   
   if (!position || position.baseAssetAmount.isZero()) {
@@ -1503,11 +669,11 @@ async function executeSwiftClose(params: CloseParams): Promise<SwiftOrderResult>
     };
   }
   
-  // Submit close order with actual position size
+  // Submit close order with actual position size — reduceOnly enforced by protocol
   return executeSwiftOrder({
     ...params,
     baseAssetAmount: position.baseAssetAmount.abs(),
-    direction: position.baseAssetAmount.gt(0) ? 'short' : 'long', // Opposite direction
+    direction: position.baseAssetAmount.gt(0) ? 'short' : 'long',
     reduceOnly: true,
   });
 }
@@ -1520,8 +686,7 @@ Swift orders expire after a slot window (typically ~10-20 slots, 4-8 seconds).
 **Handling:**
 ```typescript
 if (swiftError.includes('stale slot') || swiftError.includes('expired')) {
-  // Order expired before execution
-  // Retry with fresh slot
+  // Order expired before execution — retry with fresh slot
   return classifySwiftError('retry_swift');
 }
 ```
@@ -1540,7 +705,6 @@ interface SwiftFillResult {
 }
 
 if (result.filledAmount < result.requestedAmount) {
-  // Queue remainder
   const remainder = result.requestedAmount - result.filledAmount;
   if (remainder >= MINIMUM_ORDER_SIZE) {
     await queueTradeRetry({
@@ -1558,7 +722,6 @@ Changing from long to short (or vice versa) requires:
 1. Close existing position
 2. Open new position in opposite direction
 
-**Implementation:**
 ```typescript
 async function executePositionFlip(params: FlipParams): Promise<FlipResult> {
   // Step 1: Close existing position
@@ -1593,7 +756,7 @@ Positions smaller than minimum order size can't be closed normally.
 
 **Swift handling:**
 ```typescript
-const MINIMUM_SWIFT_ORDER_SIZE = 0.001; // Example, verify with Swift docs
+const MINIMUM_SWIFT_ORDER_SIZE = 0.001; // Verify with Swift docs
 
 if (positionSize < MINIMUM_SWIFT_ORDER_SIZE) {
   console.log(`[Swift] Position too small for Swift: ${positionSize}, using legacy`);
@@ -1611,425 +774,671 @@ if (positionSize < MINIMUM_SWIFT_ORDER_SIZE) {
 // V3: No market tier system needed. All markets use Swift with fallback.
 function shouldUseSwift(market: string): boolean {
   if (!isSwiftAvailable()) return false;
-  // All perp markets are Swift-eligible
   return true;
 }
 ```
 
 ---
 
-## Observability & Monitoring
+# Part 3: Integration Plan
 
-### Required Metrics
+---
 
-#### Swift API Metrics
+## 7. Architecture Decision: Where Swift Lives
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `swift_orders_total` | Counter | Total Swift orders submitted |
-| `swift_orders_success` | Counter | Successful Swift fills |
-| `swift_orders_failed` | Counter | Failed Swift orders |
-| `swift_orders_fallback` | Counter | Orders that fell back to legacy |
-| `swift_api_latency_ms` | Histogram | Swift API response time |
-| `swift_auction_duration_ms` | Histogram | Time from submit to fill |
-| `swift_price_improvement_bps` | Histogram | Fill price vs oracle (basis points) |
+**Decision:** Swift execution runs in the **main Node.js process**, not in the `drift-executor.mjs` subprocess.
 
-#### Per-Market Metrics
+**Rationale:**
+- Swift is sign-a-message + HTTP POST — no heavy transaction building, no process isolation needed
+- `drift-executor.mjs` stays untouched as the legacy fallback path
+- The Swift executor is a new module (`server/swift-executor.ts`) called from `drift-service.ts`
+- If Swift fails, the existing subprocess path fires as fallback — zero changes to proven code
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `swift_orders_by_market` | Counter | Swift orders per market |
-| `swift_success_rate_by_market` | Gauge | Success rate per market |
-| `swift_avg_fill_time_by_market` | Gauge | Average fill time per market |
+```
+                        ┌─────────────────────────┐
+                        │   executePerpOrder()     │
+                        │   (drift-service.ts)     │
+                        └──────────┬──────────────┘
+                                   │
+                        ┌──────────▼──────────────┐
+                        │  Should use Swift?       │
+                        │  (swift-config.ts)       │
+                        └──────┬─────────┬────────┘
+                               │ YES     │ NO
+                    ┌──────────▼───┐  ┌──▼──────────────┐
+                    │ swift-       │  │ drift-executor   │
+                    │ executor.ts  │  │ .mjs subprocess  │
+                    │ (main proc)  │  │ (unchanged)      │
+                    └──────┬───────┘  └─────────────────┘
+                           │
+                    ┌──────▼───────┐
+                    │ Swift fail?  │
+                    │ fallback →   │──▶ drift-executor.mjs
+                    └──────────────┘
+```
 
-#### Error Metrics
+---
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `swift_errors_by_type` | Counter | Errors categorized by type |
-| `swift_retries_total` | Counter | Total retry attempts |
-| `swift_fallback_reasons` | Counter | Fallback reasons categorized |
+## 8. Step-by-Step Integration Path
 
-### Implementation
+Each step has:
+- **What** you're building
+- **Where** in the codebase it goes
+- **How** to verify it works
+- **Gate** criteria before proceeding to the next step
+
+Nothing proceeds without passing its gate.
+
+---
+
+### Step 1: Database Schema Migration
+
+**What:** Add Swift tracking columns to existing tables.
+
+**Where:** `shared/schema.ts`
+
+**Changes:**
+
+```
+bot_trades table — ADD:
+  executionMethod  text  default 'legacy'    // 'swift' | 'legacy'
+  swiftOrderId     text  nullable            // Swift UUID for tracking
+  auctionDurationMs integer nullable         // How long the auction took
+  priceImprovement  decimal nullable         // Fill price vs oracle (bps)
+
+trade_retry_queue table — ADD:
+  swiftAttempts       integer  default 0     // Swift-specific retry count
+  originalExecMethod  text     default 'legacy'  // What method was tried first
+```
+
+**Not adding:**
+- No `swiftEnabled` per bot — Swift is a global platform capability with automatic fallback, not a per-bot setting
+- No separate `swift_order_logs` audit table yet — the `executionMethod` column on `bot_trades` gives us tracking without a new table. Add the audit table later if debugging requires it
+
+**Verify:**
+1. Run `npm run db:push` — migration completes without errors
+2. Query `SELECT column_name FROM information_schema.columns WHERE table_name = 'bot_trades'` — new columns exist
+3. Existing trades still load in the UI — no regressions
+
+**Gate:** Schema migration applied, existing data intact, app starts normally.
+
+---
+
+### Step 2: Swift Configuration Module
+
+**What:** Central config for Swift behavior, health tracking, and error classification.
+
+**Where:** New file `server/swift-config.ts`
+
+**Contents:**
+
+```
+SWIFT_CONFIG:
+  enabled:           env SWIFT_ENABLED (default: false — OFF until Step 7)
+  apiUrl:            'https://swift.drift.trade'
+  orderTimeoutMs:    3000  (aggressive — leaves room for legacy fallback within 5s total)
+  healthCheckMs:     30000
+  maxSwiftRetries:   2     (then fall back to legacy)
+  fallbackEnabled:   true  (always fall back to legacy on Swift failure)
+
+SWIFT_HEALTH (in-memory state):
+  isHealthy:              boolean
+  lastCheckAt:            timestamp
+  consecutiveFailures:    number
+  latencyMs:              number
+
+isSwiftAvailable():       returns enabled && isHealthy
+shouldUseSwift():         returns isSwiftAvailable() (no market filtering — all markets eligible)
+
+SWIFT_ERROR_CLASSIFICATION:
+  RETRYABLE_SWIFT:     ['timeout', '429', '503', '504', 'stale slot']
+  FALLBACK_TO_LEGACY:  ['no liquidity', 'auction timeout']
+  PERMANENT:           ['invalid signature', 'invalid order parameters', '400', '401']
+  classifySwiftError(error) → 'retry_swift' | 'fallback_legacy' | 'permanent'
+```
+
+**Verify:**
+1. Module imports without errors
+2. `isSwiftAvailable()` returns `false` (SWIFT_ENABLED defaults to false)
+3. Error classification returns correct categories for test strings
+
+**Gate:** Config module compiles, health state tracks correctly, error classification is accurate.
+
+---
+
+### Step 3: Swift Executor Module
+
+**What:** The core module that signs Swift order messages and submits them to the Swift API.
+
+**Where:** New file `server/swift-executor.ts`
+
+**Function signature:**
 
 ```typescript
-// server/swift-metrics.ts
-
-interface SwiftMetrics {
-  ordersTotal: number;
-  ordersSuccess: number;
-  ordersFailed: number;
-  ordersFallback: number;
-  latencyHistogram: number[];
-  auctionDurationHistogram: number[];
-  priceImprovementHistogram: number[];
-  errorsByType: Record<string, number>;
-  byMarket: Record<string, MarketMetrics>;
-}
-
-interface MarketMetrics {
-  ordersTotal: number;
-  ordersSuccess: number;
-  avgFillTimeMs: number;
-  avgPriceImprovementBps: number;
-}
-
-const metrics: SwiftMetrics = {
-  ordersTotal: 0,
-  ordersSuccess: 0,
-  ordersFailed: 0,
-  ordersFallback: 0,
-  latencyHistogram: [],
-  auctionDurationHistogram: [],
-  priceImprovementHistogram: [],
-  errorsByType: {},
-  byMarket: {},
-};
-
-export function recordSwiftOrder(result: SwiftOrderResult, market: string): void {
-  metrics.ordersTotal++;
-  
-  if (result.success) {
-    metrics.ordersSuccess++;
-    if (result.auctionDurationMs) {
-      metrics.auctionDurationHistogram.push(result.auctionDurationMs);
-    }
-    if (result.priceImprovement) {
-      metrics.priceImprovementHistogram.push(result.priceImprovement);
-    }
-  } else {
-    if (result.executionMethod === 'legacy' && result.swiftAttempted) {
-      metrics.ordersFallback++;
-    } else {
-      metrics.ordersFailed++;
-    }
-    
-    if (result.errorCode) {
-      metrics.errorsByType[result.errorCode] = (metrics.errorsByType[result.errorCode] || 0) + 1;
-    }
-  }
-  
-  // Update market-specific metrics
-  if (!metrics.byMarket[market]) {
-    metrics.byMarket[market] = { ordersTotal: 0, ordersSuccess: 0, avgFillTimeMs: 0, avgPriceImprovementBps: 0 };
-  }
-  metrics.byMarket[market].ordersTotal++;
-  if (result.success) {
-    metrics.byMarket[market].ordersSuccess++;
-  }
-}
-
-export function getSwiftMetrics(): SwiftMetrics {
-  return { ...metrics };
-}
+export async function executeSwiftOrder(params: {
+  privateKeyBase58: string;        // Decrypted agent key (same key used for legacy)
+  agentPublicKey: string;
+  market: string;                  // e.g., 'SOL-PERP'
+  marketIndex: number;
+  side: 'long' | 'short';
+  sizeInBase: number;
+  subAccountId: number;
+  reduceOnly: boolean;
+  slippageBps?: number;
+}): Promise<SwiftOrderResult>
 ```
 
-### Alerting Rules
+**Internal flow:**
+1. Get current slot from RPC (1 lightweight `getSlot` call)
+2. Build `SignedMsgOrderParamsMessage` with slot, UUID, order params
+3. Sign with agent keypair using `driftClient.signSignedMsgOrderParamsMessage()`
+4. POST to `https://swift.drift.trade/orders` with 3-second timeout
+5. Parse response — return success with fill details or error with classification
 
-| Alert | Condition | Severity |
-|-------|-----------|----------|
-| Swift API Down | Health check fails 3x consecutive | High |
-| High Fallback Rate | Fallback rate > 10% over 5 min | Medium |
-| Swift Latency Spike | p95 latency > 2s | Medium |
-| Market Liquidity Issue | Market success rate < 50% | Medium |
-| Swift Errors Spike | Error rate > 5% over 5 min | High |
-
-### Dashboard Endpoints
-
+**Return type:**
 ```typescript
-// GET /api/admin/swift-metrics
-app.get("/api/admin/swift-metrics", requireAdmin, (req, res) => {
-  const metrics = getSwiftMetrics();
-  res.json({
-    summary: {
-      totalOrders: metrics.ordersTotal,
-      successRate: metrics.ordersSuccess / metrics.ordersTotal,
-      fallbackRate: metrics.ordersFallback / metrics.ordersTotal,
-      avgLatencyMs: average(metrics.latencyHistogram),
-      avgPriceImprovementBps: average(metrics.priceImprovementHistogram),
-    },
-    byMarket: metrics.byMarket,
-    errorBreakdown: metrics.errorsByType,
-  });
-});
+interface SwiftOrderResult {
+  success: boolean;
+  executionMethod: 'swift';
+  txSignature?: string;           // On-chain signature from keeper
+  swiftOrderId?: string;          // Swift UUID
+  fillPrice?: number;
+  fillAmount?: number;
+  auctionDurationMs?: number;
+  priceImprovement?: number;      // vs oracle, in bps
+  error?: string;
+  errorClassification?: 'retry_swift' | 'fallback_legacy' | 'permanent';
+}
 ```
 
----
+**Key implementation details:**
+- Uses `@drift-labs/sdk` built-in methods for message encoding/signing
+- Does NOT create a full DriftClient with subscriptions — only needs a lightweight client for signing
+- Requires an active RPC connection only for `getSlot()` — uses existing `getConnection()` from drift-service
+- Does NOT handle trade sizing — that's done upstream by `computeTradeSizingAndTopUp`
+- Does NOT handle position checks — that's done upstream by `PositionService.getPositionForExecution()`
 
-## Testing Plan
+**Verify:**
+1. Unit test: sign a message with a test keypair, verify the signature format matches Swift API expectations
+2. Unit test: mock the Swift API POST, verify request body format
+3. Unit test: verify error classification for each error type
+4. Module compiles and all imports resolve
 
-### Unit Tests
-
-| Test | Description |
-|------|-------------|
-| Swift message signing | Verify SDK signing methods work correctly |
-| UUID generation | Verify unique 8-byte UUIDs |
-| Error classification | Verify error categorization logic |
-| Fallback logic | Verify fallback triggers correctly |
-| Retry strategy | Verify Swift → legacy fallback on retry |
-
-### Integration Tests
-
-| Test | Description |
-|------|-------------|
-| Swift API connectivity | Connect to Swift API, verify health check |
-| Order submission | Submit test order, verify acceptance |
-| Order fill | Submit order, verify fill response |
-| Fallback on failure | Force Swift failure, verify legacy execution |
-| Rate limiting | Verify rate limit handling |
-
-### End-to-End Tests
-
-| Test | Scenario |
-|------|----------|
-| Webhook → Swift | Full webhook flow with Swift execution |
-| Subscriber routing | Multiple subscriber Swift trades |
-| Position close | Close position with profit share |
-| Position flip | Long → Short with Swift |
-| Retry flow | Failed trade → retry → success |
-
-### Load Tests
-
-| Test | Description |
-|------|-------------|
-| Concurrent orders | 100 simultaneous Swift orders |
-| Subscriber burst | 50 subscribers from single signal |
-| Mixed execution | 50% Swift, 50% legacy |
-| Failover stress | Swift down, verify fallback handles load |
-
-### Production Validation
-
-| Metric | Target | Validation Period |
-|--------|--------|-------------------|
-| Swift success rate | > 95% | 1 week |
-| Fallback rate | < 5% | 1 week |
-| Price improvement | > 0.02% average | 2 weeks |
-| Latency p95 | < 1000ms | 1 week |
+**Gate:** Swift executor signs messages correctly, submits to API with correct format, classifies errors accurately. All unit tests pass.
 
 ---
 
-## Migration Strategy
+### Step 4: Integration Point — `executePerpOrder` Wrapper
 
-### Staged Rollout
+**What:** Modify `executePerpOrder()` in `drift-service.ts` to try Swift first, fall back to legacy subprocess.
 
-| Phase | Description | Timeline | Criteria to Proceed |
-|-------|-------------|----------|---------------------|
-| 0 | Documentation & 3rd party audit | Week 0 | Audit complete |
-| 1 | Dev environment testing | Week 1-2 | All tests pass |
-| 2 | Internal team testing (1% of traffic) | Week 3 | 99% success rate |
-| 3 | Beta users opt-in (10% of bots) | Week 4 | 98% success rate |
-| 4 | Default on for new bots | Week 5 | No critical issues |
-| 5 | Migrate existing bots (with notification) | Week 6 | User opt-out available |
-| 6 | Swift as primary (legacy as fallback) | Week 8+ | Stable for 2 weeks |
+**Where:** `server/drift-service.ts`, function `executePerpOrder()` (line ~3248)
 
-### Feature Flags
-
-```typescript
-const SWIFT_FEATURE_FLAGS = {
-  // Global controls
-  SWIFT_GLOBALLY_ENABLED: true,
-  SWIFT_PERCENTAGE_ROLLOUT: 10, // 10% of requests use Swift
-  
-  // V3 UPDATE: All perp markets support Swift. No market allowlist needed.
-  // SWIFT_MARKETS_ENABLED removed - all markets eligible by default.
-  
-  // Behavioral controls
-  SWIFT_FALLBACK_ENABLED: true,
-  SWIFT_RETRY_WITH_SWIFT: true,
-  SWIFT_CRITICAL_ORDERS_LEGACY: false, // Use legacy for critical closes
-};
+**Current flow:**
+```
+executePerpOrder() → spawn drift-executor.mjs → placeAndTakePerpOrder → return result
 ```
 
-### User Communication
-
-Before migration:
-- Blog post explaining Swift benefits
-- In-app notification about upcoming change
-- Email to active users
-
-During migration:
-- Dashboard indicator showing execution method
-- Option to disable Swift per bot
-- Support channel for issues
-
----
-
-## Risks & Mitigations
-
-| Risk | Probability | Impact | Mitigation |
-|------|-------------|--------|------------|
-| Swift API downtime | Medium | High | Automatic fallback to legacy |
-| Worse fills than legacy | Low | Medium | A/B testing before rollout; per-market monitoring |
-| Market maker liquidity gaps | Medium | Medium | Per-market Swift enablement; fallback on no-liquidity |
-| SDK breaking changes | Low | High | Pin SDK version; test before upgrades |
-| Increased complexity | Medium | Medium | Comprehensive testing; gradual rollout |
-| Profit share timing issues | Medium | High | Verify fill before profit share calculation |
-| Partial fill handling | Medium | Medium | Remainder queueing; proportional profit share |
-| Security regression | Low | Critical | Security V3 compatibility verification |
-
----
-
-## Rollback Plan
-
-### Immediate Rollback (< 1 minute)
-
-```typescript
-// Set environment variable or feature flag
-SWIFT_GLOBALLY_ENABLED=false
+**New flow:**
+```
+executePerpOrder()
+  │
+  ├─ shouldUseSwift()? ─── YES ──▶ executeSwiftOrder()
+  │                                      │
+  │                                 Success? ──▶ return swift result
+  │                                      │
+  │                                 Fail (fallback_legacy)? ──▶ continue to legacy
+  │                                 Fail (permanent)? ──▶ return error
+  │
+  └─ NO (or Swift failed with fallback) ──▶ spawn drift-executor.mjs (existing code, unchanged)
 ```
 
-This immediately routes all trades to legacy execution.
+**Critical rules:**
+- The `executePerpOrder` function signature does NOT change — all callers (webhook, manual, subscriber, retry) are unaffected
+- Swift is tried first, legacy is fallback — never the other way around
+- If Swift succeeds, the result is mapped to the same return type as legacy
+- If Swift fails with `fallback_legacy` classification, log the Swift error and proceed to legacy — no extra delay
+- If Swift fails with `permanent` classification, return the error immediately — don't waste time on legacy
+- The `executionMethod` ('swift' or 'legacy') is added to the return object so callers can log it
 
-### Per-Bot Rollback
+**What stays the same:**
+- `computeTradeSizingAndTopUp` is called BEFORE `executePerpOrder` — sizing logic unchanged
+- `PositionService.getPositionForExecution()` is called BEFORE close orders — position checks unchanged
+- The subprocess stagger logic still applies to legacy fallback calls
+- RPC failover for legacy calls is unchanged
+- Profit sharing flow downstream is unchanged — it just gets the fill price from whichever method succeeded
 
-```sql
-UPDATE trading_bots 
-SET swift_enabled = false 
-WHERE id = 'affected-bot-id';
+**Verify:**
+1. Set `SWIFT_ENABLED=false` → all trades use legacy subprocess (zero behavior change)
+2. Set `SWIFT_ENABLED=true` with Swift API mocked to return success → trades execute via Swift
+3. Set `SWIFT_ENABLED=true` with Swift API mocked to fail → trades fall back to legacy subprocess
+4. Measure total latency: Swift attempt (3s timeout) + legacy fallback should complete under 5 seconds total
+5. Existing webhook flow end-to-end works with `SWIFT_ENABLED=false`
+6. Verify `reduceOnly: true` close orders work correctly via Swift — position should close, not open a new one
+7. Verify all 4 subscriber routing trigger points work with Swift:
+   - Source bot **paused** → `parseSignalForRouting()` → `routeSignalToSubscribers()` → subscribers execute via Swift
+   - Source bot **auth disabled** → same routing path → subscribers execute via Swift
+   - Source bot **auth expired** → same routing path → subscribers execute via Swift
+   - Source bot **executes normally** → subscribers execute via Swift
+   - **Retry worker success** → `registerRoutingCallback` → subscribers execute via Swift
+
+**Gate:** All 4 execution paths (webhook, manual, subscriber, retry) AND all 4+1 routing trigger points work with both `SWIFT_ENABLED=true` and `false`. Fallback behavior is correct. `reduceOnly` close orders behave identically to legacy. No regressions on existing functionality.
+
+---
+
+### Step 5: Trade Logging Updates
+
+**What:** Record which execution method was used and Swift-specific metadata in `bot_trades`.
+
+**Where:** `server/routes.ts` — all places that insert into `bot_trades`
+
+**Changes:**
+- When logging a trade, include `executionMethod: result.executionMethod || 'legacy'`
+- When Swift was used, include `swiftOrderId`, `auctionDurationMs`, `priceImprovement`
+- When Swift failed and legacy was used, include `executionMethod: 'legacy'` (the failed Swift attempt is logged in server console only — no extra DB write for failed attempts at this stage)
+
+**Locations to update (all in `server/routes.ts`):**
+1. Webhook handler trade log (~line 5700-5800)
+2. Manual trade endpoint trade log (~line 3200-3400)
+3. Subscriber routing trade log (~line 800-900)
+4. Retry worker trade log (in `trade-retry-service.ts`)
+
+**Verify:**
+1. Execute a trade with Swift enabled → `bot_trades` row has `execution_method = 'swift'`
+2. Execute a trade with Swift disabled → `bot_trades` row has `execution_method = 'legacy'`
+3. Execute a trade where Swift fails → `bot_trades` row has `execution_method = 'legacy'`
+4. Dashboard trade history still displays correctly — new columns don't break existing queries
+
+**Gate:** All trades are logged with correct execution method. No existing queries or UI broken.
+
+---
+
+### Step 6: Retry Service Integration
+
+**What:** Update trade retry service to handle Swift-specific retry behavior.
+
+**Where:** `server/trade-retry-service.ts`
+
+**Changes:**
+
+When a trade is queued for retry:
+- Record `originalExecMethod` (was it originally a Swift trade?)
+- Initialize `swiftAttempts = 0`
+
+When executing a retry:
+- If `swiftAttempts < 2` and `isSwiftAvailable()` → try Swift
+- If Swift fails on retry → increment `swiftAttempts`, try legacy
+- If `swiftAttempts >= 2` → skip Swift, go straight to legacy
+- Cooldown re-queue logic stays the same — Swift failures count toward cooldown eligibility
+
+Cooldown integration specifics:
+- Swift timeout errors (`classifySwiftError → 'retry_swift'`) that exhaust max attempts should trigger the existing `isTimeoutError` / `isTransientError` check for cooldown eligibility
+- `cooldownRetries` counter (max 2, 2-minute delay) applies regardless of whether the original failure was Swift or legacy
+- A Swift `'fallback_legacy'` error that then also fails on legacy counts as a single attempt toward the retry limit
+
+When retry succeeds via routing callback:
+- `registerRoutingCallback(routeSignalToSubscribers)` works the same regardless of execution method — no changes needed to the callback mechanism itself
+
+**Verify:**
+1. Queue a retry with Swift enabled → first retry attempts Swift
+2. Force 2 Swift failures on retry → third retry goes directly to legacy
+3. Cooldown re-queue still triggers after max attempts (both Swift-originated and legacy-originated failures)
+4. Verify `cooldownRetries` increments correctly when Swift timeout errors exhaust normal retry attempts
+5. Successful retry still triggers subscriber routing callback
+
+**Gate:** Retry service correctly handles Swift retries, respects max Swift attempts, falls back to legacy, integrates with existing cooldown system (including `cooldownRetries` and 2-minute delay), and triggers routing callback on success.
+
+---
+
+### Step 7: Observability & Metrics
+
+**What:** Add structured metrics tracking for Swift performance. This must be in place BEFORE production activation so we can monitor from day one.
+
+**Where:** New file `server/swift-metrics.ts`, plus a new admin endpoint
+
+**Metrics tracked (in-memory counters, queryable via API):**
+- Total Swift orders submitted
+- Swift success count / failure count / fallback count
+- Average latency (ms)
+- Average price improvement (bps)
+- Per-market breakdown
+- Error type distribution
+
+**Admin endpoint:**
+```
+GET /api/admin/swift-metrics
+→ Returns JSON with all metrics
 ```
 
-### Full Code Rollback
+**Verify:**
+1. Execute several trades → metrics endpoint shows accurate counts
+2. Force a fallback → fallback counter increments
+3. Metrics survive across trades within a server session
+4. Metrics reset on server restart (acceptable for V1 — persistent metrics are a later enhancement)
 
-1. Deploy previous version without Swift code
-2. All trades automatically use legacy path
-3. Swift database fields remain but are unused
-
-### Post-Rollback Analysis
-
-1. Review Swift order logs for failure patterns
-2. Analyze metrics for root cause
-3. Document issues for fix
-4. Plan re-deployment with fixes
+**Gate:** Metrics are accurate and accessible. Deployed and ready before Swift is enabled in production.
 
 ---
 
-## Success Metrics
+### Step 8: Controlled Activation
 
-### Primary KPIs
+**What:** Enable Swift in production with monitoring.
 
-| KPI | Target | Measurement |
-|-----|--------|-------------|
-| Gas savings | $0 per trade | Track SOL spend reduction |
-| Fill price improvement | > 0.03% average | Compare Swift vs oracle |
-| Execution success rate | > 99% without fallback | Swift success / total Swift |
-| Latency | < 500ms average | Swift API to fill time |
+**Where:** Environment variable `SWIFT_ENABLED=true`
 
-### Secondary KPIs
+**Activation sequence:**
 
-| KPI | Target | Measurement |
-|-----|--------|-------------|
-| Swift adoption rate | > 80% of eligible trades | Swift attempts / total trades |
-| Fallback rate | < 5% | Fallback / Swift attempts |
-| User satisfaction | Positive feedback | Reduced SOL top-up requests |
-| Retry reduction | 30% fewer retries | Compare retry queue size |
+```
+Day 1:  Set SWIFT_ENABLED=true
+        Monitor: Console logs for Swift attempts, success/failure
+        Monitor: GET /api/admin/swift-metrics for real-time counters
+        Watch:   First 10 trades — all should either succeed via Swift or fallback cleanly
+        Check:   bot_trades table shows execution_method values
 
----
+Day 2:  Review 24h of data
+        Check:   Swift success rate (target: >90%)
+        Check:   Fallback rate (target: <10%)
+        Check:   No increase in failed trades vs pre-Swift baseline
+        Check:   Trade latency hasn't degraded significantly
+        Check:   Per-market metrics via /api/admin/swift-metrics
 
----
+Day 3:  If stable, consider this the baseline
+        If issues: Set SWIFT_ENABLED=false (instant rollback, no code change)
 
-## V3 Audit Findings & Corrections
+Week 2: Review per-market Swift performance
+        Identify any markets with consistently low fill rates
+        Review RPC usage patterns — should see reduction in Helius calls
+```
 
-**Audit Date:** February 9, 2026  
-**Scope:** Full codebase audit against production system + Swift API research
+**Emergency rollback:** Set `SWIFT_ENABLED=false` → immediate return to legacy-only, no code deployment needed.
 
-### Finding 1: Decoupled Subscriber Routing (Critical)
+**Verify:**
+1. Production trades execute via Swift successfully
+2. Fallback works when Swift API has issues
+3. No increase in trade failures
+4. Metrics endpoint shows accurate data from live trades
+5. Console logging provides clear visibility into execution path
 
-**Original assumption:** Routing happens only after successful source bot trade.  
-**Reality:** System now has 4 routing trigger points using `parseSignalForRouting()` for lightweight signal extraction without key decryption. Routing works when source bot is paused, auth disabled, auth expired, or executing normally. Retry worker also routes via `registerRoutingCallback`.  
-**Impact:** Swift integration must work at all 4 trigger points, not just post-trade.  
-**Status:** Updated in Path 3 documentation above.
-
-### Finding 2: Unified Trade Sizing (`computeTradeSizingAndTopUp`)
-
-**Original assumption:** Plan's Swift execution paths bypass trade sizing.  
-**Reality:** A 300+ line unified helper handles auto top-up, profit reinvestment mode, dynamic leverage capping, minimum order enforcement, and bot auto-pause on insufficient funds. All trade execution paths go through this.  
-**Impact:** Swift trades MUST route through `computeTradeSizingAndTopUp` before order submission. Do not bypass it.  
-**Status:** Updated in subscriber routing code examples.
-
-### Finding 3: PositionService for Close Verification
-
-**Original assumption:** Plan references generic "getOnChainPosition" for reduce-only checks.  
-**Reality:** `PositionService.getPositionForExecution()` is the established path. Uses byte-parsing (not SDK) to avoid WebSocket memory leaks.  
-**Impact:** Swift close orders should use `PositionService`, not build a new position check.  
-**Status:** Updated in Reduce-Only Semantics section.
-
-### Finding 4: All Perp Markets Support Swift
-
-**Original assumption:** Only SOL, BTC, ETH supported.  
-**Reality:** Swift launched March 2025 for ALL perpetual futures markets on Drift. All 85+ markets in QuantumVault's `PERP_MARKET_INDICES` are eligible.  
-**Impact:** Remove `supportedMarkets` allowlist. No market tiering needed.  
-**Status:** Updated throughout document.
-
-### Finding 5: Reduce-Only Natively Supported
-
-**Original assumption:** "Different semantics (TBD)" for reduce-only.  
-**Reality:** Swift natively supports `reduceOnly` flag with identical semantics to legacy orders.  
-**Impact:** No special reduce-only handling needed.  
-**Status:** Updated in Swift-Specific Limitations section.
-
-### Finding 6: Cooldown Retry System
-
-**Original assumption:** Plan doesn't account for cooldown retries.  
-**Reality:** Retry service has `cooldownRetries` field and 2-minute cooldown re-queue for timeout errors (max 2 cooldown retries).  
-**Impact:** Swift retry strategy must integrate with cooldown system.  
-**Status:** Updated in Path 4 documentation.
-
-### Finding 7: Subprocess Architecture Decision
-
-**Original assumption:** Not addressed.  
-**Reality:** Current trades run in `drift-executor.mjs` subprocess via stdin/stdout JSON. Swift is sign-message + HTTP POST (no heavy transaction building).  
-**Recommendation:** Run Swift in main Node process (lighter weight), keep legacy subprocess as fallback. This avoids modifying `drift-executor.mjs` and is architecturally cleaner since Swift doesn't need process isolation.  
-**Status:** New architectural recommendation.
-
-### Finding 8: SDK Has Built-in Swift Methods
-
-**Original assumption:** Plan proposes custom HTTP client for Swift API.  
-**Reality:** `@drift-labs/sdk` DriftClient has `encodeSwiftOrderParamsMessage()`, `decodeSwiftServerMessage()`, `placeAndMakeSwiftPerpOrder()`, and related methods.  
-**Impact:** Can leverage SDK methods instead of building from scratch.  
-**Status:** Updated in Swift Protocol Overview section.
-
-### Finding 9: Builder Codes Revenue Opportunity
-
-**Original assumption:** Not mentioned.  
-**Reality:** Builder Codes are limited to Swift orders only. Registering as a Drift builder would earn platform fees on every Swift trade executed.  
-**Impact:** Additional revenue stream worth exploring during implementation.  
-**Status:** Noted in SDK Integration section.
-
-### Finding 10: Latency Budget Gap
-
-**Original assumption:** Plan doesn't specify total timeout for Swift attempt + fallback.  
-**Reality:** Need aggressive Swift timeout (recommended 3 seconds) so Swift + fallback total stays under 5 seconds. Current webhook response time is 1-2 seconds.  
-**Impact:** Add `SWIFT_ORDER_TIMEOUT_MS: 3000` config (not 5000 as originally proposed).  
-**Status:** Recommended config change.
-
-### Finding 11: Subscriber Batch Efficiency
-
-**Original assumption:** Each subscriber independently discovers Swift failure and falls back.  
-**Reality:** For batches of N subscribers, if Swift goes unhealthy mid-batch, remaining subscribers should skip Swift proactively.  
-**Impact:** Add shared `swiftHealthy` flag checked at start of each subscriber execution within a batch.  
-**Status:** New recommendation for subscriber routing.
-
-### Finding 12: Database Schema - No Swift Fields Exist Yet
-
-**Original assumption:** Plan proposes adding `swiftEnabled` per bot and `executionMethod` per trade.  
-**Reality:** Neither `tradingBots` nor `bot_trades` schemas have any Swift-related columns. Current `trade_retry_queue` also lacks Swift fields.  
-**Impact:** Schema migration needed before implementation. Fields to add:
-- `bot_trades`: `executionMethod` (text, 'swift' | 'legacy')
-- `trade_retry_queue`: Consider adding `swiftAttempts`, `lastSwiftError` columns
-- `tradingBots`: Consider global Swift config vs per-bot `swiftEnabled` flag  
-**Status:** Schema migration required as Phase 1 prerequisite.
+**Gate:** 48 hours of stable Swift execution in production with >90% Swift success rate and clean fallback behavior, validated by metrics data.
 
 ---
 
-## Appendices
+### Step 9: Builder Code Registration (Optional — Revenue)
 
-### Appendix A: Swift API Reference
+**What:** Register QuantumVault as a Drift Builder to earn fees on Swift trades.
+
+**Where:** Drift Builder Code program (on-chain registration, one-time)
+
+**Requirements:**
+- Register a builder code with Drift Protocol
+- Add `builderIdx` and `builderFee` to Swift order submissions in `swift-executor.ts`
+- Builder fees are paid by the protocol, not the user — no impact on user fill prices
+
+**Verify:**
+1. Confirm builder registration on-chain
+2. Verify builder fee appears in Swift order submissions
+3. Check builder fee revenue accrual on Drift
+
+**Gate:** Builder code registered, fees flowing. This step is optional and can be deferred.
+
+---
+
+## 9. Security V3 Compatibility
+
+Swift signing uses the **same agent keypair** as legacy transaction signing. The key access path is identical:
+
+**For webhook/manual trades (UMK path):**
+```
+Session → UMK → derive key_privkey → decrypt agentPrivateKeyEncryptedV3 → agent keypair → sign Swift message
+```
+
+**For subscriber routing (legacy path):**
+```
+agentPrivateKeyEncrypted → decrypt with AGENT_ENCRYPTION_KEY → agent keypair → sign Swift message
+```
+
+**What stays the same:**
+- `policyHmac` verification happens BEFORE `executePerpOrder` is called — Swift changes nothing here
+- `emergencyStopTriggered` check happens BEFORE trade execution — Swift changes nothing here
+- `executionActive` check on the bot happens BEFORE trade execution — Swift changes nothing here
+- The decrypted `privateKeyBase58` is passed to `executeSwiftOrder()` the same way it's passed to the subprocess
+
+**Verification gate (applies to Step 4):**
+- Confirm Swift trades respect emergency stop — trigger emergency stop, verify Swift trade is blocked
+- Confirm Swift trades respect `executionActive: false` — disable execution, verify Swift trade is blocked
+- Confirm Swift trades verify `policyHmac` — tamper with bot config, verify trade is rejected
+- Confirm subscriber routing uses legacy key path for Swift signing — not UMK (subscribers have no session)
+
+---
+
+## 10. Audit Findings Coverage Map
+
+This section maps every finding from the v3.0 audit to a specific step in this integration plan. An external auditor can use this to verify completeness.
+
+| # | Audit Finding | Covered In | How Addressed |
+|---|---------------|------------|---------------|
+| 1 | Decoupled subscriber routing (4 trigger points) | Step 4 (verify gate #7) | All 5 routing entry points explicitly verified: paused, auth disabled, auth expired, normal, retry callback. Swift works identically at all points because it's inside `executePerpOrder()` which all paths call. |
+| 2 | Unified trade sizing (`computeTradeSizingAndTopUp`) | Step 4 (critical rules) | Explicitly stated: sizing is called BEFORE `executePerpOrder`. Swift does NOT bypass it. No changes to sizing logic. |
+| 3 | PositionService for close verification | Step 4 (critical rules) | Explicitly stated: `PositionService.getPositionForExecution()` is called BEFORE close orders. Swift does NOT bypass it. No changes to position service. |
+| 4 | All perp markets support Swift | Step 2 (config) | No market allowlist. `shouldUseSwift()` returns true for all markets. No tiering. |
+| 5 | Reduce-only natively supported | Step 4 (verify gate #6) | `reduceOnly` flag passed through to Swift order params. Explicit verification gate confirms close-only behavior. |
+| 6 | Cooldown retry system | Step 6 (cooldown specifics) | Swift failures map to existing `isTimeoutError`/`isTransientError`. `cooldownRetries` applies to both Swift and legacy failures. Explicit verify gates #3-4. |
+| 7 | Subprocess architecture decision | Section 7 (Architecture Decision) | Swift in main process, legacy subprocess untouched as fallback. `drift-executor.mjs` not modified. |
+| 8 | SDK has built-in Swift methods | Step 3 (implementation details) | Uses `@drift-labs/sdk` built-in methods for message encoding/signing. No custom HTTP client for message building. |
+| 9 | Builder Codes revenue opportunity | Step 9 (optional) | Deferred to after stable activation. Does not block core integration. |
+| 10 | Latency budget gap | Step 2 (config: 3000ms), Step 4 (verify gate #4) | Swift timeout set to 3000ms (not 5000ms). Total Swift + fallback must complete under 5 seconds. |
+| 11 | Subscriber batch efficiency | Step 4 (routing verification) | `isSwiftAvailable()` checked at entry of each subscriber execution. If Swift health degrades mid-batch, remaining subscribers fall back immediately via health state. |
+| 12 | Database schema — no Swift fields exist | Step 1 (schema migration) | Adds `executionMethod`, `swiftOrderId`, `auctionDurationMs`, `priceImprovement` to `bot_trades`. Adds `swiftAttempts`, `originalExecMethod` to `trade_retry_queue`. Audit log table deferred — traceability via `executionMethod` + console logs for V1. |
+
+### Schema Decision Justification
+
+The migration plan v3.0 proposed additional fields that this plan omits. Here's why:
+
+| Proposed Field | Decision | Reasoning |
+|----------------|----------|-----------|
+| `swift_enabled` per bot | Omitted | Swift is a platform optimization, not a per-bot feature. Global env var toggle is simpler and more reliable. |
+| `swift_status` on bot_trades | Omitted | The `executionMethod` column tells us whether Swift was used. The Swift API response status is logged to console. Add if debugging requires it. |
+| `swift_submitted_at` / `swift_filled_at` | Omitted | `executed_at` already exists. Auction duration is captured in `auctionDurationMs`. Sub-second timing not needed for V1. |
+| `fallback_reason` on bot_trades | Omitted | Fallback reasons are logged to console with full context. DB column adds schema complexity without clear V1 benefit. |
+| `keeper_pubkey` on bot_trades | Omitted | Keeper identity is informational only. No V1 use case requires querying by keeper. |
+| `swift_order_logs` table | Deferred | Full audit log table adds schema complexity. Console logs + `executionMethod` on `bot_trades` provide sufficient traceability for V1. Add when debugging requires queryable audit trail. |
+
+---
+
+## 11. File Change Summary
+
+| File | Change Type | Description |
+|------|-------------|-------------|
+| `shared/schema.ts` | Modify | Add Swift columns to `botTrades` and `tradeRetryQueue` |
+| `server/swift-config.ts` | **New** | Swift configuration, health monitoring, error classification |
+| `server/swift-executor.ts` | **New** | Swift order signing, submission, and result parsing |
+| `server/swift-metrics.ts` | **New** | In-memory metrics tracking |
+| `server/drift-service.ts` | Modify | Add Swift-first logic to `executePerpOrder()` |
+| `server/routes.ts` | Modify | Pass `executionMethod` when logging trades, add metrics endpoint |
+| `server/trade-retry-service.ts` | Modify | Add Swift retry tracking and fallback logic |
+
+**Files NOT modified:**
+| File | Reason |
+|------|--------|
+| `server/drift-executor.mjs` | Legacy subprocess stays untouched — it's the fallback |
+| `server/position-service.ts` | Position checks happen upstream, no Swift-specific changes |
+| `server/routes.ts` (routing logic) | `routeSignalToSubscribers` calls `executePerpOrder` — the Swift logic is inside that function, so routing just works |
+| Client/frontend files | No UI changes needed for V1 — `executionMethod` can be shown in trade history later |
+
+---
+
+## 12. Risk Summary
+
+| Risk | Mitigation |
+|------|------------|
+| Swift API goes down | Automatic fallback to legacy subprocess — instant, no human intervention |
+| Swift increases latency | 3-second timeout ensures fallback fires quickly. Total worst-case: ~5-6 seconds |
+| Swift signs incorrect order | Same keypair and order params as legacy — the signing input is identical |
+| Schema migration breaks existing data | Columns are additive (nullable or with defaults) — no existing data modified |
+| Swift + legacy both fail | Same outcome as today when legacy fails — trade goes to retry queue |
+| `SWIFT_ENABLED` accidentally set wrong | Defaults to `false` — must be explicitly enabled. Set to `false` for instant rollback |
+
+---
+
+## 13. What This Plan Does NOT Cover (Future Work)
+
+These are explicitly deferred to keep the initial integration focused:
+
+1. **Per-bot Swift toggle in UI** — Not needed for V1. Swift is a platform-level optimization.
+2. **Swift-only mode (disable legacy)** — Only after months of proven Swift stability.
+3. **Spot market Swift support** — Not confirmed live yet. Add when Drift announces.
+4. **Swift audit log table** — Add if debugging requires more granularity than `bot_trades.executionMethod` provides.
+5. **Frontend execution method display** — Nice-to-have, add to trade history table later.
+6. **Persistent metrics (DB-backed)** — In-memory metrics are fine for V1. Persist if needed for historical analysis.
+7. **Partial fill handling** — Swift typically fills fully for the order sizes QuantumVault uses. Handle if it becomes an issue in practice.
+
+---
+
+## 14. Dependencies & Prerequisites
+
+Before starting Step 1:
+
+- [ ] Drift SDK version supports Swift methods (`encodeSwiftOrderParamsMessage`, `signSignedMsgOrderParamsMessage`)
+  - **Check:** `npm list @drift-labs/sdk` and verify version includes Swift support
+- [ ] Swift API endpoint (`https://swift.drift.trade`) is accessible from production server
+  - **Check:** `curl -s https://swift.drift.trade/health` returns a response
+- [ ] Subscriber routing fix is deployed to production (currently blocked)
+  - **Reason:** Steps 4-6 need subscriber routing working to verify end-to-end
+- [ ] External audit of this plan is complete
+
+---
+
+## 15. Timeline Estimate
+
+| Step | Effort | Dependencies |
+|------|--------|--------------|
+| Step 1: Schema migration | 1 hour | None |
+| Step 2: Config module | 2-3 hours | None |
+| Step 3: Swift executor | 1-2 days | SDK version verified |
+| Step 4: executePerpOrder wrapper | 1 day | Steps 1-3 |
+| Step 5: Trade logging | 2-3 hours | Step 4 |
+| Step 6: Retry integration | 3-4 hours | Step 4 |
+| Step 7: Metrics | 3-4 hours | Steps 4-6 (must be ready before activation) |
+| Step 8: Controlled activation | 2-3 days monitoring | Steps 1-7 deployed |
+| Step 9: Builder codes | 1-2 hours | Step 8 stable |
+
+**Total development:** ~4-5 days of implementation + 3 days of monitoring  
+**Total elapsed:** ~2 weeks including buffer and monitoring
+
+---
+
+# Part 4: External Auditor Responses
+
+---
+
+## 16. External Auditor Responses
+
+**Audit Source:** External code review, February 2026  
+**Scope:** Review of migration plan against production codebase (`server/drift-executor.mjs`, `shared/schema.ts`, etc.)
+
+### Response 1: Reduce-Only Race Condition
+
+**Auditor concern:** The "check-then-submit" pattern in `executeSwiftClose` introduces a race condition between position fetch and order submission.
+
+**Response:** This concern is valid for the code shown in the v2.0 plan, but has been resolved. Our v3.0 audit (Finding #5) confirmed that **Swift natively supports the `reduceOnly` flag** with identical semantics to legacy orders. The "check-then-submit" pattern was proposed when we were uncertain about Swift's reduce-only support. It is NOT part of the implementation plan.
+
+The actual flow for close orders:
+1. `PositionService.getPositionForExecution()` checks if a position exists (determines IF we need to close)
+2. If position exists, `executePerpOrder()` is called with `reduceOnly: true`
+3. Swift order includes `reduceOnly: true` in the order params — the protocol enforces it
+
+No race condition exists because `reduceOnly` is enforced at the protocol level, not via a client-side size check.
+
+### Response 2: Subaccount SDK Workaround
+
+**Auditor concern:** `drift-executor.mjs` contains a critical workaround for `subAccountId > 0` where it manually fetches User account data because SDK websocket subscriptions fail. Does Swift need this same workaround?
+
+**Response:** No. The Swift execution path does NOT require full DriftClient subscription. Here's why:
+
+| Operation | Legacy (drift-executor.mjs) | Swift (swift-executor.ts) |
+|-----------|---------------------------|---------------------------|
+| DriftClient subscription | Required (full account data needed for tx building) | NOT required |
+| User account data | Needed for remaining accounts in transaction | NOT needed — Swift message only needs order params |
+| Subaccount workaround | Required (lines 1180-1220 in drift-executor.mjs) | NOT required |
+| What's needed | Full SDK setup with market subscriptions | Keypair for signing + getSlot() for slot number |
+
+Swift signing requires:
+- The agent keypair (for message signing — Ed25519, same as transaction signing)
+- The current Solana slot (1 lightweight RPC call)
+- Order parameters (market index, direction, size, reduce-only, etc.)
+
+It does NOT require:
+- DriftClient `subscribe()` call
+- User account data loading
+- Market data subscriptions
+- The subaccount workaround
+
+The subaccount workaround only exists because `placeAndTakePerpOrder` needs remaining accounts derived from the User account. Swift bypasses this entirely because the keeper (market maker) builds the on-chain transaction, not our client.
+
+**However:** If Swift fails and we fall back to legacy, the legacy subprocess (`drift-executor.mjs`) still uses its existing workaround. No change needed there.
+
+### Response 3: Execution Orchestrator Pattern
+
+**Auditor concern:** There is no "orchestrator" layer in the current code that can switch between Swift and Legacy methods. You need to refactor `executeTrade`.
+
+**Response:** This is exactly what Step 4 of the integration plan implements. The approach:
+
+- `executePerpOrder()` in `server/drift-service.ts` becomes the orchestrator
+- It tries Swift first (via `executeSwiftOrder()` in the new `server/swift-executor.ts`)
+- If Swift fails with a `fallback_legacy` classification, it proceeds to the existing subprocess spawn
+- The existing `drift-executor.mjs` is NOT modified — it remains the legacy fallback path
+- The function signature of `executePerpOrder()` does NOT change — all callers are unaffected
+
+The auditor's suggestion to rename `executeTrade` to `executeLegacyTrade` is not needed because the legacy path already lives in a separate subprocess (`drift-executor.mjs`). The orchestration happens at the `executePerpOrder()` level in the main process.
+
+### Response 4: Fee Calculation for Swift Trades
+
+**Auditor concern:** The current code estimates fees as `notional * 0.00045` and deducts gas. If Swift trades have different fee structures (no gas, potentially different taker fees), PnL calculations and profit sharing will be incorrect.
+
+**Response:** Valid concern. This needs to be addressed in the implementation. Here's the plan:
+
+**Gas fees:** Swift trades are gasless (keeper pays gas). The fee estimation should NOT include gas for Swift trades. The `executionMethod` field on the trade result allows downstream code to conditionally include/exclude gas estimates.
+
+**Taker fees:** Swift Dutch auction fills may have different effective fees than direct AMM fills. However, Drift protocol fees are set at the protocol level per user tier, not per execution method. The taker fee rate should be the same for Swift and legacy.
+
+**Implementation change (added to Step 4):**
+- The `SwiftOrderResult` includes `actualFee` from the Swift API response when available
+- When Swift is used, the fee returned is the Swift-reported fee (or estimated from the same formula minus gas)
+- Profit sharing uses the fee from the trade result, regardless of execution method
+- No gas fee deduction for Swift trades since the keeper pays gas
+
+**Impact:** This is a refinement within Step 4's implementation, not a structural change. The existing profit sharing flow already uses the fee from the trade result — it just needs the Swift result to report the correct fee.
+
+### Response 5: Subscriber Key Signing Format
+
+**Auditor concern:** The plan assumes Swift signing uses the same key format as legacy transactions. If Swift requires a different signer interface (off-chain message signer vs transaction signer), subscriber keys might need a different adapter.
+
+**Response:** Both operations use Ed25519 signing. The difference is what's being signed:
+
+| Aspect | Legacy Transaction | Swift Message |
+|--------|-------------------|---------------|
+| Key type | Ed25519 (Solana Keypair) | Ed25519 (same Keypair) |
+| What's signed | Serialized Solana Transaction | Serialized Swift OrderParams message |
+| Signing function | `Transaction.sign(keypair)` | `driftClient.signSignedMsgOrderParamsMessage(message)` |
+| Key format | `Keypair.fromSecretKey(bs58.decode(privateKeyBase58))` | Same — `Keypair.fromSecretKey(bs58.decode(privateKeyBase58))` |
+
+The subscriber's `agentPrivateKeyEncrypted` is decrypted to a `privateKeyBase58` string, which is then used to create a `Keypair`. This `Keypair` is used for both legacy transaction signing and Swift message signing. No adapter needed.
+
+The Drift SDK's `signSignedMsgOrderParamsMessage` internally uses the same `Keypair` that `DriftClient` is initialized with. The key loading path is identical for both execution methods.
+
+---
+
+# Part 5: Appendices
+
+---
+
+## 17. Appendix A: Swift API Reference
 
 **Endpoint:** `https://swift.drift.trade`
 
 **Request:**
 ```json
-POST /order
+POST /orders
 {
   "orderParams": "base64-encoded-signed-order-params",
   "signature": "base64-encoded-ed25519-signature",
@@ -2061,7 +1470,9 @@ POST /order
 }
 ```
 
-### Appendix B: Error Code Reference
+---
+
+## 18. Appendix B: Error Code Reference
 
 | Code | Description | Retryable | Fallback |
 |------|-------------|-----------|----------|
@@ -2073,7 +1484,9 @@ POST /order
 | STALE_SLOT | Order expired | Yes | No |
 | PARTIAL_FILL | Partially filled | N/A | Queue remainder |
 
-### Appendix C: SDK Methods
+---
+
+## 19. Appendix C: SDK Methods
 
 ```typescript
 // DriftClient methods for Swift
@@ -2100,81 +1513,54 @@ getPlaceAndMakePerpOrderWithSwiftIxs(
 ): Promise<TransactionInstruction[]>
 ```
 
-### Appendix D: Configuration Reference
+---
+
+## 20. Appendix D: Configuration Reference
 
 ```typescript
 // Environment variables
 SWIFT_ENABLED=true                          // Global toggle
 SWIFT_API_URL=https://swift.drift.trade     // API endpoint
-SWIFT_ORDER_TIMEOUT_MS=5000                 // Order submission timeout
+SWIFT_ORDER_TIMEOUT_MS=3000                 // Order submission timeout (aggressive for fallback budget)
 SWIFT_HEALTH_CHECK_INTERVAL_MS=30000        // Health check frequency
 SWIFT_MAX_RETRIES_BEFORE_FALLBACK=2         // Max Swift retries before legacy
-SWIFT_SUPPORTED_MARKETS=SOL-PERP,BTC-PERP,ETH-PERP  // Comma-separated markets
 ```
 
-### Appendix E: Database Migration Script
+---
+
+## 21. Appendix E: Database Migration Script
 
 ```sql
 -- Migration: Add Swift support fields
 -- Run with: npm run db:push
 
--- 1. trading_bots additions
-ALTER TABLE trading_bots 
-ADD COLUMN IF NOT EXISTS swift_enabled BOOLEAN DEFAULT true NOT NULL,
-ADD COLUMN IF NOT EXISTS swift_fallback_enabled BOOLEAN DEFAULT true NOT NULL;
-
--- 2. bot_trades additions
+-- 1. bot_trades additions
 ALTER TABLE bot_trades
 ADD COLUMN IF NOT EXISTS execution_method VARCHAR(20) DEFAULT 'legacy' NOT NULL,
 ADD COLUMN IF NOT EXISTS swift_order_id VARCHAR(64),
-ADD COLUMN IF NOT EXISTS swift_status VARCHAR(20),
-ADD COLUMN IF NOT EXISTS swift_submitted_at TIMESTAMP,
-ADD COLUMN IF NOT EXISTS swift_filled_at TIMESTAMP,
 ADD COLUMN IF NOT EXISTS auction_duration_ms INTEGER,
-ADD COLUMN IF NOT EXISTS keeper_pubkey TEXT,
-ADD COLUMN IF NOT EXISTS price_improvement DECIMAL(10, 4),
-ADD COLUMN IF NOT EXISTS fallback_reason TEXT;
+ADD COLUMN IF NOT EXISTS price_improvement DECIMAL(10, 4);
 
--- 3. trade_retry_queue additions
+-- 2. trade_retry_queue additions
 ALTER TABLE trade_retry_queue
-ADD COLUMN IF NOT EXISTS swift_order_id VARCHAR(64),
 ADD COLUMN IF NOT EXISTS original_execution_method VARCHAR(20) DEFAULT 'legacy',
-ADD COLUMN IF NOT EXISTS swift_attempts INTEGER DEFAULT 0,
-ADD COLUMN IF NOT EXISTS last_swift_error TEXT;
-
--- 4. New audit table
-CREATE TABLE IF NOT EXISTS swift_order_logs (
-  id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid(),
-  trade_id VARCHAR(255) REFERENCES bot_trades(id) ON DELETE CASCADE,
-  swift_order_id VARCHAR(64) NOT NULL,
-  event_type VARCHAR(30) NOT NULL,
-  timestamp TIMESTAMP DEFAULT NOW() NOT NULL,
-  request_payload JSONB,
-  response_payload JSONB,
-  error_code VARCHAR(20),
-  error_message TEXT,
-  latency_ms INTEGER,
-  created_at TIMESTAMP DEFAULT NOW() NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_swift_order_logs_trade_id ON swift_order_logs(trade_id);
-CREATE INDEX IF NOT EXISTS idx_swift_order_logs_swift_order_id ON swift_order_logs(swift_order_id);
-CREATE INDEX IF NOT EXISTS idx_swift_order_logs_event_type ON swift_order_logs(event_type);
+ADD COLUMN IF NOT EXISTS swift_attempts INTEGER DEFAULT 0;
 ```
 
 ---
 
-## Document History
+## 22. Document History
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2026-01-21 | Engineering | Initial draft |
-| 2.0 | 2026-01-26 | Engineering | Comprehensive gap analysis update; added detailed architecture documentation, all 4 execution paths, profit sharing integration, retry service integration, security V3 compatibility, Swift limitations, observability requirements, comprehensive testing plan |
+| 2.0 | 2026-01-26 | Engineering | Comprehensive gap analysis, all 4 execution paths, profit sharing, retry service, security V3, Swift limitations, observability, testing plan |
 | 3.0 | 2026-02-09 | Engineering + AI Audit | Codebase audit: decoupled routing, computeTradeSizingAndTopUp, PositionService, all-market support, SDK methods, cooldown retries, subprocess architecture, Builder Codes |
+| 4.0 | 2026-02-09 | Engineering | Merged research + integration plan into single document; added external auditor responses; corrected reduce-only, subaccount, fee calculation, and key signing sections |
 
 ---
 
 **Document Maintained By:** Engineering Team  
 **Last Updated:** February 9, 2026  
 **Next Review:** Before implementation kickoff  
-**Status:** Planning (Audited - V3 Updated)
+**Status:** Ready for External Audit — Single Source of Truth
