@@ -184,6 +184,10 @@ export const botTrades = pgTable("bot_trades", {
   errorMessage: text("error_message"),
   recoveredFromError: text("recovered_from_error"), // Stores original error when trade recovered via retry
   retryAttempts: integer("retry_attempts"), // Number of retry attempts before success
+  executionMethod: text("execution_method").default("legacy"), // 'swift' | 'legacy'
+  swiftOrderId: text("swift_order_id"),
+  auctionDurationMs: integer("auction_duration_ms"),
+  priceImprovement: decimal("price_improvement", { precision: 10, scale: 4 }),
   executedAt: timestamp("executed_at").defaultNow().notNull(),
 });
 
@@ -530,6 +534,8 @@ export const tradeRetryQueue = pgTable("trade_retry_queue", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   webhookPayload: jsonb("webhook_payload"),
   entryPrice: decimal("entry_price", { precision: 20, scale: 8 }),
+  swiftAttempts: integer("swift_attempts").default(0),
+  originalExecutionMethod: text("original_execution_method").default("legacy"),
 });
 
 export const insertTradeRetryQueueSchema = createInsertSchema(tradeRetryQueue).omit({
