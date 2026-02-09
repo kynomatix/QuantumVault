@@ -3551,7 +3551,7 @@ export async function closePerpPosition(
         oraclePrice: oraclePrice || undefined,
       });
 
-      if (swiftResult.success) {
+      if (swiftResult.success && swiftResult.txSignature) {
         console.log(`[Drift] Swift close succeeded for ${market}: tx=${swiftResult.txSignature}, latency=${swiftResult.auctionDurationMs}ms`);
         recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
         return {
@@ -3562,9 +3562,37 @@ export async function closePerpPosition(
         };
       }
 
-      console.log(`[Drift] Swift close failed (${swiftResult.errorClassification}), ALWAYS falling back to legacy for close orders: ${swiftResult.error}`);
-      recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
-      recordSwiftFallback(market);
+      if (swiftResult.success && !swiftResult.txSignature) {
+        console.log(`[Drift] Swift close accepted (Order processed) but no tx signature — Swift auction may not have filled. Waiting 5s then verifying...`);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        try {
+          const { PositionService } = await import('./position-service.js');
+          const verifyPos = await PositionService.getPositionForExecution(
+            expectedAgentPubkey || '',
+            market,
+            subAccountId
+          );
+          if (!verifyPos || verifyPos.size === 0) {
+            console.log(`[Drift] Swift close verified: position is closed after auction wait`);
+            recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
+            return {
+              success: true,
+              signature: 'swift-auction-fill',
+              executionMethod: 'swift',
+              fillPrice: swiftResult.fillPrice,
+            };
+          }
+          console.log(`[Drift] Swift close NOT filled after 5s wait (position still open: ${verifyPos.size} ${verifyPos.side}), falling back to legacy`);
+        } catch (verifyErr: any) {
+          console.warn(`[Drift] Swift close verification failed, falling back to legacy:`, verifyErr?.message);
+        }
+        recordSwiftMetricFailure(market, 'auction_not_filled');
+        recordSwiftFallback(market);
+      } else {
+        console.log(`[Drift] Swift close failed (${swiftResult.errorClassification}), ALWAYS falling back to legacy for close orders: ${swiftResult.error}`);
+        recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
+        recordSwiftFallback(market);
+      }
     } catch (swiftError: any) {
       console.error(`[Drift] Swift close threw unexpected error, falling back to legacy:`, swiftError?.message || swiftError);
       recordSwiftMetricFailure(market, 'unexpected_error');
