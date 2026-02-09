@@ -2,7 +2,7 @@
 
 **Created:** January 21, 2026  
 **Last Updated:** February 9, 2026  
-**Version:** 4.0  
+**Version:** 4.3  
 **Status:** Ready for External Audit  
 **V4 Changelog:** Merged research + integration plan into single document; addressed external auditor feedback on reduce-only, subaccount workarounds, fee calculation, and key signing
 
@@ -958,6 +958,27 @@ interface SwiftOrderResult {
 - Does NOT handle trade sizing — that's done upstream by `computeTradeSizingAndTopUp`
 - Does NOT handle position checks — that's done upstream by `PositionService.getPositionForExecution()`
 
+**Implementation Investigation Required (V4.3 — February 2026):**
+
+The current `getAgentDriftClient()` (drift-service.ts line 571-641) creates a full DriftClient with polling subscriptions and calls `driftClient.subscribe()` with a 15-second timeout. This is the HEAVY operation. Swift's "lightweight client" claim requires verification:
+
+The `signSignedMsgOrderParamsMessage()` method lives on `DriftClient`. Three approaches to avoid full subscription:
+
+1. **No-subscribe DriftClient (preferred):** Create a `DriftClient` instance but skip `subscribe()`. Test whether `signSignedMsgOrderParamsMessage()` works without subscriptions — since signing is a pure cryptographic operation using the wallet's keypair, it likely doesn't need account data.
+
+2. **Manual signing fallback:** If the SDK requires subscriptions for signing, use `nacl.sign()` directly with the Keypair to sign the serialized Swift order message. This bypasses `DriftClient` entirely but requires understanding the exact message format.
+
+3. **Custom subscription type:** Create `DriftClient` with `accountSubscription: { type: 'custom' }` to avoid loading account data while still having a valid client instance.
+
+**This must be resolved in Step 3 implementation.** If approach 1 works, Swift signing adds ~100ms (getSlot). If it requires full subscription, Swift signing adds ~15 seconds (subscribe + getSlot), which defeats the purpose. A quick SDK test during implementation will determine the correct approach.
+
+**getSlot() Failure Handling:**
+
+Swift signing requires a current slot number from `getSlot()` RPC call. If this fails:
+- The existing `getWorkingConnection()` RPC failover handles connection failures (tries primary, falls back to backup)
+- If BOTH RPCs are down, `getSlot()` will fail → Swift attempt fails → classify as `fallback_legacy` → proceed to legacy subprocess (which also uses RPC but may recover by the time the subprocess executes)
+- No separate retry of `getSlot()` — the 3-second Swift timeout covers the entire operation including the `getSlot()` call
+
 **Verify:**
 1. Unit test: sign a message with a test keypair, verify the signature format matches Swift API expectations
 2. Unit test: mock the Swift API POST, verify request body format
@@ -1075,11 +1096,23 @@ This change is included in Step 5 (Trade Logging Updates) scope.
 - When Swift was used, include `swiftOrderId`, `auctionDurationMs`, `priceImprovement`
 - When Swift failed and legacy was used, include `executionMethod: 'legacy'` (the failed Swift attempt is logged in server console only — no extra DB write for failed attempts at this stage)
 
-**Locations to update (all in `server/routes.ts`):**
-1. Webhook handler trade log (~line 5700-5800)
-2. Manual trade endpoint trade log (~line 3200-3400)
-3. Subscriber routing trade log (~line 800-900)
-4. Retry worker trade log (in `trade-retry-service.ts`)
+**Locations to update (all trade logging sites):**
+
+`executePerpOrder` callers (open/trade orders):
+1. Webhook handler trade log (`server/routes.ts` ~line 5700-5800)
+2. Manual trade endpoint trade log (`server/routes.ts` ~line 3200-3400)
+3. Subscriber routing open trade log (`server/routes.ts` ~line 1001)
+4. Retry worker open trade log (`server/trade-retry-service.ts` ~line 484)
+
+`closePerpPosition` callers (close orders — use `fillPrice` from result when available):
+5. Subscriber routing close log (`server/routes.ts` ~line 828) — currently uses `parseFloat(signal.price)`, must use `closeResult.fillPrice || parseFloat(signal.price)`
+6. Webhook close log (`server/routes.ts` ~line 5558-5600)
+7. Manual close in webhook handler (`server/routes.ts` ~line 3106-3140)
+8. Position flip close log (`server/routes.ts` ~line 6030-6050)
+9. Dust cleanup close log (`server/routes.ts` ~line 3301, 5652)
+10. Retry worker close log (`server/trade-retry-service.ts` ~line 389-495) — also update hardcoded fee (see Step 6)
+11. User webhook close log (`server/routes.ts` ~line 6806)
+12. Emergency close endpoint (`server/routes.ts` ~line 9080)
 
 **Verify:**
 1. Execute a trade with Swift enabled → `bot_trades` row has `execution_method = 'swift'`
@@ -1113,6 +1146,12 @@ Cooldown integration specifics:
 - Swift timeout errors (`classifySwiftError → 'retry_swift'`) that exhaust max attempts should trigger the existing `isTimeoutError` / `isTransientError` check for cooldown eligibility
 - `cooldownRetries` counter (max 2, 2-minute delay) applies regardless of whether the original failure was Swift or legacy
 - A Swift `'fallback_legacy'` error that then also fails on legacy counts as a single attempt toward the retry limit
+
+**Fee estimation on successful retry:**
+- Current retry service (trade-retry-service.ts line 461-462) hardcodes `fee = notional * 0.0005` for all successful retries
+- This doesn't match the executor's 0.00045 rate AND doesn't account for Swift's gasless nature
+- When a retry succeeds, use the `actualFee` from the execution result when available: `const fee = result.actualFee || notional * 0.00045;`
+- This ensures Swift retries that succeed don't overestimate fees
 
 When retry succeeds via routing callback:
 - `registerRoutingCallback(routeSignalToSubscribers)` works the same regardless of execution method — no changes needed to the callback mechanism itself
@@ -1291,7 +1330,7 @@ The migration plan v3.0 proposed additional fields that this plan omits. Here's 
 | `server/swift-config.ts` | **New** | Swift configuration, health monitoring, error classification |
 | `server/swift-executor.ts` | **New** | Swift order signing, submission, and result parsing |
 | `server/swift-metrics.ts` | **New** | In-memory metrics tracking |
-| `server/drift-service.ts` | Modify | Add Swift-first logic to `executePerpOrder()` |
+| `server/drift-service.ts` | Modify | Add Swift-first logic to both `executePerpOrder()` and `closePerpPosition()` |
 | `server/routes.ts` | Modify | Pass `executionMethod` when logging trades, add metrics endpoint |
 | `server/trade-retry-service.ts` | Modify | Add Swift retry tracking and fallback logic |
 
@@ -1315,6 +1354,7 @@ The migration plan v3.0 proposed additional fields that this plan omits. Here's 
 | Schema migration breaks existing data | Columns are additive (nullable or with defaults) — no existing data modified |
 | Swift + legacy both fail | Same outcome as today when legacy fails — trade goes to retry queue |
 | `SWIFT_ENABLED` accidentally set wrong | Defaults to `false` — must be explicitly enabled. Set to `false` for instant rollback |
+| Position flat during flip | Close-then-open creates a flat window. Swift's async nature may widen this gap vs legacy. Accepted risk — retry service handles failed opens. Same behavior as legacy, not a regression. |
 
 ---
 
@@ -1673,6 +1713,7 @@ ADD COLUMN IF NOT EXISTS swift_attempts INTEGER DEFAULT 0;
 | 4.0 | 2026-02-09 | Engineering | Merged research + integration plan into single document; added external auditor responses; corrected reduce-only, subaccount, fee calculation, and key signing sections |
 | 4.1 | 2026-02-09 | Engineering | Addressed Codex 5.2 code review: added closePerpPosition Swift coverage to Step 4; added fill price accuracy section; documented 5 review findings with responses |
 | 4.2 | 2026-02-09 | Engineering | Addressed ChatGPT code review: 7/8 findings confirmed as duplicates of v4.0/v4.1; 1 new finding (PnL refinement schema alignment) noted as future work |
+| 4.3 | 2026-02-09 | Engineering (Internal Audit) | Internal audit: clarified DriftClient initialization for Swift signing; added getSlot failure handling; listed all closePerpPosition callers; updated retry fee calculation; added position flip timing as accepted risk |
 
 ---
 
