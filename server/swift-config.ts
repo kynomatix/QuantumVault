@@ -73,8 +73,16 @@ export function isSwiftAvailable(): boolean {
   return SWIFT_CONFIG.enabled && swiftHealth.isHealthy;
 }
 
-export function shouldUseSwift(): boolean {
-  return isSwiftAvailable();
+export function getSwiftMinNotional(): number {
+  return Number(process.env.SWIFT_MIN_NOTIONAL) || 100;
+}
+
+export function shouldUseSwift(estimatedNotional?: number): boolean {
+  if (!isSwiftAvailable()) return false;
+  if (estimatedNotional !== undefined && estimatedNotional < getSwiftMinNotional()) {
+    return false;
+  }
+  return true;
 }
 
 export function getSwiftDiagnostics() {
@@ -83,6 +91,7 @@ export function getSwiftDiagnostics() {
     health: { ...swiftHealth },
     shouldUseSwift: isSwiftAvailable(),
     envVar: process.env.SWIFT_ENABLED,
+    minNotional: getSwiftMinNotional(),
   };
 }
 

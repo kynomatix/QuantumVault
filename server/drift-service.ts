@@ -3274,9 +3274,11 @@ export async function executePerpOrder(
     console.log(`[Drift] REDUCE-ONLY flag is SET - this order should only close existing positions, never open new ones`);
   }
   
-  // Swift-first execution path
-  const swiftCheck = shouldUseSwift();
-  console.log(`[Drift] Swift check: shouldUseSwift()=${swiftCheck}, SWIFT_CONFIG.enabled=${process.env.SWIFT_ENABLED}`);
+  // Swift-first execution path - estimate notional for minimum size check
+  const estimatedOraclePrice = await getMarketPrice(market).catch(() => null);
+  const estimatedNotional = estimatedOraclePrice ? sizeInBase * estimatedOraclePrice : undefined;
+  const swiftCheck = shouldUseSwift(estimatedNotional);
+  console.log(`[Drift] Swift check: shouldUseSwift()=${swiftCheck}, SWIFT_ENABLED=${process.env.SWIFT_ENABLED}, notional=$${estimatedNotional?.toFixed(2) || 'unknown'}, minNotional=$${process.env.SWIFT_MIN_NOTIONAL || '100'}`);
   if (swiftCheck) {
     console.log(`[Drift] Attempting Swift execution for ${market} ${side}`);
     recordSwiftAttempt(market);
@@ -3284,8 +3286,7 @@ export async function executePerpOrder(
       const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
       const agentPubkey = expectedAgentPubkey || '';
 
-      const oraclePrice = await getMarketPrice(market).catch(() => null);
-      console.log(`[Drift] Swift oracle price for ${market}: ${oraclePrice}`);
+      console.log(`[Drift] Swift oracle price for ${market}: ${estimatedOraclePrice}`);
 
       const swiftResult = await executeSwiftOrder({
         privateKeyBase58: rawKey,
@@ -3297,7 +3298,7 @@ export async function executePerpOrder(
         subAccountId,
         reduceOnly,
         slippageBps,
-        oraclePrice: oraclePrice || undefined,
+        oraclePrice: estimatedOraclePrice || undefined,
       });
 
       if (swiftResult.success && swiftResult.txSignature) {
@@ -3590,16 +3591,17 @@ export async function closePerpPosition(
   console.log(`[Drift] Closing position for ${market} (index ${marketIndex}) on subaccount ${subAccountId}`);
   
   // Swift-first close path — requires positionSide and positionSizeBase to determine close direction
-  if (shouldUseSwift() && positionSide && positionSizeBase && positionSizeBase > 0) {
+  const closeOraclePrice = await getMarketPrice(market).catch(() => null);
+  const closeNotional = closeOraclePrice && positionSizeBase ? positionSizeBase * closeOraclePrice : undefined;
+  if (shouldUseSwift(closeNotional) && positionSide && positionSizeBase && positionSizeBase > 0) {
     const closeSide = positionSide === 'long' ? 'short' : 'long';
-    console.log(`[Drift] Attempting Swift close for ${market}, closing ${positionSide} position with ${closeSide} reduce-only order, size: ${positionSizeBase}`);
+    console.log(`[Drift] Attempting Swift close for ${market}, closing ${positionSide} position with ${closeSide} reduce-only order, size: ${positionSizeBase}, notional=$${closeNotional?.toFixed(2)}`);
     recordSwiftAttempt(market);
     try {
       const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
       const agentPubkey = expectedAgentPubkey || '';
 
-      const oraclePrice = await getMarketPrice(market).catch(() => null);
-      console.log(`[Drift] Swift close oracle price for ${market}: ${oraclePrice}`);
+      console.log(`[Drift] Swift close oracle price for ${market}: ${closeOraclePrice}`);
 
       const swiftResult = await executeSwiftOrder({
         privateKeyBase58: rawKey,
@@ -3611,7 +3613,7 @@ export async function closePerpPosition(
         subAccountId,
         reduceOnly: true,
         slippageBps,
-        oraclePrice: oraclePrice || undefined,
+        oraclePrice: closeOraclePrice || undefined,
       });
 
       if (swiftResult.success && swiftResult.txSignature) {
