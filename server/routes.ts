@@ -824,8 +824,11 @@ async function routeSignalToSubscribers(
             subWallet.agentPrivateKeyEncrypted,
             subBot.market,
             subAccountId,
+            Math.abs(position.size),
+            subCloseSlippageBps,
             undefined,
-            subCloseSlippageBps
+            subWallet.agentPublicKey || undefined,
+            position.side === 'LONG' ? 'long' : 'short'
           );
 
           if (closeResult.success) {
@@ -1906,7 +1909,7 @@ export async function registerRoutes(
             
             for (const pos of openPositions) {
               try {
-                const closeResult = await closePerpPosition(agentKey, pos.market, subId);
+                const closeResult = await closePerpPosition(agentKey, pos.market, subId, Math.abs(pos.baseAssetAmount), 50, undefined, agentPubKey, pos.side === 'LONG' ? 'long' : 'short');
                 if (closeResult.success) {
                   log(`Closed ${pos.market} position in subaccount ${subId}: ${closeResult.signature}`);
                 } else {
@@ -2004,7 +2007,7 @@ export async function registerRoutes(
             
             for (const pos of openPositions) {
               try {
-                const closeResult = await closePerpPosition(agentKey, pos.market, 0);
+                const closeResult = await closePerpPosition(agentKey, pos.market, 0, Math.abs(pos.baseAssetAmount), 50, undefined, agentPubKey, pos.side === 'LONG' ? 'long' : 'short');
                 if (closeResult.success) {
                   log(`Closed ${pos.market} in main account: ${closeResult.signature}`);
                 } else {
@@ -2331,8 +2334,11 @@ export async function registerRoutes(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
             subAccountId,
+            Math.abs(position.baseAssetAmount),
+            closeAllSlippageBps,
             undefined,
-            closeAllSlippageBps
+            wallet.agentPublicKey || undefined,
+            position.side === 'LONG' ? 'long' : 'short'
           );
 
           if (result.success) {
@@ -3318,8 +3324,11 @@ export async function registerRoutes(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
             subAccountId,
+            Math.abs(postClosePosition.size),
+            dustSlippageBps,
             undefined,
-            dustSlippageBps
+            wallet.agentPublicKey,
+            postClosePosition.side === 'LONG' ? 'long' : 'short'
           );
           
           if (retryResult.success && retryResult.signature) {
@@ -3449,14 +3458,35 @@ export async function registerRoutes(
       const subAccountId = bot.driftSubaccountId ?? 0;
       console.log(`[CloseMarketPosition] Closing ${market} in subaccount ${subAccountId} (bot: ${bot.name})`);
 
-      // Execute close order using closePerpPosition
+      // Query position for Swift support
+      let marketPositionSide: 'long' | 'short' | undefined;
+      let marketPositionSize: number | undefined;
+      try {
+        const marketPos = await PositionService.getPositionForExecution(
+          bot.id,
+          wallet.agentPublicKey,
+          subAccountId,
+          market,
+          wallet.agentPrivateKeyEncrypted
+        );
+        if (marketPos.side !== 'FLAT' && Math.abs(marketPos.size) > 0) {
+          marketPositionSide = marketPos.side === 'LONG' ? 'long' : 'short';
+          marketPositionSize = Math.abs(marketPos.size);
+        }
+      } catch (posErr) {
+        console.warn(`[CloseMarketPosition] Could not query position for Swift, will use legacy:`, posErr);
+      }
+
       const marketCloseSlippageBps = wallet.slippageBps ?? 50;
       const result = await closePerpPosition(
         wallet.agentPrivateKeyEncrypted,
         market,
         subAccountId,
+        marketPositionSize,
+        marketCloseSlippageBps,
         undefined,
-        marketCloseSlippageBps
+        wallet.agentPublicKey,
+        marketPositionSide
       );
 
       if (!result.success) {
@@ -5678,9 +5708,11 @@ export async function registerRoutes(
                   wallet.agentPrivateKeyEncrypted,
                   bot.market,
                   subAccountId,
-                  undefined,
+                  Math.abs(postClosePosition.size),
                   webhookDustSlippageBps,
-                  privateKeyBase58
+                  privateKeyBase58,
+                  wallet.agentPublicKey!,
+                  postClosePosition.side === 'LONG' ? 'long' : 'short'
                 );
                 
                 if (retryResult.success && retryResult.signature) {
@@ -6059,9 +6091,11 @@ export async function registerRoutes(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
             subAccountId,
-            undefined,
+            closeSize,
             flipSlippageBps,
-            privateKeyBase58
+            privateKeyBase58,
+            wallet.agentPublicKey!,
+            isCurrentlyLong ? 'long' : 'short'
           );
           
           if (!closeResult.success) {
@@ -6839,10 +6873,11 @@ export async function registerRoutes(
             wallet.agentPrivateKeyEncrypted,
             bot.market,
             subAccountId,
-            undefined,
+            closeSize,
             userCloseSlippageBps,
             privateKeyBase58,
-            wallet.agentPublicKey || undefined
+            wallet.agentPublicKey || undefined,
+            onChainPosition.side === 'LONG' ? 'long' : 'short'
           );
           
           if (result.success && !result.signature) {
