@@ -109,7 +109,7 @@ async function submitToSwiftApi(params: {
   const body = {
     market_index: params.marketIndex,
     market_type: 'perp',
-    message: Buffer.from(params.orderParams).toString('base64'),
+    message: params.orderParams.toString(),
     signature: Buffer.from(params.signature).toString('base64'),
     taker_authority: params.takerAuthority,
   };
