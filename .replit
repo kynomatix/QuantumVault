@@ -50,3 +50,4 @@ mockupState = "FULLSTACK"
 
 [userenv.shared]
 NODE_OPTIONS = "--max-old-space-size=4096"
+SWIFT_ENABLED = "true"

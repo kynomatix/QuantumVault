@@ -22,6 +22,7 @@ import { sendTradeNotification, type TradeNotification } from "./notification-se
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
+import { getSwiftMetrics } from "./swift-metrics";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
@@ -779,6 +780,7 @@ async function routeSignalToSubscribers(
             fee: '0',
             errorMessage: 'Wallet not found in database',
             webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'wallet_not_found' },
+            executionMethod: 'legacy',
           });
           return 'tradeFailed';
         }
@@ -795,6 +797,7 @@ async function routeSignalToSubscribers(
             fee: '0',
             errorMessage: 'No agent wallet configured for trading',
             webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'no_agent_keys' },
+            executionMethod: 'legacy',
           });
           return 'tradeFailed';
         }
@@ -852,12 +855,13 @@ async function routeSignalToSubscribers(
               market: subBot.market,
               side: position.side === 'LONG' ? 'SHORT' : 'LONG',
               size: Math.abs(position.size).toFixed(8),
-              price: fillPrice.toFixed(6),
+              price: closeResult.fillPrice?.toString() || fillPrice.toFixed(6),
               status: 'executed',
               fee: closeFee.toFixed(6),
               pnl: closeTradePnl !== 0 ? closeTradePnl.toFixed(6) : null,
               txSignature: closeResult.signature || null,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+              executionMethod: closeResult.executionMethod || 'legacy',
             });
             // Update stats with PnL
             await storage.updateTradingBotStats(subBot.id, {
@@ -924,6 +928,7 @@ async function routeSignalToSubscribers(
               fee: '0',
               errorMessage: 'Bot has no Max Position Size configured',
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'no_max_position_size' },
+              executionMethod: 'legacy',
             });
             return 'tradeFailed';
           }
@@ -965,6 +970,7 @@ async function routeSignalToSubscribers(
               fee: '0',
               errorMessage: sizingResult.error || 'Trade sizing failed',
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'sizing_failed' },
+              executionMethod: 'legacy',
             });
             
             if (sizingResult.shouldPauseBot && sizingResult.pauseReason) {
@@ -990,6 +996,7 @@ async function routeSignalToSubscribers(
               fee: '0',
               errorMessage: 'Trade size too small (minimum 0.001 contracts)',
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'size_too_small' },
+              executionMethod: 'legacy',
             });
             return 'tradeFailed';
           }
@@ -1027,6 +1034,8 @@ async function routeSignalToSubscribers(
               fee: tradeFee.toFixed(6),
               txSignature: orderResult.txSignature || orderResult.signature || null,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+              executionMethod: orderResult.executionMethod || 'legacy',
+              swiftOrderId: orderResult.swiftOrderId || null,
             });
 
             await storage.updateTradingBotStats(subBot.id, {
@@ -1060,6 +1069,7 @@ async function routeSignalToSubscribers(
               fee: '0',
               errorMessage: parseDriftError(orderResult.error),
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+              executionMethod: 'legacy',
             });
 
             sendTradeNotification(subWallet.address, {
@@ -3119,6 +3129,7 @@ export async function registerRoutes(
         fee: "0",
         status: "pending",
         webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice },
+        executionMethod: 'legacy',
       });
       console.log(`[ClosePosition] Created pending trade record: ${pendingCloseTrade.id}`);
 
@@ -3544,6 +3555,7 @@ export async function registerRoutes(
         price: oraclePrice.toString(),
         status: "pending",
         webhookPayload: { manual: true, action: side === 'long' ? 'buy' : 'sell' },
+        executionMethod: 'legacy',
       });
 
       // Execute trade
@@ -4444,6 +4456,8 @@ export async function registerRoutes(
                 status: "executed",
                 txSignature: result.txSignature,
                 webhookPayload: { action: "pause_close", reason: "Bot paused by user", entryPrice: pauseEntryPrice, exitPrice: pauseFillPrice },
+                executionMethod: result.executionMethod || 'legacy',
+                swiftOrderId: result.swiftOrderId || null,
               });
               
               // Sync position from on-chain (replaces client-side math with actual Drift state)
@@ -5545,6 +5559,7 @@ export async function registerRoutes(
           price: signalPrice,
           status: "pending",
           webhookPayload: payload,
+          executionMethod: 'legacy',
         });
         
         try {
@@ -6021,6 +6036,7 @@ export async function registerRoutes(
           price: signalPrice,
           status: "pending",
           webhookPayload: { ...payload, _flipClose: true },
+          executionMethod: 'legacy',
         });
         
         try {
@@ -6161,6 +6177,7 @@ export async function registerRoutes(
         price: signalPrice,
         status: "pending",
         webhookPayload: payload,
+        executionMethod: 'legacy',
       });
 
       // Store signal time in webhook log for reference
@@ -6799,6 +6816,7 @@ export async function registerRoutes(
             price: signalPrice,
             status: "pending",
             webhookPayload: payload,
+            executionMethod: 'legacy',
           });
           
           // Execute close
@@ -7066,6 +7084,7 @@ export async function registerRoutes(
         price: signalPrice,
         status: "pending",
         webhookPayload: payload,
+        executionMethod: 'legacy',
       });
 
       if (signalTime) {
@@ -8991,6 +9010,8 @@ export async function registerRoutes(
           status: 'executed',
           txSignature: result.signature || result.txSignature,
           webhookPayload: { retryOf: tradeId },
+          executionMethod: result.executionMethod || 'legacy',
+          swiftOrderId: result.swiftOrderId || null,
         });
         
         console.log(`[Retry Trade] Success! New trade ID: ${newTrade.id}, tx: ${result.signature || result.txSignature}`);
@@ -9268,6 +9289,15 @@ export async function registerRoutes(
     next();
   };
   
+  app.get("/api/admin/swift-metrics", requireAdminAuth, async (req, res) => {
+    try {
+      const metrics = getSwiftMetrics();
+      res.json(metrics);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch Swift metrics" });
+    }
+  });
+
   // Get all webhook logs (most recent first)
   app.get("/api/admin/webhook-logs", requireAdminAuth, async (req, res) => {
     try {

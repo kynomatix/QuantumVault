@@ -10,6 +10,7 @@ import { getAgentKeypair } from './agent-wallet';
 import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 import { shouldUseSwift } from './swift-config';
 import { executeSwiftOrder, type SwiftOrderResult } from './swift-executor';
+import { recordSwiftAttempt, recordSwiftSuccess as recordSwiftMetricSuccess, recordSwiftFailure as recordSwiftMetricFailure, recordSwiftFallback } from './swift-metrics';
 import { decrypt } from './crypto';
 
 // ============================================================================
@@ -3258,7 +3259,7 @@ export async function executePerpOrder(
   slippageBps: number = 50,
   privateKeyBase58?: string,
   expectedAgentPubkey?: string,
-): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: 'swift' | 'legacy' }> {
+): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: 'swift' | 'legacy'; swiftOrderId?: string }> {
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
   
@@ -3275,6 +3276,7 @@ export async function executePerpOrder(
   // Swift-first execution path
   if (shouldUseSwift()) {
     console.log(`[Drift] Attempting Swift execution for ${market} ${side}`);
+    recordSwiftAttempt(market);
     try {
       const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
       const agentPubkey = expectedAgentPubkey || '';
@@ -3293,6 +3295,7 @@ export async function executePerpOrder(
 
       if (swiftResult.success) {
         console.log(`[Drift] Swift execution succeeded for ${market}: tx=${swiftResult.txSignature}, latency=${swiftResult.auctionDurationMs}ms`);
+        recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
         return {
           success: true,
           signature: swiftResult.txSignature,
@@ -3300,11 +3303,13 @@ export async function executePerpOrder(
           fillPrice: swiftResult.fillPrice,
           actualFee: undefined,
           executionMethod: 'swift' as const,
+          swiftOrderId: swiftResult.swiftOrderId,
         };
       }
 
       if (swiftResult.errorClassification === 'permanent') {
         console.error(`[Drift] Swift permanent error for ${market}: ${swiftResult.error}`);
+        recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
         return {
           success: false,
           error: swiftResult.error,
@@ -3313,8 +3318,12 @@ export async function executePerpOrder(
       }
 
       console.log(`[Drift] Swift failed (${swiftResult.errorClassification}), falling back to legacy: ${swiftResult.error}`);
+      recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
+      recordSwiftFallback(market);
     } catch (swiftError: any) {
       console.error(`[Drift] Swift attempt threw unexpected error, falling back to legacy:`, swiftError?.message || swiftError);
+      recordSwiftMetricFailure(market, 'unexpected_error');
+      recordSwiftFallback(market);
     }
   }
   
@@ -3514,6 +3523,7 @@ export async function closePerpPosition(
   if (shouldUseSwift() && positionSide && positionSizeBase && positionSizeBase > 0) {
     const closeSide = positionSide === 'long' ? 'short' : 'long';
     console.log(`[Drift] Attempting Swift close for ${market}, closing ${positionSide} position with ${closeSide} reduce-only order, size: ${positionSizeBase}`);
+    recordSwiftAttempt(market);
     try {
       const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
       const agentPubkey = expectedAgentPubkey || '';
@@ -3532,6 +3542,7 @@ export async function closePerpPosition(
 
       if (swiftResult.success) {
         console.log(`[Drift] Swift close succeeded for ${market}: tx=${swiftResult.txSignature}, latency=${swiftResult.auctionDurationMs}ms`);
+        recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
         return {
           success: true,
           signature: swiftResult.txSignature,
@@ -3542,6 +3553,7 @@ export async function closePerpPosition(
 
       if (swiftResult.errorClassification === 'permanent') {
         console.error(`[Drift] Swift close permanent error for ${market}: ${swiftResult.error}`);
+        recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
         return {
           success: false,
           error: swiftResult.error,
@@ -3550,8 +3562,12 @@ export async function closePerpPosition(
       }
 
       console.log(`[Drift] Swift close failed (${swiftResult.errorClassification}), falling back to legacy: ${swiftResult.error}`);
+      recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
+      recordSwiftFallback(market);
     } catch (swiftError: any) {
       console.error(`[Drift] Swift close threw unexpected error, falling back to legacy:`, swiftError?.message || swiftError);
+      recordSwiftMetricFailure(market, 'unexpected_error');
+      recordSwiftFallback(market);
     }
   } else if (shouldUseSwift() && (!positionSide || !positionSizeBase)) {
     console.log(`[Drift] Swift available but positionSide/positionSizeBase not provided for close, using legacy`);

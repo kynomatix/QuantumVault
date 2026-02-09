@@ -5,6 +5,7 @@ import { storage } from "./storage";
 import { getMarketBySymbol } from "./market-liquidity-service";
 import { transferUsdcToWallet } from "./agent-wallet";
 import { PublicKey } from "@solana/web3.js";
+import { isSwiftAvailable, classifySwiftError } from './swift-config';
 
 export interface RetryJob {
   id: string;
@@ -29,6 +30,8 @@ export interface RetryJob {
   webhookPayload?: unknown;
   entryPrice?: number; // For close orders: entry price to calculate PnL for profit sharing
   cooldownRetries?: number; // Number of delayed re-queue attempts after exhausting normal retries
+  swiftAttempts?: number;        // Swift-specific retry count
+  originalExecMethod?: string;   // What method was tried first ('swift' | 'legacy')
 }
 
 const retryQueue: Map<string, RetryJob> = new Map();
@@ -261,6 +264,8 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
     maxAttempts,
     nextRetryAt,
     createdAt,
+    swiftAttempts: 0,
+    originalExecMethod: 'legacy',
   };
   
   retryQueue.set(dbJobId, fullJob);
@@ -350,8 +355,11 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   }
   
   try {
-    let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number };
+    let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string };
     let actualCloseSide: 'long' | 'short' = 'short';
+    const swiftAvailable = isSwiftAvailable();
+    const jobSwiftAttempts = job.swiftAttempts || 0;
+    console.log(`[TradeRetry] Swift status: available=${swiftAvailable}, swiftAttempts=${jobSwiftAttempts}, originalMethod=${job.originalExecMethod || 'legacy'}`);
     
     if (job.side === 'close') {
       // CRITICAL: Check on-chain position before close retry to prevent duplicate closes
@@ -451,7 +459,14 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     }
     
     if (result.success) {
-      console.log(`[TradeRetry] ✅ Job ${job.id} succeeded on attempt ${job.attempts}: ${result.signature}`);
+      const execMethod = result.executionMethod || 'legacy';
+      if (job.attempts === 1 && !job.originalExecMethod) {
+        job.originalExecMethod = execMethod;
+      }
+      if (execMethod === 'swift') {
+        job.swiftAttempts = (job.swiftAttempts || 0) + 1;
+      }
+      console.log(`[TradeRetry] ✅ Job ${job.id} succeeded via ${execMethod} on attempt ${job.attempts}: ${result.signature}`);
       
       const wallet = await storage.getWallet(job.walletAddress);
       const bot = await storage.getTradingBotById(job.botId);
@@ -459,7 +474,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       if (bot && wallet) {
         const fillPrice = result.fillPrice || 0;
         const notional = job.size * fillPrice;
-        const fee = notional * 0.0005;
+        const fee = result.actualFee || notional * 0.00045;
         
         // Update original trade if it exists, otherwise create new
         let tradeId: string;
@@ -474,12 +489,14 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             price: fillPrice.toString(),
             fee: fee.toString(),
             txSignature: result.signature || null,
-            errorMessage: null, // Clear the error message since we recovered
-            recoveredFromError: originalError, // Preserve original error for UX
+            errorMessage: null,
+            recoveredFromError: originalError,
             retryAttempts: job.attempts,
+            executionMethod: result.executionMethod || 'legacy',
+            swiftOrderId: result.swiftOrderId || null,
           });
           tradeId = job.originalTradeId;
-          console.log(`[TradeRetry] Updated original trade ${tradeId} to RECOVERED (was: ${originalError.slice(0, 50)}...)`);
+          console.log(`[TradeRetry] Updated original trade ${tradeId} to RECOVERED via ${result.executionMethod || 'legacy'} (was: ${originalError.slice(0, 50)}...)`);
         } else {
           const newTrade = await storage.createBotTrade({
             tradingBotId: job.botId,
@@ -492,6 +509,8 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             status: 'executed',
             txSignature: result.signature,
             webhookPayload: { autoRetry: true, attempts: job.attempts, originalJobId: job.id },
+            executionMethod: result.executionMethod || 'legacy',
+            swiftOrderId: result.swiftOrderId || null,
           });
           tradeId = newTrade.id;
           console.log(`[TradeRetry] Created new trade ${tradeId}`);
@@ -657,6 +676,15 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     }
     
     job.lastError = result.error || 'Unknown error';
+    const failedExecMethod = result.executionMethod || 'legacy';
+    if (job.attempts === 1 && !job.originalExecMethod) {
+      job.originalExecMethod = failedExecMethod;
+    }
+    if (failedExecMethod === 'swift') {
+      job.swiftAttempts = (job.swiftAttempts || 0) + 1;
+      const swiftClassification = classifySwiftError(job.lastError);
+      console.log(`[TradeRetry] Swift attempt failed (swiftAttempts=${job.swiftAttempts}, classification=${swiftClassification}): ${job.lastError.slice(0, 100)}`);
+    }
     const errorInfo = categorizeError(job.lastError);
     
     // Retry if transient error (rate limit, price feed, oracle issues) and attempts remaining

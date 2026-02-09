@@ -837,10 +837,10 @@ Nothing proceeds without passing its gate.
 | 2 | Swift Configuration Module | - [x] COMPLETED | Feb 9, 2026 |
 | 3 | Swift Executor Module | - [x] COMPLETED | Feb 9, 2026 |
 | 4 | Integration — executePerpOrder Wrapper | - [x] COMPLETED | Feb 9, 2026 |
-| 5 | Trade Logging Updates | - [ ] NOT STARTED | |
-| 6 | Retry Service Integration | - [ ] NOT STARTED | |
-| 7 | Observability & Metrics | - [ ] NOT STARTED | |
-| 8 | Controlled Activation | - [ ] NOT STARTED | |
+| 5 | Trade Logging Updates | - [x] COMPLETED | Feb 9, 2026 |
+| 6 | Retry Service Integration | - [x] COMPLETED | Feb 9, 2026 |
+| 7 | Observability & Metrics | - [x] COMPLETED | Feb 9, 2026 |
+| 8 | Controlled Activation | - [x] COMPLETED | Feb 9, 2026 |
 | 9 | Builder Code Registration (Optional) | - [ ] NOT STARTED | |
 
 **How to use:** When completing a step, change `- [ ] NOT STARTED` to `- [x] COMPLETED` and fill in the date. This tracker is the first thing to check when resuming work to know where you left off.
@@ -1107,7 +1107,7 @@ This change is included in Step 5 (Trade Logging Updates) scope.
 
 ---
 
-### Step 5: Trade Logging Updates — ⬜ NOT STARTED
+### Step 5: Trade Logging Updates — ✅ COMPLETED (Feb 9, 2026)
 
 **What:** Record which execution method was used and Swift-specific metadata in `bot_trades`.
 
@@ -1146,7 +1146,7 @@ This change is included in Step 5 (Trade Logging Updates) scope.
 
 ---
 
-### Step 6: Retry Service Integration — ⬜ NOT STARTED
+### Step 6: Retry Service Integration — ✅ COMPLETED (Feb 9, 2026)
 
 **What:** Update trade retry service to handle Swift-specific retry behavior.
 
@@ -1189,7 +1189,7 @@ When retry succeeds via routing callback:
 
 ---
 
-### Step 7: Observability & Metrics — ⬜ NOT STARTED
+### Step 7: Observability & Metrics — ✅ COMPLETED (Feb 9, 2026)
 
 **What:** Add structured metrics tracking for Swift performance. This must be in place BEFORE production activation so we can monitor from day one.
 
@@ -1219,7 +1219,7 @@ GET /api/admin/swift-metrics
 
 ---
 
-### Step 8: Controlled Activation — ⬜ NOT STARTED
+### Step 8: Controlled Activation — ✅ COMPLETED (Feb 9, 2026)
 
 **What:** Enable Swift in production with monitoring.
 
