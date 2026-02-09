@@ -3274,7 +3274,9 @@ export async function executePerpOrder(
   }
   
   // Swift-first execution path
-  if (shouldUseSwift()) {
+  const swiftCheck = shouldUseSwift();
+  console.log(`[Drift] Swift check: shouldUseSwift()=${swiftCheck}, SWIFT_CONFIG.enabled=${process.env.SWIFT_ENABLED}`);
+  if (swiftCheck) {
     console.log(`[Drift] Attempting Swift execution for ${market} ${side}`);
     recordSwiftAttempt(market);
     try {

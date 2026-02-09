@@ -8,6 +8,8 @@ export const SWIFT_CONFIG = {
   fallbackEnabled: true,
 } as const;
 
+console.log(`[Swift Config] SWIFT_ENABLED env='${process.env.SWIFT_ENABLED}', config.enabled=${SWIFT_CONFIG.enabled}, apiUrl=${SWIFT_CONFIG.apiUrl}`);
+
 interface SwiftHealthState {
   isHealthy: boolean;
   lastCheckAt: number;
