@@ -829,9 +829,25 @@ Each step has:
 
 Nothing proceeds without passing its gate.
 
+### Implementation Progress Tracker
+
+| Step | Description | Status | Date Completed |
+|------|-------------|--------|----------------|
+| 1 | Database Schema Migration | - [ ] NOT STARTED | |
+| 2 | Swift Configuration Module | - [ ] NOT STARTED | |
+| 3 | Swift Executor Module | - [ ] NOT STARTED | |
+| 4 | Integration — executePerpOrder Wrapper | - [ ] NOT STARTED | |
+| 5 | Trade Logging Updates | - [ ] NOT STARTED | |
+| 6 | Retry Service Integration | - [ ] NOT STARTED | |
+| 7 | Observability & Metrics | - [ ] NOT STARTED | |
+| 8 | Controlled Activation | - [ ] NOT STARTED | |
+| 9 | Builder Code Registration (Optional) | - [ ] NOT STARTED | |
+
+**How to use:** When completing a step, change `- [ ] NOT STARTED` to `- [x] COMPLETED` and fill in the date. This tracker is the first thing to check when resuming work to know where you left off.
+
 ---
 
-### Step 1: Database Schema Migration
+### Step 1: Database Schema Migration — ⬜ NOT STARTED
 
 **What:** Add Swift tracking columns to existing tables.
 
@@ -864,7 +880,7 @@ trade_retry_queue table — ADD:
 
 ---
 
-### Step 2: Swift Configuration Module
+### Step 2: Swift Configuration Module — ⬜ NOT STARTED
 
 **What:** Central config for Swift behavior, health tracking, and error classification.
 
@@ -906,7 +922,7 @@ SWIFT_ERROR_CLASSIFICATION:
 
 ---
 
-### Step 3: Swift Executor Module
+### Step 3: Swift Executor Module — ⬜ NOT STARTED
 
 **What:** The core module that signs Swift order messages and submits them to the Swift API.
 
@@ -989,7 +1005,7 @@ Swift signing requires a current slot number from `getSlot()` RPC call. If this 
 
 ---
 
-### Step 4: Integration Point — `executePerpOrder` Wrapper
+### Step 4: Integration Point — `executePerpOrder` Wrapper — ⬜ NOT STARTED
 
 **What:** Modify `executePerpOrder()` in `drift-service.ts` to try Swift first, fall back to legacy subprocess.
 
@@ -1085,7 +1101,7 @@ This change is included in Step 5 (Trade Logging Updates) scope.
 
 ---
 
-### Step 5: Trade Logging Updates
+### Step 5: Trade Logging Updates — ⬜ NOT STARTED
 
 **What:** Record which execution method was used and Swift-specific metadata in `bot_trades`.
 
@@ -1124,7 +1140,7 @@ This change is included in Step 5 (Trade Logging Updates) scope.
 
 ---
 
-### Step 6: Retry Service Integration
+### Step 6: Retry Service Integration — ⬜ NOT STARTED
 
 **What:** Update trade retry service to handle Swift-specific retry behavior.
 
@@ -1167,7 +1183,7 @@ When retry succeeds via routing callback:
 
 ---
 
-### Step 7: Observability & Metrics
+### Step 7: Observability & Metrics — ⬜ NOT STARTED
 
 **What:** Add structured metrics tracking for Swift performance. This must be in place BEFORE production activation so we can monitor from day one.
 
@@ -1197,7 +1213,7 @@ GET /api/admin/swift-metrics
 
 ---
 
-### Step 8: Controlled Activation
+### Step 8: Controlled Activation — ⬜ NOT STARTED
 
 **What:** Enable Swift in production with monitoring.
 
@@ -1240,7 +1256,7 @@ Week 2: Review per-market Swift performance
 
 ---
 
-### Step 9: Builder Code Registration (Optional — Revenue)
+### Step 9: Builder Code Registration (Optional — Revenue) — ⬜ NOT STARTED
 
 **What:** Register QuantumVault as a Drift Builder to earn fees on Swift trades.
 
