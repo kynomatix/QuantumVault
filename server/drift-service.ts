@@ -8,6 +8,9 @@ import * as fs from 'fs';
 import BN from 'bn.js';
 import { getAgentKeypair } from './agent-wallet';
 import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
+import { shouldUseSwift } from './swift-config';
+import { executeSwiftOrder, type SwiftOrderResult } from './swift-executor';
+import { decrypt } from './crypto';
 
 // ============================================================================
 // ERROR CATEGORIES - Clear, distinguishable error prefixes for debugging
@@ -3255,7 +3258,7 @@ export async function executePerpOrder(
   slippageBps: number = 50,
   privateKeyBase58?: string,
   expectedAgentPubkey?: string,
-): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number }> {
+): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: 'swift' | 'legacy' }> {
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
   
@@ -3267,6 +3270,52 @@ export async function executePerpOrder(
   console.log(`[Drift] *** Executing ${side.toUpperCase()} ${reduceOnly ? 'REDUCE-ONLY ' : ''}order *** for ${market} (index ${marketIndex}), size: ${sizeInBase}, subaccount: ${subAccountId}, slippage: ${slippageBps}bps`);
   if (reduceOnly) {
     console.log(`[Drift] REDUCE-ONLY flag is SET - this order should only close existing positions, never open new ones`);
+  }
+  
+  // Swift-first execution path
+  if (shouldUseSwift()) {
+    console.log(`[Drift] Attempting Swift execution for ${market} ${side}`);
+    try {
+      const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
+      const agentPubkey = expectedAgentPubkey || '';
+
+      const swiftResult = await executeSwiftOrder({
+        privateKeyBase58: rawKey,
+        agentPublicKey: agentPubkey,
+        market,
+        marketIndex,
+        side,
+        sizeInBase,
+        subAccountId,
+        reduceOnly,
+        slippageBps,
+      });
+
+      if (swiftResult.success) {
+        console.log(`[Drift] Swift execution succeeded for ${market}: tx=${swiftResult.txSignature}, latency=${swiftResult.auctionDurationMs}ms`);
+        return {
+          success: true,
+          signature: swiftResult.txSignature,
+          txSignature: swiftResult.txSignature,
+          fillPrice: swiftResult.fillPrice,
+          actualFee: undefined,
+          executionMethod: 'swift' as const,
+        };
+      }
+
+      if (swiftResult.errorClassification === 'permanent') {
+        console.error(`[Drift] Swift permanent error for ${market}: ${swiftResult.error}`);
+        return {
+          success: false,
+          error: swiftResult.error,
+          executionMethod: 'swift' as const,
+        };
+      }
+
+      console.log(`[Drift] Swift failed (${swiftResult.errorClassification}), falling back to legacy: ${swiftResult.error}`);
+    } catch (swiftError: any) {
+      console.error(`[Drift] Swift attempt threw unexpected error, falling back to legacy:`, swiftError?.message || swiftError);
+    }
   }
   
   // Try to use in-process SDK first, fall back to subprocess if SDK not available
@@ -3449,7 +3498,8 @@ export async function closePerpPosition(
   slippageBps: number = 50,
   privateKeyBase58?: string,
   expectedAgentPubkey?: string,
-): Promise<{ success: boolean; signature?: string; error?: string }> {
+  positionSide?: 'long' | 'short',
+): Promise<{ success: boolean; signature?: string; error?: string; executionMethod?: 'swift' | 'legacy'; fillPrice?: number }> {
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
   
@@ -3459,6 +3509,53 @@ export async function closePerpPosition(
   }
   
   console.log(`[Drift] Closing position for ${market} (index ${marketIndex}) on subaccount ${subAccountId}`);
+  
+  // Swift-first close path — requires positionSide and positionSizeBase to determine close direction
+  if (shouldUseSwift() && positionSide && positionSizeBase && positionSizeBase > 0) {
+    const closeSide = positionSide === 'long' ? 'short' : 'long';
+    console.log(`[Drift] Attempting Swift close for ${market}, closing ${positionSide} position with ${closeSide} reduce-only order, size: ${positionSizeBase}`);
+    try {
+      const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
+      const agentPubkey = expectedAgentPubkey || '';
+
+      const swiftResult = await executeSwiftOrder({
+        privateKeyBase58: rawKey,
+        agentPublicKey: agentPubkey,
+        market,
+        marketIndex,
+        side: closeSide,
+        sizeInBase: positionSizeBase,
+        subAccountId,
+        reduceOnly: true,
+        slippageBps,
+      });
+
+      if (swiftResult.success) {
+        console.log(`[Drift] Swift close succeeded for ${market}: tx=${swiftResult.txSignature}, latency=${swiftResult.auctionDurationMs}ms`);
+        return {
+          success: true,
+          signature: swiftResult.txSignature,
+          executionMethod: 'swift',
+          fillPrice: swiftResult.fillPrice,
+        };
+      }
+
+      if (swiftResult.errorClassification === 'permanent') {
+        console.error(`[Drift] Swift close permanent error for ${market}: ${swiftResult.error}`);
+        return {
+          success: false,
+          error: swiftResult.error,
+          executionMethod: 'swift',
+        };
+      }
+
+      console.log(`[Drift] Swift close failed (${swiftResult.errorClassification}), falling back to legacy: ${swiftResult.error}`);
+    } catch (swiftError: any) {
+      console.error(`[Drift] Swift close threw unexpected error, falling back to legacy:`, swiftError?.message || swiftError);
+    }
+  } else if (shouldUseSwift() && (!positionSide || !positionSizeBase)) {
+    console.log(`[Drift] Swift available but positionSide/positionSizeBase not provided for close, using legacy`);
+  }
   
   // Try to use in-process SDK first, fall back to subprocess if SDK not available
   let sdk: any = null;

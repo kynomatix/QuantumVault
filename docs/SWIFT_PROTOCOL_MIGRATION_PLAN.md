@@ -836,7 +836,7 @@ Nothing proceeds without passing its gate.
 | 1 | Database Schema Migration | - [x] COMPLETED | Feb 9, 2026 |
 | 2 | Swift Configuration Module | - [x] COMPLETED | Feb 9, 2026 |
 | 3 | Swift Executor Module | - [x] COMPLETED | Feb 9, 2026 |
-| 4 | Integration — executePerpOrder Wrapper | - [ ] NOT STARTED | |
+| 4 | Integration — executePerpOrder Wrapper | - [x] COMPLETED | Feb 9, 2026 |
 | 5 | Trade Logging Updates | - [ ] NOT STARTED | |
 | 6 | Retry Service Integration | - [ ] NOT STARTED | |
 | 7 | Observability & Metrics | - [ ] NOT STARTED | |
@@ -1011,7 +1011,7 @@ Swift signing requires a current slot number from `getSlot()` RPC call. If this 
 
 ---
 
-### Step 4: Integration Point — `executePerpOrder` Wrapper — ⬜ NOT STARTED
+### Step 4: Integration Point — `executePerpOrder` Wrapper — ✅ COMPLETED (Feb 9, 2026)
 
 **What:** Modify `executePerpOrder()` in `drift-service.ts` to try Swift first, fall back to legacy subprocess.
 
