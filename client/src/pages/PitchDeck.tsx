@@ -346,6 +346,20 @@ function ProductFeaturesSlide() {
       description: "Multi-asset collateral and intelligent borrowing for capital efficiency",
       gradient: "from-purple-500/20 to-indigo-500/10",
       border: "border-purple-500/30"
+    },
+    {
+      icon: <Activity className="w-6 h-6" />,
+      title: "Gasless Execution",
+      description: "Swift Protocol routes trades through market maker auctions — zero gas, lower overhead",
+      gradient: "from-emerald-500/20 to-green-500/10",
+      border: "border-emerald-500/30"
+    },
+    {
+      icon: <RefreshCw className="w-6 h-6" />,
+      title: "Dual Execution Paths",
+      description: "Automatic failover between Swift and on-chain ensures trades execute in any conditions",
+      gradient: "from-amber-500/20 to-orange-500/10",
+      border: "border-amber-500/30"
     }
   ];
 
@@ -360,7 +374,7 @@ function ProductFeaturesSlide() {
         Enterprise-grade infrastructure built on Drift Protocol
       </motion.p>
       
-      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-w-5xl w-full">
+      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 max-w-6xl w-full">
         {features.map((feature, i) => (
           <motion.div 
             key={i}
@@ -774,6 +788,7 @@ function TechStackSlide() {
   const tech = [
     { name: "Solana", desc: "400ms blocks, sub-cent fees" },
     { name: "Drift Protocol", desc: "$1B+ TVL, 80+ markets" },
+    { name: "Swift Protocol", desc: "Gasless execution with auto failover" },
     { name: "TradingView", desc: "Strategy & webhook integration" },
     { name: "React + TypeScript", desc: "Modern web application" },
     { name: "PostgreSQL", desc: "Reliable data persistence" },
@@ -834,13 +849,13 @@ function RoadmapSlide() {
       quarter: "Q1 2026",
       title: "Foundation",
       status: "complete",
-      items: ["Core trading bots", "TradingView webhooks", "Signal marketplace", "Profit sharing"]
+      items: ["Core trading bots", "TradingView webhooks", "Signal marketplace", "Profit sharing", "Swift Protocol (gasless)"]
     },
     {
       quarter: "Q2 2026",
       title: "Growth",
       status: "current",
-      items: ["Swift Protocol", "Grid trading", "Advanced analytics", "Mobile optimization"]
+      items: ["Grid trading", "Advanced analytics", "Mobile optimization", "Multi-strategy bots"]
     },
     {
       quarter: "Q3 2026",
