@@ -512,7 +512,7 @@ function createInitializeUserInstruction(userPubkey, userAccount, userStats, sub
 }
 
 // Minimum SOL required to create a Drift subaccount (~0.035 SOL rent + ~0.005 tx fees + ~0.002 SignedMsg PDA rent for Swift)
-const MIN_SOL_FOR_SUBACCOUNT = 0.05;
+const MIN_SOL_FOR_SUBACCOUNT = 0.04;
 const SOL_TOLERANCE = 0.001; // Small tolerance for floating point precision
 
 // Initialize Drift accounts using RAW SOLANA TRANSACTIONS (bypasses DriftClient entirely)
