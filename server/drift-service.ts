@@ -3341,11 +3341,12 @@ export async function executePerpOrder(
             if (postSwiftPos.side !== 'FLAT' && Math.abs(postSwiftPos.size) > 0.0001) {
               console.log(`[Drift] Swift open VERIFIED: position found on-chain (${postSwiftPos.side} ${postSwiftPos.size}) after ${AUCTION_WAIT_MS}ms auction wait`);
               recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
+              console.log(`[Drift] Swift fill price: on-chain entry=$${postSwiftPos.entryPrice?.toFixed(6) || 'N/A'}, oracle estimate=$${swiftResult.fillPrice?.toFixed(6) || 'N/A'}`);
               return {
                 success: true,
                 signature: 'swift-auction-fill',
                 txSignature: 'swift-auction-fill',
-                fillPrice: swiftResult.fillPrice,
+                fillPrice: postSwiftPos.entryPrice || swiftResult.fillPrice,
                 actualFee: undefined,
                 executionMethod: 'swift' as const,
                 swiftOrderId: swiftResult.swiftOrderId,

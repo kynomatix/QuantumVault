@@ -3367,7 +3367,7 @@ export async function registerRoutes(
 
       // Update the pending trade record to executed status with PnL
       await storage.updateBotTrade(pendingCloseTrade.id, {
-        price: result.fillPrice ? String(result.fillPrice) : String(fillPrice),
+        price: String(fillPrice || result.fillPrice || 0),
         fee: String(closeFee),
         pnl: tradePnl !== 0 ? String(tradePnl) : null,
         status: "executed",
@@ -3618,7 +3618,7 @@ export async function registerRoutes(
         return res.status(500).json({ error: userFriendlyError });
       }
 
-      const fillPrice = orderResult.fillPrice || oraclePrice;
+      let fillPrice = orderResult.fillPrice || oraclePrice;
       const tradeNotional = contractSize * fillPrice;
       // Use actual fee from executor if available, otherwise estimate
       const tradeFee = orderResult.actualFee ?? (tradeNotional * DRIFT_FEE_RATE);
@@ -3634,7 +3634,7 @@ export async function registerRoutes(
       });
 
       // Sync position
-      await syncPositionFromOnChain(
+      const syncResult = await syncPositionFromOnChain(
         bot.id,
         bot.walletAddress,
         wallet.agentPublicKey,
@@ -3646,6 +3646,18 @@ export async function registerRoutes(
         side,
         contractSize
       );
+
+      // Update trade with real on-chain fill price if available (more accurate than oracle estimate)
+      if (syncResult?.onChainEntryPrice && syncResult.onChainEntryPrice > 0 && Math.abs(syncResult.onChainEntryPrice - fillPrice) > 0.001) {
+        console.log(`[ManualTrade] Updating fill price: oracle=$${fillPrice.toFixed(6)} -> on-chain=$${syncResult.onChainEntryPrice.toFixed(6)}`);
+        fillPrice = syncResult.onChainEntryPrice;
+        const updatedNotional = contractSize * fillPrice;
+        const updatedFee = orderResult.actualFee ?? (updatedNotional * DRIFT_FEE_RATE);
+        await storage.updateBotTrade(trade.id, {
+          price: fillPrice.toString(),
+          fee: updatedFee.toString(),
+        });
+      }
 
       // Update stats
       const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
@@ -7301,7 +7313,7 @@ export async function registerRoutes(
         return res.status(500).json({ error: userFriendlyError });
       }
 
-      const userFillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
+      let userFillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
       
       // Calculate fee (0.05% taker fee on notional value)
       const userTradeNotional = contractSize * userFillPrice;
@@ -7328,6 +7340,17 @@ export async function registerRoutes(
         side,
         contractSize
       );
+
+      if (syncResult?.onChainEntryPrice && syncResult.onChainEntryPrice > 0 && Math.abs(syncResult.onChainEntryPrice - userFillPrice) > 0.001) {
+        console.log(`[Webhook] Updating fill price: oracle=$${userFillPrice.toFixed(6)} -> on-chain=$${syncResult.onChainEntryPrice.toFixed(6)}`);
+        userFillPrice = syncResult.onChainEntryPrice;
+        const updatedNotional = contractSize * userFillPrice;
+        const updatedFee = updatedNotional * DRIFT_FEE_RATE;
+        await storage.updateBotTrade(trade.id, {
+          price: userFillPrice.toString(),
+          fee: updatedFee.toString(),
+        });
+      }
 
       // Update bot stats (including volume for FUEL tracking)
       const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
