@@ -1824,6 +1824,126 @@ An oracle price safety guard was added to prevent Swift orders with zero/missing
 - `executeSwiftOrder()` returns `fallback_legacy` classification when message cannot be built
 - This prevents submitting Swift orders with invalid auction parameters (start/end price of 0)
 
+#### Full Debugging Timeline & Investigation Narrative
+
+This section documents the complete chronological journey from "Swift orders aren't filling" to the root cause discovery and fix. This narrative is intended to inform future documentation (e.g., a user-facing implementation guide) so readers understand not just what was built, but how and why every decision was made.
+
+**Phase 1: Implementation (Steps 1-8)**
+
+The Swift integration was built following the documented flow from Drift's v2-teacher docs and SDK:
+1. Created `swift-config.ts` — configuration, health tracking, error classification
+2. Created `swift-executor.ts` — lightweight DriftClient, message building, signing, API submission
+3. Created `swift-metrics.ts` — real-time performance metrics
+4. Integrated Swift into all 9 execution paths in `drift-service.ts` via `shouldUseSwift()` → `executeSwiftOrder()` → fallback pattern
+5. Added 8-second auction verification using `PositionService` to detect fills
+6. Added database tracking columns (`executionMethod`, `swiftOrderId`) to `bot_trades`
+7. Set `SWIFT_ENABLED=true` and began live testing
+
+At this point, the code was correct according to all available documentation. The Swift API was reachable, orders were being signed and submitted, and the API responded with 200 OK.
+
+**Phase 2: Orders Accepted But Never Filled**
+
+Live testing revealed the core problem: Swift orders were accepted by the API but market makers never filled them. The 8-second verification window would expire, and every order fell back to legacy execution.
+
+Two test trades were run:
+- $92 notional (small position) — API returned "Order processed", no fill after 8 seconds
+- $175 notional (medium position) — same result
+
+Both trades fell back to legacy and executed successfully, confirming the legacy path was fine.
+
+**Phase 3: Systematic Debugging — Ruling Out Suspects**
+
+The investigation worked through potential causes one by one:
+
+1. **Message encoding (RULED OUT):** An external auditor flagged potential base64 vs hex encoding issues. Investigation of the SDK source code (`signSignedMsgOrderParamsMessage`) revealed that the SDK internally converts the Borsh buffer to hex via `Buffer.from(hexString)`, so `.toString()` correctly returns hex. Using `.toString('base64')` would double-encode. Confirmed correct.
+
+2. **Auction parameters (RULED OUT):** Auction start/end prices and duration were reviewed. The 5bps buffer on start price and slippage-based end price were reasonable. The `auctionDuration` of 20 slots (~8 seconds) was within normal range. Parameters matched what Drift's own examples showed.
+
+3. **Trade size too small (RULED OUT):** Both $92 and $175 notional are above Drift's minimum order sizes. Other platforms execute similar-sized Swift orders regularly.
+
+4. **Market liquidity (RULED OUT):** The test markets (SOL-PERP, RENDER-PERP) have deep MM liquidity. Legacy fills succeeded instantly, proving MMs were active.
+
+5. **Oracle price zero/missing (PARTIALLY RELEVANT):** Discovered that if oracle price wasn't passed to the Swift executor, auction params would be all zeros — invalid. Added the oracle price safety guard. However, this wasn't the root cause since test trades did have valid oracle prices.
+
+6. **Swift close verification bug (FOUND AND FIXED):** During testing, discovered that the 8-second fill verification loop was using the wrong position check method, causing infinite loops on close orders. Fixed by switching to `PositionService.getPositionForExecution()`. This was a real bug but not the root cause of orders not filling.
+
+**Phase 4: The Breakthrough — Shifting Perspective**
+
+After ruling out all client-side causes, the question shifted from "what are we sending wrong?" to "what does the on-chain program need to execute this?"
+
+The key insight: the Swift API is just a relay. It accepts signed messages and broadcasts them to market makers. The actual execution happens on-chain when a keeper calls `placeSwiftTakerOrder`. That instruction has a specific set of required accounts.
+
+**Investigation steps:**
+1. Examined the `placeSwiftTakerOrder` instruction in the Drift program's account list
+2. Found it requires a `signedMsgUserOrders` account — a PDA specific to the taker's authority
+3. Derived the PDA: `PublicKey.findProgramAddressSync(["SIGNED_MSG", authority.toBuffer()], DRIFT_PROGRAM_ID)`
+4. For agent wallet `FLGNeFscYwp4MDmHuRfhEFsQYTq3jiLPrxMFJfwMYRXN`, the PDA is `CNquLziNQKTvdxAuTGZ71sdRQsmZepdtBenSpY1UmeVP`
+5. Queried Helius RPC: `getAccountInfo("CNquLziNQKTvdxAuTGZ71sdRQsmZepdtBenSpY1UmeVP")` → **returned `null`**
+
+The account didn't exist. Market makers were seeing the Swift order, attempting to fill it on-chain, but the `placeSwiftTakerOrder` instruction failed because the required PDA wasn't initialized. They silently skipped the order and moved on.
+
+**Phase 5: Understanding the Prerequisite**
+
+Further investigation into the SDK revealed:
+- `getInitializeSignedMsgUserOrdersAccountIx(authority, numOrders)` — builds the instruction to create this PDA
+- `initializeSignedMsgUserOrders(authority, numOrders)` — full method that sends the transaction
+- The PDA is per-authority (wallet), NOT per-subaccount — one init covers all subaccounts
+- `numOrders` determines the account size (number of concurrent signed msg orders it can hold)
+- Drift's web UI at `app.drift.trade` presumably handles this during their own onboarding flow, which is why it's not mentioned in the programmatic integration docs
+
+**Phase 6: Implementation Decision — Safety First**
+
+The fix needed to work for both existing users (whose wallets don't have the PDA) and new users (who haven't created accounts yet). The architect was consulted and recommended:
+
+1. **Do NOT bundle the SignedMsg init into the existing account creation transaction** — if it fails, it would break Drift account creation for new users. Account creation is critical and battle-tested; adding a new instruction risks breaking it.
+
+2. **Use the SDK method** (`getInitializeSignedMsgUserOrdersAccountIx`) **rather than hand-crafting the raw instruction** — the existing account creation in `drift-executor.mjs` uses raw transactions to bypass DriftClient bugs, but for SignedMsg init there's no such bug, so using the SDK method is safer and avoids getting the instruction layout wrong.
+
+3. **For existing users: lazy preflight with caching** — check the PDA on first Swift order attempt, create if missing, cache the result in memory. Success cached for 24 hours (no overhead on subsequent orders), failure cached for 10 minutes (allows retry without hammering RPC).
+
+4. **For new users: fire-and-forget after account creation** — run the init as a background task after SA0 is successfully created. If it fails, the lazy preflight catches it later. If it succeeds, the user's first Swift order will hit the cache and skip the check.
+
+5. **Any failure in SignedMsg init must NEVER block legacy trading** — all errors are caught, logged, and result in fallback to legacy execution.
+
+**Phase 7: Verification Pending**
+
+As of this writing, the SignedMsg PDA initialization code is deployed but the PDA has not yet been created on-chain for the existing test wallet. The next Swift order attempt will:
+1. Hit `ensureSignedMsgAccount()` in `swift-executor.ts`
+2. Check the PDA on-chain — find it missing
+3. Build and send the init transaction
+4. If successful, cache the result and proceed with the Swift order
+5. Market makers should now be able to fill the order via `placeSwiftTakerOrder`
+
+This will be the definitive test of whether the SignedMsg PDA was the sole remaining blocker.
+
+#### Summary of All Swift-Related Code Changes (Complete List)
+
+For reference when building user-facing documentation, here is every file modified or created during the Swift integration:
+
+| File | Type | Purpose |
+|------|------|---------|
+| `server/swift-config.ts` | Created | Swift configuration, health tracking, error classification, metrics recording |
+| `server/swift-executor.ts` | Created | Core Swift order execution: message building, signing, API submission, SignedMsg preflight with caching |
+| `server/swift-metrics.ts` | Created | Real-time Swift performance metrics (latency, success rate, fallback frequency) |
+| `server/drift-service.ts` | Modified | Added `shouldUseSwift()` gate and Swift-first execution to all 9 trade paths with fallback |
+| `server/drift-executor.mjs` | Modified | Added `initializeSignedMsgAccountSafe()` for proactive SignedMsg PDA init during new user onboarding |
+| `server/position-service.ts` | Used (not modified) | Provides `getPositionForExecution()` for Swift close verification |
+| `shared/schema.ts` | Modified | Added `executionMethod` and `swiftOrderId` columns to `bot_trades` table |
+| `server/rpc-config.ts` | Used (not modified) | Provides RPC URL resolution for Swift executor |
+| `docs/SWIFT_PROTOCOL_MIGRATION_PLAN.md` | Modified | This document — all planning, audit responses, and post-implementation findings |
+
+#### Lessons Learned for Future Integrations
+
+1. **Silent failures are the hardest to debug.** When an API returns 200 OK but nothing happens downstream, the error surface is invisible. Always verify end-to-end on-chain results, not just API responses.
+
+2. **Check on-chain prerequisites independently.** Don't assume that a successful API call means the on-chain state is ready. Query the blockchain directly to verify all required accounts exist.
+
+3. **The SDK source code IS the documentation.** When public docs are incomplete, read the SDK methods, their parameters, and the instruction accounts they reference. If a method like `initializeSignedMsgUserOrders` exists, someone is expected to call it.
+
+4. **Shift perspective when stuck.** After ruling out client-side issues, ask: "What does the OTHER side need to complete this?" Tracing the market maker's execution path (not just the taker's submission path) revealed the missing account.
+
+5. **Isolate new on-chain operations.** Never bundle untested on-chain instructions into battle-tested transaction flows. Use separate transactions so failures don't cascade.
+
 ---
 
 ## 25. Post-Implementation Cleanup Checklist
