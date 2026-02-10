@@ -3251,6 +3251,60 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
   });
 }
 
+async function swiftLateOpenRecovery(
+  encryptedPrivateKey: string,
+  expectedAgentPubkey: string | undefined,
+  subAccountId: number,
+  market: string,
+  baselineSide: string,
+  baselineSize: number,
+  swiftFillPriceEstimate: number | undefined,
+  swiftOrderId: string | undefined,
+  legacyError: string,
+): Promise<{ success: boolean; signature?: string; txSignature?: string; fillPrice?: number; actualFee?: number; executionMethod?: 'swift' | 'legacy'; swiftOrderId?: string } | null> {
+  try {
+    let pubkey = expectedAgentPubkey;
+    if (!pubkey) {
+      try {
+        const kp = getAgentKeypair(encryptedPrivateKey);
+        pubkey = kp.publicKey.toBase58();
+      } catch { return null; }
+    }
+    if (!pubkey) return null;
+    
+    console.log(`[Drift] Swift late-fill recovery: legacy failed with "${legacyError}", checking if Swift filled the position (baseline: ${baselineSide}/${baselineSize})...`);
+    const { PositionService } = await import('./position-service.js');
+    const recoveryPos = await PositionService.getPositionForExecution(
+      'swift-late-fill-recovery',
+      pubkey,
+      subAccountId,
+      market,
+      encryptedPrivateKey
+    );
+    const recoverySize = Math.abs(recoveryPos.size);
+    const positionChanged = (baselineSide === 'FLAT' && recoveryPos.side !== 'FLAT' && recoverySize > 0.0001) ||
+      (baselineSide !== 'FLAT' && recoverySize > baselineSize + 0.0001);
+    if (positionChanged) {
+      console.log(`[Drift] *** SWIFT LATE-FILL RECOVERY *** Position changed from ${baselineSide}/${baselineSize} to ${recoveryPos.side}/${recoverySize}. Legacy error was false alarm — Swift filled the trade.`);
+      recordSwiftMetricSuccess(market, 0, undefined);
+      return {
+        success: true,
+        signature: 'swift-late-fill-recovery',
+        txSignature: 'swift-late-fill-recovery',
+        fillPrice: recoveryPos.entryPrice || swiftFillPriceEstimate,
+        actualFee: undefined,
+        executionMethod: 'swift' as const,
+        swiftOrderId: swiftOrderId,
+      };
+    }
+    console.log(`[Drift] Swift late-fill recovery: position still ${recoveryPos.side}/${recoverySize}, legacy error was genuine`);
+    return null;
+  } catch (err: any) {
+    console.warn(`[Drift] Swift late-fill recovery check failed: ${err?.message}`);
+    return null;
+  }
+}
+
 export async function executePerpOrder(
   encryptedPrivateKey: string,
   market: string,
@@ -3563,6 +3617,11 @@ export async function executePerpOrder(
         reportRPCError('connection');
         console.log('[Drift] Subprocess timeout detected - reported as RPC connection error for failover');
       }
+      
+      if (swiftAuctionSubmitted && !reduceOnly && (errLower.includes('6010') || errLower.includes('insufficient') || errLower.includes('collateral'))) {
+        const recoveryResult = await swiftLateOpenRecovery(encryptedPrivateKey, expectedAgentPubkey, subAccountId, market, preSwiftPositionSide, preSwiftPositionSize, swiftFillPriceEstimate, swiftOrderIdForGuard, result.error);
+        if (recoveryResult) return recoveryResult;
+      }
     } else if (result.success) {
       // Trade succeeded - reset error counter
       reset429Counter();
@@ -3600,6 +3659,11 @@ export async function executePerpOrder(
       // CRITICAL: Timeouts should trigger RPC failover
       reportRPCError('connection');
       console.log('[Drift] Timeout error detected - reported as RPC connection error for failover');
+    }
+    
+    if (swiftAuctionSubmitted && !reduceOnly && (errLower.includes('6010') || errLower.includes('insufficient') || errLower.includes('collateral'))) {
+      const recoveryResult = await swiftLateOpenRecovery(encryptedPrivateKey, expectedAgentPubkey, subAccountId, market, preSwiftPositionSide, preSwiftPositionSize, swiftFillPriceEstimate, swiftOrderIdForGuard, errorMessage);
+      if (recoveryResult) return recoveryResult;
     }
     
     // Normalize rate limit errors to ensure they're detectable by isRateLimitError
