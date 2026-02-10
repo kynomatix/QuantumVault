@@ -6,6 +6,20 @@ QuantumVault is a Solana-based bot trading platform for deploying and managing p
 ## User Preferences
 Preferred communication style: Simple, everyday language.
 
+### Public URL Policy
+-   **Production URL**: https://myquantumvault.com/ — ALWAYS use this for any external-facing references, submissions, documentation, or communications.
+-   **NEVER** share or broadcast the Replit URL externally. The Replit URL is internal only.
+
+### Assets
+-   **Pitchdeck**: Available for investor/partner presentations and grant applications when relevant.
+-   **GitHub**: https://github.com/kynomatix/QuantumVault
+
+### Superteam Earn Agent
+-   **Agent Name**: quantumvault-agent
+-   **Agent ID**: 3447347d-709d-4727-845a-fb95968457ab
+-   **Claim Code**: F7B595763A80A2D1FD3A52D1
+-   **Username**: quantumvault-agent-chocolate-83
+
 ### RPC Configuration
 -   **Primary RPC**: Helius Dev Tier (PAID - not free tier)
 -   **Backup RPC**: Triton (funded and available for failover)
