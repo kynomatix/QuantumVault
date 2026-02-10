@@ -14,3 +14,6 @@ replit.md
 .config/
 .local/
 .upm/
+vite-plugin-meta-images.ts
+generated-*
+.replit-*
