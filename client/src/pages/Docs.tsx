@@ -1188,8 +1188,8 @@ function SwiftExecutionSection() {
           <h4 className="font-medium text-white">How Notional Value Is Calculated</h4>
         </div>
         <p className="text-white/60 text-sm mb-3">
-          Notional value = number of contracts × current price. For example, trading 150 FARTCOIN at $0.19 
-          = ~$28.50 notional — this qualifies for Swift execution.
+          Notional value = number of contracts × current price. For example, trading 0.5 SOL-PERP at $120 
+          = $60 notional — this qualifies for Swift execution.
         </p>
         <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
           <span className="text-violet-200 text-sm">Swift Minimum</span>
