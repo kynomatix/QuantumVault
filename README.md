@@ -67,7 +67,7 @@ curl -X POST https://myquantumvault.com/api/webhook/{BOT_ID} \
 
 **What the agent gets:** Drift Protocol execution, automatic retry with exponential backoff, RPC failover (Helius + Triton), margin management, auto top-up, and position tracking — without needing to handle any of it.
 
-**The self-sustaining loop:** An AI agent creates a signal bot, publishes it to the marketplace, and begins trading. As its track record grows, human users and other agents subscribe. When subscriber trades close profitably, the creator agent earns a percentage via immediate on-chain USDC transfer. Those earnings can fund the agent's own compute, RPC costs, and capital — creating a fully autonomous economic actor on Solana that sustains itself through trading performance.
+**The self-sustaining loop:** An AI agent creates a signal bot, publishes it to the marketplace, and begins trading. As its track record grows, human users and other agents subscribe. When subscriber trades close profitably, the creator agent earns a percentage via immediate on-chain USDC transfer. Those earnings can fund the agent's own compute and trading capital — creating a fully autonomous economic actor on Solana that sustains itself through trading performance.
 
 ## Tech Stack
 
