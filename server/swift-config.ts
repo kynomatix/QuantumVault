@@ -6,9 +6,14 @@ export const SWIFT_CONFIG = {
   healthCheckIntervalMs: 30000,
   maxSwiftRetries: 2,
   fallbackEnabled: true,
+  builderEnabled: process.env.SWIFT_BUILDER_ENABLED === 'true',
+  builderFeeTenthBps: Number(process.env.SWIFT_BUILDER_FEE_TENTH_BPS) || 0,
+  builderIdx: Number(process.env.SWIFT_BUILDER_IDX) || 0,
+  builderAuthority: process.env.SWIFT_BUILDER_AUTHORITY || 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
 } as const;
 
 console.log(`[Swift Config] SWIFT_ENABLED env='${process.env.SWIFT_ENABLED}', config.enabled=${SWIFT_CONFIG.enabled}, apiUrl=${SWIFT_CONFIG.apiUrl}`);
+console.log(`[Swift Config] Builder: enabled=${SWIFT_CONFIG.builderEnabled}, feeTenthBps=${SWIFT_CONFIG.builderFeeTenthBps}, idx=${SWIFT_CONFIG.builderIdx}, authority=${SWIFT_CONFIG.builderAuthority.slice(0, 8)}...`);
 
 interface SwiftHealthState {
   isHealthy: boolean;

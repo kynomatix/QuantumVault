@@ -226,7 +226,16 @@ function buildSwiftMessage(params: {
     postOnly: PostOnlyParams.NONE,
   };
 
-  return {
+  const swiftMsg: {
+    signedMsgOrderParams: typeof orderParams;
+    subAccountId: number;
+    slot: BN;
+    uuid: Uint8Array;
+    stopLossOrderParams: null;
+    takeProfitOrderParams: null;
+    builderIdx?: number;
+    builderFeeTenthBps?: number;
+  } = {
     signedMsgOrderParams: orderParams,
     subAccountId: params.subAccountId,
     slot: new BN(params.slot),
@@ -234,6 +243,14 @@ function buildSwiftMessage(params: {
     stopLossOrderParams: null,
     takeProfitOrderParams: null,
   };
+
+  if (SWIFT_CONFIG.builderEnabled && SWIFT_CONFIG.builderFeeTenthBps > 0) {
+    swiftMsg.builderIdx = SWIFT_CONFIG.builderIdx;
+    swiftMsg.builderFeeTenthBps = SWIFT_CONFIG.builderFeeTenthBps;
+    swiftLog(`Builder code enabled: idx=${SWIFT_CONFIG.builderIdx}, feeTenthBps=${SWIFT_CONFIG.builderFeeTenthBps} (=${SWIFT_CONFIG.builderFeeTenthBps / 10} bps)`);
+  }
+
+  return swiftMsg;
 }
 
 async function submitToSwiftApi(params: {

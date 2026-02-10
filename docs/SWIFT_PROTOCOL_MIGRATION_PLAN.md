@@ -845,7 +845,7 @@ Nothing proceeds without passing its gate.
 | 6 | Retry Service Integration | - [x] COMPLETED | Feb 9, 2026 |
 | 7 | Observability & Metrics | - [x] COMPLETED | Feb 9, 2026 |
 | 8 | Controlled Activation | - [x] COMPLETED | Feb 9, 2026 |
-| 9 | Builder Code Registration (Optional) | - [ ] NOT STARTED | |
+| 9 | Builder Code Registration (Optional) | - [~] CODE READY | Feb 10, 2026 |
 
 **How to use:** When completing a step, change `- [ ] NOT STARTED` to `- [x] COMPLETED` and fill in the date. This tracker is the first thing to check when resuming work to know where you left off.
 
@@ -1266,16 +1266,32 @@ Week 2: Review per-market Swift performance
 
 ---
 
-### Step 9: Builder Code Registration (Optional — Revenue) — ⬜ NOT STARTED
+### Step 9: Builder Code Registration (Optional — Revenue) — 🟡 CODE READY (awaiting on-chain registration)
 
 **What:** Register QuantumVault as a Drift Builder to earn fees on Swift trades.
 
 **Where:** Drift Builder Code program (on-chain registration, one-time)
 
 **Requirements:**
-- Register a builder code with Drift Protocol
-- Add `builderIdx` and `builderFee` to Swift order submissions in `swift-executor.ts`
+- Register QuantumVault as a builder with Drift Protocol via `driftClient.initializeRevenueShare(builderAuthority)`
+- Each user must initialize a `RevenueShareEscrow` and approve the builder via `driftClient.changeApprovedBuilder(builder, maxFeeTenthBps, true)`
+- Add `builderIdx` and `builderFeeTenthBps` to Swift message in `swift-executor.ts`
 - Builder fees are paid by the protocol, not the user — no impact on user fill prices
+
+**Code-side implementation (Feb 10, 2026):**
+- `server/swift-config.ts`: Added config fields with env var overrides:
+  - `builderEnabled` — `SWIFT_BUILDER_ENABLED` (default: `false`)
+  - `builderFeeTenthBps` — `SWIFT_BUILDER_FEE_TENTH_BPS` (default: `0`, unit: 1/10th of a basis point, so `10` = 1 bps)
+  - `builderIdx` — `SWIFT_BUILDER_IDX` (default: `0`, numeric index from user's approved builders list)
+  - `builderAuthority` — `SWIFT_BUILDER_AUTHORITY` (default: `AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez`, used for registration only)
+- `server/swift-executor.ts`: `buildSwiftMessage()` conditionally adds `builderIdx` and `builderFeeTenthBps` to the Swift message (matching SDK's `SignedMsgOrderParamsMessage` type) when `builderEnabled=true` AND `builderFeeTenthBps > 0`
+- Defaults to disabled with 0 fee (safe for developer preview, no change to existing behavior)
+
+**Pending — On-chain registration:**
+1. Call `driftClient.initializeRevenueShare(platformWalletPubkey)` from the platform wallet (`AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez`) — creates the `RevenueShareAccount`
+2. For each user: call `driftClient.initializeRevenueShareEscrow(userAuthority, numOrders)` and `driftClient.changeApprovedBuilder(platformWalletPubkey, maxFeeTenthBps, true)` — can be automated in onboarding flow
+3. Once registered, set env vars: `SWIFT_BUILDER_ENABLED=true`, `SWIFT_BUILDER_IDX=<idx>`, `SWIFT_BUILDER_FEE_TENTH_BPS=<fee>`
+4. The `builderIdx` value is determined by the user's approved builder list position — must be confirmed after registration
 
 **Verify:**
 1. Confirm builder registration on-chain

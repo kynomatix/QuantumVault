@@ -88,16 +88,24 @@ Drift Builder Codes allow third-party apps (like QuantumVault) to earn per-order
 
 ### Fee Setting Strategy
 
-Builder fees are in **basis points (bps)**. Consider:
+Builder fees are configured in **tenth of a basis point** (`feeTenthBps` in the SDK). So `10 feeTenthBps = 1 bps = 0.01%`.
 
-| Strategy | Builder Fee | Notes |
-|----------|------------|-------|
-| **Zero fee (preview)** | 0 bps | Register builder but charge nothing initially |
-| **Minimal** | 1–2 bps (0.01–0.02%) | Barely noticeable, accumulates at scale |
-| **Moderate** | 3–5 bps (0.03–0.05%) | Meaningful revenue, still competitive |
-| **Aggressive** | 5–10 bps (0.05–0.1%) | Higher revenue but may deter sophisticated traders |
+| Strategy | Builder Fee | SDK Value (`feeTenthBps`) | Notes |
+|----------|------------|--------------------------|-------|
+| **Zero fee (preview)** | 0 bps | 0 | Register builder but charge nothing initially |
+| **Minimal** | 1–2 bps (0.01–0.02%) | 10–20 | Barely noticeable, accumulates at scale |
+| **Moderate** | 3–5 bps (0.03–0.05%) | 30–50 | Meaningful revenue, still competitive |
+| **Aggressive** | 5–10 bps (0.05–0.1%) | 50–100 | Higher revenue but may deter sophisticated traders |
 
-Recommendation: Start at **0 bps** during developer preview (register the builder code but don't charge), then introduce 1–3 bps when the platform fee goes live at bootstrapping phase.
+Recommendation: Start at **0 feeTenthBps** during developer preview (register the builder code but don't charge), then introduce 10–30 feeTenthBps (1–3 bps) when the platform fee goes live at bootstrapping phase.
+
+### SDK Field Reference
+
+The Drift SDK `SignedMsgOrderParamsMessage` type accepts these builder fields:
+- `builderIdx: number` — Numeric index of the builder in the user's approved builders list (set during on-chain registration)
+- `builderFeeTenthBps: number` — Fee amount in 1/10th of a basis point
+
+These go on the **Swift message** (not the order params). The `builderAuthority` (public key) is only used during on-chain registration, not in order submission.
 
 ### Relationship to Platform Fee
 
@@ -149,11 +157,12 @@ Trade Execution
 ## 6. Implementation Phases
 
 ### Phase 1: Builder Code Registration (Can Do Now)
-- Register QuantumVault as a Drift builder on-chain
-- Set builder fee to 0 bps (no charge during preview)
-- Add `builderIdx` and `builderFee` to Swift order submissions in `swift-executor.ts`
+- Register QuantumVault as a Drift builder on-chain using `driftClient.initializeRevenueShare(builderAuthority)`
+- Set builder fee to 0 feeTenthBps (no charge during preview)
+- Code-side support already implemented: `builderIdx` and `builderFeeTenthBps` added to Swift message in `swift-executor.ts`
+- Activate via env vars: `SWIFT_BUILDER_ENABLED=true`, `SWIFT_BUILDER_IDX=<idx>`, `SWIFT_BUILDER_FEE_TENTH_BPS=<fee>`
 - No user-facing changes needed yet (fee is 0)
-- **Prerequisite**: Each user's `RevenueShareEscrow` must be initialized — can be done lazily during first Swift trade
+- **Prerequisite**: Each user's `RevenueShareEscrow` must be initialized and must approve the builder — can be done lazily during first Swift trade
 
 ### Phase 2: User Escrow Initialization (With Builder Code)
 - Add `RevenueShareEscrow` initialization to user onboarding flow (when agent wallet is created)
