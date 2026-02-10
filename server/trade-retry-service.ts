@@ -404,6 +404,8 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     } else {
       // For OPEN trades (long/short): Check on-chain if position already exists
       // This prevents marking trades as "failed" when a previous timeout actually succeeded
+      // IMPORTANT: Must compare position size against intended trade size to avoid false positives
+      // from residual positions left by incomplete closes
       try {
         const positions = await getPerpPositions(job.agentPublicKey, job.subAccountId);
         const normalizedMarket = job.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
@@ -412,33 +414,40 @@ async function processRetryJob(job: RetryJob): Promise<void> {
           return posMarket === normalizedMarket;
         });
         
-        // Check if position exists and matches the intended direction
         if (position && Math.abs(position.baseAssetAmount) >= 0.0001) {
           const positionSide = position.side.toLowerCase();
           const intendedSide = job.side.toLowerCase();
+          const onChainSize = Math.abs(position.baseAssetAmount);
+          const intendedSize = job.size;
+          const sizeRatio = intendedSize > 0 ? onChainSize / intendedSize : 0;
           
-          // If position exists in the same direction, trade was already executed
           if (positionSide === intendedSide) {
-            console.log(`[TradeRetry] Position already exists: ${position.side} ${Math.abs(position.baseAssetAmount).toFixed(6)} ${job.market} - previous attempt likely succeeded`);
-            
-            // Update original trade to recovered since it actually succeeded
-            if (job.originalTradeId) {
-              await storage.updateBotTrade(job.originalTradeId, {
-                status: 'recovered',
-                errorMessage: null,
-                recoveredFromError: 'Trade succeeded on-chain despite timeout (verified on retry)',
-                retryAttempts: job.attempts,
-              });
+            // Only consider it a successful recovery if the on-chain position is at least
+            // 50% of the intended trade size. A tiny residual position (e.g. from an
+            // incomplete close) should NOT be mistaken for the timed-out trade succeeding.
+            if (sizeRatio >= 0.5) {
+              console.log(`[TradeRetry] Position already exists: ${position.side} ${onChainSize.toFixed(6)} ${job.market} (intended: ${intendedSize.toFixed(6)}, ratio: ${sizeRatio.toFixed(2)}) - previous attempt likely succeeded`);
+              
+              if (job.originalTradeId) {
+                await storage.updateBotTrade(job.originalTradeId, {
+                  status: 'recovered',
+                  errorMessage: null,
+                  recoveredFromError: `Trade succeeded on-chain despite timeout (verified on retry, on-chain size: ${onChainSize.toFixed(6)})`,
+                  retryAttempts: job.attempts,
+                });
+              }
+              
+              await notifyRetryResult(job, true);
+              retryQueue.delete(job.id);
+              try {
+                await storage.markTradeRetryJobCompleted(job.id);
+              } catch (dbErr) {
+                console.warn(`[TradeRetry] Failed to mark job as completed in DB:`, dbErr);
+              }
+              return;
+            } else {
+              console.log(`[TradeRetry] Position exists but too small: ${position.side} ${onChainSize.toFixed(6)} ${job.market} vs intended ${intendedSize.toFixed(6)} (ratio: ${sizeRatio.toFixed(2)}) - likely residual from incomplete close, proceeding with trade`);
             }
-            
-            await notifyRetryResult(job, true);
-            retryQueue.delete(job.id);
-            try {
-              await storage.markTradeRetryJobCompleted(job.id);
-            } catch (dbErr) {
-              console.warn(`[TradeRetry] Failed to mark job as completed in DB:`, dbErr);
-            }
-            return;
           }
         }
       } catch (posCheckErr) {
