@@ -1,0 +1,52 @@
+Here’s the core reason it looks gated *and* what you can actually do to participate:
+
+### 💡 Why it says **“Agents Only”**
+
+The listing you’re looking at — **Open Innovation Track: Build Anything on Solana** — is explicitly restricted to submissions via a Superteam *agent*, not a standard human Earn profile. On the platform, agent-only listings aren’t visible in the normal feed, and human applicants can’t submit directly there through the UI. ([Superteam][1])
+
+Agents in Superteam Earn are essentially autonomous identity profiles designed to interact with *agent-eligible* listings via API — they register, fetch eligible tasks, submit outputs, then hand payouts off to a real person to claim. ([Superteam][2])
+
+That means:
+
+* **Direct human application via the dashboard is blocked for this listing.**
+* The bounty is meant to be discovered and submitted by an agent process. ([Superteam][1])
+
+### 📌 What “agent” actually means
+
+Superteam Earn’s agent system is not about membership status or community level — it’s a **technical API identity** you register via their agent endpoints (you generate an API key and agent ID). Those agents then can fetch agent-only listings programmatically and submit work. ([Superteam][2])
+
+So “agents only” doesn’t mean you need to be on a special invite list — it means **you must use an agent identity to participate**.
+
+### 🛠️ How to participate with your platform
+
+If your platform has technical automation or programmatic capabilities, you can:
+
+1. **Register an agent identity via the Superteam Earn API**
+
+   * POST to the `/api/agents` endpoint to create a new agent.
+   * You’ll receive an `apiKey`, a `claimCode`, and an agent ID. ([Superteam][2])
+
+2. **Use the agent API to discover the agent-only listing**
+
+   * Agents can list eligible opportunities marked `AGENT_ONLY` (which your bounty is). ([Superteam][2])
+
+3. **Submit work through the agent submission endpoint**
+
+   * Send your product link, demo, or explanation through the agent’s submission call. ([Superteam][2])
+
+4. **Connect the submission to a human for payout**
+
+   * Hand the `claimCode` to a human operator — that person claims the reward via the claim page linking the agent to a human wallet. ([Superteam][2])
+
+That workflow is exactly how Superteam intends agent-only bounties to operate — you’re not actually excluded, you just need to route your build through their agent API framework. ([Superteam][2])
+
+### 🧠 TL;DR
+
+* **“Agents only” = you must submit through a registered Superteam agent identity.** ([Superteam][1])
+* This is *not* a community-level gatekeep — it’s a technical requirement for how listings are consumed. ([Superteam][2])
+* If your product or platform can register an agent and submit via API, you *can* apply and win the bounty. ([Superteam][2])
+
+If you want, I can walk you through the exact API calls and payloads for registering and submitting an agent-based entry.
+
+[1]: https://superteam.fun/earn/listing/open-innovation-track-agents/ "Open Innovation Track: Build Anything on Solana by Superteam | Superteam Earn Listing"
+[2]: https://superteam.fun/earn/agents?utm_source=chatgpt.com "Agents | Superteam Earn"

@@ -1,0 +1,44 @@
+This updated plan is **excellent**. You have successfully addressed the critical architectural flaws (Drift vs. Wallet balance) and the UX issues (Agent vs. Main wallet) while adding a sophisticated layer of RPC optimization that is crucial for production reliability on Solana.
+
+The addition of the **Hostage Prevention (TTL)** mechanism is a very mature product decision—it ensures that a technical failure on the creator's side doesn't punish the subscriber indefinitely.
+
+I have found **three minor refinements** to make the implementation even more robust, but they are not blockers. You can proceed with coding immediately.
+
+### Refinement 1: Handling "Rent-Exempt" Balance for SOL
+**Location:** `transferUsdcToWallet`
+**Issue:** You check if `solBalance < 0.003`.
+**Nuance:** On Solana, if an account's SOL balance drops below the "rent-exempt minimum" (usually ~0.00089 SOL for a basic wallet, more if it has data), the transaction might fail or the account could be garbage collected (though less likely for system accounts).
+**Refinement:**
+Ensure your check of `0.003` includes the transaction fee (~0.000005) *plus* enough to keep the account rent-exempt. `0.003` is a safe buffer, but just be aware that if the agent wallet is *brand new* and perfectly empty, you might need to fund it with ~0.002 SOL first to initialize it properly before it can even pay gas. Your current check handles the "stop if too low" case correctly.
+
+### Refinement 2: The "Dust" Re-Check
+**Location:** `distributeCreatorProfitShare`
+**Issue:** You withdraw `creatorShare` from Drift.
+**Nuance:** Drift's internal accounting uses high-precision integers (BigNum). When you request a withdrawal of exactly `$2.5034`, Drift might settle slightly differently due to rounding in the conversion from their internal `quote_asset_amount` to the SPL token integer amount (6 decimals for USDC).
+**Refinement:**
+After `withdrawFromDrift` succeeds, standard practice is to use the *exact amount withdrawn* for the transfer, rather than the calculated `creatorShare`.
+*   *Current Plan:* Withdraw `X`, Transfer `X`.
+*   *Safe Plan:* Withdraw `X`. Read the `withdrawResult.amountActuallyWithdrawn` (if available from SDK) or simply proceed with `X`. If Drift rounded down by 0.000001, the transfer of `X` might fail due to "Insufficient Funds" by 1 micro-cent.
+*   *Fix:* In `transferUsdcToWallet`, if the transfer fails specifically due to "Insufficient Funds", retry automatically with `amount - 0.000001`. Or, just withdraw `creatorShare` but transfer `creatorShare * 0.9999` (safe but messy).
+*   *Better Fix:* Just rely on the fact that the agent wallet likely has *some* existing dust from previous trades. If it's a brand new wallet, this is a tiny edge case.
+
+### Refinement 3: Idempotency Key for IOUs
+**Location:** `IOU Database Table`
+**Issue:** You use `trade_id` as a reference.
+**Refinement:** Add a unique constraint on `(subscriber_bot_id, trade_id)` in the `pending_profit_shares` table.
+```sql
+CREATE UNIQUE INDEX idx_unique_profit_share 
+ON pending_profit_shares(subscriber_bot_id, trade_id) 
+WHERE status != 'voided';
+```
+This ensures that if your webhook fires twice (which happens often with RPCs), you don't accidentally insert two separate IOUs for the same winning trade before the first one is processed.
+
+### Final Verdict
+**This plan is approved for production implementation.**
+
+*   **Architecture:** Solid (Drift Withdraw -> Transfer).
+*   **Safety:** High (IOU failover + TTL).
+*   **Performance:** Optimized (Batch RPC calls).
+*   **UX:** Good (Direct to Creator's Phantom wallet).
+
+You are ready to start **Phase 1: Core Transfer System**.

@@ -1,0 +1,108 @@
+Based on the code I've reviewed, I can see that you have successfully added the core Swift files (`swift-executor.ts`, `swift-config.ts`, `swift-metrics.ts`) and they appear to be implemented correctly according to the spec.
+
+However, I found the likely cause of your "hiccups": **The Swift logic is imported but never actually called.**
+
+While `server/drift-service.ts` has the correct imports at the top (lines 11-13), the `executePerpOrder` function is missing the logic to divert trades to the Swift executor. It is currently falling straight through to the legacy SDK/subprocess path, which explains why "Swift market makers aren't picking up the trades"—the trades are never being sent to the Swift API.
+
+Here is the breakdown of the issue and the fix:
+
+### 1. The Missing Link
+In `server/drift-service.ts`, your `executePerpOrder` function currently looks like this (simplified):
+
+```typescript
+export async function executePerpOrder(...) {
+  // ... imports and setup ...
+  
+  // CURRENT STATE:
+  // Missing the Swift check here!
+  
+  // Try to use in-process SDK first, fall back to subprocess...
+  let sdk: any = null;
+  // ... legacy logic continues ...
+}
+```
+
+### 2. The Fix
+You need to inject the Swift execution block at the very start of `executePerpOrder` in `server/drift-service.ts`.
+
+**Add this block immediately after the market index validation:**
+
+```typescript
+// ... inside executePerpOrder ...
+
+  if (marketIndex === undefined) {
+    // ... existing error handling ...
+  }
+
+  // --- START SWIFT INTEGRATION ---
+  // estimate notional value for the check (base amount * current oracle price)
+  // You might need to fetch the price quickly or pass it in, but strictly speaking 
+  // checking SWIFT_ENABLED inside shouldUseSwift is the most important part.
+  
+  if (shouldUseSwift(sizeInBase * 100)) { // Pass approx notional if needed, or just true to test
+    console.log(`[Drift] Attempting SWIFT execution for ${market}...`);
+    
+    // We need the decrypted private key for Swift
+    // If we only have encrypted, we must decrypt it
+    let decryptedKey = privateKeyBase58;
+    if (!decryptedKey && encryptedPrivateKey) {
+      try {
+        decryptedKey = decrypt(encryptedPrivateKey);
+      } catch (err) {
+        console.error('[Drift] Failed to decrypt key for Swift execution');
+      }
+    }
+
+    if (decryptedKey) {
+      // 1. Execute via Swift
+      const swiftResult = await executeSwiftOrder({
+        privateKeyBase58: decryptedKey,
+        agentPublicKey: expectedAgentPubkey || '', // Ensure you have this or derive it
+        market: market,
+        marketIndex: marketIndex,
+        side: side,
+        sizeInBase: sizeInBase,
+        subAccountId: subAccountId,
+        reduceOnly: reduceOnly,
+        slippageBps: slippageBps
+      });
+
+      // 2. Handle Success
+      if (swiftResult.success) {
+        console.log(`[Drift] SWIFT execution successful: ${swiftResult.swiftOrderId}`);
+        recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0);
+        return {
+          success: true,
+          signature: swiftResult.txSignature,
+          txSignature: swiftResult.txSignature,
+          fillPrice: swiftResult.fillPrice,
+          // ... map other fields as needed
+        };
+      }
+
+      // 3. Handle Fallback (if not a permanent error)
+      const errorClass = swiftResult.errorClassification;
+      console.warn(`[Drift] Swift failed (${errorClass}): ${swiftResult.error}`);
+      
+      if (errorClass === 'permanent') {
+        recordSwiftMetricFailure(market, swiftResult.error || 'Unknown error');
+        return { success: false, error: swiftResult.error };
+      }
+
+      // If we get here, it's a 'soft' failure (timeout/no liquidity), so we 
+      // log the fallback and let the code continue to the Legacy path below.
+      console.log('[Drift] Falling back to Legacy execution method...');
+      recordSwiftFallback(market);
+    }
+  }
+  // --- END SWIFT INTEGRATION ---
+
+  // Legacy code continues below...
+  // Try to use in-process SDK first, fall back to subprocess...
+```
+
+### 3. Other Checks
+*   **Trade Size:** You mentioned trade size might be an issue. `swift-config.ts` has a `SWIFT_MIN_NOTIONAL` check. Ensure your test trades are larger than this value (default seems to be $100 if env var isn't set), or lower the limit in `.env` for testing.
+*   **Environment Variables:** Ensure `SWIFT_ENABLED=true` is set in your environment.
+
+Once you add that code block to `executePerpOrder`, the trades will actually attempt to hit the Swift API endpoints you configured.

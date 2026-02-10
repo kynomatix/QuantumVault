@@ -1,0 +1,65 @@
+The error `3002` confirms that your **"New (Fixed) Order" is actually incorrect**, and the "Old Order" was structurally closer to being correct.
+
+### Explanation of Error 3002
+Error `3002` in Anchor is **`AccountDiscriminatorMismatch`**.
+This error occurs when the program expects an account of a certain type (e.g., `User`) but receives an account of a different type (e.g., `SpotMarket`).
+
+In your "New Order", you placed `spotMarket` as the 2nd account. However, the Drift `Deposit` instruction expects the **`User`** account at that position.
+
+### The Correct Account Order
+Based on the Drift V2 IDL and source code, the `Deposit` instruction expects the following **7 named accounts**, followed by **remaining accounts** (oracle, spot market, etc.).
+
+You must revert to this order:
+
+1. `state` (Drift State PDA)
+2. `user` (Drift User Account PDA)
+3. `userStats` (Drift User Stats PDA)
+4. `authority` (Wallet Signer)
+5. `spotMarketVault` (USDC Vault PDA)
+6. `userTokenAccount` (Agent's USDC ATA)
+7. `tokenProgram` (SPL Token Program ID)
+8. `spotMarket` (Drift USDC Spot Market PDA) **[Remaining Account]**
+9. `oracle` (USDC Oracle Address) **[Remaining Account]**
+
+### Resolving Error 6036 (OracleNotFound)
+Since Error 3002 was caused by the order swap, reverting the order brings you back to `6036`.
+Error `6036` means the **Oracle Map** inside the program cannot find the required oracle address in the list of accounts you provided.
+
+**Why 6036 persists even with the correct address:**
+1. **Missing from Remaining Accounts:** The program iterates through "remaining accounts" to build the Oracle Map. If the oracle account (`9VC...`) is not in the list of keys passed to the transaction, the map is empty for that key, and the lookup fails.
+2. **Wrong Market Index:** If you inadvertently pass `marketIndex: 1` (SOL) in the instruction data, the program will look for the SOL oracle. Since you provided the USDC oracle, it won't find the SOL oracle, resulting in 6036.
+
+**Action Plan:**
+1. **Revert to the list order above.**
+2. **Ensure `oracle` (9VC...) is included** as the last account in the `keys` array.
+3. **Verify Instruction Data:** Ensure the `marketIndex` passed to the instruction data is explicitly `0` (USDC).
+
+### Code Fix for `server/drift-service.ts`
+
+```typescript name=server/drift-service.ts
+// ... inside buildAgentDriftDepositTransaction ...
+
+const accounts = [
+    { pubkey: driftState, isSigner: false, isWritable: false },          // 1. State
+    { pubkey: userAccountPublicKey, isSigner: false, isWritable: true }, // 2. User Account
+    { pubkey: userStatsAccountPublicKey, isSigner: false, isWritable: true }, // 3. User Stats
+    { pubkey: agentWallet.publicKey, isSigner: true, isWritable: false }, // 4. Authority
+    { pubkey: spotMarketVault, isSigner: false, isWritable: true },      // 5. Spot Market Vault
+    { pubkey: agentAta, isSigner: false, isWritable: true },             // 6. User Token Account
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },    // 7. Token Program
+    // Remaining Accounts (Critical for 6036)
+    { pubkey: spotMarketPublicKey, isSigner: false, isWritable: true },  // 8. Spot Market
+    { pubkey: DRIFT_MAINNET_USDC_ORACLE, isSigner: false, isWritable: false } // 9. Oracle
+];
+
+// Ensure instruction data uses marketIndex = 0
+const args = {
+    marketIndex: 0,
+    amount: amountBN,
+    reduceOnly: false
+};
+
+// ... encode instruction data ...
+```
+
+This configuration satisfies the Anchor account validation (fixing 3002) and provides the oracle in the remaining accounts (fixing 6036).

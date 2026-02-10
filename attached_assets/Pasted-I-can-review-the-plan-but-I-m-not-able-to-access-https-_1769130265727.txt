@@ -1,0 +1,113 @@
+I can review the plan, but I’m not able to access https://myquantumvault.com/docs from here. If you can paste the relevant doc sections (or summarize the key architecture/flows), I’ll compare them to your plan and point out any gaps, pitfalls, or mismatches.
+
+In the meantime, here are plan-specific risks and gaps I can already flag just from your implementation document:
+
+---
+
+## Likely Gaps / Pitfalls in the Plan
+
+### 1. **Profit share order vs. settlePnl**
+You mention “settlePnl already happens automatically via Drift SDK” but then in the integration section you call profit share *before* settlePnl. This is a direct contradiction.
+
+- **If settlePnl hasn’t run yet**, the profit is still in Drift subaccount collateral and **withdraw will fail**.
+- You must either **explicitly call settlePnl immediately before profit share**, or enforce the current settle flow runs first and returns success before profit share.
+
+✅ **Fix:** Reorder the flow or make `distributeCreatorProfitShare()` call `settlePnl` itself (or check that it was done for this trade).
+
+---
+
+### 2. **Assuming withdrawal succeeds without verifying withdrawable balance**
+You skip USDC balance check after withdrawal — but Drift withdrawal can succeed with **partial fill** or **withdraw less than requested** if collateral/insurance or margin constraints exist.
+
+✅ **Fix:** After withdrawal, verify agent USDC balance **meets** `creatorShare` before transfer. Otherwise, IOU should be created for the shortfall amount.
+
+---
+
+### 3. **No protection against overlapping withdrawals**
+Two concurrent profit share events could withdraw from the same Drift subaccount at the same time (e.g., partial closes in rapid succession).
+
+✅ **Fix:** Add a per-subaccount mutex/lock (DB row or Redis lock) around profit share withdrawal + transfer.
+
+---
+
+### 4. **IOU logic not actually integrated yet**
+You describe IOU flow, but Phase 1 still returns `{ success: false, iouCreated: true }` without actually creating it.
+
+✅ **Fix:** Either enforce IOU creation or don’t claim it in return types until implemented. Otherwise you’ll have silent loss.
+
+---
+
+### 5. **Missing check for creator wallet validity**
+You only check `creatorWalletAddress` exists, but don’t validate it’s a valid Solana address.
+
+✅ **Fix:** Validate `new PublicKey(...)` inside `distributeCreatorProfitShare()` and treat invalid address as a voidable IOU with admin alert.
+
+---
+
+### 6. **Dust handling is static**
+You hardcode `$0.01`, but for SPL USDC 6 decimals, on-chain minimums + rent may make tiny transfers still valid but wasteful. If you use USD fixed minimum, consider chain fee/ATA creation impact.
+
+✅ **Fix:** consider separate thresholds for:
+- amount < 0.01 (skip)
+- amount < 0.05 when ATA must be created (skip or bundle)
+
+---
+
+### 7. **SOL gas check may still be too low**
+0.003 SOL may be insufficient if:
+- destination ATA needs creation
+- congestion (priority fees)
+- multiple instructions batched
+
+✅ **Fix:** calculate dynamic gas estimate:
+- base fee
+- ATA creation
+- optional priority fee buffer
+
+---
+
+### 8. **TTL hostage resolution leaves funds with subscriber**
+Your TTL voiding releases the subscriber but does **not move funds** to creator nor lock them aside. This creates a “griefing” vector: creator loses profit if their wallet is invalid or offline for 7 days.
+
+✅ **Fix:** consider **escrow or internal ledger credit** for creator after TTL. Otherwise the 7-day timeout effectively forfeits creator payout.
+
+---
+
+### 9. **Profit share on auto-withdraw / bot deletion**
+You plan to block withdrawal and bot deletion if IOU exists, but:
+- If subscriber tries to withdraw *before* profit share is attempted, IOU won’t exist yet.
+- If profit share fails due to SOL balance, you should block withdrawal and *also* queue IOU.
+
+✅ **Fix:** enforce profit share check **inside** withdrawal/delete handlers before allowing execution.
+
+---
+
+### 10. **No formal reconciliation**
+If on-chain transfer succeeds but DB insert failed, you may lose audit state.
+
+✅ **Fix:** add optional “profit share history” (lightweight ledger) even for successes, or at minimum store tx sig in trade record.
+
+---
+
+### 11. **Partial close double-withdraw risk**
+If partial closes happen in same slot and settle/withdraw runs repeatedly, you might withdraw **more than available** if settled PnL hasn’t been updated between calls.
+
+✅ **Fix:** only run profit share after **confirmed** settlePnl for that close trade and avoid parallelization.
+
+---
+
+### 12. **No reporting of creator payout on failed transfer**
+There’s no notification to creator or admin if IOU is created/voided.
+
+✅ **Fix:** add log + admin alert at least when IOU is created and when it’s voided.
+
+---
+
+## Things I need from docs to check for mismatches
+Please paste or summarize:
+- How profit share currently works or intended in the docs
+- Current close-trade flow in production docs
+- Any backend constraints around withdrawals or cron jobs
+- Any defined wallet/agent relationship in docs
+
+Once I have that, I can cross-check the plan against the actual dapp flow and highlight mismatches.
