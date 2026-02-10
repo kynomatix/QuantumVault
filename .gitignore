@@ -6,3 +6,11 @@ vite.config.ts.*
 *.tar.gz
 attached_assets/
 docs/
+test-discover.ts
+QVC_plan.md
+replit.md
+.replit
+.cache/
+.config/
+.local/
+.upm/
