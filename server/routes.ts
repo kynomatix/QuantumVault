@@ -1057,12 +1057,14 @@ async function routeSignalToSubscribers(
             if (syncResult?.onChainEntryPrice && syncResult.onChainEntryPrice > 0 && Math.abs(syncResult.onChainEntryPrice - fillPrice) > 0.001) {
               console.log(`[Subscriber Routing] Updating fill price for ${subBot.id}: oracle=$${fillPrice.toFixed(6)} -> on-chain=$${syncResult.onChainEntryPrice.toFixed(6)}`);
               fillPrice = syncResult.onChainEntryPrice;
-              const updatedNotional = contractSize * fillPrice;
-              const updatedFee = updatedNotional * DRIFT_FEE_RATE;
-              await storage.updateBotTrade(subTrade.id, {
-                price: fillPrice.toString(),
-                fee: updatedFee.toString(),
-              });
+              const tradeUpdate: Record<string, string> = {
+                price: fillPrice.toFixed(6),
+              };
+              if (!orderResult.actualFee) {
+                const updatedNotional = contractSize * fillPrice;
+                tradeUpdate.fee = (updatedNotional * DRIFT_FEE_RATE).toFixed(6);
+              }
+              await storage.updateBotTrade(subTrade.id, tradeUpdate);
             }
 
             await storage.updateTradingBotStats(subBot.id, {
@@ -3674,12 +3676,14 @@ export async function registerRoutes(
       if (syncResult?.onChainEntryPrice && syncResult.onChainEntryPrice > 0 && Math.abs(syncResult.onChainEntryPrice - fillPrice) > 0.001) {
         console.log(`[ManualTrade] Updating fill price: oracle=$${fillPrice.toFixed(6)} -> on-chain=$${syncResult.onChainEntryPrice.toFixed(6)}`);
         fillPrice = syncResult.onChainEntryPrice;
-        const updatedNotional = contractSize * fillPrice;
-        const updatedFee = orderResult.actualFee ?? (updatedNotional * DRIFT_FEE_RATE);
-        await storage.updateBotTrade(trade.id, {
-          price: fillPrice.toString(),
-          fee: updatedFee.toString(),
-        });
+        const tradeUpdate: Record<string, string> = {
+          price: fillPrice.toFixed(6),
+        };
+        if (!orderResult.actualFee) {
+          const updatedNotional = contractSize * fillPrice;
+          tradeUpdate.fee = (updatedNotional * DRIFT_FEE_RATE).toFixed(6);
+        }
+        await storage.updateBotTrade(trade.id, tradeUpdate);
       }
 
       // Update stats
@@ -7367,12 +7371,14 @@ export async function registerRoutes(
       if (syncResult?.onChainEntryPrice && syncResult.onChainEntryPrice > 0 && Math.abs(syncResult.onChainEntryPrice - userFillPrice) > 0.001) {
         console.log(`[Webhook] Updating fill price: oracle=$${userFillPrice.toFixed(6)} -> on-chain=$${syncResult.onChainEntryPrice.toFixed(6)}`);
         userFillPrice = syncResult.onChainEntryPrice;
-        const updatedNotional = contractSize * userFillPrice;
-        const updatedFee = updatedNotional * DRIFT_FEE_RATE;
-        await storage.updateBotTrade(trade.id, {
-          price: userFillPrice.toString(),
-          fee: updatedFee.toString(),
-        });
+        const tradeUpdate: Record<string, string> = {
+          price: userFillPrice.toFixed(6),
+        };
+        if (!orderResult.actualFee) {
+          const updatedNotional = contractSize * userFillPrice;
+          tradeUpdate.fee = (updatedNotional * DRIFT_FEE_RATE).toFixed(6);
+        }
+        await storage.updateBotTrade(trade.id, tradeUpdate);
       }
 
       // Update bot stats (including volume for FUEL tracking)
