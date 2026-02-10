@@ -1176,10 +1176,35 @@ function SwiftExecutionSection() {
         anything — it's completely seamless and your trades will always go through safely.
       </Alert>
 
+      <SubHeading>Minimum Trade Size for Swift</SubHeading>
+      <Paragraph>
+        Swift routes trades through market maker auctions. For very small trades, market makers may not 
+        participate in the auction, so there's a minimum trade size of <strong className="text-violet-300">$25 notional value</strong> for 
+        Swift execution. Trades below this threshold automatically use direct on-chain execution instead.
+      </Paragraph>
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-6">
+        <div className="flex items-center gap-3 mb-3">
+          <DollarSign className="w-5 h-5 text-violet-400" />
+          <h4 className="font-medium text-white">How Notional Value Is Calculated</h4>
+        </div>
+        <p className="text-white/60 text-sm mb-3">
+          Notional value = number of contracts × current price. For example, trading 150 FARTCOIN at $0.19 
+          = ~$28.50 notional — this qualifies for Swift execution.
+        </p>
+        <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
+          <span className="text-violet-200 text-sm">Swift Minimum</span>
+          <span className="text-violet-200 font-medium text-sm">$25 notional value</span>
+        </div>
+      </div>
+      <Alert type="info">
+        If your trade is below the minimum, it still executes normally — just via direct on-chain 
+        transaction instead of Swift. The only difference is a small gas fee (~0.000005 SOL per trade).
+      </Alert>
+
       <SubHeading>What You Need to Know</SubHeading>
       <div className="space-y-3 mb-6">
         <Alert type="info">
-          Swift is enabled by default for all trades. No setup required on your end.
+          Swift is enabled by default for all trades above $25 notional value. No setup required on your end.
         </Alert>
         <Alert type="info">
           A one-time account setup (~0.05 SOL) is required when you first start trading. This covers 
@@ -1208,6 +1233,10 @@ function SwiftExecutionSection() {
           <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
             <span className="text-violet-200 text-sm">Fallback</span>
             <span className="text-violet-200 font-medium text-sm">Automatic</span>
+          </div>
+          <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
+            <span className="text-violet-200 text-sm">Minimum Trade Size</span>
+            <span className="text-violet-200 font-medium text-sm">$25 notional</span>
           </div>
           <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
             <span className="text-violet-200 text-sm">Setup Required</span>

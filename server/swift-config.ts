@@ -79,7 +79,7 @@ export function isSwiftAvailable(): boolean {
 }
 
 export function getSwiftMinNotional(): number {
-  return Number(process.env.SWIFT_MIN_NOTIONAL) || 100;
+  return Number(process.env.SWIFT_MIN_NOTIONAL) || 25;
 }
 
 export function shouldUseSwift(estimatedNotional?: number): boolean {
