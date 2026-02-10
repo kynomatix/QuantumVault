@@ -1201,6 +1201,34 @@ function SwiftExecutionSection() {
         transaction instead of Swift. The only difference is a small gas fee (~0.000005 SOL per trade).
       </Alert>
 
+      <SubHeading>Market Liquidity & Swift Availability</SubHeading>
+      <Paragraph>
+        Swift relies on professional market makers to compete in an auction and fill your trade. This works 
+        best on popular, high-volume markets where market makers are actively looking for orders to fill. 
+        On smaller or newer altcoin markets, there may be fewer market makers participating, which means 
+        Swift auctions are less likely to get filled.
+      </Paragraph>
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
+        <div className="flex items-center gap-3 mb-3">
+          <TrendingUp className="w-5 h-5 text-violet-400" />
+          <h4 className="font-medium text-white">Best Markets for Swift</h4>
+        </div>
+        <p className="text-white/60 text-sm mb-2">
+          High-volume markets like <strong className="text-white/80">SOL, BTC, ETH, SUI</strong> and other 
+          major tokens tend to have the most active market makers, so Swift fills are more consistent.
+        </p>
+        <p className="text-white/60 text-sm">
+          Smaller altcoin markets with lower trading volume may see Swift auctions go unfilled more 
+          frequently. When this happens, your trade automatically switches to direct on-chain execution — 
+          no action needed from you, and your trade still goes through.
+        </p>
+      </div>
+      <Alert type="info">
+        Even if Swift doesn't fill on a particular market, it doesn't cost you anything extra. The system 
+        simply falls back to direct on-chain execution seamlessly. As markets grow in popularity and attract 
+        more market makers, Swift fill rates will improve over time.
+      </Alert>
+
       <SubHeading>What You Need to Know</SubHeading>
       <div className="space-y-3 mb-6">
         <Alert type="info">
