@@ -1762,6 +1762,7 @@ ADD COLUMN IF NOT EXISTS swift_attempts INTEGER DEFAULT 0;
 | 4.3 | 2026-02-09 | Engineering (Internal Audit) | Internal audit: clarified DriftClient initialization for Swift signing; added getSlot failure handling; listed all closePerpPosition callers; updated retry fee calculation; added position flip timing as accepted risk |
 | 4.4 | 2026-02-09 | Engineering | Post-implementation findings: SignedMsg PDA prerequisite (critical undocumented requirement), oracle price safety guard, message encoding confirmation. Added lazy migration + proactive init for SignedMsg account. |
 | 4.5 | 2026-02-10 | Engineering | Marked all completed steps with ✅ dates. Updated prerequisites as confirmed. Updated cleanup checklist. Builder Code Step 9 code ready (not active). |
+| 4.6 | 2026-02-10 | Engineering | Late-fill race condition guards: two-layer defense (pre-legacy guard + post-error recovery) to prevent double-open from Swift auction fills after 8s verification window. Section 25. |
 
 ---
 
@@ -1963,7 +1964,66 @@ For reference when building user-facing documentation, here is every file modifi
 
 ---
 
-## 25. Post-Implementation Cleanup Checklist
+## 25. Late-Fill Race Condition Guards
+
+**Discovery Date:** February 10, 2026
+**Status:** Resolved — Two-layer defense implemented in `drift-service.ts`
+
+#### Finding: Swift Auction Fills After 8-Second Verification Window
+
+**Problem:** Swift orders accepted by market makers ("Order processed") sometimes fill AFTER the 8-second position verification window. The existing logic checks position state at 8s, sees FLAT, concludes "not filled," and falls back to legacy `placeAndTakePerpOrder`. By the time legacy executes (~10-13s), Swift has filled the position on-chain. Legacy then tries to open the same position on top, fails with `InsufficientCollateral` (Error 6010), and returns a 500 error to the user — even though the trade actually succeeded via Swift.
+
+**Impact:** User sees an error message ("Insufficient capital") for a trade that actually succeeded. Worse, if legacy somehow succeeds (e.g., enough free margin exists), the bot opens a double-sized position, which could lead to liquidation.
+
+**Evidence from logs (Feb 10, 2026):**
+1. `01:27:26` — Swift order submitted, API returns "Order processed"
+2. `01:27:34` — 8s verification: position is FLAT → falls back to legacy
+3. `01:27:39` — Legacy subprocess fails with InsufficientCollateral (Swift filled between 8-13s)
+4. `01:27:55` — Auto-retry also fails (20s subprocess timeout)
+5. PositionService reconciliation later detected the position on-chain (size=1.85 SOL-PERP)
+
+**Resolution: Two-Layer Defense**
+
+**Layer 1 — Pre-Legacy Guard** (`executePerpOrder` and `closePerpPosition`):
+- When Swift submits an auction order (the "no tx signature" path), saves the position state from the 8s verification check as a baseline
+- Right before legacy execution fires, does ONE final position check
+- Compares against the baseline to detect position changes:
+  - **Opens:** baseline was FLAT → now non-FLAT = late fill. Or baseline had size X → now has size > X = late add-to-position fill
+  - **Closes:** position was non-FLAT → now FLAT or size reduced >50% = late close fill
+- If late fill detected: returns success with `executionMethod: 'swift'`, skips legacy entirely
+- If no change: proceeds with legacy normally
+- Falls through safely on any error (RPC timeout, etc.)
+
+**Layer 2 — Post-Legacy Error Recovery** (`swiftLateOpenRecovery` helper):
+- If the pre-legacy guard missed the fill (tiny timing window) and legacy fails with a collateral/margin error (6010, "insufficient," "collateral")
+- Checks one more time if the position changed from the baseline
+- If position exists from late Swift fill: converts the error into a success response
+- If position is still unchanged: returns the genuine legacy error
+
+**RPC Impact:**
+- Happy path (Swift fills within 8s): **zero extra RPC calls**
+- Swift unfilled at 8s, guard catches late fill: **1 extra call** (prevents double-open)
+- Swift unfilled at 8s, guard misses, legacy errors: **1 extra call** (recovery converts error to success)
+- Swift genuinely unfilled, legacy proceeds normally: **1 extra call** (guard sees FLAT, legacy runs)
+- The extra call only fires in the fallback path — never on the happy path
+
+**Key Design Decisions:**
+1. **Baseline comparison, not absolute check:** Guards compare current position against the state recorded at the 8s check, preventing false positives from pre-existing positions
+2. **No separate snapshot RPC call:** Reuses the result from the existing 8s verification as the baseline — no additional call added to the hot path
+3. **Safe fallthrough:** All guard/recovery checks are wrapped in try/catch and return null on failure, allowing legacy to proceed
+4. **Open-only pre-legacy guard:** The `!reduceOnly` check ensures guards don't interfere with close-only orders on the open path
+
+**Files Modified:**
+- `server/drift-service.ts` — `swiftLateOpenRecovery()` helper, pre-legacy guards in both `executePerpOrder` and `closePerpPosition`
+
+**Lessons Learned:**
+1. **Off-chain APIs with on-chain settlement have inherent timing gaps.** Swift accepts orders off-chain but fills happen on-chain through an auction. The two systems have no shared clock — verification windows must account for variable settlement latency.
+2. **Defense-in-depth for critical financial operations.** A single check point (8s) was insufficient. Two layers (pre-check + error recovery) close the timing gap from both directions.
+3. **Error recovery beats error prevention for race conditions.** The pre-legacy guard prevents most double-opens, but the post-error recovery is the true safety net — it handles the irreducible timing gap that no pre-check can fully close.
+
+---
+
+## 26. Post-Implementation Cleanup Checklist
 
 When all 10 implementation steps are completed and validated in production:
 
