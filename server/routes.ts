@@ -1020,14 +1020,13 @@ async function routeSignalToSubscribers(
           );
 
           if (orderResult.success) {
-            const fillPrice = orderResult.fillPrice ?? oraclePrice;
+            let fillPrice = orderResult.fillPrice ?? oraclePrice;
             const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
 
-            // Calculate fee from actual result or estimate from notional
             const tradeNotional = contractSize * fillPrice;
-            const tradeFee = orderResult.actualFee ?? (tradeNotional * 0.00045); // Drift taker fee ~0.045%
+            const tradeFee = orderResult.actualFee ?? (tradeNotional * DRIFT_FEE_RATE);
             
-            await storage.createBotTrade({
+            const subTrade = await storage.createBotTrade({
               tradingBotId: subBot.id,
               walletAddress: subBot.walletAddress,
               market: subBot.market,
@@ -1041,6 +1040,30 @@ async function routeSignalToSubscribers(
               executionMethod: orderResult.executionMethod || 'legacy',
               swiftOrderId: orderResult.swiftOrderId || null,
             });
+
+            const syncResult = await syncPositionFromOnChain(
+              subBot.id,
+              subBot.walletAddress,
+              subWallet.agentPublicKey!,
+              subAccountId,
+              subBot.market,
+              subTrade.id,
+              tradeFee,
+              fillPrice,
+              side,
+              contractSize
+            );
+
+            if (syncResult?.onChainEntryPrice && syncResult.onChainEntryPrice > 0 && Math.abs(syncResult.onChainEntryPrice - fillPrice) > 0.001) {
+              console.log(`[Subscriber Routing] Updating fill price for ${subBot.id}: oracle=$${fillPrice.toFixed(6)} -> on-chain=$${syncResult.onChainEntryPrice.toFixed(6)}`);
+              fillPrice = syncResult.onChainEntryPrice;
+              const updatedNotional = contractSize * fillPrice;
+              const updatedFee = updatedNotional * DRIFT_FEE_RATE;
+              await storage.updateBotTrade(subTrade.id, {
+                price: fillPrice.toString(),
+                fee: updatedFee.toString(),
+              });
+            }
 
             await storage.updateTradingBotStats(subBot.id, {
               ...stats,
