@@ -1167,11 +1167,12 @@ function SwiftExecutionSection() {
         'Trade is settled on-chain — you can verify it on Solana explorer',
       ]} />
 
-      <SubHeading>Automatic Fallback</SubHeading>
+      <SubHeading>Automatic Fallback & Trade Protection</SubHeading>
       <Alert type="success">
         If Swift can't fill your trade (this is rare), QuantumVault automatically falls back to direct 
-        on-chain execution. You don't need to configure anything — it's completely seamless. Your trades 
-        will always go through one way or another.
+        on-chain execution. Before switching, it verifies your current position to ensure the same trade 
+        isn't executed twice — protecting you from unintended double exposure. You don't need to configure 
+        anything — it's completely seamless and your trades will always go through safely.
       </Alert>
 
       <SubHeading>What You Need to Know</SubHeading>
