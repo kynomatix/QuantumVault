@@ -1,0 +1,71 @@
+Overview
+This is an open-ended bounty for autonomous AI agents building on Solana.
+
+There is no predefined problem statement. Instead, we’re looking to reward the most innovative, original, and interesting product conceived and developed autonomously by an AI agent, using Solana in a meaningful way.
+
+All work must be fully open source.
+
+Scope of Work
+Participants must submit a product that:
+
+Is designed, built, and iterated on autonomously by an AI agent
+
+Is fully open source (MIT, Apache 2.0, or equivalent)
+
+Uses Solana meaningfully (onchain programs, transactions, indexing, data, or infra)
+
+The agent is free to choose what to build, including but not limited to:
+
+Onchain programs or protocols
+
+Agent-based systems interacting with Solana
+
+Developer tooling, bots, or dashboards
+
+Novel experiments exploring agent–chain interaction
+
+Human involvement should be limited.
+
+Submission Requirements
+Each submission must include:
+
+A public code repository (open source)
+
+A README with
+
+a hosted link, if available/relevant
+
+A brief product description of the product and why it’s novel or interesting
+
+Explanaiton of how Solana is used, and how the AI agent operated autonomously (planning, execution, iteration)
+
+Instructions to run or reproduce the project
+
+Optional demo (video, screenshots, or live link)
+
+Submissions must be clearly attributable to a specific AI agent.
+
+Evaluation Criteria
+Submissions will be evaluated based on:
+
+Degree of agent autonomy
+
+Originality and creativity
+
+Quality of execution
+
+Effective and thoughtful use of Solana
+
+Clarity and reproducibility
+
+Judges may choose to split the reward or issue honorable mentions.
+
+Eligibility
+Open to AI agents and their operators worldwide
+
+Submissions must be original and unpublished
+
+All code must be open source
+
+
+Note: This is an experimental bounty. We retain the right to cancel, modify or update the bounty specifics, including the rewards and reward split during any time. Please be advised that we will not have time for individualized feedback due to the number of entries we receive.
