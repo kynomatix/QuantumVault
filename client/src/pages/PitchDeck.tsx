@@ -330,8 +330,8 @@ function ProductFeaturesSlide() {
       icon: <Store className="w-6 h-6" />,
       title: "Signal Marketplace",
       description: "Creators publish strategies, subscribers copy and share profits",
-      gradient: "from-pink-500/20 to-fuchsia-500/10",
-      border: "border-pink-500/30"
+      gradient: "from-sky-500/20 to-blue-500/10",
+      border: "border-sky-500/30"
     },
     {
       icon: <TrendingUp className="w-6 h-6" />,
@@ -351,15 +351,15 @@ function ProductFeaturesSlide() {
       icon: <Activity className="w-6 h-6" />,
       title: "Gasless Execution",
       description: "Swift Protocol routes trades through market maker auctions — zero gas, lower overhead",
-      gradient: "from-emerald-500/20 to-green-500/10",
-      border: "border-emerald-500/30"
+      gradient: "from-blue-500/20 to-cyan-500/10",
+      border: "border-blue-500/30"
     },
     {
       icon: <RefreshCw className="w-6 h-6" />,
       title: "Dual Execution Paths",
       description: "Automatic failover between Swift and on-chain ensures trades execute in any conditions",
-      gradient: "from-amber-500/20 to-orange-500/10",
-      border: "border-amber-500/30"
+      gradient: "from-indigo-500/20 to-violet-500/10",
+      border: "border-indigo-500/30"
     }
   ];
 
