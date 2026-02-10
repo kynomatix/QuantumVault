@@ -341,9 +341,9 @@ function ProductFeaturesSlide() {
       border: "border-blue-500/30"
     },
     {
-      icon: <Layers className="w-6 h-6" />,
-      title: "Vaults (Coming)",
-      description: "Multi-asset collateral and intelligent borrowing for capital efficiency",
+      icon: <RefreshCw className="w-6 h-6" />,
+      title: "Dual Execution Paths",
+      description: "Automatic failover between Swift and on-chain ensures trades execute in any conditions",
       gradient: "from-purple-500/20 to-indigo-500/10",
       border: "border-purple-500/30"
     },
@@ -355,9 +355,9 @@ function ProductFeaturesSlide() {
       border: "border-blue-500/30"
     },
     {
-      icon: <RefreshCw className="w-6 h-6" />,
-      title: "Dual Execution Paths",
-      description: "Automatic failover between Swift and on-chain ensures trades execute in any conditions",
+      icon: <Layers className="w-6 h-6" />,
+      title: "Vaults (Coming)",
+      description: "Multi-asset collateral and intelligent borrowing for capital efficiency",
       gradient: "from-indigo-500/20 to-violet-500/10",
       border: "border-indigo-500/30"
     }
