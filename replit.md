@@ -6,18 +6,6 @@ QuantumVault is a Solana-based bot trading platform for deploying and managing p
 ## User Preferences
 Preferred communication style: Simple, everyday language.
 
-### Active Implementation Directive — Swift Protocol Migration
-**STATUS: STEPS 1-8 COMPLETED (Feb 9, 2026) — SWIFT_ENABLED=true, ready for live testing**
-All Swift Protocol integration work follows `docs/SWIFT_PROTOCOL_MIGRATION_PLAN.md` (v4.4) step by step.
-- Steps 1-8: COMPLETED — Swift integration fully implemented with automatic fallback to legacy
-- Step 9 (Builder Code Registration): OPTIONAL, deferred — does not block Swift usage
-- **Critical prerequisite (discovered post-implementation):** SignedMsg user account PDA must be initialized on-chain per agent wallet. Without it, MMs cannot fill Swift orders. See migration plan Section 24.
-- **SignedMsg init:** Handled automatically — lazy preflight in `swift-executor.ts` (existing users) + proactive init in `drift-executor.mjs` (new users). Cached after first check.
-- **Key files**: `server/swift-config.ts`, `server/swift-executor.ts`, `server/swift-metrics.ts`, `server/drift-service.ts`
-- **Monitoring**: `GET /api/admin/swift-metrics` for real-time Swift performance data
-- **Emergency rollback**: Set `SWIFT_ENABLED=false` in env vars for instant return to legacy-only
-- **REMOVAL:** When all steps are completed and validated, remove this section from replit.md.
-
 ### RPC Configuration
 -   **Primary RPC**: Helius Dev Tier (PAID - not free tier)
 -   **Backup RPC**: Triton (funded and available for failover)
@@ -38,8 +26,8 @@ All Swift Protocol integration work follows `docs/SWIFT_PROTOCOL_MIGRATION_PLAN.
 -   **Data Storage**: PostgreSQL via Drizzle ORM.
 
 ### Key Features
--   **Automated Trade Execution**: TradingView webhook signals trigger `placeAndTakePerpOrder` on Drift Protocol, with dynamic sizing, robust position management (close/flip detection), and bot lifecycle management.
--   **Unified Trade Execution**: All trade paths use a shared helper for consistent auto top-up, profit reinvestment, trade sizing, and minimum order handling. Dynamic order scaling based on margin capacity and equity recovery.
+-   **Swift-First Trade Execution**: All trades route through Swift Protocol (gasless, MM-auction-based fills) with automatic fallback to legacy `placeAndTakePerpOrder`. Late-fill guard prevents double execution during fallback. Emergency rollback via `SWIFT_ENABLED=false`.
+-   **Unified Trade Execution**: All trade paths (webhook, manual, subscriber, close) use a shared helper for consistent auto top-up, profit reinvestment, trade sizing, and minimum order handling. Dynamic order scaling based on margin capacity and equity recovery.
 -   **Profit Management**: Supports profit reinvestment and automatic withdrawal of excess profits. Dynamic USDC Deposit APY fetched from Drift Data API.
 -   **Account Management**: One-click reset for Drift accounts.
 -   **User Interface**: Single Page Architecture with tab-based navigation for real-time data (running positions, PnL, fees) and account health metrics using SDK `decodeUser`.

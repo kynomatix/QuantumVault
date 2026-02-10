@@ -758,7 +758,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
             Welcome to QuantumVault
           </DialogTitle>
           <DialogDescription>
-            To enable automated trading, your agent wallet needs SOL for transaction fees on Solana.
+            To enable automated trading, your agent wallet needs SOL for transaction fees and initial account setup on Solana.
           </DialogDescription>
         </DialogHeader>
 
@@ -789,7 +789,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
                 <div className="text-sm">
                   <p className="font-medium text-orange-500 mb-1">Why SOL is Required</p>
                   <p className="text-muted-foreground">
-                    SOL is used to pay transaction fees (gas) on Solana. Without it, your trading agent cannot execute trades, deposits, or withdrawals.
+                    SOL is used for a one-time account setup (Drift trading account + Swift execution authorization) and ongoing transaction fees. Without it, your trading agent cannot execute trades.
                   </p>
                 </div>
               </div>
@@ -848,7 +848,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              Recommended: 0.1 SOL (covers ~1000+ transactions)
+              Recommended: 0.1 SOL (covers account setup + ~1000 transactions)
             </p>
           </div>
         </div>

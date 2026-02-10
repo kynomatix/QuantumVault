@@ -249,10 +249,11 @@ function FundingSection() {
         and USDC (for trading capital).
       </Paragraph>
       
-      <SubHeading>SOL for Gas Fees</SubHeading>
+      <SubHeading>SOL for Account Setup & Fees</SubHeading>
       <Paragraph>
-        Solana transactions require a small amount of SOL to pay for network fees. We recommend 
-        depositing at least 0.1 SOL to cover many trades. Each trade costs approximately $0.001-0.003.
+        SOL covers a one-time account setup (~0.05 SOL for your Drift trading account and Swift execution 
+        authorization) plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover 
+        setup and many trades. Most trades via Swift cost no gas at all.
       </Paragraph>
       <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
         <div className="flex items-center justify-between">
