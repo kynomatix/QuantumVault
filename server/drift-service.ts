@@ -3326,30 +3326,6 @@ export async function executePerpOrder(
         swiftAuctionSubmitted = true;
         swiftOrderIdForGuard = swiftResult.swiftOrderId;
         swiftFillPriceEstimate = swiftResult.fillPrice;
-        try {
-          let snapshotPubkey = expectedAgentPubkey;
-          if (!snapshotPubkey) {
-            try {
-              const kp = getAgentKeypair(encryptedPrivateKey);
-              snapshotPubkey = kp.publicKey.toBase58();
-            } catch {}
-          }
-          if (snapshotPubkey) {
-            const { PositionService } = await import('./position-service.js');
-            const prePos = await PositionService.getPositionForExecution(
-              'swift-pre-snapshot',
-              snapshotPubkey,
-              subAccountId,
-              market,
-              encryptedPrivateKey
-            );
-            preSwiftPositionSize = Math.abs(prePos.size);
-            preSwiftPositionSide = prePos.side;
-            console.log(`[Drift] Pre-Swift position snapshot: side=${preSwiftPositionSide}, size=${preSwiftPositionSize}`);
-          }
-        } catch (snapErr: any) {
-          console.warn(`[Drift] Could not capture pre-Swift position snapshot: ${snapErr?.message}`);
-        }
         console.log(`[Drift] Swift open accepted (Order processed) but no tx signature — waiting for auction fill verification via PositionService...`);
         const AUCTION_WAIT_MS = 8000;
         await new Promise(resolve => setTimeout(resolve, AUCTION_WAIT_MS));
@@ -3371,7 +3347,9 @@ export async function executePerpOrder(
               market,
               encryptedPrivateKey
             );
-            console.log(`[Drift] Swift open verification result: side=${postSwiftPos.side}, size=${postSwiftPos.size}`);
+            preSwiftPositionSize = Math.abs(postSwiftPos.size);
+            preSwiftPositionSide = postSwiftPos.side;
+            console.log(`[Drift] Swift open verification result: side=${postSwiftPos.side}, size=${postSwiftPos.size} (saved as guard baseline)`);
             if (postSwiftPos.side !== 'FLAT' && Math.abs(postSwiftPos.size) > 0.0001) {
               console.log(`[Drift] Swift open VERIFIED: position found on-chain (${postSwiftPos.side} ${postSwiftPos.size}) after ${AUCTION_WAIT_MS}ms auction wait`);
               recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
