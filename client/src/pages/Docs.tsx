@@ -6,7 +6,7 @@ import {
   ChevronRight, ArrowLeft, Zap, DollarSign,
   Copy, Check, Menu, X,
   AlertTriangle, Info, CheckCircle2, ArrowDown, ArrowUp,
-  Shield, Lock, Key, RefreshCw, Sparkles, TrendingUp, TrendingDown, Cpu
+  Shield, Lock, Key, RefreshCw, Sparkles, TrendingUp, TrendingDown, Cpu, Activity
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -22,6 +22,7 @@ type DocSection =
   | 'marketplace'
   | 'settings'
   | 'security'
+  | 'swift-execution'
   | 'ai-agents';
 
 interface NavItem {
@@ -40,6 +41,7 @@ const navItems: NavItem[] = [
   { id: 'marketplace', label: 'Marketplace', icon: Users },
   { id: 'settings', label: 'Settings & Referrals', icon: Zap },
   { id: 'security', label: 'Security', icon: Shield },
+  { id: 'swift-execution', label: 'Swift Execution', icon: Zap },
   { id: 'ai-agents', label: 'AI Agent Integration', icon: Cpu },
 ];
 
@@ -1103,6 +1105,118 @@ function SecuritySection() {
   );
 }
 
+function SwiftExecutionSection() {
+  return (
+    <div>
+      <SectionHeading>Swift Execution</SectionHeading>
+      <Paragraph>
+        Swift is a faster, cheaper way to execute your trades on Drift Protocol. Instead of sending 
+        transactions directly to the Solana blockchain, Swift sends your trade intent to professional 
+        market makers who compete to fill your order — resulting in gasless trades, better prices, 
+        and lower fees.
+      </Paragraph>
+
+      <SubHeading>Why Swift Is Better for You</SubHeading>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Zap className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Gasless Trading</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            No SOL burned per trade. Swift eliminates blockchain gas fees so you keep more of your profits.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <TrendingUp className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Better Fills</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Market makers compete in an auction to fill your order, often giving you price improvement over standard execution.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <DollarSign className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Lower Fees</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Swift taker fees can be lower than standard on-chain execution, saving you money on every trade.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <RefreshCw className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Reduced RPC Pressure</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Fewer blockchain calls means more reliable execution, especially important for high-frequency strategies on 1-minute charts.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>How It Works</SubHeading>
+      <Paragraph>
+        Swift handles the complexity behind the scenes. Here's what happens when a trade is triggered:
+      </Paragraph>
+      <StepList steps={[
+        'Your bot receives a trading signal (from TradingView or AI agent)',
+        "QuantumVault creates a signed trade intent and submits it to Swift's auction",
+        'Professional market makers compete to fill your order at the best price',
+        'Trade is settled on-chain — you can verify it on Solana explorer',
+      ]} />
+
+      <SubHeading>Automatic Fallback</SubHeading>
+      <Alert type="success">
+        If Swift can't fill your trade (this is rare), QuantumVault automatically falls back to direct 
+        on-chain execution. You don't need to configure anything — it's completely seamless. Your trades 
+        will always go through one way or another.
+      </Alert>
+
+      <SubHeading>What You Need to Know</SubHeading>
+      <div className="space-y-3 mb-6">
+        <Alert type="info">
+          Swift is enabled by default for all trades. No setup required on your end.
+        </Alert>
+        <Alert type="info">
+          A one-time account setup (~0.05 SOL) is required when you first start trading. This covers 
+          both your Drift account and Swift authorization.
+        </Alert>
+        <Alert type="warning">
+          In rare edge cases, a trade may take a few extra seconds if Swift needs to fall back to direct 
+          execution. This is normal and your trade will still complete.
+        </Alert>
+      </div>
+
+      <SubHeading>Swift Status</SubHeading>
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+        <div className="flex items-center gap-3 mb-4">
+          <Activity className="w-5 h-5 text-violet-400" />
+          <h4 className="font-medium text-white">Current Configuration</h4>
+        </div>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
+            <span className="text-violet-200 text-sm">Swift Status</span>
+            <span className="text-violet-200 font-medium text-sm flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-green-400" />
+              Active
+            </span>
+          </div>
+          <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
+            <span className="text-violet-200 text-sm">Fallback</span>
+            <span className="text-violet-200 font-medium text-sm">Automatic</span>
+          </div>
+          <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
+            <span className="text-violet-200 text-sm">Setup Required</span>
+            <span className="text-violet-200 font-medium text-sm">None (auto-configured)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AIAgentsSection() {
   const webhookExample = `{
   "botId": "your-bot-uuid",
@@ -1405,6 +1519,8 @@ export default function DocsPage() {
         return <SettingsSection />;
       case 'security':
         return <SecuritySection />;
+      case 'swift-execution':
+        return <SwiftExecutionSection />;
       case 'ai-agents':
         return <AIAgentsSection />;
       default:
