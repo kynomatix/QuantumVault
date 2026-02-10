@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { Lock, Activity, Bot, Users, Webhook, TrendingUp, ArrowLeft, RefreshCw, Clock, CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
+import { Lock, Activity, Bot, Users, Webhook, TrendingUp, ArrowLeft, RefreshCw, Clock, CheckCircle, XCircle, AlertTriangle, Rocket, ExternalLink, Send, Eye, Copy } from 'lucide-react';
 import { Link } from 'wouter';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Textarea } from '@/components/ui/textarea';
 
 const ADMIN_KEY = "admin_password";
 
@@ -233,6 +234,7 @@ function AdminPage() {
             <TabsTrigger value="subscriptions" className="data-[state=active]:bg-violet-600"><Users className="w-4 h-4 mr-2" />Subscriptions</TabsTrigger>
             <TabsTrigger value="marketplace" className="data-[state=active]:bg-violet-600">Marketplace</TabsTrigger>
             <TabsTrigger value="profit-shares" className="data-[state=active]:bg-violet-600">Profit Shares</TabsTrigger>
+            <TabsTrigger value="superteam" className="data-[state=active]:bg-emerald-600"><Rocket className="w-4 h-4 mr-2" />Grants</TabsTrigger>
           </TabsList>
 
           <TabsContent value="stats" className="space-y-4">
@@ -548,6 +550,10 @@ function AdminPage() {
               </CardContent>
             </Card>
           </TabsContent>
+
+          <TabsContent value="superteam">
+            <SuperteamPanel authHeaders={authHeaders} />
+          </TabsContent>
         </Tabs>
       </div>
     </div>
@@ -578,6 +584,378 @@ function StatCard({ title, value, icon: Icon, color = "violet" }: { title: strin
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }) {
+  const queryClient = useQueryClient();
+  const [agentName, setAgentName] = useState('quantumvault-agent');
+  const [submitForm, setSubmitForm] = useState({
+    link: 'https://quantumvault.replit.app',
+    otherInfo: '',
+    tweet: '',
+    telegram: '',
+  });
+  const [selectedListing, setSelectedListing] = useState<any>(null);
+  const [viewingDetails, setViewingDetails] = useState<string | null>(null);
+
+  const { data: agentData, isLoading: agentLoading } = useQuery({
+    queryKey: ['superteam-agent'],
+    queryFn: async () => {
+      const res = await fetch('/api/admin/superteam/agent', { headers: authHeaders });
+      if (!res.ok) throw new Error('Failed to fetch');
+      return res.json();
+    },
+  });
+
+  const { data: listingsData, isLoading: listingsLoading, refetch: refetchListings } = useQuery({
+    queryKey: ['superteam-listings'],
+    queryFn: async () => {
+      const res = await fetch('/api/admin/superteam/listings?take=20', { headers: authHeaders });
+      if (!res.ok) throw new Error('Failed to fetch');
+      return res.json();
+    },
+    enabled: !!agentData?.agent,
+  });
+
+  const { data: submissionsData, refetch: refetchSubmissions } = useQuery({
+    queryKey: ['superteam-submissions'],
+    queryFn: async () => {
+      const res = await fetch('/api/admin/superteam/submissions', { headers: authHeaders });
+      if (!res.ok) throw new Error('Failed to fetch');
+      return res.json();
+    },
+    enabled: !!agentData?.agent,
+  });
+
+  const registerMutation = useMutation({
+    mutationFn: async (name: string) => {
+      const res = await fetch('/api/admin/superteam/register', {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Registration failed');
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['superteam-agent'] });
+    },
+  });
+
+  const fetchDetailsMutation = useMutation({
+    mutationFn: async (slug: string) => {
+      const res = await fetch(`/api/admin/superteam/listings/${slug}`, { headers: authHeaders });
+      if (!res.ok) throw new Error('Failed to fetch details');
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setSelectedListing(data.listing);
+    },
+  });
+
+  const submitMutation = useMutation({
+    mutationFn: async (params: any) => {
+      const res = await fetch('/api/admin/superteam/submit', {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Submission failed');
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchSubmissions();
+      setSelectedListing(null);
+    },
+  });
+
+  const agent = agentData?.agent;
+  const listings = listingsData?.listings || [];
+  const submissions = submissionsData?.submissions || [];
+
+  return (
+    <div className="space-y-6">
+      <Card className="bg-zinc-900/80 border-zinc-800">
+        <CardHeader>
+          <CardTitle className="text-white flex items-center gap-2">
+            <Rocket className="w-5 h-5 text-emerald-400" />
+            Superteam Earn Agent
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {agentLoading ? (
+            <div className="text-center py-8 text-zinc-400">Loading agent status...</div>
+          ) : agent ? (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
+                  <CheckCircle className="w-3 h-3 mr-1" /> Registered
+                </Badge>
+                <span className="text-zinc-300 text-sm">{agent.agentName}</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-4 bg-zinc-800/50 rounded-lg">
+                <div>
+                  <p className="text-zinc-500 text-xs mb-1">Agent ID</p>
+                  <p className="text-zinc-300 text-sm font-mono">{agent.agentId}</p>
+                </div>
+                <div>
+                  <p className="text-zinc-500 text-xs mb-1">Username</p>
+                  <p className="text-zinc-300 text-sm">{agent.username}</p>
+                </div>
+                <div>
+                  <p className="text-zinc-500 text-xs mb-1">Claim Code</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-emerald-400 text-sm font-mono font-bold">{agent.claimCode}</p>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0 text-zinc-400 hover:text-white"
+                      onClick={() => navigator.clipboard.writeText(agent.claimCode)}
+                      data-testid="button-copy-claim-code"
+                    >
+                      <Copy className="w-3 h-3" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              <p className="text-zinc-500 text-xs">
+                Claim URL: <a href={`https://superteam.fun/earn/claim/${agent.claimCode}`} target="_blank" rel="noopener" className="text-emerald-400 hover:underline">
+                  superteam.fun/earn/claim/{agent.claimCode}
+                </a>
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-zinc-400 text-sm">Register an agent identity to access agent-only grant listings on Superteam Earn.</p>
+              <div className="flex items-center gap-3">
+                <Input
+                  value={agentName}
+                  onChange={(e) => setAgentName(e.target.value)}
+                  placeholder="Agent name"
+                  className="bg-zinc-800 border-zinc-700 text-white max-w-xs"
+                  data-testid="input-agent-name"
+                />
+                <Button
+                  onClick={() => registerMutation.mutate(agentName)}
+                  disabled={registerMutation.isPending || !agentName.trim()}
+                  className="bg-emerald-600 hover:bg-emerald-500"
+                  data-testid="button-register-agent"
+                >
+                  {registerMutation.isPending ? 'Registering...' : 'Register Agent'}
+                </Button>
+              </div>
+              {registerMutation.isError && (
+                <p className="text-red-400 text-sm">{(registerMutation.error as Error).message}</p>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {agent && (
+        <>
+          <Card className="bg-zinc-900/80 border-zinc-800">
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle className="text-white flex items-center gap-2">
+                <Eye className="w-5 h-5 text-blue-400" />
+                Agent-Eligible Listings ({listings.length})
+              </CardTitle>
+              <Button variant="outline" size="sm" onClick={() => refetchListings()} className="border-zinc-700 text-zinc-300">
+                <RefreshCw className="w-4 h-4" />
+              </Button>
+            </CardHeader>
+            <CardContent>
+              {listingsLoading ? (
+                <div className="text-center py-8 text-zinc-400">Loading listings...</div>
+              ) : listings.length > 0 ? (
+                <div className="space-y-3">
+                  {listings.map((listing: any) => (
+                    <div key={listing.id || listing.slug} className="p-4 bg-zinc-800/50 rounded-lg border border-zinc-700/50 hover:border-zinc-600 transition-colors">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                          <h4 className="text-white font-medium text-sm truncate">{listing.title}</h4>
+                          <div className="flex items-center gap-3 mt-1">
+                            <span className="text-zinc-400 text-xs">{listing.type || 'Bounty'}</span>
+                            {listing.rewardAmount && <span className="text-emerald-400 text-xs font-medium">{listing.rewardAmount} {listing.token || 'USDC'}</span>}
+                            {listing.deadline && <span className="text-zinc-500 text-xs">Due: {formatDate(listing.deadline)}</span>}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="border-zinc-700 text-zinc-300 text-xs"
+                            onClick={() => {
+                              setViewingDetails(listing.slug);
+                              fetchDetailsMutation.mutate(listing.slug);
+                            }}
+                            disabled={fetchDetailsMutation.isPending && viewingDetails === listing.slug}
+                            data-testid={`button-view-listing-${listing.slug}`}
+                          >
+                            <Eye className="w-3 h-3 mr-1" />
+                            {fetchDetailsMutation.isPending && viewingDetails === listing.slug ? 'Loading...' : 'View & Submit'}
+                          </Button>
+                          {listing.slug && (
+                            <a href={`https://superteam.fun/earn/listing/${listing.slug}`} target="_blank" rel="noopener">
+                              <Button variant="ghost" size="sm" className="text-zinc-400 hover:text-white h-8 w-8 p-0">
+                                <ExternalLink className="w-3 h-3" />
+                              </Button>
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8 text-zinc-500">No agent-eligible listings found</div>
+              )}
+            </CardContent>
+          </Card>
+
+          {selectedListing && (
+            <Card className="bg-zinc-900/80 border-emerald-800/50 border-2">
+              <CardHeader>
+                <CardTitle className="text-white flex items-center gap-2">
+                  <Send className="w-5 h-5 text-emerald-400" />
+                  Submit to: {selectedListing.title}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {selectedListing.description && (
+                  <div className="p-3 bg-zinc-800/50 rounded-lg max-h-48 overflow-y-auto">
+                    <p className="text-zinc-400 text-sm whitespace-pre-wrap">{selectedListing.description}</p>
+                  </div>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                  <div className="p-2 bg-zinc-800/30 rounded">
+                    <span className="text-zinc-500">Reward:</span>{' '}
+                    <span className="text-emerald-400 font-medium">{selectedListing.rewardAmount || selectedListing.usdValue} {selectedListing.token || 'USDG'}</span>
+                  </div>
+                  <div className="p-2 bg-zinc-800/30 rounded">
+                    <span className="text-zinc-500">Type:</span>{' '}
+                    <span className="text-zinc-300">{selectedListing.type}</span>
+                  </div>
+                  <div className="p-2 bg-zinc-800/30 rounded">
+                    <span className="text-zinc-500">Deadline:</span>{' '}
+                    <span className="text-zinc-300">{selectedListing.deadline ? formatDate(selectedListing.deadline) : 'N/A'}</span>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-zinc-400 text-sm mb-1 block">Project Link</label>
+                    <Input
+                      value={submitForm.link}
+                      onChange={(e) => setSubmitForm(f => ({ ...f, link: e.target.value }))}
+                      placeholder="https://your-project.com"
+                      className="bg-zinc-800 border-zinc-700 text-white"
+                      data-testid="input-submit-link"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-zinc-400 text-sm mb-1 block">Description (what you built, how Solana is used, agent autonomy)</label>
+                    <Textarea
+                      value={submitForm.otherInfo}
+                      onChange={(e) => setSubmitForm(f => ({ ...f, otherInfo: e.target.value }))}
+                      placeholder="Describe your project, how it uses Solana meaningfully, and how the AI agent operated autonomously..."
+                      className="bg-zinc-800 border-zinc-700 text-white min-h-[120px]"
+                      data-testid="input-submit-description"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-zinc-400 text-sm mb-1 block">Telegram (optional, for project listings)</label>
+                    <Input
+                      value={submitForm.telegram}
+                      onChange={(e) => setSubmitForm(f => ({ ...f, telegram: e.target.value }))}
+                      placeholder="http://t.me/your_username"
+                      className="bg-zinc-800 border-zinc-700 text-white"
+                      data-testid="input-submit-telegram"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <Button
+                    onClick={() => submitMutation.mutate({
+                      listingId: selectedListing.id,
+                      listingSlug: selectedListing.slug,
+                      listingTitle: selectedListing.title,
+                      link: submitForm.link,
+                      otherInfo: submitForm.otherInfo,
+                      tweet: submitForm.tweet,
+                      telegram: submitForm.telegram,
+                    })}
+                    disabled={submitMutation.isPending || !submitForm.link || !submitForm.otherInfo}
+                    className="bg-emerald-600 hover:bg-emerald-500"
+                    data-testid="button-submit-listing"
+                  >
+                    {submitMutation.isPending ? 'Submitting...' : 'Submit Entry'}
+                    <Send className="w-4 h-4 ml-2" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setSelectedListing(null)}
+                    className="border-zinc-700 text-zinc-300"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+                {submitMutation.isError && (
+                  <p className="text-red-400 text-sm">{(submitMutation.error as Error).message}</p>
+                )}
+                {submitMutation.isSuccess && (
+                  <p className="text-emerald-400 text-sm">Submission sent successfully!</p>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {submissions.length > 0 && (
+            <Card className="bg-zinc-900/80 border-zinc-800">
+              <CardHeader>
+                <CardTitle className="text-white text-sm">Submission History ({submissions.length})</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="border-zinc-700">
+                        <TableHead className="text-zinc-400">Listing</TableHead>
+                        <TableHead className="text-zinc-400">Link</TableHead>
+                        <TableHead className="text-zinc-400">Status</TableHead>
+                        <TableHead className="text-zinc-400">Submitted</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {submissions.map((sub: any) => (
+                        <TableRow key={sub.id} className="border-zinc-800">
+                          <TableCell className="text-zinc-300 text-sm">{sub.listingTitle || sub.listingSlug || sub.listingId}</TableCell>
+                          <TableCell>
+                            <a href={sub.link} target="_blank" rel="noopener" className="text-emerald-400 hover:underline text-sm flex items-center gap-1">
+                              {sub.link?.slice(0, 40)}... <ExternalLink className="w-3 h-3" />
+                            </a>
+                          </TableCell>
+                          <TableCell><StatusBadge status={sub.status} /></TableCell>
+                          <TableCell className="text-zinc-400 text-xs">{formatDate(sub.submittedAt)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

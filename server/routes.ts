@@ -9974,6 +9974,107 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== SUPERTEAM AGENT ROUTES ====================
+  const { superteamAgentService } = await import("./superteam-agent-service");
+
+  app.post("/api/admin/superteam/register", requireAdminAuth, async (req, res) => {
+    try {
+      const { name } = req.body;
+      if (!name) return res.status(400).json({ error: "Agent name is required" });
+      const result = await superteamAgentService.registerAgent(name);
+      res.json({ success: true, agent: { agentId: result.agentId, username: result.username, claimCode: result.claimCode } });
+    } catch (error: any) {
+      console.error("[Superteam] Registration error:", error);
+      res.status(500).json({ error: "Agent registration failed. Check server logs for details." });
+    }
+  });
+
+  app.get("/api/admin/superteam/agent", requireAdminAuth, async (_req, res) => {
+    try {
+      const agent = await superteamAgentService.getAgent();
+      if (!agent) return res.json({ agent: null });
+      res.json({ agent: { id: agent.id, agentName: agent.agentName, agentId: agent.agentId, claimCode: agent.claimCode, username: agent.username, status: agent.status, createdAt: agent.createdAt, hasApiKey: !!agent.apiKey } });
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to fetch agent status." });
+    }
+  });
+
+  app.get("/api/admin/superteam/listings", requireAdminAuth, async (req, res) => {
+    try {
+      const take = parseInt(req.query.take as string) || 20;
+      const deadline = req.query.deadline as string;
+      const listings = await superteamAgentService.listLiveListings(take, deadline);
+      res.json({ listings });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/admin/superteam/listings/:slug", requireAdminAuth, async (req, res) => {
+    try {
+      const details = await superteamAgentService.getListingDetails(req.params.slug);
+      res.json({ listing: details });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/admin/superteam/submit", requireAdminAuth, async (req, res) => {
+    try {
+      const { listingId, listingSlug, listingTitle, link, otherInfo, tweet, telegram, eligibilityAnswers, ask } = req.body;
+      if (!listingId || !link || !otherInfo) return res.status(400).json({ error: "listingId, link, and otherInfo are required" });
+      const result = await superteamAgentService.submitToListing({ listingId, listingSlug, listingTitle, link, otherInfo, tweet, telegram, eligibilityAnswers, ask });
+      res.json({ success: true, submission: result });
+    } catch (error: any) {
+      console.error("[Superteam] Submission error:", error);
+      const safeMsg = error.message?.includes('(') ? error.message.split('):')[1]?.trim() || 'Submission failed' : error.message || 'Submission failed';
+      res.status(500).json({ error: safeMsg });
+    }
+  });
+
+  app.post("/api/admin/superteam/update-submission", requireAdminAuth, async (req, res) => {
+    try {
+      const { listingId, link, otherInfo, tweet, telegram, eligibilityAnswers, ask } = req.body;
+      if (!listingId || !link || !otherInfo) return res.status(400).json({ error: "listingId, link, and otherInfo are required" });
+      const result = await superteamAgentService.updateSubmission({ listingId, link, otherInfo, tweet, telegram, eligibilityAnswers, ask });
+      res.json({ success: true, submission: result });
+    } catch (error: any) {
+      console.error("[Superteam] Update error:", error);
+      res.status(500).json({ error: "Submission update failed. Check server logs." });
+    }
+  });
+
+  app.get("/api/admin/superteam/comments/:listingId", requireAdminAuth, async (req, res) => {
+    try {
+      const skip = parseInt(req.query.skip as string) || 0;
+      const take = parseInt(req.query.take as string) || 20;
+      const comments = await superteamAgentService.getComments(req.params.listingId, skip, take);
+      res.json({ comments });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/admin/superteam/comment", requireAdminAuth, async (req, res) => {
+    try {
+      const { listingId, message, pocId, replyToId, replyToUserId } = req.body;
+      if (!listingId || !message) return res.status(400).json({ error: "listingId and message are required" });
+      const result = await superteamAgentService.postComment({ listingId, message, pocId, replyToId, replyToUserId });
+      res.json({ success: true, comment: result });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/admin/superteam/submissions", requireAdminAuth, async (_req, res) => {
+    try {
+      const submissions = await superteamAgentService.getSubmissions();
+      res.json({ submissions });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   return httpServer;
 }
 

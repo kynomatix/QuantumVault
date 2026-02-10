@@ -630,3 +630,44 @@ export const insertPortfolioDailySnapshotSchema = createInsertSchema(portfolioDa
 });
 export type InsertPortfolioDailySnapshot = z.infer<typeof insertPortfolioDailySnapshotSchema>;
 export type PortfolioDailySnapshot = typeof portfolioDailySnapshots.$inferSelect;
+
+export const superteamAgents = pgTable("superteam_agents", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentName: text("agent_name").notNull(),
+  agentId: text("agent_id"),
+  apiKey: text("api_key"),
+  claimCode: text("claim_code"),
+  username: text("username"),
+  status: text("status").notNull().default("pending"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertSuperteamAgentSchema = createInsertSchema(superteamAgents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertSuperteamAgent = z.infer<typeof insertSuperteamAgentSchema>;
+export type SuperteamAgent = typeof superteamAgents.$inferSelect;
+
+export const superteamSubmissions = pgTable("superteam_submissions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: text("agent_id").notNull(),
+  listingId: text("listing_id").notNull(),
+  listingSlug: text("listing_slug"),
+  listingTitle: text("listing_title"),
+  link: text("link"),
+  otherInfo: text("other_info"),
+  tweet: text("tweet"),
+  telegram: text("telegram"),
+  status: text("status").notNull().default("submitted"),
+  submittedAt: timestamp("submitted_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at"),
+});
+
+export const insertSuperteamSubmissionSchema = createInsertSchema(superteamSubmissions).omit({
+  id: true,
+  submittedAt: true,
+  updatedAt: true,
+});
+export type InsertSuperteamSubmission = z.infer<typeof insertSuperteamSubmissionSchema>;
+export type SuperteamSubmission = typeof superteamSubmissions.$inferSelect;
