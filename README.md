@@ -14,6 +14,7 @@ This is not a demo or proof of concept — QuantumVault is live on Solana mainne
 
 - **Swift Protocol Integration** — First-of-its-kind gasless trade execution through Drift's Swift Protocol, reducing RPC usage by 90–97% via market-maker auction-based fills with automatic on-chain fallback
 - **Execution Infrastructure for AI Agents** — Any autonomous agent can trade Solana perps through a simple webhook API with a published skill.md-compatible interface
+- **Self-Sustaining AI Agent Economy** — AI agents create signal bots, attract subscribers through profitable performance, earn on-chain USDC profit share from subscriber trades, and use those earnings to fund their own compute and operating costs — a fully autonomous economic loop on Solana
 - **On-Chain Signal Marketplace** — Users and agents publish trading signals, others subscribe with proportional copy-trading, and creators earn immediate on-chain USDC profit share
 - **Built Through Human-AI Collaboration** — Architected and implemented by an AI agent (Replit Agent / Claude), guided by a Drift Protocol Ambassador with a decade of trading experience, two decades of IT expertise, and five years in Solana DeFi. Three additional LLMs (Google Gemini Pro 3, xAI Grok Code Fast 1, OpenAI ChatGPT Codex 5.2) were used for independent security audits, architectural review, and refactoring plans
 
@@ -26,7 +27,7 @@ This is not a demo or proof of concept — QuantumVault is live on Solana mainne
 | **Agent Wallets** | Server-managed Solana wallets per user with AES-256-GCM encrypted private keys for autonomous execution |
 | **Token Operations** | Automated USDC deposits, withdrawals, and profit distribution via SPL Token program |
 | **Profit Sharing** | Immediate on-chain USDC transfers to signal creators when subscriber trades close profitably |
-| **Account Isolation** | Each bot operates on a unique Drift subaccount with auto-initialization and referral attribution |
+| **Account Isolation** | Each bot operates on a unique Drift subaccount with auto-initialization |
 
 ## How the AI Agent Operated Autonomously
 
@@ -39,7 +40,7 @@ The primary AI agent (Replit Agent / Claude) autonomously handled:
 - Creator profit-sharing system with on-chain USDC transfers
 - Security architecture (UMK key derivation, execution authorization, policy HMAC)
 - Production debugging of subscriber routing failures and Swift fill behavior across different market liquidities
-- Telegram notification system and referral program
+- Telegram notification system
 - AI agent integration documentation and skill interface
 - Superteam Earn agent submission system — the agent built it and used it to submit this project
 - Continuous deployment and maintenance on Solana mainnet
@@ -65,6 +66,8 @@ curl -X POST https://myquantumvault.com/api/webhook/{BOT_ID} \
 ```
 
 **What the agent gets:** Drift Protocol execution, automatic retry with exponential backoff, RPC failover (Helius + Triton), margin management, auto top-up, and position tracking — without needing to handle any of it.
+
+**The self-sustaining loop:** An AI agent creates a signal bot, publishes it to the marketplace, and begins trading. As its track record grows, human users and other agents subscribe. When subscriber trades close profitably, the creator agent earns a percentage via immediate on-chain USDC transfer. Those earnings can fund the agent's own compute, RPC costs, and capital — creating a fully autonomous economic actor on Solana that sustains itself through trading performance.
 
 ## Tech Stack
 
@@ -123,7 +126,6 @@ The platform is deployed and running in production at [myquantumvault.com](https
 - **Real-Time Dashboard** — Live positions, PnL tracking, account health, and fee monitoring
 - **Agent Wallets** — Server-managed wallets with encrypted key storage for autonomous execution
 - **Telegram Notifications** — Configurable alerts for trades, errors, and position changes
-- **Referral System** — Unique referral codes with Drift Protocol attribution
 - **AI Agent API** — Webhook interface for autonomous agents to trade Solana perps
 
 ## Security
