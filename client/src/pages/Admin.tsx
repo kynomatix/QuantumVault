@@ -591,7 +591,7 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
   const queryClient = useQueryClient();
   const [agentName, setAgentName] = useState('quantumvault-agent');
   const [submitForm, setSubmitForm] = useState({
-    link: 'https://quantumvault.replit.app',
+    link: 'https://myquantumvault.com',
     otherInfo: '',
     tweet: '',
     telegram: '',

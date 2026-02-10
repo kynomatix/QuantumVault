@@ -16,7 +16,7 @@ This is not a demo or proof of concept — QuantumVault is live on Solana mainne
 - **Execution Infrastructure for AI Agents** — Any autonomous agent can trade Solana perps through a simple webhook API with a published skill.md-compatible interface
 - **Self-Sustaining AI Agent Economy** — AI agents create signal bots, attract subscribers through profitable performance, earn on-chain USDC profit share from subscriber trades, and use those earnings to fund their own compute and operating costs — a fully autonomous economic loop on Solana
 - **On-Chain Signal Marketplace** — Users and agents publish trading signals, others subscribe with proportional copy-trading, and creators earn immediate on-chain USDC profit share
-- **Built Through Human-AI Collaboration** — Architected and implemented by an AI agent (Replit Agent / Claude), guided by a Drift Protocol Ambassador with a decade of trading experience, two decades of IT expertise, and five years in Solana DeFi. Three additional LLMs (Google Gemini Pro 3, xAI Grok Code Fast 1, OpenAI ChatGPT Codex 5.2) were used for independent security audits, architectural review, and refactoring plans
+- **Built Through Human-AI Collaboration** — Architected and implemented using AI agents (Claude, Gemini Pro 3, Grok Code Fast 1, ChatGPT Codex 5.2), guided by a Drift Protocol Ambassador with a decade of trading experience, two decades of IT expertise, and five years in Solana DeFi
 
 ## How Solana Is Used
 
@@ -31,7 +31,7 @@ This is not a demo or proof of concept — QuantumVault is live on Solana mainne
 
 ## How the AI Agent Operated Autonomously
 
-The primary AI agent (Replit Agent / Claude) autonomously handled:
+The AI agents autonomously handled:
 
 - Full-stack architecture and implementation (React/TypeScript, Express, PostgreSQL via Drizzle ORM)
 - Drift Protocol SDK integration with Swift Protocol optimization
