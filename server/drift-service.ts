@@ -3280,6 +3280,12 @@ export async function executePerpOrder(
   const estimatedNotional = estimatedOraclePrice ? sizeInBase * estimatedOraclePrice : undefined;
   const swiftCheck = shouldUseSwift(estimatedNotional);
   console.log(`[Drift] Swift check: shouldUseSwift()=${swiftCheck}, SWIFT_ENABLED=${process.env.SWIFT_ENABLED}, notional=$${estimatedNotional?.toFixed(2) || 'unknown'}, minNotional=$${process.env.SWIFT_MIN_NOTIONAL || '100'}`);
+  let swiftAuctionSubmitted = false;
+  let swiftVerifyPubkey: string | undefined;
+  let swiftOrderIdForGuard: string | undefined;
+  let swiftFillPriceEstimate: number | undefined;
+  let preSwiftPositionSize = 0;
+  let preSwiftPositionSide = 'FLAT';
   if (swiftCheck) {
     console.log(`[Drift] Attempting Swift execution for ${market} ${side}`);
     recordSwiftAttempt(market);
@@ -3317,6 +3323,33 @@ export async function executePerpOrder(
       }
 
       if (swiftResult.success && !swiftResult.txSignature) {
+        swiftAuctionSubmitted = true;
+        swiftOrderIdForGuard = swiftResult.swiftOrderId;
+        swiftFillPriceEstimate = swiftResult.fillPrice;
+        try {
+          let snapshotPubkey = expectedAgentPubkey;
+          if (!snapshotPubkey) {
+            try {
+              const kp = getAgentKeypair(encryptedPrivateKey);
+              snapshotPubkey = kp.publicKey.toBase58();
+            } catch {}
+          }
+          if (snapshotPubkey) {
+            const { PositionService } = await import('./position-service.js');
+            const prePos = await PositionService.getPositionForExecution(
+              'swift-pre-snapshot',
+              snapshotPubkey,
+              subAccountId,
+              market,
+              encryptedPrivateKey
+            );
+            preSwiftPositionSize = Math.abs(prePos.size);
+            preSwiftPositionSide = prePos.side;
+            console.log(`[Drift] Pre-Swift position snapshot: side=${preSwiftPositionSide}, size=${preSwiftPositionSize}`);
+          }
+        } catch (snapErr: any) {
+          console.warn(`[Drift] Could not capture pre-Swift position snapshot: ${snapErr?.message}`);
+        }
         console.log(`[Drift] Swift open accepted (Order processed) but no tx signature — waiting for auction fill verification via PositionService...`);
         const AUCTION_WAIT_MS = 8000;
         await new Promise(resolve => setTimeout(resolve, AUCTION_WAIT_MS));
@@ -3328,6 +3361,7 @@ export async function executePerpOrder(
               verifyPubkey = kp.publicKey.toBase58();
             } catch {}
           }
+          swiftVerifyPubkey = verifyPubkey;
           if (verifyPubkey) {
             const { PositionService } = await import('./position-service.js');
             const postSwiftPos = await PositionService.getPositionForExecution(
@@ -3383,6 +3417,48 @@ export async function executePerpOrder(
     }
   }
   
+  if (swiftAuctionSubmitted && !reduceOnly) {
+    let guardPubkey = swiftVerifyPubkey || expectedAgentPubkey;
+    if (!guardPubkey) {
+      try {
+        const kp = getAgentKeypair(encryptedPrivateKey);
+        guardPubkey = kp.publicKey.toBase58();
+      } catch {}
+    }
+    if (guardPubkey) {
+      try {
+        console.log(`[Drift] Pre-legacy guard: Swift auction was submitted for ${market}, doing final position check before legacy fires (pre-Swift: ${preSwiftPositionSide} size=${preSwiftPositionSize})...`);
+        const { PositionService } = await import('./position-service.js');
+        const guardPos = await PositionService.getPositionForExecution(
+          'swift-late-fill-guard',
+          guardPubkey,
+          subAccountId,
+          market,
+          encryptedPrivateKey
+        );
+        const guardSize = Math.abs(guardPos.size);
+        const positionChanged = (preSwiftPositionSide === 'FLAT' && guardPos.side !== 'FLAT' && guardSize > 0.0001) ||
+          (preSwiftPositionSide !== 'FLAT' && guardSize > preSwiftPositionSize + 0.0001);
+        if (positionChanged) {
+          console.log(`[Drift] *** LATE SWIFT FILL DETECTED *** Position changed from ${preSwiftPositionSide}/${preSwiftPositionSize} to ${guardPos.side}/${guardSize} after initial 8s check. Returning success instead of running legacy.`);
+          recordSwiftMetricSuccess(market, 0, undefined);
+          return {
+            success: true,
+            signature: 'swift-late-auction-fill',
+            txSignature: 'swift-late-auction-fill',
+            fillPrice: guardPos.entryPrice || swiftFillPriceEstimate,
+            actualFee: undefined,
+            executionMethod: 'swift' as const,
+            swiftOrderId: swiftOrderIdForGuard,
+          };
+        }
+        console.log(`[Drift] Pre-legacy guard: no position change detected (now ${guardPos.side}/${guardSize}), proceeding with legacy execution`);
+      } catch (guardErr: any) {
+        console.warn(`[Drift] Pre-legacy guard check failed (${guardErr?.message}), proceeding with legacy`);
+      }
+    }
+  }
+
   // Try to use in-process SDK first, fall back to subprocess if SDK not available
   let sdk: any = null;
   let useDriftClient = false;
@@ -3578,6 +3654,8 @@ export async function closePerpPosition(
   // Swift-first close path — requires positionSide and positionSizeBase to determine close direction
   const closeOraclePrice = await getMarketPrice(market).catch(() => null);
   const closeNotional = closeOraclePrice && positionSizeBase ? positionSizeBase * closeOraclePrice : undefined;
+  let swiftCloseAuctionSubmitted = false;
+  let swiftCloseVerifyPubkey: string | undefined;
   if (shouldUseSwift(closeNotional) && positionSide && positionSizeBase && positionSizeBase > 0) {
     const closeSide = positionSide === 'long' ? 'short' : 'long';
     console.log(`[Drift] Attempting Swift close for ${market}, closing ${positionSide} position with ${closeSide} reduce-only order, size: ${positionSizeBase}, notional=$${closeNotional?.toFixed(2)}`);
@@ -3613,6 +3691,7 @@ export async function closePerpPosition(
       }
 
       if (swiftResult.success && !swiftResult.txSignature) {
+        swiftCloseAuctionSubmitted = true;
         console.log(`[Drift] Swift close accepted (Order processed) but no tx signature — Swift auction may not have filled. Waiting 8s then verifying via PositionService...`);
         await new Promise(resolve => setTimeout(resolve, 8000));
         try {
@@ -3623,6 +3702,7 @@ export async function closePerpPosition(
               verifyPubkey = kp.publicKey.toBase58();
             } catch {}
           }
+          swiftCloseVerifyPubkey = verifyPubkey;
           const { PositionService } = await import('./position-service.js');
           const postSwiftPos = await PositionService.getPositionForExecution(
             'swift-close-verify',
@@ -3662,6 +3742,45 @@ export async function closePerpPosition(
     console.log(`[Drift] Swift available but positionSide/positionSizeBase not provided for close, using legacy`);
   }
   
+  if (swiftCloseAuctionSubmitted) {
+    let closeGuardPubkey = swiftCloseVerifyPubkey || expectedAgentPubkey;
+    if (!closeGuardPubkey) {
+      try {
+        const kp = getAgentKeypair(encryptedPrivateKey);
+        closeGuardPubkey = kp.publicKey.toBase58();
+      } catch {}
+    }
+    if (closeGuardPubkey) {
+      try {
+        console.log(`[Drift] Pre-legacy close guard: Swift close auction was submitted for ${market} (was ${positionSide} size=${positionSizeBase}), doing final position check before legacy close fires...`);
+        const { PositionService } = await import('./position-service.js');
+        const closeGuardPos = await PositionService.getPositionForExecution(
+          'swift-close-late-fill-guard',
+          closeGuardPubkey,
+          subAccountId,
+          market,
+          encryptedPrivateKey
+        );
+        const closeGuardSize = Math.abs(closeGuardPos.size);
+        const closeWasFilled = (closeGuardPos.side === 'FLAT' || closeGuardSize < 0.0001) ||
+          (positionSizeBase && closeGuardSize < positionSizeBase * 0.5);
+        if (closeWasFilled) {
+          console.log(`[Drift] *** LATE SWIFT CLOSE FILL DETECTED *** Position changed from ${positionSide}/${positionSizeBase} to ${closeGuardPos.side}/${closeGuardSize} after initial 8s check. Returning success instead of running legacy close.`);
+          recordSwiftMetricSuccess(market, 0, undefined);
+          return {
+            success: true,
+            signature: 'swift-late-auction-fill',
+            executionMethod: 'swift' as const,
+            fillPrice: undefined,
+          };
+        }
+        console.log(`[Drift] Pre-legacy close guard: position still ${closeGuardPos.side}/${closeGuardSize}, proceeding with legacy close`);
+      } catch (guardErr: any) {
+        console.warn(`[Drift] Pre-legacy close guard check failed (${guardErr?.message}), proceeding with legacy close`);
+      }
+    }
+  }
+
   // Try to use in-process SDK first, fall back to subprocess if SDK not available
   let sdk: any = null;
   let useDriftClient = false;
