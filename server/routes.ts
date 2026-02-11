@@ -1009,6 +1009,35 @@ async function routeSignalToSubscribers(
           // NOTE: Uses legacy encrypted key - subscriber wallet's UMK not available (see function header comment)
           const side = signal.action === 'buy' ? 'long' : 'short';
           const subSlippageBps = subWallet.slippageBps ?? 50;
+
+          // FLIP DETECTION: Snapshot existing position before trade execution
+          // If subscriber has an opposite position, this trade will close it (flip)
+          // We need to track this to calculate realized PnL and trigger profit sharing
+          let preTradePosition: { side: string; size: number; entryPrice: number } | null = null;
+          try {
+            const existingPos = await PositionService.getPositionForExecution(
+              subBot.id,
+              subWallet.agentPublicKey!,
+              subAccountId,
+              subBot.market,
+              subWallet.agentPrivateKeyEncrypted
+            );
+            if (existingPos.side !== 'FLAT' && Math.abs(existingPos.size) >= 0.0001) {
+              const isOpposite = (existingPos.side === 'LONG' && side === 'short') || 
+                                 (existingPos.side === 'SHORT' && side === 'long');
+              if (isOpposite) {
+                preTradePosition = {
+                  side: existingPos.side,
+                  size: Math.abs(existingPos.size),
+                  entryPrice: existingPos.entryPrice || 0,
+                };
+                console.log(`[Subscriber Routing] FLIP DETECTED for ${subBot.id}: existing ${preTradePosition.side} ${preTradePosition.size} @ $${preTradePosition.entryPrice.toFixed(2)} will be closed by incoming ${side.toUpperCase()}`);
+              }
+            }
+          } catch (err) {
+            console.error(`[Subscriber Routing] Pre-trade position check failed for ${subBot.id}:`, err);
+          }
+
           const orderResult = await executePerpOrder(
             subWallet.agentPrivateKeyEncrypted,
             subBot.market,
@@ -1065,6 +1094,62 @@ async function routeSignalToSubscribers(
                 tradeUpdate.fee = (updatedNotional * DRIFT_FEE_RATE).toFixed(6);
               }
               await storage.updateBotTrade(subTrade.id, tradeUpdate);
+            }
+
+            // FLIP PROFIT SHARE: If a flip occurred, calculate realized PnL from closing the old position
+            // The closed portion is the minimum of pre-trade position size and new order size
+            // (handles both full flips and partial reduces that flip direction)
+            if (preTradePosition && preTradePosition.entryPrice > 0) {
+              const closedSize = Math.min(preTradePosition.size, contractSize);
+              const closedEntryPrice = preTradePosition.entryPrice;
+              const exitPrice = fillPrice;
+              // Fee on the close leg only (proportional to closed size, not full order)
+              const closeFee = closedSize * exitPrice * DRIFT_FEE_RATE;
+              
+              let flipPnl = 0;
+              if (preTradePosition.side === 'LONG') {
+                flipPnl = (exitPrice - closedEntryPrice) * closedSize - closeFee;
+              } else {
+                flipPnl = (closedEntryPrice - exitPrice) * closedSize - closeFee;
+              }
+              
+              console.log(`[Subscriber Routing] Flip PnL for ${subBot.id}: closed ${preTradePosition.side} ${closedSize}/${preTradePosition.size} @ entry=$${closedEntryPrice.toFixed(2)}, exit=$${exitPrice.toFixed(2)}, pnl=$${flipPnl.toFixed(4)}`);
+              
+              // Update stats with the realized PnL from the flip
+              if (flipPnl !== 0) {
+                stats.totalPnl = (stats.totalPnl || 0) + flipPnl;
+                if (flipPnl > 0) {
+                  stats.winningTrades = (stats.winningTrades || 0) + 1;
+                } else {
+                  stats.losingTrades = (stats.losingTrades || 0) + 1;
+                }
+              }
+              
+              // Update the trade record with realized PnL from the flip
+              await storage.updateBotTrade(subTrade.id, {
+                pnl: flipPnl.toFixed(6),
+              });
+              
+              // Trigger profit sharing if the flip realized a profit
+              if (flipPnl > 0) {
+                const flipTradeId = `${subBot.id}-flip-${Date.now()}`;
+                console.log(`[Subscriber Routing] Initiating profit share for FLIP on ${subBot.id}: pnl=$${flipPnl.toFixed(4)}`);
+                distributeCreatorProfitShare({
+                  subscriberBotId: subBot.id,
+                  subscriberWalletAddress: subBot.walletAddress,
+                  subscriberAgentPublicKey: subWallet.agentPublicKey!,
+                  subscriberEncryptedPrivateKey: subWallet.agentPrivateKeyEncrypted,
+                  driftSubaccountId: subAccountId,
+                  realizedPnl: flipPnl,
+                  tradeId: flipTradeId,
+                }).then(result => {
+                  if (result.success && result.amount) {
+                    console.log(`[Subscriber Routing] Flip profit share distributed: $${result.amount.toFixed(4)} from ${subBot.id}`);
+                  } else if (!result.success && result.error) {
+                    console.error(`[Subscriber Routing] Flip profit share failed for ${subBot.id}: ${result.error}`);
+                  }
+                }).catch(err => console.error(`[Subscriber Routing] Flip profit share error for ${subBot.id}:`, err));
+              }
             }
 
             await storage.updateTradingBotStats(subBot.id, {
