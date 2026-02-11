@@ -5619,6 +5619,19 @@ export async function registerRoutes(
             errorMessage: "Close signal ignored - no on-chain position", 
             processed: true 
           });
+
+          if (botPublishedInfo && botPublishedInfo.isActive) {
+            console.log(`[Webhook] Source bot flat but published - routing close signal to subscribers`);
+            routeSignalToSubscribers(botId, {
+              action: action as 'buy' | 'sell',
+              contracts,
+              positionSize,
+              price: signalPrice || '0',
+              isCloseSignal: true,
+              strategyPositionSize,
+            }).catch(err => console.error(`[Subscriber Routing] Error routing close from flat source:`, err));
+          }
+
           return res.status(200).json({ 
             status: "skipped", 
             reason: "No on-chain position to close - this may be a stale SL/TP signal" 
@@ -5852,6 +5865,23 @@ export async function registerRoutes(
               side: closeSide,
             });
 
+            console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS (CLOSE) ==========`);
+            console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for bot ${botId}`);
+            console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, isCloseSignal=true, price=${signalPrice || closeFillPrice.toString()}`);
+            routeSignalToSubscribers(botId, {
+              action: action as 'buy' | 'sell',
+              contracts,
+              positionSize,
+              price: signalPrice || closeFillPrice.toString(),
+              isCloseSignal: true,
+              strategyPositionSize,
+            }).then(() => {
+              console.log(`[WEBHOOK-TRACE] CLOSE routing completed successfully for bot ${botId}`);
+            }).catch(routingErr => {
+              console.error(`[WEBHOOK-TRACE] CLOSE routing FAILED for bot ${botId}:`, routingErr);
+              console.error(`[Subscriber Routing] Deferred routing error for bot ${botId}:`, routingErr);
+            });
+
             // --- Deferred post-trade work (fire-and-forget, non-blocking) ---
             console.log('[Webhook] Response sent, deferring post-trade work...');
             (async () => {
@@ -5882,24 +5912,6 @@ export async function registerRoutes(
                 });
               } catch (err) {
                 console.error(`[Webhook] Deferred post-trade sync/stats failed (non-blocking): ${err}`);
-              }
-
-              console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS (CLOSE) ==========`);
-              console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for bot ${botId}`);
-              console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, isCloseSignal=true, price=${signalPrice || closeFillPrice.toString()}`);
-              try {
-                await routeSignalToSubscribers(botId, {
-                  action: action as 'buy' | 'sell',
-                  contracts,
-                  positionSize,
-                  price: signalPrice || closeFillPrice.toString(),
-                  isCloseSignal: true,
-                  strategyPositionSize,
-                });
-                console.log(`[WEBHOOK-TRACE] CLOSE routing completed successfully for bot ${botId}`);
-              } catch (routingErr) {
-                console.error(`[WEBHOOK-TRACE] CLOSE routing FAILED for bot ${botId}:`, routingErr);
-                console.error(`[Subscriber Routing] Deferred routing error for bot ${botId}:`, routingErr);
               }
 
               if (closeTradePnl > 0) {
@@ -6483,6 +6495,23 @@ export async function registerRoutes(
         signalHash,
       });
 
+      console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS (OPEN) ==========`);
+      console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for bot ${botId}`);
+      console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, isCloseSignal=false, price=${signalPrice || fillPrice.toString()}`);
+      routeSignalToSubscribers(botId, {
+        action: action as 'buy' | 'sell',
+        contracts,
+        positionSize,
+        price: signalPrice || fillPrice.toString(),
+        isCloseSignal: false,
+        strategyPositionSize,
+      }).then(() => {
+        console.log(`[WEBHOOK-TRACE] OPEN routing completed successfully for bot ${botId}`);
+      }).catch(routingErr => {
+        console.error(`[WEBHOOK-TRACE] OPEN routing FAILED for bot ${botId}:`, routingErr);
+        console.error(`[Subscriber Routing] Deferred routing error for bot ${botId}:`, routingErr);
+      });
+
       // --- Deferred post-trade work (fire-and-forget, non-blocking) ---
       console.log('[Webhook] Response sent, deferring post-trade work...');
       (async () => {
@@ -6548,24 +6577,6 @@ export async function registerRoutes(
           });
         } catch (err) {
           console.error(`[Webhook] Deferred post-trade sync/stats failed (non-blocking): ${err}`);
-        }
-
-        console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS (OPEN) ==========`);
-        console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for bot ${botId}`);
-        console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, isCloseSignal=false, price=${signalPrice || fillPrice.toString()}`);
-        try {
-          await routeSignalToSubscribers(botId, {
-            action: action as 'buy' | 'sell',
-            contracts,
-            positionSize,
-            price: signalPrice || fillPrice.toString(),
-            isCloseSignal: false,
-            strategyPositionSize,
-          });
-          console.log(`[WEBHOOK-TRACE] OPEN routing completed successfully for bot ${botId}`);
-        } catch (routingErr) {
-          console.error(`[WEBHOOK-TRACE] OPEN routing FAILED for bot ${botId}:`, routingErr);
-          console.error(`[Subscriber Routing] Deferred routing error for bot ${botId}:`, routingErr);
         }
 
         sendTradeNotification(wallet.address, {
