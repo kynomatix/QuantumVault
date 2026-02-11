@@ -857,7 +857,7 @@ async function routeSignalToSubscribers(
               tradingBotId: subBot.id,
               walletAddress: subBot.walletAddress,
               market: subBot.market,
-              side: position.side === 'LONG' ? 'SHORT' : 'LONG',
+              side: "CLOSE",
               size: Math.abs(position.size).toFixed(8),
               price: closeResult.fillPrice?.toString() || fillPrice.toFixed(6),
               status: 'executed',
