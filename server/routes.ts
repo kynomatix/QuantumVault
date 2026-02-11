@@ -6771,13 +6771,7 @@ export async function registerRoutes(
       // PHASE 6.2: Wrap execution in try/finally to ensure agent key cleanup
       try {
 
-      // Check if bot is active
-      if (!bot.isActive) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused" });
-        return res.status(400).json({ error: "Bot is paused" });
-      }
-
-      // Parse TradingView strategy signal - reuse existing parsing logic
+      // Parse TradingView strategy signal FIRST (needed for routing even if bot is paused)
       let action: string | null = null;
       let contracts: string = "0";
       let positionSize: string = bot.maxPositionSize || "100";
@@ -6869,7 +6863,26 @@ export async function registerRoutes(
         (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
       
       console.log(`[User Webhook] Signal analysis: action=${action}, contracts=${contracts}, strategyPositionSize=${strategyPositionSize}, isCloseSignal=${isCloseSignal}`);
-      
+
+      // Check if bot is active - route to subscribers even if paused
+      if (!bot.isActive) {
+        const routingSignal = parseSignalForRouting(payload);
+        const botPublishedInfo = await storage.getPublishedBotByTradingBotId(botId);
+        if (botPublishedInfo && botPublishedInfo.isActive && routingSignal.action) {
+          console.log(`[User Webhook] Source bot ${botId.slice(0, 8)}... is paused but published - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
+          routeSignalToSubscribers(botId, {
+            action: routingSignal.action as 'buy' | 'sell',
+            contracts: routingSignal.contracts,
+            positionSize,
+            price: routingSignal.price,
+            isCloseSignal: routingSignal.isCloseSignal,
+            strategyPositionSize: routingSignal.strategyPositionSize,
+          }).catch(err => console.error(`[User Webhook] Error routing signal from paused bot:`, err));
+        }
+        await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused", processed: true });
+        return res.status(400).json({ error: "Bot is paused" });
+      }
+
       // CLOSE SIGNAL HANDLING - mirrors logic from /api/webhook/tradingview/:botId
       if (isCloseSignal) {
         console.log(`[User Webhook] *** CLOSE SIGNAL DETECTED *** (strategyPositionSize=${strategyPositionSize}) - Entering close handler`);
@@ -6911,6 +6924,21 @@ export async function registerRoutes(
               errorMessage: "Close signal ignored - no on-chain position", 
               processed: true 
             });
+
+            // Route close signal to subscribers even if source bot is flat
+            const botPublishedInfo = await storage.getPublishedBotByTradingBotId(botId);
+            if (botPublishedInfo && botPublishedInfo.isActive) {
+              console.log(`[User Webhook] Source bot flat but published - routing close signal to subscribers`);
+              routeSignalToSubscribers(botId, {
+                action: action as 'buy' | 'sell',
+                contracts,
+                positionSize,
+                price: signalPrice || '0',
+                isCloseSignal: true,
+                strategyPositionSize,
+              }).catch(err => console.error(`[User Webhook] Error routing close from flat source:`, err));
+            }
+
             return res.status(200).json({ 
               status: "skipped", 
               reason: "No on-chain position to close - this may be a stale SL/TP signal" 
@@ -6962,6 +6990,21 @@ export async function registerRoutes(
               tradeExecuted: false,
               errorMessage: "Close signal processed - position was already flat"
             });
+
+            // Route close signal to subscribers even when source position was already closed
+            const botPubInfo = await storage.getPublishedBotByTradingBotId(botId);
+            if (botPubInfo && botPubInfo.isActive) {
+              console.log(`[User Webhook] Source position already flat but published - routing close to subscribers`);
+              routeSignalToSubscribers(botId, {
+                action: action as 'buy' | 'sell',
+                contracts,
+                positionSize,
+                price: signalPrice || '0',
+                isCloseSignal: true,
+                strategyPositionSize,
+              }).catch(err => console.error(`[User Webhook] Error routing close from already-closed source:`, err));
+            }
+
             return res.json({
               status: "success",
               type: "close",
@@ -7023,6 +7066,22 @@ export async function registerRoutes(
             
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
             
+            // SUBSCRIBER ROUTING: Route close signal to subscriber bots
+            console.log(`[User Webhook] ========== ROUTING SUBSCRIBER BOTS (CLOSE) ==========`);
+            console.log(`[User Webhook] Calling routeSignalToSubscribers for bot ${botId}`);
+            routeSignalToSubscribers(botId, {
+              action: action as 'buy' | 'sell',
+              contracts,
+              positionSize,
+              price: signalPrice || closeFillPrice.toString(),
+              isCloseSignal: true,
+              strategyPositionSize,
+            }).then(() => {
+              console.log(`[User Webhook] CLOSE routing completed successfully for bot ${botId}`);
+            }).catch(routingErr => {
+              console.error(`[User Webhook] CLOSE routing FAILED for bot ${botId}:`, routingErr);
+            });
+
             // Send position closed notification
             sendTradeNotification(walletAddress, {
               type: 'position_closed',
@@ -7048,7 +7107,6 @@ export async function registerRoutes(
                   console.log(`[User Webhook] Profit share distributed: $${result.amount.toFixed(4)}`);
                 } else if (!result.success && result.error) {
                   console.error(`[User Webhook] Profit share failed: ${result.error}`);
-                  // IOU is now created inside distributeCreatorProfitShare
                 }
               }).catch(err => console.error('[User Webhook] Profit share error:', err));
             }
@@ -7456,6 +7514,22 @@ export async function registerRoutes(
         botId: botId,
         txSignature: orderResult.txSignature || orderResult.signature,
         signalHash,
+      });
+
+      // SUBSCRIBER ROUTING: Route open signal to subscriber bots
+      console.log(`[User Webhook] ========== ROUTING SUBSCRIBER BOTS (OPEN) ==========`);
+      console.log(`[User Webhook] Calling routeSignalToSubscribers for bot ${botId}`);
+      routeSignalToSubscribers(botId, {
+        action: action as 'buy' | 'sell',
+        contracts,
+        positionSize,
+        price: signalPrice || userFillPrice.toString(),
+        isCloseSignal: false,
+        strategyPositionSize,
+      }).then(() => {
+        console.log(`[User Webhook] OPEN routing completed successfully for bot ${botId}`);
+      }).catch(routingErr => {
+        console.error(`[User Webhook] OPEN routing FAILED for bot ${botId}:`, routingErr);
       });
       } finally {
         // PHASE 6.2: Ensure agent key is cleaned up after execution
