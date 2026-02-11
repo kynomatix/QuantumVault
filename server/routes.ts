@@ -909,6 +909,51 @@ async function routeSignalToSubscribers(
             return 'closeSuccess';
           } else {
             console.error(`[Subscriber Routing] Close failed for subscriber bot ${subBot.id}:`, closeResult.error);
+            const closeErrorMsg = parseDriftError(closeResult.error);
+            
+            const failedCloseTrade = await storage.createBotTrade({
+              tradingBotId: subBot.id,
+              walletAddress: subBot.walletAddress,
+              market: subBot.market,
+              side: "CLOSE",
+              size: Math.abs(position.size).toFixed(8),
+              price: signal.price,
+              status: 'failed',
+              fee: '0',
+              errorMessage: closeErrorMsg,
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+              executionMethod: 'legacy',
+            });
+
+            if (isTransientError(closeErrorMsg)) {
+              try {
+                const closeSide = position.side === 'LONG' ? 'short' : 'long';
+                const retryJobId = await queueTradeRetry({
+                  botId: subBot.id,
+                  walletAddress: subBot.walletAddress,
+                  agentPrivateKeyEncrypted: subWallet.agentPrivateKeyEncrypted,
+                  agentPublicKey: subWallet.agentPublicKey!,
+                  market: subBot.market,
+                  side: 'close',
+                  size: Math.abs(position.size),
+                  subAccountId: subAccountId,
+                  reduceOnly: true,
+                  slippageBps: subCloseSlippageBps,
+                  priority: 'critical',
+                  lastError: closeErrorMsg,
+                  originalTradeId: failedCloseTrade.id,
+                  entryPrice: position.entryPrice || 0,
+                });
+                console.log(`[Subscriber Routing] Queued CRITICAL close retry for ${subBot.id}: job=${retryJobId}`);
+                await storage.updateBotTrade(failedCloseTrade.id, {
+                  status: 'pending',
+                  errorMessage: `Transient error - CRITICAL auto-retry queued (job: ${retryJobId}): ${closeErrorMsg}`,
+                });
+              } catch (retryErr) {
+                console.error(`[Subscriber Routing] Failed to queue close retry for ${subBot.id}:`, retryErr);
+              }
+            }
+            
             return 'closeFailed';
           }
         } else {
@@ -1171,8 +1216,9 @@ async function routeSignalToSubscribers(
             return 'tradeSuccess';
           } else {
             console.error(`[Subscriber Routing] Order failed for subscriber bot ${subBot.id}:`, orderResult.error);
+            const errorMsg = parseDriftError(orderResult.error);
             
-            await storage.createBotTrade({
+            const failedTrade = await storage.createBotTrade({
               tradingBotId: subBot.id,
               walletAddress: subBot.walletAddress,
               market: subBot.market,
@@ -1181,10 +1227,37 @@ async function routeSignalToSubscribers(
               price: oraclePrice.toFixed(6),
               status: 'failed',
               fee: '0',
-              errorMessage: parseDriftError(orderResult.error),
+              errorMessage: errorMsg,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
               executionMethod: 'legacy',
             });
+
+            if (isTransientError(errorMsg)) {
+              try {
+                const retryJobId = await queueTradeRetry({
+                  botId: subBot.id,
+                  walletAddress: subBot.walletAddress,
+                  agentPrivateKeyEncrypted: subWallet.agentPrivateKeyEncrypted,
+                  agentPublicKey: subWallet.agentPublicKey!,
+                  market: subBot.market,
+                  side,
+                  size: contractSize,
+                  subAccountId: subAccountId,
+                  reduceOnly: false,
+                  slippageBps: subSlippageBps,
+                  priority: 'normal',
+                  lastError: errorMsg,
+                  originalTradeId: failedTrade.id,
+                });
+                console.log(`[Subscriber Routing] Queued retry for failed subscriber trade ${subBot.id}: job=${retryJobId}`);
+                await storage.updateBotTrade(failedTrade.id, {
+                  status: 'pending',
+                  errorMessage: `Transient error - auto-retry queued (job: ${retryJobId}): ${errorMsg}`,
+                });
+              } catch (retryErr) {
+                console.error(`[Subscriber Routing] Failed to queue retry for ${subBot.id}:`, retryErr);
+              }
+            }
 
             sendTradeNotification(subWallet.address, {
               type: 'trade_failed',
@@ -1193,7 +1266,7 @@ async function routeSignalToSubscribers(
               side: side === 'long' ? 'LONG' : 'SHORT',
               size: contractSize * oraclePrice,
               price: oraclePrice,
-              error: parseDriftError(orderResult.error),
+              error: errorMsg,
             }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
             
             return 'tradeFailed';
