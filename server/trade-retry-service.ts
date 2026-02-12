@@ -376,12 +376,43 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         if (!position || Math.abs(position.baseAssetAmount) < 0.0001) {
           console.log(`[TradeRetry] Position already closed for ${job.market}, skipping retry`);
           
-          // Update original trade if exists
           if (job.originalTradeId) {
-            await storage.updateBotTrade(job.originalTradeId, {
-              status: 'executed',
-              errorMessage: 'Position was already closed (retry skipped)',
-            });
+            const originalTrade = await storage.getBotTrade(job.originalTradeId);
+            const originalError = originalTrade?.errorMessage || 'Unknown error';
+            const updateData: Record<string, any> = {
+              status: 'recovered',
+              errorMessage: null,
+              recoveredFromError: originalError,
+              retryAttempts: job.attempts,
+            };
+            if (job.entryPrice && job.entryPrice > 0) {
+              const exitPrice = originalTrade?.price ? parseFloat(originalTrade.price) : 0;
+              if (exitPrice > 0) {
+                const fee = originalTrade?.fee ? parseFloat(originalTrade.fee) : job.size * exitPrice * 0.00045;
+                const normalizedMarket = job.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
+                const recentTrades = await storage.getBotTrades(job.botId, 30);
+                const sortedTrades = recentTrades
+                  .filter(t => t.side !== 'CLOSE' && t.status !== 'failed' && t.id !== job.originalTradeId)
+                  .filter(t => t.market.toUpperCase().replace('-PERP', '').replace('PERP', '') === normalizedMarket)
+                  .sort((a, b) => new Date(b.executedAt).getTime() - new Date(a.executedAt).getTime());
+                const matchedOpen = sortedTrades.find(t => new Date(t.executedAt) < new Date(originalTrade!.executedAt));
+                
+                if (matchedOpen) {
+                  const wasLong = matchedOpen.side === 'LONG';
+                  let closePnl: number;
+                  if (wasLong) {
+                    closePnl = (exitPrice - job.entryPrice) * job.size - fee;
+                  } else {
+                    closePnl = (job.entryPrice - exitPrice) * job.size - fee;
+                  }
+                  updateData.pnl = closePnl.toFixed(2);
+                  console.log(`[TradeRetry] Recovered close PnL (already closed): ${matchedOpen.side} entry=$${job.entryPrice.toFixed(4)}, exit=$${exitPrice.toFixed(4)}, pnl=$${closePnl.toFixed(4)}`);
+                } else {
+                  console.log(`[TradeRetry] No matching open trade found for PnL calculation, skipping PnL update`);
+                }
+              }
+            }
+            await storage.updateBotTrade(job.originalTradeId, updateData);
           }
           
           await notifyRetryResult(job, true);
@@ -401,7 +432,10 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         job.market,
         job.subAccountId,
         undefined,
-        job.slippageBps
+        job.slippageBps,
+        undefined,
+        job.agentPublicKey || undefined,
+        actualCloseSide
       );
     } else {
       // For OPEN trades (long/short): Check on-chain if position already exists
@@ -494,8 +528,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
           const originalTrade = await storage.getBotTrade(job.originalTradeId);
           const originalError = originalTrade?.errorMessage || 'Unknown error';
           
-          // Mark as "recovered" instead of "executed" to show there was an issue that was fixed
-          await storage.updateBotTrade(job.originalTradeId, {
+          const recoveredUpdate: Record<string, any> = {
             status: 'recovered',
             price: fillPrice.toString(),
             fee: fee.toString(),
@@ -505,7 +538,19 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             retryAttempts: job.attempts,
             executionMethod: result.executionMethod || 'legacy',
             swiftOrderId: result.swiftOrderId || null,
-          });
+          };
+          if (job.side === 'close' && job.entryPrice && job.entryPrice > 0 && fillPrice > 0) {
+            const positionWasLong = actualCloseSide === 'short';
+            let closePnl: number;
+            if (positionWasLong) {
+              closePnl = (fillPrice - job.entryPrice) * job.size - fee;
+            } else {
+              closePnl = (job.entryPrice - fillPrice) * job.size - fee;
+            }
+            recoveredUpdate.pnl = closePnl.toFixed(2);
+            console.log(`[TradeRetry] Recovered close PnL: entry=$${job.entryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, size=${job.size}, fee=$${fee.toFixed(4)}, pnl=$${closePnl.toFixed(4)}`);
+          }
+          await storage.updateBotTrade(job.originalTradeId, recoveredUpdate);
           tradeId = job.originalTradeId;
           console.log(`[TradeRetry] Updated original trade ${tradeId} to RECOVERED via ${result.executionMethod || 'legacy'} (was: ${originalError.slice(0, 50)}...)`);
         } else {
@@ -956,6 +1001,60 @@ export async function startRetryWorker(): Promise<void> {
       console.error('[TradeRetry] Queue processing error:', err);
     });
   }, 2000);
+}
+
+export async function backfillRecoveredClosePnl(): Promise<void> {
+  try {
+    const walletAddresses = await storage.getWalletsWithTradingBots();
+    let backfilledCount = 0;
+    
+    for (const walletAddress of walletAddresses) {
+      const bots = await storage.getTradingBots(walletAddress);
+      
+      for (const bot of bots) {
+        const trades = await storage.getBotTrades(bot.id, 200);
+        const recoveredCloses = trades.filter(t => t.status === 'recovered' && t.side === 'CLOSE' && !t.pnl && t.price && parseFloat(t.price) > 0);
+        
+        for (const closeTrade of recoveredCloses) {
+          const closePrice = parseFloat(closeTrade.price);
+          const closeSize = parseFloat(closeTrade.size);
+          const closeFee = closeTrade.fee ? parseFloat(closeTrade.fee) : closeSize * closePrice * 0.00045;
+          const closeMarket = closeTrade.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
+          
+          const sortedOpens = trades
+            .filter(t => t.side !== 'CLOSE' && t.status !== 'failed')
+            .filter(t => t.market.toUpperCase().replace('-PERP', '').replace('PERP', '') === closeMarket)
+            .sort((a, b) => new Date(b.executedAt).getTime() - new Date(a.executedAt).getTime());
+          const matchedOpen = sortedOpens.find(t => new Date(t.executedAt) < new Date(closeTrade.executedAt));
+          
+          if (matchedOpen && matchedOpen.price && parseFloat(matchedOpen.price) > 0) {
+            const entryPrice = parseFloat(matchedOpen.price);
+            const wasLong = matchedOpen.side === 'LONG';
+            let pnl: number;
+            if (wasLong) {
+              pnl = (closePrice - entryPrice) * closeSize - closeFee;
+            } else {
+              pnl = (entryPrice - closePrice) * closeSize - closeFee;
+            }
+            
+            await storage.updateBotTrade(closeTrade.id, { pnl: pnl.toFixed(2) });
+            backfilledCount++;
+            console.log(`[PnL Backfill] ${bot.name} ${closeTrade.market}: ${matchedOpen.side} entry=$${entryPrice.toFixed(4)}, exit=$${closePrice.toFixed(4)}, size=${closeSize}, pnl=$${pnl.toFixed(2)}`);
+          } else {
+            console.log(`[PnL Backfill] ${bot.name} ${closeTrade.market}: no matching open trade found, skipping`);
+          }
+        }
+      }
+    }
+    
+    if (backfilledCount > 0) {
+      console.log(`[PnL Backfill] Backfilled PnL for ${backfilledCount} recovered close trades`);
+    } else {
+      console.log(`[PnL Backfill] No recovered closes missing PnL found`);
+    }
+  } catch (err) {
+    console.error('[PnL Backfill] Error:', err);
+  }
 }
 
 export function stopRetryWorker(): void {

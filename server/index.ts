@@ -6,7 +6,7 @@ import { storage } from "./storage";
 import { startPeriodicReconciliation } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
-import { startRetryWorker } from "./trade-retry-service";
+import { startRetryWorker, backfillRecoveredClosePnl } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 
@@ -175,6 +175,9 @@ app.use((req, res, next) => {
       
       // Start trade retry worker for rate-limited trade recovery
       startRetryWorker();
+      
+      // One-time backfill: fix recovered close trades missing PnL
+      backfillRecoveredClosePnl();
       
       // Start profit share retry job for IOU failover system
       startProfitShareRetryJob();
