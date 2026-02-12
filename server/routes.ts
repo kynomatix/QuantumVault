@@ -1090,7 +1090,9 @@ async function routeSignalToSubscribers(
             contractSize,
             subAccountId,
             false,
-            subSlippageBps
+            subSlippageBps,
+            undefined,
+            subWallet.agentPublicKey || undefined
           );
 
           if (orderResult.success) {
@@ -4626,7 +4628,10 @@ export async function registerRoutes(
               closeSide,
               closeSize,
               pauseSubAccountId,
-              true // reduceOnly
+              true, // reduceOnly
+              50,
+              undefined,
+              wallet.agentPublicKey || undefined
             );
             
             if (result.success && result.txSignature) {

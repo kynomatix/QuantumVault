@@ -872,11 +872,11 @@ export async function startRetryWorker(): Promise<void> {
       
       const now = Date.now();
       const MAX_JOB_AGE_MS = 60 * 60 * 1000; // 1 hour TTL for OPEN retry jobs
-      const MAX_CLOSE_JOB_AGE_MS = 5 * 60 * 1000; // 5 minute TTL for CLOSE retry jobs (stale closes are useless after market moves)
+      const MAX_CLOSE_JOB_AGE_MS = 30 * 60 * 1000; // 30 minute TTL for CLOSE retry jobs (subscriber copies must still close even if delayed)
       
       for (const dbJob of pendingJobs) {
         // CLEANUP: Check if job is too old (stale)
-        // CLOSE orders get a much shorter TTL - after 5 min the market has moved and retrying is pointless
+        // CLOSE orders get a shorter TTL but 30 min allows time for subscriber copy trades to complete retries
         const isCloseJob = dbJob.side === 'close';
         const maxAge = isCloseJob ? MAX_CLOSE_JOB_AGE_MS : MAX_JOB_AGE_MS;
         const jobAge = now - new Date(dbJob.createdAt).getTime();
