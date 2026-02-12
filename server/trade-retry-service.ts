@@ -36,6 +36,8 @@ export interface RetryJob {
 
 const retryQueue: Map<string, RetryJob> = new Map();
 let workerInterval: NodeJS.Timeout | null = null;
+let isProcessing = false;
+const inFlightJobs: Set<string> = new Set();
 
 // Callback for routing signals to subscribers after successful retry
 // This allows routes.ts to register the routing function without circular dependencies
@@ -802,41 +804,55 @@ async function processRetryJob(job: RetryJob): Promise<void> {
 }
 
 async function processQueue(): Promise<void> {
-  const now = Date.now();
-  const readyJobs: RetryJob[] = [];
-  
-  const allJobs = Array.from(retryQueue.values());
-  for (const job of allJobs) {
-    if (job.nextRetryAt <= now) {
-      readyJobs.push(job);
-    }
+  if (isProcessing) {
+    return;
   }
+  isProcessing = true;
   
-  readyJobs.sort((a, b) => {
-    if (a.priority === 'critical' && b.priority !== 'critical') return -1;
-    if (b.priority === 'critical' && a.priority !== 'critical') return 1;
-    return a.nextRetryAt - b.nextRetryAt;
-  });
-  
-  // Limit concurrent processing to prevent RPC bunching
-  // Process max 2 jobs per cycle with staggered delays
-  const maxJobsPerCycle = 2;
-  const jobsToProcess = readyJobs.slice(0, maxJobsPerCycle);
-  
-  for (let i = 0; i < jobsToProcess.length; i++) {
-    const job = jobsToProcess[i];
+  try {
+    const now = Date.now();
+    const readyJobs: RetryJob[] = [];
     
-    // Add 3-second delay between jobs to prevent RPC rate limiting
-    if (i > 0) {
-      await new Promise(r => setTimeout(r, 3000));
+    const allJobs = Array.from(retryQueue.values());
+    for (const job of allJobs) {
+      if (job.nextRetryAt <= now && !inFlightJobs.has(job.id)) {
+        readyJobs.push(job);
+      }
     }
     
-    await processRetryJob(job);
-  }
-  
-  // If more jobs are waiting, they'll be picked up in the next cycle
-  if (readyJobs.length > maxJobsPerCycle) {
-    console.log(`[TradeRetry] ${readyJobs.length - maxJobsPerCycle} more jobs waiting, will process next cycle`);
+    readyJobs.sort((a, b) => {
+      if (a.priority === 'critical' && b.priority !== 'critical') return -1;
+      if (b.priority === 'critical' && a.priority !== 'critical') return 1;
+      return a.nextRetryAt - b.nextRetryAt;
+    });
+    
+    const maxJobsPerCycle = 2;
+    const jobsToProcess = readyJobs.slice(0, maxJobsPerCycle);
+    
+    for (let i = 0; i < jobsToProcess.length; i++) {
+      const job = jobsToProcess[i];
+      
+      if (i > 0) {
+        await new Promise(r => setTimeout(r, 3000));
+      }
+      
+      inFlightJobs.add(job.id);
+      processRetryJob(job).catch(err => {
+        console.error(`[TradeRetry] Job ${job.id} unhandled error: ${err?.message?.slice(0, 150) || err}`);
+      }).finally(() => {
+        inFlightJobs.delete(job.id);
+      });
+    }
+    
+    if (readyJobs.length > maxJobsPerCycle) {
+      console.log(`[TradeRetry] ${readyJobs.length - maxJobsPerCycle} more jobs waiting, will process next cycle`);
+    }
+    
+    if (inFlightJobs.size > 0) {
+      console.log(`[TradeRetry] ${inFlightJobs.size} job(s) currently in-flight`);
+    }
+  } finally {
+    isProcessing = false;
   }
 }
 
@@ -950,7 +966,7 @@ export function stopRetryWorker(): void {
   }
 }
 
-export function getQueueStatus(): { pending: number; jobs: Array<{ id: string; market: string; side: string; priority: string; attempts: number; nextRetryIn: number }> } {
+export function getQueueStatus(): { pending: number; inFlight: number; jobs: Array<{ id: string; market: string; side: string; priority: string; attempts: number; nextRetryIn: number; inFlight: boolean }> } {
   const jobs = Array.from(retryQueue.values()).map(job => ({
     id: job.id,
     market: job.market,
@@ -958,10 +974,12 @@ export function getQueueStatus(): { pending: number; jobs: Array<{ id: string; m
     priority: job.priority,
     attempts: job.attempts,
     nextRetryIn: Math.max(0, Math.round((job.nextRetryAt - Date.now()) / 1000)),
+    inFlight: inFlightJobs.has(job.id),
   }));
   
   return {
     pending: jobs.length,
+    inFlight: inFlightJobs.size,
     jobs,
   };
 }
