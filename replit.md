@@ -47,7 +47,7 @@ Preferred communication style: Simple, everyday language.
 -   **User Interface**: Single Page Architecture with tab-based navigation for real-time data (running positions, PnL, fees) and account health metrics using SDK `decodeUser`.
 -   **Reliability**: Webhook deduplication, automatic trade retry with exponential backoff and critical priority for CLOSE orders, on-chain verification for duplicate closes, and auto top-up on retry.
 -   **Equity Event Tracking**: Monitors deposits and withdrawals for transaction history.
--   **Marketplace**: Users can publish signal bots and subscribe to others' trading signals, with proportional trade sizing and PnL snapshots.
+-   **Marketplace**: Users can publish signal bots and subscribe to others' trading signals, with proportional trade sizing and PnL snapshots. Subscriber trades execute sequentially with 2s stagger to prevent RPC contention (see `SUBSCRIBER_DIAGNOSTICS.md`).
 -   **Creator Profit Sharing**: Signal bot creators earn a percentage of subscriber profits on profitable trade closes via immediate on-chain USDC transfers with an IOU failover system.
 -   **Referral System**: Unique 6-character alphanumeric referral codes for each user.
 

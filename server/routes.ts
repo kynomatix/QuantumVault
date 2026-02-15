@@ -1282,12 +1282,24 @@ async function routeSignalToSubscribers(
       }
     };
 
-    // Execute all subscriber processing in parallel for maximum speed
+    const SUBSCRIBER_STAGGER_MS = 2000;
     const startTime = Date.now();
-    const results = await Promise.all(subscriberBots.map(subBot => processSubscriber(subBot)));
+    const results: SubscriberResult[] = [];
+
+    console.log(`[Subscriber Routing] Processing ${subscriberBots.length} subscribers SEQUENTIALLY with ${SUBSCRIBER_STAGGER_MS}ms stagger to prevent RPC contention`);
+
+    for (let i = 0; i < subscriberBots.length; i++) {
+      const subBot = subscriberBots[i];
+      if (i > 0) {
+        console.log(`[Subscriber Routing] Stagger delay ${SUBSCRIBER_STAGGER_MS}ms before subscriber ${i + 1}/${subscriberBots.length} (${subBot.id})`);
+        await new Promise(resolve => setTimeout(resolve, SUBSCRIBER_STAGGER_MS));
+      }
+      const result = await processSubscriber(subBot);
+      results.push(result);
+    }
+
     const elapsed = Date.now() - startTime;
 
-    // Aggregate results from all subscribers (thread-safe reduction)
     const outcomes = results.reduce((acc, result) => {
       if (result === 'skippedInactive') acc.skippedInactive++;
       else if (result === 'skippedFlat') acc.skippedFlat++;
@@ -1299,10 +1311,9 @@ async function routeSignalToSubscribers(
       return acc;
     }, { skippedInactive: 0, skippedFlat: 0, tradeSuccess: 0, tradeFailed: 0, closeSuccess: 0, closeFailed: 0, errors: 0 });
 
-    // Summary log for debugging
     const total = subscriberBots.length;
     const processed = outcomes.tradeSuccess + outcomes.tradeFailed + outcomes.closeSuccess + outcomes.closeFailed;
-    console.log(`[Subscriber Routing] SUMMARY for source ${sourceBotId}: ${total} subscribers processed in ${elapsed}ms (PARALLEL), ${outcomes.skippedInactive} skipped (inactive), ${outcomes.skippedFlat} skipped (flat), ${outcomes.tradeSuccess} trades OK, ${outcomes.tradeFailed} trades FAILED, ${outcomes.closeSuccess} closes OK, ${outcomes.closeFailed} closes FAILED, ${outcomes.errors} errors`);
+    console.log(`[Subscriber Routing] SUMMARY for source ${sourceBotId}: ${total} subscribers processed in ${elapsed}ms (SEQUENTIAL, ${SUBSCRIBER_STAGGER_MS}ms stagger), ${outcomes.skippedInactive} skipped (inactive), ${outcomes.skippedFlat} skipped (flat), ${outcomes.tradeSuccess} trades OK, ${outcomes.tradeFailed} trades FAILED, ${outcomes.closeSuccess} closes OK, ${outcomes.closeFailed} closes FAILED, ${outcomes.errors} errors`);
 
       // Store routing audit trail in webhook log for visibility
       try {
