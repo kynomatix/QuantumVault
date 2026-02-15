@@ -257,6 +257,66 @@ Current Protection Status:
   Last action: 5 min ago
 ```
 
+## Strategy 2: Liquidation Prevention Close (Alternative to Elastic Collateral)
+
+### Concept
+Instead of depositing more collateral to keep a position alive, this strategy **closes the position** when account health drops below a user-defined threshold. The user takes a controlled loss instead of risking full liquidation.
+
+**Key difference from Elastic Collateral:**
+- Elastic Collateral = keep position open by adding funds (good for HTF swing trades that need breathing room)
+- Liquidation Prevention Close = cut losses early (good for users who'd rather exit at -30% than get liquidated at -100%)
+
+**These two strategies are mutually exclusive** — enabling one disables the other. It doesn't make sense to simultaneously add funds to keep a position alive AND close the position to prevent liquidation.
+
+### User-Facing Settings (per bot)
+
+```typescript
+interface LiquidationPreventionCloseSettings {
+  enabled: boolean;
+  healthThreshold: number;     // Close when account health drops below this % (e.g., 20%)
+  closeMethod: 'market';       // Always market close for speed
+}
+```
+
+### Default Values
+- `healthThreshold`: 20% (close before Drift's ~3.125% maintenance margin triggers liquidation)
+- `closeMethod`: market (no limit orders — speed matters here)
+
+### How It Works
+1. Reconciliation service already fetches account data every 60s
+2. During reconciliation, check account health for bots with prevention close enabled
+3. If health < threshold → trigger `closePerpPosition()` for that bot
+4. Record the close as a special trade type so the UI can show "Closed by liquidation prevention"
+5. Send Telegram notification: "Position closed to prevent liquidation (health was X%)"
+
+### UI Placement
+Located in the bot management drawer, in a collapsible section below Auto Top-Up:
+
+```
+▼ Risk Management
+  ○ Auto Top-Up (adds funds to keep position open)
+  ○ Liquidation Prevention Close (closes position to prevent liquidation)
+  
+  [If Prevention Close selected:]
+  Close when health drops below ___% [20]
+```
+
+Only one can be active at a time — radio button selection.
+
+### Integration Points
+- Same as Elastic Collateral: hooks into reconciliation service (0 new RPC calls)
+- Uses existing `closePerpPosition()` for execution
+- Uses existing `sendTradeNotification()` for alerts
+- Records in `bot_trades` table with a flag indicating automated close reason
+
+### Edge Cases
+1. **Close fails due to RPC issues**: Queue for critical retry (same as manual close retry)
+2. **Position already being liquidated**: Check position exists before attempting close
+3. **Multiple bots on same wallet**: Each bot's health is independent (separate subaccounts)
+4. **Health oscillates around threshold**: Add cooldown to prevent rapid open/close cycles
+
+---
+
 ## Risk Considerations
 
 ### Guardrails
