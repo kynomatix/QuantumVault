@@ -31,9 +31,34 @@ Every routing batch produces a structured JSON audit log:
 [Subscriber Routing] AUDIT: {"publishedBotId":"...","publishedBotName":"...","subscriberCount":2,"results":{"success":1,"failed":0,"skipped":1,"errors":0},"timestamp":"..."}
 ```
 
+### Execution Mode: Sequential with Stagger
+
+Subscriber trades are processed **sequentially with a 2-second stagger** between each trade. This prevents RPC contention that caused mass failures when trades fired in parallel.
+
+```
+Signal arrives → Subscriber 1 executes → 2s wait → Subscriber 2 executes → 2s wait → ...
+```
+
+With 5 subscribers, total routing takes ~8-10s. This is faster in practice than parallel execution, which caused timeout cascades lasting 79+ minutes.
+
 ---
 
 ## Previous Issues (Fixed)
+
+### Issue 4: Parallel Execution Caused RPC Contention (Fixed Feb 15)
+All subscriber trades fired simultaneously via `Promise.all`, causing RPC contention. Source trades (BUH wallet) ran at 100% success while copy trades (F7H3/6ULL) dropped to 50-65%.
+
+**Root cause:** When multiple subscriber bots receive the same signal, `Promise.all` fired 3-5 trade executions at once. These competed with the source bot's post-trade sync AND with each other for RPC bandwidth. The 20-second subprocess timeout was insufficient under this load, causing cascading `TIMEOUT_SUBPROCESS` errors.
+
+**Production evidence (Feb 15, 12h window):**
+- Source bots (BUH wallet): 21/21 succeeded (100%)
+- Copy bots (F7H3 + 6ULL): 9 executed, 6 recovered, 8 failed (65%)
+- Copy bots using Swift: mostly succeeded (SUI, PENGU)
+- Copy bots forced to legacy: mostly failed (FARTCOIN below $25 Swift minimum, RENDER on 6ULL)
+
+**Fix:** Replaced `Promise.all(subscriberBots.map(...))` with sequential `for` loop and 2s stagger delay between each subscriber trade. Sequential is actually faster in practice because it avoids the timeout/retry cascade.
+
+**Note on previous queue system:** An earlier queue-based system was implemented but removed because wrapping it in a container/abstraction caused outright trade failures (trades failing immediately instead of just being slow). The parallel `Promise.all` approach replaced it, which worked when RPC capacity was available but broke under concurrent load.
 
 ### Issue 3: Source Bot Pause Blocked All Subscribers (Fixed Feb 7)
 When a source bot was paused, the webhook handler returned "Bot is paused" at line 5155 before routing logic ever ran. All subscribers were blocked from receiving signals.
