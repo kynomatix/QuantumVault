@@ -52,7 +52,10 @@ import {
   BarChart3,
   BookOpen,
   Info,
-  DollarSign
+  DollarSign,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -193,6 +196,21 @@ export default function AppPage() {
   const [sharePopupBot, setSharePopupBot] = useState<{ id: string; tradingBotId: string; name: string; market: string } | null>(null);
   const [copiedField, setCopiedField] = useState<'botId' | 'shareLink' | null>(null);
   const [botSearchQuery, setBotSearchQuery] = useState('');
+  const [botSortBy, setBotSortBy] = useState<'added' | 'pnl' | 'name'>('added');
+  const [botSortDir, setBotSortDir] = useState<'asc' | 'desc'>('desc');
+  const [botSortMenuOpen, setBotSortMenuOpen] = useState(false);
+  const botSortRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!botSortMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (botSortRef.current && !botSortRef.current.contains(e.target as Node)) {
+        setBotSortMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [botSortMenuOpen]);
 
   // Fetch data using React Query hooks
   const { data: portfolioData } = usePortfolio();
@@ -1726,10 +1744,56 @@ export default function AppPage() {
                   <div className="gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
                       <h2 className="font-display font-semibold">Active Bots</h2>
-                      <Button variant="outline" size="sm" onClick={() => setActiveNav('bots')} data-testid="button-add-bot">
-                        <Plus className="w-4 h-4 mr-1" />
-                        Add Bot
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        <div className="relative" ref={botSortRef}>
+                          <button
+                            onClick={() => setBotSortMenuOpen(!botSortMenuOpen)}
+                            className="p-1.5 rounded-md hover:bg-muted/50 text-muted-foreground hover:text-white transition-colors"
+                            data-testid="button-sort-bots"
+                            title="Sort bots"
+                          >
+                            <ArrowUpDown className="w-4 h-4" />
+                          </button>
+                          {botSortMenuOpen && (
+                            <div className="absolute right-0 top-full mt-1 z-50 bg-background border border-border rounded-lg shadow-lg py-1 min-w-[160px]"
+                              onMouseLeave={() => setBotSortMenuOpen(false)}
+                            >
+                              <p className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Sort by</p>
+                              {([['added', 'Date Added'], ['pnl', 'P&L'], ['name', 'Name']] as const).map(([key, label]) => (
+                                <button
+                                  key={key}
+                                  onClick={() => { setBotSortBy(key); setBotSortMenuOpen(false); }}
+                                  className={`w-full text-left px-3 py-1.5 text-xs hover:bg-muted/50 transition-colors flex items-center justify-between ${botSortBy === key ? 'text-primary' : 'text-foreground'}`}
+                                  data-testid={`sort-option-${key}`}
+                                >
+                                  {label}
+                                  {botSortBy === key && <Check className="w-3 h-3" />}
+                                </button>
+                              ))}
+                              <div className="border-t border-border my-1" />
+                              <p className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Order</p>
+                              {([['desc', 'Descending'], ['asc', 'Ascending']] as const).map(([dir, label]) => (
+                                <button
+                                  key={dir}
+                                  onClick={() => { setBotSortDir(dir); setBotSortMenuOpen(false); }}
+                                  className={`w-full text-left px-3 py-1.5 text-xs hover:bg-muted/50 transition-colors flex items-center justify-between ${botSortDir === dir ? 'text-primary' : 'text-foreground'}`}
+                                  data-testid={`sort-dir-${dir}`}
+                                >
+                                  <span className="flex items-center gap-1.5">
+                                    {dir === 'desc' ? <ArrowDown className="w-3 h-3" /> : <ArrowUp className="w-3 h-3" />}
+                                    {label}
+                                  </span>
+                                  {botSortDir === dir && <Check className="w-3 h-3" />}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <Button variant="outline" size="sm" onClick={() => setActiveNav('bots')} data-testid="button-add-bot">
+                          <Plus className="w-4 h-4 mr-1" />
+                          Add Bot
+                        </Button>
+                      </div>
                     </div>
                     {botsData && botsData.length >= 7 && (
                       <div className="relative mb-3">
@@ -1759,7 +1823,18 @@ export default function AppPage() {
                             bot.name.toLowerCase().includes(botSearchQuery.toLowerCase()) ||
                             bot.market.toLowerCase().includes(botSearchQuery.toLowerCase())
                           );
-                          if (filteredBots.length === 0 && botSearchQuery) {
+                          const sortedBots = [...filteredBots].sort((a: any, b: any) => {
+                            let cmp = 0;
+                            if (botSortBy === 'pnl') {
+                              cmp = ((a.netPnl ?? 0) - (b.netPnl ?? 0));
+                            } else if (botSortBy === 'name') {
+                              cmp = a.name.localeCompare(b.name);
+                            } else {
+                              cmp = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+                            }
+                            return botSortDir === 'desc' ? -cmp : cmp;
+                          });
+                          if (sortedBots.length === 0 && botSearchQuery) {
                             return (
                               <div className="text-center py-6 text-muted-foreground">
                                 <Search className="w-6 h-6 mx-auto mb-2 opacity-50" />
@@ -1767,7 +1842,7 @@ export default function AppPage() {
                               </div>
                             );
                           }
-                          return filteredBots.map((bot: TradingBot) => (
+                          return sortedBots.map((bot: TradingBot) => (
                           <div 
                             key={bot.id} 
                             className="p-3 rounded-xl bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer" 
