@@ -817,3 +817,53 @@ If we can't modify reconciliation:
 | Rate limiting | Low | Medium - depends on implementation choice |
 | Complexity | Low (piggyback) | Medium (requires reconciliation refactor) |
 | Time to implement | 2-3 days | 4-5 days |
+
+---
+
+## Feb 15 2026 — Implementation Feasibility Analysis
+
+**Status: DEFERRED — will implement in a future session.**
+
+### Architecture Review Findings
+
+Reviewed the entire codebase to assess what already exists and what needs to be built. **Difficulty: Medium-Low.** Most of the plumbing is already in place.
+
+### Existing Infrastructure That Can Be Reused (No New RPC Calls)
+
+| What We Need | Already Exists | Where | RPC Cost |
+|-------------|---------------|-------|----------|
+| Account health data | `getDriftAccountInfo()` returns `totalCollateral`, `marginUsed`, `freeCollateral` | `server/drift-service.ts` | Already called |
+| Health % calculation | Simple math: `(totalCollateral - marginUsed) / totalCollateral * 100` | New logic, existing data | 0 |
+| Batch account fetch | `getBatchDriftAccountInfo()` — single `getMultipleAccountsInfo` for all subaccounts | `server/drift-service.ts` | 1 call per wallet (not per bot) |
+| Position close | `closePerpPosition()` — Swift-first with legacy fallback | `server/drift-service.ts` | Already battle-tested |
+| Critical close retry | Trade retry service with exponential backoff for CLOSE orders | `server/trade-retry-service.ts` | Existing |
+| Deposit function | `executeAgentDriftDeposit()` | `server/drift-service.ts` | 1 call when triggered |
+| Withdraw function | `executeAgentDriftWithdraw()` | `server/drift-service.ts` | 1 call when triggered |
+| Agent wallet balance check | `getAgentUsdcBalance()` | `server/drift-service.ts` | Existing |
+| 60s monitoring loop | Reconciliation service loops all active bots | `server/reconciliation-service.ts` | Already running |
+| Telegram notifications | `sendTradeNotification()` with multiple event types | `server/routes.ts` | 0 |
+| Event tracking | `equity_events` table accepts any event type string | `shared/schema.ts` | 0 |
+| Auto top-up pattern | `computeTradeSizingAndTopUp()` — deposit + balance check pattern | `server/routes.ts` | Reference implementation |
+
+### What Needs to Be Built
+
+| Component | Effort | Details |
+|-----------|--------|---------|
+| Schema columns on `trading_bots` | Small | ~5-8 new columns: risk mode enum, health threshold, elastic collateral settings |
+| Reconciliation loop extension | Medium | Add `getBatchDriftAccountInfo()` call + health check logic inside existing 60s loop |
+| Mutual exclusivity logic | Small | Enabling one risk mode disables the other (radio button) |
+| Frontend UI | Medium | Collapsible "Risk Management" section below Auto Top-Up in bot drawer, radio buttons for mode selection |
+| API route | Small | Extend existing bot update PATCH route, or add one new endpoint |
+
+### RPC Cost Impact
+
+- **Monitoring**: +1 batched RPC call per wallet per 60s reconciliation cycle (using `getBatchDriftAccountInfo`)
+- **Liquidation Prevention Close**: Uses existing `closePerpPosition()` — no new RPC pattern
+- **Elastic Collateral deposit/withdraw**: Occasional calls only when triggered
+- **Total**: ~1-2 extra calls/minute per active wallet. Negligible.
+
+### Key Insight: Reconciliation Gap
+
+Current reconciliation only calls `getPerpPositions()` (position size sync). It does NOT fetch account health. Adding `getBatchDriftAccountInfo()` to the reconciliation loop gives us health data for free across all bots in one RPC call per wallet. This is the main code change needed.
+
+### Estimated Implementation Time: 1-2 focused sessions
