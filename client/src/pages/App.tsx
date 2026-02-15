@@ -196,7 +196,7 @@ export default function AppPage() {
   const [sharePopupBot, setSharePopupBot] = useState<{ id: string; tradingBotId: string; name: string; market: string } | null>(null);
   const [copiedField, setCopiedField] = useState<'botId' | 'shareLink' | null>(null);
   const [botSearchQuery, setBotSearchQuery] = useState('');
-  const [botSortBy, setBotSortBy] = useState<'added' | 'pnl' | 'name'>('added');
+  const [botSortBy, setBotSortBy] = useState<'added' | 'pnl' | 'pnlPct' | 'name'>('added');
   const [botSortDir, setBotSortDir] = useState<'asc' | 'desc'>('desc');
   const [botSortMenuOpen, setBotSortMenuOpen] = useState(false);
   const botSortRef = useRef<HTMLDivElement>(null);
@@ -1759,7 +1759,7 @@ export default function AppPage() {
                               onMouseLeave={() => setBotSortMenuOpen(false)}
                             >
                               <p className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Sort by</p>
-                              {([['added', 'Date Added'], ['pnl', 'P&L'], ['name', 'Name']] as const).map(([key, label]) => (
+                              {([['added', 'Date Added'], ['pnl', 'P&L ($)'], ['pnlPct', 'P&L (%)'], ['name', 'Name']] as const).map(([key, label]) => (
                                 <button
                                   key={key}
                                   onClick={() => { setBotSortBy(key); setBotSortMenuOpen(false); }}
@@ -1827,6 +1827,8 @@ export default function AppPage() {
                             let cmp = 0;
                             if (botSortBy === 'pnl') {
                               cmp = ((a.netPnl ?? 0) - (b.netPnl ?? 0));
+                            } else if (botSortBy === 'pnlPct') {
+                              cmp = ((a.netPnlPercent ?? 0) - (b.netPnlPercent ?? 0));
                             } else if (botSortBy === 'name') {
                               cmp = a.name.localeCompare(b.name);
                             } else {
