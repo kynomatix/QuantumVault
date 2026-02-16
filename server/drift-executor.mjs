@@ -1291,7 +1291,9 @@ async function executeTrade(command) {
       if (subAccountId > 0) {
         console.error(`[Executor] Subaccount ${subAccountId} requires direct RPC fetch (SDK bug workaround)`);
         try {
-          const userAccountPubKey = await driftClient.getUserAccountPublicKey(subAccountId);
+          // Use local PDA derivation instead of driftClient.getUserAccountPublicKey()
+          // because with minimal subscription, the SDK may not have loaded the user yet
+          const userAccountPubKey = getUserAccountPDA(driftClient.wallet.publicKey, subAccountId);
           console.error(`[Executor] User PDA for subaccount ${subAccountId}: ${userAccountPubKey.toBase58().slice(0,8)}...`);
           
           // Fetch user account data using the existing connection (to avoid rate limits)
@@ -1317,8 +1319,14 @@ async function executeTrade(command) {
           if (accountInfo && accountInfo.data) {
             console.error(`[Executor] Direct RPC fetch succeeded: ${accountInfo.data.length} bytes`);
             
-            // Get the User object - it should exist after subscribe
-            const user = driftClient.getUser(subAccountId) || driftClient.users.get(subAccountId);
+            // Get the User object - may not exist with minimal subscription
+            let user = null;
+            try {
+              user = driftClient.getUser(subAccountId);
+            } catch (_) {
+              // getUser throws if user not loaded - try internal map
+              user = driftClient.users?.get(subAccountId) || null;
+            }
             if (user && user.accountSubscriber) {
               // Try to decode and cache the user account
               try {
@@ -1530,7 +1538,10 @@ async function closePosition(command) {
   
   console.error(`[Executor] Closing position for ${market} (index ${marketIndex}) subaccount ${subAccountId}`);
   
-  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId, marketIndex);
+  // Close uses full subscription (no marketIndex) to ensure SDK fully loads user accounts
+  // for non-zero subaccounts. Minimal subscription causes getUser() to fail because
+  // subscribe() finishes before BulkAccountLoader loads user account data.
+  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId);
   
   try {
     // Add subscribe timeout matching executeTrade() - prevents hanging on SDK subscribe
