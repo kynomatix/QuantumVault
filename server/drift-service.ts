@@ -19,8 +19,8 @@ import { getMarketPrice } from './drift-price';
 // ============================================================================
 export const TradeErrors = {
   // Timeout errors (operation took too long)
-  TIMEOUT_TRADE: 'TIMEOUT_TRADE: Trade execution timed out after 20 seconds',
-  TIMEOUT_CLOSE: 'TIMEOUT_CLOSE: Close execution timed out after 30 seconds',
+  TIMEOUT_TRADE: 'TIMEOUT_TRADE: Trade execution timed out after 45 seconds',
+  TIMEOUT_CLOSE: 'TIMEOUT_CLOSE: Close execution timed out after 60 seconds',
   TIMEOUT_SUBPROCESS: 'TIMEOUT_SUBPROCESS: Subprocess operation timed out',
   
   // RPC errors (blockchain network issues)
@@ -3236,10 +3236,12 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     child.stdin.write(JSON.stringify(command));
     child.stdin.end();
     
-    // CLOSE orders get 30s timeout (more sequential work: subscribe + position check + referrer + order)
-    // OPEN orders keep 20s timeout (less pre-trade work needed)
+    // CLOSE orders get 60s timeout (subscribe + position check + referrer + order + confirmation)
+    // OPEN orders get 45s timeout (subscribe + order + confirmation)
+    // Previous 20s/30s timeouts were too tight - subprocess cold-start (module loading + 
+    // SDK subscribe + RPC connection) alone takes 5-15s, leaving insufficient time for execution
     const isCloseAction = command.action === 'close';
-    const timeoutMs = isCloseAction ? 30000 : 20000;
+    const timeoutMs = isCloseAction ? 60000 : 45000;
     setTimeout(() => {
       child.kill();
       console.log(`[Drift] Subprocess timed out after ${timeoutMs / 1000}s (${command.action || 'trade'}) - will trigger auto-retry`);
