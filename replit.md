@@ -6,6 +6,9 @@ QuantumVault is a Solana-based bot trading platform for deploying and managing p
 ## User Preferences
 Preferred communication style: Simple, everyday language.
 
+### CRITICAL: Do NOT Attempt These Fixes
+-   **NEVER use minimal/reduced DriftClient subscription for the close path in drift-executor.mjs.** On Feb 16 2026, passing `marketIndex` to `createDriftClient()` for closes caused "DriftClient has no user for user id X" errors in production, breaking all position closes on non-zero subaccounts. The close path MUST use full subscription (no `requiredPerpMarketIndex`) so the SDK has time to load user account data via BulkAccountLoader. The open/trade path can use minimal subscription with proper fallbacks, but closes cannot.
+
 ### Public URL Policy
 -   **Production URL**: https://myquantumvault.com/ — ALWAYS use this for any external-facing references, submissions, documentation, or communications.
 -   **NEVER** share or broadcast the Replit URL externally. The Replit URL is internal only.
