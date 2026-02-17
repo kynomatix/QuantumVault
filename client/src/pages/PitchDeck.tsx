@@ -977,7 +977,7 @@ function TeamSlide() {
             for multiple crypto projects.
           </p>
           <div className="flex justify-center gap-3">
-            <a href="https://twitter.com/kryptolytix" target="_blank" rel="noopener noreferrer" 
+            <a href="https://x.com/myQuantumVault_" target="_blank" rel="noopener noreferrer" 
                className="p-3 rounded-xl bg-white/5 hover:bg-white/10 transition-colors"
                data-testid="link-team-twitter">
               <Twitter className="w-5 h-5" />
@@ -1095,11 +1095,11 @@ function ClosingSlide() {
       </motion.div>
       
       <motion.div variants={fadeIn} className="flex flex-wrap gap-6 justify-center text-sm text-muted-foreground relative z-10">
-        <a href="https://twitter.com/kryptolytix" target="_blank" rel="noopener noreferrer" 
+        <a href="https://x.com/myQuantumVault_" target="_blank" rel="noopener noreferrer" 
            className="flex items-center gap-2 hover:text-primary transition-colors"
            data-testid="link-closing-twitter">
           <Twitter className="w-4 h-4" />
-          @kryptolytix
+          @myQuantumVault_
         </a>
         <a href="mailto:invest@myquantumvault.com" 
            className="flex items-center gap-2 hover:text-primary transition-colors"
