@@ -977,7 +977,7 @@ function TeamSlide() {
             for multiple crypto projects.
           </p>
           <div className="flex justify-center gap-3">
-            <a href="https://x.com/myQuantumVault_" target="_blank" rel="noopener noreferrer" 
+            <a href="https://x.com/kryptolytix" target="_blank" rel="noopener noreferrer" 
                className="p-3 rounded-xl bg-white/5 hover:bg-white/10 transition-colors"
                data-testid="link-team-twitter">
               <Twitter className="w-5 h-5" />
