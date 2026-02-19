@@ -1095,11 +1095,11 @@ function ClosingSlide() {
       </motion.div>
       
       <motion.div variants={fadeIn} className="flex flex-wrap gap-6 justify-center text-sm text-muted-foreground relative z-10">
-        <a href="https://x.com/myQuantumVault_" target="_blank" rel="noopener noreferrer" 
+        <a href="https://x.com/kryptolytix" target="_blank" rel="noopener noreferrer" 
            className="flex items-center gap-2 hover:text-primary transition-colors"
            data-testid="link-closing-twitter">
           <Twitter className="w-4 h-4" />
-          @myQuantumVault_
+          @kryptolytix
         </a>
         <a href="mailto:invest@myquantumvault.com" 
            className="flex items-center gap-2 hover:text-primary transition-colors"
