@@ -115,7 +115,7 @@ type MarketplaceSortBy = 'pnl7d' | 'pnl30d' | 'pnl90d' | 'pnlAllTime' | 'subscri
 
 export default function AppPage() {
   const [, navigate] = useLocation();
-  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected, referralCode: walletReferralCode } = useWallet();
+  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected, referralCode: walletReferralCode, authenticateWallet } = useWallet();
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
   const { toast } = useToast();
@@ -760,6 +760,27 @@ export default function AppPage() {
             } else if (!data.isExistingUser) {
               // New user with some SOL but still needs more - show welcome popup
               setWelcomePopupOpen(true);
+            }
+          }
+          welcomeCheckedRef.current = true;
+        } else if (res.status === 400) {
+          // Agent wallet not initialized - need to trigger full auth with signature
+          // This happens when session was restored from cookie but agent wallet was never created
+          // (e.g., connecting from a new device where auth/verify was skipped)
+          const errorData = await res.json().catch(() => ({}));
+          if (errorData.error === 'Agent wallet not initialized') {
+            console.log('[Welcome] Agent wallet not initialized, re-authenticating to create agent wallet');
+            if (publicKeyString && authenticateWallet) {
+              const authSuccess = await authenticateWallet(publicKeyString);
+              if (authSuccess) {
+                // Retry balance check now that auth/verify should have created the agent wallet
+                const retryRes = await fetch('/api/agent/balance', { credentials: 'include' });
+                if (retryRes.ok) {
+                  const retryData = await retryRes.json();
+                  setAgentPublicKey(retryData.agentPublicKey);
+                  setWelcomePopupOpen(true);
+                }
+              }
             }
           }
           welcomeCheckedRef.current = true;
