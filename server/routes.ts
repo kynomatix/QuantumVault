@@ -23,6 +23,7 @@ import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSec
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { getSwiftMetrics } from "./swift-metrics";
+import { DOCS_MARKDOWN } from "./docs-markdown";
 import { getSwiftDiagnostics } from "./swift-config";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
@@ -1422,6 +1423,27 @@ export async function registerRoutes(
   // Register routing callback for trade retry service
   // This allows successful retries to route signals to subscribers
   registerRoutingCallback(routeSignalToSubscribers);
+
+  app.get("/llms.txt", (_req, res) => {
+    const llmsTxt = `# QuantumVault
+> Automated perpetual futures trading on Solana via Drift Protocol.
+
+URL: https://myquantumvault.com
+Full Documentation: https://myquantumvault.com/api/docs
+
+QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol for automated perpetual futures trading on Solana. Features include webhook-based trade execution, automated capital management (profit reinvest, auto withdraw, auto top-up), copy trading marketplace, Swift gasless execution, and bank-grade wallet security.
+
+## Docs
+- [Full Documentation (Markdown)](https://myquantumvault.com/api/docs)
+`;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.send(llmsTxt);
+  });
+
+  app.get("/api/docs", (_req, res) => {
+    res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+    res.send(DOCS_MARKDOWN);
+  });
 
   // Public API: Platform metrics (no auth required) - for landing page
   app.get("/api/metrics", async (req, res) => {
