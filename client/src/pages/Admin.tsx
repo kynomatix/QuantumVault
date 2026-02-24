@@ -976,10 +976,10 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
                               onClick={() => {
                                 setEditingSubmission(sub);
                                 setEditForm({
-                                  link: sub.link || 'https://myquantumvault.com',
-                                  otherInfo: sub.otherInfo || submitForm.otherInfo,
+                                  link: sub.link || '',
+                                  otherInfo: sub.otherInfo || '',
                                   tweet: sub.tweet || '',
-                                  telegram: sub.telegram || '@Kynomatix',
+                                  telegram: sub.telegram || '',
                                 });
                               }}
                               data-testid={`button-edit-submission-${sub.id}`}
