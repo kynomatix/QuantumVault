@@ -592,9 +592,9 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
   const [agentName, setAgentName] = useState('quantumvault-agent');
   const [submitForm, setSubmitForm] = useState({
     link: 'https://myquantumvault.com',
-    otherInfo: '',
+    otherInfo: 'QuantumVault is a Solana-based perpetual futures trading platform built on Drift Protocol. It enables automated bot trading via TradingView webhooks with Swift Protocol integration for gasless execution (90-97% RPC reduction). Features include real-time PnL tracking, a signal marketplace with creator profit sharing, agent wallet architecture, and Phantom Wallet integration. Built by a Drift Protocol Ambassador with a decade of trading experience and 5+ years in Solana DeFi.',
     tweet: '',
-    telegram: '',
+    telegram: '@Kynomatix',
   });
   const [selectedListing, setSelectedListing] = useState<any>(null);
   const [viewingDetails, setViewingDetails] = useState<string | null>(null);
