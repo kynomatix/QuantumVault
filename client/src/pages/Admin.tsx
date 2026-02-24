@@ -676,6 +676,28 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
     },
   });
 
+  const [editingSubmission, setEditingSubmission] = useState<any>(null);
+  const [editForm, setEditForm] = useState({ link: '', otherInfo: '', tweet: '', telegram: '' });
+
+  const updateMutation = useMutation({
+    mutationFn: async (params: any) => {
+      const res = await fetch('/api/admin/superteam/update-submission', {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Update failed');
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchSubmissions();
+      setEditingSubmission(null);
+    },
+  });
+
   const agent = agentData?.agent;
   const listings = listingsData?.listings || [];
   const submissions = submissionsData?.submissions || [];
@@ -932,6 +954,7 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
                         <TableHead className="text-zinc-400">Link</TableHead>
                         <TableHead className="text-zinc-400">Status</TableHead>
                         <TableHead className="text-zinc-400">Submitted</TableHead>
+                        <TableHead className="text-zinc-400">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -945,10 +968,90 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
                           </TableCell>
                           <TableCell><StatusBadge status={sub.status} /></TableCell>
                           <TableCell className="text-zinc-400 text-xs">{formatDate(sub.submittedAt)}</TableCell>
+                          <TableCell>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-zinc-600 text-zinc-300 hover:bg-zinc-700 text-xs"
+                              onClick={() => {
+                                setEditingSubmission(sub);
+                                setEditForm({
+                                  link: sub.link || 'https://myquantumvault.com',
+                                  otherInfo: sub.otherInfo || submitForm.otherInfo,
+                                  tweet: sub.tweet || '',
+                                  telegram: sub.telegram || '@Kynomatix',
+                                });
+                              }}
+                              data-testid={`button-edit-submission-${sub.id}`}
+                            >
+                              Edit
+                            </Button>
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
                   </Table>
+
+                  {editingSubmission && (
+                    <div className="mt-4 p-4 bg-zinc-800/80 rounded-lg border border-emerald-600/30 space-y-3">
+                      <h4 className="text-white text-sm font-medium">Editing: {editingSubmission.listingTitle || editingSubmission.listingSlug}</h4>
+                      <div className="space-y-2">
+                        <label className="text-zinc-400 text-sm mb-1 block">Link</label>
+                        <Input
+                          value={editForm.link}
+                          onChange={(e) => setEditForm(f => ({ ...f, link: e.target.value }))}
+                          className="bg-zinc-900 border-zinc-700 text-white text-sm"
+                          data-testid="input-edit-link"
+                        />
+                        <label className="text-zinc-400 text-sm mb-1 block">Description</label>
+                        <Textarea
+                          value={editForm.otherInfo}
+                          onChange={(e) => setEditForm(f => ({ ...f, otherInfo: e.target.value }))}
+                          className="bg-zinc-900 border-zinc-700 text-white text-sm min-h-[80px]"
+                          data-testid="input-edit-description"
+                        />
+                        <label className="text-zinc-400 text-sm mb-1 block">Telegram</label>
+                        <Input
+                          value={editForm.telegram}
+                          onChange={(e) => setEditForm(f => ({ ...f, telegram: e.target.value }))}
+                          className="bg-zinc-900 border-zinc-700 text-white text-sm"
+                          data-testid="input-edit-telegram"
+                        />
+                      </div>
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
+                          onClick={() => updateMutation.mutate({
+                            listingId: editingSubmission.listingId,
+                            link: editForm.link,
+                            otherInfo: editForm.otherInfo,
+                            tweet: editForm.tweet,
+                            telegram: editForm.telegram,
+                          })}
+                          disabled={updateMutation.isPending || !editForm.link || !editForm.otherInfo}
+                          data-testid="button-save-edit"
+                        >
+                          {updateMutation.isPending ? 'Updating...' : 'Save Changes'}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="border-zinc-600 text-zinc-300 hover:bg-zinc-700 text-xs"
+                          onClick={() => setEditingSubmission(null)}
+                          data-testid="button-cancel-edit"
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                      {updateMutation.isError && (
+                        <p className="text-red-400 text-sm">{(updateMutation.error as Error).message}</p>
+                      )}
+                      {updateMutation.isSuccess && (
+                        <p className="text-emerald-400 text-sm">Submission updated successfully!</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>
