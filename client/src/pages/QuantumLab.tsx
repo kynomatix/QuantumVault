@@ -15,7 +15,7 @@ import {
   Code2, Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
-  History, ChevronRight, Trash2, ArrowLeft, Plus, Menu,
+  History, ChevronRight, Trash2, ArrowLeft, Plus,
   Shield, AlertTriangle, DollarSign, Target, Flame, Info,
 } from "lucide-react";
 import {
@@ -188,8 +188,6 @@ export default function QuantumLab() {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeResultsJobId, setActiveResultsJobId] = useState<string | null>(null);
   const [activeHistoryRunId, setActiveHistoryRunId] = useState<number | null>(null);
-  const [mobileMenuOpen, _setMobileMenuOpen] = useState(false);
-
   const renderContent = () => {
     switch (mainTab) {
       case "setup":
@@ -230,91 +228,50 @@ export default function QuantumLab() {
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
       <header className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/80 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between py-3 md:py-0 md:h-16 gap-3 md:gap-0">
-            <div className="flex items-center gap-2">
+          <div className="flex items-center justify-between h-16">
+            <div className="flex items-center gap-3">
+              <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
+                <ArrowLeft className="w-4 h-4" />
+              </Link>
               <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-8 h-8 rounded-lg" />
               <span className="font-display font-bold text-white">QuantumVault</span>
               <span className="text-white/40 text-sm">Lab</span>
             </div>
 
-            <div className="flex items-center justify-between md:hidden">
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                data-testid="btn-mobile-menu"
-              >
-                {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-              </Button>
-
-              <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
-                <ArrowLeft className="w-4 h-4" />
-                <span className="text-sm">Back</span>
-              </Link>
-            </div>
-
-            <div className="hidden md:flex items-center gap-4">
-              <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home-desktop">
-                <ArrowLeft className="w-4 h-4" />
-                <span className="text-sm">Back</span>
-              </Link>
-            </div>
+            <nav className="flex items-center gap-1" data-testid="nav-tabs">
+              {labNavItems.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => setMainTab(item.id)}
+                    className={cn(
+                      "flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+                      mainTab === item.id
+                        ? "bg-violet-500/20 text-violet-300"
+                        : "text-white/50 hover:text-white hover:bg-white/5"
+                    )}
+                    data-testid={`nav-${item.id}`}
+                  >
+                    <Icon className="w-4 h-4" />
+                    <span className="hidden sm:inline">{item.label}</span>
+                  </button>
+                );
+              })}
+            </nav>
           </div>
         </div>
       </header>
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="flex gap-8">
-          <aside className={cn(
-            "fixed inset-0 z-40 md:relative md:inset-auto w-64 flex-shrink-0",
-            "bg-slate-950 md:bg-transparent",
-            mobileMenuOpen ? "block" : "hidden md:block"
-          )}>
-            <div className="sticky top-24 p-4 md:p-0">
-              <div className="flex items-center justify-between md:hidden mb-4">
-                <span className="font-medium text-white">Navigation</span>
-                <Button variant="ghost" size="icon" onClick={() => setMobileMenuOpen(false)}>
-                  <X className="w-5 h-5" />
-                </Button>
-              </div>
-              <nav className="space-y-1">
-                {labNavItems.map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <button
-                      key={item.id}
-                      onClick={() => {
-                        setMainTab(item.id);
-                        setMobileMenuOpen(false);
-                      }}
-                      className={cn(
-                        "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
-                        mainTab === item.id
-                          ? "bg-primary/20 text-primary"
-                          : "text-white/60 hover:text-white hover:bg-white/5"
-                      )}
-                      data-testid={`nav-${item.id}`}
-                    >
-                      <Icon className="w-4 h-4" />
-                      {item.label}
-                    </button>
-                  );
-                })}
-              </nav>
-            </div>
-          </aside>
-
-          <main className="flex-1 min-w-0">
-            <motion.div
-              key={mainTab}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.2 }}
-            >
-              {renderContent()}
-            </motion.div>
-          </main>
-        </div>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <motion.div
+          key={mainTab}
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.2 }}
+        >
+          {renderContent()}
+        </motion.div>
       </div>
     </div>
   );
@@ -575,14 +532,14 @@ function SetupPanel({ onJobStarted }: { onJobStarted: (jobId: string) => void })
             <Label className="text-xs font-semibold uppercase tracking-wider text-white/40 mb-3 block">
               <div className="flex items-center gap-1.5"><Calendar className="w-3 h-3" /> Date Range</div>
             </Label>
-            <div className="flex items-center gap-2">
-              <div className="flex-1">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="min-w-0">
                 <Label className="text-[11px] text-white/40 mb-1 block">Start</Label>
-                <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="text-xs font-mono bg-white/5 border-white/10 text-white" data-testid="input-start-date" />
+                <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="text-xs font-mono bg-white/5 border-white/10 text-white w-full" data-testid="input-start-date" />
               </div>
-              <div className="flex-1">
+              <div className="min-w-0">
                 <Label className="text-[11px] text-white/40 mb-1 block">End</Label>
-                <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="text-xs font-mono bg-white/5 border-white/10 text-white" data-testid="input-end-date" />
+                <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="text-xs font-mono bg-white/5 border-white/10 text-white w-full" data-testid="input-end-date" />
               </div>
             </div>
             <p className="text-[10px] text-yellow-500/70 mt-2 flex items-center gap-1">
