@@ -5376,6 +5376,56 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
+  app.get("/api/performance-heatmap", requireWallet, async (req, res) => {
+    try {
+      const trades = await storage.getWalletBotTrades(req.walletAddress!, 10000);
+      const executed = trades.filter(t => t.status === "executed" && t.pnl !== null && t.executedAt);
+
+      const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      const hourLabels = Array.from({ length: 24 }, (_, i) => `${i.toString().padStart(2, "0")}:00`);
+
+      const grid: { day: number; hour: number; pnl: number; count: number }[][] = Array.from(
+        { length: 7 },
+        (_, d) => Array.from({ length: 24 }, (_, h) => ({ day: d, hour: h, pnl: 0, count: 0 }))
+      );
+
+      const marketPnl: Record<string, { pnl: number; count: number; wins: number }> = {};
+
+      for (const trade of executed) {
+        const dt = new Date(trade.executedAt!);
+        const dayIdx = dt.getUTCDay();
+        const hourIdx = dt.getUTCHours();
+        const grossPnl = parseFloat(trade.pnl as string || "0");
+        const fee = parseFloat(trade.fee as string || "0");
+        const netPnl = grossPnl - fee;
+
+        grid[dayIdx][hourIdx].pnl += netPnl;
+        grid[dayIdx][hourIdx].count += 1;
+
+        const market = trade.market || "Unknown";
+        if (!marketPnl[market]) marketPnl[market] = { pnl: 0, count: 0, wins: 0 };
+        marketPnl[market].pnl += netPnl;
+        marketPnl[market].count += 1;
+        if (netPnl > 0) marketPnl[market].wins += 1;
+      }
+
+      const cells = grid.flat();
+      const markets = Object.entries(marketPnl)
+        .map(([market, data]) => ({
+          market,
+          pnl: Math.round(data.pnl * 100) / 100,
+          count: data.count,
+          winRate: data.count > 0 ? Math.round((data.wins / data.count) * 100) : 0,
+        }))
+        .sort((a, b) => b.pnl - a.pnl);
+
+      res.json({ days, hours: hourLabels, cells, markets, totalTrades: executed.length });
+    } catch (error) {
+      console.error("Performance heatmap error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Get bot's current position
   app.get("/api/trading-bots/:id/position", requireWallet, async (req, res) => {
     try {

@@ -79,6 +79,7 @@ import { TradeHistoryModal } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
 import { PublishBotModal } from '@/components/PublishBotModal';
+import { PerformanceHeatmap } from '@/components/PerformanceHeatmap';
 import { SubscribeBotModal } from '@/components/SubscribeBotModal';
 import { BotDetailsModal } from '@/components/BotDetailsModal';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
@@ -2473,6 +2474,8 @@ export default function AppPage() {
                         </div>
                       )}
                     </div>
+
+                    <PerformanceHeatmap />
                   </>
                 ) : (
                   <div className="gradient-border p-8 noise text-center">

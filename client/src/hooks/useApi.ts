@@ -581,3 +581,46 @@ export function usePortfolioPerformance() {
     staleTime: 20000,
   });
 }
+
+export interface HeatmapCell {
+  day: number;
+  hour: number;
+  pnl: number;
+  count: number;
+}
+
+export interface HeatmapMarket {
+  market: string;
+  pnl: number;
+  count: number;
+  winRate: number;
+}
+
+export interface HeatmapData {
+  days: string[];
+  hours: string[];
+  cells: HeatmapCell[];
+  markets: HeatmapMarket[];
+  totalTrades: number;
+}
+
+async function fetchPerformanceHeatmap(): Promise<HeatmapData | null> {
+  try {
+    const res = await fetch("/api/performance-heatmap", { credentials: "include" });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export function usePerformanceHeatmap() {
+  const { publicKeyString, sessionConnected } = useWallet();
+  return useQuery({
+    queryKey: ["performanceHeatmap", publicKeyString],
+    queryFn: fetchPerformanceHeatmap,
+    enabled: !!publicKeyString && sessionConnected,
+    refetchInterval: 60000,
+    staleTime: 30000,
+  });
+}
