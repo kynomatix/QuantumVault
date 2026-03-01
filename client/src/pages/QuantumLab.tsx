@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
@@ -35,6 +36,27 @@ import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema"
 type MainTab = "main" | "results" | "history";
 type SortKey = "netProfitPercent" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades";
 type SortDir = "asc" | "desc";
+type RankingMode = "profit" | "winrate" | "balanced" | "conservative";
+
+const RANKING_LABELS: Record<RankingMode, string> = {
+  profit: "Best Profit",
+  winrate: "Best Win Rate",
+  balanced: "Balanced",
+  conservative: "Conservative",
+};
+
+function rankScore(r: { netProfitPercent: number; winRatePercent: number; maxDrawdownPercent: number; profitFactor: number }, mode: RankingMode): number {
+  switch (mode) {
+    case "profit":
+      return r.netProfitPercent * 1000 + r.profitFactor * 10;
+    case "winrate":
+      return r.winRatePercent * 1000 + r.netProfitPercent * 10;
+    case "balanced":
+      return r.netProfitPercent * 100 + r.winRatePercent * 100 + r.profitFactor * 50 - r.maxDrawdownPercent * 30;
+    case "conservative":
+      return -r.maxDrawdownPercent * 200 + r.profitFactor * 100 + r.winRatePercent * 50 + r.netProfitPercent * 10;
+  }
+}
 
 interface LabNavItem {
   id: MainTab;
@@ -998,6 +1020,7 @@ function ResultsPanel({ jobId }: { jobId: string | null }) {
   const [expandedCombo, setExpandedCombo] = useState<string | null>(null);
   const [tradeSort, setTradeSort] = useState<{ key: keyof LabTradeRecord; dir: SortDir }>({ key: "entryTime", dir: "desc" });
   const [pollCount, setPollCount] = useState(0);
+  const [rankingMode, setRankingMode] = useState<RankingMode>("profit");
 
   const { data: results, isLoading } = useQuery<LabJobResult>({
     queryKey: ["/api/lab/job", jobId, "results"],
@@ -1021,7 +1044,7 @@ function ResultsPanel({ jobId }: { jobId: string | null }) {
     for (const config of results.configs) {
       const key = `${config.ticker}|${config.timeframe}`;
       const existing = bestPerCombo.get(key);
-      if (!existing || config.netProfitPercent > existing.netProfitPercent) bestPerCombo.set(key, config);
+      if (!existing || rankScore(config, rankingMode) > rankScore(existing, rankingMode)) bestPerCombo.set(key, config);
     }
     const arr = Array.from(bestPerCombo.values());
     arr.sort((a, b) => {
@@ -1030,7 +1053,13 @@ function ResultsPanel({ jobId }: { jobId: string | null }) {
       return (a[sortKey] - b[sortKey]) * mult;
     });
     return arr;
-  }, [results, sortKey, sortDir]);
+  }, [results, sortKey, sortDir, rankingMode]);
+
+  useEffect(() => {
+    if (sortedConfigs.length > 0) {
+      setSelectedConfig(sortedConfigs[0]);
+    }
+  }, [rankingMode, sortedConfigs]);
 
   const bestProfit = useMemo(() => results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.netProfitPercent)) : 0, [results]);
   const bestWinRate = useMemo(() => results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.winRatePercent)) : 0, [results]);
@@ -1103,6 +1132,16 @@ function ResultsPanel({ jobId }: { jobId: string | null }) {
           <p className="text-xs text-white/60">{results.totalConfigsTested.toLocaleString()} configurations tested</p>
         </div>
         <div className="flex items-center gap-2">
+          <Select value={rankingMode} onValueChange={(v) => setRankingMode(v as RankingMode)}>
+            <SelectTrigger className="w-[160px] h-8 bg-white/5 border-white/10 text-white text-xs" data-testid="select-ranking-mode">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="bg-slate-900 border-white/10">
+              {(Object.entries(RANKING_LABELS) as [RankingMode, string][]).map(([k, label]) => (
+                <SelectItem key={k} value={k} className="text-white/80 text-xs focus:bg-violet-600/20 focus:text-white">{label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Button variant="secondary" size="sm" onClick={() => window.open(`/api/lab/export/csv/${jobId}`, "_blank")} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-download-csv">
             <Download className="w-3 h-3 mr-1" /> CSV
           </Button>
@@ -1464,6 +1503,7 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
   const [sortKey, setSortKey] = useState<SortKey>("netProfitPercent");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedResult, setSelectedResult] = useState<LabOptResult | null>(null);
+  const [rankingMode, setRankingMode] = useState<RankingMode>("profit");
 
   const { data: run } = useQuery<LabOptimizationRun>({
     queryKey: ["/api/lab/runs", runId],
@@ -1490,7 +1530,7 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
     for (const r of results) {
       const key = `${r.ticker}|${r.timeframe}`;
       const existing = map.get(key);
-      if (!existing || r.netProfitPercent > existing.netProfitPercent) map.set(key, r);
+      if (!existing || rankScore(r, rankingMode) > rankScore(existing, rankingMode)) map.set(key, r);
     }
     const arr = Array.from(map.values());
     arr.sort((a, b) => {
@@ -1499,7 +1539,13 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
       return (a[sortKey] - b[sortKey]) * mult;
     });
     return arr;
-  }, [results, sortKey, sortDir]);
+  }, [results, sortKey, sortDir, rankingMode]);
+
+  useEffect(() => {
+    if (bestPerCombo.length > 0) {
+      setSelectedResult(bestPerCombo[0]);
+    }
+  }, [rankingMode, bestPerCombo]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir(d => d === "desc" ? "asc" : "desc");
@@ -1549,14 +1595,26 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
             </p>
           </div>
         </div>
-        {selectedResult && (
-          <Button variant="secondary" size="sm" onClick={() => {
-            const params = selectedResult.params as Record<string, any>;
-            navigator.clipboard.writeText(Object.entries(params).map(([k, v]) => `${k} = ${v}`).join("\n"));
-          }} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-copy-params">
-            <Copy className="w-3 h-3 mr-1" /> Copy Params
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          <Select value={rankingMode} onValueChange={(v) => setRankingMode(v as RankingMode)}>
+            <SelectTrigger className="w-[160px] h-8 bg-white/5 border-white/10 text-white text-xs" data-testid="select-history-ranking-mode">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="bg-slate-900 border-white/10">
+              {(Object.entries(RANKING_LABELS) as [RankingMode, string][]).map(([k, label]) => (
+                <SelectItem key={k} value={k} className="text-white/80 text-xs focus:bg-violet-600/20 focus:text-white">{label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {selectedResult && (
+            <Button variant="secondary" size="sm" onClick={() => {
+              const params = selectedResult.params as Record<string, any>;
+              navigator.clipboard.writeText(Object.entries(params).map(([k, v]) => `${k} = ${v}`).join("\n"));
+            }} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-copy-params">
+              <Copy className="w-3 h-3 mr-1" /> Copy Params
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
