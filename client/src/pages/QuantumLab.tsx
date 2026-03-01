@@ -672,6 +672,8 @@ function RunningPanel({ jobId, onComplete }: { jobId: string | null; onComplete:
     try {
       await apiRequest("POST", `/api/lab/job/${jobId}/cancel`);
       eventSourceRef.current?.close();
+      setProgress(prev => prev ? { ...prev, status: "error", stage: "Cancelled by user", error: "Cancelled" } : prev);
+      toast({ title: "Optimization cancelled" });
     } catch { toast({ title: "Failed to cancel", variant: "destructive" }); }
     setCancelling(false);
   };
@@ -697,7 +699,9 @@ function RunningPanel({ jobId, onComplete }: { jobId: string | null; onComplete:
           <div className="flex items-center gap-3">
             <div className={statusColor}>{statusIcon}</div>
             <div>
-              <h2 className="text-lg font-semibold text-white" data-testid="text-running-title">Optimization Running</h2>
+              <h2 className="text-lg font-semibold text-white" data-testid="text-running-title">
+                {progress?.error === "Cancelled" ? "Optimization Cancelled" : progress?.status === "complete" ? "Optimization Complete" : progress?.status === "error" ? "Optimization Error" : "Optimization Running"}
+              </h2>
               <p className="text-sm text-white/60" data-testid="text-running-stage">{progress?.stage || "Initializing..."}</p>
             </div>
           </div>

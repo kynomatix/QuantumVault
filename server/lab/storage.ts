@@ -234,6 +234,15 @@ export class LabDatabaseStorage implements ILabStorage {
     const job = this.jobs.get(id);
     if (job) {
       job.abortSignal.aborted = true;
+      job.progress = {
+        ...job.progress,
+        status: "error",
+        stage: "Cancelled by user",
+        error: "Cancelled",
+      };
+      if (job.runId) {
+        this.failRun(job.runId).catch(() => {});
+      }
     }
   }
 }

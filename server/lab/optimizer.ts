@@ -117,7 +117,15 @@ export async function runOptimization(
   let globalCurrent = 0;
 
   for (const combo of combos) {
-    if (abortSignal?.aborted) break;
+    if (abortSignal?.aborted) {
+      onProgress({
+        jobId, status: "error", stage: "Cancelled by user",
+        current: globalCurrent, total: totalSamples * combos.length,
+        percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
+        elapsed: Date.now() - startTime, tickerProgress, error: "Cancelled",
+      });
+      return allResults;
+    }
     const key = `${combo.ticker}|${combo.timeframe}`;
     tickerProgress[key] = { status: "running" };
 
@@ -188,7 +196,7 @@ export async function runOptimization(
     });
 
     for (let s = 0; s < config.randomSamples; s++) {
-      if (abortSignal?.aborted) break;
+      if (abortSignal?.aborted) { globalCurrent += (config.randomSamples - s); break; }
       const params = generateRandomParams(inputs);
       const result = runBacktest(candles, params, combo.ticker, combo.timeframe);
       if (result.totalTrades >= config.minTrades && result.maxDrawdownPercent <= config.maxDrawdownCap) {
@@ -222,6 +230,8 @@ export async function runOptimization(
       }
     }
 
+    if (abortSignal?.aborted) continue;
+
     comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
     const topSeeds = comboResults.slice(0, config.topK);
 
@@ -240,7 +250,7 @@ export async function runOptimization(
       if (abortSignal?.aborted) break;
       const seed = topSeeds[seedIdx];
       for (let r = 0; r < config.refinementsPerSeed; r++) {
-        if (abortSignal?.aborted) break;
+        if (abortSignal?.aborted) { globalCurrent += (config.refinementsPerSeed - r); break; }
         const jitteredParams = jitterParams(seed.params, inputs);
         const result = runBacktest(candles, jitteredParams, combo.ticker, combo.timeframe);
         if (result.totalTrades >= config.minTrades && result.maxDrawdownPercent <= config.maxDrawdownCap) {
