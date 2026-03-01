@@ -1132,16 +1132,6 @@ function ResultsPanel({ jobId }: { jobId: string | null }) {
           <p className="text-xs text-white/60">{results.totalConfigsTested.toLocaleString()} configurations tested</p>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={rankingMode} onValueChange={(v) => setRankingMode(v as RankingMode)}>
-            <SelectTrigger className="w-[160px] h-8 bg-white/5 border-white/10 text-white text-xs" data-testid="select-ranking-mode">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent className="bg-slate-900 border-white/10">
-              {(Object.entries(RANKING_LABELS) as [RankingMode, string][]).map(([k, label]) => (
-                <SelectItem key={k} value={k} className="text-white/80 text-xs focus:bg-violet-600/20 focus:text-white">{label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
           <Button variant="secondary" size="sm" onClick={() => window.open(`/api/lab/export/csv/${jobId}`, "_blank")} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-download-csv">
             <Download className="w-3 h-3 mr-1" /> CSV
           </Button>
@@ -1166,8 +1156,18 @@ function ResultsPanel({ jobId }: { jobId: string | null }) {
         <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-1">
           <h3 className="text-sm font-semibold flex items-center gap-2 text-white">
             <BarChart3 className="w-4 h-4 text-violet-400" /> Best Configurations
+            <span className="text-xs text-white/40 font-normal ml-1">{sortedConfigs.length} combo{sortedConfigs.length !== 1 ? "s" : ""}</span>
           </h3>
-          <span className="text-xs text-white/60">{sortedConfigs.length} combo{sortedConfigs.length !== 1 ? "s" : ""}</span>
+          <Select value={rankingMode} onValueChange={(v) => setRankingMode(v as RankingMode)}>
+            <SelectTrigger className="w-[160px] h-8 bg-white/5 border-white/10 text-white text-xs" data-testid="select-ranking-mode">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="bg-slate-900 border-white/10">
+              {(Object.entries(RANKING_LABELS) as [RankingMode, string][]).map(([k, label]) => (
+                <SelectItem key={k} value={k} className="text-white/80 text-xs focus:bg-violet-600/20 focus:text-white">{label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm" data-testid="table-configs">
@@ -1595,26 +1595,14 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Select value={rankingMode} onValueChange={(v) => setRankingMode(v as RankingMode)}>
-            <SelectTrigger className="w-[160px] h-8 bg-white/5 border-white/10 text-white text-xs" data-testid="select-history-ranking-mode">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent className="bg-slate-900 border-white/10">
-              {(Object.entries(RANKING_LABELS) as [RankingMode, string][]).map(([k, label]) => (
-                <SelectItem key={k} value={k} className="text-white/80 text-xs focus:bg-violet-600/20 focus:text-white">{label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {selectedResult && (
-            <Button variant="secondary" size="sm" onClick={() => {
-              const params = selectedResult.params as Record<string, any>;
-              navigator.clipboard.writeText(Object.entries(params).map(([k, v]) => `${k} = ${v}`).join("\n"));
-            }} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-copy-params">
-              <Copy className="w-3 h-3 mr-1" /> Copy Params
-            </Button>
-          )}
-        </div>
+        {selectedResult && (
+          <Button variant="secondary" size="sm" onClick={() => {
+            const params = selectedResult.params as Record<string, any>;
+            navigator.clipboard.writeText(Object.entries(params).map(([k, v]) => `${k} = ${v}`).join("\n"));
+          }} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-copy-params">
+            <Copy className="w-3 h-3 mr-1" /> Copy Params
+          </Button>
+        )}
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -1625,10 +1613,20 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
       </div>
 
       <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
-        <div className="px-4 py-3 border-b border-white/10">
+        <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-1">
           <h3 className="text-sm font-semibold flex items-center gap-2 text-white">
             <BarChart3 className="w-4 h-4 text-violet-400" /> Best per Ticker/Timeframe
           </h3>
+          <Select value={rankingMode} onValueChange={(v) => setRankingMode(v as RankingMode)}>
+            <SelectTrigger className="w-[160px] h-8 bg-white/5 border-white/10 text-white text-xs" data-testid="select-history-ranking-mode">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="bg-slate-900 border-white/10">
+              {(Object.entries(RANKING_LABELS) as [RankingMode, string][]).map(([k, label]) => (
+                <SelectItem key={k} value={k} className="text-white/80 text-xs focus:bg-violet-600/20 focus:text-white">{label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm" data-testid="table-history-configs">
