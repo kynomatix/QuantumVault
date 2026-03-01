@@ -906,10 +906,16 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
             const paramCombos = calcParamCombinations(parsedResult.inputs);
             const marketCombos = selectedTickers.length * selectedTimeframes.length;
             const totalSearch = paramCombos * marketCombos;
+            const totalTests = (randomSamples + topK * refinements) * marketCombos;
             return (
-              <p className="text-[11px] text-white/40" data-testid="text-total-search-space">
-                {formatCombinations(paramCombos)} param combos &times; {marketCombos} market{marketCombos !== 1 ? "s" : ""} = <span className="text-sky-300 font-medium">{formatCombinations(totalSearch)} total search space</span>
-              </p>
+              <>
+                <p className="text-[11px] text-white/40" data-testid="text-total-search-space">
+                  Search space: <span className="text-sky-300 font-medium">{formatCombinations(totalSearch)}</span> possible combinations
+                </p>
+                <p className="text-[11px] text-white/40">
+                  Optimizer will test: <span className="text-violet-300 font-medium">{formatCombinations(totalTests)}</span> samples
+                </p>
+              </>
             );
           })()}
         </div>
