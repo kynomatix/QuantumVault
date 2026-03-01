@@ -335,6 +335,7 @@ export default function QuantumLab() {
   });
 
   const handleJobStarted = useCallback((jobId: string) => {
+    setJobProgress(null);
     setActiveJobId(jobId);
     queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
   }, []);

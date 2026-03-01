@@ -179,6 +179,10 @@ export function registerLabRoutes(app: Express): void {
         job.id,
         job.abortSignal
       ).then(async (results: any[]) => {
+        if (job.abortSignal.aborted) {
+          console.log(`[QuantumLab] Job ${job.id} was cancelled, skipping result save`);
+          return;
+        }
         console.log(`[QuantumLab] Optimization finished: ${results.length} results`);
         labStorage.setResults(job.id, results);
         if (runId) {

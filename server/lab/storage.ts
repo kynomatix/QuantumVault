@@ -182,12 +182,21 @@ export class LabDatabaseStorage implements ILabStorage {
     return undefined;
   }
 
+  private scheduleCleanup(id: string): void {
+    setTimeout(() => {
+      this.jobs.delete(id);
+    }, 5 * 60 * 1000);
+  }
+
   updateProgress(id: string, progress: LabJobProgress): void {
     const job = this.jobs.get(id);
     if (job) {
       job.progress = progress;
       for (const listener of Array.from(job.listeners)) {
         try { listener(progress); } catch {}
+      }
+      if (progress.status === "complete" || progress.status === "error") {
+        this.scheduleCleanup(id);
       }
     }
   }
@@ -237,6 +246,7 @@ export class LabDatabaseStorage implements ILabStorage {
       if (job.runId) {
         this.failRun(job.runId).catch(() => {});
       }
+      this.scheduleCleanup(id);
     }
   }
 }
