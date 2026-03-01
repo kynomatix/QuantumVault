@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb, unique, json, index } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb, unique, json, index, serial, real } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -671,3 +671,222 @@ export const insertSuperteamSubmissionSchema = createInsertSchema(superteamSubmi
 });
 export type InsertSuperteamSubmission = z.infer<typeof insertSuperteamSubmissionSchema>;
 export type SuperteamSubmission = typeof superteamSubmissions.$inferSelect;
+
+export const labStrategies = pgTable("lab_strategies", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id"),
+  name: text("name").notNull(),
+  description: text("description"),
+  pineScript: text("pine_script").notNull(),
+  parsedInputs: jsonb("parsed_inputs").notNull(),
+  groups: jsonb("groups"),
+  strategySettings: jsonb("strategy_settings"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const labOptimizationRuns = pgTable("lab_optimization_runs", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id"),
+  strategyId: integer("strategy_id").notNull(),
+  tickers: jsonb("tickers").notNull(),
+  timeframes: jsonb("timeframes").notNull(),
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date").notNull(),
+  randomSamples: integer("random_samples").notNull(),
+  topK: integer("top_k").notNull(),
+  refinementsPerSeed: integer("refinements_per_seed").notNull(),
+  minTrades: integer("min_trades").notNull(),
+  maxDrawdownCap: real("max_drawdown_cap").notNull(),
+  mode: text("mode").notNull(),
+  status: text("status").notNull().default("running"),
+  totalConfigsTested: integer("total_configs_tested"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  completedAt: timestamp("completed_at"),
+});
+
+export const labOptimizationResults = pgTable("lab_optimization_results", {
+  id: serial("id").primaryKey(),
+  runId: integer("run_id").notNull(),
+  ticker: text("ticker").notNull(),
+  timeframe: text("timeframe").notNull(),
+  rank: integer("rank").notNull(),
+  netProfitPercent: real("net_profit_percent").notNull(),
+  winRatePercent: real("win_rate_percent").notNull(),
+  maxDrawdownPercent: real("max_drawdown_percent").notNull(),
+  profitFactor: real("profit_factor").notNull(),
+  totalTrades: integer("total_trades").notNull(),
+  params: jsonb("params").notNull(),
+  trades: jsonb("trades"),
+  equityCurve: jsonb("equity_curve"),
+});
+
+export const insertLabStrategySchema = createInsertSchema(labStrategies).omit({ id: true, createdAt: true });
+export const insertLabRunSchema = createInsertSchema(labOptimizationRuns).omit({ id: true, createdAt: true, completedAt: true });
+export const insertLabResultSchema = createInsertSchema(labOptimizationResults).omit({ id: true });
+
+export type LabStrategy = typeof labStrategies.$inferSelect;
+export type InsertLabStrategy = z.infer<typeof insertLabStrategySchema>;
+export type LabOptimizationRun = typeof labOptimizationRuns.$inferSelect;
+export type InsertLabRun = z.infer<typeof insertLabRunSchema>;
+export type LabOptResult = typeof labOptimizationResults.$inferSelect;
+export type InsertLabResult = z.infer<typeof insertLabResultSchema>;
+
+export interface LabPineInput {
+  name: string;
+  type: "int" | "float" | "bool" | "string" | "time";
+  default: any;
+  label: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  group?: string;
+  groupLabel?: string;
+  options?: string[];
+  optimizable: boolean;
+}
+
+export interface LabPineParseResult {
+  inputs: LabPineInput[];
+  groups: Record<string, string>;
+  strategySettings: {
+    initialCapital?: number;
+    defaultQtyValue?: number;
+    commission?: number;
+  };
+}
+
+export interface LabOptimizationConfig {
+  pineScript: string;
+  parsedInputs: LabPineInput[];
+  tickers: string[];
+  timeframes: string[];
+  startDate: string;
+  endDate: string;
+  randomSamples: number;
+  topK: number;
+  refinementsPerSeed: number;
+  minTrades: number;
+  maxDrawdownCap: number;
+  mode: "smoke" | "sweep";
+  strategyId?: number;
+}
+
+export interface LabTradeRecord {
+  entryTime: string;
+  exitTime: string;
+  direction: "long" | "short";
+  entryPrice: number;
+  exitPrice: number;
+  pnlPercent: number;
+  pnlDollar: number;
+  exitReason: string;
+  barsHeld: number;
+}
+
+export interface LabBacktestResult {
+  ticker: string;
+  timeframe: string;
+  netProfitPercent: number;
+  winRatePercent: number;
+  maxDrawdownPercent: number;
+  profitFactor: number;
+  totalTrades: number;
+  params: Record<string, any>;
+  trades: LabTradeRecord[];
+  equityCurve: { time: string; equity: number }[];
+}
+
+export interface LabJobProgress {
+  jobId: string;
+  status: "fetching" | "baseline" | "random_search" | "refinement" | "complete" | "error";
+  stage: string;
+  current: number;
+  total: number;
+  percent: number;
+  bestSoFar?: {
+    netProfitPercent: number;
+    winRatePercent: number;
+    maxDrawdownPercent: number;
+    profitFactor: number;
+  };
+  eta?: number;
+  elapsed: number;
+  error?: string;
+  tickerProgress?: Record<string, {
+    status: "pending" | "running" | "complete";
+    best?: number;
+  }>;
+}
+
+export interface LabJobResult {
+  jobId: string;
+  runId?: number;
+  configs: LabBacktestResult[];
+  totalConfigsTested: number;
+  bestByCombo: Record<string, LabBacktestResult[]>;
+}
+
+export interface LabRiskAnalysis {
+  maxDrawdownPercent: number;
+  recommendedLeverage: number;
+  maxSafeLeverage: number;
+  liquidationBuffer: number;
+  consecutiveLosses: number;
+  longestLosingStreak: number;
+  avgLossPercent: number;
+  avgWinPercent: number;
+  worstTradePercent: number;
+  recoveryFactor: number;
+  kellyPercent: number;
+  riskOfRuin: number;
+  recommendedWalletAllocation: number;
+  minCapitalRequired: number;
+  streakDrawdownPercent: number;
+  avgBarsInDrawdown: number;
+  riskRating: "LOW" | "MODERATE" | "HIGH" | "EXTREME";
+  recommendations: string[];
+}
+
+export const LAB_AVAILABLE_TICKERS = [
+  { symbol: "SOL/USDT:USDT", name: "SOL" },
+  { symbol: "BTC/USDT:USDT", name: "BTC" },
+  { symbol: "ETH/USDT:USDT", name: "ETH" },
+  { symbol: "HYPE/USDT:USDT", name: "HYPE" },
+  { symbol: "XRP/USDT:USDT", name: "XRP" },
+  { symbol: "SUI/USDT:USDT", name: "SUI" },
+  { symbol: "ZEC/USDT:USDT", name: "ZEC" },
+  { symbol: "PAXG/USDT:USDT", name: "PAXG" },
+  { symbol: "JUP/USDT:USDT", name: "JUP" },
+  { symbol: "DRIFT/USDT:USDT", name: "DRIFT" },
+  { symbol: "DOGE/USDT:USDT", name: "DOGE" },
+  { symbol: "TAO/USDT:USDT", name: "TAO" },
+] as const;
+
+export const LAB_AVAILABLE_TIMEFRAMES = ["5m", "15m", "30m", "1h", "2h", "4h", "12h"] as const;
+
+export const insertLabStrategyBodySchema = z.object({
+  name: z.string().min(1),
+  description: z.string().nullable().optional(),
+  pineScript: z.string().min(1),
+  parsedInputs: z.any(),
+  groups: z.any().optional(),
+  strategySettings: z.any().optional(),
+});
+
+export const updateLabStrategyBodySchema = insertLabStrategyBodySchema.partial();
+
+export const labOptimizationConfigSchema = z.object({
+  pineScript: z.string().min(1),
+  parsedInputs: z.array(z.any()),
+  tickers: z.array(z.string()).min(1),
+  timeframes: z.array(z.string()).min(1),
+  startDate: z.string(),
+  endDate: z.string(),
+  randomSamples: z.number().default(900),
+  topK: z.number().default(20),
+  refinementsPerSeed: z.number().default(60),
+  minTrades: z.number().default(10),
+  maxDrawdownCap: z.number().default(85),
+  mode: z.enum(["smoke", "sweep"]),
+  strategyId: z.number().optional(),
+});

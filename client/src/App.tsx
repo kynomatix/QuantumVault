@@ -11,6 +11,7 @@ import DocsPage from "@/pages/Docs";
 import Analytics from "@/pages/Analytics";
 import PitchDeck from "@/pages/PitchDeck";
 import Admin from "@/pages/Admin";
+import QuantumLab from "@/pages/QuantumLab";
 
 function Router() {
   return (
@@ -21,6 +22,7 @@ function Router() {
       <Route path="/analytics" component={Analytics} />
       <Route path="/pitch-deck" component={PitchDeck} />
       <Route path="/admin" component={Admin} />
+      <Route path="/quantumlab" component={QuantumLab} />
       <Route component={NotFound} />
     </Switch>
   );

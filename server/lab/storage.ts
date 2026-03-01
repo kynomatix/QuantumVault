@@ -1,0 +1,241 @@
+import {
+  labStrategies, labOptimizationRuns, labOptimizationResults,
+  type LabStrategy, type InsertLabStrategy,
+  type LabOptimizationRun, type InsertLabRun,
+  type LabOptResult, type InsertLabResult,
+  type LabBacktestResult, type LabJobProgress, type LabOptimizationConfig, type LabJobResult,
+} from "@shared/schema";
+import { db } from "../db";
+import { eq, desc } from "drizzle-orm";
+import { randomUUID } from "crypto";
+
+const MAX_CONCURRENT_JOBS = 1;
+
+export interface LabJob {
+  id: string;
+  config: LabOptimizationConfig;
+  progress: LabJobProgress;
+  results: LabBacktestResult[];
+  abortSignal: { aborted: boolean };
+  listeners: Set<(progress: LabJobProgress) => void>;
+  runId?: number;
+}
+
+export interface ILabStorage {
+  createStrategy(data: InsertLabStrategy): Promise<LabStrategy>;
+  getStrategies(): Promise<LabStrategy[]>;
+  getStrategy(id: number): Promise<LabStrategy | undefined>;
+  updateStrategy(id: number, data: Partial<InsertLabStrategy>): Promise<LabStrategy | undefined>;
+  deleteStrategy(id: number): Promise<void>;
+
+  createRun(data: InsertLabRun): Promise<LabOptimizationRun>;
+  getRuns(strategyId?: number): Promise<LabOptimizationRun[]>;
+  getRun(id: number): Promise<LabOptimizationRun | undefined>;
+  completeRun(id: number, totalConfigsTested: number): Promise<void>;
+  failRun(id: number): Promise<void>;
+  deleteRun(id: number): Promise<void>;
+
+  saveResults(runId: number, results: LabBacktestResult[]): Promise<void>;
+  getRunResults(runId: number): Promise<LabOptResult[]>;
+
+  createJob(config: LabOptimizationConfig): LabJob;
+  getJob(id: string): LabJob | undefined;
+  getJobByRunId(runId: number): LabJob | undefined;
+  updateProgress(id: string, progress: LabJobProgress): void;
+  setResults(id: string, results: LabBacktestResult[]): void;
+  getJobResult(id: string): LabJobResult | undefined;
+  cancelJob(id: string): void;
+}
+
+export class LabDatabaseStorage implements ILabStorage {
+  private jobs: Map<string, LabJob>;
+
+  constructor() {
+    this.jobs = new Map();
+  }
+
+  async createStrategy(data: InsertLabStrategy): Promise<LabStrategy> {
+    const [strategy] = await db.insert(labStrategies).values(data).returning();
+    return strategy;
+  }
+
+  async getStrategies(): Promise<LabStrategy[]> {
+    return db.select().from(labStrategies).orderBy(desc(labStrategies.createdAt));
+  }
+
+  async getStrategy(id: number): Promise<LabStrategy | undefined> {
+    const [strategy] = await db.select().from(labStrategies).where(eq(labStrategies.id, id));
+    return strategy;
+  }
+
+  async updateStrategy(id: number, data: Partial<InsertLabStrategy>): Promise<LabStrategy | undefined> {
+    const [strategy] = await db.update(labStrategies).set(data).where(eq(labStrategies.id, id)).returning();
+    return strategy;
+  }
+
+  async deleteStrategy(id: number): Promise<void> {
+    await db.delete(labStrategies).where(eq(labStrategies.id, id));
+  }
+
+  async createRun(data: InsertLabRun): Promise<LabOptimizationRun> {
+    const [run] = await db.insert(labOptimizationRuns).values(data).returning();
+    return run;
+  }
+
+  async getRuns(strategyId?: number): Promise<LabOptimizationRun[]> {
+    if (strategyId) {
+      return db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.strategyId, strategyId)).orderBy(desc(labOptimizationRuns.createdAt));
+    }
+    return db.select().from(labOptimizationRuns).orderBy(desc(labOptimizationRuns.createdAt));
+  }
+
+  async getRun(id: number): Promise<LabOptimizationRun | undefined> {
+    const [run] = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.id, id));
+    return run;
+  }
+
+  async completeRun(id: number, totalConfigsTested: number): Promise<void> {
+    await db.update(labOptimizationRuns).set({
+      status: "complete",
+      totalConfigsTested,
+      completedAt: new Date(),
+    }).where(eq(labOptimizationRuns.id, id));
+  }
+
+  async failRun(id: number): Promise<void> {
+    await db.update(labOptimizationRuns).set({
+      status: "failed",
+      completedAt: new Date(),
+    }).where(eq(labOptimizationRuns.id, id));
+  }
+
+  async deleteRun(id: number): Promise<void> {
+    await db.delete(labOptimizationResults).where(eq(labOptimizationResults.runId, id));
+    await db.delete(labOptimizationRuns).where(eq(labOptimizationRuns.id, id));
+  }
+
+  async saveResults(runId: number, results: LabBacktestResult[]): Promise<void> {
+    console.log(`[lab/saveResults] runId=${runId}, results.length=${results.length}`);
+    if (results.length === 0) {
+      console.log(`[lab/saveResults] No results to save, returning early`);
+      return;
+    }
+    const insertData: InsertLabResult[] = results.map((r, idx) => ({
+      runId,
+      ticker: r.ticker,
+      timeframe: r.timeframe,
+      rank: idx + 1,
+      netProfitPercent: r.netProfitPercent,
+      winRatePercent: r.winRatePercent,
+      maxDrawdownPercent: r.maxDrawdownPercent,
+      profitFactor: r.profitFactor,
+      totalTrades: r.totalTrades,
+      params: r.params,
+      trades: r.trades,
+      equityCurve: r.equityCurve,
+    }));
+
+    const batchSize = 50;
+    for (let i = 0; i < insertData.length; i += batchSize) {
+      const batch = insertData.slice(i, i + batchSize);
+      console.log(`[lab/saveResults] Inserting batch ${i / batchSize + 1}, size=${batch.length}`);
+      await db.insert(labOptimizationResults).values(batch);
+    }
+    console.log(`[lab/saveResults] All batches inserted successfully`);
+  }
+
+  async getRunResults(runId: number): Promise<LabOptResult[]> {
+    return db.select().from(labOptimizationResults).where(eq(labOptimizationResults.runId, runId)).orderBy(labOptimizationResults.rank);
+  }
+
+  createJob(config: LabOptimizationConfig): LabJob {
+    const activeJobs = Array.from(this.jobs.values()).filter(
+      (j) => j.progress.status !== "complete" && j.progress.status !== "error"
+    );
+    if (activeJobs.length >= MAX_CONCURRENT_JOBS) {
+      throw new Error(`Maximum concurrent jobs limit reached (${MAX_CONCURRENT_JOBS}). Please wait for the current job to finish.`);
+    }
+
+    const id = randomUUID();
+    const job: LabJob = {
+      id,
+      config,
+      progress: {
+        jobId: id,
+        status: "fetching",
+        stage: "Initializing...",
+        current: 0,
+        total: 0,
+        percent: 0,
+        elapsed: 0,
+      },
+      results: [],
+      abortSignal: { aborted: false },
+      listeners: new Set(),
+    };
+    this.jobs.set(id, job);
+    return job;
+  }
+
+  getJob(id: string): LabJob | undefined {
+    return this.jobs.get(id);
+  }
+
+  getJobByRunId(runId: number): LabJob | undefined {
+    for (const job of Array.from(this.jobs.values())) {
+      if (job.runId === runId) return job;
+    }
+    return undefined;
+  }
+
+  updateProgress(id: string, progress: LabJobProgress): void {
+    const job = this.jobs.get(id);
+    if (job) {
+      job.progress = progress;
+      for (const listener of Array.from(job.listeners)) {
+        try { listener(progress); } catch {}
+      }
+    }
+  }
+
+  setResults(id: string, results: LabBacktestResult[]): void {
+    const job = this.jobs.get(id);
+    if (job) {
+      job.results = results;
+    }
+  }
+
+  getJobResult(id: string): LabJobResult | undefined {
+    const job = this.jobs.get(id);
+    if (!job) return undefined;
+    const isFinished = job.progress.status === "complete" || job.progress.status === "error";
+    if (job.results.length === 0 && !isFinished) return undefined;
+
+    const bestByCombo: Record<string, LabBacktestResult[]> = {};
+    for (const result of job.results) {
+      const key = `${result.ticker}|${result.timeframe}`;
+      if (!bestByCombo[key]) bestByCombo[key] = [];
+      bestByCombo[key].push(result);
+    }
+
+    const totalSamples = job.config.randomSamples + job.config.topK * job.config.refinementsPerSeed;
+    const combos = job.config.tickers.length * job.config.timeframes.length;
+
+    return {
+      jobId: id,
+      runId: job.runId,
+      configs: job.results,
+      totalConfigsTested: totalSamples * combos,
+      bestByCombo,
+    };
+  }
+
+  cancelJob(id: string): void {
+    const job = this.jobs.get(id);
+    if (job) {
+      job.abortSignal.aborted = true;
+    }
+  }
+}
+
+export const labStorage = new LabDatabaseStorage();

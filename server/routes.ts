@@ -25,6 +25,7 @@ import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { getSwiftMetrics } from "./swift-metrics";
 import { DOCS_MARKDOWN } from "./docs-markdown";
 import { getSwiftDiagnostics } from "./swift-config";
+import { registerLabRoutes } from "./lab/routes";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
@@ -10355,6 +10356,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       res.status(500).json({ error: error.message });
     }
   });
+
+  registerLabRoutes(app);
 
   return httpServer;
 }
