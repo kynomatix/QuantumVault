@@ -188,7 +188,7 @@ export default function QuantumLab() {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeResultsJobId, setActiveResultsJobId] = useState<string | null>(null);
   const [activeHistoryRunId, setActiveHistoryRunId] = useState<number | null>(null);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [mobileMenuOpen, _setMobileMenuOpen] = useState(false);
 
   const renderContent = () => {
     switch (mainTab) {
