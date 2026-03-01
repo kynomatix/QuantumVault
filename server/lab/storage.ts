@@ -115,11 +115,7 @@ export class LabDatabaseStorage implements ILabStorage {
   }
 
   async saveResults(runId: number, results: LabBacktestResult[]): Promise<void> {
-    console.log(`[lab/saveResults] runId=${runId}, results.length=${results.length}`);
-    if (results.length === 0) {
-      console.log(`[lab/saveResults] No results to save, returning early`);
-      return;
-    }
+    if (results.length === 0) return;
     const insertData: InsertLabResult[] = results.map((r, idx) => ({
       runId,
       ticker: r.ticker,
@@ -138,10 +134,8 @@ export class LabDatabaseStorage implements ILabStorage {
     const batchSize = 50;
     for (let i = 0; i < insertData.length; i += batchSize) {
       const batch = insertData.slice(i, i + batchSize);
-      console.log(`[lab/saveResults] Inserting batch ${i / batchSize + 1}, size=${batch.length}`);
       await db.insert(labOptimizationResults).values(batch);
     }
-    console.log(`[lab/saveResults] All batches inserted successfully`);
   }
 
   async getRunResults(runId: number): Promise<LabOptResult[]> {

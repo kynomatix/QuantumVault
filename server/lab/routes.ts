@@ -216,14 +216,6 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/job/:id/status", (req: Request, res: Response) => {
-    const job = labStorage.getJob(req.params.id);
-    if (!job) {
-      return res.status(404).json({ error: "Job not found" });
-    }
-    res.json(job.progress);
-  });
-
   app.get("/api/lab/job/:id/progress", (req: Request, res: Response) => {
     const job = labStorage.getJob(req.params.id);
     if (!job) {

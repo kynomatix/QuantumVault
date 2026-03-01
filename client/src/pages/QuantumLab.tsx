@@ -12,7 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import {
-  Code2, Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
+  Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen,
@@ -71,7 +71,7 @@ function calculateRiskAnalysis(
   if (closedTrades.length === 0) {
     return {
       maxDrawdownPercent, recommendedLeverage: 1, maxSafeLeverage: 1, liquidationBuffer: 0,
-      consecutiveLosses: 0, longestLosingStreak: 0, avgLossPercent: 0, avgWinPercent: 0,
+      longestLosingStreak: 0, avgLossPercent: 0, avgWinPercent: 0,
       worstTradePercent: 0, recoveryFactor: 0, kellyPercent: 0, riskOfRuin: 100,
       recommendedWalletAllocation: 0, minCapitalRequired: 0, streakDrawdownPercent: 0,
       avgBarsInDrawdown: 0, riskRating: "EXTREME",
@@ -147,7 +147,7 @@ function calculateRiskAnalysis(
 
   return {
     maxDrawdownPercent: Math.round(maxDrawdownPercent * 100) / 100, recommendedLeverage, maxSafeLeverage,
-    liquidationBuffer: Math.max(0, liquidationBuffer), consecutiveLosses: longestLosingStreak, longestLosingStreak,
+    liquidationBuffer: Math.max(0, liquidationBuffer), longestLosingStreak,
     avgLossPercent: Math.round(avgLossPercent * 100) / 100, avgWinPercent: Math.round(avgWinPercent * 100) / 100,
     worstTradePercent: Math.round(worstTradePercent * 100) / 100, recoveryFactor: Math.round(recoveryFactor * 100) / 100,
     kellyPercent: Math.round(kellyPercent * 100) / 100, riskOfRuin: Math.round(riskOfRuin * 100) / 100,

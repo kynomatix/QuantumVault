@@ -1,7 +1,7 @@
-import type { LabTradeRecord, LabBacktestResult, LabPineInput } from "@shared/schema";
+import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "./indicators";
 
-interface OHLCV {
+export interface OHLCV {
   time: number;
   open: number;
   high: number;

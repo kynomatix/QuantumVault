@@ -1,16 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
+import type { OHLCV } from "./engine";
 
 const CACHE_DIR = path.join(process.cwd(), "cache");
-
-interface OHLCV {
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
 
 function ensureCacheDir() {
   if (!fs.existsSync(CACHE_DIR)) {

@@ -831,7 +831,6 @@ export interface LabRiskAnalysis {
   recommendedLeverage: number;
   maxSafeLeverage: number;
   liquidationBuffer: number;
-  consecutiveLosses: number;
   longestLosingStreak: number;
   avgLossPercent: number;
   avgWinPercent: number;

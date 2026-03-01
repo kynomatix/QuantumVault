@@ -1,15 +1,6 @@
 import type { LabPineInput, LabBacktestResult, LabOptimizationConfig, LabJobProgress } from "@shared/schema";
-import { runBacktest } from "./engine";
+import { runBacktest, type OHLCV } from "./engine";
 import { fetchOHLCV } from "./datafeed";
-
-interface OHLCV {
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
 
 function generateRandomParams(inputs: LabPineInput[]): Record<string, any> {
   const params: Record<string, any> = {};
