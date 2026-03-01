@@ -15,7 +15,7 @@ import {
   Code2, Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
-  History, ChevronRight, Trash2, ArrowLeft, Plus,
+  History, ChevronRight, Trash2, ArrowLeft,
   Shield, AlertTriangle, DollarSign, Target, Flame, Info,
 } from "lucide-react";
 import {
@@ -32,7 +32,7 @@ import type {
 } from "@shared/schema";
 import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
 
-type MainTab = "setup" | "running" | "results" | "history" | "strategies";
+type MainTab = "main" | "results" | "history";
 type SortKey = "netProfitPercent" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades";
 type SortDir = "asc" | "desc";
 
@@ -43,11 +43,9 @@ interface LabNavItem {
 }
 
 const labNavItems: LabNavItem[] = [
-  { id: "setup", label: "Setup", icon: Settings2 },
-  { id: "running", label: "Running", icon: Activity },
+  { id: "main", label: "Main", icon: Settings2 },
   { id: "results", label: "Results", icon: BarChart3 },
   { id: "history", label: "History", icon: History },
-  { id: "strategies", label: "Strategies", icon: Code2 },
 ];
 
 const EXAMPLE_PINE = `// Paste your Pine Script strategy here
@@ -184,24 +182,71 @@ function formatTradeTime(iso: string): string {
 }
 
 export default function QuantumLab() {
-  const [mainTab, setMainTab] = useState<MainTab>("setup");
+  const [mainTab, setMainTab] = useState<MainTab>("main");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeResultsJobId, setActiveResultsJobId] = useState<string | null>(null);
   const [activeHistoryRunId, setActiveHistoryRunId] = useState<number | null>(null);
+  const [selectedStrategy, setSelectedStrategy] = useState<LabStrategy | null>(null);
+  const { toast } = useToast();
+
+  const { data: strategies } = useQuery<LabStrategy[]>({ queryKey: ["/api/lab/strategies"] });
+
+  const deleteStrategyMutation = useMutation({
+    mutationFn: async (id: number) => { await apiRequest("DELETE", `/api/lab/strategies/${id}`); },
+    onSuccess: (_: unknown, deletedId: number) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/strategies"] });
+      if (selectedStrategy?.id === deletedId) setSelectedStrategy(null);
+      toast({ title: "Strategy deleted" });
+    },
+  });
+
   const renderContent = () => {
     switch (mainTab) {
-      case "setup":
+      case "main":
         return (
-          <SetupPanel
-            onJobStarted={(jobId) => { setActiveJobId(jobId); setMainTab("running"); }}
-          />
-        );
-      case "running":
-        return (
-          <RunningPanel
-            jobId={activeJobId}
-            onComplete={(jobId) => { setActiveResultsJobId(jobId); setMainTab("results"); }}
-          />
+          <div className="space-y-6">
+            {strategies && strategies.length > 0 && (
+              <div className="flex items-center gap-2 overflow-x-auto pb-2 mb-4" data-testid="strategy-chips">
+                {strategies.map((s) => {
+                  const paramCount = (s.parsedInputs as any[])?.length ?? 0;
+                  const isSelected = selectedStrategy?.id === s.id;
+                  return (
+                    <button
+                      key={s.id}
+                      onClick={() => setSelectedStrategy(isSelected ? null : s)}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium cursor-pointer transition-colors whitespace-nowrap",
+                        isSelected
+                          ? "bg-violet-500/20 text-violet-300 border border-violet-500/30"
+                          : "bg-white/5 text-white/60 hover:bg-white/10 border border-white/10"
+                      )}
+                      data-testid={`chip-strategy-${s.id}`}
+                    >
+                      {s.name}
+                      <span className="text-[10px] opacity-60">({paramCount})</span>
+                      <X
+                        className="w-3 h-3 text-white/30 hover:text-red-400"
+                        onClick={(e) => { e.stopPropagation(); deleteStrategyMutation.mutate(s.id); }}
+                        data-testid={`chip-delete-${s.id}`}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <SetupPanel
+              onJobStarted={(jobId) => { setActiveJobId(jobId); }}
+              loadedStrategy={selectedStrategy}
+            />
+
+            {activeJobId && (
+              <RunningPanel
+                jobId={activeJobId}
+                onComplete={(jobId) => { setActiveResultsJobId(jobId); setActiveJobId(null); setMainTab("results"); }}
+              />
+            )}
+          </div>
         );
       case "results":
         return <ResultsPanel jobId={activeResultsJobId} />;
@@ -214,11 +259,9 @@ export default function QuantumLab() {
         ) : (
           <RunHistoryPanel
             onSelectRun={(id) => setActiveHistoryRunId(id)}
-            onViewRunning={(jobId) => { setActiveJobId(jobId); setMainTab("running"); }}
+            onViewRunning={(jobId) => { setActiveJobId(jobId); setMainTab("main"); }}
           />
         );
-      case "strategies":
-        return <StrategiesPanel onLoadStrategy={() => setMainTab("setup")} />;
       default:
         return null;
     }
@@ -277,7 +320,7 @@ export default function QuantumLab() {
   );
 }
 
-function SetupPanel({ onJobStarted }: { onJobStarted: (jobId: string) => void }) {
+function SetupPanel({ onJobStarted, loadedStrategy }: { onJobStarted: (jobId: string) => void; loadedStrategy: LabStrategy | null }) {
   const { toast } = useToast();
   const [code, setCode] = useState(EXAMPLE_PINE);
   const [strategyName, setStrategyName] = useState("");
@@ -285,6 +328,20 @@ function SetupPanel({ onJobStarted }: { onJobStarted: (jobId: string) => void })
   const [parsedResult, setParsedResult] = useState<LabPineParseResult | null>(null);
   const [isParsing, setIsParsing] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (loadedStrategy) {
+      setCode(loadedStrategy.pineScript);
+      setStrategyName(loadedStrategy.name);
+      setStrategyId(loadedStrategy.id);
+      setParsedResult({
+        inputs: loadedStrategy.parsedInputs as LabPineInput[],
+        groups: (loadedStrategy.groups || {}) as Record<string, string>,
+        strategySettings: (loadedStrategy.strategySettings || {}) as any,
+      });
+      setParseError(null);
+    }
+  }, [loadedStrategy]);
   const [selectedTickers, setSelectedTickers] = useState<string[]>(["SOL/USDT:USDT"]);
   const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>(["15m"]);
   const [startDate, setStartDate] = useState("2023-01-01");
@@ -1514,117 +1571,6 @@ function HistStatCard({ label, value, color, icon }: { label: string; value: str
   );
 }
 
-function StrategiesPanel({ onLoadStrategy }: { onLoadStrategy: () => void }) {
-  const { toast } = useToast();
-  const { data: strategies, isLoading } = useQuery<LabStrategy[]>({ queryKey: ["/api/lab/strategies"] });
-
-  const deleteMutation = useMutation({
-    mutationFn: async (id: number) => { await apiRequest("DELETE", `/api/lab/strategies/${id}`); },
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["/api/lab/strategies"] }); toast({ title: "Strategy deleted" }); },
-  });
-
-  if (isLoading) return <div className="flex items-center justify-center h-96"><Loader2 className="w-6 h-6 animate-spin text-violet-400" /></div>;
-
-  return (
-    <div className="max-w-5xl mx-auto space-y-6">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h2 className="text-lg font-semibold text-white" data-testid="text-strategies-title">Strategy Library</h2>
-          <p className="text-xs text-white/60">{strategies?.length ?? 0} strategies saved</p>
-        </div>
-        <Button size="sm" onClick={onLoadStrategy} className="bg-violet-600 hover:bg-violet-500 text-white" data-testid="button-new-strategy">
-          <Plus className="w-3 h-3 mr-1" /> New Strategy
-        </Button>
-      </div>
-
-      {(!strategies || strategies.length === 0) ? (
-        <Card className="bg-white/5 border border-white/10 p-12 text-center">
-          <Code2 className="w-10 h-10 mx-auto mb-4 text-white/20" />
-          <p className="text-sm text-white/60 mb-4">No strategies saved yet. Go to Setup to paste and save a strategy.</p>
-          <Button variant="secondary" size="sm" onClick={onLoadStrategy} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-go-setup">
-            <Plus className="w-3 h-3 mr-1" /> Create First Strategy
-          </Button>
-        </Card>
-      ) : (
-        <div className="space-y-4">
-          {strategies.map((strategy) => (
-            <StrategyCardItem key={strategy.id} strategy={strategy} onDelete={() => deleteMutation.mutate(strategy.id)} isDeleting={deleteMutation.isPending} onLoadStrategy={onLoadStrategy} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StrategyCardItem({ strategy, onDelete, isDeleting, onLoadStrategy }: {
-  strategy: LabStrategy; onDelete: () => void; isDeleting: boolean; onLoadStrategy: () => void;
-}) {
-  const { data: runs } = useQuery<LabOptimizationRun[]>({
-    queryKey: ["/api/lab/runs", { strategyId: strategy.id }],
-    queryFn: async () => {
-      const res = await fetch(`/api/lab/runs?strategyId=${strategy.id}`);
-      if (!res.ok) throw new Error("Failed to fetch runs");
-      return res.json();
-    },
-  });
-
-  const inputs = strategy.parsedInputs as any[];
-  const optimizableCount = inputs?.filter((i: any) => i.optimizable).length ?? 0;
-  const completedRuns = runs?.filter(r => r.status === "complete") ?? [];
-
-  return (
-    <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden" data-testid={`strategy-card-${strategy.id}`}>
-      <div className="p-4 flex items-start justify-between gap-4">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 mb-1">
-            <Code2 className="w-4 h-4 text-violet-400 flex-shrink-0" />
-            <h3 className="text-sm font-semibold truncate text-white" data-testid={`text-strategy-name-${strategy.id}`}>{strategy.name}</h3>
-          </div>
-          {strategy.description && <p className="text-xs text-white/60 mb-2 line-clamp-2">{strategy.description}</p>}
-          <div className="flex items-center gap-3 flex-wrap">
-            <Badge className="text-[10px] bg-violet-500/20 text-violet-300">{optimizableCount} optimizable params</Badge>
-            <Badge variant="outline" className="text-[10px] border-white/20 text-white/60">
-              <Clock className="w-2.5 h-2.5 mr-1" /> {new Date(strategy.createdAt).toLocaleDateString()}
-            </Badge>
-            {completedRuns.length > 0 && (
-              <Badge variant="outline" className="text-[10px] text-green-400 border-green-500/30">
-                <Activity className="w-2.5 h-2.5 mr-1" /> {completedRuns.length} run{completedRuns.length !== 1 ? "s" : ""}
-              </Badge>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <Button variant="secondary" size="sm" onClick={onLoadStrategy} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid={`button-load-strategy-${strategy.id}`}>
-            <TrendingUp className="w-3 h-3 mr-1" /> Optimize
-          </Button>
-          <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onDelete(); }} disabled={isDeleting} className="text-white/40 hover:text-red-400" data-testid={`button-delete-strategy-${strategy.id}`}>
-            <Trash2 className="w-3 h-3" />
-          </Button>
-        </div>
-      </div>
-
-      {completedRuns.length > 0 && (
-        <div className="border-t border-white/10 px-4 py-2 bg-white/[0.02]">
-          <div className="flex items-center gap-2 text-[11px] text-white/40 mb-1">
-            <BarChart3 className="w-3 h-3" /> Recent Runs
-          </div>
-          <div className="space-y-1">
-            {completedRuns.slice(0, 3).map((run) => {
-              const tickers = (run.tickers as string[]).map(t => t.split("/")[0]).join(", ");
-              const timeframes = (run.timeframes as string[]).join(", ");
-              return (
-                <div key={run.id} className="flex items-center justify-between text-xs" data-testid={`run-row-${run.id}`}>
-                  <span className="text-white/40">{tickers} / {timeframes} — {new Date(run.createdAt).toLocaleDateString()}</span>
-                  <Badge variant="outline" className="text-[9px] border-white/20 text-white/60">{run.totalConfigsTested?.toLocaleString() ?? "?"} configs</Badge>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </Card>
-  );
-}
 
 function RiskManagementPanel({ analysis, ticker, timeframe }: { analysis: LabRiskAnalysis; ticker?: string; timeframe?: string }) {
   const ratingColors: Record<LabRiskAnalysis["riskRating"], { text: string; bg: string; border: string }> = {
