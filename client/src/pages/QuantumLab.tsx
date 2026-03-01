@@ -1566,7 +1566,8 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
     queryKey: ["/api/lab/runs", runId, "results"],
     queryFn: async () => {
       const res = await fetch(`/api/lab/runs/${runId}/results`);
-      if (!res.ok) throw new Error("No results");
+      if (res.status === 404) return [];
+      if (!res.ok) throw new Error("Failed to load results");
       return res.json();
     },
     enabled: run?.status !== "running",
@@ -1613,8 +1614,9 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
     return (
       <div className="flex items-center justify-center h-96">
         <div className="text-center space-y-4">
-          <XCircle className="w-8 h-8 text-red-400 mx-auto" />
-          <p className="text-sm text-white/60">No results found for this run.</p>
+          <AlertCircle className="w-8 h-8 text-amber-400 mx-auto" />
+          <p className="text-sm text-white/60">No qualifying results for this run.</p>
+          <p className="text-xs text-white/30 max-w-xs mx-auto">All configurations were filtered out by minimum trades or max drawdown cap. Try widening the filters.</p>
           <Button variant="secondary" size="sm" onClick={onBack} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-back-history">
             <ArrowLeft className="w-3 h-3 mr-1" /> Back to History
           </Button>
