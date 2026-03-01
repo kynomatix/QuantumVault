@@ -1377,8 +1377,19 @@ function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: num
 
             return (
               <div key={run.id} className="flex items-center gap-2">
-                <div className="flex-1 cursor-pointer" onClick={() => isComplete ? onSelectRun(run.id) : undefined}>
-                  <Card className={`bg-white/5 border border-white/10 p-4 ${isComplete ? "cursor-pointer hover:bg-white/10" : "opacity-70"}`} data-testid={`history-run-card-${run.id}`}>
+                <div className="flex-1 cursor-pointer" onClick={async () => {
+                  if (isComplete) { onSelectRun(run.id); }
+                  else if (isRunning) {
+                    try {
+                      const res = await fetch(`/api/lab/runs/${run.id}/job`);
+                      if (res.ok) {
+                        const { jobId } = await res.json();
+                        onViewRunning(jobId);
+                      }
+                    } catch {}
+                  }
+                }}>
+                  <Card className={`bg-white/5 border border-white/10 p-4 ${isComplete || isRunning ? "cursor-pointer hover:bg-white/10" : "opacity-70"}`} data-testid={`history-run-card-${run.id}`}>
                     <div className="flex items-center justify-between gap-4 flex-wrap">
                       <div className="flex items-center gap-3 min-w-0 flex-1">
                         <div className={`flex items-center justify-center w-9 h-9 rounded-md ${statusBg} flex-shrink-0`}>{statusIcon}</div>
@@ -1402,7 +1413,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: num
                           </div>
                         </div>
                       </div>
-                      {isComplete && <ChevronRight className="w-4 h-4 text-white/40 flex-shrink-0" />}
+                      {(isComplete || isRunning) && <ChevronRight className="w-4 h-4 text-white/40 flex-shrink-0" />}
                     </div>
                   </Card>
                 </div>
