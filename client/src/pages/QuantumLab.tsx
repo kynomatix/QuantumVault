@@ -63,9 +63,10 @@ function calcParamCombinations(inputs: LabPineInput[]): number {
 }
 
 function formatCombinations(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  if (n >= 1_000_000_000_000) return `${Math.round(n / 1_000_000_000_000)}T`;
+  if (n >= 1_000_000_000) return `${Math.round(n / 1_000_000_000)}B`;
+  if (n >= 1_000_000) return `${Math.round(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
   return n.toLocaleString();
 }
 
