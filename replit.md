@@ -53,6 +53,7 @@ Preferred communication style: Simple, everyday language.
 -   **Marketplace**: Users can publish signal bots and subscribe to others' trading signals, with proportional trade sizing and PnL snapshots. Subscriber trades execute sequentially with 2s stagger to prevent RPC contention (see `SUBSCRIBER_DIAGNOSTICS.md`).
 -   **Creator Profit Sharing**: Signal bot creators earn a percentage of subscriber profits on profitable trade closes via immediate on-chain USDC transfers with an IOU failover system.
 -   **Referral System**: Unique 6-character alphanumeric referral codes for each user.
+-   **QuantumLab (Backtesting)**: Hidden at `/quantumlab` (no nav button). Pine Script strategy backtesting and optimization engine with Gate.io OHLCV data, random search + refinement optimizer, risk analysis, and strategy library. Backend at `server/lab/` with APIs at `/api/lab/`. DB tables: `lab_strategies`, `lab_optimization_runs`, `lab_optimization_results`. Max 1 concurrent optimization job to protect core trading operations. Styled to match Docs page (violet/slate theme with sidebar navigation).
 
 ### Security Architecture
 -   **Key Management**: User Master Key (UMK) derived per-user, encrypting secrets with AES-256-GCM, and session-based decryption.
