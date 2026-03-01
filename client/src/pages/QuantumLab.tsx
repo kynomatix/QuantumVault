@@ -194,6 +194,74 @@ export default function QuantumLab() {
   const [strategyId, setStrategyId] = useState<number | null>(null);
   const [parsedResult, setParsedResult] = useState<LabPineParseResult | null>(null);
 
+  const [jobProgress, setJobProgress] = useState<LabJobProgress | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+
+  useEffect(() => {
+    if (!activeJobId) { setJobProgress(null); return; }
+    const currentJobId = activeJobId;
+    let reconnectTimer: ReturnType<typeof setTimeout>;
+    let isMounted = true;
+
+    function connect() {
+      if (!isMounted) return;
+      eventSourceRef.current?.close();
+      const es = new EventSource(`/api/lab/job/${currentJobId}/progress`);
+      eventSourceRef.current = es;
+      es.onmessage = (event) => {
+        try {
+          const data: LabJobProgress = JSON.parse(event.data);
+          setJobProgress(data);
+          if (data.status === "complete") {
+            es.close();
+            setActiveResultsJobId(currentJobId);
+            setActiveJobId(null);
+            setMainTab("results");
+            queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+          }
+          if (data.status === "error") {
+            es.close();
+            setActiveJobId(null);
+            queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+            toast({ title: "Optimization failed", description: data.error, variant: "destructive" });
+          }
+        } catch {}
+      };
+      es.onerror = () => {
+        es.close();
+        if (isMounted) {
+          reconnectTimer = setTimeout(async () => {
+            try {
+              const res = await fetch(`/api/lab/job/${currentJobId}/results`);
+              if (res.ok) {
+                setActiveResultsJobId(currentJobId);
+                setActiveJobId(null);
+                setMainTab("results");
+                queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+                return;
+              }
+            } catch {}
+            connect();
+          }, 3000);
+        }
+      };
+    }
+    connect();
+    return () => { isMounted = false; clearTimeout(reconnectTimer); eventSourceRef.current?.close(); };
+  }, [activeJobId, toast]);
+
+  const handleCancelJob = useCallback(async () => {
+    if (!activeJobId) return;
+    try {
+      await apiRequest("POST", `/api/lab/job/${activeJobId}/cancel`);
+      eventSourceRef.current?.close();
+      setJobProgress(prev => prev ? { ...prev, status: "error", stage: "Cancelled by user", error: "Cancelled" } : prev);
+      setActiveJobId(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+      toast({ title: "Optimization cancelled" });
+    } catch { toast({ title: "Failed to cancel", variant: "destructive" }); }
+  }, [activeJobId, toast]);
+
   useEffect(() => {
     if (selectedStrategy) {
       setCode(selectedStrategy.pineScript);
@@ -218,43 +286,56 @@ export default function QuantumLab() {
     },
   });
 
+  const handleJobStarted = useCallback((jobId: string) => {
+    setActiveJobId(jobId);
+    queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+  }, []);
+
   const renderContent = () => {
     switch (mainTab) {
       case "main":
         return (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2 space-y-6">
-              {strategies && strategies.length > 0 && (
-                <StrategyLibrary
-                  strategies={strategies}
-                  selectedId={selectedStrategy?.id ?? null}
-                  onSelect={(s) => setSelectedStrategy(selectedStrategy?.id === s.id ? null : s)}
-                  onDelete={(id) => deleteStrategyMutation.mutate(id)}
-                  isDeleting={deleteStrategyMutation.isPending}
+          <div className="space-y-6">
+            {activeJobId && jobProgress && (
+              <JobMonitor
+                progress={jobProgress}
+                onCancel={handleCancelJob}
+              />
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2 space-y-6">
+                {strategies && strategies.length > 0 && (
+                  <StrategyLibrary
+                    strategies={strategies}
+                    selectedId={selectedStrategy?.id ?? null}
+                    onSelect={(s) => setSelectedStrategy(selectedStrategy?.id === s.id ? null : s)}
+                    onDelete={(id) => deleteStrategyMutation.mutate(id)}
+                    isDeleting={deleteStrategyMutation.isPending}
+                  />
+                )}
+
+                <SetupPanel
+                  code={code}
+                  setCode={setCode}
+                  strategyName={strategyName}
+                  setStrategyName={setStrategyName}
+                  strategyId={strategyId}
+                  setStrategyId={setStrategyId}
+                  parsedResult={parsedResult}
+                  setParsedResult={setParsedResult}
                 />
-              )}
+              </div>
 
-              <SetupPanel
-                code={code}
-                setCode={setCode}
-                strategyName={strategyName}
-                setStrategyName={setStrategyName}
-                strategyId={strategyId}
-                setStrategyId={setStrategyId}
-                parsedResult={parsedResult}
-                setParsedResult={setParsedResult}
-              />
-            </div>
-
-            <div className="space-y-6">
-              <RunConfigPanel
-                code={code}
-                parsedResult={parsedResult}
-                strategyId={strategyId}
-                onJobStarted={(jobId) => { setActiveJobId(jobId); }}
-                activeJobId={activeJobId}
-                onJobComplete={(jobId) => { setActiveResultsJobId(jobId); setActiveJobId(null); setMainTab("results"); }}
-              />
+              <div className="space-y-6">
+                <RunConfigPanel
+                  code={code}
+                  parsedResult={parsedResult}
+                  strategyId={strategyId}
+                  onJobStarted={handleJobStarted}
+                  isRunning={!!activeJobId}
+                />
+              </div>
             </div>
           </div>
         );
@@ -583,13 +664,12 @@ const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
   { label: "Other", tickers: ["XRP", "DOGE", "ZEC", "PAXG"] },
 ];
 
-function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, activeJobId, onJobComplete }: {
+function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunning }: {
   code: string;
   parsedResult: LabPineParseResult | null;
   strategyId: number | null;
   onJobStarted: (jobId: string) => void;
-  activeJobId: string | null;
-  onJobComplete: (jobId: string) => void;
+  isRunning: boolean;
 }) {
   const { toast } = useToast();
   const [selectedTickers, setSelectedTickers] = useState<string[]>(["SOL/USDT:USDT"]);
@@ -770,190 +850,135 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, activeJo
             {selectedTickers.length} market{selectedTickers.length !== 1 ? "s" : ""} &times; {selectedTimeframes.length} timeframe{selectedTimeframes.length !== 1 ? "s" : ""} = <span className="text-white/60 font-medium">{selectedTickers.length * selectedTimeframes.length} combo{selectedTickers.length * selectedTimeframes.length !== 1 ? "s" : ""}</span>
           </p>
         </div>
-        <Button className="w-full bg-white/5 hover:bg-white/10 text-white/70 border border-white/10" onClick={() => handleRun("smoke")} disabled={isSubmitting || !parsedResult} data-testid="button-smoke-test">
+        <Button className="w-full bg-white/5 hover:bg-white/10 text-white/70 border border-white/10" onClick={() => handleRun("smoke")} disabled={isSubmitting || isRunning || !parsedResult} data-testid="button-smoke-test">
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
           Smoke Test
         </Button>
-        <Button className="w-full bg-violet-600 hover:bg-violet-500 text-white" onClick={() => handleRun("sweep")} disabled={isSubmitting || !parsedResult} data-testid="button-full-sweep">
+        <Button className="w-full bg-violet-600 hover:bg-violet-500 text-white" onClick={() => handleRun("sweep")} disabled={isSubmitting || isRunning || !parsedResult} data-testid="button-full-sweep">
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Rocket className="w-4 h-4 mr-2" />}
           Full Sweep
         </Button>
-        <p className="text-[10px] text-white/30 text-center">Smoke test uses first ticker/timeframe only</p>
+        <p className="text-[10px] text-white/30 text-center">{isRunning ? "Optimization in progress — see monitor above" : "Smoke test uses first ticker/timeframe only"}</p>
       </Card>
-
-      {activeJobId && (
-        <RunningPanel
-          jobId={activeJobId}
-          onComplete={onJobComplete}
-        />
-      )}
     </>
   );
 }
 
-function RunningPanel({ jobId, onComplete }: { jobId: string | null; onComplete: (jobId: string) => void }) {
-  const { toast } = useToast();
-  const [progress, setProgress] = useState<LabJobProgress | null>(null);
+function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel: () => void }) {
   const [cancelling, setCancelling] = useState(false);
-  const eventSourceRef = useRef<EventSource | null>(null);
-
-  useEffect(() => {
-    if (!jobId) return;
-    const currentJobId = jobId;
-    let reconnectTimer: ReturnType<typeof setTimeout>;
-    let isMounted = true;
-
-    function connect() {
-      if (!isMounted) return;
-      const es = new EventSource(`/api/lab/job/${currentJobId}/progress`);
-      eventSourceRef.current = es;
-      es.onmessage = (event) => {
-        try {
-          const data: LabJobProgress = JSON.parse(event.data);
-          setProgress(data);
-          if (data.status === "complete") { es.close(); onComplete(currentJobId); }
-          if (data.status === "error") { es.close(); toast({ title: "Optimization failed", description: data.error, variant: "destructive" }); }
-        } catch {}
-      };
-      es.onerror = () => {
-        es.close();
-        if (isMounted) {
-          reconnectTimer = setTimeout(async () => {
-            try {
-              const res = await fetch(`/api/lab/job/${currentJobId}/results`);
-              if (res.ok) { onComplete(currentJobId); return; }
-            } catch {}
-            connect();
-          }, 3000);
-        }
-      };
-    }
-    connect();
-    return () => { isMounted = false; clearTimeout(reconnectTimer); eventSourceRef.current?.close(); };
-  }, [jobId, onComplete, toast]);
 
   const handleCancel = async () => {
-    if (!jobId) return;
     setCancelling(true);
-    try {
-      await apiRequest("POST", `/api/lab/job/${jobId}/cancel`);
-      eventSourceRef.current?.close();
-      setProgress(prev => prev ? { ...prev, status: "error", stage: "Cancelled by user", error: "Cancelled" } : prev);
-      toast({ title: "Optimization cancelled" });
-    } catch { toast({ title: "Failed to cancel", variant: "destructive" }); }
+    await onCancel();
     setCancelling(false);
   };
 
-  if (!jobId) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <div className="text-center space-y-3">
-          <Activity className="w-8 h-8 mx-auto text-white/20" />
-          <p className="text-sm text-white/60">No active job. Start an optimization from the Setup tab.</p>
-        </div>
-      </div>
-    );
-  }
-
-  const statusColor = progress?.status === "error" ? "text-red-400" : progress?.status === "complete" ? "text-green-400" : "text-violet-400";
-  const statusIcon = progress?.status === "error" ? <AlertCircle className="w-5 h-5" /> : progress?.status === "complete" ? <CheckCircle2 className="w-5 h-5" /> : <Loader2 className="w-5 h-5 animate-spin" />;
+  const statusColor = progress.status === "error" ? "text-red-400" : progress.status === "complete" ? "text-green-400" : "text-violet-400";
+  const statusIcon = progress.status === "error" ? <AlertCircle className="w-5 h-5" /> : progress.status === "complete" ? <CheckCircle2 className="w-5 h-5" /> : <Loader2 className="w-5 h-5 animate-spin" />;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <Card className="bg-white/5 border border-white/10 p-6 space-y-6">
-        <div className="flex items-center justify-between gap-1">
-          <div className="flex items-center gap-3">
+    <Card className="bg-violet-500/5 border border-violet-500/20 p-0 overflow-hidden" data-testid="job-monitor">
+      <div className="relative w-full h-1.5 bg-white/5">
+        <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-violet-600 to-violet-400 transition-all duration-500 ease-out" style={{ width: `${Math.round(progress.percent ?? 0)}%` }} />
+      </div>
+
+      <div className="p-5 space-y-4">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-3 min-w-0">
             <div className={statusColor}>{statusIcon}</div>
-            <div>
-              <h2 className="text-lg font-semibold text-white" data-testid="text-running-title">
-                {progress?.error === "Cancelled" ? "Optimization Cancelled" : progress?.status === "complete" ? "Optimization Complete" : progress?.status === "error" ? "Optimization Error" : "Optimization Running"}
+            <div className="min-w-0">
+              <h2 className="text-base font-semibold text-white truncate" data-testid="text-running-title">
+                {progress.error === "Cancelled" ? "Cancelled" : progress.status === "complete" ? "Complete" : progress.status === "error" ? "Error" : "Optimization Running"}
               </h2>
-              <p className="text-sm text-white/60" data-testid="text-running-stage">{progress?.stage || "Initializing..."}</p>
+              <p className="text-xs text-white/50 truncate" data-testid="text-running-stage">{progress.stage || "Initializing..."}</p>
             </div>
           </div>
-          <Button variant="destructive" size="sm" onClick={handleCancel} disabled={cancelling || progress?.status === "complete" || progress?.status === "error"} data-testid="button-cancel">
-            {cancelling ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <X className="w-3 h-3 mr-1" />} Cancel
-          </Button>
-        </div>
-
-        <div className="space-y-3" data-testid="progress-bar">
-          <div className="flex items-center justify-between">
-            <span className="text-2xl font-bold font-mono tabular-nums text-white" data-testid="text-percent">{Math.round(progress?.percent ?? 0)}%</span>
-            <span className="text-xs text-white/60 font-mono tabular-nums" data-testid="text-configs-count">
-              {progress?.current?.toLocaleString() ?? 0} / {progress?.total?.toLocaleString() ?? 0} configs
-            </span>
-          </div>
-          <div className="relative w-full h-8 rounded-md bg-white/5 border border-white/10" role="progressbar" aria-valuenow={Math.round(progress?.percent ?? 0)} aria-valuemin={0} aria-valuemax={100}>
-            <div className="absolute inset-0 rounded-md bg-gradient-to-r from-violet-600/80 to-violet-500 transition-all duration-500 ease-out" style={{ width: `${Math.round(progress?.percent ?? 0)}%` }} />
+          <div className="flex items-center gap-3 flex-shrink-0">
+            <span className="text-2xl font-bold font-mono tabular-nums text-white" data-testid="text-percent">{Math.round(progress.percent ?? 0)}%</span>
+            <Button variant="destructive" size="sm" onClick={handleCancel} disabled={cancelling || progress.status === "complete" || progress.status === "error"} data-testid="button-cancel">
+              {cancelling ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <X className="w-3 h-3 mr-1" />} Cancel
+            </Button>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
-          <div className="flex items-center gap-2 text-sm">
-            <Clock className="w-4 h-4 text-white/40" />
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="flex items-center gap-2 text-sm px-3 py-2 rounded-md bg-white/5">
+            <Clock className="w-3.5 h-3.5 text-white/30 flex-shrink-0" />
             <div>
-              <p className="text-xs text-white/40">Elapsed</p>
-              <p className="font-mono text-sm text-white" data-testid="text-elapsed">{progress ? formatDuration(progress.elapsed) : "--"}</p>
+              <p className="text-[10px] text-white/30">Elapsed</p>
+              <p className="font-mono text-xs text-white" data-testid="text-elapsed">{formatDuration(progress.elapsed)}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 text-sm">
-            <Activity className="w-4 h-4 text-white/40" />
+          <div className="flex items-center gap-2 text-sm px-3 py-2 rounded-md bg-white/5">
+            <Activity className="w-3.5 h-3.5 text-white/30 flex-shrink-0" />
             <div>
-              <p className="text-xs text-white/40">ETA</p>
-              <p className="font-mono text-sm text-white" data-testid="text-eta">{progress?.eta ? formatDuration(progress.eta) : "--"}</p>
+              <p className="text-[10px] text-white/30">ETA</p>
+              <p className="font-mono text-xs text-white" data-testid="text-eta">{progress.eta ? formatDuration(progress.eta) : "--"}</p>
             </div>
           </div>
+          <div className="flex items-center gap-2 text-sm px-3 py-2 rounded-md bg-white/5 col-span-2 sm:col-span-1">
+            <BarChart3 className="w-3.5 h-3.5 text-white/30 flex-shrink-0" />
+            <div>
+              <p className="text-[10px] text-white/30">Configs</p>
+              <p className="font-mono text-xs text-white" data-testid="text-configs-count">{progress.current?.toLocaleString() ?? 0} / {progress.total?.toLocaleString() ?? 0}</p>
+            </div>
+          </div>
+          {progress.bestSoFar && (
+            <div className="flex items-center gap-2 text-sm px-3 py-2 rounded-md bg-white/5 col-span-2 sm:col-span-1">
+              <TrendingUp className="w-3.5 h-3.5 text-green-400/60 flex-shrink-0" />
+              <div>
+                <p className="text-[10px] text-white/30">Best Profit</p>
+                <p className={`font-mono text-xs font-semibold ${progress.bestSoFar.netProfitPercent >= 0 ? "text-green-400" : "text-red-400"}`} data-testid="text-best-profit">
+                  {progress.bestSoFar.netProfitPercent > 0 ? "+" : ""}{progress.bestSoFar.netProfitPercent.toFixed(2)}%
+                </p>
+              </div>
+            </div>
+          )}
         </div>
-      </Card>
 
-      {progress?.bestSoFar && (
-        <Card className="bg-white/5 border border-white/10 p-6">
-          <h3 className="text-sm font-semibold mb-4 flex items-center gap-2 text-white">
-            <TrendingUp className="w-4 h-4 text-green-400" /> Best So Far
-          </h3>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <RunMetricCard label="Net Profit" value={`${progress.bestSoFar.netProfitPercent > 0 ? "+" : ""}${progress.bestSoFar.netProfitPercent.toFixed(2)}%`} color={progress.bestSoFar.netProfitPercent >= 0 ? "text-green-400" : "text-red-400"} testId="text-best-profit" />
+        {progress.bestSoFar && (
+          <div className="grid grid-cols-3 gap-3">
             <RunMetricCard label="Win Rate" value={`${progress.bestSoFar.winRatePercent.toFixed(1)}%`} color={progress.bestSoFar.winRatePercent >= 50 ? "text-green-400" : "text-yellow-400"} testId="text-best-winrate" />
             <RunMetricCard label="Max Drawdown" value={`${progress.bestSoFar.maxDrawdownPercent.toFixed(1)}%`} color={progress.bestSoFar.maxDrawdownPercent <= 30 ? "text-green-400" : "text-red-400"} testId="text-best-drawdown" />
             <RunMetricCard label="Profit Factor" value={progress.bestSoFar.profitFactor.toFixed(2)} color={progress.bestSoFar.profitFactor >= 1.5 ? "text-green-400" : "text-yellow-400"} testId="text-best-pf" />
           </div>
-        </Card>
-      )}
+        )}
 
-      {progress?.tickerProgress && Object.keys(progress.tickerProgress).length > 1 && (
-        <Card className="bg-white/5 border border-white/10 p-6">
-          <h3 className="text-sm font-semibold mb-4 flex items-center gap-2 text-white">
-            <BarChart3 className="w-4 h-4 text-violet-400" /> Sweep Progress
-          </h3>
-          <div className="space-y-2">
-            {Object.entries(progress.tickerProgress).map(([key, val]) => {
-              const [ticker, tf] = key.split("|");
-              const name = ticker.split("/")[0];
-              return (
-                <div key={key} className="flex items-center justify-between gap-1 py-1.5 px-3 rounded-md bg-white/5" data-testid={`sweep-${name}-${tf}`}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono text-white">{name}</span>
-                    <Badge variant="outline" className="text-[10px] border-white/20 text-white/60">{tf}</Badge>
+        {progress.tickerProgress && Object.keys(progress.tickerProgress).length > 1 && (
+          <div className="space-y-1.5">
+            <p className="text-[10px] uppercase tracking-wider text-white/30 flex items-center gap-1.5">
+              <BarChart3 className="w-3 h-3" /> Sweep Progress
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+              {Object.entries(progress.tickerProgress).map(([key, val]) => {
+                const [ticker, tf] = key.split("|");
+                const name = ticker.split("/")[0];
+                return (
+                  <div key={key} className="flex items-center justify-between gap-1 py-1.5 px-3 rounded-md bg-white/5" data-testid={`sweep-${name}-${tf}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-mono text-white">{name}</span>
+                      <Badge variant="outline" className="text-[10px] border-white/20 text-white/60">{tf}</Badge>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {val.best !== undefined && (
+                        <span className={`text-xs font-mono ${val.best >= 0 ? "text-green-400" : "text-red-400"}`}>
+                          {val.best > 0 ? "+" : ""}{val.best.toFixed(1)}%
+                        </span>
+                      )}
+                      <Badge className={`text-[10px] ${val.status === "complete" ? "bg-green-500/20 text-green-400" : val.status === "running" ? "bg-violet-500/20 text-violet-400" : "bg-white/5 text-white/60"}`}>
+                        {val.status === "complete" && <CheckCircle2 className="w-2.5 h-2.5 mr-1" />}
+                        {val.status === "running" && <Loader2 className="w-2.5 h-2.5 mr-1 animate-spin" />}
+                        {val.status}
+                      </Badge>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {val.best !== undefined && (
-                      <span className={`text-xs font-mono ${val.best >= 0 ? "text-green-400" : "text-red-400"}`}>
-                        {val.best > 0 ? "+" : ""}{val.best.toFixed(1)}%
-                      </span>
-                    )}
-                    <Badge className={`text-[10px] ${val.status === "complete" ? "bg-green-500/20 text-green-400" : val.status === "running" ? "bg-violet-500/20 text-violet-400" : "bg-white/5 text-white/60"}`}>
-                      {val.status === "complete" && <CheckCircle2 className="w-2.5 h-2.5 mr-1" />}
-                      {val.status === "running" && <Loader2 className="w-2.5 h-2.5 mr-1 animate-spin" />}
-                      {val.status}
-                    </Badge>
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </Card>
-      )}
-    </div>
+        )}
+      </div>
+    </Card>
   );
 }
 
@@ -1327,7 +1352,10 @@ function ConfigRow({ config, name, isExpanded, comboResults, onToggleExpand, onS
 
 function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: number) => void; onViewRunning: (jobId: string) => void }) {
   const { toast } = useToast();
-  const { data: runs, isLoading } = useQuery<LabOptimizationRun[]>({ queryKey: ["/api/lab/runs"] });
+  const { data: runs, isLoading } = useQuery<LabOptimizationRun[]>({
+    queryKey: ["/api/lab/runs"],
+    refetchInterval: 5000,
+  });
   const { data: strategies } = useQuery<LabStrategy[]>({ queryKey: ["/api/lab/strategies"] });
 
   const deleteMutation = useMutation({
