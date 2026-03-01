@@ -15,7 +15,7 @@ import {
   Code2, Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
-  History, ChevronRight, Trash2, ArrowLeft,
+  History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen,
   Shield, AlertTriangle, DollarSign, Target, Flame, Info,
 } from "lucide-react";
 import {
@@ -189,6 +189,24 @@ export default function QuantumLab() {
   const [selectedStrategy, setSelectedStrategy] = useState<LabStrategy | null>(null);
   const { toast } = useToast();
 
+  const [code, setCode] = useState(EXAMPLE_PINE);
+  const [strategyName, setStrategyName] = useState("");
+  const [strategyId, setStrategyId] = useState<number | null>(null);
+  const [parsedResult, setParsedResult] = useState<LabPineParseResult | null>(null);
+
+  useEffect(() => {
+    if (selectedStrategy) {
+      setCode(selectedStrategy.pineScript);
+      setStrategyName(selectedStrategy.name);
+      setStrategyId(selectedStrategy.id);
+      setParsedResult({
+        inputs: selectedStrategy.parsedInputs as LabPineInput[],
+        groups: (selectedStrategy.groups || {}) as Record<string, string>,
+        strategySettings: (selectedStrategy.strategySettings || {}) as any,
+      });
+    }
+  }, [selectedStrategy]);
+
   const { data: strategies } = useQuery<LabStrategy[]>({ queryKey: ["/api/lab/strategies"] });
 
   const deleteStrategyMutation = useMutation({
@@ -204,48 +222,40 @@ export default function QuantumLab() {
     switch (mainTab) {
       case "main":
         return (
-          <div className="space-y-6">
-            {strategies && strategies.length > 0 && (
-              <div className="flex items-center gap-2 overflow-x-auto pb-2 mb-4" data-testid="strategy-chips">
-                {strategies.map((s) => {
-                  const paramCount = (s.parsedInputs as any[])?.length ?? 0;
-                  const isSelected = selectedStrategy?.id === s.id;
-                  return (
-                    <button
-                      key={s.id}
-                      onClick={() => setSelectedStrategy(isSelected ? null : s)}
-                      className={cn(
-                        "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium cursor-pointer transition-colors whitespace-nowrap",
-                        isSelected
-                          ? "bg-violet-500/20 text-violet-300 border border-violet-500/30"
-                          : "bg-white/5 text-white/60 hover:bg-white/10 border border-white/10"
-                      )}
-                      data-testid={`chip-strategy-${s.id}`}
-                    >
-                      {s.name}
-                      <span className="text-[10px] opacity-60">({paramCount})</span>
-                      <X
-                        className="w-3 h-3 text-white/30 hover:text-red-400"
-                        onClick={(e) => { e.stopPropagation(); deleteStrategyMutation.mutate(s.id); }}
-                        data-testid={`chip-delete-${s.id}`}
-                      />
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 space-y-6">
+              {strategies && strategies.length > 0 && (
+                <StrategyLibrary
+                  strategies={strategies}
+                  selectedId={selectedStrategy?.id ?? null}
+                  onSelect={(s) => setSelectedStrategy(selectedStrategy?.id === s.id ? null : s)}
+                  onDelete={(id) => deleteStrategyMutation.mutate(id)}
+                  isDeleting={deleteStrategyMutation.isPending}
+                />
+              )}
 
-            <SetupPanel
-              onJobStarted={(jobId) => { setActiveJobId(jobId); }}
-              loadedStrategy={selectedStrategy}
-            />
-
-            {activeJobId && (
-              <RunningPanel
-                jobId={activeJobId}
-                onComplete={(jobId) => { setActiveResultsJobId(jobId); setActiveJobId(null); setMainTab("results"); }}
+              <SetupPanel
+                code={code}
+                setCode={setCode}
+                strategyName={strategyName}
+                setStrategyName={setStrategyName}
+                strategyId={strategyId}
+                setStrategyId={setStrategyId}
+                parsedResult={parsedResult}
+                setParsedResult={setParsedResult}
               />
-            )}
+            </div>
+
+            <div className="space-y-6">
+              <RunConfigPanel
+                code={code}
+                parsedResult={parsedResult}
+                strategyId={strategyId}
+                onJobStarted={(jobId) => { setActiveJobId(jobId); }}
+                activeJobId={activeJobId}
+                onJobComplete={(jobId) => { setActiveResultsJobId(jobId); setActiveJobId(null); setMainTab("results"); }}
+              />
+            </div>
           </div>
         );
       case "results":
@@ -320,39 +330,85 @@ export default function QuantumLab() {
   );
 }
 
-function SetupPanel({ onJobStarted, loadedStrategy }: { onJobStarted: (jobId: string) => void; loadedStrategy: LabStrategy | null }) {
+function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, isDeleting }: {
+  strategies: LabStrategy[];
+  selectedId: number | null;
+  onSelect: (s: LabStrategy) => void;
+  onDelete: (id: number) => void;
+  isDeleting: boolean;
+}) {
+  return (
+    <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden" data-testid="strategy-library">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+        <div className="flex items-center gap-2">
+          <BookOpen className="w-4 h-4 text-violet-400" />
+          <div>
+            <span className="text-sm font-medium text-white">Strategy Library</span>
+            <span className="text-[11px] text-white/40 ml-2">{strategies.length} saved</span>
+          </div>
+        </div>
+        <p className="text-[11px] text-white/40">Select a strategy to load it into the editor</p>
+      </div>
+      <div className="divide-y divide-white/5">
+        {strategies.map((s) => {
+          const paramCount = (s.parsedInputs as any[])?.filter((i: any) => i.optimizable).length ?? 0;
+          const totalParams = (s.parsedInputs as any[])?.length ?? 0;
+          const isSelected = selectedId === s.id;
+          return (
+            <div
+              key={s.id}
+              onClick={() => onSelect(s)}
+              className={cn(
+                "w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left transition-colors cursor-pointer",
+                isSelected ? "bg-violet-500/10" : "hover:bg-white/[0.03]"
+              )}
+              data-testid={`strategy-row-${s.id}`}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <div className={cn(
+                  "w-2 h-2 rounded-full flex-shrink-0",
+                  isSelected ? "bg-violet-400" : "bg-white/20"
+                )} />
+                <div className="min-w-0">
+                  <p className={cn("text-sm font-medium truncate", isSelected ? "text-violet-300" : "text-white/80")} data-testid={`text-strategy-name-${s.id}`}>{s.name}</p>
+                  <p className="text-[11px] text-white/40">{new Date(s.createdAt).toLocaleDateString()}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <Badge className="text-[10px] bg-violet-500/15 text-violet-300/80 border-none">{paramCount} optimizable</Badge>
+                {totalParams - paramCount > 0 && (
+                  <Badge variant="outline" className="text-[10px] border-white/10 text-white/40">{totalParams - paramCount} fixed</Badge>
+                )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
+                  disabled={isDeleting}
+                  className="p-1 rounded hover:bg-red-500/20 text-white/20 hover:text-red-400 transition-colors"
+                  data-testid={`button-delete-strategy-${s.id}`}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, setStrategyId, parsedResult, setParsedResult }: {
+  code: string;
+  setCode: (code: string) => void;
+  strategyName: string;
+  setStrategyName: (name: string) => void;
+  strategyId: number | null;
+  setStrategyId: (id: number | null) => void;
+  parsedResult: LabPineParseResult | null;
+  setParsedResult: (result: LabPineParseResult | null) => void;
+}) {
   const { toast } = useToast();
-  const [code, setCode] = useState(EXAMPLE_PINE);
-  const [strategyName, setStrategyName] = useState("");
-  const [strategyId, setStrategyId] = useState<number | null>(null);
-  const [parsedResult, setParsedResult] = useState<LabPineParseResult | null>(null);
   const [isParsing, setIsParsing] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (loadedStrategy) {
-      setCode(loadedStrategy.pineScript);
-      setStrategyName(loadedStrategy.name);
-      setStrategyId(loadedStrategy.id);
-      setParsedResult({
-        inputs: loadedStrategy.parsedInputs as LabPineInput[],
-        groups: (loadedStrategy.groups || {}) as Record<string, string>,
-        strategySettings: (loadedStrategy.strategySettings || {}) as any,
-      });
-      setParseError(null);
-    }
-  }, [loadedStrategy]);
-  const [selectedTickers, setSelectedTickers] = useState<string[]>(["SOL/USDT:USDT"]);
-  const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>(["15m"]);
-  const [startDate, setStartDate] = useState("2023-01-01");
-  const [endDate, setEndDate] = useState(new Date().toISOString().split("T")[0]);
-  const [randomSamples, setRandomSamples] = useState(900);
-  const [topK, setTopK] = useState(20);
-  const [refinements, setRefinements] = useState(60);
-  const [minTrades, setMinTrades] = useState(10);
-  const [maxDrawdown, setMaxDrawdown] = useState(85);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -402,6 +458,152 @@ function SetupPanel({ onJobStarted, loadedStrategy }: { onJobStarted: (jobId: st
     }
   }, [code, toast]);
 
+  const optimizableCount = parsedResult?.inputs.filter(i => i.optimizable).length ?? 0;
+  const fixedCount = parsedResult?.inputs.filter(i => !i.optimizable).length ?? 0;
+  const groupedInputs = parsedResult ? groupByCategory(parsedResult.inputs) : {};
+
+  return (
+    <div className="space-y-6">
+      <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
+        <div className="flex items-center justify-between gap-1 px-4 py-3 border-b border-white/10">
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <FileCode className="w-4 h-4 text-violet-400 flex-shrink-0" />
+            <Input
+              value={strategyName}
+              onChange={(e) => setStrategyName(e.target.value)}
+              placeholder="Strategy name..."
+              className="h-7 text-sm border-none bg-transparent px-1 max-w-[200px] text-white"
+              data-testid="input-strategy-name"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            {parsedResult && (
+              <Button variant="secondary" size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} data-testid="button-save-strategy" className="bg-white/5 hover:bg-white/10 text-white/70">
+                {saveMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
+                {strategyId ? "Update" : "Save"}
+              </Button>
+            )}
+            <Button size="sm" onClick={handleParse} disabled={isParsing} data-testid="button-parse" className="bg-violet-600 hover:bg-violet-500 text-white">
+              {isParsing ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <CheckCircle2 className="w-3 h-3 mr-1" />}
+              {isParsing ? "Parsing..." : "Parse Script"}
+            </Button>
+          </div>
+        </div>
+        <div className="h-[400px]">
+          <textarea
+            className="w-full h-full bg-black/40 text-white/80 font-mono text-[13px] p-3 resize-none focus:outline-none focus:ring-1 focus:ring-violet-500 leading-relaxed border-none"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            spellCheck={false}
+            data-testid="editor-pine-script"
+            placeholder="Paste your Pine Script strategy code here..."
+          />
+        </div>
+      </Card>
+
+      {parseError && (
+        <Card className="p-4 border-red-500/30 bg-red-500/5 border">
+          <div className="flex items-center gap-2 text-red-400">
+            <AlertCircle className="w-4 h-4" />
+            <span className="text-sm" data-testid="text-parse-error">{parseError}</span>
+          </div>
+        </Card>
+      )}
+
+      {parsedResult && parsedResult.inputs.length > 0 && (
+        <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
+          <div className="flex items-center justify-between gap-1 px-4 py-3 border-b border-white/10">
+            <div className="flex items-center gap-2">
+              <Settings2 className="w-4 h-4 text-violet-400" />
+              <span className="text-sm font-medium text-white">Parsed Parameters</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Badge className="bg-violet-500/20 text-violet-300 border-violet-500/30" data-testid="badge-optimizable-count">
+                {optimizableCount} optimizable
+              </Badge>
+              {fixedCount > 0 && (
+                <Badge variant="outline" className="border-white/20 text-white/60" data-testid="badge-fixed-count">
+                  <Lock className="w-3 h-3 mr-1" />
+                  {fixedCount} fixed
+                </Badge>
+              )}
+            </div>
+          </div>
+          <div className="p-4 space-y-4 max-h-[400px] overflow-auto">
+            {Object.entries(groupedInputs).map(([group, inputs]) => (
+              <div key={group}>
+                <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-2" data-testid={`text-group-${group}`}>{group}</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {inputs.map((input: LabPineInput) => (
+                    <div
+                      key={input.name}
+                      className={`flex items-center justify-between gap-1 p-2.5 rounded-md text-sm ${
+                        input.optimizable ? "bg-white/5 border border-white/10" : "bg-yellow-500/5 border border-yellow-500/20"
+                      }`}
+                      data-testid={`param-${input.name}`}
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-mono text-xs text-white">{input.name}</span>
+                          <Badge variant="outline" className="text-[10px] px-1 py-0 border-white/20 text-white/60">{input.type}</Badge>
+                          {!input.optimizable && (
+                            <Tooltip>
+                              <TooltipTrigger><Lock className="w-3 h-3 text-yellow-500" /></TooltipTrigger>
+                              <TooltipContent>Not optimized - fixed parameter</TooltipContent>
+                            </Tooltip>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-white/40 truncate">{input.label}</p>
+                      </div>
+                      <div className="text-right text-xs flex-shrink-0">
+                        <div className="font-mono text-white">{String(input.default)}</div>
+                        {input.optimizable && (input.type === "int" || input.type === "float") && (
+                          <div className="text-[10px] text-white/40">{input.min} - {input.max}</div>
+                        )}
+                        {input.optimizable && input.options && (
+                          <div className="text-[10px] text-white/40">{input.options.length} options</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
+  { label: "Major", tickers: ["SOL", "BTC", "ETH"] },
+  { label: "Layer 1", tickers: ["SUI", "TAO"] },
+  { label: "DeFi", tickers: ["JUP", "DRIFT", "HYPE"] },
+  { label: "Other", tickers: ["XRP", "DOGE", "ZEC", "PAXG"] },
+];
+
+function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, activeJobId, onJobComplete }: {
+  code: string;
+  parsedResult: LabPineParseResult | null;
+  strategyId: number | null;
+  onJobStarted: (jobId: string) => void;
+  activeJobId: string | null;
+  onJobComplete: (jobId: string) => void;
+}) {
+  const { toast } = useToast();
+  const [selectedTickers, setSelectedTickers] = useState<string[]>(["SOL/USDT:USDT"]);
+  const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>(["15m"]);
+  const [startDate, setStartDate] = useState("2023-01-01");
+  const [endDate, setEndDate] = useState(new Date().toISOString().split("T")[0]);
+  const [randomSamples, setRandomSamples] = useState(900);
+  const [topK, setTopK] = useState(20);
+  const [refinements, setRefinements] = useState(60);
+  const [minTrades, setMinTrades] = useState(10);
+  const [maxDrawdown, setMaxDrawdown] = useState(85);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   const toggleTicker = (symbol: string) => setSelectedTickers(prev => prev.includes(symbol) ? prev.filter(s => s !== symbol) : [...prev, symbol]);
   const toggleTimeframe = (tf: string) => setSelectedTimeframes(prev => prev.includes(tf) ? prev.filter(t => t !== tf) : [...prev, tf]);
 
@@ -430,255 +632,162 @@ function SetupPanel({ onJobStarted, loadedStrategy }: { onJobStarted: (jobId: st
     }
   };
 
-  const optimizableCount = parsedResult?.inputs.filter(i => i.optimizable).length ?? 0;
-  const fixedCount = parsedResult?.inputs.filter(i => !i.optimizable).length ?? 0;
-  const groupedInputs = parsedResult ? groupByCategory(parsedResult.inputs) : {};
-
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <div className="lg:col-span-2 space-y-6">
-        <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
-          <div className="flex items-center justify-between gap-1 px-4 py-3 border-b border-white/10">
-            <div className="flex items-center gap-2 flex-1 min-w-0">
-              <Code2 className="w-4 h-4 text-violet-400 flex-shrink-0" />
-              <Input
-                value={strategyName}
-                onChange={(e) => setStrategyName(e.target.value)}
-                placeholder="Strategy name..."
-                className="h-7 text-sm border-none bg-transparent px-1 max-w-[200px] text-white"
-                data-testid="input-strategy-name"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              {parsedResult && (
-                <Button variant="secondary" size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} data-testid="button-save-strategy" className="bg-white/5 hover:bg-white/10 text-white/70">
-                  {saveMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
-                  {strategyId ? "Update" : "Save"}
-                </Button>
-              )}
-              <Button size="sm" onClick={handleParse} disabled={isParsing} data-testid="button-parse" className="bg-violet-600 hover:bg-violet-500 text-white">
-                {isParsing ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <CheckCircle2 className="w-3 h-3 mr-1" />}
-                {isParsing ? "Parsing..." : "Parse Script"}
-              </Button>
-            </div>
+    <>
+      <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
+        <div className="px-4 py-3 border-b border-white/10">
+          <div className="flex items-center gap-2">
+            <Settings2 className="w-4 h-4 text-violet-400" />
+            <span className="text-sm font-medium text-white">Run Configuration</span>
           </div>
-          <div className="h-[400px]">
-            <textarea
-              className="w-full h-full bg-black/40 border border-white/10 text-white/80 font-mono text-[13px] p-3 resize-none focus:outline-none focus:ring-1 focus:ring-violet-500 leading-relaxed"
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              spellCheck={false}
-              data-testid="editor-pine-script"
-              placeholder="Paste your Pine Script strategy code here..."
-            />
-          </div>
-        </Card>
+          <p className="text-[11px] text-white/40 mt-0.5">Select markets, timeframes, and backtest period</p>
+        </div>
 
-        {parseError && (
-          <Card className="p-4 border-red-500/30 bg-red-500/5 border border-white/10">
-            <div className="flex items-center gap-2 text-red-400">
-              <AlertCircle className="w-4 h-4" />
-              <span className="text-sm" data-testid="text-parse-error">{parseError}</span>
+        <div className="p-4 space-y-5">
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <Label className="text-xs font-semibold text-white/50 flex items-center gap-1.5">
+                <Activity className="w-3 h-3" /> Markets
+              </Label>
+              <span className="text-[10px] text-white/30">{selectedTickers.length} selected</span>
             </div>
-          </Card>
-        )}
-
-        {parsedResult && parsedResult.inputs.length > 0 && (
-          <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
-            <div className="flex items-center justify-between gap-1 px-4 py-3 border-b border-white/10">
-              <div className="flex items-center gap-2">
-                <Settings2 className="w-4 h-4 text-violet-400" />
-                <span className="text-sm font-medium text-white">Parsed Parameters</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <Badge className="bg-violet-500/20 text-violet-300 border-violet-500/30" data-testid="badge-optimizable-count">
-                  {optimizableCount} optimizable
-                </Badge>
-                {fixedCount > 0 && (
-                  <Badge variant="outline" className="border-white/20 text-white/60" data-testid="badge-fixed-count">
-                    <Lock className="w-3 h-3 mr-1" />
-                    {fixedCount} fixed
-                  </Badge>
-                )}
-              </div>
-            </div>
-            <div className="p-4 space-y-4 max-h-[400px] overflow-auto">
-              {Object.entries(groupedInputs).map(([group, inputs]) => (
-                <div key={group}>
-                  <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-2" data-testid={`text-group-${group}`}>{group}</h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {inputs.map((input: LabPineInput) => (
-                      <div
-                        key={input.name}
-                        className={`flex items-center justify-between gap-1 p-2.5 rounded-md text-sm ${
-                          input.optimizable ? "bg-white/5 border border-white/10" : "bg-yellow-500/5 border border-yellow-500/20"
-                        }`}
-                        data-testid={`param-${input.name}`}
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-mono text-xs text-white">{input.name}</span>
-                            <Badge variant="outline" className="text-[10px] px-1 py-0 border-white/20 text-white/60">{input.type}</Badge>
-                            {!input.optimizable && (
-                              <Tooltip>
-                                <TooltipTrigger><Lock className="w-3 h-3 text-yellow-500" /></TooltipTrigger>
-                                <TooltipContent>Not optimized - fixed parameter</TooltipContent>
-                              </Tooltip>
-                            )}
-                          </div>
-                          <p className="text-[11px] text-white/40 truncate">{input.label}</p>
-                        </div>
-                        <div className="text-right text-xs flex-shrink-0">
-                          <div className="font-mono text-white">{String(input.default)}</div>
-                          {input.optimizable && (input.type === "int" || input.type === "float") && (
-                            <div className="text-[10px] text-white/40">{input.min} - {input.max}</div>
+            <div className="space-y-3">
+              {TICKER_GROUPS.map((group) => (
+                <div key={group.label}>
+                  <p className="text-[10px] uppercase tracking-wider text-white/30 mb-1.5">{group.label}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {group.tickers.map((name) => {
+                      const ticker = LAB_AVAILABLE_TICKERS.find(t => t.name === name);
+                      if (!ticker) return null;
+                      const isSelected = selectedTickers.includes(ticker.symbol);
+                      return (
+                        <button
+                          key={ticker.symbol}
+                          onClick={() => toggleTicker(ticker.symbol)}
+                          className={cn(
+                            "px-2.5 py-1 rounded text-xs font-medium transition-all",
+                            isSelected
+                              ? "bg-violet-600 text-white shadow-sm shadow-violet-500/20"
+                              : "bg-white/5 text-white/50 hover:bg-white/10 border border-white/10"
                           )}
-                          {input.optimizable && input.options && (
-                            <div className="text-[10px] text-white/40">{input.options.length} options</div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
+                          data-testid={`button-ticker-${name}`}
+                        >
+                          {name}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               ))}
             </div>
-          </Card>
-        )}
-      </div>
+          </div>
 
-      <div className="space-y-6">
-        <Card className="bg-white/5 border border-white/10 p-4 space-y-5">
-          <div>
-            <Label className="text-xs font-semibold uppercase tracking-wider text-white/40 mb-3 block">Tickers</Label>
+          <div className="border-t border-white/5 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <Label className="text-xs font-semibold text-white/50 flex items-center gap-1.5">
+                <Clock className="w-3 h-3" /> Timeframes
+              </Label>
+              <span className="text-[10px] text-white/30">{selectedTimeframes.length} selected</span>
+            </div>
             <div className="flex flex-wrap gap-1.5">
-              {LAB_AVAILABLE_TICKERS.map((t) => (
-                <button
-                  key={t.symbol}
-                  onClick={() => toggleTicker(t.symbol)}
-                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                    selectedTickers.includes(t.symbol) ? "bg-violet-600 text-white" : "bg-white/5 text-white/60 border border-white/10"
-                  }`}
-                  data-testid={`button-ticker-${t.name}`}
-                >
-                  {t.name}
-                </button>
-              ))}
+              {LAB_AVAILABLE_TIMEFRAMES.map((tf) => {
+                const isSelected = selectedTimeframes.includes(tf);
+                return (
+                  <button
+                    key={tf}
+                    onClick={() => toggleTimeframe(tf)}
+                    className={cn(
+                      "px-2.5 py-1 rounded text-xs font-medium transition-all",
+                      isSelected
+                        ? "bg-violet-600 text-white shadow-sm shadow-violet-500/20"
+                        : "bg-white/5 text-white/50 hover:bg-white/10 border border-white/10"
+                    )}
+                    data-testid={`button-tf-${tf}`}
+                  >
+                    {tf}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
-          <div>
-            <Label className="text-xs font-semibold uppercase tracking-wider text-white/40 mb-3 block">Timeframes</Label>
-            <div className="flex flex-wrap gap-1.5">
-              {LAB_AVAILABLE_TIMEFRAMES.map((tf) => (
-                <button
-                  key={tf}
-                  onClick={() => toggleTimeframe(tf)}
-                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                    selectedTimeframes.includes(tf) ? "bg-violet-600 text-white" : "bg-white/5 text-white/60 border border-white/10"
-                  }`}
-                  data-testid={`button-tf-${tf}`}
-                >
-                  {tf}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <Label className="text-xs font-semibold uppercase tracking-wider text-white/40 mb-3 block">
-              <div className="flex items-center gap-1.5"><Calendar className="w-3 h-3" /> Date Range</div>
+          <div className="border-t border-white/5 pt-4">
+            <Label className="text-xs font-semibold text-white/50 flex items-center gap-1.5 mb-2">
+              <Calendar className="w-3 h-3" /> Backtest Period
             </Label>
             <div className="grid grid-cols-2 gap-2">
               <div className="min-w-0">
-                <Label className="text-[11px] text-white/40 mb-1 block">Start</Label>
-                <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="text-xs font-mono bg-white/5 border-white/10 text-white w-full" data-testid="input-start-date" />
+                <Label className="text-[10px] text-white/30 mb-1 block">From</Label>
+                <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="text-xs font-mono bg-white/5 border-white/10 text-white w-full h-8" data-testid="input-start-date" />
               </div>
               <div className="min-w-0">
-                <Label className="text-[11px] text-white/40 mb-1 block">End</Label>
-                <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="text-xs font-mono bg-white/5 border-white/10 text-white w-full" data-testid="input-end-date" />
+                <Label className="text-[10px] text-white/30 mb-1 block">To</Label>
+                <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="text-xs font-mono bg-white/5 border-white/10 text-white w-full h-8" data-testid="input-end-date" />
               </div>
             </div>
-            <p className="text-[10px] text-yellow-500/70 mt-2 flex items-center gap-1">
-              <Lock className="w-3 h-3" /> Date range is fixed and never optimized
-            </p>
           </div>
 
           <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
             <CollapsibleTrigger asChild>
-              <button className="flex items-center gap-1.5 text-xs text-white/60 w-full py-1 hover:bg-white/5 rounded-md px-2" data-testid="button-advanced-toggle">
+              <button className="flex items-center justify-between gap-1.5 text-xs text-white/40 w-full py-2 hover:bg-white/5 rounded-md px-2 border-t border-white/5" data-testid="button-advanced-toggle">
+                <span className="flex items-center gap-1.5">
+                  <Settings2 className="w-3 h-3" /> Advanced Settings
+                </span>
                 <ChevronDown className={`w-3 h-3 transition-transform ${advancedOpen ? "rotate-180" : ""}`} />
-                Advanced Settings
               </button>
             </CollapsibleTrigger>
             <CollapsibleContent className="space-y-3 pt-3">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <Label className="text-[11px] text-white/40 mb-1 block">Random Samples</Label>
-                  <Input type="number" value={randomSamples} onChange={(e) => setRandomSamples(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white" data-testid="input-random-samples" />
+                  <Label className="text-[10px] text-white/30 mb-1 block">Random Samples</Label>
+                  <Input type="number" value={randomSamples} onChange={(e) => setRandomSamples(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-random-samples" />
                 </div>
                 <div>
-                  <Label className="text-[11px] text-white/40 mb-1 block">Top K Seeds</Label>
-                  <Input type="number" value={topK} onChange={(e) => setTopK(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white" data-testid="input-top-k" />
+                  <Label className="text-[10px] text-white/30 mb-1 block">Top K Seeds</Label>
+                  <Input type="number" value={topK} onChange={(e) => setTopK(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-top-k" />
                 </div>
                 <div>
-                  <Label className="text-[11px] text-white/40 mb-1 block">Refinements/Seed</Label>
-                  <Input type="number" value={refinements} onChange={(e) => setRefinements(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white" data-testid="input-refinements" />
+                  <Label className="text-[10px] text-white/30 mb-1 block">Refinements/Seed</Label>
+                  <Input type="number" value={refinements} onChange={(e) => setRefinements(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-refinements" />
                 </div>
                 <div>
-                  <Label className="text-[11px] text-white/40 mb-1 block">Min Trades</Label>
-                  <Input type="number" value={minTrades} onChange={(e) => setMinTrades(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white" data-testid="input-min-trades" />
+                  <Label className="text-[10px] text-white/30 mb-1 block">Min Trades</Label>
+                  <Input type="number" value={minTrades} onChange={(e) => setMinTrades(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-min-trades" />
                 </div>
               </div>
               <div>
-                <Label className="text-[11px] text-white/40 mb-1 block">Max Drawdown Cap (%)</Label>
-                <Input type="number" value={maxDrawdown} onChange={(e) => setMaxDrawdown(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white" data-testid="input-max-drawdown" />
+                <Label className="text-[10px] text-white/30 mb-1 block">Max Drawdown Cap (%)</Label>
+                <Input type="number" value={maxDrawdown} onChange={(e) => setMaxDrawdown(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-max-drawdown" />
               </div>
             </CollapsibleContent>
           </Collapsible>
+        </div>
+      </Card>
 
-          <div className="space-y-2 pt-2">
-            <Button className="w-full bg-violet-600 hover:bg-violet-500 text-white border-none" onClick={() => handleRun("smoke")} disabled={isSubmitting || !parsedResult} data-testid="button-smoke-test">
-              {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
-              Run Smoke Test
-            </Button>
-            <Button className="w-full bg-violet-600 hover:bg-violet-500 text-white" onClick={() => handleRun("sweep")} disabled={isSubmitting || !parsedResult} data-testid="button-full-sweep">
-              {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Rocket className="w-4 h-4 mr-2" />}
-              Run Full Sweep
-            </Button>
-            {parsedResult && (
-              <p className="text-[10px] text-white/40 text-center">
-                {selectedTickers.length} ticker{selectedTickers.length !== 1 ? "s" : ""} x {selectedTimeframes.length} timeframe{selectedTimeframes.length !== 1 ? "s" : ""} = {selectedTickers.length * selectedTimeframes.length} combo{selectedTickers.length * selectedTimeframes.length !== 1 ? "s" : ""}
-              </p>
-            )}
-          </div>
-        </Card>
+      <Card className="bg-white/5 border border-white/10 p-4 space-y-2">
+        <div className="text-center mb-3">
+          <p className="text-[11px] text-white/40">
+            {selectedTickers.length} market{selectedTickers.length !== 1 ? "s" : ""} &times; {selectedTimeframes.length} timeframe{selectedTimeframes.length !== 1 ? "s" : ""} = <span className="text-white/60 font-medium">{selectedTickers.length * selectedTimeframes.length} combo{selectedTickers.length * selectedTimeframes.length !== 1 ? "s" : ""}</span>
+          </p>
+        </div>
+        <Button className="w-full bg-white/5 hover:bg-white/10 text-white/70 border border-white/10" onClick={() => handleRun("smoke")} disabled={isSubmitting || !parsedResult} data-testid="button-smoke-test">
+          {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
+          Smoke Test
+        </Button>
+        <Button className="w-full bg-violet-600 hover:bg-violet-500 text-white" onClick={() => handleRun("sweep")} disabled={isSubmitting || !parsedResult} data-testid="button-full-sweep">
+          {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Rocket className="w-4 h-4 mr-2" />}
+          Full Sweep
+        </Button>
+        <p className="text-[10px] text-white/30 text-center">Smoke test uses first ticker/timeframe only</p>
+      </Card>
 
-        <Card className="bg-white/5 border border-white/10 p-4 space-y-3">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-white/40">Quick Stats</h3>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-white/60 flex items-center gap-1.5"><TrendingUp className="w-3 h-3" /> Parameters</span>
-              <span className="font-mono text-white" data-testid="text-param-count">{parsedResult?.inputs.length ?? 0}</span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-white/60 flex items-center gap-1.5"><Gauge className="w-3 h-3" /> Optimizable</span>
-              <span className="font-mono text-violet-400" data-testid="text-optimizable">{optimizableCount}</span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-white/60 flex items-center gap-1.5"><Lock className="w-3 h-3" /> Fixed</span>
-              <span className="font-mono text-yellow-400" data-testid="text-fixed">{fixedCount}</span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-white/60 flex items-center gap-1.5"><BarChart3 className="w-3 h-3" /> Est. Configs</span>
-              <span className="font-mono text-white" data-testid="text-est-configs">
-                {((randomSamples + topK * refinements) * selectedTickers.length * selectedTimeframes.length).toLocaleString()}
-              </span>
-            </div>
-          </div>
-        </Card>
-      </div>
-    </div>
+      {activeJobId && (
+        <RunningPanel
+          jobId={activeJobId}
+          onComplete={onJobComplete}
+        />
+      )}
+    </>
   );
 }
 
