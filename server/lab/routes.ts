@@ -114,6 +114,16 @@ export function registerLabRoutes(app: Express): void {
     res.json({ jobId: job.id });
   });
 
+  app.post("/api/lab/runs/:id/fail", async (req: Request, res: Response) => {
+    try {
+      const runId = parseInt(req.params.id);
+      await labStorage.failRun(runId);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/lab/runs/:id/results", async (req: Request, res: Response) => {
     try {
       const results = await labStorage.getRunResults(parseInt(req.params.id));

@@ -1385,6 +1385,9 @@ function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: num
                       if (res.ok) {
                         const { jobId } = await res.json();
                         onViewRunning(jobId);
+                      } else {
+                        await apiRequest("POST", `/api/lab/runs/${run.id}/fail`);
+                        queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
                       }
                     } catch {}
                   }
