@@ -45,6 +45,30 @@ const RANKING_LABELS: Record<RankingMode, string> = {
   conservative: "Conservative",
 };
 
+function calcParamCombinations(inputs: LabPineInput[]): number {
+  let total = 1;
+  for (const p of inputs) {
+    if (!p.optimizable) continue;
+    if (p.options && p.options.length > 0) {
+      total *= p.options.length;
+    } else if ((p.type === "int" || p.type === "float") && p.min != null && p.max != null) {
+      const step = p.step ?? 1;
+      const count = Math.max(1, Math.floor((p.max - p.min) / step) + 1);
+      total *= count;
+    } else if (p.type === "bool") {
+      total *= 2;
+    }
+  }
+  return total;
+}
+
+function formatCombinations(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toLocaleString();
+}
+
 function rankScore(r: { netProfitPercent: number; winRatePercent: number; maxDrawdownPercent: number; profitFactor: number }, mode: RankingMode): number {
   switch (mode) {
     case "profit":
@@ -327,16 +351,6 @@ export default function QuantumLab() {
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 space-y-6">
-                {strategies && strategies.length > 0 && (
-                  <StrategyLibrary
-                    strategies={strategies}
-                    selectedId={selectedStrategy?.id ?? null}
-                    onSelect={(s) => setSelectedStrategy(selectedStrategy?.id === s.id ? null : s)}
-                    onDelete={(id) => deleteStrategyMutation.mutate(id)}
-                    isDeleting={deleteStrategyMutation.isPending}
-                  />
-                )}
-
                 <SetupPanel
                   code={code}
                   setCode={setCode}
@@ -350,6 +364,15 @@ export default function QuantumLab() {
               </div>
 
               <div className="space-y-6">
+                {strategies && strategies.length > 0 && (
+                  <StrategyLibrary
+                    strategies={strategies}
+                    selectedId={selectedStrategy?.id ?? null}
+                    onSelect={(s) => setSelectedStrategy(selectedStrategy?.id === s.id ? null : s)}
+                    onDelete={(id) => deleteStrategyMutation.mutate(id)}
+                    isDeleting={deleteStrategyMutation.isPending}
+                  />
+                )}
                 <RunConfigPanel
                   code={code}
                   parsedResult={parsedResult}
@@ -452,49 +475,48 @@ function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, isDeletin
         </div>
         <p className="text-[11px] text-white/40">Select a strategy to load it into the editor</p>
       </div>
-      <div className="divide-y divide-white/5">
-        {strategies.map((s) => {
-          const paramCount = (s.parsedInputs as any[])?.filter((i: any) => i.optimizable).length ?? 0;
-          const totalParams = (s.parsedInputs as any[])?.length ?? 0;
-          const isSelected = selectedId === s.id;
-          return (
-            <div
-              key={s.id}
-              onClick={() => onSelect(s)}
-              className={cn(
-                "w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left transition-colors cursor-pointer",
-                isSelected ? "bg-violet-500/10" : "hover:bg-white/[0.03]"
-              )}
-              data-testid={`strategy-row-${s.id}`}
-            >
-              <div className="flex items-center gap-3 min-w-0">
-                <div className={cn(
-                  "w-2 h-2 rounded-full flex-shrink-0",
-                  isSelected ? "bg-violet-400" : "bg-white/20"
-                )} />
-                <div className="min-w-0">
-                  <p className={cn("text-sm font-medium truncate", isSelected ? "text-violet-300" : "text-white/80")} data-testid={`text-strategy-name-${s.id}`}>{s.name}</p>
-                  <p className="text-[11px] text-white/40">{new Date(s.createdAt).toLocaleDateString()}</p>
+      <ScrollArea className="max-h-[240px]">
+        <div className="divide-y divide-white/5">
+          {strategies.map((s) => {
+            const paramCount = (s.parsedInputs as any[])?.filter((i: any) => i.optimizable).length ?? 0;
+            const totalParams = (s.parsedInputs as any[])?.length ?? 0;
+            const isSelected = selectedId === s.id;
+            return (
+              <div
+                key={s.id}
+                onClick={() => onSelect(s)}
+                className={cn(
+                  "w-full flex items-center justify-between gap-2 px-3 py-2 text-left transition-colors cursor-pointer",
+                  isSelected ? "bg-violet-500/10" : "hover:bg-white/[0.03]"
+                )}
+                data-testid={`strategy-row-${s.id}`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className={cn(
+                    "w-2 h-2 rounded-full flex-shrink-0",
+                    isSelected ? "bg-violet-400" : "bg-white/20"
+                  )} />
+                  <div className="min-w-0">
+                    <p className={cn("text-xs font-medium truncate", isSelected ? "text-violet-300" : "text-white/80")} data-testid={`text-strategy-name-${s.id}`}>{s.name}</p>
+                    <p className="text-[10px] text-white/40">{new Date(s.createdAt).toLocaleDateString()}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <Badge className="text-[9px] bg-violet-500/15 text-violet-300/80 border-none px-1.5">{paramCount} opt</Badge>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
+                    disabled={isDeleting}
+                    className="p-1 rounded hover:bg-red-500/20 text-white/20 hover:text-red-400 transition-colors"
+                    data-testid={`button-delete-strategy-${s.id}`}
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
                 </div>
               </div>
-              <div className="flex items-center gap-2 flex-shrink-0">
-                <Badge className="text-[10px] bg-violet-500/15 text-violet-300/80 border-none">{paramCount} optimizable</Badge>
-                {totalParams - paramCount > 0 && (
-                  <Badge variant="outline" className="text-[10px] border-white/10 text-white/40">{totalParams - paramCount} fixed</Badge>
-                )}
-                <button
-                  onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
-                  disabled={isDeleting}
-                  className="p-1 rounded hover:bg-red-500/20 text-white/20 hover:text-red-400 transition-colors"
-                  data-testid={`button-delete-strategy-${s.id}`}
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      </ScrollArea>
     </Card>
   );
 }
@@ -564,6 +586,7 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
   const optimizableCount = parsedResult?.inputs.filter(i => i.optimizable).length ?? 0;
   const fixedCount = parsedResult?.inputs.filter(i => !i.optimizable).length ?? 0;
   const groupedInputs = parsedResult ? groupByCategory(parsedResult.inputs) : {};
+  const paramCombinations = parsedResult ? calcParamCombinations(parsedResult.inputs) : 0;
 
   return (
     <div className="space-y-6">
@@ -628,6 +651,12 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
                 <Badge variant="outline" className="border-white/20 text-white/60" data-testid="badge-fixed-count">
                   <Lock className="w-3 h-3 mr-1" />
                   {fixedCount} fixed
+                </Badge>
+              )}
+              {paramCombinations > 1 && (
+                <Badge className="bg-sky-500/20 text-sky-300 border-sky-500/30" data-testid="badge-combinations">
+                  <Target className="w-3 h-3 mr-1" />
+                  {formatCombinations(paramCombinations)} combos
                 </Badge>
               )}
             </div>
@@ -867,10 +896,20 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
       </Card>
 
       <Card className="bg-white/5 border border-white/10 p-4 space-y-2">
-        <div className="text-center mb-3">
+        <div className="text-center mb-3 space-y-1">
           <p className="text-[11px] text-white/40">
             {selectedTickers.length} market{selectedTickers.length !== 1 ? "s" : ""} &times; {selectedTimeframes.length} timeframe{selectedTimeframes.length !== 1 ? "s" : ""} = <span className="text-white/60 font-medium">{selectedTickers.length * selectedTimeframes.length} combo{selectedTickers.length * selectedTimeframes.length !== 1 ? "s" : ""}</span>
           </p>
+          {parsedResult && parsedResult.inputs.length > 0 && (() => {
+            const paramCombos = calcParamCombinations(parsedResult.inputs);
+            const marketCombos = selectedTickers.length * selectedTimeframes.length;
+            const totalSearch = paramCombos * marketCombos;
+            return (
+              <p className="text-[11px] text-white/40" data-testid="text-total-search-space">
+                {formatCombinations(paramCombos)} param combos &times; {marketCombos} market{marketCombos !== 1 ? "s" : ""} = <span className="text-sky-300 font-medium">{formatCombinations(totalSearch)} total search space</span>
+              </p>
+            );
+          })()}
         </div>
         <Button className="w-full bg-white/5 hover:bg-white/10 text-white/70 border border-white/10" onClick={() => handleRun("smoke")} disabled={isSubmitting || isRunning || !parsedResult} data-testid="button-smoke-test">
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
