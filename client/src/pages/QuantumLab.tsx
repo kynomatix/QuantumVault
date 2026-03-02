@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo, Fragment } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo, Fragment, memo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -277,11 +277,35 @@ export default function QuantumLab() {
       eventSourceRef.current?.close();
       const es = new EventSource(`/api/lab/job/${currentJobId}/progress`);
       eventSourceRef.current = es;
+      let lastProgressUpdate = 0;
+      let pendingData: LabJobProgress | null = null;
+      let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+      const THROTTLE_MS = 500;
+
       es.onmessage = (event) => {
         try {
           failCount = 0;
           const data: LabJobProgress = JSON.parse(event.data);
-          setJobProgress(data);
+          const isTerminal = data.status === "complete" || data.status === "error";
+          const now = Date.now();
+          if (isTerminal || now - lastProgressUpdate >= THROTTLE_MS) {
+            lastProgressUpdate = now;
+            if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
+            pendingData = null;
+            setJobProgress(data);
+          } else {
+            pendingData = data;
+            if (!throttleTimer) {
+              throttleTimer = setTimeout(() => {
+                throttleTimer = null;
+                if (pendingData) {
+                  lastProgressUpdate = Date.now();
+                  setJobProgress(pendingData);
+                  pendingData = null;
+                }
+              }, THROTTLE_MS - (now - lastProgressUpdate));
+            }
+          }
           if (data.status === "complete") {
             es.close();
             setActiveJobId(null);
@@ -1306,7 +1330,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
   );
 }
 
-function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => void }) {
+const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => void }) {
   const [sortKey, setSortKey] = useState<SortKey>("netProfitPercent");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedResult, setSelectedResult] = useState<LabOptResult | null>(null);
@@ -1633,7 +1657,7 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
       )}
     </div>
   );
-}
+});
 
 function HistStatCard({ label, value, color, icon, sublabel }: { label: string; value: string; color: string; icon: any; sublabel?: string }) {
   return (
