@@ -2,7 +2,9 @@ import * as fs from "fs";
 import * as path from "path";
 import type { OHLCV } from "./engine";
 
-const CACHE_DIR = path.join(process.cwd(), "cache");
+const CACHE_DIR = process.env.NODE_ENV === "production"
+  ? path.join("/tmp", "lab-cache")
+  : path.join(process.cwd(), "cache");
 
 function ensureCacheDir() {
   if (!fs.existsSync(CACHE_DIR)) {

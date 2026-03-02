@@ -52,6 +52,25 @@ export class LabDatabaseStorage implements ILabStorage {
 
   constructor() {
     this.jobs = new Map();
+    this.cleanupStaleRuns();
+  }
+
+  private async cleanupStaleRuns(): Promise<void> {
+    try {
+      const staleRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "running"));
+      for (const run of staleRuns) {
+        await db.update(labOptimizationRuns).set({
+          status: "failed",
+          completedAt: new Date(),
+        }).where(eq(labOptimizationRuns.id, run.id));
+        console.log(`[QuantumLab] Cleaned up stale run ${run.id} (was stuck in 'running')`);
+      }
+      if (staleRuns.length > 0) {
+        console.log(`[QuantumLab] Cleaned up ${staleRuns.length} stale run(s) from previous session`);
+      }
+    } catch (err: any) {
+      console.log(`[QuantumLab] Stale run cleanup error: ${err.message}`);
+    }
   }
 
   async createStrategy(data: InsertLabStrategy): Promise<LabStrategy> {
