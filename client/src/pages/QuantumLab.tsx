@@ -527,7 +527,7 @@ export default function QuantumLab() {
           />
         );
       case "heatmap":
-        return <HeatmapPanel />;
+        return <HeatmapPanel onViewRun={(runId) => { setActiveHistoryRunId(runId); setMainTab("results"); }} />;
       default:
         return null;
     }
@@ -1887,9 +1887,10 @@ function formatHeatVal(value: number, metric: HeatmapMetric): string {
   return `${value.toFixed(1)}%`;
 }
 
-function HeatmapPanel() {
+function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number) => void }) {
   const [metric, setMetric] = useState<HeatmapMetric>("bestProfit");
   const [selectedCell, setSelectedCell] = useState<any | null>(null);
+  const [selectedTopIdx, setSelectedTopIdx] = useState<number>(0);
 
   const { data, isLoading } = useQuery<any>({
     queryKey: ["/api/lab/heatmap"],
@@ -1915,6 +1916,36 @@ function HeatmapPanel() {
     if (strategies) for (const s of strategies) map.set(s.id, s);
     return map;
   }, [strategies]);
+
+  const sortedTop5 = useMemo(() => {
+    if (!selectedCell?.allResults) return [];
+    const results = [...selectedCell.allResults];
+    switch (metric) {
+      case "bestProfit":
+      case "avgProfit":
+        results.sort((a: any, b: any) => b.netProfitPercent - a.netProfitPercent);
+        break;
+      case "bestWinRate":
+      case "avgWinRate":
+        results.sort((a: any, b: any) => b.winRatePercent - a.winRatePercent);
+        break;
+      case "lowestDrawdown":
+      case "avgDrawdown":
+        results.sort((a: any, b: any) => a.maxDrawdownPercent - b.maxDrawdownPercent);
+        break;
+      case "bestPF":
+      case "avgPF":
+        results.sort((a: any, b: any) => b.profitFactor - a.profitFactor);
+        break;
+    }
+    return results.slice(0, 5);
+  }, [selectedCell, metric]);
+
+  useEffect(() => {
+    setSelectedTopIdx(0);
+  }, [metric, selectedCell]);
+
+  const activeConfig = sortedTop5[selectedTopIdx] ?? sortedTop5[0] ?? null;
 
   const handleExportPine = useCallback((cfg: any, ticker: string, timeframe: string) => {
     const strat = strategyMap.get(cfg.strategyId);
@@ -2087,11 +2118,11 @@ function HeatmapPanel() {
             </Card>
           </div>
 
-          {selectedCell.top5?.length > 0 && (
+          {sortedTop5.length > 0 && (
             <div>
               <h4 className="text-sm font-medium text-white/60 mb-2">Top 5 Configurations</h4>
               <div className="space-y-1">
-                <div className="grid grid-cols-7 gap-2 text-[10px] text-white/40 px-3 py-1" style={{ gridTemplateColumns: "2rem 1fr 1fr 1fr 1fr 1fr 2rem" }}>
+                <div className="grid gap-2 text-[10px] text-white/40 px-3 py-1" style={{ gridTemplateColumns: "2rem 1fr 1fr 1fr 1fr 1fr 3.5rem" }}>
                   <span>#</span>
                   <span>Profit</span>
                   <span>Win Rate</span>
@@ -2100,16 +2131,18 @@ function HeatmapPanel() {
                   <span>Trades</span>
                   <span></span>
                 </div>
-                {selectedCell.top5.map((cfg: any, idx: number) => {
+                {sortedTop5.map((cfg: any, idx: number) => {
                   const hasStrategy = cfg.strategyId && strategyMap.get(cfg.strategyId)?.pineScript;
+                  const isActive = idx === selectedTopIdx;
                   return (
                     <div
                       key={idx}
-                      className="grid grid-cols-7 gap-2 text-xs px-3 py-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] transition-colors items-center"
-                      style={{ gridTemplateColumns: "2rem 1fr 1fr 1fr 1fr 1fr 2rem" }}
+                      onClick={() => setSelectedTopIdx(idx)}
+                      className={`grid gap-2 text-xs px-3 py-2 rounded-lg cursor-pointer transition-colors items-center ${isActive ? "bg-violet-500/10 ring-1 ring-violet-500/30" : "bg-white/[0.03] hover:bg-white/[0.06]"}`}
+                      style={{ gridTemplateColumns: "2rem 1fr 1fr 1fr 1fr 1fr 3.5rem" }}
                       data-testid={`heatmap-top-${idx}`}
                     >
-                      <span className="text-white/50 font-mono">{idx + 1}</span>
+                      <span className={`font-mono ${isActive ? "text-violet-400" : "text-white/50"}`}>{idx + 1}</span>
                       <span className={`font-mono font-medium ${cfg.netProfitPercent >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                         {cfg.netProfitPercent.toFixed(1)}%
                       </span>
@@ -2117,8 +2150,18 @@ function HeatmapPanel() {
                       <span className="font-mono text-amber-400">{cfg.maxDrawdownPercent.toFixed(1)}%</span>
                       <span className="font-mono text-violet-400">{cfg.profitFactor.toFixed(2)}</span>
                       <span className="font-mono text-white/60">{cfg.totalTrades}</span>
-                      <span className="flex justify-center">
-                        {hasStrategy ? (
+                      <span className="flex items-center justify-end gap-0.5">
+                        {cfg.runId && onViewRun && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onViewRun(cfg.runId); }}
+                            className="p-1 rounded hover:bg-white/10 text-white/40 hover:text-white transition-colors"
+                            title="View full results"
+                            data-testid={`heatmap-view-run-${idx}`}
+                          >
+                            <FileCode className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {hasStrategy && (
                           <button
                             onClick={(e) => { e.stopPropagation(); handleExportPine(cfg, selectedCell.ticker, selectedCell.timeframe); }}
                             className="p-1 rounded hover:bg-violet-500/20 text-white/40 hover:text-violet-300 transition-colors"
@@ -2127,8 +2170,6 @@ function HeatmapPanel() {
                           >
                             <Download className="w-3.5 h-3.5" />
                           </button>
-                        ) : (
-                          <span className="w-3.5 h-3.5" />
                         )}
                       </span>
                     </div>
@@ -2138,11 +2179,13 @@ function HeatmapPanel() {
             </div>
           )}
 
-          {selectedCell.top5?.[0]?.params && (
+          {activeConfig?.params && (
             <div>
-              <h4 className="text-sm font-medium text-white/60 mb-2">Best Config Parameters</h4>
+              <h4 className="text-sm font-medium text-white/60 mb-2">
+                Config #{selectedTopIdx + 1} Parameters
+              </h4>
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1.5">
-                {Object.entries(selectedCell.top5[0].params as Record<string, any>).map(([key, value]) => (
+                {Object.entries(activeConfig.params as Record<string, any>).map(([key, value]) => (
                   <div key={key} className="flex items-center justify-between px-3 py-1.5 rounded bg-white/[0.03] text-xs">
                     <span className="text-white/50 truncate mr-2">{key}</span>
                     <span className="font-mono text-white font-medium">{typeof value === "number" ? (Number.isInteger(value) ? value : value.toFixed(4)) : String(value)}</span>

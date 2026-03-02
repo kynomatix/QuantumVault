@@ -479,7 +479,7 @@ export function registerLabRoutes(app: Express): void {
           avgDrawdown,
           avgPF,
           runsCount: new Set(sorted.map((r: any) => r.runId)).size,
-          top5: sorted.slice(0, 5).map((r: any) => ({
+          allResults: sorted.map((r: any) => ({
             netProfitPercent: r.netProfitPercent,
             winRatePercent: r.winRatePercent,
             maxDrawdownPercent: r.maxDrawdownPercent,
