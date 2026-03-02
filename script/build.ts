@@ -83,6 +83,22 @@ async function buildAll() {
     external: externals,
     logLevel: "info",
   });
+
+  console.log("building optimizer worker...");
+  await esbuild({
+    entryPoints: ["server/lab/optimizer-worker.ts"],
+    platform: "node",
+    bundle: true,
+    format: "cjs",
+    outfile: "dist/optimizer-worker.cjs",
+    target: "node20",
+    define: {
+      "process.env.NODE_ENV": '"production"',
+    },
+    minify: true,
+    external: externals,
+    logLevel: "info",
+  });
 }
 
 buildAll().catch((err) => {

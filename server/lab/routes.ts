@@ -1,9 +1,12 @@
 import type { Express, Request, Response } from "express";
 import { labStorage } from "./storage";
 import { parsePineScript } from "./pine-parser";
-import { runOptimization, type OptimizationCallbacks } from "./optimizer";
-import { labOptimizationConfigSchema, insertLabStrategyBodySchema, updateLabStrategyBodySchema, LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES, type LabCheckpoint, type LabOptimizationConfig } from "@shared/schema";
+import { labOptimizationConfigSchema, insertLabStrategyBodySchema, updateLabStrategyBodySchema, LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES, type LabCheckpoint, type LabOptimizationConfig, type LabBacktestResult } from "@shared/schema";
 import { getCacheStats, clearCandleCache } from "./candle-store";
+import { fetchOHLCV } from "./datafeed";
+import { Worker } from "worker_threads";
+import { resolve, dirname } from "path";
+import type { OHLCV } from "./engine";
 
 export function registerLabRoutes(app: Express): void {
 
@@ -158,130 +161,234 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  function createWorker(workerDataPayload: any): Worker {
+    const isProd = typeof (globalThis as any).__ESBUILD_CJS_BUNDLE__ !== "undefined";
+    if (isProd) {
+      const workerPath = resolve(dirname(process.argv[1] || __filename), "optimizer-worker.cjs");
+      return new Worker(workerPath, { workerData: workerDataPayload });
+    }
+    return new Worker(
+      `require('tsx/cjs'); require('${resolve(process.cwd(), "server", "lab", "optimizer-worker.ts").replace(/\\/g, "/")}');`,
+      { eval: true, workerData: workerDataPayload }
+    );
+  }
+
+  let activeWorker: Worker | null = null;
+
+  async function fetchAllCandles(
+    config: LabOptimizationConfig,
+    onProgress: (msg: string) => void
+  ): Promise<Record<string, OHLCV[]>> {
+    const candlesByCombo: Record<string, OHLCV[]> = {};
+    for (const ticker of config.tickers) {
+      for (const tf of config.timeframes) {
+        const key = `${ticker}|${tf}`;
+        onProgress(`Fetching data for ${ticker.split("/")[0]} ${tf}`);
+        try {
+          const candles = await fetchOHLCV(ticker, tf, config.startDate, config.endDate, onProgress);
+          candlesByCombo[key] = candles;
+        } catch (err: any) {
+          console.log(`[QuantumLab] Failed to fetch data for ${ticker} ${tf}: ${err.message}`);
+          candlesByCombo[key] = [];
+        }
+      }
+    }
+    return candlesByCombo;
+  }
+
   function startOptimizationJob(
     config: LabOptimizationConfig,
     job: ReturnType<typeof labStorage.createJob>,
     runId: number | undefined,
-    resumeCheckpoint?: LabCheckpoint
+    resumeCheckpoint?: LabCheckpoint,
+    prefetchedCandles?: Record<string, OHLCV[]>
   ) {
     const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
 
-    const callbacks: OptimizationCallbacks = {
-      onProgress: (progress: any) => labStorage.updateProgress(job.id, progress),
-      onComboCheckpoint: async (completedCombo: string, comboResults: any[]) => {
-        if (!runId) return;
-        completedCombos.push(completedCombo);
-        try {
-          if (comboResults.length > 0) {
-            await labStorage.saveComboResults(runId, comboResults);
-          }
-          const checkpoint: LabCheckpoint = {
-            completedCombos: [...completedCombos],
-            configSnapshot: config,
-            currentCombo: undefined,
-            currentStage: undefined,
-            currentIteration: undefined,
-            partialResults: undefined,
-          };
-          await labStorage.saveCheckpoint(runId, checkpoint);
-          console.log(`[QuantumLab] Checkpoint saved: ${completedCombos.length} combos done (run ${runId})`);
-        } catch (err: any) {
-          console.log(`[QuantumLab] Checkpoint save error: ${err.message}`);
-        }
-      },
-      onPartialCheckpoint: async (combo: string, stage: "random" | "refine", iteration: number, partialResults: any[]) => {
-        if (!runId) return;
-        try {
-          if (partialResults.length > 0) {
-            await labStorage.saveComboResults(runId, partialResults, true);
-          }
-          const checkpoint: LabCheckpoint = {
-            completedCombos: [...completedCombos],
-            configSnapshot: config,
-            currentCombo: combo,
-            currentStage: stage,
-            currentIteration: iteration,
-          };
-          await labStorage.saveCheckpoint(runId, checkpoint);
-        } catch (err: any) {
-          console.log(`[QuantumLab] Partial checkpoint error: ${err.message}`);
-        }
-      },
-    };
+    const doStart = async () => {
+      let candlesByCombo: Record<string, OHLCV[]>;
+      if (prefetchedCandles) {
+        candlesByCombo = prefetchedCandles;
+      } else {
+        labStorage.updateProgress(job.id, {
+          jobId: job.id, status: "fetching", stage: "Fetching candle data...",
+          current: 0, total: 0, percent: 0, elapsed: 0,
+        });
+        candlesByCombo = await fetchAllCandles(config, (msg) => {
+          labStorage.updateProgress(job.id, {
+            jobId: job.id, status: "fetching", stage: msg,
+            current: 0, total: 0, percent: 0, elapsed: Date.now(),
+          });
+        });
+      }
 
-    runOptimization(
-      config,
-      callbacks.onProgress,
-      job.id,
-      job.abortSignal,
-      callbacks,
-      resumeCheckpoint
-    ).then(async (results: any[]) => {
-      if (job.abortSignal.aborted) {
-        console.log(`[QuantumLab] Job ${job.id} was cancelled with ${results.length} results found`);
-        if (results.length > 0) {
-          labStorage.setResults(job.id, results);
+      const worker = createWorker({
+        jobId: job.id,
+        config: {
+          tickers: config.tickers,
+          timeframes: config.timeframes,
+          randomSamples: config.randomSamples,
+          topK: config.topK,
+          refinementsPerSeed: config.refinementsPerSeed,
+          minTrades: config.minTrades,
+          maxDrawdownCap: config.maxDrawdownCap,
+          parsedInputs: config.parsedInputs,
+        },
+        candlesByCombo,
+        resumeCheckpoint,
+      });
+
+      activeWorker = worker;
+
+      worker.on("message", async (msg: any) => {
+        switch (msg.type) {
+          case "progress":
+            labStorage.updateProgress(job.id, msg.data);
+            break;
+
+          case "partial-checkpoint":
+            if (!runId) break;
+            try {
+              if (msg.results.length > 0) {
+                await labStorage.saveComboResults(runId, msg.results, true);
+              }
+              const checkpoint: LabCheckpoint = {
+                completedCombos: [...completedCombos],
+                configSnapshot: config,
+                currentCombo: msg.combo,
+                currentStage: msg.stage,
+                currentIteration: msg.iteration,
+              };
+              await labStorage.saveCheckpoint(runId, checkpoint);
+            } catch (err: any) {
+              console.log(`[QuantumLab] Partial checkpoint error: ${err.message}`);
+            }
+            break;
+
+          case "combo-complete":
+            completedCombos.push(msg.combo);
+            if (!runId) break;
+            try {
+              if (msg.results.length > 0) {
+                await labStorage.saveComboResults(runId, msg.results);
+              }
+              const checkpoint: LabCheckpoint = {
+                completedCombos: [...completedCombos],
+                configSnapshot: config,
+                currentCombo: undefined,
+                currentStage: undefined,
+                currentIteration: undefined,
+                partialResults: undefined,
+              };
+              await labStorage.saveCheckpoint(runId, checkpoint);
+              console.log(`[QuantumLab] Checkpoint saved: ${completedCombos.length} combos done (run ${runId})`);
+            } catch (err: any) {
+              console.log(`[QuantumLab] Checkpoint save error: ${err.message}`);
+            }
+            break;
+
+          case "done": {
+            const results = msg.results as LabBacktestResult[];
+            if (job.abortSignal.aborted) {
+              console.log(`[QuantumLab] Job ${job.id} was cancelled with ${results.length} results found`);
+              labStorage.setResults(job.id, results);
+              if (runId) {
+                await labStorage.pauseRun(runId).catch(() => {});
+              }
+            } else {
+              console.log(`[QuantumLab] Optimization finished: ${results.length} new results`);
+              labStorage.setResults(job.id, results);
+              if (runId) {
+                try {
+                  const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed;
+                  const combos = config.tickers.length * config.timeframes.length;
+                  await labStorage.completeRun(runId, totalSamples * combos);
+                  await labStorage.saveCheckpoint(runId, { completedCombos: [], configSnapshot: config });
+                  console.log(`[QuantumLab] Run ${runId} completed`);
+                } catch (err: any) {
+                  console.log(`[QuantumLab] Failed to complete run: ${err.stack || err.message}`);
+                }
+              }
+            }
+            activeWorker = null;
+            break;
+          }
+
+          case "error":
+            console.log(`[QuantumLab] Worker error: ${msg.message}`);
+            labStorage.updateProgress(job.id, {
+              jobId: job.id, status: "error", stage: `Error: ${msg.message}`,
+              current: 0, total: 0, percent: 0, elapsed: 0, error: msg.message,
+            });
+            if (runId) {
+              try {
+                const savedResults = await labStorage.getRunResults(runId);
+                const cp = await labStorage.getCheckpoint(runId);
+                const hasCheckpoint = cp?.completedCombos?.length || (cp?.currentCombo && cp?.currentIteration != null);
+                if (savedResults.length > 0 || hasCheckpoint) {
+                  await labStorage.pauseRun(runId);
+                  console.log(`[QuantumLab] Run ${runId} error but has progress → paused`);
+                } else {
+                  await labStorage.failRun(runId);
+                }
+              } catch {}
+            }
+            activeWorker = null;
+            break;
+        }
+      });
+
+      worker.on("error", async (err: Error) => {
+        console.log(`[QuantumLab] Worker thread error: ${err.message}`);
+        labStorage.updateProgress(job.id, {
+          jobId: job.id, status: "error", stage: `Worker error: ${err.message}`,
+          current: 0, total: 0, percent: 0, elapsed: 0, error: err.message,
+        });
+        if (runId) {
+          try {
+            const savedResults = await labStorage.getRunResults(runId);
+            const cp = await labStorage.getCheckpoint(runId);
+            const hasCheckpoint = cp?.completedCombos?.length || (cp?.currentCombo && cp?.currentIteration != null);
+            if (savedResults.length > 0 || hasCheckpoint) {
+              await labStorage.pauseRun(runId);
+              console.log(`[QuantumLab] Worker error but run ${runId} has progress → paused`);
+            } else {
+              await labStorage.failRun(runId);
+            }
+          } catch { await labStorage.failRun(runId).catch(() => {}); }
+        }
+        activeWorker = null;
+      });
+
+      worker.on("exit", async (code: number) => {
+        if (code !== 0 && activeWorker === worker) {
+          console.log(`[QuantumLab] Worker exited with code ${code}`);
           if (runId) {
             try {
-              const byCombo = new Map<string, any[]>();
-              for (const r of results) {
-                const k = `${r.ticker}|${r.timeframe}`;
-                if (!byCombo.has(k)) byCombo.set(k, []);
-                byCombo.get(k)!.push(r);
+              const savedResults = await labStorage.getRunResults(runId);
+              const cp = await labStorage.getCheckpoint(runId);
+              const hasCheckpoint = cp?.completedCombos?.length || (cp?.currentCombo && cp?.currentIteration != null);
+              if (savedResults.length > 0 || hasCheckpoint) {
+                await labStorage.pauseRun(runId);
+                console.log(`[QuantumLab] Worker exit(${code}) but run ${runId} has progress → paused`);
+              } else {
+                await labStorage.failRun(runId);
               }
-              for (const [comboKey, comboResults] of byCombo) {
-                await labStorage.saveComboResults(runId, comboResults);
-              }
-              await labStorage.pauseRun(runId);
-              console.log(`[QuantumLab] Cancelled run ${runId}: saved ${results.length} results across ${byCombo.size} combos → paused`);
-            } catch (err: any) {
-              console.log(`[QuantumLab] Failed to save cancelled results: ${err.message}`);
-            }
+            } catch { await labStorage.failRun(runId).catch(() => {}); }
           }
-        } else {
-          if (runId) {
-            await labStorage.pauseRun(runId).catch(() => {});
-          }
+          activeWorker = null;
         }
-        return;
-      }
-      console.log(`[QuantumLab] Optimization finished: ${results.length} new results`);
-      labStorage.setResults(job.id, results);
-      if (runId) {
-        try {
-          const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed;
-          const combos = config.tickers.length * config.timeframes.length;
-          await labStorage.completeRun(runId, totalSamples * combos);
-          await labStorage.saveCheckpoint(runId, { completedCombos: [], configSnapshot: config });
-          console.log(`[QuantumLab] Run ${runId} completed`);
-        } catch (err: any) {
-          console.log(`[QuantumLab] Failed to complete run: ${err.stack || err.message}`);
-        }
-      }
-    }).catch(async (err: any) => {
-      console.log(`[QuantumLab] Optimization error: ${err.stack || err.message}`);
+      });
+    };
+
+    doStart().catch(async (err: any) => {
+      console.log(`[QuantumLab] Failed to start optimization: ${err.message}`);
       labStorage.updateProgress(job.id, {
-        jobId: job.id,
-        status: "error",
-        stage: `Error: ${err.message}`,
-        current: 0,
-        total: 0,
-        percent: 0,
-        elapsed: 0,
-        error: err.message,
+        jobId: job.id, status: "error", stage: `Error: ${err.message}`,
+        current: 0, total: 0, percent: 0, elapsed: 0, error: err.message,
       });
       if (runId) {
-        try {
-          const savedResults = await labStorage.getRunResults(runId);
-          const cp = await labStorage.getCheckpoint(runId);
-          const hasCheckpoint = cp?.completedCombos?.length || (cp?.currentCombo && cp?.currentIteration != null);
-          if (savedResults.length > 0 || hasCheckpoint) {
-            await labStorage.pauseRun(runId);
-            console.log(`[QuantumLab] Run ${runId} error but has progress → paused (${savedResults.length} results, checkpoint: ${!!hasCheckpoint})`);
-          } else {
-            await labStorage.failRun(runId);
-          }
-        } catch {}
+        await labStorage.failRun(runId).catch(() => {});
       }
     });
   }
@@ -416,8 +523,23 @@ export function registerLabRoutes(app: Express): void {
     res.json(results);
   });
 
-  app.post("/api/lab/job/:id/cancel", (req: Request, res: Response) => {
+  app.post("/api/lab/job/:id/cancel", async (req: Request, res: Response) => {
+    const job = labStorage.getJob(req.params.id);
+    if (activeWorker) {
+      activeWorker.postMessage({ type: "abort" });
+    }
     labStorage.cancelJob(req.params.id);
+    if (job?.runId && activeWorker) {
+      setTimeout(async () => {
+        try {
+          const run = await labStorage.getRun(job.runId!);
+          if (run && run.status === "running") {
+            await labStorage.pauseRun(job.runId!);
+            console.log(`[QuantumLab] Cancel safety net: run ${job.runId} → paused`);
+          }
+        } catch {}
+      }, 5000);
+    }
     res.json({ success: true });
   });
 
@@ -548,6 +670,19 @@ export function registerLabRoutes(app: Express): void {
 
   const gracefulShutdown = async (signal: string) => {
     console.log(`[QuantumLab] ${signal} received — pausing active jobs...`);
+    if (activeWorker) {
+      activeWorker.postMessage({ type: "abort" });
+      try {
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            activeWorker?.once("exit", () => resolve());
+          }),
+          new Promise<void>(resolve => setTimeout(resolve, 2000)),
+        ]);
+        activeWorker?.terminate();
+      } catch {}
+      activeWorker = null;
+    }
     const allJobs = (labStorage as any).jobs as Map<string, any> | undefined;
     if (!allJobs || allJobs.size === 0) return;
     const pausePromises: Promise<void>[] = [];
