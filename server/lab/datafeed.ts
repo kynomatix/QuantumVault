@@ -2,6 +2,8 @@ import type { OHLCV } from "./engine";
 import { getCachedCandles, saveCandlesToDb } from "./candle-store";
 
 const OKX_BATCH_SIZE = 300;
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 1000;
 
 function symbolToOkxInstId(symbol: string): string {
   const base = symbol.split("/")[0];
@@ -28,16 +30,36 @@ async function fetchOkxCandles(
   if (beforeMs) params.set("before", String(beforeMs));
 
   const url = `https://www.okx.com/api/v5/market/history-candles?${params}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`OKX API error ${res.status}: ${text}`);
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      if (res.status === 429) {
+        const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
+        console.log(`[OKX] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
+        await new Promise(resolve => setTimeout(resolve, wait));
+        continue;
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`OKX API error ${res.status}: ${text}`);
+      }
+      const json = await res.json();
+      if (json.code !== "0") {
+        throw new Error(`OKX API error: ${json.msg || JSON.stringify(json)}`);
+      }
+      return json.data || [];
+    } catch (err: any) {
+      if (attempt < MAX_RETRIES - 1) {
+        const wait = RETRY_DELAY_MS * (attempt + 1);
+        console.log(`[OKX] Fetch error (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message} — retrying in ${wait}ms`);
+        await new Promise(resolve => setTimeout(resolve, wait));
+        continue;
+      }
+      throw err;
+    }
   }
-  const json = await res.json();
-  if (json.code !== "0") {
-    throw new Error(`OKX API error: ${json.msg || JSON.stringify(json)}`);
-  }
-  return json.data || [];
+  return [];
 }
 
 export async function fetchOHLCV(
@@ -67,14 +89,16 @@ export async function fetchOHLCV(
   let currentEndMs = endMs;
   let page = 0;
   let emptyPages = 0;
+  let consecutiveErrors = 0;
 
   while (currentEndMs > startMs) {
     try {
       const raw = await fetchOkxCandles(instId, bar, currentEndMs);
+      consecutiveErrors = 0;
 
       if (!raw || raw.length === 0) {
         emptyPages++;
-        if (emptyPages > 3) break;
+        if (emptyPages > 5) break;
         currentEndMs -= getTimeframeSeconds(timeframe) * OKX_BATCH_SIZE * 1000;
         continue;
       }
@@ -98,17 +122,23 @@ export async function fetchOHLCV(
       currentEndMs = oldestTs;
       page++;
 
-      if (page % 3 === 0) {
+      if (page % 5 === 0) {
         onProgress?.(`Fetched ${allCandles.length} candles for ${symbol} ${timeframe}...`);
       }
 
-      await new Promise(resolve => setTimeout(resolve, 150));
+      await new Promise(resolve => setTimeout(resolve, 200));
     } catch (err: any) {
-      console.log(`Error fetching ${symbol} from OKX: ${err.message}`);
-      if (allCandles.length > 0) break;
-      throw err;
+      consecutiveErrors++;
+      console.log(`[OKX] Page fetch error after ${allCandles.length} candles (error ${consecutiveErrors}/5): ${err.message}`);
+      if (consecutiveErrors >= 5) {
+        console.log(`[OKX] Too many consecutive errors, stopping fetch with ${allCandles.length} candles`);
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * consecutiveErrors));
     }
   }
+
+  console.log(`[OKX] Fetch complete: ${allCandles.length} candles over ${page} pages for ${instId} ${bar}`);
 
   if (allCandles.length > 0) {
     const deduped = deduplicateCandles(allCandles);
