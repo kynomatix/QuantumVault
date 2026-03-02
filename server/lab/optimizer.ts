@@ -247,10 +247,7 @@ export async function runOptimization(
 
       if (s % 10 === 0) {
         await new Promise(resolve => setImmediate(resolve));
-      }
-
-      if (s % 50 === 0) {
-        const best = comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0];
+        const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
         effectiveOnProgress({
           jobId,
           status: "random_search",
@@ -259,22 +256,22 @@ export async function runOptimization(
           total: totalSamples * combos.length,
           percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
           elapsed: Date.now() - startTime,
-          bestSoFar: {
+          bestSoFar: best ? {
             netProfitPercent: best.netProfitPercent,
             winRatePercent: best.winRatePercent,
             maxDrawdownPercent: best.maxDrawdownPercent,
             profitFactor: best.profitFactor,
-          },
+          } : undefined,
           tickerProgress,
           eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
         });
+      }
 
-        if (s > 0 && callbacks?.onPartialCheckpoint) {
-          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
-          await callbacks.onPartialCheckpoint(key, "random", s + 1, topPartial).catch(e =>
-            console.log(`[QuantumLab] Partial checkpoint error: ${e.message}`)
-          );
-        }
+      if (s % 50 === 0 && s > 0 && callbacks?.onPartialCheckpoint) {
+        const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+        await callbacks.onPartialCheckpoint(key, "random", s + 1, topPartial).catch(e =>
+          console.log(`[QuantumLab] Partial checkpoint error: ${e.message}`)
+        );
       }
     }
 
@@ -319,33 +316,31 @@ export async function runOptimization(
         }
       }
 
-      if (seedIdx % 5 === 0) {
-        const best = comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0];
-        effectiveOnProgress({
-          jobId,
-          status: "refinement",
-          stage: `Refining seed ${seedIdx + 1}/${topSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
-          current: globalCurrent,
-          total: totalSamples * combos.length,
-          percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
-          elapsed: Date.now() - startTime,
-          bestSoFar: {
-            netProfitPercent: best.netProfitPercent,
-            winRatePercent: best.winRatePercent,
-            maxDrawdownPercent: best.maxDrawdownPercent,
-            profitFactor: best.profitFactor,
-          },
-          tickerProgress,
-          eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
-        });
+      const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
+      effectiveOnProgress({
+        jobId,
+        status: "refinement",
+        stage: `Refining seed ${seedIdx + 1}/${topSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
+        current: globalCurrent,
+        total: totalSamples * combos.length,
+        percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
+        elapsed: Date.now() - startTime,
+        bestSoFar: best ? {
+          netProfitPercent: best.netProfitPercent,
+          winRatePercent: best.winRatePercent,
+          maxDrawdownPercent: best.maxDrawdownPercent,
+          profitFactor: best.profitFactor,
+        } : undefined,
+        tickerProgress,
+        eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
+      });
 
-        if (callbacks?.onPartialCheckpoint) {
-          const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
-          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
-          await callbacks.onPartialCheckpoint(key, "refine", actualIter, topPartial).catch(e =>
-            console.log(`[QuantumLab] Partial checkpoint error: ${e.message}`)
-          );
-        }
+      if (seedIdx % 5 === 0 && callbacks?.onPartialCheckpoint) {
+        const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
+        const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+        await callbacks.onPartialCheckpoint(key, "refine", actualIter, topPartial).catch(e =>
+          console.log(`[QuantumLab] Partial checkpoint error: ${e.message}`)
+        );
       }
     }
 
