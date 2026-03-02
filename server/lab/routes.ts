@@ -422,6 +422,85 @@ export function registerLabRoutes(app: Express): void {
     res.send(csv);
   });
 
+  app.get("/api/lab/heatmap", async (_req: Request, res: Response) => {
+    try {
+      const runs = await labStorage.getRuns();
+      const completedRuns = runs.filter(r => r.status === "complete" || r.status === "paused");
+      if (completedRuns.length === 0) {
+        return res.json({ cells: [], tickers: [], timeframes: [], runs: 0 });
+      }
+
+      const cellMap = new Map<string, { ticker: string; timeframe: string; results: any[] }>();
+
+      for (const run of completedRuns) {
+        const results = await labStorage.getRunResults(run.id);
+        for (const r of results) {
+          const key = `${r.ticker}|${r.timeframe}`;
+          if (!cellMap.has(key)) {
+            cellMap.set(key, { ticker: r.ticker, timeframe: r.timeframe, results: [] });
+          }
+          cellMap.get(key)!.results.push({
+            runId: run.id,
+            rank: r.rank,
+            netProfitPercent: r.netProfitPercent,
+            winRatePercent: r.winRatePercent,
+            maxDrawdownPercent: r.maxDrawdownPercent,
+            profitFactor: r.profitFactor,
+            totalTrades: r.totalTrades,
+            params: r.params,
+          });
+        }
+      }
+
+      const tickers = new Set<string>();
+      const timeframes = new Set<string>();
+      const cells: any[] = [];
+
+      for (const [, cell] of cellMap) {
+        tickers.add(cell.ticker);
+        timeframes.add(cell.timeframe);
+        const sorted = cell.results.sort((a: any, b: any) => b.netProfitPercent - a.netProfitPercent);
+        const best = sorted[0];
+        const avgProfit = sorted.reduce((s: number, r: any) => s + r.netProfitPercent, 0) / sorted.length;
+        const avgWinRate = sorted.reduce((s: number, r: any) => s + r.winRatePercent, 0) / sorted.length;
+        const avgDrawdown = sorted.reduce((s: number, r: any) => s + r.maxDrawdownPercent, 0) / sorted.length;
+        const avgPF = sorted.reduce((s: number, r: any) => s + r.profitFactor, 0) / sorted.length;
+        cells.push({
+          ticker: cell.ticker,
+          timeframe: cell.timeframe,
+          totalConfigs: sorted.length,
+          bestProfit: best.netProfitPercent,
+          bestWinRate: Math.max(...sorted.map((r: any) => r.winRatePercent)),
+          bestPF: Math.max(...sorted.map((r: any) => r.profitFactor)),
+          lowestDrawdown: Math.min(...sorted.map((r: any) => r.maxDrawdownPercent)),
+          avgProfit,
+          avgWinRate,
+          avgDrawdown,
+          avgPF,
+          runsCount: new Set(sorted.map((r: any) => r.runId)).size,
+          top5: sorted.slice(0, 5).map((r: any) => ({
+            netProfitPercent: r.netProfitPercent,
+            winRatePercent: r.winRatePercent,
+            maxDrawdownPercent: r.maxDrawdownPercent,
+            profitFactor: r.profitFactor,
+            totalTrades: r.totalTrades,
+            params: r.params,
+            runId: r.runId,
+          })),
+        });
+      }
+
+      const tfOrder = ["15m", "30m", "1h", "2h", "4h", "1d"];
+      const sortedTimeframes = [...timeframes].sort((a, b) => tfOrder.indexOf(a) - tfOrder.indexOf(b));
+      const sortedTickers = [...tickers].sort();
+
+      res.json({ cells, tickers: sortedTickers, timeframes: sortedTimeframes, runs: completedRuns.length });
+    } catch (err: any) {
+      console.log(`[QuantumLab] Heatmap error: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/lab/cache/stats", async (_req: Request, res: Response) => {
     try {
       const stats = await getCacheStats();

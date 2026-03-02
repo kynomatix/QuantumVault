@@ -17,7 +17,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw,
+  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -33,7 +33,7 @@ import type {
 } from "@shared/schema";
 import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
 
-type MainTab = "main" | "results";
+type MainTab = "main" | "results" | "heatmap";
 type SortKey = "netProfitPercent" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades";
 type SortDir = "asc" | "desc";
 type RankingMode = "profit" | "winrate" | "balanced" | "conservative";
@@ -93,6 +93,7 @@ interface LabNavItem {
 const labNavItems: LabNavItem[] = [
   { id: "main", label: "Main", icon: Settings2 },
   { id: "results", label: "Results", icon: History },
+  { id: "heatmap", label: "Heatmap", icon: Grid3X3 },
 ];
 
 const EXAMPLE_PINE = `// Paste your Pine Script strategy here
@@ -456,6 +457,8 @@ export default function QuantumLab() {
             onGoToLiveJob={() => setMainTab("main")}
           />
         );
+      case "heatmap":
+        return <HeatmapPanel />;
       default:
         return null;
     }
@@ -1760,6 +1763,260 @@ function RiskMetricCard({ label, value, sublabel, icon, color, testId }: { label
       <p className="text-[10px] text-white/40 mt-0.5">{label}</p>
       <p className="text-[9px] text-white/30">{sublabel}</p>
     </Card>
+  );
+}
+
+type HeatmapMetric = "bestProfit" | "avgProfit" | "bestWinRate" | "avgWinRate" | "lowestDrawdown" | "avgDrawdown" | "bestPF" | "avgPF";
+const HEATMAP_METRICS: { value: HeatmapMetric; label: string }[] = [
+  { value: "bestProfit", label: "Best Profit %" },
+  { value: "avgProfit", label: "Avg Profit %" },
+  { value: "bestWinRate", label: "Best Win Rate %" },
+  { value: "avgWinRate", label: "Avg Win Rate %" },
+  { value: "lowestDrawdown", label: "Lowest Drawdown %" },
+  { value: "avgDrawdown", label: "Avg Drawdown %" },
+  { value: "bestPF", label: "Best Profit Factor" },
+  { value: "avgPF", label: "Avg Profit Factor" },
+];
+
+function getHeatColor(value: number, min: number, max: number, metric: HeatmapMetric): string {
+  if (max === min) return "rgba(139, 92, 246, 0.3)";
+  const isInverse = metric === "lowestDrawdown" || metric === "avgDrawdown";
+  let t = (value - min) / (max - min);
+  if (isInverse) t = 1 - t;
+  if (t < 0.25) return `rgba(239, 68, 68, ${0.2 + t * 2})`;
+  if (t < 0.5) return `rgba(245, 158, 11, ${0.3 + (t - 0.25) * 1.5})`;
+  if (t < 0.75) return `rgba(16, 185, 129, ${0.3 + (t - 0.5) * 1.5})`;
+  return `rgba(16, 185, 129, ${0.6 + (t - 0.75) * 1.6})`;
+}
+
+function formatHeatVal(value: number, metric: HeatmapMetric): string {
+  if (metric === "bestPF" || metric === "avgPF") return value.toFixed(2);
+  return `${value.toFixed(1)}%`;
+}
+
+function HeatmapPanel() {
+  const [metric, setMetric] = useState<HeatmapMetric>("bestProfit");
+  const [selectedCell, setSelectedCell] = useState<any | null>(null);
+
+  const { data, isLoading } = useQuery<any>({
+    queryKey: ["/api/lab/heatmap"],
+    queryFn: async () => {
+      const res = await fetch("/api/lab/heatmap");
+      if (!res.ok) throw new Error("Failed to load heatmap");
+      return res.json();
+    },
+    refetchInterval: 30000,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="w-6 h-6 animate-spin text-violet-400" />
+        <span className="ml-3 text-white/50">Loading heatmap data...</span>
+      </div>
+    );
+  }
+
+  if (!data || data.cells.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-white/50">
+        <Grid3X3 className="w-16 h-16 mb-4 opacity-30" />
+        <h3 className="text-lg font-semibold text-white/70 mb-2">No Heatmap Data Yet</h3>
+        <p className="text-sm">Run some optimizations across different tickers and timeframes to see the heatmap.</p>
+      </div>
+    );
+  }
+
+  const { cells, tickers, timeframes } = data;
+  const cellLookup = new Map<string, any>();
+  for (const c of cells) cellLookup.set(`${c.ticker}|${c.timeframe}`, c);
+
+  const values = cells.map((c: any) => c[metric] as number);
+  const minVal = Math.min(...values);
+  const maxVal = Math.max(...values);
+
+  return (
+    <div className="space-y-6" data-testid="heatmap-panel">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Grid3X3 className="w-5 h-5 text-violet-400" />
+          <div>
+            <h2 className="text-lg font-display font-semibold text-white">Optimization Heatmap</h2>
+            <p className="text-xs text-white/40">{data.runs} completed runs · {cells.length} ticker/timeframe combos</p>
+          </div>
+        </div>
+        <Select value={metric} onValueChange={(v) => { setMetric(v as HeatmapMetric); setSelectedCell(null); }}>
+          <SelectTrigger className="w-[200px] bg-white/5 border-white/10 text-white" data-testid="select-heatmap-metric">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {HEATMAP_METRICS.map((m) => (
+              <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4 overflow-x-auto">
+        <div className="min-w-[400px]">
+          <div className="grid gap-1" style={{ gridTemplateColumns: `120px repeat(${timeframes.length}, 1fr)` }}>
+            <div />
+            {timeframes.map((tf: string) => (
+              <div key={tf} className="text-center text-xs font-medium text-white/50 py-2">{tf}</div>
+            ))}
+
+            {tickers.map((ticker: string) => (
+              <Fragment key={ticker}>
+                <div className="flex items-center text-xs font-medium text-white/70 pr-3 justify-end truncate">
+                  {ticker.split("/")[0]}
+                </div>
+                {timeframes.map((tf: string) => {
+                  const cell = cellLookup.get(`${ticker}|${tf}`);
+                  const isSelected = selectedCell?.ticker === ticker && selectedCell?.timeframe === tf;
+                  if (!cell) {
+                    return (
+                      <div key={tf} className="aspect-[2/1] rounded-lg bg-white/[0.02] border border-white/5 flex items-center justify-center">
+                        <span className="text-[10px] text-white/20">—</span>
+                      </div>
+                    );
+                  }
+                  const val = cell[metric] as number;
+                  return (
+                    <button
+                      key={tf}
+                      onClick={() => setSelectedCell(isSelected ? null : cell)}
+                      className={cn(
+                        "aspect-[2/1] rounded-lg flex flex-col items-center justify-center transition-all cursor-pointer hover:scale-105 border",
+                        isSelected ? "ring-2 ring-violet-400 border-violet-400/50" : "border-white/5 hover:border-white/20"
+                      )}
+                      style={{ backgroundColor: getHeatColor(val, minVal, maxVal, metric) }}
+                      data-testid={`heatmap-cell-${ticker.split("/")[0]}-${tf}`}
+                    >
+                      <span className="text-sm font-bold font-mono text-white drop-shadow-lg">
+                        {formatHeatVal(val, metric)}
+                      </span>
+                      <span className="text-[9px] text-white/60 mt-0.5">{cell.totalConfigs} configs</span>
+                    </button>
+                  );
+                })}
+              </Fragment>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-center gap-2 mt-4 text-[10px] text-white/40">
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(239, 68, 68, 0.5)" }} />
+            <span>Worst</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(245, 158, 11, 0.5)" }} />
+            <span>Below Avg</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(16, 185, 129, 0.5)" }} />
+            <span>Above Avg</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(16, 185, 129, 0.9)" }} />
+            <span>Best</span>
+          </div>
+        </div>
+      </div>
+
+      {selectedCell && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="rounded-xl border border-white/10 bg-white/[0.02] p-5 space-y-4"
+          data-testid="heatmap-detail"
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Activity className="w-5 h-5 text-violet-400" />
+              <div>
+                <h3 className="font-semibold text-white">{selectedCell.ticker.split("/")[0]} · {selectedCell.timeframe}</h3>
+                <p className="text-xs text-white/40">{selectedCell.totalConfigs} configs across {selectedCell.runsCount} run{selectedCell.runsCount !== 1 ? "s" : ""}</p>
+              </div>
+            </div>
+            <button onClick={() => setSelectedCell(null)} className="text-white/40 hover:text-white" data-testid="button-close-detail">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Card className="bg-white/5 border border-white/10 p-3">
+              <p className="text-[10px] text-white/40 mb-1">Best Profit</p>
+              <p className={`text-lg font-bold font-mono ${selectedCell.bestProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {selectedCell.bestProfit.toFixed(1)}%
+              </p>
+              <p className="text-[9px] text-white/30 mt-1">avg {selectedCell.avgProfit.toFixed(1)}%</p>
+            </Card>
+            <Card className="bg-white/5 border border-white/10 p-3">
+              <p className="text-[10px] text-white/40 mb-1">Best Win Rate</p>
+              <p className="text-lg font-bold font-mono text-sky-400">{selectedCell.bestWinRate.toFixed(1)}%</p>
+              <p className="text-[9px] text-white/30 mt-1">avg {selectedCell.avgWinRate.toFixed(1)}%</p>
+            </Card>
+            <Card className="bg-white/5 border border-white/10 p-3">
+              <p className="text-[10px] text-white/40 mb-1">Lowest Drawdown</p>
+              <p className="text-lg font-bold font-mono text-amber-400">{selectedCell.lowestDrawdown.toFixed(1)}%</p>
+              <p className="text-[9px] text-white/30 mt-1">avg {selectedCell.avgDrawdown.toFixed(1)}%</p>
+            </Card>
+            <Card className="bg-white/5 border border-white/10 p-3">
+              <p className="text-[10px] text-white/40 mb-1">Best Profit Factor</p>
+              <p className="text-lg font-bold font-mono text-violet-400">{selectedCell.bestPF.toFixed(2)}</p>
+              <p className="text-[9px] text-white/30 mt-1">avg {selectedCell.avgPF.toFixed(2)}</p>
+            </Card>
+          </div>
+
+          {selectedCell.top5?.length > 0 && (
+            <div>
+              <h4 className="text-sm font-medium text-white/60 mb-2">Top 5 Configurations</h4>
+              <div className="space-y-1">
+                <div className="grid grid-cols-6 gap-2 text-[10px] text-white/40 px-3 py-1">
+                  <span>#</span>
+                  <span>Profit</span>
+                  <span>Win Rate</span>
+                  <span>Drawdown</span>
+                  <span>PF</span>
+                  <span>Trades</span>
+                </div>
+                {selectedCell.top5.map((cfg: any, idx: number) => (
+                  <div
+                    key={idx}
+                    className="grid grid-cols-6 gap-2 text-xs px-3 py-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] transition-colors"
+                    data-testid={`heatmap-top-${idx}`}
+                  >
+                    <span className="text-white/50 font-mono">{idx + 1}</span>
+                    <span className={`font-mono font-medium ${cfg.netProfitPercent >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {cfg.netProfitPercent.toFixed(1)}%
+                    </span>
+                    <span className="font-mono text-sky-400">{cfg.winRatePercent.toFixed(1)}%</span>
+                    <span className="font-mono text-amber-400">{cfg.maxDrawdownPercent.toFixed(1)}%</span>
+                    <span className="font-mono text-violet-400">{cfg.profitFactor.toFixed(2)}</span>
+                    <span className="font-mono text-white/60">{cfg.totalTrades}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {selectedCell.top5?.[0]?.params && (
+            <div>
+              <h4 className="text-sm font-medium text-white/60 mb-2">Best Config Parameters</h4>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1.5">
+                {Object.entries(selectedCell.top5[0].params as Record<string, any>).map(([key, value]) => (
+                  <div key={key} className="flex items-center justify-between px-3 py-1.5 rounded bg-white/[0.03] text-xs">
+                    <span className="text-white/50 truncate mr-2">{key}</span>
+                    <span className="font-mono text-white font-medium">{typeof value === "number" ? (Number.isInteger(value) ? value : value.toFixed(4)) : String(value)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </motion.div>
+      )}
+    </div>
   );
 }
 
