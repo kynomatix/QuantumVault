@@ -74,13 +74,13 @@ function formatCombinations(n: number): string {
 function rankScore(r: { netProfitPercent: number; winRatePercent: number; maxDrawdownPercent: number; profitFactor: number }, mode: RankingMode): number {
   switch (mode) {
     case "profit":
-      return r.netProfitPercent * 1000 + r.profitFactor * 10;
+      return r.netProfitPercent;
     case "winrate":
-      return r.winRatePercent * 1000 + r.netProfitPercent * 10;
+      return r.winRatePercent * 100 + r.profitFactor;
     case "balanced":
-      return r.netProfitPercent * 100 + r.winRatePercent * 100 + r.profitFactor * 50 - r.maxDrawdownPercent * 30;
+      return r.netProfitPercent * 0.35 + r.winRatePercent * 0.25 + (100 - r.maxDrawdownPercent) * 0.20 + r.profitFactor * 10 * 0.20;
     case "conservative":
-      return -r.maxDrawdownPercent * 200 + r.profitFactor * 100 + r.winRatePercent * 50 + r.netProfitPercent * 10;
+      return (100 - r.maxDrawdownPercent) * 0.40 + r.winRatePercent * 0.35 + r.profitFactor * 10 * 0.15 + r.netProfitPercent * 0.10;
   }
 }
 
@@ -1132,15 +1132,23 @@ function ResultsPanel({ jobId }: { jobId: string | null }) {
   }, [results, sortKey, sortDir, rankingMode]);
 
   useEffect(() => {
-    if (sortedConfigs.length > 0) {
-      setSelectedConfig(sortedConfigs[0]);
+    if (!results || sortedConfigs.length === 0) return;
+    if (selectedConfig) {
+      const key = `${selectedConfig.ticker}|${selectedConfig.timeframe}`;
+      const comboConfigs = results.configs.filter(c => `${c.ticker}|${c.timeframe}` === key);
+      if (comboConfigs.length > 0) {
+        const newBest = comboConfigs.reduce((best, c) => rankScore(c, rankingMode) > rankScore(best, rankingMode) ? c : best);
+        setSelectedConfig(newBest);
+        return;
+      }
     }
-  }, [rankingMode, sortedConfigs]);
+    setSelectedConfig(sortedConfigs[0]);
+  }, [rankingMode]);
 
-  const bestProfit = useMemo(() => results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.netProfitPercent)) : 0, [results]);
-  const bestWinRate = useMemo(() => results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.winRatePercent)) : 0, [results]);
-  const lowestDrawdown = useMemo(() => results && results.configs.length > 0 ? Math.min(...results.configs.map(c => c.maxDrawdownPercent)) : 0, [results]);
-  const bestPF = useMemo(() => results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.profitFactor)) : 0, [results]);
+  const bestProfit = useMemo(() => selectedConfig?.netProfitPercent ?? (results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.netProfitPercent)) : 0), [selectedConfig, results]);
+  const bestWinRate = useMemo(() => selectedConfig?.winRatePercent ?? (results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.winRatePercent)) : 0), [selectedConfig, results]);
+  const lowestDrawdown = useMemo(() => selectedConfig?.maxDrawdownPercent ?? (results && results.configs.length > 0 ? Math.min(...results.configs.map(c => c.maxDrawdownPercent)) : 0), [selectedConfig, results]);
+  const bestPF = useMemo(() => selectedConfig?.profitFactor ?? (results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.profitFactor)) : 0), [selectedConfig, results]);
 
   const riskAnalysis = useMemo(() => {
     if (!selectedConfig) return null;
@@ -1221,10 +1229,10 @@ function ResultsPanel({ jobId }: { jobId: string | null }) {
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-        <SummaryCard label="Best Net Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} icon={<TrendingUp className="w-4 h-4" />} color={bestProfit >= 0 ? "text-green-400" : "text-red-400"} bgColor={bestProfit >= 0 ? "bg-green-500/10" : "bg-red-500/10"} testId="summary-profit" />
-        <SummaryCard label="Best Win Rate" value={`${bestWinRate.toFixed(1)}%`} icon={<Percent className="w-4 h-4" />} color="text-sky-400" bgColor="bg-sky-500/10" testId="summary-winrate" />
-        <SummaryCard label="Lowest Drawdown" value={`${lowestDrawdown.toFixed(1)}%`} icon={<TrendingDown className="w-4 h-4" />} color="text-amber-400" bgColor="bg-amber-500/10" testId="summary-drawdown" />
-        <SummaryCard label="Best Profit Factor" value={bestPF.toFixed(2)} icon={<BarChart3 className="w-4 h-4" />} color="text-violet-400" bgColor="bg-violet-500/10" testId="summary-pf" />
+        <SummaryCard label="Net Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} icon={<TrendingUp className="w-4 h-4" />} color={bestProfit >= 0 ? "text-green-400" : "text-red-400"} bgColor={bestProfit >= 0 ? "bg-green-500/10" : "bg-red-500/10"} testId="summary-profit" />
+        <SummaryCard label="Win Rate" value={`${bestWinRate.toFixed(1)}%`} icon={<Percent className="w-4 h-4" />} color="text-sky-400" bgColor="bg-sky-500/10" testId="summary-winrate" />
+        <SummaryCard label="Max Drawdown" value={`${lowestDrawdown.toFixed(1)}%`} icon={<TrendingDown className="w-4 h-4" />} color="text-amber-400" bgColor="bg-amber-500/10" testId="summary-drawdown" />
+        <SummaryCard label="Profit Factor" value={bestPF.toFixed(2)} icon={<BarChart3 className="w-4 h-4" />} color="text-violet-400" bgColor="bg-violet-500/10" testId="summary-pf" />
         <SummaryCard label="Configs Tested" value={results.totalConfigsTested.toLocaleString()} icon={<Zap className="w-4 h-4" />} color="text-white" bgColor="bg-white/5" testId="summary-total" />
       </div>
 
@@ -1661,10 +1669,18 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
   }, [results, sortKey, sortDir, rankingMode]);
 
   useEffect(() => {
-    if (bestPerCombo.length > 0) {
-      setSelectedResult(bestPerCombo[0]);
+    if (!results || bestPerCombo.length === 0) return;
+    if (selectedResult) {
+      const key = `${selectedResult.ticker}|${selectedResult.timeframe}`;
+      const comboConfigs = results.filter(r => `${r.ticker}|${r.timeframe}` === key);
+      if (comboConfigs.length > 0) {
+        const newBest = comboConfigs.reduce((best, c) => rankScore(c, rankingMode) > rankScore(best, rankingMode) ? c : best);
+        setSelectedResult(newBest);
+        return;
+      }
     }
-  }, [rankingMode, bestPerCombo]);
+    setSelectedResult(bestPerCombo[0]);
+  }, [rankingMode]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir(d => d === "desc" ? "asc" : "desc");
@@ -1695,10 +1711,10 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
     );
   }
 
-  const bestProfit = Math.max(...results.map(r => r.netProfitPercent));
-  const bestWinRate = Math.max(...results.map(r => r.winRatePercent));
-  const lowestDD = Math.min(...results.map(r => r.maxDrawdownPercent));
-  const bestPF = Math.max(...results.map(r => r.profitFactor));
+  const bestProfit = selectedResult?.netProfitPercent ?? Math.max(...results.map(r => r.netProfitPercent));
+  const bestWinRate = selectedResult?.winRatePercent ?? Math.max(...results.map(r => r.winRatePercent));
+  const lowestDD = selectedResult?.maxDrawdownPercent ?? Math.min(...results.map(r => r.maxDrawdownPercent));
+  const bestPF = selectedResult?.profitFactor ?? Math.max(...results.map(r => r.profitFactor));
 
   return (
     <div className="space-y-6">
@@ -1726,10 +1742,10 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <HistStatCard label="Best Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} color={bestProfit >= 0 ? "text-green-400" : "text-red-400"} icon={<TrendingUp className="w-4 h-4" />} />
-        <HistStatCard label="Best Win Rate" value={`${bestWinRate.toFixed(1)}%`} color="text-sky-400" icon={<Percent className="w-4 h-4" />} />
-        <HistStatCard label="Lowest DD" value={`${lowestDD.toFixed(1)}%`} color="text-amber-400" icon={<TrendingDown className="w-4 h-4" />} />
-        <HistStatCard label="Best PF" value={bestPF.toFixed(2)} color="text-violet-400" icon={<BarChart3 className="w-4 h-4" />} />
+        <HistStatCard label="Net Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} color={bestProfit >= 0 ? "text-green-400" : "text-red-400"} icon={<TrendingUp className="w-4 h-4" />} />
+        <HistStatCard label="Win Rate" value={`${bestWinRate.toFixed(1)}%`} color="text-sky-400" icon={<Percent className="w-4 h-4" />} />
+        <HistStatCard label="Max Drawdown" value={`${lowestDD.toFixed(1)}%`} color="text-amber-400" icon={<TrendingDown className="w-4 h-4" />} />
+        <HistStatCard label="Profit Factor" value={bestPF.toFixed(2)} color="text-violet-400" icon={<BarChart3 className="w-4 h-4" />} />
       </div>
 
       <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
