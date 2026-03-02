@@ -74,10 +74,20 @@ export class LabDatabaseStorage implements ILabStorage {
           status: newStatus,
           ...(!hasAnyCheckpoint ? { completedAt: new Date() } : {}),
         }).where(eq(labOptimizationRuns.id, run.id));
+
+        if (hasMidComboCheckpoint && cp.partialResults?.length > 0) {
+          try {
+            await this.saveComboResults(run.id, cp.partialResults);
+            console.log(`[QuantumLab] Stale run ${run.id}: saved ${cp.partialResults.length} partial results from checkpoint`);
+          } catch (err: any) {
+            console.log(`[QuantumLab] Stale run ${run.id}: failed to save partial results: ${err.message}`);
+          }
+        }
+
         const detail = hasComboCheckpoint
           ? `${cp.completedCombos.length} combos checkpointed`
           : hasMidComboCheckpoint
-            ? `mid-combo ${cp.currentCombo} at ${cp.currentStage} iter ${cp.currentIteration}`
+            ? `mid-combo ${cp.currentCombo} at ${cp.currentStage} iter ${cp.currentIteration}${cp.partialResults?.length ? `, ${cp.partialResults.length} results saved` : ""}`
             : "";
         console.log(`[QuantumLab] Stale run ${run.id} → ${newStatus}${detail ? ` (${detail})` : ""}`);
       }

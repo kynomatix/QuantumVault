@@ -201,7 +201,31 @@ export function registerLabRoutes(app: Express): void {
       resumeCheckpoint
     ).then(async (results: any[]) => {
       if (job.abortSignal.aborted) {
-        console.log(`[QuantumLab] Job ${job.id} was cancelled, skipping final save`);
+        console.log(`[QuantumLab] Job ${job.id} was cancelled with ${results.length} results found`);
+        if (results.length > 0) {
+          labStorage.setResults(job.id, results);
+          if (runId) {
+            try {
+              const byCombo = new Map<string, any[]>();
+              for (const r of results) {
+                const k = `${r.ticker}|${r.timeframe}`;
+                if (!byCombo.has(k)) byCombo.set(k, []);
+                byCombo.get(k)!.push(r);
+              }
+              for (const [comboKey, comboResults] of byCombo) {
+                await labStorage.saveComboResults(runId, comboResults);
+              }
+              await labStorage.pauseRun(runId);
+              console.log(`[QuantumLab] Cancelled run ${runId}: saved ${results.length} results across ${byCombo.size} combos → paused`);
+            } catch (err: any) {
+              console.log(`[QuantumLab] Failed to save cancelled results: ${err.message}`);
+            }
+          }
+        } else {
+          if (runId) {
+            await labStorage.pauseRun(runId).catch(() => {});
+          }
+        }
         return;
       }
       console.log(`[QuantumLab] Optimization finished: ${results.length} new results`);

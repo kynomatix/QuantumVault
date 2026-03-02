@@ -337,7 +337,7 @@ export default function QuantumLab() {
     setActiveJobId(null);
     setJobProgress(null);
     queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
-    toast({ title: "Optimization cancelled" });
+    toast({ title: "Optimization cancelled", description: "Best results found so far have been saved to History." });
   }, [activeJobId, toast]);
 
   useEffect(() => {
