@@ -839,10 +839,12 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
 }
 
 const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
-  { label: "Major", tickers: ["SOL", "BTC", "ETH"] },
-  { label: "Layer 1", tickers: ["SUI", "TAO"] },
-  { label: "DeFi", tickers: ["JUP", "DRIFT", "HYPE"] },
-  { label: "Other", tickers: ["XRP", "DOGE", "ZEC", "PAXG"] },
+  { label: "Major", tickers: ["SOL", "BTC", "ETH", "XRP", "ADA", "LTC", "BNB", "AVAX", "LINK", "DOGE"] },
+  { label: "Layer 1 / Infra", tickers: ["SUI", "APT", "SEI", "TON", "BERA", "OP", "ARB", "POL", "MNT", "TIA", "INJ"] },
+  { label: "Solana DeFi", tickers: ["JUP", "DRIFT", "RAY", "JTO", "PYTH", "W", "KMNO", "TNSR", "CLOUD", "IO", "ME", "RENDER", "HNT"] },
+  { label: "Memes", tickers: ["WIF", "POPCAT", "MOODENG", "FWOG", "GOAT", "PNUT", "MEW", "MICHI", "MOTHER", "FARTCOIN", "PENGU", "DBR"] },
+  { label: "New / Trending", tickers: ["HYPE", "TRUMP", "AI16Z", "KAITO", "IP"] },
+  { label: "Commodities / Other", tickers: ["PAXG", "ZEC", "TAO"] },
 ];
 
 function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunning }: {
@@ -912,7 +914,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
               </Label>
               <span className="text-[10px] text-white/30">{selectedTickers.length} selected</span>
             </div>
-            <div className="space-y-3">
+            <div className="max-h-[200px] overflow-y-auto space-y-3 pr-1 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
               {TICKER_GROUPS.map((group) => (
                 <div key={group.label}>
                   <p className="text-[10px] uppercase tracking-wider text-white/30 mb-1.5">{group.label}</p>
