@@ -95,6 +95,28 @@ export class LabDatabaseStorage implements ILabStorage {
       if (staleRuns.length > 0) {
         console.log(`[QuantumLab] Processed ${staleRuns.length} stale run(s) from previous session`);
       }
+
+      const failedRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "failed"));
+      let recovered = 0;
+      for (const run of failedRuns) {
+        const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+        const hasCheckpoint = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
+        const savedResults = await db.select({ id: labOptimizationResults.id })
+          .from(labOptimizationResults)
+          .where(eq(labOptimizationResults.runId, run.id))
+          .limit(1);
+        if (hasCheckpoint || savedResults.length > 0) {
+          await db.update(labOptimizationRuns).set({
+            status: "paused",
+            completedAt: null,
+          }).where(eq(labOptimizationRuns.id, run.id));
+          console.log(`[QuantumLab] Recovered failed run ${run.id} → paused (has ${hasCheckpoint ? "checkpoint" : ""}${savedResults.length > 0 ? " results" : ""})`);
+          recovered++;
+        }
+      }
+      if (recovered > 0) {
+        console.log(`[QuantumLab] Recovered ${recovered} failed run(s) with salvageable data`);
+      }
     } catch (err: any) {
       console.log(`[QuantumLab] Stale run cleanup error: ${err.message}`);
     }
@@ -149,6 +171,28 @@ export class LabDatabaseStorage implements ILabStorage {
   }
 
   async failRun(id: number): Promise<void> {
+    const savedResults = await db.select({ id: labOptimizationResults.id })
+      .from(labOptimizationResults)
+      .where(eq(labOptimizationResults.runId, id))
+      .limit(1);
+    if (savedResults.length > 0) {
+      await db.update(labOptimizationRuns).set({
+        status: "paused",
+      }).where(eq(labOptimizationRuns.id, id));
+      console.log(`[QuantumLab] failRun(${id}) → paused instead (has saved results)`);
+      return;
+    }
+    const [run] = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.id, id));
+    if (run) {
+      const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+      if (cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null)) {
+        await db.update(labOptimizationRuns).set({
+          status: "paused",
+        }).where(eq(labOptimizationRuns.id, id));
+        console.log(`[QuantumLab] failRun(${id}) → paused instead (has checkpoint)`);
+        return;
+      }
+    }
     await db.update(labOptimizationRuns).set({
       status: "failed",
       completedAt: new Date(),

@@ -118,8 +118,23 @@ export function registerLabRoutes(app: Express): void {
   app.post("/api/lab/runs/:id/fail", async (req: Request, res: Response) => {
     try {
       const runId = parseInt(req.params.id);
-      await labStorage.failRun(runId);
-      res.json({ ok: true });
+      const run = await labStorage.getRun(runId);
+      if (!run) return res.status(404).json({ error: "Run not found" });
+      if (run.status === "complete" || run.status === "paused") {
+        return res.json({ ok: true, status: run.status });
+      }
+      const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+      const hasCheckpoint = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
+      const savedResults = await labStorage.getRunResults(runId);
+      const hasResults = savedResults.length > 0;
+      if (hasCheckpoint || hasResults) {
+        await labStorage.pauseRun(runId);
+        console.log(`[QuantumLab] Run ${runId} fail request → paused instead (has ${hasCheckpoint ? "checkpoint" : ""}${hasResults ? " results" : ""})`);
+        res.json({ ok: true, status: "paused" });
+      } else {
+        await labStorage.failRun(runId);
+        res.json({ ok: true, status: "failed" });
+      }
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -256,7 +271,17 @@ export function registerLabRoutes(app: Express): void {
         error: err.message,
       });
       if (runId) {
-        try { await labStorage.failRun(runId); } catch {}
+        try {
+          const savedResults = await labStorage.getRunResults(runId);
+          const cp = await labStorage.getCheckpoint(runId);
+          const hasCheckpoint = cp?.completedCombos?.length || (cp?.currentCombo && cp?.currentIteration != null);
+          if (savedResults.length > 0 || hasCheckpoint) {
+            await labStorage.pauseRun(runId);
+            console.log(`[QuantumLab] Run ${runId} error but has progress → paused (${savedResults.length} results, checkpoint: ${!!hasCheckpoint})`);
+          } else {
+            await labStorage.failRun(runId);
+          }
+        } catch {}
       }
     });
   }
@@ -520,4 +545,26 @@ export function registerLabRoutes(app: Express): void {
       res.status(500).json({ error: err.message });
     }
   });
+
+  const gracefulShutdown = async (signal: string) => {
+    console.log(`[QuantumLab] ${signal} received — pausing active jobs...`);
+    const allJobs = (labStorage as any).jobs as Map<string, any> | undefined;
+    if (!allJobs) return;
+    for (const [jobId, job] of allJobs) {
+      if (job.abortSignal && !job.abortSignal.aborted && job.progress?.status !== "complete" && job.progress?.status !== "error") {
+        job.abortSignal.aborted = true;
+        if (job.runId) {
+          try {
+            await labStorage.pauseRun(job.runId);
+            console.log(`[QuantumLab] Job ${jobId} (run ${job.runId}) → paused on ${signal}`);
+          } catch (err: any) {
+            console.log(`[QuantumLab] Failed to pause run ${job.runId} on ${signal}: ${err.message}`);
+          }
+        }
+      }
+    }
+  };
+
+  process.on("SIGTERM", () => { gracefulShutdown("SIGTERM").catch(() => {}); });
+  process.on("SIGINT", () => { gracefulShutdown("SIGINT").catch(() => {}); });
 }

@@ -1327,7 +1327,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
             return (
               <div key={run.id} className="flex items-center gap-2">
                 <div className="flex-1 cursor-pointer" onClick={async () => {
-                  if (isComplete || isPaused) { onSelectRun(run.id); }
+                  if (isComplete || isPaused || isFailed) { onSelectRun(run.id); }
                   else if (isRunning) {
                     try {
                       const res = await fetch(`/api/lab/runs/${run.id}/job`);
@@ -1335,13 +1335,17 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
                         const { jobId } = await res.json();
                         onViewRunning(jobId);
                       } else {
-                        await apiRequest("POST", `/api/lab/runs/${run.id}/fail`);
+                        const failRes = await apiRequest("POST", `/api/lab/runs/${run.id}/fail`);
+                        const failData = await failRes.json();
                         queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+                        if (failData.status === "paused") {
+                          onSelectRun(run.id);
+                        }
                       }
                     } catch {}
                   }
                 }}>
-                  <Card className={`bg-white/5 border border-white/10 p-4 ${isComplete || isRunning || isPaused ? "cursor-pointer hover:bg-white/10" : "opacity-70"}`} data-testid={`history-run-card-${run.id}`}>
+                  <Card className={`bg-white/5 border border-white/10 p-4 cursor-pointer hover:bg-white/10`} data-testid={`history-run-card-${run.id}`}>
                     <div className="flex items-center justify-between gap-4 flex-wrap">
                       <div className="flex items-center gap-3 min-w-0 flex-1">
                         <div className={`flex items-center justify-center w-9 h-9 rounded-md ${statusBg} flex-shrink-0`}>{statusIcon}</div>
@@ -1357,7 +1361,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
                               <Clock className="w-3 h-3" /> {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </span>
                             <span className="text-[11px] text-white/40 flex items-center gap-1">
-                              <BarChart3 className="w-3 h-3" /> {run.totalConfigsTested?.toLocaleString() ?? "?"} configs
+                              <BarChart3 className="w-3 h-3" /> {run.totalConfigsTested?.toLocaleString() ?? (isPaused || isFailed ? "partial" : "?")} configs
                             </span>
                             {isPaused ? (
                               <Badge className="text-[10px] bg-amber-500/20 text-amber-400">
@@ -1500,12 +1504,20 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack }:
   if (isLoading) return <div className="flex items-center justify-center h-96"><Loader2 className="w-6 h-6 animate-spin text-violet-400" /></div>;
 
   if (!results || results.length === 0) {
+    const runStatus = run?.status;
+    const isInterrupted = runStatus === "failed" || runStatus === "paused";
     return (
       <div className="flex items-center justify-center h-96">
         <div className="text-center space-y-4">
           <AlertCircle className="w-8 h-8 text-amber-400 mx-auto" />
-          <p className="text-sm text-white/60">No qualifying results for this run.</p>
-          <p className="text-xs text-white/30 max-w-xs mx-auto">All configurations were filtered out by minimum trades or max drawdown cap. Try widening the filters.</p>
+          <p className="text-sm text-white/60">
+            {isInterrupted ? "This run was interrupted before any results were saved." : "No qualifying results for this run."}
+          </p>
+          <p className="text-xs text-white/30 max-w-xs mx-auto">
+            {isInterrupted
+              ? "The server restarted before the first checkpoint could be saved. Try running the optimization again."
+              : "All configurations were filtered out by minimum trades or max drawdown cap. Try widening the filters."}
+          </p>
           <Button variant="secondary" size="sm" onClick={onBack} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-back-history">
             <ArrowLeft className="w-3 h-3 mr-1" /> Back to History
           </Button>
@@ -1528,7 +1540,12 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack }:
             <ArrowLeft className="w-4 h-4" />
           </Button>
           <div>
-            <h2 className="text-lg font-semibold text-white" data-testid="text-history-title">Run #{runId} Results</h2>
+            <h2 className="text-lg font-semibold text-white" data-testid="text-history-title">
+              Run #{runId} Results
+              {run && (run.status === "paused" || run.status === "failed") && (
+                <Badge className="ml-2 text-[10px] bg-amber-500/20 text-amber-400 align-middle">Partial</Badge>
+              )}
+            </h2>
             <p className="text-xs text-white/60">
               {run ? `${(run.tickers as string[]).map(t => t.split("/")[0]).join(", ")} / ${(run.timeframes as string[]).join(", ")} — ${new Date(run.createdAt).toLocaleDateString()}` : ""}
               {run?.totalConfigsTested ? ` — ${run.totalConfigsTested.toLocaleString()} configs tested` : ""}
