@@ -428,6 +428,8 @@ export default function QuantumLab() {
           <RunHistoryPanel
             onSelectRun={(id) => setActiveHistoryRunId(id)}
             onViewRunning={(jobId) => { setActiveJobId(jobId); setMainTab("main"); }}
+            liveProgress={activeJobId ? jobProgress : null}
+            onGoToLiveJob={() => setMainTab("main")}
           />
         );
       default:
@@ -1103,7 +1105,7 @@ function SortHeader({ label, sortKey, current, dir, onClick }: { label: string; 
   );
 }
 
-function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: number) => void; onViewRunning: (jobId: string) => void }) {
+function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJob }: { onSelectRun: (id: number) => void; onViewRunning: (jobId: string) => void; liveProgress?: LabJobProgress | null; onGoToLiveJob?: () => void }) {
   const { toast } = useToast();
   const { data: runs, isLoading } = useQuery<LabOptimizationRun[]>({
     queryKey: ["/api/lab/runs"],
@@ -1147,6 +1149,56 @@ function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: num
         </h2>
         <p className="text-xs text-white/60 mt-1">{allRuns.length} run{allRuns.length !== 1 ? "s" : ""}</p>
       </div>
+
+      {liveProgress && liveProgress.status !== "complete" && liveProgress.status !== "error" && (
+        <Card className="bg-violet-500/10 border border-violet-500/30 p-4" data-testid="card-live-progress">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+              <span className="text-sm font-medium text-violet-300">Optimization Running</span>
+              <span className="text-xs text-white/40">{liveProgress.stage}</span>
+            </div>
+            {onGoToLiveJob && (
+              <Button variant="ghost" size="sm" className="text-violet-300 hover:text-violet-200 hover:bg-violet-500/20 gap-1" onClick={onGoToLiveJob} data-testid="button-go-to-live-job">
+                <Play className="w-3 h-3" /> View Progress
+              </Button>
+            )}
+          </div>
+          <div className="w-full bg-white/10 rounded-full h-2 mb-3">
+            <div className="bg-violet-500 h-2 rounded-full transition-all duration-500" style={{ width: `${liveProgress.percent ?? 0}%` }} />
+          </div>
+          <div className="flex items-center gap-4 text-xs text-white/60">
+            <span>{liveProgress.percent ?? 0}% complete</span>
+            <span>{liveProgress.current?.toLocaleString() ?? 0} / {liveProgress.total?.toLocaleString() ?? 0} configs</span>
+            {liveProgress.eta && <span>ETA: {Math.ceil(liveProgress.eta / 60000)}m</span>}
+          </div>
+          {liveProgress.bestSoFar && (
+            <div className="mt-3 pt-3 border-t border-white/10">
+              <p className="text-[11px] text-white/40 mb-2 uppercase tracking-wider">Best Result So Far</p>
+              <div className="grid grid-cols-4 gap-3">
+                <div>
+                  <p className="text-[11px] text-white/40">Net Profit</p>
+                  <p className={`text-sm font-mono font-semibold ${liveProgress.bestSoFar.netProfitPercent >= 0 ? "text-green-400" : "text-red-400"}`}>
+                    {liveProgress.bestSoFar.netProfitPercent.toFixed(1)}%
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] text-white/40">Win Rate</p>
+                  <p className="text-sm font-mono font-semibold text-white">{liveProgress.bestSoFar.winRatePercent.toFixed(1)}%</p>
+                </div>
+                <div>
+                  <p className="text-[11px] text-white/40">Max DD</p>
+                  <p className="text-sm font-mono font-semibold text-amber-400">{liveProgress.bestSoFar.maxDrawdownPercent.toFixed(1)}%</p>
+                </div>
+                <div>
+                  <p className="text-[11px] text-white/40">Profit Factor</p>
+                  <p className="text-sm font-mono font-semibold text-white">{liveProgress.bestSoFar.profitFactor.toFixed(2)}</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
 
       {allRuns.length === 0 ? (
         <Card className="bg-white/5 border border-white/10 p-12 text-center">
