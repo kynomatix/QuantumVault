@@ -27,6 +27,7 @@ import {
   Store,
   Star,
   Zap,
+  FlaskConical,
   Shield,
   ChevronRight,
   ChevronDown,
@@ -1422,7 +1423,7 @@ export default function AppPage() {
               data-testid="link-quantumlab-header"
               title="QuantumLab"
             >
-              <Zap className="w-5 h-5 text-muted-foreground" />
+              <FlaskConical className="w-5 h-5 text-muted-foreground" />
             </a>
             <a 
               href="/analytics" 
