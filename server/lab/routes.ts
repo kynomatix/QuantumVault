@@ -177,13 +177,15 @@ export function registerLabRoutes(app: Express): void {
       onPartialCheckpoint: async (combo: string, stage: "random" | "refine", iteration: number, partialResults: any[]) => {
         if (!runId) return;
         try {
+          if (partialResults.length > 0) {
+            await labStorage.saveComboResults(runId, partialResults, true);
+          }
           const checkpoint: LabCheckpoint = {
             completedCombos: [...completedCombos],
             configSnapshot: config,
             currentCombo: combo,
             currentStage: stage,
             currentIteration: iteration,
-            partialResults,
           };
           await labStorage.saveCheckpoint(runId, checkpoint);
         } catch (err: any) {
@@ -287,6 +289,7 @@ export function registerLabRoutes(app: Express): void {
         });
         runId = run.id;
         job.runId = runId;
+        await labStorage.saveCheckpoint(runId, { completedCombos: [], configSnapshot: config });
       }
 
       startOptimizationJob(config, job, runId);
@@ -308,12 +311,32 @@ export function registerLabRoutes(app: Express): void {
       const checkpoint = await labStorage.getCheckpoint(runId);
       if (!checkpoint?.configSnapshot) return res.status(400).json({ error: "No checkpoint data found for this run" });
 
+      if (checkpoint.currentCombo && !checkpoint.partialResults?.length) {
+        const dbResults = await labStorage.getRunResults(runId);
+        const comboResults = dbResults.filter(r => `${r.ticker}|${r.timeframe}` === checkpoint.currentCombo);
+        if (comboResults.length > 0) {
+          checkpoint.partialResults = comboResults.map(r => ({
+            ticker: r.ticker,
+            timeframe: r.timeframe,
+            netProfitPercent: r.netProfitPercent,
+            winRatePercent: r.winRatePercent,
+            maxDrawdownPercent: r.maxDrawdownPercent,
+            profitFactor: r.profitFactor,
+            totalTrades: r.totalTrades,
+            params: r.params as Record<string, any>,
+            trades: (r.trades as any[]) ?? [],
+            equityCurve: (r.equityCurve as any[]) ?? [],
+          }));
+          console.log(`[QuantumLab] Loaded ${comboResults.length} partial results from DB for combo ${checkpoint.currentCombo}`);
+        }
+      }
+
       const config = checkpoint.configSnapshot;
       const job = labStorage.createJob(config);
       job.runId = runId;
 
       await labStorage.resumeRun(runId);
-      console.log(`[QuantumLab] Resuming run ${runId} — ${checkpoint.completedCombos.length} combos already done`);
+      console.log(`[QuantumLab] Resuming run ${runId} — ${checkpoint.completedCombos.length} combos already done${checkpoint.currentCombo ? `, mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}` : ""}`);
 
       startOptimizationJob(config, job, runId, checkpoint);
 

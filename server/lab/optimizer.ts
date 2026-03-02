@@ -267,7 +267,7 @@ export async function runOptimization(
         });
       }
 
-      if (s % 50 === 0 && s > 0 && callbacks?.onPartialCheckpoint) {
+      if (s % 25 === 0 && s > 0 && callbacks?.onPartialCheckpoint) {
         const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
         await callbacks.onPartialCheckpoint(key, "random", s + 1, topPartial).catch(e =>
           console.log(`[QuantumLab] Partial checkpoint error: ${e.message}`)
@@ -335,7 +335,7 @@ export async function runOptimization(
         eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
       });
 
-      if (seedIdx % 5 === 0 && callbacks?.onPartialCheckpoint) {
+      if (seedIdx % 3 === 0 && callbacks?.onPartialCheckpoint) {
         const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
         const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
         await callbacks.onPartialCheckpoint(key, "refine", actualIter, topPartial).catch(e =>

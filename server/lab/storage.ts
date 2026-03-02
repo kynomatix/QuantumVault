@@ -41,7 +41,7 @@ export interface ILabStorage {
   getCheckpoint(runId: number): Promise<LabCheckpoint | null>;
 
   saveResults(runId: number, results: LabBacktestResult[]): Promise<void>;
-  saveComboResults(runId: number, results: LabBacktestResult[]): Promise<void>;
+  saveComboResults(runId: number, results: LabBacktestResult[], isPartial?: boolean): Promise<void>;
   getRunResults(runId: number): Promise<LabOptResult[]>;
 
   createJob(config: LabOptimizationConfig): LabJob;
@@ -69,26 +69,27 @@ export class LabDatabaseStorage implements ILabStorage {
         const hasComboCheckpoint = cp?.completedCombos?.length > 0;
         const hasMidComboCheckpoint = cp?.currentCombo && cp?.currentIteration != null && cp.currentIteration >= 0;
         const hasAnyCheckpoint = hasComboCheckpoint || hasMidComboCheckpoint;
-        const newStatus = hasAnyCheckpoint ? "paused" : "failed";
+
+        const savedResults = await db.select({ id: labOptimizationResults.id })
+          .from(labOptimizationResults)
+          .where(eq(labOptimizationResults.runId, run.id))
+          .limit(1);
+        const hasPersistedResults = savedResults.length > 0;
+
+        const canResume = hasAnyCheckpoint || hasPersistedResults;
+        const newStatus = canResume ? "paused" : "failed";
         await db.update(labOptimizationRuns).set({
           status: newStatus,
-          ...(!hasAnyCheckpoint ? { completedAt: new Date() } : {}),
+          ...(!canResume ? { completedAt: new Date() } : {}),
         }).where(eq(labOptimizationRuns.id, run.id));
-
-        if (hasMidComboCheckpoint && cp.partialResults?.length > 0) {
-          try {
-            await this.saveComboResults(run.id, cp.partialResults);
-            console.log(`[QuantumLab] Stale run ${run.id}: saved ${cp.partialResults.length} partial results from checkpoint`);
-          } catch (err: any) {
-            console.log(`[QuantumLab] Stale run ${run.id}: failed to save partial results: ${err.message}`);
-          }
-        }
 
         const detail = hasComboCheckpoint
           ? `${cp.completedCombos.length} combos checkpointed`
           : hasMidComboCheckpoint
-            ? `mid-combo ${cp.currentCombo} at ${cp.currentStage} iter ${cp.currentIteration}${cp.partialResults?.length ? `, ${cp.partialResults.length} results saved` : ""}`
-            : "";
+            ? `mid-combo ${cp.currentCombo} at ${cp.currentStage} iter ${cp.currentIteration}`
+            : hasPersistedResults
+              ? `has persisted results in DB`
+              : "";
         console.log(`[QuantumLab] Stale run ${run.id} → ${newStatus}${detail ? ` (${detail})` : ""}`);
       }
       if (staleRuns.length > 0) {
@@ -207,19 +208,29 @@ export class LabDatabaseStorage implements ILabStorage {
     }
   }
 
-  async saveComboResults(runId: number, results: LabBacktestResult[]): Promise<void> {
+  async saveComboResults(runId: number, results: LabBacktestResult[], isPartial = false): Promise<void> {
     if (results.length === 0) return;
     const combo = results[0];
     const comboKey = `${combo.ticker}|${combo.timeframe}`;
     const existing = await db.select({ id: labOptimizationResults.id, ticker: labOptimizationResults.ticker, timeframe: labOptimizationResults.timeframe })
       .from(labOptimizationResults)
       .where(eq(labOptimizationResults.runId, runId));
-    const alreadySaved = existing.some(r => `${r.ticker}|${r.timeframe}` === comboKey);
-    if (alreadySaved) {
-      console.log(`[QuantumLab] Combo ${comboKey} already saved for run ${runId}, skipping duplicate`);
-      return;
+    const existingForCombo = existing.filter(r => `${r.ticker}|${r.timeframe}` === comboKey);
+
+    if (existingForCombo.length > 0) {
+      if (!isPartial) {
+        const idsToDelete = existingForCombo.map(r => r.id);
+        await db.delete(labOptimizationResults).where(inArray(labOptimizationResults.id, idsToDelete));
+        console.log(`[QuantumLab] Combo ${comboKey} run ${runId}: replaced ${idsToDelete.length} partial results with ${results.length} final results`);
+      } else {
+        const idsToDelete = existingForCombo.map(r => r.id);
+        await db.delete(labOptimizationResults).where(inArray(labOptimizationResults.id, idsToDelete));
+        console.log(`[QuantumLab] Combo ${comboKey} run ${runId}: updating ${results.length} partial results`);
+      }
     }
-    const startRank = existing.length + 1;
+
+    const otherCount = existing.length - existingForCombo.length;
+    const startRank = otherCount + 1;
     const insertData: InsertLabResult[] = results.map((r, idx) => ({
       runId,
       ticker: r.ticker,
