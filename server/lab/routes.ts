@@ -3,6 +3,7 @@ import { labStorage } from "./storage";
 import { parsePineScript } from "./pine-parser";
 import { runOptimization, type OptimizationCallbacks } from "./optimizer";
 import { labOptimizationConfigSchema, insertLabStrategyBodySchema, updateLabStrategyBodySchema, LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES, type LabCheckpoint, type LabOptimizationConfig } from "@shared/schema";
+import { getCacheStats, clearCandleCache } from "./candle-store";
 
 export function registerLabRoutes(app: Express): void {
 
@@ -372,5 +373,23 @@ export function registerLabRoutes(app: Express): void {
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", `attachment; filename="optimization_results_${req.params.id}.csv"`);
     res.send(csv);
+  });
+
+  app.get("/api/lab/cache/stats", async (_req: Request, res: Response) => {
+    try {
+      const stats = await getCacheStats();
+      res.json(stats);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/lab/cache", async (_req: Request, res: Response) => {
+    try {
+      const deleted = await clearCandleCache();
+      res.json({ success: true, deletedRows: deleted });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 }

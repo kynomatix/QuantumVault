@@ -705,6 +705,21 @@ export const labOptimizationRuns = pgTable("lab_optimization_runs", {
   completedAt: timestamp("completed_at"),
 });
 
+export const labCandleCache = pgTable("lab_candle_cache", {
+  id: serial("id").primaryKey(),
+  symbol: text("symbol").notNull(),
+  timeframe: text("timeframe").notNull(),
+  time: decimal("time", { precision: 20, scale: 0 }).notNull(),
+  open: real("open").notNull(),
+  high: real("high").notNull(),
+  low: real("low").notNull(),
+  close: real("close").notNull(),
+  volume: real("volume").notNull(),
+}, (table) => [
+  unique("lab_candle_cache_unique").on(table.symbol, table.timeframe, table.time),
+  index("lab_candle_cache_lookup").on(table.symbol, table.timeframe),
+]);
+
 export const labOptimizationResults = pgTable("lab_optimization_results", {
   id: serial("id").primaryKey(),
   runId: integer("run_id").notNull(),

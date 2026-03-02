@@ -1,25 +1,5 @@
-import * as fs from "fs";
-import * as path from "path";
 import type { OHLCV } from "./engine";
-
-const CACHE_DIR = process.env.NODE_ENV === "production"
-  ? path.join("/tmp", "lab-cache")
-  : path.join(process.cwd(), "cache");
-
-function ensureCacheDir() {
-  if (!fs.existsSync(CACHE_DIR)) {
-    fs.mkdirSync(CACHE_DIR, { recursive: true });
-  }
-}
-
-function getCacheKey(symbol: string, timeframe: string, startDate: string, endDate: string): string {
-  const cleanSymbol = symbol.replace(/[/:]/g, "_");
-  return `${cleanSymbol}_${timeframe}_${startDate}_${endDate}`;
-}
-
-function getCachePath(key: string): string {
-  return path.join(CACHE_DIR, `${key}.json`);
-}
+import { getCachedCandles, saveCandlesToDb } from "./candle-store";
 
 function symbolToGateContract(symbol: string): string {
   const base = symbol.split("/")[0];
@@ -69,14 +49,14 @@ export async function fetchOHLCV(
   endDate: string,
   onProgress?: (msg: string) => void
 ): Promise<OHLCV[]> {
-  ensureCacheDir();
-  const cacheKey = getCacheKey(symbol, timeframe, startDate, endDate);
-  const cachePath = getCachePath(cacheKey);
+  const startMs = new Date(startDate).getTime();
+  const endMs = new Date(endDate).getTime();
 
-  if (fs.existsSync(cachePath)) {
-    onProgress?.(`Loading cached data for ${symbol} ${timeframe}`);
-    const cached = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
-    console.log(`Loaded ${cached.length} cached candles for ${symbol} ${timeframe}`);
+  onProgress?.(`Checking cache for ${symbol} ${timeframe}...`);
+  const cached = await getCachedCandles(symbol, timeframe, startMs, endMs);
+  if (cached && cached.length >= 100) {
+    console.log(`[CandleCache] Hit: ${cached.length} candles for ${symbol} ${timeframe}`);
+    onProgress?.(`Loaded ${cached.length} cached candles for ${symbol} ${timeframe}`);
     return cached;
   }
 
@@ -84,8 +64,8 @@ export async function fetchOHLCV(
   onProgress?.(`Fetching ${symbol} ${timeframe} from Gate.io...`);
   console.log(`Fetching OHLCV for ${contract} ${timeframe} from ${startDate} to ${endDate} via Gate.io`);
 
-  const requestedStartSec = Math.floor(new Date(startDate).getTime() / 1000);
-  const endSec = Math.floor(new Date(endDate).getTime() / 1000);
+  const requestedStartSec = Math.floor(startMs / 1000);
+  const endSec = Math.floor(endMs / 1000);
   const allCandles: OHLCV[] = [];
 
   const earliestAllowed = getEarliestAllowedStart(timeframe);
@@ -165,9 +145,12 @@ export async function fetchOHLCV(
 
   if (allCandles.length > 0) {
     const deduped = deduplicateCandles(allCandles);
-    fs.writeFileSync(cachePath, JSON.stringify(deduped));
-    console.log(`Cached ${deduped.length} candles for ${symbol} ${timeframe}`);
     onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
+
+    saveCandlesToDb(symbol, timeframe, deduped).catch((err) =>
+      console.log(`[CandleCache] Background save error: ${err.message}`)
+    );
+
     return deduped;
   }
 
