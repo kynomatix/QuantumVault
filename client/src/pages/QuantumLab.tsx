@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo, Fragment } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -329,12 +329,15 @@ export default function QuantumLab() {
     if (!activeJobId) return;
     try {
       await apiRequest("POST", `/api/lab/job/${activeJobId}/cancel`);
-      eventSourceRef.current?.close();
-      setJobProgress(prev => prev ? { ...prev, status: "error", stage: "Cancelled by user", error: "Cancelled" } : prev);
-      setActiveJobId(null);
-      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
-      toast({ title: "Optimization cancelled" });
-    } catch { toast({ title: "Failed to cancel", variant: "destructive" }); }
+    } catch {
+      toast({ title: "Failed to cancel", variant: "destructive" });
+      return;
+    }
+    eventSourceRef.current?.close();
+    setActiveJobId(null);
+    setJobProgress(null);
+    queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+    toast({ title: "Optimization cancelled" });
   }, [activeJobId, toast]);
 
   useEffect(() => {
@@ -1100,49 +1103,6 @@ function SortHeader({ label, sortKey, current, dir, onClick }: { label: string; 
   );
 }
 
-function ConfigRow({ config, name, isExpanded, comboResults, onToggleExpand, onSelectConfig, selectedConfig }: {
-  config: LabBacktestResult; name: string; isExpanded: boolean; comboResults: LabBacktestResult[];
-  onToggleExpand: () => void; onSelectConfig: (c: LabBacktestResult) => void; selectedConfig: LabBacktestResult | null;
-}) {
-  const isSelected = selectedConfig === config;
-  return (
-    <>
-      <tr className={`border-b border-white/5 cursor-pointer transition-colors ${isSelected ? "bg-violet-500/5" : "hover:bg-white/5"}`}
-        onClick={() => onSelectConfig(config)} data-testid={`config-row-${name}-${config.timeframe}`}>
-        <td className="py-2.5 px-4 font-medium text-white">{name}</td>
-        <td className="py-2.5 px-2"><Badge variant="outline" className="text-[10px] border-white/20 text-white/60">{config.timeframe}</Badge></td>
-        <td className={`py-2.5 px-2 text-right font-mono font-medium ${config.netProfitPercent >= 0 ? "text-green-400" : "text-red-400"}`}>
-          {config.netProfitPercent > 0 ? "+" : ""}{config.netProfitPercent.toFixed(2)}%
-        </td>
-        <td className={`py-2.5 px-2 text-right font-mono ${config.winRatePercent >= 50 ? "text-green-400" : "text-yellow-400"}`}>{config.winRatePercent.toFixed(1)}%</td>
-        <td className={`py-2.5 px-2 text-right font-mono ${config.maxDrawdownPercent <= 30 ? "text-green-400" : "text-red-400"}`}>{config.maxDrawdownPercent.toFixed(1)}%</td>
-        <td className={`py-2.5 px-2 text-right font-mono ${config.profitFactor >= 1.5 ? "text-green-400" : "text-white"}`}>{config.profitFactor.toFixed(2)}</td>
-        <td className="py-2.5 px-2 text-right font-mono text-white/60">{config.totalTrades}</td>
-        <td className="py-2.5 px-2">
-          {comboResults.length > 1 && (
-            <button onClick={(e) => { e.stopPropagation(); onToggleExpand(); }} className="p-1 text-white/60">
-              {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            </button>
-          )}
-        </td>
-      </tr>
-      {isExpanded && comboResults.filter(r => JSON.stringify(r.params) !== JSON.stringify(config.params)).map((r, idx) => (
-        <tr key={idx} className={`border-b border-white/5 cursor-pointer text-white/40 ${selectedConfig === r ? "bg-violet-500/5" : "hover:bg-white/5"}`}
-          onClick={() => onSelectConfig(r)} data-testid={`config-sub-${name}-${idx}`}>
-          <td className="py-2 px-4 pl-8 text-xs">#{idx + 2}</td>
-          <td className="py-2 px-2"><Badge variant="outline" className="text-[10px] border-white/20">{r.timeframe}</Badge></td>
-          <td className={`py-2 px-2 text-right font-mono text-xs ${r.netProfitPercent >= 0 ? "text-green-400" : "text-red-400"}`}>{r.netProfitPercent > 0 ? "+" : ""}{r.netProfitPercent.toFixed(2)}%</td>
-          <td className="py-2 px-2 text-right font-mono text-xs">{r.winRatePercent.toFixed(1)}%</td>
-          <td className="py-2 px-2 text-right font-mono text-xs">{r.maxDrawdownPercent.toFixed(1)}%</td>
-          <td className="py-2 px-2 text-right font-mono text-xs">{r.profitFactor.toFixed(2)}</td>
-          <td className="py-2 px-2 text-right font-mono text-xs">{r.totalTrades}</td>
-          <td></td>
-        </tr>
-      ))}
-    </>
-  );
-}
-
 function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: number) => void; onViewRunning: (jobId: string) => void }) {
   const { toast } = useToast();
   const { data: runs, isLoading } = useQuery<LabOptimizationRun[]>({
@@ -1299,6 +1259,7 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedResult, setSelectedResult] = useState<LabOptResult | null>(null);
   const [rankingMode, setRankingMode] = useState<RankingMode>("profit");
+  const [expandedCombos, setExpandedCombos] = useState<Set<string>>(new Set());
 
   const { data: run } = useQuery<LabOptimizationRun>({
     queryKey: ["/api/lab/runs", runId],
@@ -1320,22 +1281,32 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
     enabled: run?.status !== "running",
   });
 
-  const bestPerCombo = useMemo(() => {
-    if (!results) return [];
-    const map = new Map<string, LabOptResult>();
+  const resultsByCombo = useMemo(() => {
+    if (!results) return new Map<string, LabOptResult[]>();
+    const map = new Map<string, LabOptResult[]>();
     for (const r of results) {
       const key = `${r.ticker}|${r.timeframe}`;
-      const existing = map.get(key);
-      if (!existing || rankScore(r, rankingMode) > rankScore(existing, rankingMode)) map.set(key, r);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(r);
     }
-    const arr = Array.from(map.values());
+    for (const [key, arr] of map) {
+      arr.sort((a, b) => rankScore(b, rankingMode) - rankScore(a, rankingMode));
+    }
+    return map;
+  }, [results, rankingMode]);
+
+  const bestPerCombo = useMemo(() => {
+    const arr: LabOptResult[] = [];
+    for (const [, comboArr] of resultsByCombo) {
+      if (comboArr.length > 0) arr.push(comboArr[0]);
+    }
     arr.sort((a, b) => {
       const mult = sortDir === "desc" ? -1 : 1;
       if (sortKey === "maxDrawdownPercent") return (a[sortKey] - b[sortKey]) * -mult;
       return (a[sortKey] - b[sortKey]) * mult;
     });
     return arr;
-  }, [results, sortKey, sortDir, rankingMode]);
+  }, [resultsByCombo, sortKey, sortDir]);
 
   useEffect(() => {
     if (!results || bestPerCombo.length === 0) return;
@@ -1444,25 +1415,58 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
                 <SortHeader label="Max DD %" sortKey="maxDrawdownPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="PF" sortKey="profitFactor" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="Trades" sortKey="totalTrades" current={sortKey} dir={sortDir} onClick={handleSort} />
+                <th className="w-8"></th>
               </tr>
             </thead>
             <tbody>
               {bestPerCombo.map((r) => {
                 const name = r.ticker.split("/")[0];
+                const comboKey = `${r.ticker}|${r.timeframe}`;
                 const isSelected = selectedResult?.id === r.id;
+                const comboResults = resultsByCombo.get(comboKey) ?? [];
+                const subResults = comboResults.filter(sr => sr.id !== r.id);
+                const isExpanded = expandedCombos.has(comboKey);
                 return (
-                  <tr key={r.id} className={`border-b border-white/5 cursor-pointer transition-colors ${isSelected ? "bg-violet-500/5" : "hover:bg-white/5"}`}
-                    onClick={() => setSelectedResult(r)} data-testid={`history-row-${r.id}`}>
-                    <td className="py-2.5 px-4 font-medium text-white">{name}</td>
-                    <td className="py-2.5 px-2"><Badge variant="outline" className="text-[10px] border-white/20 text-white/60">{r.timeframe}</Badge></td>
-                    <td className={`py-2.5 px-2 text-right font-mono font-medium ${r.netProfitPercent >= 0 ? "text-green-400" : "text-red-400"}`}>
-                      {r.netProfitPercent > 0 ? "+" : ""}{r.netProfitPercent.toFixed(2)}%
-                    </td>
-                    <td className={`py-2.5 px-2 text-right font-mono ${r.winRatePercent >= 50 ? "text-green-400" : "text-yellow-400"}`}>{r.winRatePercent.toFixed(1)}%</td>
-                    <td className={`py-2.5 px-2 text-right font-mono ${r.maxDrawdownPercent <= 30 ? "text-green-400" : "text-red-400"}`}>{r.maxDrawdownPercent.toFixed(1)}%</td>
-                    <td className={`py-2.5 px-2 text-right font-mono ${r.profitFactor >= 1.5 ? "text-green-400" : "text-white"}`}>{r.profitFactor.toFixed(2)}</td>
-                    <td className="py-2.5 px-2 text-right font-mono text-white/60">{r.totalTrades}</td>
-                  </tr>
+                  <Fragment key={r.id}>
+                    <tr className={`border-b border-white/5 cursor-pointer transition-colors ${isSelected ? "bg-violet-500/5" : "hover:bg-white/5"}`}
+                      onClick={() => setSelectedResult(r)} data-testid={`history-row-${r.id}`}>
+                      <td className="py-2.5 px-4 font-medium text-white">{name}</td>
+                      <td className="py-2.5 px-2"><Badge variant="outline" className="text-[10px] border-white/20 text-white/60">{r.timeframe}</Badge></td>
+                      <td className={`py-2.5 px-2 text-right font-mono font-medium ${r.netProfitPercent >= 0 ? "text-green-400" : "text-red-400"}`}>
+                        {r.netProfitPercent > 0 ? "+" : ""}{r.netProfitPercent.toFixed(2)}%
+                      </td>
+                      <td className={`py-2.5 px-2 text-right font-mono ${r.winRatePercent >= 50 ? "text-green-400" : "text-yellow-400"}`}>{r.winRatePercent.toFixed(1)}%</td>
+                      <td className={`py-2.5 px-2 text-right font-mono ${r.maxDrawdownPercent <= 30 ? "text-green-400" : "text-red-400"}`}>{r.maxDrawdownPercent.toFixed(1)}%</td>
+                      <td className={`py-2.5 px-2 text-right font-mono ${r.profitFactor >= 1.5 ? "text-green-400" : "text-white"}`}>{r.profitFactor.toFixed(2)}</td>
+                      <td className="py-2.5 px-2 text-right font-mono text-white/60">{r.totalTrades}</td>
+                      <td className="py-2.5 px-2">
+                        {subResults.length > 0 && (
+                          <button onClick={(e) => { e.stopPropagation(); setExpandedCombos(prev => { const next = new Set(prev); if (next.has(comboKey)) next.delete(comboKey); else next.add(comboKey); return next; }); }}
+                            className="p-1 text-white/40 hover:text-white/70 transition-colors" data-testid={`button-expand-${comboKey}`}>
+                            {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                    {isExpanded && subResults.map((sr, idx) => {
+                      const subSelected = selectedResult?.id === sr.id;
+                      return (
+                        <tr key={sr.id} className={`border-b border-white/5 cursor-pointer transition-colors ${subSelected ? "bg-violet-500/5" : "hover:bg-white/5"}`}
+                          onClick={() => setSelectedResult(sr)} data-testid={`history-sub-${sr.id}`}>
+                          <td className="py-2 px-4 pl-8 text-xs text-white/40">#{idx + 2}</td>
+                          <td className="py-2 px-2"><Badge variant="outline" className="text-[10px] border-white/20 text-white/40">{sr.timeframe}</Badge></td>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.netProfitPercent >= 0 ? "text-green-400/70" : "text-red-400/70"}`}>
+                            {sr.netProfitPercent > 0 ? "+" : ""}{sr.netProfitPercent.toFixed(2)}%
+                          </td>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.winRatePercent >= 50 ? "text-green-400/70" : "text-yellow-400/70"}`}>{sr.winRatePercent.toFixed(1)}%</td>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.maxDrawdownPercent <= 30 ? "text-green-400/70" : "text-red-400/70"}`}>{sr.maxDrawdownPercent.toFixed(1)}%</td>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.profitFactor >= 1.5 ? "text-green-400/70" : "text-white/50"}`}>{sr.profitFactor.toFixed(2)}</td>
+                          <td className="py-2 px-2 text-right font-mono text-xs text-white/40">{sr.totalTrades}</td>
+                          <td></td>
+                        </tr>
+                      );
+                    })}
+                  </Fragment>
                 );
               })}
             </tbody>

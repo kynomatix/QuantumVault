@@ -331,17 +331,21 @@ export class LabDatabaseStorage implements ILabStorage {
     const job = this.jobs.get(id);
     if (job) {
       job.abortSignal.aborted = true;
-      job.progress = {
+      const cancelProgress: LabJobProgress = {
         ...job.progress,
         status: "error",
         stage: "Cancelled by user",
         error: "Cancelled",
       };
+      job.progress = cancelProgress;
+      for (const listener of Array.from(job.listeners)) {
+        try { listener(cancelProgress); } catch {}
+      }
       if (job.runId) {
         this.getCheckpoint(job.runId).then(checkpoint => {
-          if (checkpoint && checkpoint.completedCombos.length > 0) {
+          if (checkpoint && (checkpoint.completedCombos?.length > 0 || (checkpoint.currentCombo && checkpoint.currentIteration != null && checkpoint.currentIteration >= 0))) {
             this.pauseRun(job.runId!).catch(() => {});
-            console.log(`[QuantumLab] Job ${id} cancelled with ${checkpoint.completedCombos.length} combos checkpointed → paused`);
+            console.log(`[QuantumLab] Job ${id} cancelled with checkpoint → paused`);
           } else {
             this.failRun(job.runId!).catch(() => {});
           }
