@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -16,7 +17,7 @@ import {
   Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
-  History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen,
+  History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown,
   Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3,
 } from "lucide-react";
 import {
@@ -593,61 +594,90 @@ function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, isDeletin
   onDelete: (id: number) => void;
   isDeleting: boolean;
 }) {
+  const [open, setOpen] = useState(false);
+  const selected = strategies.find(s => s.id === selectedId);
+
   return (
-    <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden" data-testid="strategy-library">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-        <div className="flex items-center gap-2">
-          <BookOpen className="w-4 h-4 text-violet-400" />
-          <div>
-            <span className="text-sm font-medium text-white">Strategy Library</span>
-            <span className="text-[11px] text-white/40 ml-2">{strategies.length} saved</span>
-          </div>
-        </div>
-        <p className="text-[11px] text-white/40">Select a strategy to load it into the editor</p>
+    <div data-testid="strategy-library">
+      <div className="flex items-center gap-2 mb-1.5">
+        <BookOpen className="w-3.5 h-3.5 text-violet-400" />
+        <span className="text-xs font-medium text-white/60">Strategy Library</span>
       </div>
-      <ScrollArea className="max-h-[240px]">
-        <div className="divide-y divide-white/5">
-          {strategies.map((s) => {
-            const paramCount = (s.parsedInputs as any[])?.filter((i: any) => i.optimizable).length ?? 0;
-            const totalParams = (s.parsedInputs as any[])?.length ?? 0;
-            const isSelected = selectedId === s.id;
-            return (
-              <div
-                key={s.id}
-                onClick={() => onSelect(s)}
-                className={cn(
-                  "w-full flex items-center justify-between gap-2 px-3 py-2 text-left transition-colors cursor-pointer",
-                  isSelected ? "bg-violet-500/10" : "hover:bg-white/[0.03]"
-                )}
-                data-testid={`strategy-row-${s.id}`}
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className={cn(
-                    "w-2 h-2 rounded-full flex-shrink-0",
-                    isSelected ? "bg-violet-400" : "bg-white/20"
-                  )} />
-                  <div className="min-w-0">
-                    <p className={cn("text-xs font-medium truncate", isSelected ? "text-violet-300" : "text-white/80")} data-testid={`text-strategy-name-${s.id}`}>{s.name}</p>
-                    <p className="text-[10px] text-white/40">{new Date(s.createdAt).toLocaleDateString()}</p>
-                  </div>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <button
+            className={cn(
+              "w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg border transition-all text-left",
+              "bg-white/[0.03] hover:bg-white/[0.06] border-white/10 hover:border-violet-500/30",
+              open && "border-violet-500/40 bg-white/[0.06] ring-1 ring-violet-500/20"
+            )}
+            data-testid="button-strategy-dropdown"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <FileCode className="w-4 h-4 text-violet-400 flex-shrink-0" />
+              {selected ? (
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-white truncate" data-testid="text-selected-strategy">{selected.name}</p>
+                  <p className="text-[10px] text-white/40">{((selected.parsedInputs as any[])?.filter((i: any) => i.optimizable).length ?? 0)} optimizable params</p>
                 </div>
-                <div className="flex items-center gap-1.5 flex-shrink-0">
-                  <Badge className="text-[9px] bg-violet-500/15 text-violet-300/80 border-none px-1.5">{paramCount} opt</Badge>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
-                    disabled={isDeleting}
-                    className="p-1 rounded hover:bg-red-500/20 text-white/20 hover:text-red-400 transition-colors"
-                    data-testid={`button-delete-strategy-${s.id}`}
+              ) : (
+                <span className="text-sm text-white/40">Select a saved strategy...</span>
+              )}
+            </div>
+            <ChevronsUpDown className="w-4 h-4 text-white/30 flex-shrink-0" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          className="w-[var(--radix-popover-trigger-width)] p-0 bg-slate-900 border-white/10 shadow-xl shadow-black/40"
+          align="start"
+          sideOffset={6}
+        >
+          <div className="px-3 py-2 border-b border-white/10">
+            <p className="text-[11px] text-white/40">{strategies.length} saved {strategies.length === 1 ? "strategy" : "strategies"}</p>
+          </div>
+          <ScrollArea className="max-h-[240px]">
+            <div className="p-1">
+              {strategies.map((s) => {
+                const paramCount = (s.parsedInputs as any[])?.filter((i: any) => i.optimizable).length ?? 0;
+                const isSelected = selectedId === s.id;
+                return (
+                  <div
+                    key={s.id}
+                    onClick={() => { onSelect(s); setOpen(false); }}
+                    className={cn(
+                      "flex items-center justify-between gap-2 px-2.5 py-2 rounded-md cursor-pointer transition-colors group",
+                      isSelected ? "bg-violet-500/15" : "hover:bg-white/[0.05]"
+                    )}
+                    data-testid={`strategy-row-${s.id}`}
                   >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </ScrollArea>
-    </Card>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className={cn(
+                        "w-4 h-4 rounded flex items-center justify-center flex-shrink-0 transition-colors",
+                        isSelected ? "bg-violet-500 text-white" : "border border-white/15 text-transparent group-hover:border-white/25"
+                      )}>
+                        <Check className="w-3 h-3" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className={cn("text-xs font-medium truncate", isSelected ? "text-violet-300" : "text-white/80")} data-testid={`text-strategy-name-${s.id}`}>{s.name}</p>
+                        <p className="text-[10px] text-white/40">{new Date(s.createdAt).toLocaleDateString()} · {paramCount} opt params</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
+                      disabled={isDeleting}
+                      className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/20 text-white/30 hover:text-red-400 transition-all"
+                      data-testid={`button-delete-strategy-${s.id}`}
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </ScrollArea>
+        </PopoverContent>
+      </Popover>
+    </div>
   );
 }
 
