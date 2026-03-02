@@ -33,7 +33,7 @@ import type {
 } from "@shared/schema";
 import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
 
-type MainTab = "main" | "results" | "history";
+type MainTab = "main" | "results";
 type SortKey = "netProfitPercent" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades";
 type SortDir = "asc" | "desc";
 type RankingMode = "profit" | "winrate" | "balanced" | "conservative";
@@ -92,8 +92,7 @@ interface LabNavItem {
 
 const labNavItems: LabNavItem[] = [
   { id: "main", label: "Main", icon: Settings2 },
-  { id: "results", label: "Results", icon: BarChart3 },
-  { id: "history", label: "History", icon: History },
+  { id: "results", label: "Results", icon: History },
 ];
 
 const EXAMPLE_PINE = `// Paste your Pine Script strategy here
@@ -232,7 +231,7 @@ function formatTradeTime(iso: string): string {
 export default function QuantumLab() {
   const [mainTab, setMainTab] = useState<MainTab>("main");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [activeResultsJobId, setActiveResultsJobId] = useState<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<number | null>(null);
   const [activeHistoryRunId, setActiveHistoryRunId] = useState<number | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<LabStrategy | null>(null);
   const { toast } = useToast();
@@ -285,8 +284,8 @@ export default function QuantumLab() {
           setJobProgress(data);
           if (data.status === "complete") {
             es.close();
-            setActiveResultsJobId(currentJobId);
             setActiveJobId(null);
+            if (activeRunId) setActiveHistoryRunId(activeRunId);
             setMainTab("results");
             queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
           }
@@ -310,8 +309,8 @@ export default function QuantumLab() {
             try {
               const res = await fetch(`/api/lab/job/${currentJobId}/results`);
               if (res.ok) {
-                setActiveResultsJobId(currentJobId);
                 setActiveJobId(null);
+                if (activeRunId) setActiveHistoryRunId(activeRunId);
                 setMainTab("results");
                 queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
                 return;
@@ -362,9 +361,10 @@ export default function QuantumLab() {
     },
   });
 
-  const handleJobStarted = useCallback((jobId: string) => {
+  const handleJobStarted = useCallback((jobId: string, runId?: number) => {
     setJobProgress(null);
     setActiveJobId(jobId);
+    if (runId) setActiveRunId(runId);
     queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
   }, []);
 
@@ -416,8 +416,6 @@ export default function QuantumLab() {
           </div>
         );
       case "results":
-        return <ResultsPanel jobId={activeResultsJobId} />;
-      case "history":
         return activeHistoryRunId ? (
           <HistoryResultsPanel
             runId={activeHistoryRunId}
@@ -750,7 +748,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
   code: string;
   parsedResult: LabPineParseResult | null;
   strategyId: number | null;
-  onJobStarted: (jobId: string) => void;
+  onJobStarted: (jobId: string, runId?: number) => void;
   isRunning: boolean;
 }) {
   const { toast } = useToast();
@@ -785,8 +783,8 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
         startDate, endDate, randomSamples: samples, topK: top, refinementsPerSeed: refs,
         minTrades, maxDrawdownCap: maxDrawdown, mode, strategyId: strategyId ?? undefined,
       });
-      const { jobId } = await res.json();
-      onJobStarted(jobId);
+      const { jobId, runId } = await res.json();
+      onJobStarted(jobId, runId);
     } catch (err: any) {
       toast({ title: "Failed to start optimization", description: err.message, variant: "destructive" });
     } finally {
@@ -1086,335 +1084,6 @@ function RunMetricCard({ label, value, color, testId }: { label: string; value: 
       <p className="text-[11px] text-white/40 uppercase tracking-wider mb-1">{label}</p>
       <p className={`text-xl font-bold font-mono ${color}`} data-testid={testId}>{value}</p>
     </div>
-  );
-}
-
-function ResultsPanel({ jobId }: { jobId: string | null }) {
-  const [selectedConfig, setSelectedConfig] = useState<LabBacktestResult | null>(null);
-  const [sortKey, setSortKey] = useState<SortKey>("netProfitPercent");
-  const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [expandedCombo, setExpandedCombo] = useState<string | null>(null);
-  const [tradeSort, setTradeSort] = useState<{ key: keyof LabTradeRecord; dir: SortDir }>({ key: "entryTime", dir: "desc" });
-  const [pollCount, setPollCount] = useState(0);
-  const [rankingMode, setRankingMode] = useState<RankingMode>("profit");
-
-  const { data: results, isLoading } = useQuery<LabJobResult>({
-    queryKey: ["/api/lab/job", jobId, "results"],
-    queryFn: async () => {
-      const res = await fetch(`/api/lab/job/${jobId}/results`);
-      if (!res.ok) { setPollCount(c => c + 1); throw new Error("Results not available"); }
-      return res.json();
-    },
-    enabled: !!jobId,
-    refetchInterval: (query) => {
-      if (query.state.data) return false;
-      if (pollCount >= 15) return false;
-      return 2000;
-    },
-    retry: false,
-  });
-
-  const sortedConfigs = useMemo(() => {
-    if (!results) return [];
-    const bestPerCombo = new Map<string, LabBacktestResult>();
-    for (const config of results.configs) {
-      const key = `${config.ticker}|${config.timeframe}`;
-      const existing = bestPerCombo.get(key);
-      if (!existing || rankScore(config, rankingMode) > rankScore(existing, rankingMode)) bestPerCombo.set(key, config);
-    }
-    const arr = Array.from(bestPerCombo.values());
-    arr.sort((a, b) => {
-      const mult = sortDir === "desc" ? -1 : 1;
-      if (sortKey === "maxDrawdownPercent") return (a[sortKey] - b[sortKey]) * -mult;
-      return (a[sortKey] - b[sortKey]) * mult;
-    });
-    return arr;
-  }, [results, sortKey, sortDir, rankingMode]);
-
-  useEffect(() => {
-    if (!results || sortedConfigs.length === 0) return;
-    if (selectedConfig) {
-      const key = `${selectedConfig.ticker}|${selectedConfig.timeframe}`;
-      const comboConfigs = results.configs.filter(c => `${c.ticker}|${c.timeframe}` === key);
-      if (comboConfigs.length > 0) {
-        const newBest = comboConfigs.reduce((best, c) => rankScore(c, rankingMode) > rankScore(best, rankingMode) ? c : best);
-        setSelectedConfig(newBest);
-        return;
-      }
-    }
-    setSelectedConfig(sortedConfigs[0]);
-  }, [rankingMode]);
-
-  const bestProfit = useMemo(() => selectedConfig?.netProfitPercent ?? (results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.netProfitPercent)) : 0), [selectedConfig, results]);
-  const bestWinRate = useMemo(() => selectedConfig?.winRatePercent ?? (results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.winRatePercent)) : 0), [selectedConfig, results]);
-  const lowestDrawdown = useMemo(() => selectedConfig?.maxDrawdownPercent ?? (results && results.configs.length > 0 ? Math.min(...results.configs.map(c => c.maxDrawdownPercent)) : 0), [selectedConfig, results]);
-  const bestPF = useMemo(() => selectedConfig?.profitFactor ?? (results && results.configs.length > 0 ? Math.max(...results.configs.map(c => c.profitFactor)) : 0), [selectedConfig, results]);
-
-  const riskAnalysis = useMemo(() => {
-    if (!selectedConfig) return null;
-    return calculateRiskAnalysis(selectedConfig.trades, selectedConfig.netProfitPercent, selectedConfig.maxDrawdownPercent, selectedConfig.winRatePercent, selectedConfig.equityCurve);
-  }, [selectedConfig]);
-
-  const handleSort = (key: SortKey) => {
-    if (sortKey === key) setSortDir(d => d === "desc" ? "asc" : "desc");
-    else { setSortKey(key); setSortDir("desc"); }
-  };
-
-  const sortedTrades = useMemo(() => {
-    if (!selectedConfig) return [];
-    return [...selectedConfig.trades].sort((a, b) => {
-      const key = tradeSort.key;
-      const mult = tradeSort.dir === "desc" ? -1 : 1;
-      if (typeof a[key] === "number" && typeof b[key] === "number") return ((a[key] as number) - (b[key] as number)) * mult;
-      return String(a[key]).localeCompare(String(b[key])) * mult;
-    });
-  }, [selectedConfig, tradeSort]);
-
-  if (!jobId) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <div className="text-center space-y-3">
-          <BarChart3 className="w-8 h-8 mx-auto text-white/20" />
-          <p className="text-sm text-white/60">No results to display. Run an optimization first.</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (isLoading || (!results && pollCount < 15)) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <div className="text-center space-y-5">
-          <div className="relative mx-auto w-16 h-16">
-            <div className="absolute inset-0 rounded-full border-4 border-white/10" />
-            <div className="absolute inset-0 rounded-full border-4 border-t-violet-500 border-r-transparent border-b-transparent border-l-transparent animate-spin" />
-            <Activity className="absolute inset-0 m-auto w-5 h-5 text-violet-400/70" />
-          </div>
-          <p className="text-sm font-medium text-white" data-testid="text-loading-results">Preparing results...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!results || results.configs.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <div className="text-center space-y-3">
-          <XCircle className="w-8 h-8 text-red-400 mx-auto" />
-          <p className="text-sm text-white/60" data-testid="text-no-results">No results found</p>
-          <p className="text-xs text-white/40 max-w-xs mx-auto">The optimization completed but produced no results. Try adjusting parameters or date range.</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between gap-1 flex-wrap">
-        <div>
-          <h2 className="text-lg font-semibold text-white" data-testid="text-results-title">Results Dashboard</h2>
-          <p className="text-xs text-white/60">{results.totalConfigsTested.toLocaleString()} configurations tested</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" onClick={() => window.open(`/api/lab/export/csv/${jobId}`, "_blank")} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-download-csv">
-            <Download className="w-3 h-3 mr-1" /> CSV
-          </Button>
-          <Button variant="secondary" size="sm" onClick={() => {
-            const best = selectedConfig || sortedConfigs[0];
-            if (best) navigator.clipboard.writeText(Object.entries(best.params).map(([k, v]) => `${k} = ${v}`).join("\n"));
-          }} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-copy-config">
-            <Copy className="w-3 h-3 mr-1" /> Copy Best
-          </Button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-        <SummaryCard label="Net Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} icon={<TrendingUp className="w-4 h-4" />} color={bestProfit >= 0 ? "text-green-400" : "text-red-400"} bgColor={bestProfit >= 0 ? "bg-green-500/10" : "bg-red-500/10"} testId="summary-profit" />
-        <SummaryCard label="Win Rate" value={`${bestWinRate.toFixed(1)}%`} icon={<Percent className="w-4 h-4" />} color="text-sky-400" bgColor="bg-sky-500/10" testId="summary-winrate" />
-        <SummaryCard label="Max Drawdown" value={`${lowestDrawdown.toFixed(1)}%`} icon={<TrendingDown className="w-4 h-4" />} color="text-amber-400" bgColor="bg-amber-500/10" testId="summary-drawdown" />
-        <SummaryCard label="Profit Factor" value={bestPF.toFixed(2)} icon={<BarChart3 className="w-4 h-4" />} color="text-violet-400" bgColor="bg-violet-500/10" testId="summary-pf" />
-        <SummaryCard label="Configs Tested" value={results.totalConfigsTested.toLocaleString()} icon={<Zap className="w-4 h-4" />} color="text-white" bgColor="bg-white/5" testId="summary-total" />
-      </div>
-
-      <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
-        <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-1">
-          <h3 className="text-sm font-semibold flex items-center gap-2 text-white">
-            <BarChart3 className="w-4 h-4 text-violet-400" /> Best Configurations
-            <span className="text-xs text-white/40 font-normal ml-1">{sortedConfigs.length} combo{sortedConfigs.length !== 1 ? "s" : ""}</span>
-          </h3>
-          <Select value={rankingMode} onValueChange={(v) => setRankingMode(v as RankingMode)}>
-            <SelectTrigger className="w-[160px] h-8 bg-white/5 border-white/10 text-white text-xs" data-testid="select-ranking-mode">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent className="bg-slate-900 border-white/10">
-              {(Object.entries(RANKING_LABELS) as [RankingMode, string][]).map(([k, label]) => (
-                <SelectItem key={k} value={k} className="text-white/80 text-xs focus:bg-violet-600/20 focus:text-white">{label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm" data-testid="table-configs">
-            <thead>
-              <tr className="border-b border-white/10 text-xs text-white/40 uppercase tracking-wider">
-                <th className="text-left py-2.5 px-4">Ticker</th>
-                <th className="text-left py-2.5 px-2">TF</th>
-                <SortHeader label="Net Profit %" sortKey="netProfitPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
-                <SortHeader label="Win Rate %" sortKey="winRatePercent" current={sortKey} dir={sortDir} onClick={handleSort} />
-                <SortHeader label="Max DD %" sortKey="maxDrawdownPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
-                <SortHeader label="PF" sortKey="profitFactor" current={sortKey} dir={sortDir} onClick={handleSort} />
-                <SortHeader label="Trades" sortKey="totalTrades" current={sortKey} dir={sortDir} onClick={handleSort} />
-                <th className="py-2.5 px-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedConfigs.map((config) => {
-                const key = `${config.ticker}|${config.timeframe}`;
-                const rawCombo = results.bestByCombo[key] || [];
-                const rankedCombo = [...rawCombo].sort((a, b) => rankScore(b, rankingMode) - rankScore(a, rankingMode));
-                const isExpanded = expandedCombo === key;
-                const name = config.ticker.split("/")[0];
-                return (
-                  <ConfigRow key={key} config={config} name={name} isExpanded={isExpanded} comboResults={rankedCombo}
-                    onToggleExpand={() => setExpandedCombo(isExpanded ? null : key)}
-                    onSelectConfig={(c) => setSelectedConfig(c)} selectedConfig={selectedConfig} />
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      {selectedConfig && (
-        <Tabs defaultValue="equity" className="space-y-4">
-          <TabsList className="bg-white/5 border border-white/10" data-testid="tabs-detail">
-            <TabsTrigger value="equity" className="data-[state=active]:bg-violet-600" data-testid="tab-equity">Equity Curve</TabsTrigger>
-            <TabsTrigger value="risk" className="data-[state=active]:bg-violet-600" data-testid="tab-risk">Risk Management</TabsTrigger>
-            <TabsTrigger value="trades" className="data-[state=active]:bg-violet-600" data-testid="tab-trades">Trade Log</TabsTrigger>
-            <TabsTrigger value="params" className="data-[state=active]:bg-violet-600" data-testid="tab-params">Parameters</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="equity">
-            <Card className="bg-white/5 border border-white/10 p-4">
-              <div className="flex items-center justify-between gap-1 mb-4">
-                <h3 className="text-sm font-semibold flex items-center gap-2 text-white">
-                  <Activity className="w-4 h-4 text-violet-400" /> Equity Curve — {selectedConfig.ticker.split("/")[0]} {selectedConfig.timeframe}
-                </h3>
-                <Badge variant="outline" className="text-xs font-mono border-white/20 text-white">
-                  {selectedConfig.netProfitPercent > 0 ? "+" : ""}{selectedConfig.netProfitPercent.toFixed(2)}%
-                </Badge>
-              </div>
-              <div className="h-[350px]" data-testid="chart-equity">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={selectedConfig.equityCurve}>
-                    <defs>
-                      <linearGradient id="eqGradLab" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(225, 10%, 18%)" />
-                    <XAxis dataKey="time" tick={{ fill: "hsl(220, 10%, 50%)", fontSize: 10 }} tickFormatter={(val) => new Date(val).toLocaleDateString(undefined, { month: "short", year: "2-digit" })} stroke="hsl(225, 10%, 18%)" interval="preserveStartEnd" />
-                    <YAxis tick={{ fill: "hsl(220, 10%, 50%)", fontSize: 10 }} stroke="hsl(225, 10%, 18%)" tickFormatter={(val) => `$${val.toFixed(0)}`} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: "hsl(228, 14%, 10%)", border: "1px solid hsl(225, 10%, 18%)", borderRadius: "6px", fontSize: "12px", color: "hsl(220, 13%, 91%)" }} formatter={(value: number) => [`$${value.toFixed(2)}`, "Equity"]} labelFormatter={(label) => new Date(label).toLocaleString()} />
-                    <Area type="monotone" dataKey="equity" stroke="#8b5cf6" strokeWidth={1.5} fill="url(#eqGradLab)" dot={false} activeDot={{ r: 3, fill: "#8b5cf6" }} />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="risk">
-            {riskAnalysis && <RiskManagementPanel analysis={riskAnalysis} ticker={selectedConfig.ticker} timeframe={selectedConfig.timeframe} />}
-          </TabsContent>
-
-          <TabsContent value="trades">
-            <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
-              <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-1">
-                <h3 className="text-sm font-semibold text-white">{selectedConfig.trades.length} Trades</h3>
-                <div className="flex items-center gap-2">
-                  <Badge className="text-[10px] bg-green-500/10 text-green-400">{selectedConfig.trades.filter(t => t.pnlPercent > 0).length} wins</Badge>
-                  <Badge className="text-[10px] bg-red-500/10 text-red-400">{selectedConfig.trades.filter(t => t.pnlPercent <= 0).length} losses</Badge>
-                </div>
-              </div>
-              <ScrollArea className="max-h-[400px]">
-                <table className="w-full text-xs" data-testid="table-trades">
-                  <thead className="sticky top-0 bg-slate-950 z-10">
-                    <tr className="border-b border-white/10 text-[10px] text-white/40 uppercase tracking-wider">
-                      <th className="text-left py-2 px-3">Entry</th>
-                      <th className="text-left py-2 px-2">Exit</th>
-                      <th className="text-left py-2 px-2">Dir</th>
-                      <th className="text-right py-2 px-2">Entry $</th>
-                      <th className="text-right py-2 px-2">Exit $</th>
-                      <th className="text-right py-2 px-2 cursor-pointer" onClick={() => setTradeSort(s => ({ key: "pnlPercent", dir: s.dir === "desc" ? "asc" : "desc" }))}>PnL %</th>
-                      <th className="text-right py-2 px-2">PnL $</th>
-                      <th className="text-left py-2 px-2">Reason</th>
-                      <th className="text-right py-2 px-2">Bars</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedTrades.map((trade, idx) => (
-                      <tr key={idx} className={`border-b border-white/5 ${trade.pnlPercent > 0 ? "bg-green-500/[0.03]" : "bg-red-500/[0.03]"}`} data-testid={`trade-row-${idx}`}>
-                        <td className="py-2 px-3 font-mono text-white/60">{formatTradeTime(trade.entryTime)}</td>
-                        <td className="py-2 px-2 font-mono text-white/60">{formatTradeTime(trade.exitTime)}</td>
-                        <td className="py-2 px-2">
-                          <Badge variant="outline" className={`text-[9px] ${trade.direction === "long" ? "text-green-400 border-green-500/30" : "text-red-400 border-red-500/30"}`}>
-                            {trade.direction.toUpperCase()}
-                          </Badge>
-                        </td>
-                        <td className="py-2 px-2 text-right font-mono text-white">{trade.entryPrice.toFixed(2)}</td>
-                        <td className="py-2 px-2 text-right font-mono text-white">{trade.exitPrice.toFixed(2)}</td>
-                        <td className={`py-2 px-2 text-right font-mono font-medium ${trade.pnlPercent >= 0 ? "text-green-400" : "text-red-400"}`}>
-                          {trade.pnlPercent > 0 ? "+" : ""}{trade.pnlPercent.toFixed(2)}%
-                        </td>
-                        <td className={`py-2 px-2 text-right font-mono ${trade.pnlDollar >= 0 ? "text-green-400" : "text-red-400"}`}>
-                          {trade.pnlDollar > 0 ? "+" : ""}{trade.pnlDollar.toFixed(2)}
-                        </td>
-                        <td className="py-2 px-2 text-white/60">{trade.exitReason}</td>
-                        <td className="py-2 px-2 text-right font-mono text-white/60">{trade.barsHeld}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </ScrollArea>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="params">
-            <Card className="bg-white/5 border border-white/10 p-4">
-              <h3 className="text-sm font-semibold mb-4 text-white">Parameters — {selectedConfig.ticker.split("/")[0]} {selectedConfig.timeframe}</h3>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {Object.entries(selectedConfig.params).map(([key, value]) => (
-                  <div key={key} className="flex items-center justify-between gap-1 p-2.5 rounded-md bg-white/5 border border-white/10" data-testid={`result-param-${key}`}>
-                    <span className="text-xs font-mono text-white/60">{key}</span>
-                    <span className="text-xs font-mono font-medium text-white">{String(value)}</span>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          </TabsContent>
-        </Tabs>
-      )}
-
-      {!selectedConfig && sortedConfigs.length > 0 && (
-        <div className="text-center py-8 text-white/40">
-          <Activity className="w-8 h-8 mx-auto mb-3 opacity-30" />
-          <p className="text-sm">Click on a configuration row above to view equity curve, trade log, and parameters</p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SummaryCard({ label, value, icon, color, bgColor, testId }: { label: string; value: string; icon: any; color: string; bgColor: string; testId: string }) {
-  return (
-    <Card className="bg-white/5 border border-white/10 p-4">
-      <div className="flex items-center gap-2 mb-2">
-        <div className={`p-1.5 rounded-md ${bgColor}`}><div className={color}>{icon}</div></div>
-      </div>
-      <p className={`text-xl font-bold font-mono ${color}`} data-testid={testId}>{value}</p>
-      <p className="text-[11px] text-white/40 mt-0.5">{label}</p>
-    </Card>
   );
 }
 

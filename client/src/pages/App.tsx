@@ -1417,6 +1417,14 @@ export default function AppPage() {
           </div>
           <div className="flex items-center gap-1">
             <a 
+              href="/quantumlab" 
+              className="p-2 hover:bg-muted rounded-lg"
+              data-testid="link-quantumlab-header"
+              title="QuantumLab"
+            >
+              <Zap className="w-5 h-5 text-muted-foreground" />
+            </a>
+            <a 
               href="/analytics" 
               className="p-2 hover:bg-muted rounded-lg"
               data-testid="link-analytics-header"
