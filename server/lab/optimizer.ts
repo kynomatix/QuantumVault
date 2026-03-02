@@ -236,6 +236,9 @@ export async function runOptimization(
 
     const randomStart = skipRefineEntirely ? config.randomSamples : skipRandomUntil;
 
+    let lastCheckpointTime = Date.now();
+    const CHECKPOINT_INTERVAL_MS = 60_000;
+
     for (let s = randomStart; s < config.randomSamples; s++) {
       if (abortSignal?.aborted) { globalCurrent += (config.randomSamples - s); break; }
       const params = generateRandomParams(inputs);
@@ -245,7 +248,7 @@ export async function runOptimization(
       }
       globalCurrent++;
 
-      if (s % 3 === 0) {
+      if (s % 5 === 0) {
         await new Promise(resolve => setImmediate(resolve));
       }
 
@@ -270,12 +273,13 @@ export async function runOptimization(
         });
       }
 
-      if (s % 25 === 0 && s > 0 && callbacks?.onPartialCheckpoint) {
+      const now = Date.now();
+      if (now - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS && callbacks?.onPartialCheckpoint) {
+        lastCheckpointTime = now;
         const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
         await callbacks.onPartialCheckpoint(key, "random", s + 1, topPartial).catch(e =>
           console.log(`[QuantumLab] Partial checkpoint error: ${e.message}`)
         );
-        await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
 
@@ -315,7 +319,7 @@ export async function runOptimization(
           comboResults.push(result);
         }
         globalCurrent++;
-        if (r % 3 === 0) {
+        if (r % 5 === 0) {
           await new Promise(resolve => setImmediate(resolve));
         }
       }
@@ -339,13 +343,14 @@ export async function runOptimization(
         eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
       });
 
-      if (seedIdx % 3 === 0 && callbacks?.onPartialCheckpoint) {
+      const refNow = Date.now();
+      if (refNow - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS && callbacks?.onPartialCheckpoint) {
+        lastCheckpointTime = refNow;
         const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
         const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
         await callbacks.onPartialCheckpoint(key, "refine", actualIter, topPartial).catch(e =>
           console.log(`[QuantumLab] Partial checkpoint error: ${e.message}`)
         );
-        await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
 

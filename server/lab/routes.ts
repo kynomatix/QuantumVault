@@ -549,19 +549,25 @@ export function registerLabRoutes(app: Express): void {
   const gracefulShutdown = async (signal: string) => {
     console.log(`[QuantumLab] ${signal} received — pausing active jobs...`);
     const allJobs = (labStorage as any).jobs as Map<string, any> | undefined;
-    if (!allJobs) return;
+    if (!allJobs || allJobs.size === 0) return;
+    const pausePromises: Promise<void>[] = [];
     for (const [jobId, job] of allJobs) {
       if (job.abortSignal && !job.abortSignal.aborted && job.progress?.status !== "complete" && job.progress?.status !== "error") {
         job.abortSignal.aborted = true;
         if (job.runId) {
-          try {
-            await labStorage.pauseRun(job.runId);
-            console.log(`[QuantumLab] Job ${jobId} (run ${job.runId}) → paused on ${signal}`);
-          } catch (err: any) {
-            console.log(`[QuantumLab] Failed to pause run ${job.runId} on ${signal}: ${err.message}`);
-          }
+          pausePromises.push(
+            labStorage.pauseRun(job.runId)
+              .then(() => console.log(`[QuantumLab] Job ${jobId} (run ${job.runId}) → paused on ${signal}`))
+              .catch((err: any) => console.log(`[QuantumLab] Failed to pause run ${job.runId} on ${signal}: ${err.message}`))
+          );
         }
       }
+    }
+    if (pausePromises.length > 0) {
+      await Promise.race([
+        Promise.allSettled(pausePromises),
+        new Promise(resolve => setTimeout(resolve, 3000)),
+      ]);
     }
   };
 
