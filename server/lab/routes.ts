@@ -441,6 +441,7 @@ export function registerLabRoutes(app: Express): void {
           }
           cellMap.get(key)!.results.push({
             runId: run.id,
+            strategyId: run.strategyId,
             rank: r.rank,
             netProfitPercent: r.netProfitPercent,
             winRatePercent: r.winRatePercent,
@@ -486,6 +487,7 @@ export function registerLabRoutes(app: Express): void {
             totalTrades: r.totalTrades,
             params: r.params,
             runId: r.runId,
+            strategyId: r.strategyId,
           })),
         });
       }
