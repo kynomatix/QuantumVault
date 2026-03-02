@@ -1360,19 +1360,24 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
     return arr;
   }, [resultsByCombo, sortKey, sortDir]);
 
+  const prevRankingRef = useRef(rankingMode);
   useEffect(() => {
     if (!results || bestPerCombo.length === 0) return;
-    if (selectedResult) {
+    const rankingChanged = prevRankingRef.current !== rankingMode;
+    prevRankingRef.current = rankingMode;
+
+    if (rankingChanged && selectedResult) {
       const key = `${selectedResult.ticker}|${selectedResult.timeframe}`;
-      const comboConfigs = results.filter(r => `${r.ticker}|${r.timeframe}` === key);
-      if (comboConfigs.length > 0) {
-        const newBest = comboConfigs.reduce((best, c) => rankScore(c, rankingMode) > rankScore(best, rankingMode) ? c : best);
-        setSelectedResult(newBest);
+      const comboConfigs = resultsByCombo.get(key);
+      if (comboConfigs && comboConfigs.length > 0) {
+        setSelectedResult(comboConfigs[0]);
         return;
       }
     }
-    setSelectedResult(bestPerCombo[0]);
-  }, [rankingMode]);
+    if (!selectedResult) {
+      setSelectedResult(bestPerCombo[0]);
+    }
+  }, [rankingMode, results, bestPerCombo, resultsByCombo]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir(d => d === "desc" ? "asc" : "desc");
@@ -1403,10 +1408,11 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
     );
   }
 
-  const bestProfit = selectedResult?.netProfitPercent ?? Math.max(...results.map(r => r.netProfitPercent));
-  const bestWinRate = selectedResult?.winRatePercent ?? Math.max(...results.map(r => r.winRatePercent));
-  const lowestDD = selectedResult?.maxDrawdownPercent ?? Math.min(...results.map(r => r.maxDrawdownPercent));
-  const bestPF = selectedResult?.profitFactor ?? Math.max(...results.map(r => r.profitFactor));
+  const displayResult = selectedResult ?? bestPerCombo[0];
+  const bestProfit = displayResult?.netProfitPercent ?? 0;
+  const bestWinRate = displayResult?.winRatePercent ?? 0;
+  const lowestDD = displayResult?.maxDrawdownPercent ?? 0;
+  const bestPF = displayResult?.profitFactor ?? 0;
 
   return (
     <div className="space-y-6">
@@ -1434,10 +1440,10 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <HistStatCard label="Net Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} color={bestProfit >= 0 ? "text-green-400" : "text-red-400"} icon={<TrendingUp className="w-4 h-4" />} />
+        <HistStatCard label="Net Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} color={bestProfit >= 0 ? "text-green-400" : "text-red-400"} icon={<TrendingUp className="w-4 h-4" />} sublabel={displayResult ? `${displayResult.ticker.split("/")[0]} ${displayResult.timeframe}` : undefined} />
         <HistStatCard label="Win Rate" value={`${bestWinRate.toFixed(1)}%`} color="text-sky-400" icon={<Percent className="w-4 h-4" />} />
         <HistStatCard label="Max Drawdown" value={`${lowestDD.toFixed(1)}%`} color="text-amber-400" icon={<TrendingDown className="w-4 h-4" />} />
-        <HistStatCard label="Profit Factor" value={bestPF.toFixed(2)} color="text-violet-400" icon={<BarChart3 className="w-4 h-4" />} />
+        <HistStatCard label="Profit Factor" value={bestPF.toFixed(2)} color="text-violet-400" icon={<BarChart3 className="w-4 h-4" />} sublabel={RANKING_LABELS[rankingMode]} />
       </div>
 
       <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
@@ -1629,12 +1635,13 @@ function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => v
   );
 }
 
-function HistStatCard({ label, value, color, icon }: { label: string; value: string; color: string; icon: any }) {
+function HistStatCard({ label, value, color, icon, sublabel }: { label: string; value: string; color: string; icon: any; sublabel?: string }) {
   return (
     <Card className="bg-white/5 border border-white/10 p-4">
       <div className={`mb-1 ${color}`}>{icon}</div>
       <p className={`text-xl font-bold font-mono ${color}`}>{value}</p>
       <p className="text-[11px] text-white/40">{label}</p>
+      {sublabel && <p className="text-[10px] text-white/30 mt-0.5">{sublabel}</p>}
     </Card>
   );
 }
