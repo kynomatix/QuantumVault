@@ -1,45 +1,43 @@
 import type { OHLCV } from "./engine";
 import { getCachedCandles, saveCandlesToDb } from "./candle-store";
 
-function symbolToGateContract(symbol: string): string {
+const OKX_BATCH_SIZE = 300;
+
+function symbolToOkxInstId(symbol: string): string {
   const base = symbol.split("/")[0];
-  return `${base}_USDT`;
+  return `${base}-USDT-SWAP`;
 }
 
-function mapTimeframeToGate(tf: string): string {
+function mapTimeframeToOkx(tf: string): string {
   const map: Record<string, string> = {
     "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
-    "1h": "1h", "2h": "2h", "4h": "4h", "8h": "8h",
-    "12h": "12h", "1d": "1d", "1w": "1w",
+    "1h": "1H", "2h": "2H", "4h": "4H", "8h": "8H",
+    "12h": "12H", "1d": "1D", "1w": "1W",
   };
   return map[tf] || tf;
 }
 
-async function fetchGateOHLCV(
-  contract: string,
-  timeframe: string,
-  fromSec: number,
-  toSec: number
-): Promise<{ data: any[] | null; tooOld: boolean }> {
-  const interval = mapTimeframeToGate(timeframe);
-  const url = `https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=${interval}&from=${fromSec}&to=${toSec}`;
+async function fetchOkxCandles(
+  instId: string,
+  bar: string,
+  afterMs?: number,
+  beforeMs?: number
+): Promise<any[]> {
+  const params = new URLSearchParams({ instId, bar, limit: String(OKX_BATCH_SIZE) });
+  if (afterMs) params.set("after", String(afterMs));
+  if (beforeMs) params.set("before", String(beforeMs));
 
+  const url = `https://www.okx.com/api/v5/market/history-candles?${params}`;
   const res = await fetch(url);
   if (!res.ok) {
     const text = await res.text();
-    if (res.status === 400 && text.includes("too long ago")) {
-      return { data: null, tooOld: true };
-    }
-    throw new Error(`Gate.io API error ${res.status}: ${text}`);
+    throw new Error(`OKX API error ${res.status}: ${text}`);
   }
-  return { data: await res.json(), tooOld: false };
-}
-
-function getEarliestAllowedStart(timeframe: string): number {
-  const tfSeconds = getTimeframeSeconds(timeframe);
-  const maxCandles = 9500;
-  const nowSec = Math.floor(Date.now() / 1000);
-  return nowSec - (tfSeconds * maxCandles);
+  const json = await res.json();
+  if (json.code !== "0") {
+    throw new Error(`OKX API error: ${json.msg || JSON.stringify(json)}`);
+  }
+  return json.data || [];
 }
 
 export async function fetchOHLCV(
@@ -60,84 +58,53 @@ export async function fetchOHLCV(
     return cached;
   }
 
-  const contract = symbolToGateContract(symbol);
-  onProgress?.(`Fetching ${symbol} ${timeframe} from Gate.io...`);
-  console.log(`Fetching OHLCV for ${contract} ${timeframe} from ${startDate} to ${endDate} via Gate.io`);
+  const instId = symbolToOkxInstId(symbol);
+  const bar = mapTimeframeToOkx(timeframe);
+  onProgress?.(`Fetching ${symbol} ${timeframe} from OKX...`);
+  console.log(`Fetching OHLCV for ${instId} ${bar} from ${startDate} to ${endDate} via OKX`);
 
-  const requestedStartSec = Math.floor(startMs / 1000);
-  const endSec = Math.floor(endMs / 1000);
   const allCandles: OHLCV[] = [];
-
-  const earliestAllowed = getEarliestAllowedStart(timeframe);
-  let since = requestedStartSec;
-
-  if (since < earliestAllowed) {
-    const earliestDate = new Date(earliestAllowed * 1000).toISOString().split("T")[0];
-    console.log(`Requested start ${startDate} is too far back for ${timeframe}. Gate.io limit ~9500 candles. Shifting to ${earliestDate}`);
-    onProgress?.(`Date range adjusted: Gate.io only serves ~9500 ${timeframe} candles. Starting from ${earliestDate} instead of ${startDate}`);
-    since = earliestAllowed;
-  }
-
+  let currentEndMs = endMs;
   let page = 0;
-  let consecutiveTooOld = 0;
+  let emptyPages = 0;
 
-  while (since < endSec) {
+  while (currentEndMs > startMs) {
     try {
-      const batchEnd = Math.min(since + getTimeframeSeconds(timeframe) * 2000, endSec);
-      const { data: raw, tooOld } = await fetchGateOHLCV(contract, timeframe, since, batchEnd);
-
-      if (tooOld) {
-        consecutiveTooOld++;
-        console.log(`Batch starting at ${new Date(since * 1000).toISOString()} too old for Gate.io, skipping forward`);
-        since = Math.min(since + getTimeframeSeconds(timeframe) * 2000, endSec);
-        if (consecutiveTooOld > 5) {
-          const newStart = getEarliestAllowedStart(timeframe);
-          if (newStart < endSec) {
-            console.log(`Jumping to earliest allowed: ${new Date(newStart * 1000).toISOString()}`);
-            onProgress?.(`Skipping to earliest available data...`);
-            since = newStart;
-            consecutiveTooOld = 0;
-          } else {
-            console.log(`No data available in requested range for ${symbol} ${timeframe}`);
-            break;
-          }
-        }
-        await new Promise(resolve => setTimeout(resolve, 200));
-        continue;
-      }
-
-      consecutiveTooOld = 0;
+      const raw = await fetchOkxCandles(instId, bar, currentEndMs);
 
       if (!raw || raw.length === 0) {
-        since = batchEnd;
+        emptyPages++;
+        if (emptyPages > 3) break;
+        currentEndMs -= getTimeframeSeconds(timeframe) * OKX_BATCH_SIZE * 1000;
         continue;
       }
+      emptyPages = 0;
 
       for (const candle of raw) {
-        const ts = candle.t * 1000;
-        if (ts > endSec * 1000) break;
+        const ts = parseInt(candle[0]);
+        if (ts < startMs || ts > endMs) continue;
         allCandles.push({
           time: ts,
-          open: parseFloat(candle.o),
-          high: parseFloat(candle.h),
-          low: parseFloat(candle.l),
-          close: parseFloat(candle.c),
-          volume: parseFloat(candle.v || candle.sum || "0"),
+          open: parseFloat(candle[1]),
+          high: parseFloat(candle[2]),
+          low: parseFloat(candle[3]),
+          close: parseFloat(candle[4]),
+          volume: parseFloat(candle[5] || "0"),
         });
       }
 
-      const lastTs = raw[raw.length - 1].t;
-      if (lastTs <= since) break;
-      since = lastTs + getTimeframeSeconds(timeframe);
+      const oldestTs = parseInt(raw[raw.length - 1][0]);
+      if (oldestTs >= currentEndMs) break;
+      currentEndMs = oldestTs;
       page++;
 
-      if (page % 5 === 0) {
+      if (page % 3 === 0) {
         onProgress?.(`Fetched ${allCandles.length} candles for ${symbol} ${timeframe}...`);
       }
 
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise(resolve => setTimeout(resolve, 150));
     } catch (err: any) {
-      console.log(`Error fetching ${symbol} from Gate.io: ${err.message}`);
+      console.log(`Error fetching ${symbol} from OKX: ${err.message}`);
       if (allCandles.length > 0) break;
       throw err;
     }
