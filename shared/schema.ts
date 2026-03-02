@@ -700,6 +700,7 @@ export const labOptimizationRuns = pgTable("lab_optimization_runs", {
   mode: text("mode").notNull(),
   status: text("status").notNull().default("running"),
   totalConfigsTested: integer("total_configs_tested"),
+  checkpoint: jsonb("checkpoint"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   completedAt: timestamp("completed_at"),
 });
@@ -794,6 +795,11 @@ export interface LabBacktestResult {
   params: Record<string, any>;
   trades: LabTradeRecord[];
   equityCurve: { time: string; equity: number }[];
+}
+
+export interface LabCheckpoint {
+  completedCombos: string[];
+  configSnapshot: LabOptimizationConfig;
 }
 
 export interface LabJobProgress {

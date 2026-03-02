@@ -1,8 +1,8 @@
 import type { Express, Request, Response } from "express";
 import { labStorage } from "./storage";
 import { parsePineScript } from "./pine-parser";
-import { runOptimization } from "./optimizer";
-import { labOptimizationConfigSchema, insertLabStrategyBodySchema, updateLabStrategyBodySchema, LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
+import { runOptimization, type OptimizationCallbacks } from "./optimizer";
+import { labOptimizationConfigSchema, insertLabStrategyBodySchema, updateLabStrategyBodySchema, LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES, type LabCheckpoint, type LabOptimizationConfig } from "@shared/schema";
 
 export function registerLabRoutes(app: Express): void {
 
@@ -127,7 +127,6 @@ export function registerLabRoutes(app: Express): void {
   app.get("/api/lab/runs/:id/results", async (req: Request, res: Response) => {
     try {
       const results = await labStorage.getRunResults(parseInt(req.params.id));
-      if (!results.length) return res.status(404).json({ error: "No results found" });
       res.json(results);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -142,6 +141,78 @@ export function registerLabRoutes(app: Express): void {
       res.status(500).json({ error: err.message });
     }
   });
+
+  function startOptimizationJob(
+    config: LabOptimizationConfig,
+    job: ReturnType<typeof labStorage.createJob>,
+    runId: number | undefined,
+    resumeCheckpoint?: LabCheckpoint
+  ) {
+    const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
+
+    const callbacks: OptimizationCallbacks = {
+      onProgress: (progress: any) => labStorage.updateProgress(job.id, progress),
+      onComboCheckpoint: async (completedCombo: string, comboResults: any[]) => {
+        if (!runId) return;
+        completedCombos.push(completedCombo);
+        try {
+          if (comboResults.length > 0) {
+            await labStorage.saveComboResults(runId, comboResults);
+          }
+          const checkpoint: LabCheckpoint = {
+            completedCombos: [...completedCombos],
+            configSnapshot: config,
+          };
+          await labStorage.saveCheckpoint(runId, checkpoint);
+          console.log(`[QuantumLab] Checkpoint saved: ${completedCombos.length} combos done (run ${runId})`);
+        } catch (err: any) {
+          console.log(`[QuantumLab] Checkpoint save error: ${err.message}`);
+        }
+      },
+    };
+
+    runOptimization(
+      config,
+      callbacks.onProgress,
+      job.id,
+      job.abortSignal,
+      callbacks,
+      resumeCheckpoint
+    ).then(async (results: any[]) => {
+      if (job.abortSignal.aborted) {
+        console.log(`[QuantumLab] Job ${job.id} was cancelled, skipping final save`);
+        return;
+      }
+      console.log(`[QuantumLab] Optimization finished: ${results.length} new results`);
+      labStorage.setResults(job.id, results);
+      if (runId) {
+        try {
+          const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed;
+          const combos = config.tickers.length * config.timeframes.length;
+          await labStorage.completeRun(runId, totalSamples * combos);
+          await labStorage.saveCheckpoint(runId, { completedCombos: [], configSnapshot: config });
+          console.log(`[QuantumLab] Run ${runId} completed`);
+        } catch (err: any) {
+          console.log(`[QuantumLab] Failed to complete run: ${err.stack || err.message}`);
+        }
+      }
+    }).catch(async (err: any) => {
+      console.log(`[QuantumLab] Optimization error: ${err.stack || err.message}`);
+      labStorage.updateProgress(job.id, {
+        jobId: job.id,
+        status: "error",
+        stage: `Error: ${err.message}`,
+        current: 0,
+        total: 0,
+        percent: 0,
+        elapsed: 0,
+        error: err.message,
+      });
+      if (runId) {
+        try { await labStorage.failRun(runId); } catch {}
+      }
+    });
+  }
 
   app.post("/api/lab/run-optimization", async (req: Request, res: Response) => {
     try {
@@ -173,49 +244,37 @@ export function registerLabRoutes(app: Express): void {
         job.runId = runId;
       }
 
-      runOptimization(
-        config,
-        (progress: any) => labStorage.updateProgress(job.id, progress),
-        job.id,
-        job.abortSignal
-      ).then(async (results: any[]) => {
-        if (job.abortSignal.aborted) {
-          console.log(`[QuantumLab] Job ${job.id} was cancelled, skipping result save`);
-          return;
-        }
-        console.log(`[QuantumLab] Optimization finished: ${results.length} results`);
-        labStorage.setResults(job.id, results);
-        if (runId) {
-          try {
-            await labStorage.saveResults(runId, results);
-            const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed;
-            const combos = config.tickers.length * config.timeframes.length;
-            await labStorage.completeRun(runId, totalSamples * combos);
-            console.log(`[QuantumLab] Run ${runId} saved and completed`);
-          } catch (err: any) {
-            console.log(`[QuantumLab] Failed to save results to DB: ${err.stack || err.message}`);
-          }
-        }
-      }).catch(async (err: any) => {
-        console.log(`[QuantumLab] Optimization error: ${err.stack || err.message}`);
-        labStorage.updateProgress(job.id, {
-          jobId: job.id,
-          status: "error",
-          stage: `Error: ${err.message}`,
-          current: 0,
-          total: 0,
-          percent: 0,
-          elapsed: 0,
-          error: err.message,
-        });
-        if (runId) {
-          try { await labStorage.failRun(runId); } catch {}
-        }
-      });
+      startOptimizationJob(config, job, runId);
 
       res.json({ jobId: job.id, runId });
     } catch (err: any) {
       console.log(`[QuantumLab] Run error: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/lab/runs/:id/resume", async (req: Request, res: Response) => {
+    try {
+      const runId = parseInt(req.params.id);
+      const run = await labStorage.getRun(runId);
+      if (!run) return res.status(404).json({ error: "Run not found" });
+      if (run.status !== "paused") return res.status(400).json({ error: `Run is ${run.status}, not paused` });
+
+      const checkpoint = await labStorage.getCheckpoint(runId);
+      if (!checkpoint?.configSnapshot) return res.status(400).json({ error: "No checkpoint data found for this run" });
+
+      const config = checkpoint.configSnapshot;
+      const job = labStorage.createJob(config);
+      job.runId = runId;
+
+      await labStorage.resumeRun(runId);
+      console.log(`[QuantumLab] Resuming run ${runId} — ${checkpoint.completedCombos.length} combos already done`);
+
+      startOptimizationJob(config, job, runId, checkpoint);
+
+      res.json({ jobId: job.id, runId, resumedFrom: checkpoint.completedCombos.length });
+    } catch (err: any) {
+      console.log(`[QuantumLab] Resume error: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });

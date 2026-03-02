@@ -17,7 +17,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info,
+  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -1451,6 +1451,21 @@ function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: num
     onError: () => { toast({ title: "Failed to delete run", variant: "destructive" }); },
   });
 
+  const resumeMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await apiRequest("POST", `/api/lab/runs/${id}/resume`);
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+      toast({ title: "Optimization resumed" });
+      if (data.jobId) {
+        onViewRunning(data.jobId);
+      }
+    },
+    onError: () => { toast({ title: "Failed to resume run", variant: "destructive" }); },
+  });
+
   const strategyMap = new Map<number, LabStrategy>();
   strategies?.forEach(s => strategyMap.set(s.id, s));
 
@@ -1482,18 +1497,23 @@ function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: num
             const isComplete = run.status === "complete";
             const isFailed = run.status === "failed";
             const isRunning = run.status === "running";
+            const isPaused = run.status === "paused";
+            const checkpoint = run.checkpoint as any;
+            const checkpointedCombos = checkpoint?.completedCombos?.length ?? 0;
+            const totalCombos = tickers.length * timeframes.length;
 
             const statusIcon = isComplete ? <CheckCircle2 className="w-4 h-4 text-green-400" /> :
               isFailed ? <XCircle className="w-4 h-4 text-red-400" /> :
+              isPaused ? <PauseCircle className="w-4 h-4 text-amber-400" /> :
               isRunning ? <Loader2 className="w-4 h-4 text-violet-400 animate-spin" /> :
               <AlertCircle className="w-4 h-4 text-yellow-400" />;
 
-            const statusBg = isComplete ? "bg-green-500/10" : isFailed ? "bg-red-500/10" : isRunning ? "bg-violet-500/10" : "bg-yellow-500/10";
+            const statusBg = isComplete ? "bg-green-500/10" : isFailed ? "bg-red-500/10" : isPaused ? "bg-amber-500/10" : isRunning ? "bg-violet-500/10" : "bg-yellow-500/10";
 
             return (
               <div key={run.id} className="flex items-center gap-2">
                 <div className="flex-1 cursor-pointer" onClick={async () => {
-                  if (isComplete) { onSelectRun(run.id); }
+                  if (isComplete || isPaused) { onSelectRun(run.id); }
                   else if (isRunning) {
                     try {
                       const res = await fetch(`/api/lab/runs/${run.id}/job`);
@@ -1507,7 +1527,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: num
                     } catch {}
                   }
                 }}>
-                  <Card className={`bg-white/5 border border-white/10 p-4 ${isComplete || isRunning ? "cursor-pointer hover:bg-white/10" : "opacity-70"}`} data-testid={`history-run-card-${run.id}`}>
+                  <Card className={`bg-white/5 border border-white/10 p-4 ${isComplete || isRunning || isPaused ? "cursor-pointer hover:bg-white/10" : "opacity-70"}`} data-testid={`history-run-card-${run.id}`}>
                     <div className="flex items-center justify-between gap-4 flex-wrap">
                       <div className="flex items-center gap-3 min-w-0 flex-1">
                         <div className={`flex items-center justify-center w-9 h-9 rounded-md ${statusBg} flex-shrink-0`}>{statusIcon}</div>
@@ -1525,13 +1545,34 @@ function RunHistoryPanel({ onSelectRun, onViewRunning }: { onSelectRun: (id: num
                             <span className="text-[11px] text-white/40 flex items-center gap-1">
                               <BarChart3 className="w-3 h-3" /> {run.totalConfigsTested?.toLocaleString() ?? "?"} configs
                             </span>
-                            <Badge className={`text-[10px] ${isComplete ? "bg-white/5 text-white/70" : isFailed ? "bg-red-500/20 text-red-400" : "bg-violet-500/20 text-violet-400"}`}>
-                              {isRunning ? "Running" : isFailed ? "Failed" : run.mode === "smoke" ? "Smoke Test" : "Full Sweep"}
-                            </Badge>
+                            {isPaused ? (
+                              <Badge className="text-[10px] bg-amber-500/20 text-amber-400">
+                                Paused ({checkpointedCombos}/{totalCombos} combos)
+                              </Badge>
+                            ) : (
+                              <Badge className={`text-[10px] ${isComplete ? "bg-white/5 text-white/70" : isFailed ? "bg-red-500/20 text-red-400" : "bg-violet-500/20 text-violet-400"}`}>
+                                {isRunning ? "Running" : isFailed ? "Failed" : run.mode === "smoke" ? "Smoke Test" : "Full Sweep"}
+                              </Badge>
+                            )}
                           </div>
                         </div>
                       </div>
-                      {(isComplete || isRunning) && <ChevronRight className="w-4 h-4 text-white/40 flex-shrink-0" />}
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        {isPaused && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 gap-1"
+                            onClick={(e) => { e.stopPropagation(); resumeMutation.mutate(run.id); }}
+                            disabled={resumeMutation.isPending}
+                            data-testid={`button-resume-run-${run.id}`}
+                          >
+                            {resumeMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+                            Resume
+                          </Button>
+                        )}
+                        {(isComplete || isRunning) && <ChevronRight className="w-4 h-4 text-white/40" />}
+                      </div>
                     </div>
                   </Card>
                 </div>

@@ -4,9 +4,10 @@ import {
   type LabOptimizationRun, type InsertLabRun,
   type LabOptResult, type InsertLabResult,
   type LabBacktestResult, type LabJobProgress, type LabOptimizationConfig, type LabJobResult,
+  type LabCheckpoint,
 } from "@shared/schema";
 import { db } from "../db";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, inArray } from "drizzle-orm";
 import { randomUUID } from "crypto";
 
 const MAX_CONCURRENT_JOBS = 1;
@@ -33,9 +34,14 @@ export interface ILabStorage {
   getRun(id: number): Promise<LabOptimizationRun | undefined>;
   completeRun(id: number, totalConfigsTested: number): Promise<void>;
   failRun(id: number): Promise<void>;
+  pauseRun(id: number): Promise<void>;
+  resumeRun(id: number): Promise<void>;
   deleteRun(id: number): Promise<void>;
+  saveCheckpoint(runId: number, checkpoint: LabCheckpoint): Promise<void>;
+  getCheckpoint(runId: number): Promise<LabCheckpoint | null>;
 
   saveResults(runId: number, results: LabBacktestResult[]): Promise<void>;
+  saveComboResults(runId: number, results: LabBacktestResult[]): Promise<void>;
   getRunResults(runId: number): Promise<LabOptResult[]>;
 
   createJob(config: LabOptimizationConfig): LabJob;
@@ -59,14 +65,17 @@ export class LabDatabaseStorage implements ILabStorage {
     try {
       const staleRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "running"));
       for (const run of staleRuns) {
+        const hasCheckpoint = run.checkpoint && typeof run.checkpoint === "object" && 
+          (run.checkpoint as any).completedCombos?.length > 0;
+        const newStatus = hasCheckpoint ? "paused" : "failed";
         await db.update(labOptimizationRuns).set({
-          status: "failed",
-          completedAt: new Date(),
+          status: newStatus,
+          ...(!hasCheckpoint ? { completedAt: new Date() } : {}),
         }).where(eq(labOptimizationRuns.id, run.id));
-        console.log(`[QuantumLab] Cleaned up stale run ${run.id} (was stuck in 'running')`);
+        console.log(`[QuantumLab] Stale run ${run.id} → ${newStatus}${hasCheckpoint ? ` (${(run.checkpoint as any).completedCombos.length} combos checkpointed)` : ""}`);
       }
       if (staleRuns.length > 0) {
-        console.log(`[QuantumLab] Cleaned up ${staleRuns.length} stale run(s) from previous session`);
+        console.log(`[QuantumLab] Processed ${staleRuns.length} stale run(s) from previous session`);
       }
     } catch (err: any) {
       console.log(`[QuantumLab] Stale run cleanup error: ${err.message}`);
@@ -128,6 +137,30 @@ export class LabDatabaseStorage implements ILabStorage {
     }).where(eq(labOptimizationRuns.id, id));
   }
 
+  async pauseRun(id: number): Promise<void> {
+    await db.update(labOptimizationRuns).set({
+      status: "paused",
+    }).where(eq(labOptimizationRuns.id, id));
+  }
+
+  async resumeRun(id: number): Promise<void> {
+    await db.update(labOptimizationRuns).set({
+      status: "running",
+    }).where(eq(labOptimizationRuns.id, id));
+  }
+
+  async saveCheckpoint(runId: number, checkpoint: LabCheckpoint): Promise<void> {
+    await db.update(labOptimizationRuns).set({
+      checkpoint: checkpoint as any,
+    }).where(eq(labOptimizationRuns.id, runId));
+  }
+
+  async getCheckpoint(runId: number): Promise<LabCheckpoint | null> {
+    const [run] = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.id, runId));
+    if (!run?.checkpoint) return null;
+    return run.checkpoint as unknown as LabCheckpoint;
+  }
+
   async deleteRun(id: number): Promise<void> {
     await db.delete(labOptimizationResults).where(eq(labOptimizationResults.runId, id));
     await db.delete(labOptimizationRuns).where(eq(labOptimizationRuns.id, id));
@@ -140,6 +173,41 @@ export class LabDatabaseStorage implements ILabStorage {
       ticker: r.ticker,
       timeframe: r.timeframe,
       rank: idx + 1,
+      netProfitPercent: r.netProfitPercent,
+      winRatePercent: r.winRatePercent,
+      maxDrawdownPercent: r.maxDrawdownPercent,
+      profitFactor: r.profitFactor,
+      totalTrades: r.totalTrades,
+      params: r.params,
+      trades: r.trades,
+      equityCurve: r.equityCurve,
+    }));
+
+    const batchSize = 50;
+    for (let i = 0; i < insertData.length; i += batchSize) {
+      const batch = insertData.slice(i, i + batchSize);
+      await db.insert(labOptimizationResults).values(batch);
+    }
+  }
+
+  async saveComboResults(runId: number, results: LabBacktestResult[]): Promise<void> {
+    if (results.length === 0) return;
+    const combo = results[0];
+    const comboKey = `${combo.ticker}|${combo.timeframe}`;
+    const existing = await db.select({ id: labOptimizationResults.id, ticker: labOptimizationResults.ticker, timeframe: labOptimizationResults.timeframe })
+      .from(labOptimizationResults)
+      .where(eq(labOptimizationResults.runId, runId));
+    const alreadySaved = existing.some(r => `${r.ticker}|${r.timeframe}` === comboKey);
+    if (alreadySaved) {
+      console.log(`[QuantumLab] Combo ${comboKey} already saved for run ${runId}, skipping duplicate`);
+      return;
+    }
+    const startRank = existing.length + 1;
+    const insertData: InsertLabResult[] = results.map((r, idx) => ({
+      runId,
+      ticker: r.ticker,
+      timeframe: r.timeframe,
+      rank: startRank + idx,
       netProfitPercent: r.netProfitPercent,
       winRatePercent: r.winRatePercent,
       maxDrawdownPercent: r.maxDrawdownPercent,
@@ -263,7 +331,16 @@ export class LabDatabaseStorage implements ILabStorage {
         error: "Cancelled",
       };
       if (job.runId) {
-        this.failRun(job.runId).catch(() => {});
+        this.getCheckpoint(job.runId).then(checkpoint => {
+          if (checkpoint && checkpoint.completedCombos.length > 0) {
+            this.pauseRun(job.runId!).catch(() => {});
+            console.log(`[QuantumLab] Job ${id} cancelled with ${checkpoint.completedCombos.length} combos checkpointed → paused`);
+          } else {
+            this.failRun(job.runId!).catch(() => {});
+          }
+        }).catch(() => {
+          this.failRun(job.runId!).catch(() => {});
+        });
       }
       this.scheduleCleanup(id);
     }

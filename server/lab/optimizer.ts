@@ -1,4 +1,4 @@
-import type { LabPineInput, LabBacktestResult, LabOptimizationConfig, LabJobProgress } from "@shared/schema";
+import type { LabPineInput, LabBacktestResult, LabOptimizationConfig, LabJobProgress, LabCheckpoint } from "@shared/schema";
 import { runBacktest, type OHLCV } from "./engine";
 import { fetchOHLCV } from "./datafeed";
 
@@ -82,15 +82,23 @@ function scoreResult(r: LabBacktestResult): number {
   return r.netProfitPercent * 1000 + r.winRatePercent * 10 - r.maxDrawdownPercent * 5;
 }
 
+export interface OptimizationCallbacks {
+  onProgress: (progress: LabJobProgress) => void;
+  onComboCheckpoint: (completedCombo: string, comboResults: LabBacktestResult[]) => Promise<void>;
+}
+
 export async function runOptimization(
   config: LabOptimizationConfig,
   onProgress: (progress: LabJobProgress) => void,
   jobId: string,
-  abortSignal?: { aborted: boolean }
+  abortSignal?: { aborted: boolean },
+  callbacks?: OptimizationCallbacks,
+  resumeCheckpoint?: LabCheckpoint
 ): Promise<LabBacktestResult[]> {
   const startTime = Date.now();
   const allResults: LabBacktestResult[] = [];
   const inputs = config.parsedInputs;
+  const effectiveOnProgress = callbacks?.onProgress ?? onProgress;
 
   const combos: { ticker: string; timeframe: string }[] = [];
   for (const ticker of config.tickers) {
@@ -99,17 +107,30 @@ export async function runOptimization(
     }
   }
 
+  const completedCombos = new Set<string>(resumeCheckpoint?.completedCombos ?? []);
+
   const tickerProgress: Record<string, { status: "pending" | "running" | "complete"; best?: number }> = {};
   for (const combo of combos) {
-    tickerProgress[`${combo.ticker}|${combo.timeframe}`] = { status: "pending" };
+    const key = `${combo.ticker}|${combo.timeframe}`;
+    tickerProgress[key] = completedCombos.has(key) ? { status: "complete" } : { status: "pending" };
   }
 
   const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed;
-  let globalCurrent = 0;
+  let globalCurrent = completedCombos.size * totalSamples;
+
+  if (completedCombos.size > 0) {
+    console.log(`[QuantumLab] Resuming optimization: ${completedCombos.size}/${combos.length} combos already done`);
+  }
 
   for (const combo of combos) {
+    const key = `${combo.ticker}|${combo.timeframe}`;
+
+    if (completedCombos.has(key)) {
+      continue;
+    }
+
     if (abortSignal?.aborted) {
-      onProgress({
+      effectiveOnProgress({
         jobId, status: "error", stage: "Cancelled by user",
         current: globalCurrent, total: totalSamples * combos.length,
         percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
@@ -117,10 +138,9 @@ export async function runOptimization(
       });
       return allResults;
     }
-    const key = `${combo.ticker}|${combo.timeframe}`;
     tickerProgress[key] = { status: "running" };
 
-    onProgress({
+    effectiveOnProgress({
       jobId,
       status: "fetching",
       stage: `Fetching data for ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
@@ -138,7 +158,7 @@ export async function runOptimization(
         combo.timeframe,
         config.startDate,
         config.endDate,
-        (msg: string) => onProgress({
+        (msg: string) => effectiveOnProgress({
           jobId,
           status: "fetching",
           stage: msg,
@@ -152,12 +172,20 @@ export async function runOptimization(
     } catch (err: any) {
       console.log(`Failed to fetch data for ${combo.ticker}: ${err.message}`);
       tickerProgress[key] = { status: "complete", best: 0 };
+      completedCombos.add(key);
+      if (callbacks?.onComboCheckpoint) {
+        await callbacks.onComboCheckpoint(key, []).catch(e => console.log(`[QuantumLab] Checkpoint save error: ${e.message}`));
+      }
       continue;
     }
 
     if (candles.length < 100) {
       console.log(`Not enough candles for ${combo.ticker} ${combo.timeframe}: ${candles.length}`);
       tickerProgress[key] = { status: "complete", best: 0 };
+      completedCombos.add(key);
+      if (callbacks?.onComboCheckpoint) {
+        await callbacks.onComboCheckpoint(key, []).catch(e => console.log(`[QuantumLab] Checkpoint save error: ${e.message}`));
+      }
       continue;
     }
 
@@ -169,7 +197,7 @@ export async function runOptimization(
     const baseline = runBacktest(candles, defaultParams, combo.ticker, combo.timeframe);
     let comboResults: LabBacktestResult[] = [baseline];
 
-    onProgress({
+    effectiveOnProgress({
       jobId,
       status: "random_search",
       stage: `Random Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — 0/${config.randomSamples}`,
@@ -201,7 +229,7 @@ export async function runOptimization(
 
       if (s % 50 === 0) {
         const best = comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0];
-        onProgress({
+        effectiveOnProgress({
           jobId,
           status: "random_search",
           stage: `Random Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${s}/${config.randomSamples}`,
@@ -226,7 +254,7 @@ export async function runOptimization(
     comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
     const topSeeds = comboResults.slice(0, config.topK);
 
-    onProgress({
+    effectiveOnProgress({
       jobId,
       status: "refinement",
       stage: `Refining top ${topSeeds.length} seeds — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
@@ -255,7 +283,7 @@ export async function runOptimization(
 
       if (seedIdx % 5 === 0) {
         const best = comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0];
-        onProgress({
+        effectiveOnProgress({
           jobId,
           status: "refinement",
           stage: `Refining seed ${seedIdx + 1}/${topSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
@@ -283,11 +311,16 @@ export async function runOptimization(
       status: "complete",
       best: topForCombo[0]?.netProfitPercent ?? 0,
     };
+
+    completedCombos.add(key);
+    if (callbacks?.onComboCheckpoint) {
+      await callbacks.onComboCheckpoint(key, topForCombo).catch(e => console.log(`[QuantumLab] Checkpoint save error: ${e.message}`));
+    }
   }
 
   allResults.sort((a, b) => scoreResult(b) - scoreResult(a));
 
-  onProgress({
+  effectiveOnProgress({
     jobId,
     status: "complete",
     stage: "Optimization complete",
