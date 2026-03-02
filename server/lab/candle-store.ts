@@ -25,6 +25,15 @@ export async function getCachedCandles(
 
     if (rows.length < 50) return null;
 
+    const tfSeconds = getTimeframeSecondsForCache(timeframe);
+    const expectedCandles = Math.floor((endMs - startMs) / (tfSeconds * 1000));
+    const coverageRatio = rows.length / Math.max(expectedCandles, 1);
+
+    if (coverageRatio < 0.7) {
+      console.log(`[CandleCache] Partial hit for ${symbol} ${timeframe}: ${rows.length}/${expectedCandles} candles (${(coverageRatio * 100).toFixed(0)}% coverage) — refetching`);
+      return null;
+    }
+
     return rows.map((r) => ({
       time: Number(r.time),
       open: r.open,
@@ -37,6 +46,15 @@ export async function getCachedCandles(
     console.log(`[CandleCache] Read error: ${err.message}`);
     return null;
   }
+}
+
+function getTimeframeSecondsForCache(tf: string): number {
+  const map: Record<string, number> = {
+    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "2h": 7200, "4h": 14400, "8h": 28800,
+    "12h": 43200, "1d": 86400, "1w": 604800,
+  };
+  return map[tf] || 3600;
 }
 
 export async function saveCandlesToDb(
