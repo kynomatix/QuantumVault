@@ -65,14 +65,21 @@ export class LabDatabaseStorage implements ILabStorage {
     try {
       const staleRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "running"));
       for (const run of staleRuns) {
-        const hasCheckpoint = run.checkpoint && typeof run.checkpoint === "object" && 
-          (run.checkpoint as any).completedCombos?.length > 0;
-        const newStatus = hasCheckpoint ? "paused" : "failed";
+        const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+        const hasComboCheckpoint = cp?.completedCombos?.length > 0;
+        const hasMidComboCheckpoint = cp?.currentCombo && cp?.currentIteration != null && cp.currentIteration >= 0;
+        const hasAnyCheckpoint = hasComboCheckpoint || hasMidComboCheckpoint;
+        const newStatus = hasAnyCheckpoint ? "paused" : "failed";
         await db.update(labOptimizationRuns).set({
           status: newStatus,
-          ...(!hasCheckpoint ? { completedAt: new Date() } : {}),
+          ...(!hasAnyCheckpoint ? { completedAt: new Date() } : {}),
         }).where(eq(labOptimizationRuns.id, run.id));
-        console.log(`[QuantumLab] Stale run ${run.id} → ${newStatus}${hasCheckpoint ? ` (${(run.checkpoint as any).completedCombos.length} combos checkpointed)` : ""}`);
+        const detail = hasComboCheckpoint
+          ? `${cp.completedCombos.length} combos checkpointed`
+          : hasMidComboCheckpoint
+            ? `mid-combo ${cp.currentCombo} at ${cp.currentStage} iter ${cp.currentIteration}`
+            : "";
+        console.log(`[QuantumLab] Stale run ${run.id} → ${newStatus}${detail ? ` (${detail})` : ""}`);
       }
       if (staleRuns.length > 0) {
         console.log(`[QuantumLab] Processed ${staleRuns.length} stale run(s) from previous session`);

@@ -250,6 +250,28 @@ export default function QuantumLab() {
     const currentJobId = activeJobId;
     let reconnectTimer: ReturnType<typeof setTimeout>;
     let isMounted = true;
+    let failCount = 0;
+    const MAX_FAIL_RETRIES = 5;
+
+    async function handleDeadJob() {
+      if (!isMounted) return;
+      try {
+        const runsRes = await fetch("/api/lab/runs");
+        if (runsRes.ok) {
+          const runs = await runsRes.json();
+          const sortedRuns = [...runs].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          const matchedRun = sortedRuns.find((r: any) => r.status === "paused" || r.status === "failed");
+          if (matchedRun?.status === "paused") {
+            toast({ title: "Server restarted", description: "Your run is paused and can be resumed from History.", variant: "default" });
+          } else {
+            toast({ title: "Optimization interrupted", description: "The server restarted. Check History for details.", variant: "destructive" });
+          }
+        }
+      } catch {}
+      setActiveJobId(null);
+      setJobProgress(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+    }
 
     function connect() {
       if (!isMounted) return;
@@ -258,6 +280,7 @@ export default function QuantumLab() {
       eventSourceRef.current = es;
       es.onmessage = (event) => {
         try {
+          failCount = 0;
           const data: LabJobProgress = JSON.parse(event.data);
           setJobProgress(data);
           if (data.status === "complete") {
@@ -278,6 +301,11 @@ export default function QuantumLab() {
       es.onerror = () => {
         es.close();
         if (isMounted) {
+          failCount++;
+          if (failCount >= MAX_FAIL_RETRIES) {
+            handleDeadJob();
+            return;
+          }
           reconnectTimer = setTimeout(async () => {
             try {
               const res = await fetch(`/api/lab/job/${currentJobId}/results`);
@@ -1234,11 +1262,12 @@ function ResultsPanel({ jobId }: { jobId: string | null }) {
             <tbody>
               {sortedConfigs.map((config) => {
                 const key = `${config.ticker}|${config.timeframe}`;
-                const comboResults = results.bestByCombo[key] || [];
+                const rawCombo = results.bestByCombo[key] || [];
+                const rankedCombo = [...rawCombo].sort((a, b) => rankScore(b, rankingMode) - rankScore(a, rankingMode));
                 const isExpanded = expandedCombo === key;
                 const name = config.ticker.split("/")[0];
                 return (
-                  <ConfigRow key={key} config={config} name={name} isExpanded={isExpanded} comboResults={comboResults}
+                  <ConfigRow key={key} config={config} name={name} isExpanded={isExpanded} comboResults={rankedCombo}
                     onToggleExpand={() => setExpandedCombo(isExpanded ? null : key)}
                     onSelectConfig={(c) => setSelectedConfig(c)} selectedConfig={selectedConfig} />
                 );
@@ -1420,7 +1449,7 @@ function ConfigRow({ config, name, isExpanded, comboResults, onToggleExpand, onS
           )}
         </td>
       </tr>
-      {isExpanded && comboResults.slice(1).map((r, idx) => (
+      {isExpanded && comboResults.filter(r => JSON.stringify(r.params) !== JSON.stringify(config.params)).map((r, idx) => (
         <tr key={idx} className={`border-b border-white/5 cursor-pointer text-white/40 ${selectedConfig === r ? "bg-violet-500/5" : "hover:bg-white/5"}`}
           onClick={() => onSelectConfig(r)} data-testid={`config-sub-${name}-${idx}`}>
           <td className="py-2 px-4 pl-8 text-xs">#{idx + 2}</td>

@@ -85,6 +85,7 @@ function scoreResult(r: LabBacktestResult): number {
 export interface OptimizationCallbacks {
   onProgress: (progress: LabJobProgress) => void;
   onComboCheckpoint: (completedCombo: string, comboResults: LabBacktestResult[]) => Promise<void>;
+  onPartialCheckpoint?: (combo: string, stage: "random" | "refine", iteration: number, partialResults: LabBacktestResult[]) => Promise<void>;
 }
 
 export async function runOptimization(
@@ -109,6 +110,11 @@ export async function runOptimization(
 
   const completedCombos = new Set<string>(resumeCheckpoint?.completedCombos ?? []);
 
+  const resumeCombo = resumeCheckpoint?.currentCombo ?? null;
+  const resumeStage = resumeCheckpoint?.currentStage ?? null;
+  const resumeIteration = resumeCheckpoint?.currentIteration ?? 0;
+  const resumePartialResults = resumeCheckpoint?.partialResults ?? [];
+
   const tickerProgress: Record<string, { status: "pending" | "running" | "complete"; best?: number }> = {};
   for (const combo of combos) {
     const key = `${combo.ticker}|${combo.timeframe}`;
@@ -118,8 +124,12 @@ export async function runOptimization(
   const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed;
   let globalCurrent = completedCombos.size * totalSamples;
 
-  if (completedCombos.size > 0) {
-    console.log(`[QuantumLab] Resuming optimization: ${completedCombos.size}/${combos.length} combos already done`);
+  if (resumeCombo && !completedCombos.has(resumeCombo)) {
+    globalCurrent += resumeIteration;
+  }
+
+  if (completedCombos.size > 0 || resumeCombo) {
+    console.log(`[QuantumLab] Resuming optimization: ${completedCombos.size}/${combos.length} combos done${resumeCombo ? `, mid-combo ${resumeCombo} at ${resumeStage} iter ${resumeIteration}` : ""}`);
   }
 
   for (const combo of combos) {
@@ -195,12 +205,22 @@ export async function runOptimization(
     }
 
     const baseline = runBacktest(candles, defaultParams, combo.ticker, combo.timeframe);
-    let comboResults: LabBacktestResult[] = [baseline];
+
+    const isResumingThisCombo = resumeCombo === key;
+    const skipRandomUntil = isResumingThisCombo && resumeStage === "random" ? resumeIteration : 0;
+    const skipRefineEntirely = isResumingThisCombo && resumeStage === "refine";
+    let comboResults: LabBacktestResult[] = isResumingThisCombo && resumePartialResults.length > 0
+      ? [...resumePartialResults]
+      : [baseline];
+
+    if (isResumingThisCombo) {
+      console.log(`[QuantumLab] Resuming combo ${key}: skip ${skipRandomUntil} random samples, ${comboResults.length} partial results loaded`);
+    }
 
     effectiveOnProgress({
       jobId,
       status: "random_search",
-      stage: `Random Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — 0/${config.randomSamples}`,
+      stage: `Random Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${skipRandomUntil}/${config.randomSamples}`,
       current: globalCurrent,
       total: totalSamples * combos.length,
       percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
@@ -214,7 +234,9 @@ export async function runOptimization(
       tickerProgress,
     });
 
-    for (let s = 0; s < config.randomSamples; s++) {
+    const randomStart = skipRefineEntirely ? config.randomSamples : skipRandomUntil;
+
+    for (let s = randomStart; s < config.randomSamples; s++) {
       if (abortSignal?.aborted) { globalCurrent += (config.randomSamples - s); break; }
       const params = generateRandomParams(inputs);
       const result = runBacktest(candles, params, combo.ticker, combo.timeframe);
@@ -246,6 +268,13 @@ export async function runOptimization(
           tickerProgress,
           eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
         });
+
+        if (s > 0 && callbacks?.onPartialCheckpoint) {
+          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+          await callbacks.onPartialCheckpoint(key, "random", s + 1, topPartial).catch(e =>
+            console.log(`[QuantumLab] Partial checkpoint error: ${e.message}`)
+          );
+        }
       }
     }
 
@@ -265,11 +294,20 @@ export async function runOptimization(
       tickerProgress,
     });
 
+    const refineStartIteration = config.randomSamples;
+
     for (let seedIdx = 0; seedIdx < topSeeds.length; seedIdx++) {
       if (abortSignal?.aborted) break;
       const seed = topSeeds[seedIdx];
       for (let r = 0; r < config.refinementsPerSeed; r++) {
         if (abortSignal?.aborted) { globalCurrent += (config.refinementsPerSeed - r); break; }
+
+        const currentRefineIter = refineStartIteration + seedIdx * config.refinementsPerSeed + r;
+        if (isResumingThisCombo && resumeStage === "refine" && currentRefineIter < resumeIteration) {
+          globalCurrent++;
+          continue;
+        }
+
         const jitteredParams = jitterParams(seed.params, inputs);
         const result = runBacktest(candles, jitteredParams, combo.ticker, combo.timeframe);
         if (result.totalTrades >= config.minTrades && result.maxDrawdownPercent <= config.maxDrawdownCap) {
@@ -300,6 +338,14 @@ export async function runOptimization(
           tickerProgress,
           eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
         });
+
+        if (callbacks?.onPartialCheckpoint) {
+          const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
+          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+          await callbacks.onPartialCheckpoint(key, "refine", actualIter, topPartial).catch(e =>
+            console.log(`[QuantumLab] Partial checkpoint error: ${e.message}`)
+          );
+        }
       }
     }
 

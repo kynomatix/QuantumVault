@@ -800,6 +800,10 @@ export interface LabBacktestResult {
 export interface LabCheckpoint {
   completedCombos: string[];
   configSnapshot: LabOptimizationConfig;
+  currentCombo?: string;
+  currentStage?: "random" | "refine";
+  currentIteration?: number;
+  partialResults?: LabBacktestResult[];
 }
 
 export interface LabJobProgress {

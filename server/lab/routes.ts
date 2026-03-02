@@ -162,11 +162,31 @@ export function registerLabRoutes(app: Express): void {
           const checkpoint: LabCheckpoint = {
             completedCombos: [...completedCombos],
             configSnapshot: config,
+            currentCombo: undefined,
+            currentStage: undefined,
+            currentIteration: undefined,
+            partialResults: undefined,
           };
           await labStorage.saveCheckpoint(runId, checkpoint);
           console.log(`[QuantumLab] Checkpoint saved: ${completedCombos.length} combos done (run ${runId})`);
         } catch (err: any) {
           console.log(`[QuantumLab] Checkpoint save error: ${err.message}`);
+        }
+      },
+      onPartialCheckpoint: async (combo: string, stage: "random" | "refine", iteration: number, partialResults: any[]) => {
+        if (!runId) return;
+        try {
+          const checkpoint: LabCheckpoint = {
+            completedCombos: [...completedCombos],
+            configSnapshot: config,
+            currentCombo: combo,
+            currentStage: stage,
+            currentIteration: iteration,
+            partialResults,
+          };
+          await labStorage.saveCheckpoint(runId, checkpoint);
+        } catch (err: any) {
+          console.log(`[QuantumLab] Partial checkpoint error: ${err.message}`);
         }
       },
     };
