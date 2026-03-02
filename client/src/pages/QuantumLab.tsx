@@ -229,6 +229,75 @@ function formatTradeTime(iso: string): string {
   return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
 }
 
+function injectParamsIntoPineScript(code: string, params: Record<string, any>): string {
+  const inputPattern = /(?:(?:int|float|bool|string|var)\s+)?(\w+)\s*=\s*input\.(int|float|bool|string|time|source)\s*\(([^)]*(?:\([^)]*\))*[^)]*)\)/g;
+  let result = code;
+  let offset = 0;
+  const originalCode = code;
+  let match;
+
+  while ((match = inputPattern.exec(originalCode)) !== null) {
+    const varName = match[1];
+    const inputType = match[2];
+    const argsStr = match[3];
+
+    if (!(varName in params)) continue;
+
+    const newVal = params[varName];
+    let formattedVal: string;
+    if (inputType === "string" || inputType === "source") {
+      formattedVal = `"${newVal}"`;
+    } else if (inputType === "bool") {
+      formattedVal = newVal ? "true" : "false";
+    } else if (inputType === "float") {
+      formattedVal = typeof newVal === "number" ? (Number.isInteger(newVal) ? `${newVal}.0` : String(newVal)) : String(newVal);
+    } else {
+      formattedVal = String(newVal);
+    }
+
+    let depth = 0, inStr = false, strCh = "", firstArgEnd = -1;
+    for (let i = 0; i < argsStr.length; i++) {
+      const ch = argsStr[i];
+      if (inStr) { if (ch === strCh && argsStr[i - 1] !== "\\") inStr = false; continue; }
+      if (ch === '"' || ch === "'") { inStr = true; strCh = ch; continue; }
+      if (ch === "(" || ch === "[") { depth++; continue; }
+      if (ch === ")" || ch === "]") { depth--; continue; }
+      if (ch === "," && depth === 0) { firstArgEnd = i; break; }
+    }
+
+    const argsStart = match.index + match[0].indexOf(argsStr) + offset;
+    if (firstArgEnd === -1) {
+      const trimmed = argsStr.trim();
+      const hasKeyword = trimmed.includes("=") && !trimmed.startsWith('"') && !trimmed.startsWith("'");
+      if (hasKeyword) continue;
+      result = result.substring(0, argsStart) + formattedVal + result.substring(argsStart + argsStr.length);
+      offset += formattedVal.length - argsStr.length;
+    } else {
+      const firstArg = argsStr.substring(0, firstArgEnd).trim();
+      const hasDefvalKeyword = firstArg.match(/^defval\s*=/);
+      if (hasDefvalKeyword) {
+        const newFirstArg = `defval=${formattedVal}`;
+        result = result.substring(0, argsStart) + newFirstArg + result.substring(argsStart + firstArgEnd);
+        offset += newFirstArg.length - firstArgEnd;
+      } else {
+        result = result.substring(0, argsStart) + formattedVal + result.substring(argsStart + firstArgEnd);
+        offset += formattedVal.length - firstArgEnd;
+      }
+    }
+  }
+  return result;
+}
+
+function downloadFile(content: string, filename: string) {
+  const blob = new Blob([content], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function QuantumLab() {
   const [mainTab, setMainTab] = useState<MainTab>("main");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -1349,6 +1418,16 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack }:
     },
   });
 
+  const { data: strategy } = useQuery<LabStrategy>({
+    queryKey: ["/api/lab/strategies", run?.strategyId],
+    queryFn: async () => {
+      const res = await fetch(`/api/lab/strategies/${run!.strategyId}`);
+      if (!res.ok) throw new Error("Strategy not found");
+      return res.json();
+    },
+    enabled: !!run?.strategyId,
+  });
+
   const { data: results, isLoading } = useQuery<LabOptResult[]>({
     queryKey: ["/api/lab/runs", runId, "results"],
     queryFn: async () => {
@@ -1457,12 +1536,26 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack }:
           </div>
         </div>
         {selectedResult && (
-          <Button variant="secondary" size="sm" onClick={() => {
-            const params = selectedResult.params as Record<string, any>;
-            navigator.clipboard.writeText(Object.entries(params).map(([k, v]) => `${k} = ${v}`).join("\n"));
-          }} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-copy-params">
-            <Copy className="w-3 h-3 mr-1" /> Copy Params
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => {
+              const params = selectedResult.params as Record<string, any>;
+              navigator.clipboard.writeText(Object.entries(params).map(([k, v]) => `${k} = ${v}`).join("\n"));
+            }} className="bg-white/5 hover:bg-white/10 text-white/70" data-testid="button-copy-params">
+              <Copy className="w-3 h-3 mr-1" /> Copy Params
+            </Button>
+            {strategy?.pineScript && (
+              <Button variant="secondary" size="sm" onClick={() => {
+                const params = selectedResult.params as Record<string, any>;
+                const injected = injectParamsIntoPineScript(strategy.pineScript, params);
+                const ticker = selectedResult.ticker.split("/")[0];
+                const tf = selectedResult.timeframe;
+                const stratName = strategy.name?.replace(/[^a-zA-Z0-9_-]/g, "_") || "strategy";
+                downloadFile(injected, `${stratName}_${ticker}_${tf}_optimized.pine`);
+              }} className="bg-violet-500/20 hover:bg-violet-500/30 text-violet-300" data-testid="button-export-pine">
+                <Download className="w-3 h-3 mr-1" /> Export .pine
+              </Button>
+            )}
+          </div>
         )}
       </div>
 
