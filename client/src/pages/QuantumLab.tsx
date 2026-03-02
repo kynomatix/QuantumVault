@@ -841,8 +841,8 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
 const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
   { label: "Major", tickers: ["SOL", "BTC", "ETH", "XRP", "ADA", "LTC", "BNB", "AVAX", "LINK", "DOGE"] },
   { label: "Layer 1 / Infra", tickers: ["SUI", "APT", "SEI", "TON", "BERA", "OP", "ARB", "POL", "MNT", "TIA", "INJ"] },
-  { label: "Solana DeFi", tickers: ["JUP", "DRIFT", "RAY", "JTO", "PYTH", "W", "KMNO", "TNSR", "CLOUD", "IO", "ME", "RENDER", "HNT"] },
-  { label: "Memes", tickers: ["WIF", "POPCAT", "MOODENG", "FWOG", "GOAT", "PNUT", "MEW", "MICHI", "MOTHER", "FARTCOIN", "PENGU", "DBR"] },
+  { label: "Solana DeFi", tickers: ["JUP", "DRIFT", "RAY", "JTO", "PYTH", "W", "KMNO", "TNSR", "CLOUD", "IO", "ME", "RENDER", "HNT", "DBR"] },
+  { label: "Memes", tickers: ["WIF", "POPCAT", "MOODENG", "FWOG", "GOAT", "PNUT", "MEW", "MICHI", "MOTHER", "FARTCOIN", "PENGU"] },
   { label: "New / Trending", tickers: ["HYPE", "TRUMP", "AI16Z", "KAITO", "IP"] },
   { label: "Commodities / Other", tickers: ["PAXG", "ZEC", "TAO"] },
 ];
