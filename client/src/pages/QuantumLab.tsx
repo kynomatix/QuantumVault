@@ -307,6 +307,7 @@ export default function QuantumLab() {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<number | null>(null);
   const [activeHistoryRunId, setActiveHistoryRunId] = useState<number | null>(null);
+  const [targetCombo, setTargetCombo] = useState<{ ticker: string; timeframe: string } | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<LabStrategy | null>(null);
   const { toast } = useToast();
 
@@ -519,8 +520,11 @@ export default function QuantumLab() {
       case "results":
         return activeHistoryRunId ? (
           <HistoryResultsPanel
+            key={`${activeHistoryRunId}-${targetCombo?.ticker ?? ""}-${targetCombo?.timeframe ?? ""}`}
             runId={activeHistoryRunId}
-            onBack={() => setActiveHistoryRunId(null)}
+            onBack={() => { setActiveHistoryRunId(null); setTargetCombo(null); }}
+            targetCombo={targetCombo}
+            onTargetConsumed={() => setTargetCombo(null)}
           />
         ) : (
           <RunHistoryPanel
@@ -531,7 +535,7 @@ export default function QuantumLab() {
           />
         );
       case "heatmap":
-        return <HeatmapPanel onViewRun={(runId) => { setActiveHistoryRunId(runId); setMainTab("results"); }} />;
+        return <HeatmapPanel onViewRun={(runId, ticker, timeframe) => { setActiveHistoryRunId(runId); setTargetCombo({ ticker, timeframe }); setMainTab("results"); }} />;
       default:
         return null;
     }
@@ -1465,7 +1469,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
   );
 }
 
-const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack }: { runId: number; onBack: () => void }) {
+const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, targetCombo, onTargetConsumed }: { runId: number; onBack: () => void; targetCombo?: { ticker: string; timeframe: string } | null; onTargetConsumed?: () => void }) {
   const [sortKey, setSortKey] = useState<SortKey>("netProfitPercent");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedResult, setSelectedResult] = useState<LabOptResult | null>(null);
@@ -1528,6 +1532,25 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack }:
     });
     return arr;
   }, [resultsByCombo, sortKey, sortDir]);
+
+  const targetConsumedRef = useRef(false);
+  useEffect(() => {
+    if (!results || bestPerCombo.length === 0) return;
+    if (targetCombo && !targetConsumedRef.current) {
+      targetConsumedRef.current = true;
+      const key = `${targetCombo.ticker}|${targetCombo.timeframe}`;
+      const comboConfigs = resultsByCombo.get(key);
+      if (comboConfigs && comboConfigs.length > 0) {
+        setSelectedResult(comboConfigs[0]);
+        setExpandedCombos(new Set([key]));
+        onTargetConsumed?.();
+        return;
+      }
+    }
+    if (!selectedResult) {
+      setSelectedResult(bestPerCombo[0]);
+    }
+  }, [results, bestPerCombo, resultsByCombo, targetCombo]);
 
   const prevRankingRef = useRef(rankingMode);
   useEffect(() => {
@@ -2021,7 +2044,7 @@ function formatHeatVal(value: number, metric: HeatmapMetric): string {
   return `${value.toFixed(1)}%`;
 }
 
-function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number) => void }) {
+function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: string, timeframe: string) => void }) {
   const [metric, setMetric] = useState<HeatmapMetric>("bestProfit");
   const [selectedCell, setSelectedCell] = useState<any | null>(null);
   const [selectedTopIdx, setSelectedTopIdx] = useState<number>(0);
@@ -2297,7 +2320,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number) => void }) {
                       <span className="flex items-center justify-end gap-0.5">
                         {cfg.runId && onViewRun && (
                           <button
-                            onClick={(e) => { e.stopPropagation(); onViewRun(cfg.runId); }}
+                            onClick={(e) => { e.stopPropagation(); onViewRun(cfg.runId, selectedCell.ticker, selectedCell.timeframe); }}
                             className="p-1 rounded hover:bg-white/10 text-white/40 hover:text-white transition-colors"
                             title="View full results"
                             data-testid={`heatmap-view-run-${idx}`}
