@@ -2316,22 +2316,139 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number) => void }) {
             </div>
           )}
 
+          {activeConfig && <HeatmapRiskSummary config={activeConfig} idx={selectedTopIdx} />}
+
           {activeConfig?.params && (
-            <div>
-              <h4 className="text-sm font-medium text-white/60 mb-2">
+            <Collapsible>
+              <CollapsibleTrigger className="flex items-center gap-2 text-sm font-medium text-white/60 hover:text-white/80 transition-colors w-full py-1">
+                <ChevronRight className="w-3.5 h-3.5 transition-transform [[data-state=open]>&]:rotate-90" />
                 Config #{selectedTopIdx + 1} Parameters
-              </h4>
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1.5">
-                {Object.entries(activeConfig.params as Record<string, any>).map(([key, value]) => (
-                  <div key={key} className="flex items-center justify-between px-3 py-1.5 rounded bg-white/[0.03] text-xs">
-                    <span className="text-white/50 truncate mr-2">{key}</span>
-                    <span className="font-mono text-white font-medium">{typeof value === "number" ? (Number.isInteger(value) ? value : value.toFixed(4)) : String(value)}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1.5 mt-2">
+                  {Object.entries(activeConfig.params as Record<string, any>).map(([key, value]) => (
+                    <div key={key} className="flex items-center justify-between px-3 py-1.5 rounded bg-white/[0.03] text-xs">
+                      <span className="text-white/50 truncate mr-2">{key}</span>
+                      <span className="font-mono text-white font-medium">{typeof value === "number" ? (Number.isInteger(value) ? value : value.toFixed(4)) : String(value)}</span>
+                    </div>
+                  ))}
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
           )}
         </motion.div>
+      )}
+    </div>
+  );
+}
+
+function HeatmapRiskSummary({ config, idx }: { config: any; idx: number }) {
+  const [showProjection, setShowProjection] = useState(false);
+  const dd = config.maxDrawdownPercent || 0;
+  const profit = config.netProfitPercent || 0;
+  const winRate = config.winRatePercent || 0;
+
+  const MAX_LEVERAGE_CAP = 20;
+  const maxSafe = dd > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
+  const recommended = Math.max(1, Math.min(maxSafe, MAX_LEVERAGE_CAP));
+  const recDD = dd * recommended;
+
+  const fixedTradeSize = 1000;
+  const recDrawdownDollar = (dd * recommended / 100) * fixedTradeSize;
+  const walletAlloc = Math.round(fixedTradeSize + recDrawdownDollar * 1.5);
+
+  const recoveryFactor = dd > 0 ? profit / dd : 0;
+  let riskRating: string;
+  if (recDD <= 15 && recoveryFactor >= 3) riskRating = "LOW";
+  else if (recDD <= 35 && recoveryFactor >= 1.5) riskRating = "MODERATE";
+  else if (recDD <= 60 && recoveryFactor >= 0.5) riskRating = "HIGH";
+  else riskRating = "EXTREME";
+
+  const ratingColors: Record<string, { text: string; bg: string; border: string }> = {
+    LOW: { text: "text-green-400", bg: "bg-green-500/10", border: "border-green-500/30" },
+    MODERATE: { text: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/30" },
+    HIGH: { text: "text-red-400", bg: "bg-red-500/10", border: "border-red-500/30" },
+    EXTREME: { text: "text-red-400", bg: "bg-red-500/10", border: "border-red-500/30" },
+  };
+  const rc = ratingColors[riskRating];
+
+  const leverageLevels = [
+    { label: "1x (base)", lev: 1, isCurrent: true },
+    { label: `${recommended}x (rec)`, lev: recommended, isRecommended: true },
+    { label: `${maxSafe}x (safe)`, lev: maxSafe },
+    { label: "20x (max)", lev: 20 },
+  ];
+
+  return (
+    <div className="space-y-3" data-testid={`heatmap-risk-${idx}`}>
+      <div className="flex items-center justify-between">
+        <h4 className="text-sm font-medium text-white/60 flex items-center gap-2">
+          <Shield className="w-3.5 h-3.5 text-violet-400" />
+          Config #{idx + 1} Risk
+        </h4>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant={showProjection ? "default" : "secondary"}
+            onClick={() => setShowProjection(!showProjection)}
+            className={showProjection ? "bg-violet-600 hover:bg-violet-500 text-white text-xs h-6" : "bg-white/5 hover:bg-white/10 text-white/60 text-xs h-6 border border-white/10"}
+            data-testid={`heatmap-leverage-btn-${idx}`}
+          >
+            <ArrowUpDown className="w-3 h-3 mr-1" />
+            Leverage
+          </Button>
+          <Badge className={`${rc.bg} ${rc.text} ${rc.border} border text-[10px] font-semibold`}>{riskRating}</Badge>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div className="bg-white/[0.03] rounded-lg p-2.5 text-center">
+          <p className="text-[10px] text-white/40 mb-0.5">Recommended</p>
+          <p className="text-base font-bold text-violet-400">{recommended}x</p>
+          <p className="text-[9px] text-white/30">max safe: {maxSafe}x</p>
+        </div>
+        <div className="bg-white/[0.03] rounded-lg p-2.5 text-center">
+          <p className="text-[10px] text-white/40 mb-0.5">Wallet Allocation</p>
+          <p className="text-base font-bold text-violet-400">${walletAlloc.toLocaleString()}</p>
+          <p className="text-[9px] text-white/30">per $1k trade</p>
+        </div>
+        <div className="bg-white/[0.03] rounded-lg p-2.5 text-center">
+          <p className="text-[10px] text-white/40 mb-0.5">DD at {recommended}x</p>
+          <p className="text-base font-bold text-amber-400">{recDD.toFixed(1)}%</p>
+          <p className="text-[9px] text-white/30">unleveraged: {dd.toFixed(1)}%</p>
+        </div>
+        <div className="bg-white/[0.03] rounded-lg p-2.5 text-center">
+          <p className="text-[10px] text-white/40 mb-0.5">Recovery Factor</p>
+          <p className={cn("text-base font-bold", recoveryFactor >= 2 ? "text-green-400" : recoveryFactor >= 1 ? "text-yellow-400" : "text-red-400")}>{recoveryFactor.toFixed(2)}</p>
+          <p className="text-[9px] text-white/30">profit / drawdown</p>
+        </div>
+      </div>
+
+      {showProjection && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {leverageLevels.map((l) => (
+            <div
+              key={l.label}
+              className={cn(
+                "rounded-lg border p-2.5 text-center",
+                l.isCurrent ? "bg-white/5 border-white/10" :
+                l.isRecommended ? "bg-violet-500/10 border-violet-500/30" :
+                "bg-white/[0.03] border-white/10"
+              )}
+              data-testid={`heatmap-lev-${l.lev}x-${idx}`}
+            >
+              <p className={cn("text-[10px] font-medium mb-1", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
+              <p className={cn("text-sm font-bold tabular-nums", profit * l.lev >= 0 ? "text-green-400" : "text-red-400")}>
+                {profit * l.lev >= 0 ? "+" : ""}{(profit * l.lev).toFixed(1)}%
+              </p>
+              <p className="text-[9px] text-white/30">profit</p>
+              <div className="mt-1.5 pt-1.5 border-t border-white/5">
+                <p className="text-xs font-semibold text-red-400 tabular-nums">{(dd * l.lev).toFixed(1)}%</p>
+                <p className="text-[9px] text-white/30">drawdown</p>
+              </div>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
