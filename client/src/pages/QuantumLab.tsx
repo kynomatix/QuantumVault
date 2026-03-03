@@ -18,7 +18,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3,
+  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -717,17 +717,23 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
     },
   });
 
-  const handleParse = useCallback(async () => {
-    if (!code.trim() || code === EXAMPLE_PINE) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleParse = useCallback(async (overrideCode?: string) => {
+    const scriptCode = overrideCode ?? code;
+    if (!scriptCode.trim() || scriptCode === EXAMPLE_PINE) {
       toast({ title: "Please paste your Pine Script code first", variant: "destructive" });
       return;
     }
     setIsParsing(true);
     setParseError(null);
     try {
-      const res = await apiRequest("POST", "/api/lab/parse-pine", { code });
+      const res = await apiRequest("POST", "/api/lab/parse-pine", { code: scriptCode });
       const result = await res.json();
       setParsedResult(result);
+      if (result.strategyName) {
+        setStrategyName(result.strategyName);
+      }
       if (result.inputs.length === 0) {
         setParseError("No input declarations found. Make sure your script uses input.int(), input.float(), etc.");
       } else {
@@ -739,7 +745,22 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
     } finally {
       setIsParsing(false);
     }
-  }, [code, toast]);
+  }, [code, strategyName, toast]);
+
+  const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string;
+      if (text) {
+        setCode(text);
+        handleParse(text);
+      }
+    };
+    reader.readAsText(file);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, [handleParse]);
 
   const optimizableCount = parsedResult?.inputs.filter(i => i.optimizable).length ?? 0;
   const fixedCount = parsedResult?.inputs.filter(i => !i.optimizable).length ?? 0;
@@ -767,7 +788,12 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
                 {strategyId ? "Update" : "Save"}
               </Button>
             )}
-            <Button size="sm" onClick={handleParse} disabled={isParsing} data-testid="button-parse" className="bg-violet-600 hover:bg-violet-500 text-white">
+            <input ref={fileInputRef} type="file" accept=".pine,.txt,.ps" className="hidden" onChange={handleFileUpload} data-testid="input-file-upload" aria-label="Upload Pine Script file" />
+            <Button size="sm" onClick={() => fileInputRef.current?.click()} disabled={isParsing} data-testid="button-upload-pine" className="bg-white/5 hover:bg-white/10 text-white/70 border border-white/10">
+              <Upload className="w-3 h-3 mr-1" />
+              Upload Pine
+            </Button>
+            <Button size="sm" onClick={() => handleParse()} disabled={isParsing} data-testid="button-parse" className="bg-violet-600 hover:bg-violet-500 text-white">
               {isParsing ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <CheckCircle2 className="w-3 h-3 mr-1" />}
               {isParsing ? "Parsing..." : "Parse Script"}
             </Button>

@@ -764,6 +764,7 @@ export interface LabPineInput {
 export interface LabPineParseResult {
   inputs: LabPineInput[];
   groups: Record<string, string>;
+  strategyName?: string;
   strategySettings: {
     initialCapital?: number;
     defaultQtyValue?: number;

@@ -137,9 +137,15 @@ export function parsePineScript(code: string): LabPineParseResult {
     }
   }
 
+  let strategyName: string | undefined;
   const strategyMatch = code.match(/strategy\s*\(([^)]+)\)/);
   if (strategyMatch) {
     const args = parseArgString(strategyMatch[1]);
+    if (args.keyword["title"]) {
+      strategyName = stripQuotes(args.keyword["title"]);
+    } else if (args.positional[0]) {
+      strategyName = stripQuotes(args.positional[0]);
+    }
     if (args.keyword["initial_capital"]) {
       strategySettings.initialCapital = parseFloat(args.keyword["initial_capital"]);
     }
@@ -253,5 +259,5 @@ export function parsePineScript(code: string): LabPineParseResult {
     inputs.push(input);
   }
 
-  return { inputs, groups, strategySettings };
+  return { inputs, groups, strategyName, strategySettings };
 }
