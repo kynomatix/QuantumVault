@@ -453,6 +453,12 @@ export function registerLabRoutes(app: Express): void {
       const runId = parseInt(req.params.id);
       const run = await labStorage.getRun(runId);
       if (!run) return res.status(404).json({ error: "Run not found" });
+      if (run.status === "running") {
+        const existingJob = labStorage.getJobByRunId(runId);
+        if (existingJob) {
+          return res.json({ jobId: existingJob.id, runId, alreadyRunning: true });
+        }
+      }
       if (run.status !== "paused") return res.status(400).json({ error: `Run is ${run.status}, not paused` });
 
       const checkpoint = await labStorage.getCheckpoint(runId);

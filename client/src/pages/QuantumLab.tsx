@@ -1305,7 +1305,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
     },
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
-      toast({ title: "Optimization resumed" });
+      toast({ title: data.alreadyRunning ? "Optimization already running" : "Optimization resumed" });
       if (data.jobId) {
         onViewRunning(data.jobId);
       }
