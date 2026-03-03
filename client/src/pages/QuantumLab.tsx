@@ -2187,6 +2187,12 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                     );
                   }
                   const val = cell[metric] as number;
+                  const bestLevResult = cell.allResults?.reduce((best: any, r: any) => {
+                    const dd = r.maxDrawdownPercent || 0;
+                    const lev = dd > 0 ? Math.min(20, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
+                    const levP = r.netProfitPercent * lev;
+                    return (!best || levP > best.levProfit) ? { levProfit: levP, leverage: lev } : best;
+                  }, null);
                   return (
                     <button
                       key={tf}
@@ -2201,7 +2207,12 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                       <span className="text-sm font-bold font-mono text-white drop-shadow-lg">
                         {formatHeatVal(val, metric)}
                       </span>
-                      <span className="text-[9px] text-white/60 mt-0.5">{cell.totalConfigs} configs</span>
+                      {bestLevResult && (
+                        <span className="text-[9px] font-mono text-white/70 drop-shadow-lg">
+                          {bestLevResult.levProfit >= 0 ? "+" : ""}{bestLevResult.levProfit.toFixed(0)}% @{bestLevResult.leverage}x
+                        </span>
+                      )}
+                      <span className="text-[8px] text-white/50 mt-0.5">{cell.totalConfigs} configs</span>
                     </button>
                   );
                 })}
@@ -2250,14 +2261,31 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
             </button>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <Card className="bg-white/5 border border-white/10 p-3">
-              <p className="text-[10px] text-white/40 mb-1">Best Profit</p>
+              <p className="text-[10px] text-white/40 mb-1">Best Profit (1x)</p>
               <p className={`text-lg font-bold font-mono ${selectedCell.bestProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                 {selectedCell.bestProfit.toFixed(1)}%
               </p>
               <p className="text-[9px] text-white/30 mt-1">avg {selectedCell.avgProfit.toFixed(1)}%</p>
             </Card>
+            {(() => {
+              const bestLev = selectedCell.allResults?.reduce((best: any, r: any) => {
+                const dd = r.maxDrawdownPercent || 0;
+                const lev = dd > 0 ? Math.min(20, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
+                const levP = r.netProfitPercent * lev;
+                return (!best || levP > best.levProfit) ? { levProfit: levP, leverage: lev, baseProfit: r.netProfitPercent, dd } : best;
+              }, null);
+              return bestLev ? (
+                <Card className="bg-white/5 border border-white/10 p-3">
+                  <p className="text-[10px] text-white/40 mb-1">Best Leveraged</p>
+                  <p className={`text-lg font-bold font-mono ${bestLev.levProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {bestLev.levProfit >= 0 ? "+" : ""}{bestLev.levProfit.toFixed(1)}%
+                  </p>
+                  <p className="text-[9px] text-white/30 mt-1">{bestLev.baseProfit.toFixed(1)}% × {bestLev.leverage}x (DD {bestLev.dd.toFixed(1)}%)</p>
+                </Card>
+              ) : null;
+            })()}
             <Card className="bg-white/5 border border-white/10 p-3">
               <p className="text-[10px] text-white/40 mb-1">Best Win Rate</p>
               <p className="text-lg font-bold font-mono text-sky-400">{selectedCell.bestWinRate.toFixed(1)}%</p>
