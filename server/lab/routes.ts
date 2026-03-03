@@ -210,6 +210,7 @@ export function registerLabRoutes(app: Express): void {
       if (prefetchedCandles) {
         candlesByCombo = prefetchedCandles;
       } else {
+        const fetchStart = Date.now();
         labStorage.updateProgress(job.id, {
           jobId: job.id, status: "fetching", stage: "Fetching candle data...",
           current: 0, total: 0, percent: 0, elapsed: 0,
@@ -217,7 +218,7 @@ export function registerLabRoutes(app: Express): void {
         candlesByCombo = await fetchAllCandles(config, (msg) => {
           labStorage.updateProgress(job.id, {
             jobId: job.id, status: "fetching", stage: msg,
-            current: 0, total: 0, percent: 0, elapsed: Date.now(),
+            current: 0, total: 0, percent: 0, elapsed: Date.now() - fetchStart,
           });
         });
       }
