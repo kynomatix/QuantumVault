@@ -2256,10 +2256,11 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number) => void }) {
             <div>
               <h4 className="text-sm font-medium text-white/60 mb-2">Top 5 Configurations</h4>
               <div className="space-y-1">
-                <div className="grid gap-2 text-[10px] text-white/40 px-3 py-1" style={{ gridTemplateColumns: "2rem minmax(80px, 1.5fr) 1fr 1fr 1fr 1fr 1fr 3.5rem" }}>
+                <div className="grid gap-2 text-[10px] text-white/40 px-3 py-1" style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 0.8fr 3.5rem" }}>
                   <span>#</span>
                   <span>Strategy</span>
-                  <span>Profit</span>
+                  <span>Profit (1x)</span>
+                  <span>Leveraged Profit</span>
                   <span>Win Rate</span>
                   <span>Drawdown</span>
                   <span>PF</span>
@@ -2270,18 +2271,24 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number) => void }) {
                   const strat = cfg.strategyId ? strategyMap.get(cfg.strategyId) : null;
                   const hasStrategy = strat?.pineScript;
                   const isActive = idx === selectedTopIdx;
+                  const dd = cfg.maxDrawdownPercent || 0;
+                  const safeLev = dd > 0 ? Math.min(20, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
+                  const levProfit = cfg.netProfitPercent * safeLev;
                   return (
                     <div
                       key={idx}
                       onClick={() => setSelectedTopIdx(idx)}
                       className={`grid gap-2 text-xs px-3 py-2 rounded-lg cursor-pointer transition-colors items-center ${isActive ? "bg-violet-500/10 ring-1 ring-violet-500/30" : "bg-white/[0.03] hover:bg-white/[0.06]"}`}
-                      style={{ gridTemplateColumns: "2rem minmax(80px, 1.5fr) 1fr 1fr 1fr 1fr 1fr 3.5rem" }}
+                      style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 0.8fr 3.5rem" }}
                       data-testid={`heatmap-top-${idx}`}
                     >
                       <span className={`font-mono ${isActive ? "text-violet-400" : "text-white/50"}`}>{idx + 1}</span>
                       <span className="text-white/70 truncate" title={strat?.name || "Unknown"}>{strat?.name || "Unknown"}</span>
                       <span className={`font-mono font-medium ${cfg.netProfitPercent >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                         {cfg.netProfitPercent.toFixed(1)}%
+                      </span>
+                      <span className={`font-mono font-medium ${levProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {levProfit >= 0 ? "+" : ""}{levProfit.toFixed(1)}% <span className="text-white/30 font-normal">@{safeLev}x</span>
                       </span>
                       <span className="font-mono text-sky-400">{cfg.winRatePercent.toFixed(1)}%</span>
                       <span className="font-mono text-amber-400">{cfg.maxDrawdownPercent.toFixed(1)}%</span>
