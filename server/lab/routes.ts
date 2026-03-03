@@ -485,6 +485,10 @@ export function registerLabRoutes(app: Express): void {
       }
 
       const config = checkpoint.configSnapshot;
+      if ((checkpoint as any).autoResumeAttempts) {
+        (checkpoint as any).autoResumeAttempts = 0;
+        await labStorage.saveCheckpoint(runId, checkpoint);
+      }
       const job = labStorage.createJob(config);
       job.runId = runId;
 
@@ -714,6 +718,8 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  const MAX_AUTO_RESUME_ATTEMPTS = 2;
+
   setTimeout(async () => {
     try {
       const interruptedIds = (labStorage as any).interruptedRunIds as number[] | undefined;
@@ -728,6 +734,15 @@ export function registerLabRoutes(app: Express): void {
       const hasComboCheckpoint = cp?.completedCombos?.length > 0;
       const hasMidComboCheckpoint = cp?.currentCombo && cp?.currentIteration != null;
       if (!hasComboCheckpoint && !hasMidComboCheckpoint) return;
+
+      const crashCount = (cp.autoResumeAttempts as number) ?? 0;
+      if (crashCount >= MAX_AUTO_RESUME_ATTEMPTS) {
+        console.log(`[QuantumLab] Skipping auto-resume for run ${run.id} — crashed ${crashCount} times (max ${MAX_AUTO_RESUME_ATTEMPTS}). Manual resume required.`);
+        return;
+      }
+
+      cp.autoResumeAttempts = crashCount + 1;
+      await labStorage.saveCheckpoint(run.id, cp);
 
       const checkpoint: LabCheckpoint = cp;
       const config = checkpoint.configSnapshot!;
@@ -757,7 +772,7 @@ export function registerLabRoutes(app: Express): void {
       const detail = hasComboCheckpoint
         ? `${cp.completedCombos.length} combos done`
         : `mid-combo ${cp.currentCombo} at iter ${cp.currentIteration}`;
-      console.log(`[QuantumLab] Auto-resuming run ${run.id} (${detail})`);
+      console.log(`[QuantumLab] Auto-resuming run ${run.id} (${detail}, attempt ${crashCount + 1}/${MAX_AUTO_RESUME_ATTEMPTS})`);
       startOptimizationJob(config, job, run.id, checkpoint);
     } catch (err: any) {
       console.log(`[QuantumLab] Auto-resume error: ${err.message}`);
