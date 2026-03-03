@@ -2579,6 +2579,32 @@ function InsightsPanel() {
 
   const selectedStrategy = strategies?.find(s => s.id === selectedStrategyId) ?? null;
 
+  const { data: strategySummary } = useQuery({
+    queryKey: ["/api/lab/strategies", selectedStrategyId, "summary"],
+    queryFn: async () => {
+      const res = await fetch(`/api/lab/runs?strategyId=${selectedStrategyId}`);
+      if (!res.ok) return null;
+      const runs: any[] = await res.json();
+      const completedRuns = runs.filter(r => r.status === "complete" || r.status === "paused");
+      const tickers = new Set<string>();
+      const timeframes = new Set<string>();
+      let totalResults = 0;
+      for (const run of completedRuns) {
+        totalResults += run.totalConfigsTested ?? 0;
+        const config = run.config as any;
+        if (config?.tickers) for (const t of config.tickers) tickers.add(t);
+        if (config?.timeframes) for (const tf of config.timeframes) timeframes.add(tf);
+      }
+      return {
+        totalRuns: completedRuns.length,
+        totalResults,
+        tickers: Array.from(tickers).sort(),
+        timeframes: Array.from(timeframes).sort(),
+      };
+    },
+    enabled: !!selectedStrategyId,
+  });
+
   const toggleSection = (key: string) => {
     setExpandedSections(prev => {
       const next = new Set(prev);
@@ -2683,6 +2709,49 @@ function InsightsPanel() {
           )}
         </div>
       </Card>
+
+      {strategySummary && selectedStrategyId && !report && !loading && (
+        <Card className="border-white/10 bg-white/[0.03] p-4" data-testid="strategy-preview">
+          <div className="flex items-center gap-2 mb-3">
+            <BarChart3 className="w-4 h-4 text-violet-400" />
+            <span className="text-sm font-semibold text-white">Dataset Overview</span>
+          </div>
+          {strategySummary.totalRuns === 0 ? (
+            <p className="text-white/50 text-sm">No completed optimization runs yet. Run some optimizations first to generate insights.</p>
+          ) : (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <div className="rounded-lg bg-white/[0.03] border border-white/5 p-3">
+                  <span className="text-[10px] uppercase tracking-wide text-white/40 block">Completed Runs</span>
+                  <span className="text-lg font-bold text-white tabular-nums">{strategySummary.totalRuns}</span>
+                </div>
+                <div className="rounded-lg bg-white/[0.03] border border-white/5 p-3">
+                  <span className="text-[10px] uppercase tracking-wide text-white/40 block">Data Samples</span>
+                  <span className="text-lg font-bold text-white tabular-nums">{strategySummary.totalResults.toLocaleString()}</span>
+                </div>
+                <div className="rounded-lg bg-white/[0.03] border border-white/5 p-3">
+                  <span className="text-[10px] uppercase tracking-wide text-white/40 block">Combinations</span>
+                  <span className="text-lg font-bold text-white tabular-nums">{strategySummary.tickers.length} × {strategySummary.timeframes.length}</span>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs text-white/40 mr-1">Tickers</span>
+                  {strategySummary.tickers.map(t => (
+                    <Badge key={t} variant="outline" className="text-[10px] border-white/10 text-white/60">{t.replace("-PERP", "").replace("USDT", "")}</Badge>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs text-white/40 mr-1">Timeframes</span>
+                  {strategySummary.timeframes.map(tf => (
+                    <Badge key={tf} variant="outline" className="text-[10px] border-violet-500/20 text-violet-400">{tf}</Badge>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
 
       {loading && (
         <Card className="border-white/10 bg-white/[0.03] p-12 flex flex-col items-center justify-center gap-4">
