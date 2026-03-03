@@ -1764,7 +1764,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack }:
           </TabsContent>
 
           <TabsContent value="risk">
-            {riskAnalysis && <RiskManagementPanel analysis={riskAnalysis} ticker={selectedResult.ticker} timeframe={selectedResult.timeframe} />}
+            {riskAnalysis && <RiskManagementPanel analysis={riskAnalysis} ticker={selectedResult.ticker} timeframe={selectedResult.timeframe} backtestProfit={selectedResult.netProfitPercent} backtestDrawdown={selectedResult.maxDrawdownPercent} />}
           </TabsContent>
 
           <TabsContent value="params">
@@ -1840,7 +1840,8 @@ function HistStatCard({ label, value, color, icon, sublabel }: { label: string; 
 }
 
 
-function RiskManagementPanel({ analysis, ticker, timeframe }: { analysis: LabRiskAnalysis; ticker?: string; timeframe?: string }) {
+function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, backtestDrawdown }: { analysis: LabRiskAnalysis; ticker?: string; timeframe?: string; backtestProfit: number; backtestDrawdown: number }) {
+  const [showLeverageView, setShowLeverageView] = useState(false);
   const ratingColors: Record<LabRiskAnalysis["riskRating"], { text: string; bg: string; border: string }> = {
     LOW: { text: "text-green-400", bg: "bg-green-500/10", border: "border-green-500/30" },
     MODERATE: { text: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/30" },
@@ -1849,6 +1850,16 @@ function RiskManagementPanel({ analysis, ticker, timeframe }: { analysis: LabRis
   };
   const rc = ratingColors[analysis.riskRating];
 
+  const backtestLeverage = 10;
+  const unleveragedProfit = backtestProfit / backtestLeverage;
+  const unleveragedDrawdown = backtestDrawdown / backtestLeverage;
+  const leverageLevels = [
+    { label: "Backtest (10x)", lev: 10, isCurrent: true },
+    { label: `Recommended (${analysis.recommendedLeverage}x)`, lev: analysis.recommendedLeverage, isRecommended: true },
+    { label: `Max Safe (${analysis.maxSafeLeverage}x)`, lev: analysis.maxSafeLeverage },
+    { label: "No Leverage (1x)", lev: 1 },
+  ];
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -1856,8 +1867,58 @@ function RiskManagementPanel({ analysis, ticker, timeframe }: { analysis: LabRis
           <Shield className="w-4 h-4 text-violet-400" /> Risk Management
           {ticker && <span className="text-white/60 font-normal">- {ticker.split("/")[0]} {timeframe}</span>}
         </h3>
-        <Badge className={`${rc.bg} ${rc.text} ${rc.border} border text-xs font-semibold`} data-testid="badge-risk-rating">{analysis.riskRating} RISK</Badge>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant={showLeverageView ? "default" : "secondary"}
+            onClick={() => setShowLeverageView(!showLeverageView)}
+            className={showLeverageView ? "bg-violet-600 hover:bg-violet-500 text-white text-xs h-7" : "bg-white/5 hover:bg-white/10 text-white/60 text-xs h-7 border border-white/10"}
+            data-testid="button-leverage-projection"
+          >
+            <ArrowUpDown className="w-3 h-3 mr-1" />
+            Leverage Projection
+          </Button>
+          <Badge className={`${rc.bg} ${rc.text} ${rc.border} border text-xs font-semibold`} data-testid="badge-risk-rating">{analysis.riskRating} RISK</Badge>
+        </div>
       </div>
+
+      {showLeverageView && (
+        <Card className="bg-violet-500/5 border border-violet-500/20 p-4" data-testid="leverage-projection-panel">
+          <div className="flex items-center gap-2 mb-3">
+            <ArrowUpDown className="w-3.5 h-3.5 text-violet-400" />
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-violet-300">Leverage Projection</h4>
+          </div>
+          <p className="text-[11px] text-white/40 mb-3">Backtest uses $100 capital with $1,000 position size (10x leverage). Here's how results scale at different leverage levels on $1,000 capital:</p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {leverageLevels.map((l) => {
+              const adjProfit = unleveragedProfit * l.lev;
+              const adjDrawdown = unleveragedDrawdown * l.lev;
+              return (
+                <div
+                  key={l.label}
+                  className={cn(
+                    "rounded-lg border p-3 text-center transition-colors",
+                    l.isCurrent ? "bg-white/5 border-white/10" :
+                    l.isRecommended ? "bg-violet-500/10 border-violet-500/30" :
+                    "bg-white/[0.03] border-white/10"
+                  )}
+                  data-testid={`leverage-card-${l.lev}x`}
+                >
+                  <p className={cn("text-[10px] font-medium mb-1.5", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
+                  <p className={cn("text-lg font-bold tabular-nums", adjProfit >= 0 ? "text-green-400" : "text-red-400")}>
+                    {adjProfit >= 0 ? "+" : ""}{adjProfit.toFixed(1)}%
+                  </p>
+                  <p className="text-[10px] text-white/30 mt-0.5">profit</p>
+                  <div className="mt-2 pt-2 border-t border-white/5">
+                    <p className="text-sm font-semibold text-red-400 tabular-nums">{adjDrawdown.toFixed(1)}%</p>
+                    <p className="text-[10px] text-white/30">max drawdown</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <RiskMetricCard label="Recommended Leverage" value={`${analysis.recommendedLeverage}x`} sublabel={`Max safe: ${analysis.maxSafeLeverage}x`} icon={<Gauge className="w-4 h-4" />} color={analysis.recommendedLeverage <= 3 ? "text-green-400" : analysis.recommendedLeverage <= 7 ? "text-yellow-400" : "text-red-400"} testId="metric-leverage" />
