@@ -12,6 +12,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
+import { ToastAction } from "@/components/ui/toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import {
   Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
@@ -954,7 +955,22 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
       const { jobId, runId } = await res.json();
       onJobStarted(jobId, runId);
     } catch (err: any) {
-      toast({ title: "Failed to start optimization", description: err.message, variant: "destructive" });
+      const isConcurrencyError = err.message?.includes("concurrent") || err.message?.includes("Maximum");
+      toast({
+        title: "Failed to start optimization",
+        description: isConcurrencyError
+          ? "A stuck job is blocking new runs. Click 'Force Clear' to fix this."
+          : err.message,
+        variant: "destructive",
+        action: isConcurrencyError ? (
+          <ToastAction altText="Force clear stuck jobs" onClick={async () => {
+            try {
+              await apiRequest("POST", "/api/lab/jobs/force-clear");
+              toast({ title: "Jobs cleared", description: "You can now start a new optimization." });
+            } catch { toast({ title: "Failed to clear jobs", variant: "destructive" }); }
+          }}>Force Clear</ToastAction>
+        ) : undefined,
+      });
     } finally {
       setIsSubmitting(false);
     }

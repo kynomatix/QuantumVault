@@ -1,12 +1,14 @@
 import type { Express, Request, Response } from "express";
 import { labStorage } from "./storage";
 import { parsePineScript } from "./pine-parser";
-import { labOptimizationConfigSchema, insertLabStrategyBodySchema, updateLabStrategyBodySchema, LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES, type LabCheckpoint, type LabOptimizationConfig, type LabBacktestResult } from "@shared/schema";
+import { labOptimizationConfigSchema, insertLabStrategyBodySchema, updateLabStrategyBodySchema, LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES, type LabCheckpoint, type LabOptimizationConfig, type LabBacktestResult, labOptimizationRuns, labOptimizationResults } from "@shared/schema";
 import { getCacheStats, clearCandleCache } from "./candle-store";
 import { fetchOHLCV } from "./datafeed";
 import { Worker } from "worker_threads";
 import { resolve, dirname } from "path";
 import type { OHLCV } from "./engine";
+import { db } from "../db";
+import { eq } from "drizzle-orm";
 
 export function registerLabRoutes(app: Express): void {
 
@@ -534,6 +536,31 @@ export function registerLabRoutes(app: Express): void {
       return res.status(404).json({ error: "Results not found" });
     }
     res.json(results);
+  });
+
+  app.post("/api/lab/jobs/force-clear", async (req: Request, res: Response) => {
+    if (activeWorker) {
+      activeWorker.postMessage({ type: "abort" });
+      try { activeWorker.terminate(); } catch {}
+      activeWorker = null;
+    }
+    const evicted = labStorage.forceEvictAllJobs();
+    const staleRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "running"));
+    for (const run of staleRuns) {
+      const savedResults = await db.select({ id: labOptimizationResults.id })
+        .from(labOptimizationResults)
+        .where(eq(labOptimizationResults.runId, run.id))
+        .limit(1);
+      if (savedResults.length > 0) {
+        await labStorage.pauseRun(run.id);
+        console.log(`[QuantumLab] Force-clear: run ${run.id} → paused (has results)`);
+      } else {
+        await labStorage.failRun(run.id);
+        console.log(`[QuantumLab] Force-clear: run ${run.id} → failed`);
+      }
+    }
+    console.log(`[QuantumLab] Force-clear complete: ${evicted} in-memory jobs evicted, ${staleRuns.length} DB runs cleaned`);
+    res.json({ success: true, evictedJobs: evicted, cleanedRuns: staleRuns.length });
   });
 
   app.post("/api/lab/job/:id/cancel", async (req: Request, res: Response) => {

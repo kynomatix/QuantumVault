@@ -20,6 +20,7 @@ export interface LabJob {
   abortSignal: { aborted: boolean };
   listeners: Set<(progress: LabJobProgress) => void>;
   runId?: number;
+  lastUpdated: number;
 }
 
 export interface ILabStorage {
@@ -47,6 +48,7 @@ export interface ILabStorage {
 
   createJob(config: LabOptimizationConfig): LabJob;
   getJob(id: string): LabJob | undefined;
+  forceEvictAllJobs(): number;
   getJobByRunId(runId: number): LabJob | undefined;
   updateProgress(id: string, progress: LabJobProgress): void;
   setResults(id: string, results: LabBacktestResult[]): void;
@@ -318,10 +320,23 @@ export class LabDatabaseStorage implements ILabStorage {
   }
 
   createJob(config: LabOptimizationConfig): LabJob {
+    const STALE_TIMEOUT_MS = 5 * 60 * 1000;
+    const now = Date.now();
     const activeJobs = Array.from(this.jobs.values()).filter(
       (j) => j.progress.status !== "complete" && j.progress.status !== "error"
     );
-    if (activeJobs.length >= MAX_CONCURRENT_JOBS) {
+    for (const staleJob of activeJobs) {
+      if (now - staleJob.lastUpdated > STALE_TIMEOUT_MS) {
+        console.log(`[QuantumLab] Evicting stale job ${staleJob.id} (last updated ${Math.round((now - staleJob.lastUpdated) / 1000)}s ago, status: ${staleJob.progress.status})`);
+        staleJob.progress.status = "error";
+        staleJob.progress.stage = "Evicted: stale job";
+        this.scheduleCleanup(staleJob.id);
+      }
+    }
+    const reallyActive = Array.from(this.jobs.values()).filter(
+      (j) => j.progress.status !== "complete" && j.progress.status !== "error"
+    );
+    if (reallyActive.length >= MAX_CONCURRENT_JOBS) {
       throw new Error(`Maximum concurrent jobs limit reached (${MAX_CONCURRENT_JOBS}). Please wait for the current job to finish.`);
     }
 
@@ -341,6 +356,7 @@ export class LabDatabaseStorage implements ILabStorage {
       results: [],
       abortSignal: { aborted: false },
       listeners: new Set(),
+      lastUpdated: now,
     };
     this.jobs.set(id, job);
     return job;
@@ -348,6 +364,20 @@ export class LabDatabaseStorage implements ILabStorage {
 
   getJob(id: string): LabJob | undefined {
     return this.jobs.get(id);
+  }
+
+  forceEvictAllJobs(): number {
+    let evicted = 0;
+    for (const [id, job] of this.jobs.entries()) {
+      if (job.progress.status !== "complete" && job.progress.status !== "error") {
+        console.log(`[QuantumLab] Force-evicting job ${id} (status: ${job.progress.status})`);
+        job.progress.status = "error";
+        job.progress.stage = "Force-evicted by admin";
+        this.scheduleCleanup(id);
+        evicted++;
+      }
+    }
+    return evicted;
   }
 
   getJobByRunId(runId: number): LabJob | undefined {
@@ -367,6 +397,7 @@ export class LabDatabaseStorage implements ILabStorage {
     const job = this.jobs.get(id);
     if (job) {
       job.progress = progress;
+      job.lastUpdated = Date.now();
       for (const listener of Array.from(job.listeners)) {
         try { listener(progress); } catch {}
       }
