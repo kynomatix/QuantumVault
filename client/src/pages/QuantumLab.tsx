@@ -1137,7 +1137,7 @@ function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel
     setCancelling(false);
   };
 
-  const statusColor = progress.status === "error" ? "text-red-400" : progress.status === "complete" ? "text-green-400" : "text-violet-400";
+  const statusColor = progress.status === "error" ? "text-purple-400" : progress.status === "complete" ? "text-sky-400" : "text-violet-400";
   const statusIcon = progress.status === "error" ? <AlertCircle className="w-5 h-5" /> : progress.status === "complete" ? <CheckCircle2 className="w-5 h-5" /> : <Loader2 className="w-5 h-5 animate-spin" />;
 
   return (
@@ -1189,10 +1189,10 @@ function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel
           </div>
           {progress.bestSoFar && (
             <div className="flex items-center gap-2 text-sm px-3 py-2 rounded-md bg-white/5 col-span-2 sm:col-span-1">
-              <TrendingUp className="w-3.5 h-3.5 text-green-400/60 flex-shrink-0" />
+              <TrendingUp className="w-3.5 h-3.5 text-sky-400/60 flex-shrink-0" />
               <div>
                 <p className="text-[10px] text-white/30">Best Profit</p>
-                <p className={`font-mono text-xs font-semibold ${progress.bestSoFar.netProfitPercent >= 0 ? "text-green-400" : "text-red-400"}`} data-testid="text-best-profit">
+                <p className={`font-mono text-xs font-semibold ${progress.bestSoFar.netProfitPercent >= 0 ? "text-sky-400" : "text-purple-400"}`} data-testid="text-best-profit">
                   {progress.bestSoFar.netProfitPercent > 0 ? "+" : ""}{progress.bestSoFar.netProfitPercent.toFixed(2)}%
                 </p>
               </div>
@@ -1202,9 +1202,9 @@ function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel
 
         {progress.bestSoFar && (
           <div className="grid grid-cols-3 gap-3">
-            <RunMetricCard label="Win Rate" value={`${progress.bestSoFar.winRatePercent.toFixed(1)}%`} color={progress.bestSoFar.winRatePercent >= 50 ? "text-green-400" : "text-yellow-400"} testId="text-best-winrate" />
-            <RunMetricCard label="Max Drawdown" value={`${progress.bestSoFar.maxDrawdownPercent.toFixed(1)}%`} color={progress.bestSoFar.maxDrawdownPercent <= 30 ? "text-green-400" : "text-red-400"} testId="text-best-drawdown" />
-            <RunMetricCard label="Profit Factor" value={progress.bestSoFar.profitFactor.toFixed(2)} color={progress.bestSoFar.profitFactor >= 1.5 ? "text-green-400" : "text-yellow-400"} testId="text-best-pf" />
+            <RunMetricCard label="Win Rate" value={`${progress.bestSoFar.winRatePercent.toFixed(1)}%`} color={progress.bestSoFar.winRatePercent >= 50 ? "text-sky-400" : "text-indigo-400"} testId="text-best-winrate" />
+            <RunMetricCard label="Max Drawdown" value={`${progress.bestSoFar.maxDrawdownPercent.toFixed(1)}%`} color={progress.bestSoFar.maxDrawdownPercent <= 30 ? "text-sky-400" : "text-purple-400"} testId="text-best-drawdown" />
+            <RunMetricCard label="Profit Factor" value={progress.bestSoFar.profitFactor.toFixed(2)} color={progress.bestSoFar.profitFactor >= 1.5 ? "text-sky-400" : "text-indigo-400"} testId="text-best-pf" />
           </div>
         )}
 
@@ -1225,11 +1225,11 @@ function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel
                     </div>
                     <div className="flex items-center gap-2">
                       {val.best !== undefined && (
-                        <span className={`text-xs font-mono ${val.best >= 0 ? "text-green-400" : "text-red-400"}`}>
+                        <span className={`text-xs font-mono ${val.best >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                           {val.best > 0 ? "+" : ""}{val.best.toFixed(1)}%
                         </span>
                       )}
-                      <Badge className={`text-[10px] ${val.status === "complete" ? "bg-green-500/20 text-green-400" : val.status === "running" ? "bg-violet-500/20 text-violet-400" : "bg-white/5 text-white/60"}`}>
+                      <Badge className={`text-[10px] ${val.status === "complete" ? "bg-sky-500/20 text-sky-400" : val.status === "running" ? "bg-violet-500/20 text-violet-400" : "bg-white/5 text-white/60"}`}>
                         {val.status === "complete" && <CheckCircle2 className="w-2.5 h-2.5 mr-1" />}
                         {val.status === "running" && <Loader2 className="w-2.5 h-2.5 mr-1 animate-spin" />}
                         {val.status}
@@ -1341,7 +1341,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
               <div className="grid grid-cols-4 gap-3">
                 <div>
                   <p className="text-[11px] text-white/40">Net Profit</p>
-                  <p className={`text-sm font-mono font-semibold ${liveProgress.bestSoFar.netProfitPercent >= 0 ? "text-green-400" : "text-red-400"}`}>
+                  <p className={`text-sm font-mono font-semibold ${liveProgress.bestSoFar.netProfitPercent >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                     {liveProgress.bestSoFar.netProfitPercent.toFixed(1)}%
                   </p>
                 </div>
@@ -1351,7 +1351,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
                 </div>
                 <div>
                   <p className="text-[11px] text-white/40">Max DD</p>
-                  <p className="text-sm font-mono font-semibold text-amber-400">{liveProgress.bestSoFar.maxDrawdownPercent.toFixed(1)}%</p>
+                  <p className="text-sm font-mono font-semibold text-indigo-400">{liveProgress.bestSoFar.maxDrawdownPercent.toFixed(1)}%</p>
                 </div>
                 <div>
                   <p className="text-[11px] text-white/40">Profit Factor</p>
@@ -1383,13 +1383,13 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
             const checkpointedCombos = checkpoint?.completedCombos?.length ?? 0;
             const totalCombos = tickers.length * timeframes.length;
 
-            const statusIcon = isComplete ? <CheckCircle2 className="w-4 h-4 text-green-400" /> :
-              isFailed ? <XCircle className="w-4 h-4 text-red-400" /> :
-              isPaused ? <PauseCircle className="w-4 h-4 text-amber-400" /> :
+            const statusIcon = isComplete ? <CheckCircle2 className="w-4 h-4 text-sky-400" /> :
+              isFailed ? <XCircle className="w-4 h-4 text-purple-400" /> :
+              isPaused ? <PauseCircle className="w-4 h-4 text-indigo-400" /> :
               isRunning ? <Loader2 className="w-4 h-4 text-violet-400 animate-spin" /> :
-              <AlertCircle className="w-4 h-4 text-yellow-400" />;
+              <AlertCircle className="w-4 h-4 text-indigo-400" />;
 
-            const statusBg = isComplete ? "bg-green-500/10" : isFailed ? "bg-red-500/10" : isPaused ? "bg-amber-500/10" : isRunning ? "bg-violet-500/10" : "bg-yellow-500/10";
+            const statusBg = isComplete ? "bg-sky-500/10" : isFailed ? "bg-purple-500/10" : isPaused ? "bg-indigo-500/10" : isRunning ? "bg-violet-500/10" : "bg-indigo-500/10";
 
             return (
               <div key={run.id} className="flex items-center gap-2">
@@ -1431,11 +1431,11 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
                               <BarChart3 className="w-3 h-3" /> {run.totalConfigsTested?.toLocaleString() ?? (isPaused || isFailed ? "partial" : "?")} configs
                             </span>
                             {isPaused ? (
-                              <Badge className="text-[10px] bg-amber-500/20 text-amber-400">
+                              <Badge className="text-[10px] bg-indigo-500/20 text-indigo-400">
                                 Paused ({checkpointedCombos}/{totalCombos} combos)
                               </Badge>
                             ) : (
-                              <Badge className={`text-[10px] ${isComplete ? "bg-white/5 text-white/70" : isFailed ? "bg-red-500/20 text-red-400" : "bg-violet-500/20 text-violet-400"}`}>
+                              <Badge className={`text-[10px] ${isComplete ? "bg-white/5 text-white/70" : isFailed ? "bg-purple-500/20 text-purple-400" : "bg-violet-500/20 text-violet-400"}`}>
                                 {isRunning ? "Running" : isFailed ? "Failed" : run.mode === "smoke" ? "Smoke Test" : "Full Sweep"}
                               </Badge>
                             )}
@@ -1447,7 +1447,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 gap-1"
+                            className="text-indigo-400 hover:text-indigo-300 hover:bg-indigo-500/10 gap-1"
                             onClick={(e) => { e.stopPropagation(); resumeMutation.mutate(run.id); }}
                             disabled={resumeMutation.isPending}
                             data-testid={`button-resume-run-${run.id}`}
@@ -1595,7 +1595,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     return (
       <div className="flex items-center justify-center h-96">
         <div className="text-center space-y-4">
-          <AlertCircle className="w-8 h-8 text-amber-400 mx-auto" />
+          <AlertCircle className="w-8 h-8 text-indigo-400 mx-auto" />
           <p className="text-sm text-white/60">
             {isInterrupted ? "This run was interrupted before any results were saved." : "No qualifying results for this run."}
           </p>
@@ -1629,7 +1629,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
             <h2 className="text-lg font-semibold text-white" data-testid="text-history-title">
               Run #{runId} Results
               {run && (run.status === "paused" || run.status === "failed") && (
-                <Badge className="ml-2 text-[10px] bg-amber-500/20 text-amber-400 align-middle">Partial</Badge>
+                <Badge className="ml-2 text-[10px] bg-indigo-500/20 text-indigo-400 align-middle">Partial</Badge>
               )}
             </h2>
             <p className="text-xs text-white/60">
@@ -1663,9 +1663,9 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <HistStatCard label="Net Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} color={bestProfit >= 0 ? "text-green-400" : "text-red-400"} icon={<TrendingUp className="w-4 h-4" />} sublabel={displayResult ? `${displayResult.ticker.split("/")[0]} ${displayResult.timeframe}` : undefined} />
+        <HistStatCard label="Net Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} color={bestProfit >= 0 ? "text-sky-400" : "text-purple-400"} icon={<TrendingUp className="w-4 h-4" />} sublabel={displayResult ? `${displayResult.ticker.split("/")[0]} ${displayResult.timeframe}` : undefined} />
         <HistStatCard label="Win Rate" value={`${bestWinRate.toFixed(1)}%`} color="text-sky-400" icon={<Percent className="w-4 h-4" />} />
-        <HistStatCard label="Max Drawdown" value={`${lowestDD.toFixed(1)}%`} color="text-amber-400" icon={<TrendingDown className="w-4 h-4" />} />
+        <HistStatCard label="Max Drawdown" value={`${lowestDD.toFixed(1)}%`} color="text-indigo-400" icon={<TrendingDown className="w-4 h-4" />} />
         <HistStatCard label="Profit Factor" value={bestPF.toFixed(2)} color="text-violet-400" icon={<BarChart3 className="w-4 h-4" />} sublabel={RANKING_LABELS[rankingMode]} />
       </div>
 
@@ -1713,12 +1713,12 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                       onClick={() => setSelectedResult(r)} data-testid={`history-row-${r.id}`}>
                       <td className="py-2.5 px-4 font-medium text-white">{name}</td>
                       <td className="py-2.5 px-2"><Badge variant="outline" className="text-[10px] border-white/20 text-white/60">{r.timeframe}</Badge></td>
-                      <td className={`py-2.5 px-2 text-right font-mono font-medium ${r.netProfitPercent >= 0 ? "text-green-400" : "text-red-400"}`}>
+                      <td className={`py-2.5 px-2 text-right font-mono font-medium ${r.netProfitPercent >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                         {r.netProfitPercent > 0 ? "+" : ""}{r.netProfitPercent.toFixed(2)}%
                       </td>
-                      <td className={`py-2.5 px-2 text-right font-mono ${r.winRatePercent >= 50 ? "text-green-400" : "text-yellow-400"}`}>{r.winRatePercent.toFixed(1)}%</td>
-                      <td className={`py-2.5 px-2 text-right font-mono ${r.maxDrawdownPercent <= 30 ? "text-green-400" : "text-red-400"}`}>{r.maxDrawdownPercent.toFixed(1)}%</td>
-                      <td className={`py-2.5 px-2 text-right font-mono ${r.profitFactor >= 1.5 ? "text-green-400" : "text-white"}`}>{r.profitFactor.toFixed(2)}</td>
+                      <td className={`py-2.5 px-2 text-right font-mono ${r.winRatePercent >= 50 ? "text-sky-400" : "text-indigo-400"}`}>{r.winRatePercent.toFixed(1)}%</td>
+                      <td className={`py-2.5 px-2 text-right font-mono ${r.maxDrawdownPercent <= 30 ? "text-sky-400" : "text-purple-400"}`}>{r.maxDrawdownPercent.toFixed(1)}%</td>
+                      <td className={`py-2.5 px-2 text-right font-mono ${r.profitFactor >= 1.5 ? "text-sky-400" : "text-white"}`}>{r.profitFactor.toFixed(2)}</td>
                       <td className="py-2.5 px-2 text-right font-mono text-white/60">{r.totalTrades}</td>
                       <td className="py-2.5 px-2">
                         {subResults.length > 0 && (
@@ -1736,12 +1736,12 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           onClick={() => setSelectedResult(sr)} data-testid={`history-sub-${sr.id}`}>
                           <td className="py-2 px-4 pl-8 text-xs text-white/40">#{idx + 2}</td>
                           <td className="py-2 px-2"><Badge variant="outline" className="text-[10px] border-white/20 text-white/40">{sr.timeframe}</Badge></td>
-                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.netProfitPercent >= 0 ? "text-green-400/70" : "text-red-400/70"}`}>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.netProfitPercent >= 0 ? "text-sky-400/70" : "text-purple-400/70"}`}>
                             {sr.netProfitPercent > 0 ? "+" : ""}{sr.netProfitPercent.toFixed(2)}%
                           </td>
-                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.winRatePercent >= 50 ? "text-green-400/70" : "text-yellow-400/70"}`}>{sr.winRatePercent.toFixed(1)}%</td>
-                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.maxDrawdownPercent <= 30 ? "text-green-400/70" : "text-red-400/70"}`}>{sr.maxDrawdownPercent.toFixed(1)}%</td>
-                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.profitFactor >= 1.5 ? "text-green-400/70" : "text-white/50"}`}>{sr.profitFactor.toFixed(2)}</td>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.winRatePercent >= 50 ? "text-sky-400/70" : "text-indigo-400/70"}`}>{sr.winRatePercent.toFixed(1)}%</td>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.maxDrawdownPercent <= 30 ? "text-sky-400/70" : "text-purple-400/70"}`}>{sr.maxDrawdownPercent.toFixed(1)}%</td>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.profitFactor >= 1.5 ? "text-sky-400/70" : "text-white/50"}`}>{sr.profitFactor.toFixed(2)}</td>
                           <td className="py-2 px-2 text-right font-mono text-xs text-white/40">{sr.totalTrades}</td>
                           <td></td>
                         </tr>
@@ -1830,18 +1830,18 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                   </thead>
                   <tbody>
                     {((selectedResult.trades as any[]) ?? []).map((t: any, idx: number) => (
-                      <tr key={idx} className={`border-b border-white/5 ${t.pnlPercent > 0 ? "bg-green-500/[0.03]" : "bg-red-500/[0.03]"}`}>
+                      <tr key={idx} className={`border-b border-white/5 ${t.pnlPercent > 0 ? "bg-sky-500/[0.03]" : "bg-purple-500/[0.03]"}`}>
                         <td className="py-2 px-3 font-mono text-white/60">{new Date(t.entryTime).toLocaleDateString()}</td>
                         <td className="py-2 px-2 font-mono text-white/60">{new Date(t.exitTime).toLocaleDateString()}</td>
                         <td className="py-2 px-2">
-                          <Badge variant="outline" className={`text-[9px] ${t.direction === "long" ? "text-green-400 border-green-500/30" : "text-red-400 border-red-500/30"}`}>
+                          <Badge variant="outline" className={`text-[9px] ${t.direction === "long" ? "text-sky-400 border-sky-500/30" : "text-purple-400 border-purple-500/30"}`}>
                             {t.direction?.toUpperCase()}
                           </Badge>
                         </td>
-                        <td className={`py-2 px-2 text-right font-mono ${t.pnlPercent >= 0 ? "text-green-400" : "text-red-400"}`}>
+                        <td className={`py-2 px-2 text-right font-mono ${t.pnlPercent >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                           {t.pnlPercent > 0 ? "+" : ""}{t.pnlPercent?.toFixed(2)}%
                         </td>
-                        <td className={`py-2 px-2 text-right font-mono ${t.pnlDollar >= 0 ? "text-green-400" : "text-red-400"}`}>
+                        <td className={`py-2 px-2 text-right font-mono ${t.pnlDollar >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                           {t.pnlDollar > 0 ? "+" : ""}{t.pnlDollar?.toFixed(2)}
                         </td>
                         <td className="py-2 px-2 text-white/60">{t.exitReason}</td>
@@ -1873,10 +1873,10 @@ function HistStatCard({ label, value, color, icon, sublabel }: { label: string; 
 function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, backtestDrawdown }: { analysis: LabRiskAnalysis; ticker?: string; timeframe?: string; backtestProfit: number; backtestDrawdown: number }) {
   const [showLeverageView, setShowLeverageView] = useState(false);
   const ratingColors: Record<LabRiskAnalysis["riskRating"], { text: string; bg: string; border: string }> = {
-    LOW: { text: "text-green-400", bg: "bg-green-500/10", border: "border-green-500/30" },
-    MODERATE: { text: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/30" },
-    HIGH: { text: "text-red-400", bg: "bg-red-500/10", border: "border-red-500/30" },
-    EXTREME: { text: "text-red-400", bg: "bg-red-500/10", border: "border-red-500/30" },
+    LOW: { text: "text-sky-400", bg: "bg-sky-500/10", border: "border-sky-500/30" },
+    MODERATE: { text: "text-indigo-400", bg: "bg-indigo-500/10", border: "border-indigo-500/30" },
+    HIGH: { text: "text-purple-400", bg: "bg-purple-500/10", border: "border-purple-500/30" },
+    EXTREME: { text: "text-purple-400", bg: "bg-purple-500/10", border: "border-purple-500/30" },
   };
   const rc = ratingColors[analysis.riskRating];
 
@@ -1932,12 +1932,12 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
                   data-testid={`leverage-card-${l.lev}x`}
                 >
                   <p className={cn("text-[10px] font-medium mb-1.5", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
-                  <p className={cn("text-lg font-bold tabular-nums", adjProfit >= 0 ? "text-green-400" : "text-red-400")}>
+                  <p className={cn("text-lg font-bold tabular-nums", adjProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
                     {adjProfit >= 0 ? "+" : ""}{adjProfit.toFixed(1)}%
                   </p>
                   <p className="text-[10px] text-white/30 mt-0.5">profit</p>
                   <div className="mt-2 pt-2 border-t border-white/5">
-                    <p className="text-sm font-semibold text-red-400 tabular-nums">{adjDrawdown.toFixed(1)}%</p>
+                    <p className="text-sm font-semibold text-purple-400 tabular-nums">{adjDrawdown.toFixed(1)}%</p>
                     <p className="text-[10px] text-white/30">max drawdown</p>
                   </div>
                 </div>
@@ -1948,10 +1948,10 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
       )}
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <RiskMetricCard label="Recommended Leverage" value={`${analysis.recommendedLeverage}x`} sublabel={`Max safe: ${analysis.maxSafeLeverage}x`} icon={<Gauge className="w-4 h-4" />} color={analysis.recommendedLeverage <= 3 ? "text-green-400" : analysis.recommendedLeverage <= 7 ? "text-yellow-400" : "text-red-400"} testId="metric-leverage" />
+        <RiskMetricCard label="Recommended Leverage" value={`${analysis.recommendedLeverage}x`} sublabel={`Max safe: ${analysis.maxSafeLeverage}x`} icon={<Gauge className="w-4 h-4" />} color={analysis.recommendedLeverage <= 3 ? "text-sky-400" : analysis.recommendedLeverage <= 7 ? "text-indigo-400" : "text-purple-400"} testId="metric-leverage" />
         <RiskMetricCard label="Wallet Allocation" value={`$${analysis.recommendedWalletAllocation.toLocaleString()}`} sublabel="per $1,000 trade" icon={<DollarSign className="w-4 h-4" />} color="text-violet-400" testId="metric-wallet" />
-        <RiskMetricCard label="Longest Losing Streak" value={`${analysis.longestLosingStreak} trades`} sublabel={`${analysis.streakDrawdownPercent.toFixed(1)}% cumulative loss`} icon={<TrendingDown className="w-4 h-4" />} color={analysis.longestLosingStreak <= 3 ? "text-green-400" : analysis.longestLosingStreak <= 6 ? "text-yellow-400" : "text-red-400"} testId="metric-streak" />
-        <RiskMetricCard label="Recovery Factor" value={analysis.recoveryFactor.toFixed(2)} sublabel="profit / max drawdown" icon={<Target className="w-4 h-4" />} color={analysis.recoveryFactor >= 2 ? "text-green-400" : analysis.recoveryFactor >= 1 ? "text-yellow-400" : "text-red-400"} testId="metric-recovery" />
+        <RiskMetricCard label="Longest Losing Streak" value={`${analysis.longestLosingStreak} trades`} sublabel={`${analysis.streakDrawdownPercent.toFixed(1)}% cumulative loss`} icon={<TrendingDown className="w-4 h-4" />} color={analysis.longestLosingStreak <= 3 ? "text-sky-400" : analysis.longestLosingStreak <= 6 ? "text-indigo-400" : "text-purple-400"} testId="metric-streak" />
+        <RiskMetricCard label="Recovery Factor" value={analysis.recoveryFactor.toFixed(2)} sublabel="profit / max drawdown" icon={<Target className="w-4 h-4" />} color={analysis.recoveryFactor >= 2 ? "text-sky-400" : analysis.recoveryFactor >= 1 ? "text-indigo-400" : "text-purple-400"} testId="metric-recovery" />
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1975,13 +1975,13 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
             <Flame className="w-3.5 h-3.5" /> Risk Metrics
           </h4>
           <div className="space-y-2">
-            <DetailRow label="Max Drawdown (1x)" value={`${analysis.maxDrawdownPercent.toFixed(1)}%`} color="text-red-400" />
-            <DetailRow label="Worst Single Trade" value={`${analysis.worstTradePercent.toFixed(2)}%`} color="text-red-400" />
-            <DetailRow label="Avg Win" value={`+${analysis.avgWinPercent.toFixed(2)}%`} color="text-green-400" />
-            <DetailRow label="Avg Loss" value={`-${analysis.avgLossPercent.toFixed(2)}%`} color="text-red-400" />
+            <DetailRow label="Max Drawdown (1x)" value={`${analysis.maxDrawdownPercent.toFixed(1)}%`} color="text-purple-400" />
+            <DetailRow label="Worst Single Trade" value={`${analysis.worstTradePercent.toFixed(2)}%`} color="text-purple-400" />
+            <DetailRow label="Avg Win" value={`+${analysis.avgWinPercent.toFixed(2)}%`} color="text-sky-400" />
+            <DetailRow label="Avg Loss" value={`-${analysis.avgLossPercent.toFixed(2)}%`} color="text-purple-400" />
             <DetailRow label="Longest Losing Streak" value={`${analysis.longestLosingStreak} trades`} />
             <DetailRow label="Streak Cumulative Loss" value={`${analysis.streakDrawdownPercent.toFixed(1)}%`} />
-            <DetailRow label="Risk of Ruin" value={`${analysis.riskOfRuin.toFixed(1)}%`} color={analysis.riskOfRuin > 20 ? "text-red-400" : analysis.riskOfRuin > 5 ? "text-yellow-400" : "text-green-400"} />
+            <DetailRow label="Risk of Ruin" value={`${analysis.riskOfRuin.toFixed(1)}%`} color={analysis.riskOfRuin > 20 ? "text-purple-400" : analysis.riskOfRuin > 5 ? "text-indigo-400" : "text-sky-400"} />
             {analysis.avgBarsInDrawdown > 0 && <DetailRow label="Avg Drawdown Duration" value={`${analysis.avgBarsInDrawdown} bars`} />}
           </div>
         </Card>
@@ -1996,8 +1996,8 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
             <div key={idx} className="flex gap-2.5 text-xs" data-testid={`recommendation-${idx}`}>
               <div className="mt-0.5 shrink-0">
                 {idx === 0 ? <Gauge className="w-3.5 h-3.5 text-violet-400" /> :
-                  rec.includes("consecutive") || rec.includes("ruin") ? <AlertTriangle className="w-3.5 h-3.5 text-yellow-400" /> :
-                  rec.includes("Strong") || rec.includes("Kelly") ? <Target className="w-3.5 h-3.5 text-green-400" /> :
+                  rec.includes("consecutive") || rec.includes("ruin") ? <AlertTriangle className="w-3.5 h-3.5 text-indigo-400" /> :
+                  rec.includes("Strong") || rec.includes("Kelly") ? <Target className="w-3.5 h-3.5 text-sky-400" /> :
                   <Info className="w-3.5 h-3.5 text-white/40" />}
               </div>
               <p className="text-white/60 leading-relaxed">{rec}</p>
@@ -2037,10 +2037,10 @@ function getHeatColor(value: number, min: number, max: number, metric: HeatmapMe
   const isInverse = metric === "lowestDrawdown" || metric === "avgDrawdown";
   let t = (value - min) / (max - min);
   if (isInverse) t = 1 - t;
-  if (t < 0.25) return `rgba(239, 68, 68, ${0.2 + t * 2})`;
-  if (t < 0.5) return `rgba(245, 158, 11, ${0.3 + (t - 0.25) * 1.5})`;
-  if (t < 0.75) return `rgba(16, 185, 129, ${0.3 + (t - 0.5) * 1.5})`;
-  return `rgba(16, 185, 129, ${0.6 + (t - 0.75) * 1.6})`;
+  if (t < 0.25) return `rgba(168, 85, 247, ${0.2 + t * 2})`;
+  if (t < 0.5) return `rgba(99, 102, 241, ${0.3 + (t - 0.25) * 1.5})`;
+  if (t < 0.75) return `rgba(56, 189, 248, ${0.3 + (t - 0.5) * 1.5})`;
+  return `rgba(56, 189, 248, ${0.6 + (t - 0.75) * 1.6})`;
 }
 
 function formatHeatVal(value: number, metric: HeatmapMetric): string {
@@ -2256,19 +2256,19 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
 
         <div className="flex items-center justify-center gap-2 mt-4 text-[10px] text-white/40">
           <div className="flex items-center gap-1">
-            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(239, 68, 68, 0.5)" }} />
+            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(168, 85, 247, 0.5)" }} />
             <span>Worst</span>
           </div>
           <div className="flex items-center gap-1">
-            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(245, 158, 11, 0.5)" }} />
+            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(99, 102, 241, 0.5)" }} />
             <span>Below Avg</span>
           </div>
           <div className="flex items-center gap-1">
-            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(16, 185, 129, 0.5)" }} />
+            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(56, 189, 248, 0.5)" }} />
             <span>Above Avg</span>
           </div>
           <div className="flex items-center gap-1">
-            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(16, 185, 129, 0.9)" }} />
+            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(56, 189, 248, 0.9)" }} />
             <span>Best</span>
           </div>
         </div>
@@ -2297,7 +2297,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <Card className="bg-white/5 border border-white/10 p-3">
               <p className="text-[10px] text-white/40 mb-1">Best Profit (1x)</p>
-              <p className={`text-lg font-bold font-mono ${selectedCell.bestProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              <p className={`text-lg font-bold font-mono ${selectedCell.bestProfit >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                 {selectedCell.bestProfit.toFixed(1)}%
               </p>
               <p className="text-[9px] text-white/30 mt-1">avg {selectedCell.avgProfit.toFixed(1)}%</p>
@@ -2312,7 +2312,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
               return bestLev ? (
                 <Card className="bg-white/5 border border-white/10 p-3">
                   <p className="text-[10px] text-white/40 mb-1">Best Leveraged</p>
-                  <p className={`text-lg font-bold font-mono ${bestLev.levProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  <p className={`text-lg font-bold font-mono ${bestLev.levProfit >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                     {bestLev.levProfit >= 0 ? "+" : ""}{bestLev.levProfit.toFixed(1)}%
                   </p>
                   <p className="text-[9px] text-white/30 mt-1">{bestLev.baseProfit.toFixed(1)}% × {bestLev.leverage}x (DD {bestLev.dd.toFixed(1)}%)</p>
@@ -2326,7 +2326,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
             </Card>
             <Card className="bg-white/5 border border-white/10 p-3">
               <p className="text-[10px] text-white/40 mb-1">Lowest Drawdown</p>
-              <p className="text-lg font-bold font-mono text-amber-400">{selectedCell.lowestDrawdown.toFixed(1)}%</p>
+              <p className="text-lg font-bold font-mono text-indigo-400">{selectedCell.lowestDrawdown.toFixed(1)}%</p>
               <p className="text-[9px] text-white/30 mt-1">avg {selectedCell.avgDrawdown.toFixed(1)}%</p>
             </Card>
             <Card className="bg-white/5 border border-white/10 p-3">
@@ -2368,14 +2368,14 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                     >
                       <span className={`font-mono ${isActive ? "text-violet-400" : "text-white/50"}`}>{idx + 1}</span>
                       <span className="text-white/70 truncate" title={strat?.name || "Unknown"}>{strat?.name || "Unknown"}</span>
-                      <span className={`font-mono font-medium ${cfg.netProfitPercent >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      <span className={`font-mono font-medium ${cfg.netProfitPercent >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                         {cfg.netProfitPercent.toFixed(1)}%
                       </span>
-                      <span className={`font-mono font-medium ${levProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      <span className={`font-mono font-medium ${levProfit >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                         {levProfit >= 0 ? "+" : ""}{levProfit.toFixed(1)}% <span className="text-white/30 font-normal">@{safeLev}x</span>
                       </span>
                       <span className="font-mono text-sky-400">{cfg.winRatePercent.toFixed(1)}%</span>
-                      <span className="font-mono text-amber-400">{cfg.maxDrawdownPercent.toFixed(1)}%</span>
+                      <span className="font-mono text-indigo-400">{cfg.maxDrawdownPercent.toFixed(1)}%</span>
                       <span className="font-mono text-violet-400">{cfg.profitFactor.toFixed(2)}</span>
                       <span className="font-mono text-white/60">{cfg.totalTrades}</span>
                       <span className="flex items-center justify-end gap-0.5">
@@ -2456,10 +2456,10 @@ function HeatmapRiskSummary({ config, idx }: { config: any; idx: number }) {
   else riskRating = "EXTREME";
 
   const ratingColors: Record<string, { text: string; bg: string; border: string }> = {
-    LOW: { text: "text-green-400", bg: "bg-green-500/10", border: "border-green-500/30" },
-    MODERATE: { text: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/30" },
-    HIGH: { text: "text-red-400", bg: "bg-red-500/10", border: "border-red-500/30" },
-    EXTREME: { text: "text-red-400", bg: "bg-red-500/10", border: "border-red-500/30" },
+    LOW: { text: "text-sky-400", bg: "bg-sky-500/10", border: "border-sky-500/30" },
+    MODERATE: { text: "text-indigo-400", bg: "bg-indigo-500/10", border: "border-indigo-500/30" },
+    HIGH: { text: "text-purple-400", bg: "bg-purple-500/10", border: "border-purple-500/30" },
+    EXTREME: { text: "text-purple-400", bg: "bg-purple-500/10", border: "border-purple-500/30" },
   };
   const rc = ratingColors[riskRating];
 
@@ -2505,12 +2505,12 @@ function HeatmapRiskSummary({ config, idx }: { config: any; idx: number }) {
         </div>
         <div className="bg-white/[0.03] rounded-lg p-2.5 text-center">
           <p className="text-[10px] text-white/40 mb-0.5">DD at {recommended}x</p>
-          <p className="text-base font-bold text-amber-400">{recDD.toFixed(1)}%</p>
+          <p className="text-base font-bold text-indigo-400">{recDD.toFixed(1)}%</p>
           <p className="text-[9px] text-white/30">unleveraged: {dd.toFixed(1)}%</p>
         </div>
         <div className="bg-white/[0.03] rounded-lg p-2.5 text-center">
           <p className="text-[10px] text-white/40 mb-0.5">Recovery Factor</p>
-          <p className={cn("text-base font-bold", recoveryFactor >= 2 ? "text-green-400" : recoveryFactor >= 1 ? "text-yellow-400" : "text-red-400")}>{recoveryFactor.toFixed(2)}</p>
+          <p className={cn("text-base font-bold", recoveryFactor >= 2 ? "text-sky-400" : recoveryFactor >= 1 ? "text-indigo-400" : "text-purple-400")}>{recoveryFactor.toFixed(2)}</p>
           <p className="text-[9px] text-white/30">profit / drawdown</p>
         </div>
       </div>
@@ -2529,12 +2529,12 @@ function HeatmapRiskSummary({ config, idx }: { config: any; idx: number }) {
               data-testid={`heatmap-lev-${l.lev}x-${idx}`}
             >
               <p className={cn("text-[10px] font-medium mb-1", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
-              <p className={cn("text-sm font-bold tabular-nums", profit * l.lev >= 0 ? "text-green-400" : "text-red-400")}>
+              <p className={cn("text-sm font-bold tabular-nums", profit * l.lev >= 0 ? "text-sky-400" : "text-purple-400")}>
                 {profit * l.lev >= 0 ? "+" : ""}{(profit * l.lev).toFixed(1)}%
               </p>
               <p className="text-[9px] text-white/30">profit</p>
               <div className="mt-1.5 pt-1.5 border-t border-white/5">
-                <p className="text-xs font-semibold text-red-400 tabular-nums">{(dd * l.lev).toFixed(1)}%</p>
+                <p className="text-xs font-semibold text-purple-400 tabular-nums">{(dd * l.lev).toFixed(1)}%</p>
                 <p className="text-[9px] text-white/30">drawdown</p>
               </div>
             </div>
@@ -2614,10 +2614,10 @@ function InsightsPanel() {
     });
   };
 
-  const severityColor = (s: string) => s === "critical" ? "text-red-400 bg-red-500/10 border-red-500/20" : s === "warning" ? "text-amber-400 bg-amber-500/10 border-amber-500/20" : "text-sky-400 bg-sky-500/10 border-sky-500/20";
+  const severityColor = (s: string) => s === "critical" ? "text-purple-400 bg-purple-500/10 border-purple-500/20" : s === "warning" ? "text-indigo-400 bg-indigo-500/10 border-indigo-500/20" : "text-sky-400 bg-sky-500/10 border-sky-500/20";
   const severityIcon = (s: string) => s === "critical" ? <AlertCircle className="w-3.5 h-3.5" /> : s === "warning" ? <AlertTriangle className="w-3.5 h-3.5" /> : <Info className="w-3.5 h-3.5" />;
-  const ratingColor = (r: string) => r === "strong" ? "text-emerald-400" : r === "moderate" ? "text-amber-400" : r === "weak" ? "text-orange-400" : "text-red-400";
-  const ratingBg = (r: string) => r === "strong" ? "bg-emerald-500/10 border-emerald-500/20" : r === "moderate" ? "bg-amber-500/10 border-amber-500/20" : r === "weak" ? "bg-orange-500/10 border-orange-500/20" : "bg-red-500/10 border-red-500/20";
+  const ratingColor = (r: string) => r === "strong" ? "text-sky-400" : r === "moderate" ? "text-indigo-400" : r === "weak" ? "text-violet-400" : "text-purple-400";
+  const ratingBg = (r: string) => r === "strong" ? "bg-sky-500/10 border-sky-500/20" : r === "moderate" ? "bg-indigo-500/10 border-indigo-500/20" : r === "weak" ? "bg-violet-500/10 border-violet-500/20" : "bg-purple-500/10 border-purple-500/20";
 
   const SectionHeader = ({ sectionKey, title, icon: Icon, count }: { sectionKey: string; title: string; icon: React.ComponentType<{ className?: string }>; count?: number }) => (
     <button onClick={() => toggleSection(sectionKey)} className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/5 transition-colors" data-testid={`btn-toggle-${sectionKey}`}>
@@ -2730,7 +2730,7 @@ function InsightsPanel() {
                             <span className="text-sm font-medium text-white">{param.label}</span>
                             <span className="text-[10px] text-white/30 font-mono">{param.name}</span>
                           </div>
-                          <Badge className={param.impactScore > 5 ? "bg-red-500/20 text-red-400 border-red-500/30" : param.impactScore > 2 ? "bg-amber-500/20 text-amber-400 border-amber-500/30" : "bg-white/10 text-white/50 border-white/10"}>
+                          <Badge className={param.impactScore > 5 ? "bg-purple-500/20 text-purple-400 border-purple-500/30" : param.impactScore > 2 ? "bg-indigo-500/20 text-indigo-400 border-indigo-500/30" : "bg-white/10 text-white/50 border-white/10"}>
                             Impact: {param.impactScore.toFixed(1)}
                           </Badge>
                         </div>
@@ -2742,11 +2742,11 @@ function InsightsPanel() {
                             const isBest = b === param.bestBucket;
                             const isWorst = b === param.worstBucket;
                             return (
-                              <div key={bi} className={`grid grid-cols-4 gap-1 px-2 py-1.5 rounded text-xs ${isBest ? "bg-emerald-500/10 border border-emerald-500/20" : isWorst ? "bg-red-500/10 border border-red-500/20" : ""}`}>
+                              <div key={bi} className={`grid grid-cols-4 gap-1 px-2 py-1.5 rounded text-xs ${isBest ? "bg-sky-500/10 border border-sky-500/20" : isWorst ? "bg-purple-500/10 border border-purple-500/20" : ""}`}>
                                 <span className="text-white/80 font-mono">{b.range} <span className="text-white/30">({b.count})</span></span>
-                                <span className={`text-right font-mono ${b.avgProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>{b.avgProfit >= 0 ? "+" : ""}{b.avgProfit.toFixed(1)}%</span>
-                                <span className={`text-right font-mono ${b.avgWinRate >= 50 ? "text-emerald-400" : "text-amber-400"}`}>{b.avgWinRate.toFixed(1)}%</span>
-                                <span className="text-right font-mono text-red-400">{b.avgDrawdown.toFixed(1)}%</span>
+                                <span className={`text-right font-mono ${b.avgProfit >= 0 ? "text-sky-400" : "text-purple-400"}`}>{b.avgProfit >= 0 ? "+" : ""}{b.avgProfit.toFixed(1)}%</span>
+                                <span className={`text-right font-mono ${b.avgWinRate >= 50 ? "text-sky-400" : "text-indigo-400"}`}>{b.avgWinRate.toFixed(1)}%</span>
+                                <span className="text-right font-mono text-purple-400">{b.avgDrawdown.toFixed(1)}%</span>
                               </div>
                             );
                           })}
@@ -2768,9 +2768,9 @@ function InsightsPanel() {
                 {report.comboFit.map(combo => (
                   <div key={`${combo.ticker}-${combo.timeframe}`} className={`grid grid-cols-7 gap-1 px-2 py-2 rounded text-xs border mb-1 ${ratingBg(combo.rating)}`} data-testid={`combo-${combo.ticker}-${combo.timeframe}`}>
                     <span className="col-span-2 text-white font-medium">{combo.ticker.split("/")[0]} <span className="text-white/40">{combo.timeframe}</span></span>
-                    <span className={`text-right font-mono ${combo.avgProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>{combo.avgProfit >= 0 ? "+" : ""}{combo.avgProfit.toFixed(1)}%</span>
-                    <span className={`text-right font-mono ${combo.avgWinRate >= 50 ? "text-emerald-400" : "text-amber-400"}`}>{combo.avgWinRate.toFixed(1)}%</span>
-                    <span className="text-right font-mono text-red-400">{combo.avgDrawdown.toFixed(1)}%</span>
+                    <span className={`text-right font-mono ${combo.avgProfit >= 0 ? "text-sky-400" : "text-purple-400"}`}>{combo.avgProfit >= 0 ? "+" : ""}{combo.avgProfit.toFixed(1)}%</span>
+                    <span className={`text-right font-mono ${combo.avgWinRate >= 50 ? "text-sky-400" : "text-indigo-400"}`}>{combo.avgWinRate.toFixed(1)}%</span>
+                    <span className="text-right font-mono text-purple-400">{combo.avgDrawdown.toFixed(1)}%</span>
                     <span className="text-right font-mono text-violet-400">{combo.bestLevProfit.toFixed(0)}% @{combo.bestLeverage}x</span>
                     <span className={`text-right font-medium uppercase text-[10px] ${ratingColor(combo.rating)}`}>{combo.rating}</span>
                   </div>
@@ -2782,31 +2782,31 @@ function InsightsPanel() {
             {expandedSections.has("bias") && (
               <div className="p-4">
                 <div className="grid grid-cols-2 gap-4">
-                  <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+                  <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 p-4">
                     <div className="flex items-center gap-2 mb-3">
-                      <TrendingUp className="w-4 h-4 text-emerald-400" />
-                      <span className="text-sm font-medium text-emerald-400">Long Trades</span>
+                      <TrendingUp className="w-4 h-4 text-sky-400" />
+                      <span className="text-sm font-medium text-sky-400">Long Trades</span>
                     </div>
                     <div className="space-y-2">
                       <div className="flex justify-between text-xs"><span className="text-white/50">Total</span><span className="text-white font-mono">{report.directionalBias.longCount.toLocaleString()}</span></div>
-                      <div className="flex justify-between text-xs"><span className="text-white/50">Win Rate</span><span className="text-emerald-400 font-mono">{report.directionalBias.longWinRate.toFixed(1)}%</span></div>
-                      <div className="flex justify-between text-xs"><span className="text-white/50">Avg PnL</span><span className={`font-mono ${report.directionalBias.longAvgPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{report.directionalBias.longAvgPnl >= 0 ? "+" : ""}{report.directionalBias.longAvgPnl.toFixed(2)}%</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-white/50">Win Rate</span><span className="text-sky-400 font-mono">{report.directionalBias.longWinRate.toFixed(1)}%</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-white/50">Avg PnL</span><span className={`font-mono ${report.directionalBias.longAvgPnl >= 0 ? "text-sky-400" : "text-purple-400"}`}>{report.directionalBias.longAvgPnl >= 0 ? "+" : ""}{report.directionalBias.longAvgPnl.toFixed(2)}%</span></div>
                     </div>
                   </div>
-                  <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4">
+                  <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4">
                     <div className="flex items-center gap-2 mb-3">
-                      <TrendingDown className="w-4 h-4 text-red-400" />
-                      <span className="text-sm font-medium text-red-400">Short Trades</span>
+                      <TrendingDown className="w-4 h-4 text-purple-400" />
+                      <span className="text-sm font-medium text-purple-400">Short Trades</span>
                     </div>
                     <div className="space-y-2">
                       <div className="flex justify-between text-xs"><span className="text-white/50">Total</span><span className="text-white font-mono">{report.directionalBias.shortCount.toLocaleString()}</span></div>
-                      <div className="flex justify-between text-xs"><span className="text-white/50">Win Rate</span><span className="text-red-400 font-mono">{report.directionalBias.shortWinRate.toFixed(1)}%</span></div>
-                      <div className="flex justify-between text-xs"><span className="text-white/50">Avg PnL</span><span className={`font-mono ${report.directionalBias.shortAvgPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{report.directionalBias.shortAvgPnl >= 0 ? "+" : ""}{report.directionalBias.shortAvgPnl.toFixed(2)}%</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-white/50">Win Rate</span><span className="text-purple-400 font-mono">{report.directionalBias.shortWinRate.toFixed(1)}%</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-white/50">Avg PnL</span><span className={`font-mono ${report.directionalBias.shortAvgPnl >= 0 ? "text-sky-400" : "text-purple-400"}`}>{report.directionalBias.shortAvgPnl >= 0 ? "+" : ""}{report.directionalBias.shortAvgPnl.toFixed(2)}%</span></div>
                     </div>
                   </div>
                 </div>
                 <div className="mt-3 text-center">
-                  <Badge className={report.directionalBias.bias === "neutral" ? "bg-white/10 text-white/60" : report.directionalBias.bias === "long" ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}>
+                  <Badge className={report.directionalBias.bias === "neutral" ? "bg-white/10 text-white/60" : report.directionalBias.bias === "long" ? "bg-sky-500/20 text-sky-400" : "bg-purple-500/20 text-purple-400"}>
                     {report.directionalBias.bias === "neutral" ? "Neutral" : `${report.directionalBias.bias === "long" ? "Long" : "Short"} Bias`} — Strength: {report.directionalBias.biasStrength.toFixed(1)}
                   </Badge>
                 </div>
@@ -2818,9 +2818,9 @@ function InsightsPanel() {
               <div className="p-4 space-y-4">
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   {[
-                    { label: "Avg Win", value: `+${report.tradePatterns.avgWinSize.toFixed(2)}%`, color: "text-emerald-400" },
-                    { label: "Avg Loss", value: `-${report.tradePatterns.avgLossSize.toFixed(2)}%`, color: "text-red-400" },
-                    { label: "Reward/Risk", value: `${report.tradePatterns.winLossRatio.toFixed(1)}:1`, color: report.tradePatterns.winLossRatio >= 1 ? "text-emerald-400" : "text-red-400" },
+                    { label: "Avg Win", value: `+${report.tradePatterns.avgWinSize.toFixed(2)}%`, color: "text-sky-400" },
+                    { label: "Avg Loss", value: `-${report.tradePatterns.avgLossSize.toFixed(2)}%`, color: "text-purple-400" },
+                    { label: "Reward/Risk", value: `${report.tradePatterns.winLossRatio.toFixed(1)}:1`, color: report.tradePatterns.winLossRatio >= 1 ? "text-sky-400" : "text-purple-400" },
                     { label: "Bars Ratio", value: `${report.tradePatterns.barsRatio.toFixed(1)}x`, color: "text-violet-400" },
                   ].map(s => (
                     <div key={s.label} className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
@@ -2850,8 +2850,8 @@ function InsightsPanel() {
                           <span className="text-xs text-white/80 flex-1">{er.reason}</span>
                           <span className="text-xs font-mono text-white/50">{er.count}</span>
                           <span className="text-xs font-mono text-white/50">({er.percent.toFixed(1)}%)</span>
-                          <span className={`text-xs font-mono ${er.avgPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{er.avgPnl >= 0 ? "+" : ""}{er.avgPnl.toFixed(2)}%</span>
-                          <span className={`text-xs font-mono ${er.winRate >= 50 ? "text-emerald-400" : "text-amber-400"}`}>WR {er.winRate.toFixed(0)}%</span>
+                          <span className={`text-xs font-mono ${er.avgPnl >= 0 ? "text-sky-400" : "text-purple-400"}`}>{er.avgPnl >= 0 ? "+" : ""}{er.avgPnl.toFixed(2)}%</span>
+                          <span className={`text-xs font-mono ${er.winRate >= 50 ? "text-sky-400" : "text-indigo-400"}`}>WR {er.winRate.toFixed(0)}%</span>
                         </div>
                       ))}
                     </div>
