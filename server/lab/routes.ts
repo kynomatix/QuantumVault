@@ -708,6 +708,56 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  setTimeout(async () => {
+    try {
+      const interruptedIds = (labStorage as any).interruptedRunIds as number[] | undefined;
+      if (!interruptedIds || interruptedIds.length === 0) return;
+
+      const latestId = Math.max(...interruptedIds);
+      const run = await labStorage.getRun(latestId);
+      if (!run || run.status !== "paused") return;
+
+      const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+      if (!cp?.configSnapshot) return;
+      const hasComboCheckpoint = cp?.completedCombos?.length > 0;
+      const hasMidComboCheckpoint = cp?.currentCombo && cp?.currentIteration != null;
+      if (!hasComboCheckpoint && !hasMidComboCheckpoint) return;
+
+      const checkpoint: LabCheckpoint = cp;
+      const config = checkpoint.configSnapshot!;
+
+      if (checkpoint.currentCombo && !checkpoint.partialResults?.length) {
+        const dbResults = await labStorage.getRunResults(run.id);
+        const comboResults = dbResults.filter(r => `${r.ticker}|${r.timeframe}` === checkpoint.currentCombo);
+        if (comboResults.length > 0) {
+          checkpoint.partialResults = comboResults.map(r => ({
+            ticker: r.ticker,
+            timeframe: r.timeframe,
+            netProfitPercent: r.netProfitPercent,
+            winRatePercent: r.winRatePercent,
+            maxDrawdownPercent: r.maxDrawdownPercent,
+            profitFactor: r.profitFactor,
+            totalTrades: r.totalTrades,
+            params: r.params as Record<string, any>,
+            trades: (r.trades as any[]) ?? [],
+            equityCurve: (r.equityCurve as any[]) ?? [],
+          }));
+        }
+      }
+
+      const job = labStorage.createJob(config);
+      job.runId = run.id;
+      await labStorage.resumeRun(run.id);
+      const detail = hasComboCheckpoint
+        ? `${cp.completedCombos.length} combos done`
+        : `mid-combo ${cp.currentCombo} at iter ${cp.currentIteration}`;
+      console.log(`[QuantumLab] Auto-resuming run ${run.id} (${detail})`);
+      startOptimizationJob(config, job, run.id, checkpoint);
+    } catch (err: any) {
+      console.log(`[QuantumLab] Auto-resume error: ${err.message}`);
+    }
+  }, 5000);
+
   const gracefulShutdown = async (signal: string) => {
     console.log(`[QuantumLab] ${signal} received — pausing active jobs...`);
     if (activeWorker) {

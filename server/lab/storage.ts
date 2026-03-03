@@ -58,6 +58,7 @@ export interface ILabStorage {
 
 export class LabDatabaseStorage implements ILabStorage {
   private jobs: Map<string, LabJob>;
+  public interruptedRunIds: number[] = [];
 
   constructor() {
     this.jobs = new Map();
@@ -94,6 +95,9 @@ export class LabDatabaseStorage implements ILabStorage {
               ? `has persisted results in DB`
               : "";
         console.log(`[QuantumLab] Stale run ${run.id} → ${newStatus}${detail ? ` (${detail})` : ""}`);
+        if (canResume) {
+          this.interruptedRunIds.push(run.id);
+        }
       }
       if (staleRuns.length > 0) {
         console.log(`[QuantumLab] Processed ${staleRuns.length} stale run(s) from previous session`);
