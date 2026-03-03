@@ -2618,7 +2618,7 @@ function InsightsPanel() {
     if (!selectedStrategyId || !selectedStrategy) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/lab/strategies/${selectedStrategyId}/all-results`);
+      const res = await fetch(`/api/lab/strategies/${selectedStrategyId}/all-results?lite=1`);
       if (!res.ok) throw new Error("Failed to fetch results");
       const data = await res.json();
       if (!data.results || data.results.length === 0) {

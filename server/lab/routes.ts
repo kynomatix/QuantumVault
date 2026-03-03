@@ -99,6 +99,30 @@ export function registerLabRoutes(app: Express): void {
       if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
       const data = await labStorage.getAllResultsForStrategy(strategyId);
       if (!data.strategy) return res.status(404).json({ error: "Strategy not found" });
+      const lite = req.query.lite === "1";
+      if (lite) {
+        const slimResults = data.results.map(r => ({
+          id: r.id,
+          runId: r.runId,
+          rank: r.rank,
+          ticker: r.ticker,
+          timeframe: r.timeframe,
+          netProfitPercent: r.netProfitPercent,
+          winRatePercent: r.winRatePercent,
+          maxDrawdownPercent: r.maxDrawdownPercent,
+          profitFactor: r.profitFactor,
+          totalTrades: r.totalTrades,
+          params: r.params,
+          trades: ((r.trades as any[]) ?? []).map((t: any) => ({
+            direction: t.direction,
+            pnlPercent: t.pnlPercent,
+            pnlDollar: t.pnlDollar,
+            exitReason: t.exitReason,
+            barsHeld: t.barsHeld,
+          })),
+        }));
+        return res.json({ strategy: data.strategy, totalRuns: data.totalRuns, totalResults: data.totalResults, results: slimResults });
+      }
       res.json(data);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
