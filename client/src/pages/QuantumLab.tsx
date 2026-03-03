@@ -2077,10 +2077,15 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
   const sortedTop5 = useMemo(() => {
     if (!selectedCell?.allResults) return [];
     const results = [...selectedCell.allResults];
+    const getLevProfit = (r: any) => {
+      const dd = r.maxDrawdownPercent || 0;
+      const lev = dd > 0 ? Math.min(20, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
+      return r.netProfitPercent * lev;
+    };
     switch (metric) {
       case "bestProfit":
       case "avgProfit":
-        results.sort((a: any, b: any) => b.netProfitPercent - a.netProfitPercent);
+        results.sort((a: any, b: any) => getLevProfit(b) - getLevProfit(a));
         break;
       case "bestWinRate":
       case "avgWinRate":
