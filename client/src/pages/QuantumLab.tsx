@@ -1845,7 +1845,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                     </tr>
                   </thead>
                   <tbody>
-                    {((selectedResult.trades as any[]) ?? []).map((t: any, idx: number) => (
+                    {((selectedResult.trades as any[]) ?? []).slice().reverse().map((t: any, idx: number) => (
                       <tr key={idx} className={`border-b border-white/5 ${t.pnlPercent > 0 ? "bg-sky-500/[0.03]" : "bg-purple-500/[0.03]"}`}>
                         <td className="py-2 px-3 font-mono text-white/60">{new Date(t.entryTime).toLocaleDateString()}</td>
                         <td className="py-2 px-2 font-mono text-white/60">{new Date(t.exitTime).toLocaleDateString()}</td>
