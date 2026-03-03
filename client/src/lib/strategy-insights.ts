@@ -99,6 +99,39 @@ export interface TradePatterns {
   winLossRatio: number;
 }
 
+export interface ParamCorrelation {
+  params: Record<string, any>;
+  ticker: string;
+  timeframe: string;
+  netProfitPercent: number;
+  winRatePercent: number;
+  maxDrawdownPercent: number;
+  profitFactor: number;
+  totalTrades: number;
+  maxSafeLeverage: number;
+  leveragedProfit: number;
+}
+
+export interface TopBottomConfigs {
+  top: ParamCorrelation[];
+  bottom: ParamCorrelation[];
+}
+
+export interface ParamComboCorrelation {
+  paramKey: string;
+  paramValues: Record<string, any>;
+  count: number;
+  avgProfit: number;
+  avgWinRate: number;
+  avgDrawdown: number;
+  avgProfitFactor: number;
+}
+
+export interface ParamCorrelations {
+  bestCombos: ParamComboCorrelation[];
+  worstCombos: ParamComboCorrelation[];
+}
+
 export type SuggestionSeverity = "info" | "warning" | "critical";
 
 export interface Suggestion {
@@ -117,6 +150,8 @@ export interface StrategyInsightsReport {
   directionalBias: DirectionalBias;
   tradePatterns: TradePatterns;
   suggestions: Suggestion[];
+  topBottomConfigs: TopBottomConfigs;
+  paramCorrelations: ParamCorrelations;
 }
 
 function computeMaxSafeLeverage(dd: number): number {
@@ -431,6 +466,88 @@ function generateSuggestions(
   return suggestions;
 }
 
+function analyzeTopBottomConfigs(results: ResultData[]): TopBottomConfigs {
+  const scored = results
+    .filter(r => r.totalTrades >= 5)
+    .map(r => {
+      const lev = computeMaxSafeLeverage(r.maxDrawdownPercent);
+      return {
+        params: r.params,
+        ticker: r.ticker,
+        timeframe: r.timeframe,
+        netProfitPercent: r.netProfitPercent,
+        winRatePercent: r.winRatePercent,
+        maxDrawdownPercent: r.maxDrawdownPercent,
+        profitFactor: r.profitFactor,
+        totalTrades: r.totalTrades,
+        maxSafeLeverage: lev,
+        leveragedProfit: r.netProfitPercent * lev,
+      };
+    });
+
+  const byProfit = [...scored].sort((a, b) => b.netProfitPercent - a.netProfitPercent);
+  const top = byProfit.slice(0, 5);
+  const topIds = new Set(top.map((_, i) => i));
+  const bottomCandidates = byProfit.slice().reverse().filter((_, i) => !topIds.has(byProfit.length - 1 - i));
+  return {
+    top,
+    bottom: bottomCandidates.slice(0, 5),
+  };
+}
+
+function analyzeParamCorrelations(results: ResultData[], inputs: LabPineInput[]): ParamCorrelations {
+  const optimizable = inputs.filter(i => i.optimizable && (i.type === "int" || i.type === "float"));
+  if (optimizable.length < 2 || results.length < 10) {
+    return { bestCombos: [], worstCombos: [] };
+  }
+
+  const paramNames = optimizable.map(i => i.name).slice(0, 4);
+
+  const comboMap = new Map<string, { values: Record<string, any>; profits: number[]; winRates: number[]; drawdowns: number[]; profitFactors: number[] }>();
+
+  for (const r of results) {
+    if (r.totalTrades < 5) continue;
+    const comboValues: Record<string, any> = {};
+    let skip = false;
+    for (const name of paramNames) {
+      const v = r.params[name];
+      if (v === undefined || v === null) { skip = true; break; }
+      comboValues[name] = v;
+    }
+    if (skip) continue;
+    const key = paramNames.map(n => `${n}=${comboValues[n]}`).join("|");
+    let entry = comboMap.get(key);
+    if (!entry) {
+      entry = { values: comboValues, profits: [], winRates: [], drawdowns: [], profitFactors: [] };
+      comboMap.set(key, entry);
+    }
+    entry.profits.push(r.netProfitPercent);
+    entry.winRates.push(r.winRatePercent);
+    entry.drawdowns.push(r.maxDrawdownPercent);
+    entry.profitFactors.push(r.profitFactor);
+  }
+
+  const combos: ParamComboCorrelation[] = [];
+  for (const [key, entry] of comboMap) {
+    if (entry.profits.length < 1) continue;
+    combos.push({
+      paramKey: key,
+      paramValues: entry.values,
+      count: entry.profits.length,
+      avgProfit: avg(entry.profits),
+      avgWinRate: avg(entry.winRates),
+      avgDrawdown: avg(entry.drawdowns),
+      avgProfitFactor: avg(entry.profitFactors),
+    });
+  }
+
+  const sorted = combos.sort((a, b) => b.avgProfit - a.avgProfit);
+  return {
+    bestCombos: sorted.slice(0, 10),
+    worstCombos: sorted.slice(-10).reverse(),
+  };
+}
+
 export function generateInsightsReport(
   results: ResultData[],
   inputs: LabPineInput[],
@@ -449,6 +566,8 @@ export function generateInsightsReport(
   const comboFit = analyzeComboFit(sanitized);
   const directionalBias = analyzeDirectionalBias(sanitized);
   const tradePatterns = analyzeTradePatterns(sanitized);
+  const topBottomConfigs = analyzeTopBottomConfigs(sanitized);
+  const paramCorrelations = analyzeParamCorrelations(sanitized, inputs);
   const suggestions = generateSuggestions(paramSensitivity, comboFit, directionalBias, tradePatterns);
 
   return {
@@ -461,6 +580,8 @@ export function generateInsightsReport(
     directionalBias,
     tradePatterns,
     suggestions,
+    topBottomConfigs,
+    paramCorrelations,
   };
 }
 
@@ -513,6 +634,48 @@ export function formatReportAsText(report: StrategyInsightsReport, pineScript?: 
   }
   lines.push("");
 
+  lines.push("--- TOP 5 BEST CONFIGURATIONS ---");
+  if (report.topBottomConfigs.top.length === 0) {
+    lines.push("Not enough data (need configs with 5+ trades).");
+  } else {
+    for (let i = 0; i < report.topBottomConfigs.top.length; i++) {
+      const c = report.topBottomConfigs.top[i];
+      const ticker = c.ticker.split("/")[0];
+      lines.push(`\n#${i + 1}: ${ticker} ${c.timeframe} — profit ${c.netProfitPercent.toFixed(1)}%, WR ${c.winRatePercent.toFixed(1)}%, DD ${c.maxDrawdownPercent.toFixed(1)}%, PF ${c.profitFactor.toFixed(2)}, ${c.totalTrades} trades, safe leverage ${c.maxSafeLeverage}x (${c.leveragedProfit.toFixed(0)}% leveraged)`);
+      lines.push(`  Params: ${Object.entries(c.params).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+    }
+  }
+  lines.push("");
+
+  lines.push("--- TOP 5 WORST CONFIGURATIONS ---");
+  if (report.topBottomConfigs.bottom.length === 0) {
+    lines.push("Not enough data.");
+  } else {
+    for (let i = 0; i < report.topBottomConfigs.bottom.length; i++) {
+      const c = report.topBottomConfigs.bottom[i];
+      const ticker = c.ticker.split("/")[0];
+      lines.push(`\n#${i + 1}: ${ticker} ${c.timeframe} — profit ${c.netProfitPercent.toFixed(1)}%, WR ${c.winRatePercent.toFixed(1)}%, DD ${c.maxDrawdownPercent.toFixed(1)}%, PF ${c.profitFactor.toFixed(2)}, ${c.totalTrades} trades`);
+      lines.push(`  Params: ${Object.entries(c.params).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+    }
+  }
+  lines.push("");
+
+  lines.push("--- PARAMETER CORRELATIONS ---");
+  lines.push("(Which parameter combos work together vs against each other)");
+  if (report.paramCorrelations.bestCombos.length === 0) {
+    lines.push("Not enough data (need 2+ optimizable params and 10+ results).");
+  } else {
+    lines.push("\nBest performing parameter combinations:");
+    for (const c of report.paramCorrelations.bestCombos) {
+      lines.push(`  ${Object.entries(c.paramValues).map(([k, v]) => `${k}=${v}`).join(", ")} — avg profit ${c.avgProfit.toFixed(1)}%, WR ${c.avgWinRate.toFixed(1)}%, DD ${c.avgDrawdown.toFixed(1)}%, PF ${c.avgProfitFactor.toFixed(2)} (${c.count} configs)`);
+    }
+    lines.push("\nWorst performing parameter combinations:");
+    for (const c of report.paramCorrelations.worstCombos) {
+      lines.push(`  ${Object.entries(c.paramValues).map(([k, v]) => `${k}=${v}`).join(", ")} — avg profit ${c.avgProfit.toFixed(1)}%, WR ${c.avgWinRate.toFixed(1)}%, DD ${c.avgDrawdown.toFixed(1)}%, PF ${c.avgProfitFactor.toFixed(2)} (${c.count} configs)`);
+    }
+  }
+  lines.push("");
+
   lines.push("--- RECOMMENDATIONS ---");
   for (const s of report.suggestions) {
     const prefix = s.severity === "critical" ? "[!!!]" : s.severity === "warning" ? "[!!]" : "[i]";
@@ -528,10 +691,12 @@ export function formatReportAsText(report: StrategyInsightsReport, pineScript?: 
 
   lines.push("=== END REPORT ===");
   lines.push("");
-  lines.push("Please analyze this backtest report and suggest specific improvements to the Pine Script strategy. Focus on:");
-  lines.push("1. Parameter range adjustments based on the sensitivity analysis");
-  lines.push("2. Entry/exit condition improvements based on trade patterns");
-  lines.push("3. Any structural changes suggested by the directional bias or market fit data");
+  lines.push("Please analyze this backtest report and suggest specific improvements to the Pine Script strategy. You have full authority to rewrite the strategy entirely if you believe a different approach would yield better results. Focus on:");
+  lines.push("1. Parameter defaults and ranges — use the top/bottom configs and correlations to set optimal defaults");
+  lines.push("2. Entry/exit logic — modify or replace conditions based on trade patterns and directional bias");
+  lines.push("3. Risk management — adjust stop loss, take profit, and position sizing based on the data");
+  lines.push("4. Structural changes — add/remove indicators, change signal logic, or redesign the strategy if the data supports it");
+  lines.push("5. Provide the complete updated Pine Script, not just snippets");
 
   return lines.join("\n");
 }
