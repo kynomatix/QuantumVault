@@ -25,7 +25,7 @@ export function runBacktest(
   params: Record<string, any>,
   ticker: string,
   timeframe: string,
-  config: EngineConfig = { initialCapital: 100, commission: 0.0005, positionSize: 1000 }
+  config: EngineConfig = { initialCapital: 1000, commission: 0.0005, positionSize: 1000 }
 ): LabBacktestResult {
   const n = candles.length;
   const close = new Array(n);

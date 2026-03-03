@@ -166,33 +166,29 @@ function calculateRiskAnalysis(
 
   const recoveryFactor = maxDrawdownPercent > 0 ? netProfitPercent / maxDrawdownPercent : 0;
 
-  const BACKTEST_LEVERAGE = 10;
   const MAX_LEVERAGE_CAP = 20;
-  const unleveragedDD = maxDrawdownPercent / BACKTEST_LEVERAGE;
-  const unleveragedStreakDD = streakDrawdownPercent / BACKTEST_LEVERAGE;
-  const maxSafeLeverage = unleveragedDD > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor((100 / unleveragedDD) * 0.8))) : 1;
-  const streakSafety = unleveragedStreakDD > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor(100 / (unleveragedStreakDD * 1.5)))) : maxSafeLeverage;
+  const maxSafeLeverage = maxDrawdownPercent > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor((100 / maxDrawdownPercent) * 0.8))) : 1;
+  const streakSafety = streakDrawdownPercent > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor(100 / (streakDrawdownPercent * 1.5)))) : maxSafeLeverage;
   const recommendedLeverage = Math.max(1, Math.min(maxSafeLeverage, streakSafety));
-  const recDD = unleveragedDD * recommendedLeverage;
-  const liquidationBuffer = recDD > 0 ? Math.round(((100 / recommendedLeverage) - recDD) / (100 / recommendedLeverage) * 100) : 0;
+  const recDD = maxDrawdownPercent * recommendedLeverage;
+  const liquidationBuffer = recDD > 0 ? Math.round((100 - recDD) / 100 * 100) : 0;
 
   const fixedTradeSize = 1000;
-  const recDrawdownDollar = (unleveragedDD * recommendedLeverage / 100) * fixedTradeSize;
-  const recStreakDollar = (unleveragedStreakDD * recommendedLeverage / 100) * fixedTradeSize;
+  const recDrawdownDollar = (maxDrawdownPercent * recommendedLeverage / 100) * fixedTradeSize;
+  const recStreakDollar = (streakDrawdownPercent * recommendedLeverage / 100) * fixedTradeSize;
   const worstCaseBuffer = Math.max(recDrawdownDollar, recStreakDollar) * 1.5;
   const recommendedWalletAllocation = Math.round(fixedTradeSize + worstCaseBuffer);
   const minCapitalRequired = Math.round(fixedTradeSize + recDrawdownDollar);
 
   let riskRating: LabRiskAnalysis["riskRating"];
-  const ddAtRecommended = unleveragedDD * recommendedLeverage;
-  if (ddAtRecommended <= 15 && longestLosingStreak <= 3 && recoveryFactor >= 3) riskRating = "LOW";
-  else if (ddAtRecommended <= 35 && longestLosingStreak <= 6 && recoveryFactor >= 1.5) riskRating = "MODERATE";
-  else if (ddAtRecommended <= 60 && recoveryFactor >= 0.5) riskRating = "HIGH";
+  if (recDD <= 15 && longestLosingStreak <= 3 && recoveryFactor >= 3) riskRating = "LOW";
+  else if (recDD <= 35 && longestLosingStreak <= 6 && recoveryFactor >= 1.5) riskRating = "MODERATE";
+  else if (recDD <= 60 && recoveryFactor >= 0.5) riskRating = "HIGH";
   else riskRating = "EXTREME";
 
   const recommendations: string[] = [];
-  recommendations.push(`Use ${recommendedLeverage}x leverage (max safe: ${maxSafeLeverage}x). Backtest drawdown of ${maxDrawdownPercent.toFixed(1)}% is at 10x — at ${recommendedLeverage}x it would be ${(unleveragedDD * recommendedLeverage).toFixed(1)}%.`);
-  if (longestLosingStreak >= 4) recommendations.push(`Strategy had ${longestLosingStreak} consecutive losses (${(unleveragedStreakDD * recommendedLeverage).toFixed(1)}% at ${recommendedLeverage}x). Allocate extra buffer capital.`);
+  recommendations.push(`Use ${recommendedLeverage}x leverage (max safe: ${maxSafeLeverage}x). At ${recommendedLeverage}x, max drawdown would be ${recDD.toFixed(1)}%.`);
+  if (longestLosingStreak >= 4) recommendations.push(`Strategy had ${longestLosingStreak} consecutive losses (${(streakDrawdownPercent * recommendedLeverage).toFixed(1)}% at ${recommendedLeverage}x). Allocate extra buffer capital.`);
   if (recommendedLeverage <= 2) recommendations.push(`High per-trade drawdown limits leverage to ${recommendedLeverage}x. Consider tightening stop losses.`);
   recommendations.push(`Allocate at least $${recommendedWalletAllocation} per $1,000 trade size to survive worst-case drawdowns at ${recommendedLeverage}x.`);
   if (recoveryFactor < 1) recommendations.push(`Recovery factor is ${recoveryFactor.toFixed(2)} — drawdowns are larger than returns. High risk.`);
@@ -1857,14 +1853,11 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
   };
   const rc = ratingColors[analysis.riskRating];
 
-  const backtestLeverage = 10;
-  const unleveragedProfit = backtestProfit / backtestLeverage;
-  const unleveragedDrawdown = backtestDrawdown / backtestLeverage;
   const leverageLevels = [
-    { label: "Backtest (10x)", lev: 10, isCurrent: true },
+    { label: "No Leverage (1x)", lev: 1, isCurrent: true },
     { label: `Recommended (${analysis.recommendedLeverage}x)`, lev: analysis.recommendedLeverage, isRecommended: true },
     { label: `Max Safe (${analysis.maxSafeLeverage}x)`, lev: analysis.maxSafeLeverage },
-    { label: "No Leverage (1x)", lev: 1 },
+    { label: "Max (20x)", lev: 20 },
   ];
 
   return (
@@ -1895,11 +1888,11 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
             <ArrowUpDown className="w-3.5 h-3.5 text-violet-400" />
             <h4 className="text-xs font-semibold uppercase tracking-wider text-violet-300">Leverage Projection</h4>
           </div>
-          <p className="text-[11px] text-white/40 mb-3">Backtest uses $100 capital with $1,000 position size (10x leverage). Here's how results scale at different leverage levels on $1,000 capital:</p>
+          <p className="text-[11px] text-white/40 mb-3">Backtest uses $1,000 capital with $1,000 position size (1x). Here's how results scale with leverage:</p>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {leverageLevels.map((l) => {
-              const adjProfit = unleveragedProfit * l.lev;
-              const adjDrawdown = unleveragedDrawdown * l.lev;
+              const adjProfit = backtestProfit * l.lev;
+              const adjDrawdown = backtestDrawdown * l.lev;
               return (
                 <div
                   key={l.label}
@@ -1955,8 +1948,7 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
             <Flame className="w-3.5 h-3.5" /> Risk Metrics
           </h4>
           <div className="space-y-2">
-            <DetailRow label="Max Drawdown (at 10x)" value={`${analysis.maxDrawdownPercent.toFixed(1)}%`} color="text-red-400" />
-            <DetailRow label="Max Drawdown (at 1x)" value={`${(analysis.maxDrawdownPercent / 10).toFixed(2)}%`} color="text-white/60" />
+            <DetailRow label="Max Drawdown (1x)" value={`${analysis.maxDrawdownPercent.toFixed(1)}%`} color="text-red-400" />
             <DetailRow label="Worst Single Trade" value={`${analysis.worstTradePercent.toFixed(2)}%`} color="text-red-400" />
             <DetailRow label="Avg Win" value={`+${analysis.avgWinPercent.toFixed(2)}%`} color="text-green-400" />
             <DetailRow label="Avg Loss" value={`-${analysis.avgLossPercent.toFixed(2)}%`} color="text-red-400" />
