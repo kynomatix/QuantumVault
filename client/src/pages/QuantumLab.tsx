@@ -2135,7 +2135,22 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
 
   const { cells, tickers, timeframes } = data;
   const cellLookup = new Map<string, any>();
-  for (const c of cells) cellLookup.set(`${c.ticker}|${c.timeframe}`, c);
+  const cellLevProfit = new Map<string, { levProfit: number; leverage: number }>();
+  for (const c of cells) {
+    const key = `${c.ticker}|${c.timeframe}`;
+    cellLookup.set(key, c);
+    const best = c.allResults?.reduce((best: any, r: any) => {
+      const dd = r.maxDrawdownPercent || 0;
+      const lev = dd > 0 ? Math.min(20, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
+      const levP = r.netProfitPercent * lev;
+      return (!best || levP > best.levProfit) ? { levProfit: levP, leverage: lev } : best;
+    }, null);
+    if (best) cellLevProfit.set(key, best);
+  }
+
+  const levValues = [...cellLevProfit.values()].map(v => v.levProfit);
+  const levMin = levValues.length > 0 ? Math.min(...levValues) : 0;
+  const levMax = levValues.length > 0 ? Math.max(...levValues) : 0;
 
   const values = cells.map((c: any) => c[metric] as number);
   const minVal = Math.min(...values);
@@ -2187,12 +2202,8 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                     );
                   }
                   const val = cell[metric] as number;
-                  const bestLevResult = cell.allResults?.reduce((best: any, r: any) => {
-                    const dd = r.maxDrawdownPercent || 0;
-                    const lev = dd > 0 ? Math.min(20, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
-                    const levP = r.netProfitPercent * lev;
-                    return (!best || levP > best.levProfit) ? { levProfit: levP, leverage: lev } : best;
-                  }, null);
+                  const cellKey = `${ticker}|${tf}`;
+                  const lev = cellLevProfit.get(cellKey);
                   return (
                     <button
                       key={tf}
@@ -2201,18 +2212,23 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                         "aspect-[2/1] rounded-lg flex flex-col items-center justify-center transition-all cursor-pointer hover:scale-105 border",
                         isSelected ? "ring-2 ring-violet-400 border-violet-400/50" : "border-white/5 hover:border-white/20"
                       )}
-                      style={{ backgroundColor: getHeatColor(val, minVal, maxVal, metric) }}
+                      style={{ backgroundColor: lev ? getHeatColor(lev.levProfit, levMin, levMax, "bestProfit") : getHeatColor(val, minVal, maxVal, metric) }}
                       data-testid={`heatmap-cell-${ticker.split("/")[0]}-${tf}`}
                     >
-                      <span className="text-sm font-bold font-mono text-white drop-shadow-lg">
-                        {formatHeatVal(val, metric)}
-                      </span>
-                      {bestLevResult && (
-                        <span className="text-[9px] font-mono text-white/70 drop-shadow-lg">
-                          {bestLevResult.levProfit >= 0 ? "+" : ""}{bestLevResult.levProfit.toFixed(0)}% @{bestLevResult.leverage}x
+                      {lev ? (
+                        <>
+                          <span className="text-sm font-bold font-mono text-white drop-shadow-lg">
+                            {lev.levProfit >= 0 ? "+" : ""}{lev.levProfit.toFixed(0)}%
+                          </span>
+                          <span className="text-[9px] font-mono text-white/60 drop-shadow-lg">@{lev.leverage}x</span>
+                          <span className="text-[8px] font-mono text-white/40 drop-shadow-lg">1x: {formatHeatVal(val, metric)}</span>
+                        </>
+                      ) : (
+                        <span className="text-sm font-bold font-mono text-white drop-shadow-lg">
+                          {formatHeatVal(val, metric)}
                         </span>
                       )}
-                      <span className="text-[8px] text-white/50 mt-0.5">{cell.totalConfigs} configs</span>
+                      <span className="text-[7px] text-white/40 mt-0.5">{cell.totalConfigs} cfgs</span>
                     </button>
                   );
                 })}
