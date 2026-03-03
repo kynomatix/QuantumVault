@@ -887,9 +887,9 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
   const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>(["15m"]);
   const [startDate, setStartDate] = useState("2023-01-01");
   const [endDate, setEndDate] = useState(new Date().toISOString().split("T")[0]);
-  const [randomSamples, setRandomSamples] = useState(900);
-  const [topK, setTopK] = useState(20);
-  const [refinements, setRefinements] = useState(60);
+  const [randomSamples, setRandomSamples] = useState(2000);
+  const [topK, setTopK] = useState(30);
+  const [refinements, setRefinements] = useState(40);
   const [minTrades, setMinTrades] = useState(10);
   const [maxDrawdown, setMaxDrawdown] = useState(85);
   const [advancedOpen, setAdvancedOpen] = useState(false);
