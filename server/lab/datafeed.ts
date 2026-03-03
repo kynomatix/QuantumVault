@@ -62,6 +62,28 @@ async function fetchOkxCandles(
   return [];
 }
 
+function aggregateCandles(candles: OHLCV[], factor: number): OHLCV[] {
+  const sorted = [...candles].sort((a, b) => a.time - b.time);
+  const result: OHLCV[] = [];
+  for (let i = 0; i + factor - 1 < sorted.length; i += factor) {
+    const group = sorted.slice(i, i + factor);
+    result.push({
+      time: group[0].time,
+      open: group[0].open,
+      high: Math.max(...group.map(c => c.high)),
+      low: Math.min(...group.map(c => c.low)),
+      close: group[group.length - 1].close,
+      volume: group.reduce((s, c) => s + c.volume, 0),
+    });
+  }
+  return result;
+}
+
+const SYNTHETIC_TIMEFRAMES: Record<string, { source: string; factor: number }> = {
+  "8h": { source: "4h", factor: 2 },
+  "8H": { source: "4h", factor: 2 },
+};
+
 export async function fetchOHLCV(
   symbol: string,
   timeframe: string,
@@ -78,6 +100,23 @@ export async function fetchOHLCV(
     console.log(`[CandleCache] Hit: ${cached.length} candles for ${symbol} ${timeframe}`);
     onProgress?.(`Loaded ${cached.length} cached candles for ${symbol} ${timeframe}`);
     return cached;
+  }
+
+  const synthetic = SYNTHETIC_TIMEFRAMES[timeframe];
+  if (synthetic) {
+    onProgress?.(`Synthesizing ${timeframe} from ${synthetic.source} candles...`);
+    const sourceCandles = await fetchOHLCV(symbol, synthetic.source, startDate, endDate, onProgress);
+    const aggregated = aggregateCandles(sourceCandles, synthetic.factor);
+    console.log(`[Synthetic] Built ${aggregated.length} ${timeframe} candles from ${sourceCandles.length} ${synthetic.source} candles`);
+    onProgress?.(`Synthesized ${aggregated.length} ${timeframe} candles from ${synthetic.source}`);
+
+    if (aggregated.length > 0) {
+      saveCandlesToDb(symbol, timeframe, aggregated).catch((err) =>
+        console.log(`[CandleCache] Background save error: ${err.message}`)
+      );
+    }
+
+    return aggregated;
   }
 
   const instId = symbolToOkxInstId(symbol);
