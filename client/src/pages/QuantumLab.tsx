@@ -636,36 +636,34 @@ function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, isDeletin
             <p className="text-[11px] text-white/40">{strategies.length} saved {strategies.length === 1 ? "strategy" : "strategies"}</p>
           </div>
           <ScrollArea className="max-h-[240px]">
-            <div className="p-1">
+            <div className="p-1" role="listbox" aria-label="Saved strategies">
               {strategies.map((s) => {
                 const paramCount = (s.parsedInputs as any[])?.filter((i: any) => i.optimizable).length ?? 0;
                 const isSelected = selectedId === s.id;
                 return (
                   <div
                     key={s.id}
+                    role="option"
+                    aria-selected={isSelected}
+                    aria-label={`Strategy: ${s.name}`}
                     onClick={() => { onSelect(s); setOpen(false); }}
                     className={cn(
-                      "flex items-center justify-between gap-2 px-2.5 py-2 rounded-md cursor-pointer transition-colors group",
+                      "flex items-center justify-between gap-2 px-2.5 py-2 rounded-md cursor-pointer transition-colors",
                       isSelected ? "bg-violet-500/15" : "hover:bg-white/[0.05]"
                     )}
                     data-testid={`strategy-row-${s.id}`}
+                    data-strategy-name={s.name}
+                    data-strategy-id={s.id}
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className={cn(
-                        "w-4 h-4 rounded flex items-center justify-center flex-shrink-0 transition-colors",
-                        isSelected ? "bg-violet-500 text-white" : "border border-white/15 text-transparent group-hover:border-white/25"
-                      )}>
-                        <Check className="w-3 h-3" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className={cn("text-xs font-medium truncate", isSelected ? "text-violet-300" : "text-white/80")} data-testid={`text-strategy-name-${s.id}`}>{s.name}</p>
-                        <p className="text-[10px] text-white/40">{new Date(s.createdAt).toLocaleDateString()} · {paramCount} opt params</p>
-                      </div>
+                    <div className="min-w-0">
+                      <p className={cn("text-xs font-medium truncate", isSelected ? "text-violet-300" : "text-white/80")} data-testid={`text-strategy-name-${s.id}`}>{s.name}</p>
+                      <p className="text-[10px] text-white/40">{new Date(s.createdAt).toLocaleDateString()} · {paramCount} opt params</p>
                     </div>
                     <button
                       onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
                       disabled={isDeleting}
-                      className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/20 text-white/30 hover:text-red-400 transition-all"
+                      aria-label={`Delete strategy ${s.name}`}
+                      className="p-1 rounded hover:bg-red-500/20 text-white/20 hover:text-red-400 transition-colors flex-shrink-0"
                       data-testid={`button-delete-strategy-${s.id}`}
                     >
                       <Trash2 className="w-3 h-3" />
