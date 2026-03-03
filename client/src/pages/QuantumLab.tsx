@@ -2209,6 +2209,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                   const val = cell[metric] as number;
                   const cellKey = `${ticker}|${tf}`;
                   const lev = cellLevProfit.get(cellKey);
+                  const isProfitMetric = metric === "bestProfit" || metric === "avgProfit";
                   return (
                     <button
                       key={tf}
@@ -2217,10 +2218,10 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                         "aspect-[2/1] rounded-lg flex flex-col items-center justify-center transition-all cursor-pointer hover:scale-105 border",
                         isSelected ? "ring-2 ring-violet-400 border-violet-400/50" : "border-white/5 hover:border-white/20"
                       )}
-                      style={{ backgroundColor: lev ? getHeatColor(lev.levProfit, levMin, levMax, "bestProfit") : getHeatColor(val, minVal, maxVal, metric) }}
+                      style={{ backgroundColor: isProfitMetric && lev ? getHeatColor(lev.levProfit, levMin, levMax, "bestProfit") : getHeatColor(val, minVal, maxVal, metric) }}
                       data-testid={`heatmap-cell-${ticker.split("/")[0]}-${tf}`}
                     >
-                      {lev ? (
+                      {isProfitMetric && lev ? (
                         <>
                           <span className="text-sm font-bold font-mono text-white drop-shadow-lg">
                             {lev.levProfit >= 0 ? "+" : ""}{lev.levProfit.toFixed(0)}%
@@ -2229,9 +2230,16 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                           <span className="text-[8px] font-mono text-white/40 drop-shadow-lg">1x: {formatHeatVal(val, metric)}</span>
                         </>
                       ) : (
-                        <span className="text-sm font-bold font-mono text-white drop-shadow-lg">
-                          {formatHeatVal(val, metric)}
-                        </span>
+                        <>
+                          <span className="text-sm font-bold font-mono text-white drop-shadow-lg">
+                            {formatHeatVal(val, metric)}
+                          </span>
+                          {lev && (
+                            <span className="text-[8px] font-mono text-white/40 drop-shadow-lg">
+                              lev: {lev.levProfit >= 0 ? "+" : ""}{lev.levProfit.toFixed(0)}% @{lev.leverage}x
+                            </span>
+                          )}
+                        </>
                       )}
                       <span className="text-[7px] text-white/40 mt-0.5">{cell.totalConfigs} cfgs</span>
                     </button>
