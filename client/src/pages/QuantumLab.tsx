@@ -2591,9 +2591,10 @@ function InsightsPanel() {
       let totalResults = 0;
       for (const run of completedRuns) {
         totalResults += run.totalConfigsTested ?? 0;
-        const config = run.config as any;
-        if (config?.tickers) for (const t of config.tickers) tickers.add(t);
-        if (config?.timeframes) for (const tf of config.timeframes) timeframes.add(tf);
+        const runTickers = run.tickers as string[] | undefined;
+        const runTimeframes = run.timeframes as string[] | undefined;
+        if (runTickers) for (const t of runTickers) tickers.add(t);
+        if (runTimeframes) for (const tf of runTimeframes) timeframes.add(tf);
       }
       return {
         totalRuns: completedRuns.length,
