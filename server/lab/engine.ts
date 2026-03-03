@@ -27,11 +27,18 @@ export function runBacktest(
   timeframe: string,
   config: EngineConfig = { initialCapital: 100, commission: 0.0005, positionSize: 1000 }
 ): LabBacktestResult {
-  const close = candles.map(c => c.close);
-  const high = candles.map(c => c.high);
-  const low = candles.map(c => c.low);
-  const volume = candles.map(c => c.volume);
   const n = candles.length;
+  const close = new Array(n);
+  const high = new Array(n);
+  const low = new Array(n);
+  const volume = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = candles[i];
+    close[i] = c.close;
+    high[i] = c.high;
+    low[i] = c.low;
+    volume[i] = c.volume;
+  }
 
   const bbLen = getParam(params, "bbLen", 20);
   const bbMult = getParam(params, "bbMult", 2.0);
@@ -64,7 +71,13 @@ export function runBacktest(
   const bb = ind.bollingerBands(close, bbLen, bbMult);
   const kc = ind.keltnerChannel(close, high, low, kcLen, kcLen, kcMult);
   const sqz = ind.squeeze(bb.upper, bb.lower, kc.upper, kc.lower);
-  const mom = ind.linreg(close.map((c, i) => c - ind.sma(close, bbLen)[i]).map(v => isNaN(v) ? 0 : v), momLen);
+  const bbSma = bb.basis;
+  const momInput = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const diff = close[i] - bbSma[i];
+    momInput[i] = isNaN(diff) ? 0 : diff;
+  }
+  const mom = ind.linreg(momInput, momLen);
   const hull = useHull ? ind.hullMa(close, hullLen) : null;
   const adxVals = useAdx ? ind.adx(high, low, close, adxLen) : null;
   const rsiVals = useRsi ? ind.rsi(close, rsiLen) : null;
@@ -72,13 +85,13 @@ export function runBacktest(
   const atrVals = ind.atr(high, low, close, atrLen);
 
   const trades: LabTradeRecord[] = [];
-  const equityCurve: { time: string; equity: number }[] = [];
+  const equityValues: number[] = new Array(n);
   let equity = config.initialCapital;
   let position: null | {
     direction: "long" | "short";
     entryPrice: number;
     entryBar: number;
-    entryTime: string;
+    entryTimeIdx: number;
     size: number;
     remainingQty: number;
     stopLoss: number;
@@ -91,10 +104,8 @@ export function runBacktest(
   const warmup = Math.max(bbLen, kcLen, hullLen, adxLen * 2, rsiLen, volLen, momLen) + 10;
 
   for (let i = 0; i < n; i++) {
-    const time = new Date(candles[i].time).toISOString();
-
     if (i < warmup) {
-      equityCurve.push({ time, equity });
+      equityValues[i] = equity;
       continue;
     }
 
@@ -195,8 +206,8 @@ export function runBacktest(
         equity += pnlDollar;
 
         trades.push({
-          entryTime: position.entryTime,
-          exitTime: time,
+          entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
+          exitTime: new Date(candles[i].time).toISOString(),
           direction: dir,
           entryPrice: entry,
           exitPrice,
@@ -235,7 +246,7 @@ export function runBacktest(
           direction: "long",
           entryPrice: close[i],
           entryBar: i,
-          entryTime: time,
+          entryTimeIdx: i,
           size: 1,
           remainingQty: 1,
           stopLoss: close[i] - atrVal * slMult,
@@ -249,7 +260,7 @@ export function runBacktest(
           direction: "short",
           entryPrice: close[i],
           entryBar: i,
-          entryTime: time,
+          entryTimeIdx: i,
           size: 1,
           remainingQty: 1,
           stopLoss: close[i] + atrVal * slMult,
@@ -261,7 +272,7 @@ export function runBacktest(
       }
     }
 
-    equityCurve.push({ time, equity });
+    equityValues[i] = equity;
   }
 
   if (position) {
@@ -272,7 +283,7 @@ export function runBacktest(
     const pnlDollar = position.remainingQty * config.positionSize * (pnlPct / 100) - 2 * config.positionSize * config.commission;
     equity += pnlDollar;
     trades.push({
-      entryTime: position.entryTime,
+      entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
       exitTime: new Date(candles[n - 1].time).toISOString(),
       direction: position.direction,
       entryPrice: position.entryPrice,
@@ -284,30 +295,47 @@ export function runBacktest(
     });
   }
 
-  const wins = trades.filter(t => t.pnlPercent > 0);
-  const losses = trades.filter(t => t.pnlPercent <= 0);
-  const grossProfit = wins.reduce((s, t) => s + t.pnlDollar, 0);
-  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnlDollar, 0));
+  let winCount = 0;
+  let grossProfit = 0;
+  let grossLoss = 0;
+  for (let t = 0; t < trades.length; t++) {
+    if (trades[t].pnlPercent > 0) {
+      winCount++;
+      grossProfit += trades[t].pnlDollar;
+    } else {
+      grossLoss -= trades[t].pnlDollar;
+    }
+  }
   const netProfitPercent = ((equity - config.initialCapital) / config.initialCapital) * 100;
 
   let maxEquity = config.initialCapital;
   let maxDrawdown = 0;
-  for (const pt of equityCurve) {
-    maxEquity = Math.max(maxEquity, pt.equity);
-    const dd = ((maxEquity - pt.equity) / maxEquity) * 100;
-    maxDrawdown = Math.max(maxDrawdown, dd);
+  for (let i = 0; i < n; i++) {
+    const eq = equityValues[i];
+    if (eq > maxEquity) maxEquity = eq;
+    const dd = ((maxEquity - eq) / maxEquity) * 100;
+    if (dd > maxDrawdown) maxDrawdown = dd;
+  }
+
+  const step = Math.max(1, Math.floor(n / 500));
+  const equityCurve: { time: string; equity: number }[] = [];
+  for (let i = 0; i < n; i += step) {
+    equityCurve.push({ time: new Date(candles[i].time).toISOString(), equity: equityValues[i] });
+  }
+  if (n > 0 && (n - 1) % step !== 0) {
+    equityCurve.push({ time: new Date(candles[n - 1].time).toISOString(), equity: equityValues[n - 1] });
   }
 
   return {
     ticker,
     timeframe,
     netProfitPercent: Math.round(netProfitPercent * 100) / 100,
-    winRatePercent: trades.length > 0 ? Math.round((wins.length / trades.length) * 10000) / 100 : 0,
+    winRatePercent: trades.length > 0 ? Math.round((winCount / trades.length) * 10000) / 100 : 0,
     maxDrawdownPercent: Math.round(maxDrawdown * 100) / 100,
     profitFactor: grossLoss > 0 ? Math.round((grossProfit / grossLoss) * 100) / 100 : grossProfit > 0 ? 999 : 0,
     totalTrades: trades.length,
     params,
     trades,
-    equityCurve: equityCurve.filter((_, idx) => idx % Math.max(1, Math.floor(equityCurve.length / 500)) === 0),
+    equityCurve,
   };
 }

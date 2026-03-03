@@ -1,8 +1,11 @@
 export function sma(data: number[], period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
-  for (let i = period - 1; i < data.length; i++) {
-    let sum = 0;
-    for (let j = i - period + 1; j <= i; j++) sum += data[j];
+  if (period <= 0 || data.length < period) return result;
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += data[i];
+  result[period - 1] = sum / period;
+  for (let i = period; i < data.length; i++) {
+    sum += data[i] - data[i - period];
     result[i] = sum / period;
   }
   return result;
@@ -11,6 +14,7 @@ export function sma(data: number[], period: number): number[] {
 export function ema(data: number[], period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   const k = 2 / (period + 1);
+  const k1 = 1 - k;
   let prev = NaN;
   for (let i = 0; i < data.length; i++) {
     if (isNaN(prev)) {
@@ -21,7 +25,7 @@ export function ema(data: number[], period: number): number[] {
         result[i] = prev;
       }
     } else {
-      prev = data[i] * k + prev * (1 - k);
+      prev = data[i] * k + prev * k1;
       result[i] = prev;
     }
   }
@@ -46,22 +50,29 @@ export function hullMa(data: number[], period: number): number[] {
   const sqrtPeriod = Math.floor(Math.sqrt(period));
   const wma1 = wma(data, halfPeriod);
   const wma2 = wma(data, period);
-  const diff: number[] = [];
+  const diff: number[] = new Array(data.length);
   for (let i = 0; i < data.length; i++) {
-    diff.push(isNaN(wma1[i]) || isNaN(wma2[i]) ? NaN : 2 * wma1[i] - wma2[i]);
+    diff[i] = isNaN(wma1[i]) || isNaN(wma2[i]) ? NaN : 2 * wma1[i] - wma2[i];
   }
   return wma(diff, sqrtPeriod);
 }
 
 export function stdev(data: number[], period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
-  for (let i = period - 1; i < data.length; i++) {
-    let sum = 0;
-    for (let j = i - period + 1; j <= i; j++) sum += data[j];
-    const mean = sum / period;
-    let variance = 0;
-    for (let j = i - period + 1; j <= i; j++) variance += (data[j] - mean) ** 2;
-    result[i] = Math.sqrt(variance / period);
+  if (period <= 0 || data.length < period) return result;
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i < period; i++) {
+    sum += data[i];
+    sumSq += data[i] * data[i];
+  }
+  result[period - 1] = Math.sqrt((sumSq - (sum * sum) / period) / period);
+  for (let i = period; i < data.length; i++) {
+    const old = data[i - period];
+    sum += data[i] - old;
+    sumSq += data[i] * data[i] - old * old;
+    const variance = (sumSq - (sum * sum) / period) / period;
+    result[i] = Math.sqrt(Math.max(0, variance));
   }
   return result;
 }
@@ -69,11 +80,18 @@ export function stdev(data: number[], period: number): number[] {
 export function bollingerBands(data: number[], period: number, mult: number): { upper: number[]; basis: number[]; lower: number[] } {
   const basis = sma(data, period);
   const sd = stdev(data, period);
-  const upper: number[] = [];
-  const lower: number[] = [];
-  for (let i = 0; i < data.length; i++) {
-    upper.push(isNaN(basis[i]) ? NaN : basis[i] + mult * sd[i]);
-    lower.push(isNaN(basis[i]) ? NaN : basis[i] - mult * sd[i]);
+  const n = data.length;
+  const upper: number[] = new Array(n);
+  const lower: number[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    if (isNaN(basis[i])) {
+      upper[i] = NaN;
+      lower[i] = NaN;
+    } else {
+      const offset = mult * sd[i];
+      upper[i] = basis[i] + offset;
+      lower[i] = basis[i] - offset;
+    }
   }
   return { upper, basis, lower };
 }
@@ -97,11 +115,17 @@ export function atr(high: number[], low: number[], close: number[], period: numb
 export function keltnerChannel(close: number[], high: number[], low: number[], emaLen: number, atrLen: number, mult: number): { upper: number[]; basis: number[]; lower: number[] } {
   const basis = ema(close, emaLen);
   const atrVals = atr(high, low, close, atrLen);
-  const upper: number[] = [];
-  const lower: number[] = [];
-  for (let i = 0; i < close.length; i++) {
-    upper.push(isNaN(basis[i]) || isNaN(atrVals[i]) ? NaN : basis[i] + mult * atrVals[i]);
-    lower.push(isNaN(basis[i]) || isNaN(atrVals[i]) ? NaN : basis[i] - mult * atrVals[i]);
+  const n = close.length;
+  const upper: number[] = new Array(n);
+  const lower: number[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    if (isNaN(basis[i]) || isNaN(atrVals[i])) {
+      upper[i] = NaN;
+      lower[i] = NaN;
+    } else {
+      upper[i] = basis[i] + mult * atrVals[i];
+      lower[i] = basis[i] - mult * atrVals[i];
+    }
   }
   return { upper, basis, lower };
 }
@@ -109,26 +133,27 @@ export function keltnerChannel(close: number[], high: number[], low: number[], e
 export function rsi(data: number[], period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   if (data.length < period + 1) return result;
-  const gains: number[] = [];
-  const losses: number[] = [];
-  for (let i = 1; i < data.length; i++) {
-    const change = data[i] - data[i - 1];
-    gains.push(change > 0 ? change : 0);
-    losses.push(change < 0 ? -change : 0);
-  }
   let avgGain = 0;
   let avgLoss = 0;
-  for (let i = 0; i < period; i++) {
-    avgGain += gains[i];
-    avgLoss += losses[i];
+  for (let i = 1; i <= period; i++) {
+    const change = data[i] - data[i - 1];
+    if (change > 0) avgGain += change;
+    else avgLoss -= change;
   }
   avgGain /= period;
   avgLoss /= period;
   result[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-  for (let i = period; i < gains.length; i++) {
-    avgGain = (avgGain * (period - 1) + gains[i]) / period;
-    avgLoss = (avgLoss * (period - 1) + losses[i]) / period;
-    result[i + 1] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  const pm1 = period - 1;
+  for (let i = period + 1; i < data.length; i++) {
+    const change = data[i] - data[i - 1];
+    if (change > 0) {
+      avgGain = (avgGain * pm1 + change) / period;
+      avgLoss = (avgLoss * pm1) / period;
+    } else {
+      avgGain = (avgGain * pm1) / period;
+      avgLoss = (avgLoss * pm1 - change) / period;
+    }
+    result[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
   }
   return result;
 }
@@ -147,18 +172,18 @@ export function adx(high: number[], low: number[], close: number[], period: numb
   const atrVals = atr(high, low, close, period);
   const smoothPlusDM = ema(plusDM, period);
   const smoothMinusDM = ema(minusDM, period);
-  const dx: number[] = [];
+  const dx: number[] = new Array(high.length);
   for (let i = 0; i < high.length; i++) {
     if (isNaN(atrVals[i]) || atrVals[i] === 0 || isNaN(smoothPlusDM[i])) {
-      dx.push(NaN);
+      dx[i] = 0;
     } else {
       const plusDI = (smoothPlusDM[i] / atrVals[i]) * 100;
       const minusDI = (smoothMinusDM[i] / atrVals[i]) * 100;
       const sum = plusDI + minusDI;
-      dx.push(sum === 0 ? 0 : (Math.abs(plusDI - minusDI) / sum) * 100);
+      dx[i] = sum === 0 ? 0 : (Math.abs(plusDI - minusDI) / sum) * 100;
     }
   }
-  const adxVals = ema(dx.map(v => isNaN(v) ? 0 : v), period);
+  const adxVals = ema(dx, period);
   for (let i = 0; i < high.length; i++) {
     result[i] = adxVals[i];
   }
@@ -167,17 +192,24 @@ export function adx(high: number[], low: number[], close: number[], period: numb
 
 export function linreg(data: number[], period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
-  for (let i = period - 1; i < data.length; i++) {
-    let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  if (data.length < period) return result;
+  const sumXConst = (period * (period - 1)) / 2;
+  const sumX2Const = (period * (period - 1) * (2 * period - 1)) / 6;
+  const denom = period * sumX2Const - sumXConst * sumXConst;
+  if (denom === 0) return result;
+  const pm1 = period - 1;
+
+  for (let i = pm1; i < data.length; i++) {
+    let sumY = 0;
+    let sumXY = 0;
     for (let j = 0; j < period; j++) {
-      sumX += j;
-      sumY += data[i - period + 1 + j];
-      sumXY += j * data[i - period + 1 + j];
-      sumX2 += j * j;
+      const val = data[i - pm1 + j];
+      sumY += val;
+      sumXY += j * val;
     }
-    const slope = (period * sumXY - sumX * sumY) / (period * sumX2 - sumX * sumX);
-    const intercept = (sumY - slope * sumX) / period;
-    result[i] = intercept + slope * (period - 1);
+    const slope = (period * sumXY - sumXConst * sumY) / denom;
+    const intercept = (sumY - slope * sumXConst) / period;
+    result[i] = intercept + slope * pm1;
   }
   return result;
 }
@@ -187,12 +219,13 @@ export function volumeSma(volume: number[], period: number): number[] {
 }
 
 export function squeeze(bbUpper: number[], bbLower: number[], kcUpper: number[], kcLower: number[]): boolean[] {
-  const result: boolean[] = [];
-  for (let i = 0; i < bbUpper.length; i++) {
+  const n = bbUpper.length;
+  const result: boolean[] = new Array(n);
+  for (let i = 0; i < n; i++) {
     if (isNaN(bbUpper[i]) || isNaN(kcUpper[i])) {
-      result.push(false);
+      result[i] = false;
     } else {
-      result.push(bbLower[i] > kcLower[i] && bbUpper[i] < kcUpper[i]);
+      result[i] = bbLower[i] > kcLower[i] && bbUpper[i] < kcUpper[i];
     }
   }
   return result;
