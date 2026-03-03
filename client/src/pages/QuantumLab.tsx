@@ -18,7 +18,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload,
+  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -27,6 +27,7 @@ import {
 import { motion } from "framer-motion";
 import { Link } from "wouter";
 import { cn } from "@/lib/utils";
+import { generateInsightsReport, formatReportAsText, type StrategyInsightsReport, type ParamSensitivity, type ComboFit, type Suggestion } from "@/lib/strategy-insights";
 import type {
   LabPineInput, LabPineParseResult, LabStrategy, LabBacktestResult,
   LabJobProgress, LabJobResult, LabOptimizationRun, LabOptResult,
@@ -34,7 +35,7 @@ import type {
 } from "@shared/schema";
 import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
 
-type MainTab = "main" | "results" | "heatmap";
+type MainTab = "main" | "results" | "heatmap" | "insights";
 type SortKey = "netProfitPercent" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades";
 type SortDir = "asc" | "desc";
 type RankingMode = "profit" | "winrate" | "balanced" | "conservative";
@@ -95,6 +96,7 @@ const labNavItems: LabNavItem[] = [
   { id: "main", label: "Main", icon: Settings2 },
   { id: "results", label: "Results", icon: History },
   { id: "heatmap", label: "Heatmap", icon: Grid3X3 },
+  { id: "insights", label: "Insights", icon: Lightbulb },
 ];
 
 const EXAMPLE_PINE = `// Paste your Pine Script strategy here
@@ -536,6 +538,8 @@ export default function QuantumLab() {
         );
       case "heatmap":
         return <HeatmapPanel onViewRun={(runId, ticker, timeframe) => { setActiveHistoryRunId(runId); setTargetCombo({ ticker, timeframe }); setMainTab("results"); }} />;
+      case "insights":
+        return <InsightsPanel />;
       default:
         return null;
     }
@@ -2536,6 +2540,335 @@ function HeatmapRiskSummary({ config, idx }: { config: any; idx: number }) {
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function InsightsPanel() {
+  const { toast } = useToast();
+  const [selectedStrategyId, setSelectedStrategyId] = useState<number | null>(null);
+  const [report, setReport] = useState<StrategyInsightsReport | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(["params", "combos", "bias", "trades", "recs"]));
+
+  const { data: strategies } = useQuery<LabStrategy[]>({
+    queryKey: ["/api/lab/strategies"],
+    queryFn: async () => {
+      const res = await fetch("/api/lab/strategies");
+      if (!res.ok) return [];
+      return res.json();
+    },
+  });
+
+  const selectedStrategy = strategies?.find(s => s.id === selectedStrategyId) ?? null;
+
+  const toggleSection = (key: string) => {
+    setExpandedSections(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const generateReport = async () => {
+    if (!selectedStrategyId || !selectedStrategy) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/lab/strategies/${selectedStrategyId}/all-results`);
+      if (!res.ok) throw new Error("Failed to fetch results");
+      const data = await res.json();
+      if (!data.results || data.results.length === 0) {
+        toast({ title: "No results", description: "Run some optimizations first to generate insights", variant: "destructive" });
+        setLoading(false);
+        return;
+      }
+      const resultData = data.results.map((r: LabOptResult) => ({
+        ticker: r.ticker,
+        timeframe: r.timeframe,
+        netProfitPercent: r.netProfitPercent,
+        winRatePercent: r.winRatePercent,
+        maxDrawdownPercent: r.maxDrawdownPercent,
+        profitFactor: r.profitFactor,
+        totalTrades: r.totalTrades,
+        params: r.params as Record<string, any>,
+        trades: (r.trades || []) as any[],
+      }));
+      const inputs = (selectedStrategy.parsedInputs || []) as LabPineInput[];
+      const rpt = generateInsightsReport(resultData, inputs, selectedStrategy.name, data.totalRuns);
+      setReport(rpt);
+    } catch (err: any) {
+      toast({ title: "Error generating report", description: err.message, variant: "destructive" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const copyReport = () => {
+    if (!report || !selectedStrategy) return;
+    const text = formatReportAsText(report, selectedStrategy.pineScript);
+    navigator.clipboard.writeText(text).then(() => {
+      toast({ title: "Report copied", description: "Paste into Claude with your Pine Script for strategy improvements" });
+    }).catch(() => {
+      toast({ title: "Failed to copy", variant: "destructive" });
+    });
+  };
+
+  const severityColor = (s: string) => s === "critical" ? "text-red-400 bg-red-500/10 border-red-500/20" : s === "warning" ? "text-amber-400 bg-amber-500/10 border-amber-500/20" : "text-sky-400 bg-sky-500/10 border-sky-500/20";
+  const severityIcon = (s: string) => s === "critical" ? <AlertCircle className="w-3.5 h-3.5" /> : s === "warning" ? <AlertTriangle className="w-3.5 h-3.5" /> : <Info className="w-3.5 h-3.5" />;
+  const ratingColor = (r: string) => r === "strong" ? "text-emerald-400" : r === "moderate" ? "text-amber-400" : r === "weak" ? "text-orange-400" : "text-red-400";
+  const ratingBg = (r: string) => r === "strong" ? "bg-emerald-500/10 border-emerald-500/20" : r === "moderate" ? "bg-amber-500/10 border-amber-500/20" : r === "weak" ? "bg-orange-500/10 border-orange-500/20" : "bg-red-500/10 border-red-500/20";
+
+  const SectionHeader = ({ sectionKey, title, icon: Icon, count }: { sectionKey: string; title: string; icon: React.ComponentType<{ className?: string }>; count?: number }) => (
+    <button onClick={() => toggleSection(sectionKey)} className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/5 transition-colors" data-testid={`btn-toggle-${sectionKey}`}>
+      <div className="flex items-center gap-2">
+        <Icon className="w-4 h-4 text-violet-400" />
+        <span className="font-semibold text-white text-sm">{title}</span>
+        {count !== undefined && <Badge variant="secondary" className="bg-white/10 text-white/60 text-[10px] h-5">{count}</Badge>}
+      </div>
+      {expandedSections.has(sectionKey) ? <ChevronUp className="w-4 h-4 text-white/40" /> : <ChevronDown className="w-4 h-4 text-white/40" />}
+    </button>
+  );
+
+  return (
+    <div className="max-w-5xl mx-auto space-y-6 p-6" data-testid="insights-panel">
+      <div className="flex items-center gap-3 mb-2">
+        <Lightbulb className="w-6 h-6 text-violet-400" />
+        <div>
+          <h2 className="text-xl font-bold text-white">Strategy Insights</h2>
+          <p className="text-white/50 text-sm">Statistical analysis across all optimization runs for a strategy</p>
+        </div>
+      </div>
+
+      <Card className="border-white/10 bg-white/[0.03] p-4">
+        <div className="flex flex-col sm:flex-row items-start sm:items-end gap-4">
+          <div className="flex-1 w-full">
+            <Label className="text-white/60 text-xs mb-1.5 block">Strategy</Label>
+            <Select value={selectedStrategyId?.toString() ?? ""} onValueChange={(v) => { setSelectedStrategyId(parseInt(v)); setReport(null); }}>
+              <SelectTrigger className="bg-white/5 border-white/10 text-white" data-testid="select-insights-strategy">
+                <SelectValue placeholder="Select a strategy..." />
+              </SelectTrigger>
+              <SelectContent>
+                {strategies?.map(s => (
+                  <SelectItem key={s.id} value={s.id.toString()}>{s.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button onClick={generateReport} disabled={!selectedStrategyId || loading} className="bg-violet-600 hover:bg-violet-500 text-white gap-2" data-testid="btn-generate-insights">
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+            {loading ? "Analyzing..." : "Generate Report"}
+          </Button>
+          {report && (
+            <Button onClick={copyReport} variant="outline" className="border-white/10 text-white/70 hover:text-white gap-2" data-testid="btn-copy-report">
+              <Copy className="w-4 h-4" />
+              Copy Report
+            </Button>
+          )}
+        </div>
+      </Card>
+
+      {loading && (
+        <Card className="border-white/10 bg-white/[0.03] p-12 flex flex-col items-center justify-center gap-4">
+          <Loader2 className="w-8 h-8 text-violet-400 animate-spin" />
+          <p className="text-white/60 text-sm">Fetching and analyzing optimization data...</p>
+        </Card>
+      )}
+
+      {report && !loading && (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {[
+              { label: "Configurations", value: report.totalResults.toLocaleString(), icon: BarChart3 },
+              { label: "Runs", value: report.totalRuns.toString(), icon: Activity },
+              { label: "Trades Analyzed", value: report.totalTrades.toLocaleString(), icon: TrendingUp },
+              { label: "Combos", value: report.comboFit.length.toString(), icon: Grid3X3 },
+            ].map(stat => (
+              <Card key={stat.label} className="border-white/10 bg-white/[0.03] p-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <stat.icon className="w-3.5 h-3.5 text-violet-400" />
+                  <span className="text-[10px] text-white/50 uppercase tracking-wide">{stat.label}</span>
+                </div>
+                <p className="text-lg font-bold text-white tabular-nums">{stat.value}</p>
+              </Card>
+            ))}
+          </div>
+
+          <Card className="border-white/10 bg-white/[0.03] overflow-hidden divide-y divide-white/5">
+            <SectionHeader sectionKey="recs" title="Recommendations" icon={Lightbulb} count={report.suggestions.length} />
+            {expandedSections.has("recs") && (
+              <div className="p-4 space-y-2">
+                {report.suggestions.length === 0 ? (
+                  <p className="text-white/40 text-sm text-center py-4">No specific recommendations — run more optimizations for better insights</p>
+                ) : (
+                  report.suggestions.map((s, i) => (
+                    <div key={i} className={`flex items-start gap-3 px-3 py-2.5 rounded-lg border ${severityColor(s.severity)}`} data-testid={`suggestion-${i}`}>
+                      <div className="mt-0.5 shrink-0">{severityIcon(s.severity)}</div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <Badge variant="secondary" className="bg-white/10 text-white/50 text-[9px] h-4">{s.category}</Badge>
+                        </div>
+                        <p className="text-xs leading-relaxed">{s.text}</p>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            <SectionHeader sectionKey="params" title="Parameter Sensitivity" icon={Settings2} count={report.paramSensitivity.length} />
+            {expandedSections.has("params") && (
+              <div className="p-4">
+                {report.paramSensitivity.length === 0 ? (
+                  <p className="text-white/40 text-sm text-center py-4">Not enough variation in parameter values to analyze</p>
+                ) : (
+                  <div className="space-y-3">
+                    {report.paramSensitivity.map(param => (
+                      <div key={param.name} className="rounded-lg border border-white/5 bg-white/[0.02] overflow-hidden" data-testid={`param-sensitivity-${param.name}`}>
+                        <div className="px-3 py-2 flex items-center justify-between bg-white/[0.02]">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium text-white">{param.label}</span>
+                            <span className="text-[10px] text-white/30 font-mono">{param.name}</span>
+                          </div>
+                          <Badge className={param.impactScore > 5 ? "bg-red-500/20 text-red-400 border-red-500/30" : param.impactScore > 2 ? "bg-amber-500/20 text-amber-400 border-amber-500/30" : "bg-white/10 text-white/50 border-white/10"}>
+                            Impact: {param.impactScore.toFixed(1)}
+                          </Badge>
+                        </div>
+                        <div className="p-3">
+                          <div className="grid grid-cols-4 gap-1 text-[10px] text-white/40 uppercase tracking-wide mb-1 px-2">
+                            <span>Range</span><span className="text-right">Avg Profit</span><span className="text-right">Win Rate</span><span className="text-right">Drawdown</span>
+                          </div>
+                          {param.buckets.map((b, bi) => {
+                            const isBest = b === param.bestBucket;
+                            const isWorst = b === param.worstBucket;
+                            return (
+                              <div key={bi} className={`grid grid-cols-4 gap-1 px-2 py-1.5 rounded text-xs ${isBest ? "bg-emerald-500/10 border border-emerald-500/20" : isWorst ? "bg-red-500/10 border border-red-500/20" : ""}`}>
+                                <span className="text-white/80 font-mono">{b.range} <span className="text-white/30">({b.count})</span></span>
+                                <span className={`text-right font-mono ${b.avgProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>{b.avgProfit >= 0 ? "+" : ""}{b.avgProfit.toFixed(1)}%</span>
+                                <span className={`text-right font-mono ${b.avgWinRate >= 50 ? "text-emerald-400" : "text-amber-400"}`}>{b.avgWinRate.toFixed(1)}%</span>
+                                <span className="text-right font-mono text-red-400">{b.avgDrawdown.toFixed(1)}%</span>
+                              </div>
+                            );
+                          })}
+                          <p className="text-[11px] text-white/50 mt-2 px-2 italic">{param.recommendation}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <SectionHeader sectionKey="combos" title="Ticker / Timeframe Fit" icon={Target} count={report.comboFit.length} />
+            {expandedSections.has("combos") && (
+              <div className="p-4">
+                <div className="grid grid-cols-7 gap-1 text-[10px] text-white/40 uppercase tracking-wide mb-1 px-2">
+                  <span className="col-span-2">Combo</span><span className="text-right">Avg Profit</span><span className="text-right">Win Rate</span><span className="text-right">Drawdown</span><span className="text-right">Best Lev.</span><span className="text-right">Rating</span>
+                </div>
+                {report.comboFit.map(combo => (
+                  <div key={`${combo.ticker}-${combo.timeframe}`} className={`grid grid-cols-7 gap-1 px-2 py-2 rounded text-xs border mb-1 ${ratingBg(combo.rating)}`} data-testid={`combo-${combo.ticker}-${combo.timeframe}`}>
+                    <span className="col-span-2 text-white font-medium">{combo.ticker.split("/")[0]} <span className="text-white/40">{combo.timeframe}</span></span>
+                    <span className={`text-right font-mono ${combo.avgProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>{combo.avgProfit >= 0 ? "+" : ""}{combo.avgProfit.toFixed(1)}%</span>
+                    <span className={`text-right font-mono ${combo.avgWinRate >= 50 ? "text-emerald-400" : "text-amber-400"}`}>{combo.avgWinRate.toFixed(1)}%</span>
+                    <span className="text-right font-mono text-red-400">{combo.avgDrawdown.toFixed(1)}%</span>
+                    <span className="text-right font-mono text-violet-400">{combo.bestLevProfit.toFixed(0)}% @{combo.bestLeverage}x</span>
+                    <span className={`text-right font-medium uppercase text-[10px] ${ratingColor(combo.rating)}`}>{combo.rating}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <SectionHeader sectionKey="bias" title="Directional Bias" icon={ArrowUpDown} />
+            {expandedSections.has("bias") && (
+              <div className="p-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <TrendingUp className="w-4 h-4 text-emerald-400" />
+                      <span className="text-sm font-medium text-emerald-400">Long Trades</span>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-xs"><span className="text-white/50">Total</span><span className="text-white font-mono">{report.directionalBias.longCount.toLocaleString()}</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-white/50">Win Rate</span><span className="text-emerald-400 font-mono">{report.directionalBias.longWinRate.toFixed(1)}%</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-white/50">Avg PnL</span><span className={`font-mono ${report.directionalBias.longAvgPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{report.directionalBias.longAvgPnl >= 0 ? "+" : ""}{report.directionalBias.longAvgPnl.toFixed(2)}%</span></div>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <TrendingDown className="w-4 h-4 text-red-400" />
+                      <span className="text-sm font-medium text-red-400">Short Trades</span>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-xs"><span className="text-white/50">Total</span><span className="text-white font-mono">{report.directionalBias.shortCount.toLocaleString()}</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-white/50">Win Rate</span><span className="text-red-400 font-mono">{report.directionalBias.shortWinRate.toFixed(1)}%</span></div>
+                      <div className="flex justify-between text-xs"><span className="text-white/50">Avg PnL</span><span className={`font-mono ${report.directionalBias.shortAvgPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{report.directionalBias.shortAvgPnl >= 0 ? "+" : ""}{report.directionalBias.shortAvgPnl.toFixed(2)}%</span></div>
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-3 text-center">
+                  <Badge className={report.directionalBias.bias === "neutral" ? "bg-white/10 text-white/60" : report.directionalBias.bias === "long" ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}>
+                    {report.directionalBias.bias === "neutral" ? "Neutral" : `${report.directionalBias.bias === "long" ? "Long" : "Short"} Bias`} — Strength: {report.directionalBias.biasStrength.toFixed(1)}
+                  </Badge>
+                </div>
+              </div>
+            )}
+
+            <SectionHeader sectionKey="trades" title="Trade Patterns" icon={Activity} />
+            {expandedSections.has("trades") && (
+              <div className="p-4 space-y-4">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[
+                    { label: "Avg Win", value: `+${report.tradePatterns.avgWinSize.toFixed(2)}%`, color: "text-emerald-400" },
+                    { label: "Avg Loss", value: `-${report.tradePatterns.avgLossSize.toFixed(2)}%`, color: "text-red-400" },
+                    { label: "Reward/Risk", value: `${report.tradePatterns.winLossRatio.toFixed(1)}:1`, color: report.tradePatterns.winLossRatio >= 1 ? "text-emerald-400" : "text-red-400" },
+                    { label: "Bars Ratio", value: `${report.tradePatterns.barsRatio.toFixed(1)}x`, color: "text-violet-400" },
+                  ].map(s => (
+                    <div key={s.label} className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
+                      <span className="text-[10px] text-white/40 uppercase tracking-wide">{s.label}</span>
+                      <p className={`text-lg font-bold tabular-nums ${s.color}`}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
+                    <span className="text-[10px] text-white/40 uppercase tracking-wide block mb-1">Winners avg bars held</span>
+                    <p className="text-sm font-mono text-white">{report.tradePatterns.avgBarsWinners.toFixed(1)} bars</p>
+                  </div>
+                  <div className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
+                    <span className="text-[10px] text-white/40 uppercase tracking-wide block mb-1">Losers avg bars held</span>
+                    <p className="text-sm font-mono text-white">{report.tradePatterns.avgBarsLosers.toFixed(1)} bars</p>
+                  </div>
+                </div>
+
+                {report.tradePatterns.exitReasons.length > 0 && (
+                  <div>
+                    <span className="text-[10px] text-white/40 uppercase tracking-wide block mb-2">Exit Reasons</span>
+                    <div className="space-y-1">
+                      {report.tradePatterns.exitReasons.map(er => (
+                        <div key={er.reason} className="flex items-center gap-2 px-3 py-2 rounded bg-white/[0.02] border border-white/5" data-testid={`exit-reason-${er.reason}`}>
+                          <span className="text-xs text-white/80 flex-1">{er.reason}</span>
+                          <span className="text-xs font-mono text-white/50">{er.count}</span>
+                          <span className="text-xs font-mono text-white/50">({er.percent.toFixed(1)}%)</span>
+                          <span className={`text-xs font-mono ${er.avgPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{er.avgPnl >= 0 ? "+" : ""}{er.avgPnl.toFixed(2)}%</span>
+                          <span className={`text-xs font-mono ${er.winRate >= 50 ? "text-emerald-400" : "text-amber-400"}`}>WR {er.winRate.toFixed(0)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+
+      {!report && !loading && (
+        <Card className="border-white/10 bg-white/[0.03] p-12 flex flex-col items-center justify-center gap-3">
+          <Lightbulb className="w-10 h-10 text-white/20" />
+          <p className="text-white/40 text-sm text-center">Select a strategy and generate a report to see insights</p>
+          <p className="text-white/30 text-xs text-center max-w-md">The more optimization runs you complete, the richer the dataset and the better the insights</p>
+        </Card>
       )}
     </div>
   );

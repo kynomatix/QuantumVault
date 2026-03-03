@@ -43,6 +43,7 @@ export interface ILabStorage {
   saveResults(runId: number, results: LabBacktestResult[]): Promise<void>;
   saveComboResults(runId: number, results: LabBacktestResult[], isPartial?: boolean): Promise<void>;
   getRunResults(runId: number): Promise<LabOptResult[]>;
+  getAllResultsForStrategy(strategyId: number): Promise<{ strategy: LabStrategy | undefined; totalRuns: number; totalResults: number; results: LabOptResult[] }>;
 
   createJob(config: LabOptimizationConfig): LabJob;
   getJob(id: string): LabJob | undefined;
@@ -299,6 +300,21 @@ export class LabDatabaseStorage implements ILabStorage {
 
   async getRunResults(runId: number): Promise<LabOptResult[]> {
     return db.select().from(labOptimizationResults).where(eq(labOptimizationResults.runId, runId)).orderBy(labOptimizationResults.rank);
+  }
+
+  async getAllResultsForStrategy(strategyId: number): Promise<{ strategy: LabStrategy | undefined; totalRuns: number; totalResults: number; results: LabOptResult[] }> {
+    const strategy = await this.getStrategy(strategyId);
+    const runs = await db.select().from(labOptimizationRuns)
+      .where(eq(labOptimizationRuns.strategyId, strategyId));
+    const completedRuns = runs.filter(r => r.status === "complete" || r.status === "paused");
+    if (completedRuns.length === 0) {
+      return { strategy, totalRuns: 0, totalResults: 0, results: [] };
+    }
+    const runIds = completedRuns.map(r => r.id);
+    const results = await db.select().from(labOptimizationResults)
+      .where(inArray(labOptimizationResults.runId, runIds))
+      .orderBy(labOptimizationResults.runId, labOptimizationResults.rank);
+    return { strategy, totalRuns: completedRuns.length, totalResults: results.length, results };
   }
 
   createJob(config: LabOptimizationConfig): LabJob {
