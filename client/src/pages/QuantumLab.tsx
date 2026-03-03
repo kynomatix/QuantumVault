@@ -165,29 +165,36 @@ function calculateRiskAnalysis(
   }
 
   const recoveryFactor = maxDrawdownPercent > 0 ? netProfitPercent / maxDrawdownPercent : 0;
-  const maxSafeLeverage = maxDrawdownPercent > 0 ? Math.max(1, Math.floor((100 / maxDrawdownPercent) * 0.8)) : 1;
-  const streakSafety = streakDrawdownPercent > 0 ? Math.max(1, Math.floor(100 / (streakDrawdownPercent * 1.5))) : maxSafeLeverage;
+
+  const BACKTEST_LEVERAGE = 10;
+  const MAX_LEVERAGE_CAP = 20;
+  const unleveragedDD = maxDrawdownPercent / BACKTEST_LEVERAGE;
+  const unleveragedStreakDD = streakDrawdownPercent / BACKTEST_LEVERAGE;
+  const maxSafeLeverage = unleveragedDD > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor((100 / unleveragedDD) * 0.8))) : 1;
+  const streakSafety = unleveragedStreakDD > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor(100 / (unleveragedStreakDD * 1.5)))) : maxSafeLeverage;
   const recommendedLeverage = Math.max(1, Math.min(maxSafeLeverage, streakSafety));
-  const liquidationBuffer = maxDrawdownPercent > 0 ? Math.round(((100 / recommendedLeverage) - maxDrawdownPercent) / (100 / recommendedLeverage) * 100) : 0;
+  const recDD = unleveragedDD * recommendedLeverage;
+  const liquidationBuffer = recDD > 0 ? Math.round(((100 / recommendedLeverage) - recDD) / (100 / recommendedLeverage) * 100) : 0;
 
   const fixedTradeSize = 1000;
-  const peakDrawdownDollar = (maxDrawdownPercent / 100) * fixedTradeSize;
-  const streakDrawdownDollar = (streakDrawdownPercent / 100) * fixedTradeSize;
-  const worstCaseBuffer = Math.max(peakDrawdownDollar, streakDrawdownDollar) * 1.5;
+  const recDrawdownDollar = (unleveragedDD * recommendedLeverage / 100) * fixedTradeSize;
+  const recStreakDollar = (unleveragedStreakDD * recommendedLeverage / 100) * fixedTradeSize;
+  const worstCaseBuffer = Math.max(recDrawdownDollar, recStreakDollar) * 1.5;
   const recommendedWalletAllocation = Math.round(fixedTradeSize + worstCaseBuffer);
-  const minCapitalRequired = Math.round(fixedTradeSize + peakDrawdownDollar);
+  const minCapitalRequired = Math.round(fixedTradeSize + recDrawdownDollar);
 
   let riskRating: LabRiskAnalysis["riskRating"];
-  if (maxDrawdownPercent <= 15 && longestLosingStreak <= 3 && recoveryFactor >= 3) riskRating = "LOW";
-  else if (maxDrawdownPercent <= 35 && longestLosingStreak <= 6 && recoveryFactor >= 1.5) riskRating = "MODERATE";
-  else if (maxDrawdownPercent <= 60 && recoveryFactor >= 0.5) riskRating = "HIGH";
+  const ddAtRecommended = unleveragedDD * recommendedLeverage;
+  if (ddAtRecommended <= 15 && longestLosingStreak <= 3 && recoveryFactor >= 3) riskRating = "LOW";
+  else if (ddAtRecommended <= 35 && longestLosingStreak <= 6 && recoveryFactor >= 1.5) riskRating = "MODERATE";
+  else if (ddAtRecommended <= 60 && recoveryFactor >= 0.5) riskRating = "HIGH";
   else riskRating = "EXTREME";
 
   const recommendations: string[] = [];
-  recommendations.push(`Use ${recommendedLeverage}x leverage (max safe: ${maxSafeLeverage}x based on ${maxDrawdownPercent.toFixed(1)}% max drawdown)`);
-  if (longestLosingStreak >= 4) recommendations.push(`Strategy had ${longestLosingStreak} consecutive losses (${streakDrawdownPercent.toFixed(1)}% cumulative). Allocate extra buffer capital.`);
-  if (recommendedLeverage <= 2) recommendations.push(`High drawdown limits leverage to ${recommendedLeverage}x. Consider reducing position size or tightening stop losses.`);
-  recommendations.push(`Allocate at least $${recommendedWalletAllocation} per $1,000 trade size to survive worst-case drawdowns.`);
+  recommendations.push(`Use ${recommendedLeverage}x leverage (max safe: ${maxSafeLeverage}x). Backtest drawdown of ${maxDrawdownPercent.toFixed(1)}% is at 10x — at ${recommendedLeverage}x it would be ${(unleveragedDD * recommendedLeverage).toFixed(1)}%.`);
+  if (longestLosingStreak >= 4) recommendations.push(`Strategy had ${longestLosingStreak} consecutive losses (${(unleveragedStreakDD * recommendedLeverage).toFixed(1)}% at ${recommendedLeverage}x). Allocate extra buffer capital.`);
+  if (recommendedLeverage <= 2) recommendations.push(`High per-trade drawdown limits leverage to ${recommendedLeverage}x. Consider tightening stop losses.`);
+  recommendations.push(`Allocate at least $${recommendedWalletAllocation} per $1,000 trade size to survive worst-case drawdowns at ${recommendedLeverage}x.`);
   if (recoveryFactor < 1) recommendations.push(`Recovery factor is ${recoveryFactor.toFixed(2)} — drawdowns are larger than returns. High risk.`);
   else if (recoveryFactor >= 3) recommendations.push(`Strong recovery factor of ${recoveryFactor.toFixed(2)} — strategy recovers well from drawdowns.`);
   if (riskOfRuin > 20) recommendations.push(`Risk of ruin is ${riskOfRuin.toFixed(1)}%. Use half-Kelly position sizing to protect capital.`);
@@ -1948,7 +1955,8 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
             <Flame className="w-3.5 h-3.5" /> Risk Metrics
           </h4>
           <div className="space-y-2">
-            <DetailRow label="Max Drawdown" value={`${analysis.maxDrawdownPercent.toFixed(1)}%`} color="text-red-400" />
+            <DetailRow label="Max Drawdown (at 10x)" value={`${analysis.maxDrawdownPercent.toFixed(1)}%`} color="text-red-400" />
+            <DetailRow label="Max Drawdown (at 1x)" value={`${(analysis.maxDrawdownPercent / 10).toFixed(2)}%`} color="text-white/60" />
             <DetailRow label="Worst Single Trade" value={`${analysis.worstTradePercent.toFixed(2)}%`} color="text-red-400" />
             <DetailRow label="Avg Win" value={`+${analysis.avgWinPercent.toFixed(2)}%`} color="text-green-400" />
             <DetailRow label="Avg Loss" value={`-${analysis.avgLossPercent.toFixed(2)}%`} color="text-red-400" />
