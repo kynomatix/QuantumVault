@@ -44,6 +44,7 @@ export interface ILabStorage {
   saveResults(runId: number, results: LabBacktestResult[]): Promise<void>;
   saveComboResults(runId: number, results: LabBacktestResult[], isPartial?: boolean): Promise<void>;
   getRunResults(runId: number): Promise<LabOptResult[]>;
+  getResult(resultId: number): Promise<LabOptResult | undefined>;
   getAllResultsForStrategy(strategyId: number): Promise<{ strategy: LabStrategy | undefined; totalRuns: number; totalResults: number; results: LabOptResult[] }>;
 
   createJob(config: LabOptimizationConfig): LabJob;
@@ -306,6 +307,11 @@ export class LabDatabaseStorage implements ILabStorage {
 
   async getRunResults(runId: number): Promise<LabOptResult[]> {
     return db.select().from(labOptimizationResults).where(eq(labOptimizationResults.runId, runId)).orderBy(labOptimizationResults.rank);
+  }
+
+  async getResult(resultId: number): Promise<LabOptResult | undefined> {
+    const rows = await db.select().from(labOptimizationResults).where(eq(labOptimizationResults.id, resultId)).limit(1);
+    return rows[0];
   }
 
   async getAllResultsForStrategy(strategyId: number): Promise<{ strategy: LabStrategy | undefined; totalRuns: number; totalResults: number; results: LabOptResult[] }> {

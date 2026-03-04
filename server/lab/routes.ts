@@ -184,7 +184,32 @@ export function registerLabRoutes(app: Express): void {
   app.get("/api/lab/runs/:id/results", async (req: Request, res: Response) => {
     try {
       const results = await labStorage.getRunResults(parseInt(req.params.id));
-      res.json(results);
+      const slim = results.map(r => ({
+        id: r.id,
+        runId: r.runId,
+        rank: r.rank,
+        ticker: r.ticker,
+        timeframe: r.timeframe,
+        netProfitPercent: r.netProfitPercent,
+        winRatePercent: r.winRatePercent,
+        maxDrawdownPercent: r.maxDrawdownPercent,
+        profitFactor: r.profitFactor,
+        totalTrades: r.totalTrades,
+        params: r.params,
+      }));
+      res.json(slim);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/lab/results/:resultId", async (req: Request, res: Response) => {
+    try {
+      const resultId = parseInt(req.params.resultId);
+      if (isNaN(resultId)) return res.status(400).json({ error: "Invalid result ID" });
+      const result = await labStorage.getResult(resultId);
+      if (!result) return res.status(404).json({ error: "Result not found" });
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

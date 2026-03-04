@@ -1492,7 +1492,9 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
 const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, targetCombo, onTargetConsumed }: { runId: number; onBack: () => void; targetCombo?: { ticker: string; timeframe: string } | null; onTargetConsumed?: () => void }) {
   const [sortKey, setSortKey] = useState<SortKey>("netProfitPercent");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [selectedResult, setSelectedResult] = useState<LabOptResult | null>(null);
+  const [selectedResultSummary, setSelectedResultSummary] = useState<LabOptResult | null>(null);
+  const [selectedResultFull, setSelectedResultFull] = useState<LabOptResult | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
   const [rankingMode, setRankingMode] = useState<RankingMode>("profit");
   const [expandedCombos, setExpandedCombos] = useState<Set<string>>(new Set());
 
@@ -1553,6 +1555,25 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     return arr;
   }, [resultsByCombo, sortKey, sortDir]);
 
+  const selectResult = useCallback(async (r: LabOptResult) => {
+    setSelectedResultSummary(r);
+    setSelectedResultFull(null);
+    if (!r.id) return;
+    setLoadingDetail(true);
+    try {
+      const res = await fetch(`/api/lab/results/${r.id}`);
+      if (res.ok) {
+        const full = await res.json();
+        setSelectedResultFull(full);
+      }
+    } catch {
+    } finally {
+      setLoadingDetail(false);
+    }
+  }, []);
+
+  const selectedResult = selectedResultFull ?? selectedResultSummary;
+
   const targetConsumedRef = useRef(false);
   useEffect(() => {
     if (!results || bestPerCombo.length === 0) return;
@@ -1561,14 +1582,14 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       const key = `${targetCombo.ticker}|${targetCombo.timeframe}`;
       const comboConfigs = resultsByCombo.get(key);
       if (comboConfigs && comboConfigs.length > 0) {
-        setSelectedResult(comboConfigs[0]);
+        selectResult(comboConfigs[0]);
         setExpandedCombos(new Set([key]));
         onTargetConsumed?.();
         return;
       }
     }
     if (!selectedResult) {
-      setSelectedResult(bestPerCombo[0]);
+      selectResult(bestPerCombo[0]);
     }
   }, [results, bestPerCombo, resultsByCombo, targetCombo]);
 
@@ -1578,16 +1599,16 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     const rankingChanged = prevRankingRef.current !== rankingMode;
     prevRankingRef.current = rankingMode;
 
-    if (rankingChanged && selectedResult) {
-      const key = `${selectedResult.ticker}|${selectedResult.timeframe}`;
+    if (rankingChanged && selectedResultSummary) {
+      const key = `${selectedResultSummary.ticker}|${selectedResultSummary.timeframe}`;
       const comboConfigs = resultsByCombo.get(key);
       if (comboConfigs && comboConfigs.length > 0) {
-        setSelectedResult(comboConfigs[0]);
+        selectResult(comboConfigs[0]);
         return;
       }
     }
     if (!selectedResult) {
-      setSelectedResult(bestPerCombo[0]);
+      selectResult(bestPerCombo[0]);
     }
   }, [rankingMode, results, bestPerCombo, resultsByCombo]);
 
@@ -1726,7 +1747,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                 return (
                   <Fragment key={r.id}>
                     <tr className={`border-b border-white/5 cursor-pointer transition-colors ${isSelected ? "bg-violet-500/5" : "hover:bg-white/5"}`}
-                      onClick={() => setSelectedResult(r)} data-testid={`history-row-${r.id}`}>
+                      onClick={() => selectResult(r)} data-testid={`history-row-${r.id}`}>
                       <td className="py-2.5 px-4 font-medium text-white">{name}</td>
                       <td className="py-2.5 px-2"><Badge variant="outline" className="text-[10px] border-white/20 text-white/60">{r.timeframe}</Badge></td>
                       <td className={`py-2.5 px-2 text-right font-mono font-medium ${r.netProfitPercent >= 0 ? "text-sky-400" : "text-purple-400"}`}>
@@ -1749,7 +1770,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                       const subSelected = selectedResult?.id === sr.id;
                       return (
                         <tr key={sr.id} className={`border-b border-white/5 cursor-pointer transition-colors ${subSelected ? "bg-violet-500/5" : "hover:bg-white/5"}`}
-                          onClick={() => setSelectedResult(sr)} data-testid={`history-sub-${sr.id}`}>
+                          onClick={() => selectResult(sr)} data-testid={`history-sub-${sr.id}`}>
                           <td className="py-2 px-4 pl-8 text-xs text-white/40">#{idx + 2}</td>
                           <td className="py-2 px-2"><Badge variant="outline" className="text-[10px] border-white/20 text-white/40">{sr.timeframe}</Badge></td>
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.netProfitPercent >= 0 ? "text-sky-400/70" : "text-purple-400/70"}`}>
@@ -1785,7 +1806,9 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
               <h3 className="text-sm font-semibold mb-4 flex items-center gap-2 text-white">
                 <Activity className="w-4 h-4 text-violet-400" /> {selectedResult.ticker.split("/")[0]} {selectedResult.timeframe}
               </h3>
-              {selectedResult.equityCurve && (selectedResult.equityCurve as any[]).length > 0 ? (
+              {loadingDetail ? (
+                <div className="h-[350px] flex items-center justify-center"><Loader2 className="w-5 h-5 animate-spin text-violet-400" /></div>
+              ) : selectedResult.equityCurve && (selectedResult.equityCurve as any[]).length > 0 ? (
                 <div className="h-[350px]" data-testid="chart-history-equity">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={selectedResult.equityCurve as any[]}>
@@ -1830,7 +1853,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
           <TabsContent value="trades">
             <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
               <div className="px-4 py-3 border-b border-white/10">
-                <h3 className="text-sm font-semibold text-white">{(selectedResult.trades as any[])?.length ?? 0} Trades</h3>
+                <h3 className="text-sm font-semibold text-white">{loadingDetail ? "Loading..." : `${(selectedResult.trades as any[])?.length ?? 0} Trades`}</h3>
               </div>
               <ScrollArea className="max-h-[400px]">
                 <table className="w-full text-xs" data-testid="table-history-trades">
