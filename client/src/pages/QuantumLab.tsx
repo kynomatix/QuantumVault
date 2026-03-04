@@ -1821,6 +1821,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                 <th className="text-left py-2.5 px-4">Ticker</th>
                 <th className="text-left py-2.5 px-2">TF</th>
                 <SortHeader label="Net Profit %" sortKey="netProfitPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
+                <th className="text-right py-2.5 px-2 whitespace-nowrap">Lev. Profit</th>
                 <SortHeader label="Win Rate %" sortKey="winRatePercent" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="Max DD %" sortKey="maxDrawdownPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="PF" sortKey="profitFactor" current={sortKey} dir={sortDir} onClick={handleSort} />
@@ -1845,6 +1846,12 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                       <td className={`py-2.5 px-2 text-right font-mono font-medium ${r.netProfitPercent >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                         {r.netProfitPercent > 0 ? "+" : ""}{r.netProfitPercent.toFixed(2)}%
                       </td>
+                      {(() => { const lev = r.maxDrawdownPercent > 0 ? Math.min(20, Math.max(1, Math.floor((100 / r.maxDrawdownPercent) * 0.8))) : 1; const levProfit = r.netProfitPercent * lev; return (
+                        <td className={`py-2.5 px-2 text-right font-mono font-medium ${levProfit >= 0 ? "text-sky-400" : "text-purple-400"}`} data-testid={`lev-profit-${r.id}`}>
+                          {levProfit > 0 ? "+" : ""}{levProfit.toFixed(1)}%
+                          <span className="text-[10px] text-white/30 ml-1">{lev}x</span>
+                        </td>
+                      ); })()}
                       <td className={`py-2.5 px-2 text-right font-mono ${r.winRatePercent >= 50 ? "text-sky-400" : "text-indigo-400"}`}>{r.winRatePercent.toFixed(1)}%</td>
                       <td className={`py-2.5 px-2 text-right font-mono ${r.maxDrawdownPercent <= 30 ? "text-sky-400" : "text-purple-400"}`}>{r.maxDrawdownPercent.toFixed(1)}%</td>
                       <td className={`py-2.5 px-2 text-right font-mono ${r.profitFactor >= 1.5 ? "text-sky-400" : "text-white"}`}>{r.profitFactor.toFixed(2)}</td>
@@ -1868,6 +1875,12 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.netProfitPercent >= 0 ? "text-sky-400/70" : "text-purple-400/70"}`}>
                             {sr.netProfitPercent > 0 ? "+" : ""}{sr.netProfitPercent.toFixed(2)}%
                           </td>
+                          {(() => { const lev = sr.maxDrawdownPercent > 0 ? Math.min(20, Math.max(1, Math.floor((100 / sr.maxDrawdownPercent) * 0.8))) : 1; const levProfit = sr.netProfitPercent * lev; return (
+                            <td className={`py-2 px-2 text-right font-mono text-xs ${levProfit >= 0 ? "text-sky-400/70" : "text-purple-400/70"}`}>
+                              {levProfit > 0 ? "+" : ""}{levProfit.toFixed(1)}%
+                              <span className="text-[10px] text-white/20 ml-1">{lev}x</span>
+                            </td>
+                          ); })()}
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.winRatePercent >= 50 ? "text-sky-400/70" : "text-indigo-400/70"}`}>{sr.winRatePercent.toFixed(1)}%</td>
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.maxDrawdownPercent <= 30 ? "text-sky-400/70" : "text-purple-400/70"}`}>{sr.maxDrawdownPercent.toFixed(1)}%</td>
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.profitFactor >= 1.5 ? "text-sky-400/70" : "text-white/50"}`}>{sr.profitFactor.toFixed(2)}</td>
