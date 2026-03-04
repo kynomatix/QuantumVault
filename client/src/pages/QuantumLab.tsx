@@ -19,7 +19,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet,
+  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -2819,6 +2819,77 @@ function HeatmapRiskSummary({ config, idx }: { config: any; idx: number }) {
   );
 }
 
+function Top10Leaderboard({ strategyId }: { strategyId: number }) {
+  const { data: topResults, isLoading } = useQuery<any[]>({
+    queryKey: ["/api/lab/strategies", strategyId, "top-results"],
+    queryFn: async () => {
+      const res = await fetch(`/api/lab/strategies/${strategyId}/top-results?limit=10`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: !!strategyId,
+  });
+
+  if (isLoading) return (
+    <Card className="border-white/10 bg-white/[0.03] p-6 flex items-center justify-center gap-2">
+      <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+      <span className="text-white/50 text-sm">Loading leaderboard...</span>
+    </Card>
+  );
+
+  if (!topResults || topResults.length === 0) return null;
+
+  return (
+    <Card className="border-white/10 bg-white/[0.03] overflow-hidden" data-testid="top10-leaderboard">
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-white/5">
+        <Trophy className="w-4 h-4 text-yellow-400" />
+        <span className="font-semibold text-white text-sm">Top 10 by Leveraged Profit</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs" data-testid="top10-table">
+          <thead>
+            <tr className="border-b border-white/10 text-[10px] text-white/40 uppercase tracking-wider">
+              <th className="text-center py-2 px-2 w-8">#</th>
+              <th className="text-left py-2 px-2">Ticker</th>
+              <th className="text-left py-2 px-2">TF</th>
+              <th className="text-right py-2 px-2">Lev. Profit</th>
+              <th className="text-right py-2 px-2">Net Profit</th>
+              <th className="text-right py-2 px-2">Win Rate</th>
+              <th className="text-right py-2 px-2">Max DD</th>
+              <th className="text-right py-2 px-2">PF</th>
+              <th className="text-right py-2 px-2">Trades</th>
+              <th className="text-right py-2 px-2">Leverage</th>
+            </tr>
+          </thead>
+          <tbody>
+            {topResults.map((r: any, i: number) => {
+              const medalColors = ["text-yellow-400", "text-gray-300", "text-amber-600"];
+              return (
+                <tr key={r.id || i} className="border-b border-white/5 hover:bg-white/[0.03] transition-colors" data-testid={`top10-row-${i}`}>
+                  <td className={cn("text-center py-2 px-2 font-bold", i < 3 ? medalColors[i] : "text-white/30")}>{i + 1}</td>
+                  <td className="py-2 px-2 text-white/80 font-medium">{(r.ticker || "").replace("-PERP", "").replace("USDT", "")}</td>
+                  <td className="py-2 px-2 text-violet-400">{r.timeframe}</td>
+                  <td className={cn("text-right py-2 px-2 font-bold tabular-nums", r.levProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
+                    {r.levProfit >= 0 ? "+" : ""}{r.levProfit.toFixed(1)}%
+                  </td>
+                  <td className={cn("text-right py-2 px-2 tabular-nums", r.netProfitPercent >= 0 ? "text-sky-400/70" : "text-purple-400/70")}>
+                    {r.netProfitPercent >= 0 ? "+" : ""}{r.netProfitPercent.toFixed(1)}%
+                  </td>
+                  <td className="text-right py-2 px-2 text-white/60 tabular-nums">{r.winRatePercent.toFixed(1)}%</td>
+                  <td className="text-right py-2 px-2 text-purple-400/70 tabular-nums">{r.maxDrawdownPercent.toFixed(1)}%</td>
+                  <td className="text-right py-2 px-2 text-white/60 tabular-nums">{r.profitFactor.toFixed(2)}</td>
+                  <td className="text-right py-2 px-2 text-white/60 tabular-nums">{r.totalTrades}</td>
+                  <td className="text-right py-2 px-2 text-violet-400 font-semibold">{r.leverage}x</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
 function InsightsPanel() {
   const { toast } = useToast();
   const [selectedStrategyId, setSelectedStrategyId] = useState<number | null>(null);
@@ -3025,6 +3096,8 @@ function InsightsPanel() {
           </div>
         )}
       </Card>
+
+      {selectedStrategyId && <Top10Leaderboard strategyId={selectedStrategyId} />}
 
       {strategySummary && selectedStrategyId && !report && !loading && (
         <Card className="border-white/10 bg-white/[0.03] p-4" data-testid="strategy-preview">

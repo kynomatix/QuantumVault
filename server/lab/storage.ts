@@ -59,6 +59,8 @@ export interface ILabStorage {
   saveInsightsReport(strategyId: number, reportData: any, totalResults: number, totalRuns: number): Promise<LabInsightsReport>;
   getLatestInsightsReport(strategyId: number): Promise<LabInsightsReport | undefined>;
   getInsightsReports(strategyId: number): Promise<LabInsightsReport[]>;
+
+  getTopResultsForStrategy(strategyId: number, limit?: number): Promise<any[]>;
 }
 
 export class LabDatabaseStorage implements ILabStorage {
@@ -505,6 +507,49 @@ export class LabDatabaseStorage implements ILabStorage {
     return db.select().from(labInsightsReports)
       .where(eq(labInsightsReports.strategyId, strategyId))
       .orderBy(desc(labInsightsReports.createdAt));
+  }
+
+  async getTopResultsForStrategy(strategyId: number, limit = 10): Promise<any[]> {
+    const runs = await db.select({ id: labOptimizationRuns.id, status: labOptimizationRuns.status }).from(labOptimizationRuns)
+      .where(eq(labOptimizationRuns.strategyId, strategyId));
+    const completedRuns = runs.filter(r => r.status === "complete" || r.status === "paused").map(r => r.id);
+    if (completedRuns.length === 0) return [];
+    const results = await db.select({
+      id: labOptimizationResults.id,
+      runId: labOptimizationResults.runId,
+      rank: labOptimizationResults.rank,
+      ticker: labOptimizationResults.ticker,
+      timeframe: labOptimizationResults.timeframe,
+      netProfitPercent: labOptimizationResults.netProfitPercent,
+      winRatePercent: labOptimizationResults.winRatePercent,
+      maxDrawdownPercent: labOptimizationResults.maxDrawdownPercent,
+      profitFactor: labOptimizationResults.profitFactor,
+      totalTrades: labOptimizationResults.totalTrades,
+      params: labOptimizationResults.params,
+    }).from(labOptimizationResults)
+      .where(inArray(labOptimizationResults.runId, completedRuns))
+      .orderBy(desc(labOptimizationResults.netProfitPercent));
+    const withLev = results.map(r => {
+      const dd = r.maxDrawdownPercent;
+      const lev = dd > 0 ? Math.min(20, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
+      return { ...r, _levProfit: r.netProfitPercent * lev, _lev: lev };
+    });
+    withLev.sort((a, b) => b._levProfit - a._levProfit);
+    return withLev.slice(0, limit).map(r => ({
+      id: r.id,
+      runId: r.runId,
+      rank: r.rank,
+      ticker: r.ticker,
+      timeframe: r.timeframe,
+      netProfitPercent: r.netProfitPercent,
+      winRatePercent: r.winRatePercent,
+      maxDrawdownPercent: r.maxDrawdownPercent,
+      profitFactor: r.profitFactor,
+      totalTrades: r.totalTrades,
+      params: r.params,
+      levProfit: r._levProfit,
+      leverage: r._lev,
+    }));
   }
 }
 

@@ -93,6 +93,18 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  app.get("/api/lab/strategies/:id/top-results", async (req: Request, res: Response) => {
+    try {
+      const strategyId = parseInt(req.params.id);
+      if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
+      const limit = Math.min(50, parseInt(req.query.limit as string) || 10);
+      const results = await labStorage.getTopResultsForStrategy(strategyId, limit);
+      res.json(results);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/lab/strategies/:id/all-results", async (req: Request, res: Response) => {
     try {
       const strategyId = parseInt(req.params.id);
