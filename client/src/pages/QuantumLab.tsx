@@ -988,6 +988,8 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
       return reports.length > 0 ? reports[0] : null;
     },
     enabled: !!strategyId,
+    staleTime: 0,
+    refetchOnMount: true,
   });
   const hasInsights = !!latestInsightsReport;
 
@@ -2779,6 +2781,7 @@ function InsightsPanel() {
           totalRuns: rpt.totalRuns,
         });
         refetchSavedReports();
+        queryClient.invalidateQueries({ queryKey: ["/api/lab/strategies", selectedStrategyId, "latest-insights"] });
       } catch (saveErr: any) {
         console.log("[Insights] Failed to auto-save report:", saveErr.message);
       }
