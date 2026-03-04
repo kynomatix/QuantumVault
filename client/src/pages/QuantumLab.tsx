@@ -295,6 +295,7 @@ function injectParamsIntoPineScript(code: string, params: Record<string, any>): 
     if (!(varName in params)) continue;
 
     const newVal = params[varName];
+    const isNumeric = inputType === "int" || inputType === "float";
     let formattedVal: string;
     if (inputType === "string" || inputType === "source") {
       formattedVal = `"${newVal}"`;
@@ -306,35 +307,60 @@ function injectParamsIntoPineScript(code: string, params: Record<string, any>): 
       formattedVal = String(newVal);
     }
 
+    let newArgsStr = argsStr;
     let depth = 0, inStr = false, strCh = "", firstArgEnd = -1;
-    for (let i = 0; i < argsStr.length; i++) {
-      const ch = argsStr[i];
-      if (inStr) { if (ch === strCh && argsStr[i - 1] !== "\\") inStr = false; continue; }
+    for (let i = 0; i < newArgsStr.length; i++) {
+      const ch = newArgsStr[i];
+      if (inStr) { if (ch === strCh && newArgsStr[i - 1] !== "\\") inStr = false; continue; }
       if (ch === '"' || ch === "'") { inStr = true; strCh = ch; continue; }
       if (ch === "(" || ch === "[") { depth++; continue; }
       if (ch === ")" || ch === "]") { depth--; continue; }
       if (ch === "," && depth === 0) { firstArgEnd = i; break; }
     }
 
-    const argsStart = match.index + match[0].indexOf(argsStr) + offset;
     if (firstArgEnd === -1) {
-      const trimmed = argsStr.trim();
+      const trimmed = newArgsStr.trim();
       const hasKeyword = trimmed.includes("=") && !trimmed.startsWith('"') && !trimmed.startsWith("'");
       if (hasKeyword) continue;
-      result = result.substring(0, argsStart) + formattedVal + result.substring(argsStart + argsStr.length);
-      offset += formattedVal.length - argsStr.length;
+      newArgsStr = formattedVal;
     } else {
-      const firstArg = argsStr.substring(0, firstArgEnd).trim();
+      const firstArg = newArgsStr.substring(0, firstArgEnd).trim();
       const hasDefvalKeyword = firstArg.match(/^defval\s*=/);
       if (hasDefvalKeyword) {
-        const newFirstArg = `defval=${formattedVal}`;
-        result = result.substring(0, argsStart) + newFirstArg + result.substring(argsStart + firstArgEnd);
-        offset += newFirstArg.length - firstArgEnd;
+        newArgsStr = `defval=${formattedVal}` + newArgsStr.substring(firstArgEnd);
       } else {
-        result = result.substring(0, argsStart) + formattedVal + result.substring(argsStart + firstArgEnd);
-        offset += formattedVal.length - firstArgEnd;
+        newArgsStr = formattedVal + newArgsStr.substring(firstArgEnd);
       }
     }
+
+    if (isNumeric && typeof newVal === "number") {
+      newArgsStr = newArgsStr.replace(/\bminval\s*=\s*[^,)]+/, (m) => {
+        const minMatch = m.match(/minval\s*=\s*([^,)]+)/);
+        if (minMatch) {
+          const minV = parseFloat(minMatch[1].trim());
+          if (!isNaN(minV) && newVal < minV) {
+            const fmtMin = inputType === "float" ? (Number.isInteger(newVal) ? `${newVal}.0` : String(newVal)) : String(Math.floor(newVal));
+            return `minval=${fmtMin}`;
+          }
+        }
+        return m;
+      });
+      newArgsStr = newArgsStr.replace(/\bmaxval\s*=\s*[^,)]+/, (m) => {
+        const maxMatch = m.match(/maxval\s*=\s*([^,)]+)/);
+        if (maxMatch) {
+          const maxV = parseFloat(maxMatch[1].trim());
+          if (!isNaN(maxV) && newVal > maxV) {
+            const fmtMax = inputType === "float" ? (Number.isInteger(newVal) ? `${newVal}.0` : String(newVal)) : String(Math.ceil(newVal));
+            return `maxval=${fmtMax}`;
+          }
+        }
+        return m;
+      });
+    }
+
+    const argsStart = match.index + match[0].indexOf(argsStr) + offset;
+    result = result.substring(0, argsStart) + newArgsStr + result.substring(argsStart + argsStr.length);
+    offset += newArgsStr.length - argsStr.length;
   }
   return result;
 }
