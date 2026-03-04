@@ -19,7 +19,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb,
+  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -2073,13 +2073,14 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
                 <div
                   key={l.label}
                   className={cn(
-                    "rounded-lg border p-3 text-center transition-colors",
+                    "rounded-lg border p-3 text-center transition-colors relative",
                     l.isCurrent ? "bg-white/5 border-white/10" :
                     l.isRecommended ? "bg-violet-500/10 border-violet-500/30" :
                     "bg-white/[0.03] border-white/10"
                   )}
                   data-testid={`leverage-card-${l.lev}x`}
                 >
+                  <BotSetupAdvisor leverage={l.lev} drawdownPercent={backtestDrawdown} streakDrawdownPercent={analysis.streakDrawdownPercent} profitPercent={backtestProfit} isRecommended={l.isRecommended} />
                   <p className={cn("text-[10px] font-medium mb-1.5", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
                   <p className={cn("text-lg font-bold tabular-nums", adjProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
                     {adjProfit >= 0 ? "+" : ""}{adjProfit.toFixed(1)}%
@@ -2582,8 +2583,131 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
   );
 }
 
+function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended }: { leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean }) {
+  const [capital, setCapital] = useState("1000");
+  const capitalNum = parseFloat(capital) || 0;
+
+  const levDD = drawdownPercent * leverage;
+  const levStreakDD = (streakDrawdownPercent || drawdownPercent) * leverage;
+  const worstCaseLoss = Math.max(levDD, levStreakDD);
+  const bufferMultiplier = 1.5;
+  const tradeSize = capitalNum > 0 ? capitalNum / (1 + (worstCaseLoss / 100) * bufferMultiplier) : 0;
+  const effectiveTradeSize = Math.floor(tradeSize);
+  const equityBuffer = capitalNum > 0 ? Math.ceil(capitalNum - tradeSize) : 0;
+  const bufferPercent = capitalNum > 0 ? (equityBuffer / capitalNum) * 100 : 0;
+  const projectedProfit = capitalNum > 0 ? (profitPercent * leverage / 100) * effectiveTradeSize : 0;
+  const projectedLoss = capitalNum > 0 ? (worstCaseLoss / 100) * effectiveTradeSize : 0;
+  const survivable = worstCaseLoss < 80;
+  const enableTopUp = bufferPercent > 30;
+  const enableReinvest = leverage <= 5 && drawdownPercent < 15;
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          className={cn(
+            "absolute top-1 right-1 p-0.5 rounded transition-colors",
+            isRecommended ? "text-violet-300 hover:text-violet-200 hover:bg-violet-500/20" : "text-white/30 hover:text-white/60 hover:bg-white/10"
+          )}
+          data-testid={`bot-setup-btn-${leverage}x`}
+        >
+          <Settings2 className="w-3 h-3" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-72 bg-slate-900 border-white/10 p-0" align="center" side="top" sideOffset={8}>
+        <div className="p-3 border-b border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <Wallet className="w-3.5 h-3.5 text-violet-400" />
+            <h4 className="text-xs font-semibold text-white">Bot Setup at {leverage}x</h4>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-white/40 shrink-0">Capital $</span>
+            <Input
+              type="number"
+              value={capital}
+              onChange={(e) => setCapital(e.target.value)}
+              className="h-6 text-xs bg-white/5 border-white/10 text-white px-2"
+              min="1"
+              data-testid={`setup-capital-${leverage}x`}
+            />
+          </div>
+        </div>
+        {capitalNum > 0 && (
+          <div className="p-3 space-y-2.5">
+            <div className="space-y-1.5">
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-white/40">Investment Amount</span>
+                <span className="text-xs font-bold text-white tabular-nums">${effectiveTradeSize.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-white/40">Equity Buffer</span>
+                <span className="text-xs font-bold text-indigo-400 tabular-nums">+${equityBuffer.toLocaleString()}</span>
+              </div>
+              <div className="w-full h-1.5 bg-white/5 rounded-full overflow-hidden">
+                <div className="h-full bg-violet-500 rounded-full" style={{ width: `${Math.min(100, ((effectiveTradeSize / capitalNum) * 100))}%` }} />
+              </div>
+              <div className="flex justify-between text-[9px] text-white/30">
+                <span>{((effectiveTradeSize / capitalNum) * 100).toFixed(0)}% trading</span>
+                <span>{bufferPercent.toFixed(0)}% buffer</span>
+              </div>
+            </div>
+
+            <div className="border-t border-white/5 pt-2 space-y-1.5">
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-white/40">Set Leverage</span>
+                <span className="text-xs font-semibold text-violet-400">{leverage}x</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-white/40">Projected Profit</span>
+                <span className={cn("text-xs font-semibold tabular-nums", projectedProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
+                  {projectedProfit >= 0 ? "+" : ""}${projectedProfit.toFixed(2)}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-white/40">Worst-Case Loss</span>
+                <span className="text-xs font-semibold text-purple-400 tabular-nums">-${projectedLoss.toFixed(2)}</span>
+              </div>
+            </div>
+
+            <div className="border-t border-white/5 pt-2 space-y-1">
+              <p className="text-[10px] text-white/50 font-medium mb-1">Recommended Settings</p>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-white/40">Auto Top-Up</span>
+                <Badge className={cn("text-[9px] h-4", enableTopUp ? "bg-sky-500/10 text-sky-400 border-sky-500/30" : "bg-white/5 text-white/40 border-white/10")}>{enableTopUp ? "ON" : "OFF"}</Badge>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-white/40">Profit Reinvest</span>
+                <Badge className={cn("text-[9px] h-4", enableReinvest ? "bg-sky-500/10 text-sky-400 border-sky-500/30" : "bg-white/5 text-white/40 border-white/10")}>{enableReinvest ? "ON" : "OFF"}</Badge>
+              </div>
+            </div>
+
+            {!survivable && (
+              <div className="flex items-start gap-1.5 p-2 rounded bg-purple-500/10 border border-purple-500/20">
+                <AlertTriangle className="w-3 h-3 text-purple-400 shrink-0 mt-0.5" />
+                <p className="text-[10px] text-purple-300 leading-relaxed">Drawdown at {leverage}x exceeds 80%. High liquidation risk — consider lower leverage.</p>
+              </div>
+            )}
+            {survivable && enableTopUp && (
+              <div className="flex items-start gap-1.5 p-2 rounded bg-indigo-500/10 border border-indigo-500/20">
+                <Info className="w-3 h-3 text-indigo-400 shrink-0 mt-0.5" />
+                <p className="text-[10px] text-indigo-300 leading-relaxed">Keep ${equityBuffer.toLocaleString()} as buffer in your agent wallet with Auto Top-Up enabled to survive drawdown periods.</p>
+              </div>
+            )}
+            {survivable && !enableTopUp && equityBuffer > 0 && (
+              <div className="flex items-start gap-1.5 p-2 rounded bg-sky-500/10 border border-sky-500/20">
+                <Info className="w-3 h-3 text-sky-400 shrink-0 mt-0.5" />
+                <p className="text-[10px] text-sky-300 leading-relaxed">Deposit full ${capitalNum.toLocaleString()} into the bot. The ${equityBuffer.toLocaleString()} buffer absorbs drawdowns before recovery.</p>
+              </div>
+            )}
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function HeatmapRiskSummary({ config, idx }: { config: any; idx: number }) {
-  const [showProjection, setShowProjection] = useState(false);
+  const [showProjection, setShowProjection] = useState(true);
   const dd = config.maxDrawdownPercent || 0;
   const profit = config.netProfitPercent || 0;
   const winRate = config.winRatePercent || 0;
@@ -2670,13 +2794,14 @@ function HeatmapRiskSummary({ config, idx }: { config: any; idx: number }) {
             <div
               key={l.label}
               className={cn(
-                "rounded-lg border p-2.5 text-center",
+                "rounded-lg border p-2.5 text-center relative",
                 l.isCurrent ? "bg-white/5 border-white/10" :
                 l.isRecommended ? "bg-violet-500/10 border-violet-500/30" :
                 "bg-white/[0.03] border-white/10"
               )}
               data-testid={`heatmap-lev-${l.lev}x-${idx}`}
             >
+              <BotSetupAdvisor leverage={l.lev} drawdownPercent={dd} profitPercent={profit} isRecommended={l.isRecommended} />
               <p className={cn("text-[10px] font-medium mb-1", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
               <p className={cn("text-sm font-bold tabular-nums", profit * l.lev >= 0 ? "text-sky-400" : "text-purple-400")}>
                 {profit * l.lev >= 0 ? "+" : ""}{(profit * l.lev).toFixed(1)}%
