@@ -32,6 +32,27 @@ export function ema(data: number[], period: number): number[] {
   return result;
 }
 
+export function rma(data: number[], period: number): number[] {
+  const result: number[] = new Array(data.length).fill(NaN);
+  const k = 1 / period;
+  const k1 = 1 - k;
+  let prev = NaN;
+  for (let i = 0; i < data.length; i++) {
+    if (isNaN(prev)) {
+      if (i >= period - 1) {
+        let sum = 0;
+        for (let j = i - period + 1; j <= i; j++) sum += data[j];
+        prev = sum / period;
+        result[i] = prev;
+      }
+    } else {
+      prev = data[i] * k + prev * k1;
+      result[i] = prev;
+    }
+  }
+  return result;
+}
+
 export function wma(data: number[], period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   const denom = (period * (period + 1)) / 2;
@@ -109,11 +130,11 @@ export function trueRange(high: number[], low: number[], close: number[]): numbe
 
 export function atr(high: number[], low: number[], close: number[], period: number): number[] {
   const tr = trueRange(high, low, close);
-  return ema(tr, period);
+  return rma(tr, period);
 }
 
-export function keltnerChannel(close: number[], high: number[], low: number[], emaLen: number, atrLen: number, mult: number): { upper: number[]; basis: number[]; lower: number[] } {
-  const basis = ema(close, emaLen);
+export function keltnerChannel(close: number[], high: number[], low: number[], smaLen: number, atrLen: number, mult: number): { upper: number[]; basis: number[]; lower: number[] } {
+  const basis = sma(close, smaLen);
   const atrVals = atr(high, low, close, atrLen);
   const n = close.length;
   const upper: number[] = new Array(n);
@@ -170,8 +191,8 @@ export function adx(high: number[], low: number[], close: number[], period: numb
     minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
   }
   const atrVals = atr(high, low, close, period);
-  const smoothPlusDM = ema(plusDM, period);
-  const smoothMinusDM = ema(minusDM, period);
+  const smoothPlusDM = rma(plusDM, period);
+  const smoothMinusDM = rma(minusDM, period);
   const dx: number[] = new Array(high.length);
   for (let i = 0; i < high.length; i++) {
     if (isNaN(atrVals[i]) || atrVals[i] === 0 || isNaN(smoothPlusDM[i])) {
@@ -183,7 +204,7 @@ export function adx(high: number[], low: number[], close: number[], period: numb
       dx[i] = sum === 0 ? 0 : (Math.abs(plusDI - minusDI) / sum) * 100;
     }
   }
-  const adxVals = ema(dx, period);
+  const adxVals = rma(dx, period);
   for (let i = 0; i < high.length; i++) {
     result[i] = adxVals[i];
   }
@@ -226,6 +247,53 @@ export function squeeze(bbUpper: number[], bbLower: number[], kcUpper: number[],
       result[i] = false;
     } else {
       result[i] = bbLower[i] > kcLower[i] && bbUpper[i] < kcUpper[i];
+    }
+  }
+  return result;
+}
+
+export function highest(data: number[], period: number): number[] {
+  const result: number[] = new Array(data.length).fill(NaN);
+  for (let i = period - 1; i < data.length; i++) {
+    let max = -Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (data[j] > max) max = data[j];
+    }
+    result[i] = max;
+  }
+  return result;
+}
+
+export function lowest(data: number[], period: number): number[] {
+  const result: number[] = new Array(data.length).fill(NaN);
+  for (let i = period - 1; i < data.length; i++) {
+    let min = Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (data[j] < min) min = data[j];
+    }
+    result[i] = min;
+  }
+  return result;
+}
+
+export function percentRank(data: number[], period: number): number[] {
+  const result: number[] = new Array(data.length).fill(NaN);
+  for (let i = period; i < data.length; i++) {
+    let count = 0;
+    for (let j = i - period; j < i; j++) {
+      if (data[j] <= data[i]) count++;
+    }
+    result[i] = (count / period) * 100;
+  }
+  return result;
+}
+
+export function bbWidth(bbUpper: number[], bbLower: number[], bbBasis: number[]): number[] {
+  const n = bbUpper.length;
+  const result: number[] = new Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    if (!isNaN(bbUpper[i]) && !isNaN(bbLower[i]) && !isNaN(bbBasis[i]) && bbBasis[i] !== 0) {
+      result[i] = ((bbUpper[i] - bbLower[i]) / bbBasis[i]) * 100;
     }
   }
   return result;
