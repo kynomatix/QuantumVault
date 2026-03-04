@@ -65,6 +65,50 @@ function calcParamCombinations(inputs: LabPineInput[]): number {
   return total;
 }
 
+function calcGuidedParamCombinations(inputs: LabPineInput[], reportData: any): number {
+  if (!reportData?.paramSensitivity || !Array.isArray(reportData.paramSensitivity)) {
+    return calcParamCombinations(inputs);
+  }
+  const sensMap = new Map<string, any>();
+  for (const ps of reportData.paramSensitivity) {
+    sensMap.set(ps.name, ps);
+  }
+  const scores = reportData.paramSensitivity.map((ps: any) => ps.impactScore ?? 0);
+  const sorted = [...scores].sort((a: number, b: number) => a - b);
+  const median = sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] : 0;
+
+  let total = 1;
+  for (const p of inputs) {
+    if (!p.optimizable) continue;
+    if (p.options && p.options.length > 0) {
+      total *= p.options.length;
+      continue;
+    }
+    if (p.type === "bool") {
+      total *= 2;
+      continue;
+    }
+    if ((p.type === "int" || p.type === "float") && p.min != null && p.max != null) {
+      const sens = sensMap.get(p.name);
+      const isHighImpact = sens && (sens.impactScore ?? 0) >= median;
+      if (isHighImpact && sens?.bestBucket) {
+        const narrowMin = Math.max(p.min, sens.bestBucket.rangeMin);
+        const narrowMax = Math.min(p.max, sens.bestBucket.rangeMax);
+        if (narrowMin <= narrowMax) {
+          const step = p.type === "float" ? Math.max((p.step ?? 0.1) / 2, 0.001) : (p.step ?? 1);
+          const count = Math.max(1, Math.floor((narrowMax - narrowMin) / step) + 1);
+          total *= count;
+          continue;
+        }
+      }
+      const step = p.step ?? 1;
+      const count = Math.max(1, Math.floor((p.max - p.min) / step) + 1);
+      total *= count;
+    }
+  }
+  return total;
+}
+
 function formatCombinations(n: number): string {
   if (!Number.isFinite(n) || n > 1e15) return "∞";
   if (n >= 1_000_000_000_000) return `${Math.round(n / 1_000_000_000_000)}T`;
@@ -934,17 +978,18 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [useInsights, setUseInsights] = useState(false);
 
-  const { data: hasInsights } = useQuery<boolean>({
-    queryKey: ["/api/lab/strategies", strategyId, "has-insights"],
+  const { data: latestInsightsReport } = useQuery<any>({
+    queryKey: ["/api/lab/strategies", strategyId, "latest-insights"],
     queryFn: async () => {
-      if (!strategyId) return false;
+      if (!strategyId) return null;
       const res = await fetch(`/api/lab/strategies/${strategyId}/insights-reports`);
-      if (!res.ok) return false;
+      if (!res.ok) return null;
       const reports = await res.json();
-      return reports.length > 0;
+      return reports.length > 0 ? reports[0] : null;
     },
     enabled: !!strategyId,
   });
+  const hasInsights = !!latestInsightsReport;
 
   const toggleTicker = (symbol: string) => setSelectedTickers(prev => prev.includes(symbol) ? prev.filter(s => s !== symbol) : [...prev, symbol]);
   const toggleTimeframe = (tf: string) => setSelectedTimeframes(prev => prev.includes(tf) ? prev.filter(t => t !== tf) : [...prev, tf]);
@@ -1150,11 +1195,24 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
             const marketCombos = selectedTickers.length * selectedTimeframes.length;
             const totalSearch = paramCombos * marketCombos;
             const totalTests = (randomSamples + topK * refinements) * marketCombos;
+            const isGuided = useInsights && hasInsights && latestInsightsReport?.reportData;
+            const guidedCombos = isGuided
+              ? calcGuidedParamCombinations(parsedResult.inputs, latestInsightsReport.reportData) * marketCombos
+              : null;
             return (
               <>
-                <p className="text-[11px] text-white/40" data-testid="text-total-search-space">
-                  Search space: <span className="text-sky-300 font-medium">{formatCombinations(totalSearch)}</span> possible combinations
-                </p>
+                {isGuided && guidedCombos != null ? (
+                  <p className="text-[11px] text-white/40" data-testid="text-total-search-space">
+                    Guided space: <span className="text-violet-300 font-medium">{formatCombinations(guidedCombos)}</span>
+                    <span className="text-white/25 mx-1">←</span>
+                    <span className="text-white/25 line-through">{formatCombinations(totalSearch)}</span>
+                    <span className="text-white/25 ml-1">({Math.max(1, Math.round((guidedCombos / totalSearch) * 100))}% of full)</span>
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-white/40" data-testid="text-total-search-space">
+                    Search space: <span className="text-sky-300 font-medium">{formatCombinations(totalSearch)}</span> possible combinations
+                  </p>
+                )}
                 <p className="text-[11px] text-white/40">
                   Optimizer will test: <span className="text-violet-300 font-medium">{formatCombinations(totalTests)}</span> samples
                 </p>
