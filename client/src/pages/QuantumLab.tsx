@@ -2819,7 +2819,7 @@ function HeatmapRiskSummary({ config, idx }: { config: any; idx: number }) {
   );
 }
 
-function Top10Leaderboard({ strategyId }: { strategyId: number }) {
+function Top10Leaderboard({ strategyId, pineScript, strategyName }: { strategyId: number; pineScript?: string; strategyName?: string }) {
   const { data: topResults, isLoading } = useQuery<any[]>({
     queryKey: ["/api/lab/strategies", strategyId, "top-results"],
     queryFn: async () => {
@@ -2859,6 +2859,7 @@ function Top10Leaderboard({ strategyId }: { strategyId: number }) {
               <th className="text-right py-2 px-2">PF</th>
               <th className="text-right py-2 px-2">Trades</th>
               <th className="text-right py-2 px-2">Leverage</th>
+              {pineScript && <th className="text-center py-2 px-2 w-8"></th>}
             </tr>
           </thead>
           <tbody>
@@ -2880,6 +2881,24 @@ function Top10Leaderboard({ strategyId }: { strategyId: number }) {
                   <td className="text-right py-2 px-2 text-white/60 tabular-nums">{r.profitFactor.toFixed(2)}</td>
                   <td className="text-right py-2 px-2 text-white/60 tabular-nums">{r.totalTrades}</td>
                   <td className="text-right py-2 px-2 text-violet-400 font-semibold">{r.leverage}x</td>
+                  {pineScript && (
+                    <td className="text-center py-2 px-2">
+                      <button
+                        onClick={() => {
+                          const injected = injectParamsIntoPineScript(pineScript, r.params);
+                          const t = (r.ticker || "").split("/")[0];
+                          const tf = (r.timeframe || "").toUpperCase();
+                          const sName = (strategyName || "STRATEGY").replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase();
+                          downloadFile(injected, `${t}_${tf}_${sName}.pine`);
+                        }}
+                        className="text-violet-400 hover:text-violet-300 transition-colors p-0.5 rounded hover:bg-violet-500/10"
+                        title="Export .pine with these params"
+                        data-testid={`top10-export-${i}`}
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
+                  )}
                 </tr>
               );
             })}
@@ -3097,7 +3116,7 @@ function InsightsPanel() {
         )}
       </Card>
 
-      {selectedStrategyId && <Top10Leaderboard strategyId={selectedStrategyId} />}
+      {selectedStrategyId && <Top10Leaderboard strategyId={selectedStrategyId} pineScript={selectedStrategy?.pineScript ?? undefined} strategyName={selectedStrategy?.name ?? undefined} />}
 
       {strategySummary && selectedStrategyId && !report && !loading && (
         <Card className="border-white/10 bg-white/[0.03] p-4" data-testid="strategy-preview">
