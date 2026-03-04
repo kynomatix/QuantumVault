@@ -1,10 +1,10 @@
 import {
-  labStrategies, labOptimizationRuns, labOptimizationResults,
+  labStrategies, labOptimizationRuns, labOptimizationResults, labInsightsReports,
   type LabStrategy, type InsertLabStrategy,
   type LabOptimizationRun, type InsertLabRun,
   type LabOptResult, type InsertLabResult,
   type LabBacktestResult, type LabJobProgress, type LabOptimizationConfig, type LabJobResult,
-  type LabCheckpoint,
+  type LabCheckpoint, type LabInsightsReport,
 } from "@shared/schema";
 import { db } from "../db";
 import { eq, desc, inArray } from "drizzle-orm";
@@ -55,6 +55,10 @@ export interface ILabStorage {
   setResults(id: string, results: LabBacktestResult[]): void;
   getJobResult(id: string): LabJobResult | undefined;
   cancelJob(id: string): void;
+
+  saveInsightsReport(strategyId: number, reportData: any, totalResults: number, totalRuns: number): Promise<LabInsightsReport>;
+  getLatestInsightsReport(strategyId: number): Promise<LabInsightsReport | undefined>;
+  getInsightsReports(strategyId: number): Promise<LabInsightsReport[]>;
 }
 
 export class LabDatabaseStorage implements ILabStorage {
@@ -477,6 +481,30 @@ export class LabDatabaseStorage implements ILabStorage {
       }
       this.scheduleCleanup(id);
     }
+  }
+
+  async saveInsightsReport(strategyId: number, reportData: any, totalResults: number, totalRuns: number): Promise<LabInsightsReport> {
+    const [report] = await db.insert(labInsightsReports).values({
+      strategyId,
+      reportData,
+      totalResults,
+      totalRuns,
+    }).returning();
+    return report;
+  }
+
+  async getLatestInsightsReport(strategyId: number): Promise<LabInsightsReport | undefined> {
+    const [report] = await db.select().from(labInsightsReports)
+      .where(eq(labInsightsReports.strategyId, strategyId))
+      .orderBy(desc(labInsightsReports.createdAt))
+      .limit(1);
+    return report;
+  }
+
+  async getInsightsReports(strategyId: number): Promise<LabInsightsReport[]> {
+    return db.select().from(labInsightsReports)
+      .where(eq(labInsightsReports.strategyId, strategyId))
+      .orderBy(desc(labInsightsReports.createdAt));
   }
 }
 

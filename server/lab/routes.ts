@@ -129,6 +129,31 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  app.post("/api/lab/strategies/:id/insights-report", async (req: Request, res: Response) => {
+    try {
+      const strategyId = parseInt(req.params.id);
+      if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
+      const { reportData, totalResults, totalRuns } = req.body;
+      if (!reportData || typeof reportData !== "object") return res.status(400).json({ error: "reportData is required" });
+      if (!reportData.paramSensitivity || !Array.isArray(reportData.paramSensitivity)) return res.status(400).json({ error: "reportData must contain paramSensitivity array" });
+      const report = await labStorage.saveInsightsReport(strategyId, reportData, totalResults ?? 0, totalRuns ?? 0);
+      res.json(report);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/lab/strategies/:id/insights-reports", async (req: Request, res: Response) => {
+    try {
+      const strategyId = parseInt(req.params.id);
+      if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
+      const reports = await labStorage.getInsightsReports(strategyId);
+      res.json(reports);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/lab/runs", async (req: Request, res: Response) => {
     try {
       const strategyId = req.query.strategyId ? parseInt(req.query.strategyId as string) : undefined;
@@ -264,7 +289,8 @@ export function registerLabRoutes(app: Express): void {
     job: ReturnType<typeof labStorage.createJob>,
     runId: number | undefined,
     resumeCheckpoint?: LabCheckpoint,
-    prefetchedCandles?: Record<string, OHLCV[]>
+    prefetchedCandles?: Record<string, OHLCV[]>,
+    guidedInsights?: import("@shared/schema").GuidedInsights,
   ) {
     const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
 
@@ -297,6 +323,7 @@ export function registerLabRoutes(app: Express): void {
           minTrades: config.minTrades,
           maxDrawdownCap: config.maxDrawdownCap,
           parsedInputs: config.parsedInputs,
+          guidedInsights,
         },
         candlesByCombo,
         resumeCheckpoint,
@@ -467,6 +494,25 @@ export function registerLabRoutes(app: Express): void {
       const config = parsed.data;
       const job = labStorage.createJob(config);
 
+      let guidedInsights: import("@shared/schema").GuidedInsights | undefined;
+      if (config.useInsights && config.strategyId) {
+        const latestReport = await labStorage.getLatestInsightsReport(config.strategyId);
+        if (latestReport?.reportData) {
+          const rd = latestReport.reportData as any;
+          if (rd.paramSensitivity && Array.isArray(rd.paramSensitivity)) {
+            guidedInsights = {
+              paramSensitivity: rd.paramSensitivity.map((ps: any) => ({
+                name: ps.name,
+                type: ps.type,
+                impactScore: ps.impactScore ?? 0,
+                bestBucket: ps.bestBucket ? { rangeMin: ps.bestBucket.rangeMin, rangeMax: ps.bestBucket.rangeMax } : { rangeMin: 0, rangeMax: 0 },
+              })),
+            };
+            console.log(`[QuantumLab] Guided mode: loaded insights with ${guidedInsights.paramSensitivity.length} param sensitivities`);
+          }
+        }
+      }
+
       let runId: number | undefined;
       if (config.strategyId) {
         const run = await labStorage.createRun({
@@ -488,7 +534,7 @@ export function registerLabRoutes(app: Express): void {
         await labStorage.saveCheckpoint(runId, { completedCombos: [], configSnapshot: config });
       }
 
-      startOptimizationJob(config, job, runId);
+      startOptimizationJob(config, job, runId, undefined, undefined, guidedInsights);
 
       res.json({ jobId: job.id, runId });
     } catch (err: any) {

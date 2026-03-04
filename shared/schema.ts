@@ -736,9 +736,19 @@ export const labOptimizationResults = pgTable("lab_optimization_results", {
   equityCurve: jsonb("equity_curve"),
 });
 
+export const labInsightsReports = pgTable("lab_insights_reports", {
+  id: serial("id").primaryKey(),
+  strategyId: integer("strategy_id").notNull(),
+  reportData: jsonb("report_data").notNull(),
+  totalResults: integer("total_results"),
+  totalRuns: integer("total_runs"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const insertLabStrategySchema = createInsertSchema(labStrategies).omit({ id: true, createdAt: true });
 export const insertLabRunSchema = createInsertSchema(labOptimizationRuns).omit({ id: true, createdAt: true, completedAt: true });
 export const insertLabResultSchema = createInsertSchema(labOptimizationResults).omit({ id: true });
+export const insertLabInsightsReportSchema = createInsertSchema(labInsightsReports).omit({ id: true, createdAt: true });
 
 export type LabStrategy = typeof labStrategies.$inferSelect;
 export type InsertLabStrategy = z.infer<typeof insertLabStrategySchema>;
@@ -746,6 +756,8 @@ export type LabOptimizationRun = typeof labOptimizationRuns.$inferSelect;
 export type InsertLabRun = z.infer<typeof insertLabRunSchema>;
 export type LabOptResult = typeof labOptimizationResults.$inferSelect;
 export type InsertLabResult = z.infer<typeof insertLabResultSchema>;
+export type LabInsightsReport = typeof labInsightsReports.$inferSelect;
+export type InsertLabInsightsReport = z.infer<typeof insertLabInsightsReportSchema>;
 
 export interface LabPineInput {
   name: string;
@@ -772,6 +784,15 @@ export interface LabPineParseResult {
   };
 }
 
+export interface GuidedInsights {
+  paramSensitivity: {
+    name: string;
+    type: string;
+    impactScore: number;
+    bestBucket: { rangeMin: number; rangeMax: number };
+  }[];
+}
+
 export interface LabOptimizationConfig {
   pineScript: string;
   parsedInputs: LabPineInput[];
@@ -786,6 +807,7 @@ export interface LabOptimizationConfig {
   maxDrawdownCap: number;
   mode: "smoke" | "sweep";
   strategyId?: number;
+  useInsights?: boolean;
 }
 
 export interface LabTradeRecord {
@@ -956,4 +978,5 @@ export const labOptimizationConfigSchema = z.object({
   maxDrawdownCap: z.number().default(85),
   mode: z.enum(["smoke", "sweep"]),
   strategyId: z.number().optional(),
+  useInsights: z.boolean().optional(),
 });

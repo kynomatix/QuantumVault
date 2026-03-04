@@ -932,6 +932,19 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
   const [maxDrawdown, setMaxDrawdown] = useState(85);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [useInsights, setUseInsights] = useState(false);
+
+  const { data: hasInsights } = useQuery<boolean>({
+    queryKey: ["/api/lab/strategies", strategyId, "has-insights"],
+    queryFn: async () => {
+      if (!strategyId) return false;
+      const res = await fetch(`/api/lab/strategies/${strategyId}/insights-reports`);
+      if (!res.ok) return false;
+      const reports = await res.json();
+      return reports.length > 0;
+    },
+    enabled: !!strategyId,
+  });
 
   const toggleTicker = (symbol: string) => setSelectedTickers(prev => prev.includes(symbol) ? prev.filter(s => s !== symbol) : [...prev, symbol]);
   const toggleTimeframe = (tf: string) => setSelectedTimeframes(prev => prev.includes(tf) ? prev.filter(t => t !== tf) : [...prev, tf]);
@@ -951,6 +964,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
         pineScript: code, parsedInputs: parsedResult.inputs, tickers, timeframes,
         startDate, endDate, randomSamples: samples, topK: top, refinementsPerSeed: refs,
         minTrades, maxDrawdownCap: maxDrawdown, mode, strategyId: strategyId ?? undefined,
+        useInsights: useInsights && hasInsights ? true : undefined,
       });
       const { jobId, runId } = await res.json();
       onJobStarted(jobId, runId);
@@ -1103,6 +1117,24 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
                 <Label className="text-[10px] text-white/30 mb-1 block">Max Drawdown Cap (%)</Label>
                 <Input type="number" value={maxDrawdown} onChange={(e) => setMaxDrawdown(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-max-drawdown" />
               </div>
+              {strategyId && hasInsights && (
+                <div className="pt-2 border-t border-white/5">
+                  <button
+                    onClick={() => setUseInsights(!useInsights)}
+                    className="flex items-center justify-between w-full group"
+                    data-testid="toggle-use-insights"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Lightbulb className={`w-3.5 h-3.5 ${useInsights ? "text-violet-400" : "text-white/30"}`} />
+                      <span className={`text-xs font-medium ${useInsights ? "text-white" : "text-white/50"}`}>Use Insights</span>
+                    </div>
+                    <div className={`w-8 h-4.5 rounded-full transition-colors relative ${useInsights ? "bg-violet-600" : "bg-white/10"}`}>
+                      <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${useInsights ? "translate-x-4" : "translate-x-0.5"}`} />
+                    </div>
+                  </button>
+                  <p className="text-[10px] text-white/30 mt-1 ml-5.5">Narrows parameter ranges based on past optimization data. Best used after several runs.</p>
+                </div>
+              )}
             </CollapsibleContent>
           </Collapsible>
         </div>
@@ -2590,6 +2622,7 @@ function InsightsPanel() {
   const [report, setReport] = useState<StrategyInsightsReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(["params", "combos", "bias", "trades", "recs"]));
+  const [savedReportsOpen, setSavedReportsOpen] = useState(false);
 
   const { data: strategies } = useQuery<LabStrategy[]>({
     queryKey: ["/api/lab/strategies"],
@@ -2629,12 +2662,30 @@ function InsightsPanel() {
     enabled: !!selectedStrategyId,
   });
 
+  const { data: savedReports, refetch: refetchSavedReports } = useQuery<any[]>({
+    queryKey: ["/api/lab/strategies", selectedStrategyId, "insights-reports"],
+    queryFn: async () => {
+      const res = await fetch(`/api/lab/strategies/${selectedStrategyId}/insights-reports`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: !!selectedStrategyId,
+  });
+
   const toggleSection = (key: string) => {
     setExpandedSections(prev => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
+  };
+
+  const loadSavedReport = (saved: any) => {
+    if (saved.reportData) {
+      setReport(saved.reportData as StrategyInsightsReport);
+      setSavedReportsOpen(false);
+      toast({ title: "Report loaded", description: `Loaded report from ${new Date(saved.createdAt).toLocaleDateString()}` });
+    }
   };
 
   const generateReport = async () => {
@@ -2663,6 +2714,16 @@ function InsightsPanel() {
       const inputs = (selectedStrategy.parsedInputs || []) as LabPineInput[];
       const rpt = generateInsightsReport(resultData, inputs, selectedStrategy.name, data.totalRuns);
       setReport(rpt);
+      try {
+        await apiRequest("POST", `/api/lab/strategies/${selectedStrategyId}/insights-report`, {
+          reportData: rpt,
+          totalResults: rpt.totalResults,
+          totalRuns: rpt.totalRuns,
+        });
+        refetchSavedReports();
+      } catch (saveErr: any) {
+        console.log("[Insights] Failed to auto-save report:", saveErr.message);
+      }
     } catch (err: any) {
       toast({ title: "Error generating report", description: err.message, variant: "destructive" });
     } finally {
@@ -2732,6 +2793,33 @@ function InsightsPanel() {
             </Button>
           )}
         </div>
+        {savedReports && savedReports.length > 0 && (
+          <div className="mt-3 pt-3 border-t border-white/5">
+            <button onClick={() => setSavedReportsOpen(!savedReportsOpen)} className="flex items-center gap-1.5 text-xs text-white/40 hover:text-white/60 transition-colors" data-testid="btn-toggle-saved-reports">
+              <History className="w-3 h-3" />
+              <span>{savedReports.length} saved report{savedReports.length !== 1 ? "s" : ""}</span>
+              <ChevronDown className={`w-3 h-3 transition-transform ${savedReportsOpen ? "rotate-180" : ""}`} />
+            </button>
+            {savedReportsOpen && (
+              <div className="mt-2 space-y-1.5 max-h-[200px] overflow-y-auto">
+                {savedReports.map((sr: any) => (
+                  <button
+                    key={sr.id}
+                    onClick={() => loadSavedReport(sr)}
+                    className="w-full flex items-center justify-between px-3 py-2 rounded-md bg-white/[0.03] border border-white/5 hover:bg-white/[0.06] transition-colors text-left"
+                    data-testid={`btn-load-report-${sr.id}`}
+                  >
+                    <div>
+                      <span className="text-xs text-white/70">{new Date(sr.createdAt).toLocaleDateString()} {new Date(sr.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                      <span className="text-[10px] text-white/30 ml-2">{sr.totalResults ?? 0} results · {sr.totalRuns ?? 0} runs</span>
+                    </div>
+                    <ChevronRight className="w-3 h-3 text-white/20" />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </Card>
 
       {strategySummary && selectedStrategyId && !report && !loading && (

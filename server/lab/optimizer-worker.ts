@@ -1,6 +1,6 @@
 import { workerData, parentPort } from "worker_threads";
 import { runBacktest, type OHLCV } from "./engine";
-import type { LabPineInput, LabBacktestResult, LabJobProgress, LabCheckpoint } from "@shared/schema";
+import type { LabPineInput, LabBacktestResult, LabJobProgress, LabCheckpoint, GuidedInsights } from "@shared/schema";
 
 interface WorkerInput {
   jobId: string;
@@ -13,6 +13,7 @@ interface WorkerInput {
     minTrades: number;
     maxDrawdownCap: number;
     parsedInputs: LabPineInput[];
+    guidedInsights?: GuidedInsights;
   };
   candlesByCombo: Record<string, OHLCV[]>;
   resumeCheckpoint?: LabCheckpoint;
@@ -52,6 +53,122 @@ function generateRandomParams(inputs: LabPineInput[]): Record<string, any> {
         const range = Math.floor((max - min) / step);
         const val = min + Math.floor(Math.random() * (range + 1)) * step;
         params[input.name] = Math.round(val * 10000) / 10000;
+        break;
+      }
+      case "bool":
+        params[input.name] = Math.random() > 0.5;
+        break;
+      case "string":
+        if (input.options && input.options.length > 0) {
+          params[input.name] = input.options[Math.floor(Math.random() * input.options.length)];
+        } else {
+          params[input.name] = input.default;
+        }
+        break;
+      default:
+        params[input.name] = input.default;
+    }
+  }
+  return params;
+}
+
+function generateGuidedParams(inputs: LabPineInput[], insights: GuidedInsights): Record<string, any> {
+  const params: Record<string, any> = {};
+  const sensitivityMap = new Map(insights.paramSensitivity.map(ps => [ps.name, ps]));
+  const impactScores = insights.paramSensitivity.map(ps => ps.impactScore);
+  const medianImpact = impactScores.length > 0
+    ? impactScores.sort((a, b) => a - b)[Math.floor(impactScores.length / 2)]
+    : 0;
+
+  for (const input of inputs) {
+    if (!input.optimizable) {
+      params[input.name] = input.default;
+      continue;
+    }
+
+    const sensitivity = sensitivityMap.get(input.name);
+    if (!sensitivity || (sensitivity.bestBucket.rangeMin === 0 && sensitivity.bestBucket.rangeMax === 0)) {
+      switch (input.type) {
+        case "int": {
+          const min = input.min ?? 1;
+          const max = input.max ?? 100;
+          const step = input.step ?? 1;
+          const range = Math.floor((max - min) / step);
+          params[input.name] = min + Math.floor(Math.random() * (range + 1)) * step;
+          break;
+        }
+        case "float": {
+          const min = input.min ?? 0.1;
+          const max = input.max ?? 10;
+          const step = input.step ?? 0.1;
+          const range = Math.floor((max - min) / step);
+          const val = min + Math.floor(Math.random() * (range + 1)) * step;
+          params[input.name] = Math.round(val * 10000) / 10000;
+          break;
+        }
+        case "bool":
+          params[input.name] = Math.random() > 0.5;
+          break;
+        case "string":
+          if (input.options && input.options.length > 0) {
+            params[input.name] = input.options[Math.floor(Math.random() * input.options.length)];
+          } else {
+            params[input.name] = input.default;
+          }
+          break;
+        default:
+          params[input.name] = input.default;
+      }
+      continue;
+    }
+
+    const isHighImpact = sensitivity.impactScore >= medianImpact;
+    const bestMin = sensitivity.bestBucket.rangeMin;
+    const bestMax = sensitivity.bestBucket.rangeMax;
+
+    switch (input.type) {
+      case "int": {
+        const globalMin = input.min ?? 1;
+        const globalMax = input.max ?? 100;
+        const step = input.step ?? 1;
+        if (isHighImpact) {
+          const narrowMin = Math.max(globalMin, Math.ceil(bestMin / step) * step);
+          const narrowMax = Math.min(globalMax, Math.floor(bestMax / step) * step);
+          if (narrowMin > narrowMax) {
+            const range = Math.floor((globalMax - globalMin) / step);
+            params[input.name] = globalMin + Math.floor(Math.random() * (range + 1)) * step;
+          } else {
+            const range = Math.floor((narrowMax - narrowMin) / step);
+            params[input.name] = narrowMin + Math.floor(Math.random() * (range + 1)) * step;
+          }
+        } else {
+          const range = Math.floor((globalMax - globalMin) / step);
+          params[input.name] = globalMin + Math.floor(Math.random() * (range + 1)) * step;
+        }
+        break;
+      }
+      case "float": {
+        const globalMin = input.min ?? 0.1;
+        const globalMax = input.max ?? 10;
+        const step = input.step ?? 0.1;
+        if (isHighImpact) {
+          const narrowMin = Math.max(globalMin, bestMin);
+          const narrowMax = Math.min(globalMax, bestMax);
+          if (narrowMin > narrowMax) {
+            const range = Math.floor((globalMax - globalMin) / step);
+            const val = globalMin + Math.floor(Math.random() * (range + 1)) * step;
+            params[input.name] = Math.round(val * 10000) / 10000;
+          } else {
+            const fineStep = Math.max(step / 2, 0.001);
+            const range = Math.floor((narrowMax - narrowMin) / fineStep);
+            const val = narrowMin + Math.floor(Math.random() * Math.max(1, range + 1)) * fineStep;
+            params[input.name] = Math.round(Math.min(narrowMax, val) * 10000) / 10000;
+          }
+        } else {
+          const range = Math.floor((globalMax - globalMin) / step);
+          const val = globalMin + Math.floor(Math.random() * (range + 1)) * step;
+          params[input.name] = Math.round(val * 10000) / 10000;
+        }
         break;
       }
       case "bool":
@@ -200,9 +317,14 @@ async function run() {
     let lastCheckpointTime = Date.now();
     const CHECKPOINT_INTERVAL_MS = 60_000;
 
+    const hasGuided = !!config.guidedInsights && config.guidedInsights.paramSensitivity.length > 0;
+
     for (let s = randomStart; s < config.randomSamples; s++) {
       if (aborted) { globalCurrent += (config.randomSamples - s); break; }
-      const params = generateRandomParams(inputs);
+      const useGuided = hasGuided && Math.random() < 0.8;
+      const params = useGuided
+        ? generateGuidedParams(inputs, config.guidedInsights!)
+        : generateRandomParams(inputs);
       const result = runBacktest(candles, params, combo.ticker, combo.timeframe);
       if (result.totalTrades >= config.minTrades && result.maxDrawdownPercent <= config.maxDrawdownCap) {
         comboResults.push(result);
@@ -213,7 +335,7 @@ async function run() {
         const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
         send({ type: "progress", data: {
           jobId, status: "random_search",
-          stage: `Random Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${s}/${config.randomSamples}`,
+          stage: `${hasGuided ? "Guided" : "Random"} Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${s}/${config.randomSamples}`,
           current: globalCurrent, total: totalSamples * combos.length,
           percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
           elapsed: Date.now() - startTime,
