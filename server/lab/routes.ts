@@ -93,6 +93,17 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  app.delete("/api/lab/strategies/:id/results", async (req: Request, res: Response) => {
+    try {
+      const strategyId = parseInt(req.params.id);
+      if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
+      const cleared = await labStorage.clearStrategyResults(strategyId);
+      res.json({ success: true, runsCleared: cleared });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/lab/strategies/:id/top-results", async (req: Request, res: Response) => {
     try {
       const strategyId = parseInt(req.params.id);

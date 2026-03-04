@@ -38,6 +38,7 @@ export interface ILabStorage {
   pauseRun(id: number): Promise<void>;
   resumeRun(id: number): Promise<void>;
   deleteRun(id: number): Promise<void>;
+  clearStrategyResults(strategyId: number): Promise<number>;
   saveCheckpoint(runId: number, checkpoint: LabCheckpoint): Promise<void>;
   getCheckpoint(runId: number): Promise<LabCheckpoint | null>;
 
@@ -240,6 +241,20 @@ export class LabDatabaseStorage implements ILabStorage {
   async deleteRun(id: number): Promise<void> {
     await db.delete(labOptimizationResults).where(eq(labOptimizationResults.runId, id));
     await db.delete(labOptimizationRuns).where(eq(labOptimizationRuns.id, id));
+  }
+
+  async clearStrategyResults(strategyId: number): Promise<number> {
+    const runs = await db.select({ id: labOptimizationRuns.id })
+      .from(labOptimizationRuns)
+      .where(eq(labOptimizationRuns.strategyId, strategyId));
+    if (runs.length === 0) return 0;
+    const runIds = runs.map(r => r.id);
+    await db.transaction(async (tx) => {
+      await tx.delete(labOptimizationResults).where(inArray(labOptimizationResults.runId, runIds));
+      await tx.delete(labOptimizationRuns).where(inArray(labOptimizationRuns.id, runIds));
+      await tx.delete(labInsightsReports).where(eq(labInsightsReports.strategyId, strategyId));
+    });
+    return runs.length;
   }
 
   async saveResults(runId: number, results: LabBacktestResult[]): Promise<void> {

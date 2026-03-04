@@ -536,6 +536,19 @@ export default function QuantumLab() {
     },
   });
 
+  const clearResultsMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await apiRequest("DELETE", `/api/lab/strategies/${id}/results`);
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/strategies"] });
+      toast({ title: `Cleared ${data.runsCleared} run${data.runsCleared !== 1 ? "s" : ""} and all results` });
+    },
+    onError: () => { toast({ title: "Failed to clear results", variant: "destructive" }); },
+  });
+
   const handleJobStarted = useCallback((jobId: string, runId?: number) => {
     setJobProgress(null);
     setActiveJobId(jobId);
@@ -576,7 +589,8 @@ export default function QuantumLab() {
                     selectedId={selectedStrategy?.id ?? null}
                     onSelect={(s) => setSelectedStrategy(selectedStrategy?.id === s.id ? null : s)}
                     onDelete={(id) => deleteStrategyMutation.mutate(id)}
-                    isDeleting={deleteStrategyMutation.isPending}
+                    onClearResults={(id) => clearResultsMutation.mutate(id)}
+                    isDeleting={deleteStrategyMutation.isPending || clearResultsMutation.isPending}
                   />
                 )}
                 <RunConfigPanel
@@ -669,11 +683,12 @@ export default function QuantumLab() {
   );
 }
 
-function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, isDeleting }: {
+function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, onClearResults, isDeleting }: {
   strategies: LabStrategy[];
   selectedId: number | null;
   onSelect: (s: LabStrategy) => void;
   onDelete: (id: number) => void;
+  onClearResults: (id: number) => void;
   isDeleting: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -741,15 +756,27 @@ function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, isDeletin
                       <p className={cn("text-xs font-medium truncate", isSelected ? "text-violet-300" : "text-white/80")} data-testid={`text-strategy-name-${s.id}`}>{s.name}</p>
                       <p className="text-[10px] text-white/40">{new Date(s.createdAt).toLocaleDateString()} · {paramCount} opt params</p>
                     </div>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
-                      disabled={isDeleting}
-                      aria-label={`Delete strategy ${s.name}`}
-                      className="p-1 rounded hover:bg-red-500/20 text-white/20 hover:text-red-400 transition-colors flex-shrink-0"
-                      data-testid={`button-delete-strategy-${s.id}`}
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
+                    <div className="flex items-center gap-0.5 flex-shrink-0">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onClearResults(s.id); }}
+                        disabled={isDeleting}
+                        aria-label={`Clear results for ${s.name}`}
+                        title="Clear all runs & results"
+                        className="p-1 rounded hover:bg-indigo-500/20 text-white/20 hover:text-indigo-400 transition-colors"
+                        data-testid={`button-clear-results-${s.id}`}
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
+                        disabled={isDeleting}
+                        aria-label={`Delete strategy ${s.name}`}
+                        className="p-1 rounded hover:bg-red-500/20 text-white/20 hover:text-red-400 transition-colors"
+                        data-testid={`button-delete-strategy-${s.id}`}
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
                 );
               })}
