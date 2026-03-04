@@ -535,7 +535,14 @@ export class LabDatabaseStorage implements ILabStorage {
       return { ...r, _levProfit: r.netProfitPercent * lev, _lev: lev };
     });
     withLev.sort((a, b) => b._levProfit - a._levProfit);
-    return withLev.slice(0, limit).map(r => ({
+    const bestPerCombo = new Map<string, typeof withLev[0]>();
+    for (const r of withLev) {
+      const key = `${r.ticker}|${r.timeframe}`;
+      if (!bestPerCombo.has(key)) bestPerCombo.set(key, r);
+    }
+    const deduped = Array.from(bestPerCombo.values());
+    deduped.sort((a, b) => b._levProfit - a._levProfit);
+    return deduped.slice(0, limit).map(r => ({
       id: r.id,
       runId: r.runId,
       rank: r.rank,

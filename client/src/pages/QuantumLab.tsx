@@ -2843,7 +2843,7 @@ function Top10Leaderboard({ strategyId, pineScript, strategyName }: { strategyId
     <Card className="border-white/10 bg-white/[0.03] overflow-hidden" data-testid="top10-leaderboard">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-white/5">
         <Trophy className="w-4 h-4 text-yellow-400" />
-        <span className="font-semibold text-white text-sm">Top 10 by Leveraged Profit</span>
+        <span className="font-semibold text-white text-sm">Best per Ticker / Timeframe</span>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-xs" data-testid="top10-table">
