@@ -37,7 +37,7 @@ import type {
 import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
 
 type MainTab = "main" | "results" | "heatmap" | "insights";
-type SortKey = "netProfitPercent" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades";
+type SortKey = "netProfitPercent" | "levProfit" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades";
 type SortDir = "asc" | "desc";
 type RankingMode = "profit" | "winrate" | "balanced" | "conservative";
 
@@ -1639,9 +1639,14 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     for (const [, comboArr] of resultsByCombo) {
       if (comboArr.length > 0) arr.push(comboArr[0]);
     }
+    const getLevProfit = (r: LabOptResult) => {
+      const lev = r.maxDrawdownPercent > 0 ? Math.min(20, Math.max(1, Math.floor((100 / r.maxDrawdownPercent) * 0.8))) : 1;
+      return r.netProfitPercent * lev;
+    };
     arr.sort((a, b) => {
       const mult = sortDir === "desc" ? -1 : 1;
       if (sortKey === "maxDrawdownPercent") return (a[sortKey] - b[sortKey]) * -mult;
+      if (sortKey === "levProfit") return (getLevProfit(a) - getLevProfit(b)) * mult;
       return (a[sortKey] - b[sortKey]) * mult;
     });
     return arr;
@@ -1821,7 +1826,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                 <th className="text-left py-2.5 px-4">Ticker</th>
                 <th className="text-left py-2.5 px-2">TF</th>
                 <SortHeader label="Net Profit %" sortKey="netProfitPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
-                <th className="text-right py-2.5 px-2 whitespace-nowrap">Lev. Profit</th>
+                <SortHeader label="Lev. Profit" sortKey="levProfit" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="Win Rate %" sortKey="winRatePercent" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="Max DD %" sortKey="maxDrawdownPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="PF" sortKey="profitFactor" current={sortKey} dir={sortDir} onClick={handleSort} />
