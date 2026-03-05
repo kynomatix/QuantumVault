@@ -2684,7 +2684,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                         {hasStrategy && (
                           <button
                             onClick={(e) => { e.stopPropagation(); handleExportPine(cfg, selectedCell.ticker, selectedCell.timeframe); }}
-                            className="p-1 rounded hover:bg-violet-500/20 text-white/40 hover:text-violet-300 transition-colors"
+                            className="p-1 rounded hover:bg-violet-500/20 text-violet-400 hover:text-violet-300 transition-colors"
                             title="Export .pine with optimized params"
                             data-testid={`heatmap-export-pine-${idx}`}
                           >
