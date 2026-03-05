@@ -1031,20 +1031,41 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [useInsights, setUseInsights] = useState(false);
 
-  const { data: latestInsightsReport } = useQuery<any>({
+  const { data: allInsightsReports } = useQuery<any[]>({
     queryKey: ["/api/lab/strategies", strategyId, "latest-insights"],
     queryFn: async () => {
-      if (!strategyId) return null;
+      if (!strategyId) return [];
       const res = await fetch(`/api/lab/strategies/${strategyId}/insights-reports`);
-      if (!res.ok) return null;
-      const reports = await res.json();
-      return reports.length > 0 ? reports[0] : null;
+      if (!res.ok) return [];
+      return res.json();
     },
     enabled: !!strategyId,
     staleTime: 0,
     refetchOnMount: true,
   });
-  const hasInsights = !!latestInsightsReport;
+  const hasInsights = Array.isArray(allInsightsReports) && allInsightsReports.length > 0;
+
+  const insightsCoverage = useMemo(() => {
+    if (!Array.isArray(allInsightsReports) || allInsightsReports.length === 0 || selectedTickers.length === 0 || selectedTimeframes.length === 0) {
+      return { covered: [], missing: [], total: 0 };
+    }
+    const combos: { ticker: string; timeframe: string; label: string }[] = [];
+    for (const t of selectedTickers) {
+      for (const tf of selectedTimeframes) {
+        combos.push({ ticker: t, timeframe: tf, label: `${t.replace("-PERP", "").replace("/USDT", "")} ${tf}` });
+      }
+    }
+    const covered: typeof combos = [];
+    const missing: typeof combos = [];
+    for (const combo of combos) {
+      const found = allInsightsReports.some(r => {
+        const f = (r.reportData as any)?.filter;
+        return f?.ticker === combo.ticker && f?.timeframe === combo.timeframe;
+      });
+      if (found) covered.push(combo); else missing.push(combo);
+    }
+    return { covered, missing, total: combos.length };
+  }, [allInsightsReports, selectedTickers, selectedTimeframes]);
 
   const toggleTicker = (symbol: string) => setSelectedTickers(prev => prev.includes(symbol) ? prev.filter(s => s !== symbol) : [...prev, symbol]);
   const toggleTimeframe = (tf: string) => setSelectedTimeframes(prev => prev.includes(tf) ? prev.filter(t => t !== tf) : [...prev, tf]);
@@ -1232,7 +1253,50 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
                       <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${useInsights ? "translate-x-4" : "translate-x-0.5"}`} />
                     </div>
                   </button>
-                  <p className="text-[10px] text-white/30 mt-1 pl-6">Narrows parameter ranges based on past optimization data. Best used after several runs.</p>
+                  {useInsights && insightsCoverage.total > 0 && (
+                    <div className="mt-2 pl-6 space-y-1">
+                      {insightsCoverage.missing.length === 0 ? (
+                        <p className="text-[10px] text-sky-400 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                          {insightsCoverage.total === 1
+                            ? `Focused report found for ${insightsCoverage.covered[0].label}`
+                            : `All ${insightsCoverage.total} combos have focused reports`}
+                        </p>
+                      ) : insightsCoverage.covered.length === 0 ? (
+                        <div>
+                          <p className="text-[10px] text-violet-400 flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3" />
+                            No focused reports — will use general report
+                          </p>
+                          <p className="text-[10px] text-white/30 mt-0.5">
+                            Go to Insights tab and generate reports for {insightsCoverage.missing.slice(0, 3).map(m => m.label).join(", ")}
+                            {insightsCoverage.missing.length > 3 ? ` +${insightsCoverage.missing.length - 3} more` : ""} for best results.
+                          </p>
+                        </div>
+                      ) : (
+                        <div>
+                          <p className="text-[10px] text-indigo-400 flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3" />
+                            {insightsCoverage.covered.length}/{insightsCoverage.total} combos have focused reports
+                          </p>
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {insightsCoverage.covered.map(c => (
+                              <span key={c.label} className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400/70 border border-sky-500/10">{c.label}</span>
+                            ))}
+                            {insightsCoverage.missing.map(m => (
+                              <span key={m.label} className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400/50 border border-violet-500/10">{m.label}</span>
+                            ))}
+                          </div>
+                          <p className="text-[10px] text-white/30 mt-1">
+                            Missing combos will use the general report. Generate focused reports in the Insights tab for better results.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {!useInsights && (
+                    <p className="text-[10px] text-white/30 mt-1 pl-6">Narrows parameter ranges based on past optimization data. Best used after several runs.</p>
+                  )}
                 </div>
               )}
             </CollapsibleContent>
@@ -1250,9 +1314,10 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
             const marketCombos = selectedTickers.length * selectedTimeframes.length;
             const totalSearch = paramCombos * marketCombos;
             const totalTests = (randomSamples + topK * refinements) * marketCombos;
-            const isGuided = useInsights && hasInsights && latestInsightsReport?.reportData;
+            const latestReport = allInsightsReports?.[0];
+            const isGuided = useInsights && hasInsights && latestReport?.reportData;
             const guidedCombos = isGuided
-              ? calcGuidedParamCombinations(parsedResult.inputs, latestInsightsReport.reportData) * marketCombos
+              ? calcGuidedParamCombinations(parsedResult.inputs, latestReport.reportData) * marketCombos
               : null;
             return (
               <>

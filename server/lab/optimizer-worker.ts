@@ -14,6 +14,7 @@ interface WorkerInput {
     maxDrawdownCap: number;
     parsedInputs: LabPineInput[];
     guidedInsights?: GuidedInsights;
+    guidedInsightsPerCombo?: Record<string, GuidedInsights>;
   };
   candlesByCombo: Record<string, OHLCV[]>;
   resumeCheckpoint?: LabCheckpoint;
@@ -317,13 +318,15 @@ async function run() {
     let lastCheckpointTime = Date.now();
     const CHECKPOINT_INTERVAL_MS = 60_000;
 
-    const hasGuided = !!config.guidedInsights && config.guidedInsights.paramSensitivity.length > 0;
+    const comboKey = `${combo.ticker}|${combo.timeframe}`;
+    const comboInsights = config.guidedInsightsPerCombo?.[comboKey] ?? config.guidedInsights;
+    const hasGuided = !!comboInsights && comboInsights.paramSensitivity.length > 0;
 
     for (let s = randomStart; s < config.randomSamples; s++) {
       if (aborted) { globalCurrent += (config.randomSamples - s); break; }
       const useGuided = hasGuided && Math.random() < 0.8;
       const params = useGuided
-        ? generateGuidedParams(inputs, config.guidedInsights!)
+        ? generateGuidedParams(inputs, comboInsights!)
         : generateRandomParams(inputs);
       const result = runBacktest(candles, params, combo.ticker, combo.timeframe);
       if (result.totalTrades >= config.minTrades && result.maxDrawdownPercent <= config.maxDrawdownCap) {

@@ -314,6 +314,7 @@ export function registerLabRoutes(app: Express): void {
     resumeCheckpoint?: LabCheckpoint,
     prefetchedCandles?: Record<string, OHLCV[]>,
     guidedInsights?: import("@shared/schema").GuidedInsights,
+    guidedInsightsPerCombo?: Record<string, import("@shared/schema").GuidedInsights>,
   ) {
     const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
 
@@ -347,6 +348,7 @@ export function registerLabRoutes(app: Express): void {
           maxDrawdownCap: config.maxDrawdownCap,
           parsedInputs: config.parsedInputs,
           guidedInsights,
+          guidedInsightsPerCombo,
         },
         candlesByCombo,
         resumeCheckpoint,
@@ -518,36 +520,51 @@ export function registerLabRoutes(app: Express): void {
       const job = labStorage.createJob(config);
 
       let guidedInsights: import("@shared/schema").GuidedInsights | undefined;
+      let guidedInsightsPerCombo: Record<string, import("@shared/schema").GuidedInsights> | undefined;
       if (config.useInsights && config.strategyId) {
-        let chosenReport: any = null;
         const allReports = await labStorage.getInsightsReports(config.strategyId);
-        if (config.tickers.length === 1 && config.timeframes.length === 1) {
-          const targetTicker = config.tickers[0];
-          const targetTf = config.timeframes[0];
-          chosenReport = allReports.find(r => {
-            const rd = r.reportData as any;
-            return rd?.filter?.ticker === targetTicker && rd?.filter?.timeframe === targetTf;
-          });
-          if (chosenReport) {
-            console.log(`[QuantumLab] Guided mode: found filtered report for ${targetTicker} ${targetTf}`);
+
+        function extractInsights(rd: any): import("@shared/schema").GuidedInsights | null {
+          if (!rd?.paramSensitivity || !Array.isArray(rd.paramSensitivity)) return null;
+          return {
+            paramSensitivity: rd.paramSensitivity.map((ps: any) => ({
+              name: ps.name,
+              type: ps.type,
+              impactScore: ps.impactScore ?? 0,
+              bestBucket: ps.bestBucket ? { rangeMin: ps.bestBucket.rangeMin, rangeMax: ps.bestBucket.rangeMax } : { rangeMin: 0, rangeMax: 0 },
+            })),
+          };
+        }
+
+        const perComboMap: Record<string, import("@shared/schema").GuidedInsights> = {};
+        for (const t of config.tickers) {
+          for (const tf of config.timeframes) {
+            const key = `${t}|${tf}`;
+            const matchingReport = allReports.find(r => {
+              const rd = r.reportData as any;
+              return rd?.filter?.ticker === t && rd?.filter?.timeframe === tf;
+            });
+            if (matchingReport) {
+              const insights = extractInsights(matchingReport.reportData as any);
+              if (insights) {
+                perComboMap[key] = insights;
+                console.log(`[QuantumLab] Guided mode: found focused report for ${key}`);
+              }
+            }
           }
         }
-        if (!chosenReport && allReports.length > 0) {
-          chosenReport = allReports[0];
-          console.log(`[QuantumLab] Guided mode: using latest report (${(chosenReport.reportData as any)?.filter ? "filtered" : "general"})`);
+
+        if (Object.keys(perComboMap).length > 0) {
+          guidedInsightsPerCombo = perComboMap;
+          console.log(`[QuantumLab] Guided mode: ${Object.keys(perComboMap).length} focused reports loaded`);
         }
-        if (chosenReport?.reportData) {
-          const rd = chosenReport.reportData as any;
-          if (rd.paramSensitivity && Array.isArray(rd.paramSensitivity)) {
-            guidedInsights = {
-              paramSensitivity: rd.paramSensitivity.map((ps: any) => ({
-                name: ps.name,
-                type: ps.type,
-                impactScore: ps.impactScore ?? 0,
-                bestBucket: ps.bestBucket ? { rangeMin: ps.bestBucket.rangeMin, rangeMax: ps.bestBucket.rangeMax } : { rangeMin: 0, rangeMax: 0 },
-              })),
-            };
-            console.log(`[QuantumLab] Guided mode: loaded insights with ${guidedInsights.paramSensitivity.length} param sensitivities`);
+
+        const latestGeneral = allReports.find(r => !(r.reportData as any)?.filter?.ticker) ?? allReports[0];
+        if (latestGeneral) {
+          const fallback = extractInsights(latestGeneral.reportData as any);
+          if (fallback) {
+            guidedInsights = fallback;
+            console.log(`[QuantumLab] Guided mode: fallback report loaded (${(latestGeneral.reportData as any)?.filter ? "filtered" : "general"}) with ${fallback.paramSensitivity.length} params`);
           }
         }
       }
@@ -573,7 +590,7 @@ export function registerLabRoutes(app: Express): void {
         await labStorage.saveCheckpoint(runId, { completedCombos: [], configSnapshot: config });
       }
 
-      startOptimizationJob(config, job, runId, undefined, undefined, guidedInsights);
+      startOptimizationJob(config, job, runId, undefined, undefined, guidedInsights, guidedInsightsPerCombo);
 
       res.json({ jobId: job.id, runId });
     } catch (err: any) {
