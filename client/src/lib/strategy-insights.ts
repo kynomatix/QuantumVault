@@ -145,6 +145,7 @@ export interface StrategyInsightsReport {
   totalResults: number;
   totalRuns: number;
   totalTrades: number;
+  filter?: { ticker?: string; timeframe?: string } | null;
   paramSensitivity: ParamSensitivity[];
   comboFit: ComboFit[];
   directionalBias: DirectionalBias;
@@ -553,8 +554,13 @@ export function generateInsightsReport(
   inputs: LabPineInput[],
   strategyName: string,
   totalRuns: number,
+  filter?: { ticker?: string; timeframe?: string } | null,
 ): StrategyInsightsReport {
-  const sanitized = results.map(r => ({
+  let filtered = results;
+  if (filter?.ticker) filtered = filtered.filter(r => r.ticker === filter.ticker);
+  if (filter?.timeframe) filtered = filtered.filter(r => r.timeframe === filter.timeframe);
+
+  const sanitized = filtered.map(r => ({
     ...r,
     trades: (Array.isArray(r.trades) ? r.trades : [])
       .map(sanitizeTrade)
@@ -572,9 +578,10 @@ export function generateInsightsReport(
 
   return {
     strategyName,
-    totalResults: results.length,
+    totalResults: filtered.length,
     totalRuns,
     totalTrades,
+    filter: filter || null,
     paramSensitivity,
     comboFit,
     directionalBias,
@@ -590,6 +597,12 @@ export function formatReportAsText(report: StrategyInsightsReport, pineScript?: 
 
   lines.push("=== STRATEGY INSIGHTS REPORT ===");
   lines.push(`Strategy: ${report.strategyName}`);
+  if (report.filter?.ticker || report.filter?.timeframe) {
+    const parts: string[] = [];
+    if (report.filter.ticker) parts.push(report.filter.ticker);
+    if (report.filter.timeframe) parts.push(report.filter.timeframe);
+    lines.push(`Filter: ${parts.join(" ")}`);
+  }
   lines.push(`Dataset: ${report.totalResults} configurations across ${report.totalRuns} optimization runs`);
   lines.push(`Total trades analyzed: ${report.totalTrades.toLocaleString()}`);
   lines.push("");

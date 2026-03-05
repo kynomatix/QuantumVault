@@ -19,7 +19,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy,
+  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -2991,9 +2991,9 @@ function OptimizerGuide() {
             <div>
               <div className="flex items-center gap-1.5 mb-1.5">
                 <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">1</span>
-                <span className="text-white font-medium text-[13px]">One ticker + one timeframe per run</span>
+                <span className="text-white font-medium text-[13px]">Use the Focus filter for clean reports</span>
               </div>
-              <p className="pl-7">Parameter sensitivity is calculated across all results together. Mixing multiple tickers and timeframes dilutes the analysis because each market has different optimal settings. Focused runs give you the sharpest, most actionable insights.</p>
+              <p className="pl-7">Use the "Focus" dropdown to generate reports for a specific ticker + timeframe combo. This gives the sharpest, most actionable parameter insights since each market has different optimal settings. The "All Results" option gives you a cross-market overview.</p>
             </div>
 
             <div>
@@ -3012,7 +3012,7 @@ function OptimizerGuide() {
               <div className="pl-7 space-y-1">
                 <p><span className="text-violet-300 font-medium">Random runs</span> — Start with standard random search to explore the full parameter space broadly.</p>
                 <p><span className="text-violet-300 font-medium">Generate Insights</span> — Review the report. Check which parameters have high impact scores and which ranges perform best.</p>
-                <p><span className="text-violet-300 font-medium">Guided runs</span> — Enable "Use Insights" in Advanced Settings. The optimizer will focus 80% of samples on the best ranges while keeping 20% fully random to avoid missing new opportunities.</p>
+                <p><span className="text-violet-300 font-medium">Guided runs</span> — Enable "Use Insights" in Advanced Settings. The optimizer will prefer a filtered report matching your run's ticker/timeframe, falling back to the latest report. 80% of samples focus on the best ranges while 20% stay fully random.</p>
                 <p><span className="text-violet-300 font-medium">Regenerate Insights</span> — The new report will analyze ALL runs combined, refining the recommendations further. Each cycle sharpens the focus.</p>
               </div>
             </div>
@@ -3067,6 +3067,7 @@ function InsightsPanel() {
   const [loading, setLoading] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(["params", "combos", "bias", "trades", "recs"]));
   const [savedReportsOpen, setSavedReportsOpen] = useState(false);
+  const [insightsFilter, setInsightsFilter] = useState<string>("all");
 
   const { data: strategies } = useQuery<LabStrategy[]>({
     queryKey: ["/api/lab/strategies"],
@@ -3144,6 +3145,21 @@ function InsightsPanel() {
         setLoading(false);
         return;
       }
+      const filterParsed = insightsFilter !== "all" ? (() => {
+        const [t, tf] = insightsFilter.split("|");
+        return { ticker: t || undefined, timeframe: tf || undefined };
+      })() : null;
+      if (filterParsed) {
+        const matchCount = data.results.filter((r: any) =>
+          (!filterParsed.ticker || r.ticker === filterParsed.ticker) &&
+          (!filterParsed.timeframe || r.timeframe === filterParsed.timeframe)
+        ).length;
+        if (matchCount === 0) {
+          toast({ title: "No matching results", description: `No results found for ${insightsFilter.replace("|", " ")}. Try "All Results" or run optimizations with this ticker/timeframe first.`, variant: "destructive" });
+          setLoading(false);
+          return;
+        }
+      }
       const resultData = data.results.map((r: LabOptResult) => ({
         ticker: r.ticker,
         timeframe: r.timeframe,
@@ -3156,7 +3172,7 @@ function InsightsPanel() {
         trades: (r.trades || []) as any[],
       }));
       const inputs = (selectedStrategy.parsedInputs || []) as LabPineInput[];
-      const rpt = generateInsightsReport(resultData, inputs, selectedStrategy.name, data.totalRuns);
+      const rpt = generateInsightsReport(resultData, inputs, selectedStrategy.name, data.totalRuns, filterParsed);
       setReport(rpt);
       try {
         await apiRequest("POST", `/api/lab/strategies/${selectedStrategyId}/insights-report`, {
@@ -3209,7 +3225,7 @@ function InsightsPanel() {
           <Lightbulb className="w-6 h-6 text-violet-400" />
           <div>
             <h2 className="text-xl font-bold text-white">Strategy Insights</h2>
-            <p className="text-white/50 text-sm">Statistical analysis across all optimization runs for a strategy</p>
+            <p className="text-white/50 text-sm">Statistical analysis across optimization runs — filter by ticker/timeframe for focused insights</p>
           </div>
         </div>
         <OptimizerGuide />
@@ -3219,7 +3235,7 @@ function InsightsPanel() {
         <div className="flex flex-col sm:flex-row items-start sm:items-end gap-4">
           <div className="flex-1 w-full">
             <Label className="text-white/60 text-xs mb-1.5 block">Strategy</Label>
-            <Select value={selectedStrategyId?.toString() ?? ""} onValueChange={(v) => { setSelectedStrategyId(parseInt(v)); setReport(null); }}>
+            <Select value={selectedStrategyId?.toString() ?? ""} onValueChange={(v) => { setSelectedStrategyId(parseInt(v)); setReport(null); setInsightsFilter("all"); }}>
               <SelectTrigger className="bg-white/5 border-white/10 text-white" data-testid="select-insights-strategy">
                 <SelectValue placeholder="Select a strategy..." />
               </SelectTrigger>
@@ -3230,6 +3246,26 @@ function InsightsPanel() {
               </SelectContent>
             </Select>
           </div>
+          {strategySummary && strategySummary.tickers.length > 0 && (
+            <div className="w-full sm:w-auto sm:min-w-[200px]">
+              <Label className="text-white/60 text-xs mb-1.5 block">Focus</Label>
+              <Select value={insightsFilter} onValueChange={(v) => { setInsightsFilter(v); setReport(null); }}>
+                <SelectTrigger className="bg-white/5 border-white/10 text-white" data-testid="select-insights-filter">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Results (General)</SelectItem>
+                  {strategySummary.tickers.flatMap(t =>
+                    strategySummary.timeframes.map(tf => {
+                      const key = `${t}|${tf}`;
+                      const label = `${t.replace("-PERP", "").replace("/USDT", "")} ${tf}`;
+                      return <SelectItem key={key} value={key}>{label}</SelectItem>;
+                    })
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <Button onClick={generateReport} disabled={!selectedStrategyId || loading} className="bg-violet-600 hover:bg-violet-500 text-white gap-2" data-testid="btn-generate-insights">
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
             {loading ? "Analyzing..." : "Generate Report"}
@@ -3260,6 +3296,14 @@ function InsightsPanel() {
                     <div>
                       <span className="text-xs text-white/70">{new Date(sr.createdAt).toLocaleDateString()} {new Date(sr.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                       <span className="text-[10px] text-white/30 ml-2">{sr.totalResults ?? 0} results · {sr.totalRuns ?? 0} runs</span>
+                      {sr.reportData?.filter && (sr.reportData.filter.ticker || sr.reportData.filter.timeframe) && (
+                        <span className="text-[10px] text-violet-400/60 ml-2">
+                          {[sr.reportData.filter.ticker?.replace("-PERP", "").replace("/USDT", ""), sr.reportData.filter.timeframe].filter(Boolean).join(" ")}
+                        </span>
+                      )}
+                      {sr.reportData && !sr.reportData.filter && (
+                        <span className="text-[10px] text-white/20 ml-2">General</span>
+                      )}
                     </div>
                     <ChevronRight className="w-3 h-3 text-white/20" />
                   </button>
@@ -3324,6 +3368,15 @@ function InsightsPanel() {
 
       {report && !loading && (
         <>
+          {report.filter && (report.filter.ticker || report.filter.timeframe) && (
+            <div className="flex items-center gap-2 text-sm">
+              <Filter className="w-3.5 h-3.5 text-violet-400" />
+              <span className="text-white/50">Filtered to:</span>
+              <Badge className="bg-violet-500/15 text-violet-300 border-violet-500/20 text-xs">
+                {[report.filter.ticker?.replace("-PERP", "").replace("/USDT", ""), report.filter.timeframe].filter(Boolean).join(" ")}
+              </Badge>
+            </div>
+          )}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[
               { label: "Configurations", value: report.totalResults.toLocaleString(), icon: BarChart3 },

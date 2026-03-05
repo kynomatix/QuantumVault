@@ -519,9 +519,25 @@ export function registerLabRoutes(app: Express): void {
 
       let guidedInsights: import("@shared/schema").GuidedInsights | undefined;
       if (config.useInsights && config.strategyId) {
-        const latestReport = await labStorage.getLatestInsightsReport(config.strategyId);
-        if (latestReport?.reportData) {
-          const rd = latestReport.reportData as any;
+        let chosenReport: any = null;
+        const allReports = await labStorage.getInsightsReports(config.strategyId);
+        if (config.tickers.length === 1 && config.timeframes.length === 1) {
+          const targetTicker = config.tickers[0];
+          const targetTf = config.timeframes[0];
+          chosenReport = allReports.find(r => {
+            const rd = r.reportData as any;
+            return rd?.filter?.ticker === targetTicker && rd?.filter?.timeframe === targetTf;
+          });
+          if (chosenReport) {
+            console.log(`[QuantumLab] Guided mode: found filtered report for ${targetTicker} ${targetTf}`);
+          }
+        }
+        if (!chosenReport && allReports.length > 0) {
+          chosenReport = allReports[0];
+          console.log(`[QuantumLab] Guided mode: using latest report (${(chosenReport.reportData as any)?.filter ? "filtered" : "general"})`);
+        }
+        if (chosenReport?.reportData) {
+          const rd = chosenReport.reportData as any;
           if (rd.paramSensitivity && Array.isArray(rd.paramSensitivity)) {
             guidedInsights = {
               paramSensitivity: rd.paramSensitivity.map((ps: any) => ({
