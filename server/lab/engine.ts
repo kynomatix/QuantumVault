@@ -252,11 +252,6 @@ export function runBacktest(
     exitReason: string;
     signalBar: number;
   } | null = null;
-  let pendingPartials: {
-    qty: number;
-    fillPriceRef: number;
-    signalBar: number;
-  }[] = [];
   let barsSinceExit = 999;
 
   for (let i = 0; i < n; i++) {
@@ -282,19 +277,6 @@ export function runBacktest(
         beActive: false,
       };
       pendingEntry = null;
-    }
-
-    if (pendingPartials.length > 0 && position && i > 0) {
-      for (const partial of pendingPartials) {
-        const fillPrice = open[i];
-        const dir = position.direction;
-        const pnl = dir === "long"
-          ? (fillPrice - position.entryPrice) / position.entryPrice
-          : (position.entryPrice - fillPrice) / position.entryPrice;
-        equity += partial.qty * config.positionSize * pnl - 2 * partial.qty * config.positionSize * config.commission;
-        position.remainingQty -= partial.qty;
-      }
-      pendingPartials = [];
     }
 
     if (pendingExit !== null && position && i > 0) {
@@ -331,40 +313,73 @@ export function runBacktest(
       const dir = position.direction;
       const isLong = dir === "long";
       const atrNow = isNaN(slAtr[i]) ? close[i] * 0.02 : slAtr[i];
+      const hiVal = high[i];
+      const loVal = low[i];
 
       if (useTP1 && !position.tp1Hit && position.tp1Level !== 0) {
-        const hit = isLong ? close[i] >= position.tp1Level : close[i] <= position.tp1Level;
+        const hit = isLong ? hiVal >= position.tp1Level : loVal <= position.tp1Level;
         if (hit) {
+          const fillPrice = position.tp1Level;
           const partialQty = position.remainingQty * (tp1QtyPct / 100);
-          pendingPartials.push({ qty: partialQty, fillPriceRef: close[i], signalBar: i });
+          const pnl = isLong
+            ? (fillPrice - position.entryPrice) / position.entryPrice
+            : (position.entryPrice - fillPrice) / position.entryPrice;
+          equity += partialQty * config.positionSize * pnl - 2 * partialQty * config.positionSize * config.commission;
+          position.remainingQty -= partialQty;
           position.tp1Hit = true;
         }
       }
 
       if (useTP2 && !position.tp2Hit && position.tp1Hit && position.tp2Level !== 0) {
-        const hit = isLong ? close[i] >= position.tp2Level : close[i] <= position.tp2Level;
+        const hit = isLong ? hiVal >= position.tp2Level : loVal <= position.tp2Level;
         if (hit) {
-          const currentQty = position.remainingQty - pendingPartials.reduce((s, pp) => s + pp.qty, 0);
-          const partialQty = currentQty * (tp2QtyPct / 100);
-          pendingPartials.push({ qty: partialQty, fillPriceRef: close[i], signalBar: i });
+          const fillPrice = position.tp2Level;
+          const partialQty = position.remainingQty * (tp2QtyPct / 100);
+          const pnl = isLong
+            ? (fillPrice - position.entryPrice) / position.entryPrice
+            : (position.entryPrice - fillPrice) / position.entryPrice;
+          equity += partialQty * config.positionSize * pnl - 2 * partialQty * config.positionSize * config.commission;
+          position.remainingQty -= partialQty;
           position.tp2Hit = true;
         }
       }
 
       if (useTP3 && !position.tp3Hit && position.tp2Hit && position.tp3Level !== 0) {
-        const hit = isLong ? close[i] >= position.tp3Level : close[i] <= position.tp3Level;
+        const hit = isLong ? hiVal >= position.tp3Level : loVal <= position.tp3Level;
         if (hit) {
           position.tp3Hit = true;
-          pendingExit = { exitReason: "TP3", signalBar: i };
+          const fillPrice = position.tp3Level;
+          const pnlPct = isLong
+            ? ((fillPrice - position.entryPrice) / position.entryPrice) * 100
+            : ((position.entryPrice - fillPrice) / position.entryPrice) * 100;
+          const pnlDollar = position.remainingQty * config.positionSize * (pnlPct / 100)
+            - 2 * position.remainingQty * config.positionSize * config.commission;
+          equity += pnlDollar;
+          trades.push({
+            entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
+            exitTime: new Date(candles[i].time).toISOString(),
+            direction: dir,
+            entryPrice: position.entryPrice,
+            exitPrice: fillPrice,
+            pnlPercent: Math.round(pnlPct * 100) / 100,
+            pnlDollar: Math.round(pnlDollar * 100) / 100,
+            exitReason: "TP3",
+            barsHeld: i - position.entryBar,
+          });
+          position = null;
+          barsSinceExit = 0;
+          equityValues[i] = equity;
+          continue;
         }
       }
 
-      if (!pendingExit && useBE && !position.beActive) {
+      if (position && !pendingExit && useBE && !position.beActive) {
         let shouldActivateBE = false;
         if (beActivation === "After TP1") shouldActivateBE = position.tp1Hit;
         else if (beActivation === "After TP2") shouldActivateBE = position.tp2Hit;
         else if (beActivation === "Custom ATR Distance") {
-          const dist = isLong ? close[i] - position.refPrice : position.refPrice - close[i];
+          const extreme = isLong ? hiVal : loVal;
+          const dist = isLong ? extreme - position.refPrice : position.refPrice - extreme;
           shouldActivateBE = dist >= beActAtr * position.entryAtr;
         }
         if (shouldActivateBE) {
@@ -375,23 +390,25 @@ export function runBacktest(
         }
       }
 
-      if (!pendingExit && useTrail) {
+      if (position && !pendingExit && useTrail) {
         let shouldActivateTrail = false;
         if (trailActivation === "Immediately") shouldActivateTrail = true;
         else if (trailActivation === "After TP1") shouldActivateTrail = position.tp1Hit;
         else if (trailActivation === "After TP2") shouldActivateTrail = position.tp2Hit;
         else if (trailActivation === "Custom ATR Distance") {
-          const dist = isLong ? close[i] - position.refPrice : position.refPrice - close[i];
+          const extreme = isLong ? hiVal : loVal;
+          const dist = isLong ? extreme - position.refPrice : position.refPrice - extreme;
           shouldActivateTrail = dist >= trailActAtr * position.entryAtr;
         }
 
         if (shouldActivateTrail) {
           position.trailActive = true;
+          const extremeForTrail = isLong ? hiVal : loVal;
           let newTrail: number;
           if (trailMode === "ATR") {
-            newTrail = isLong ? close[i] - trailAtrMult * atrNow : close[i] + trailAtrMult * atrNow;
+            newTrail = isLong ? extremeForTrail - trailAtrMult * atrNow : extremeForTrail + trailAtrMult * atrNow;
           } else {
-            newTrail = isLong ? close[i] * (1 - trailPct / 100) : close[i] * (1 + trailPct / 100);
+            newTrail = isLong ? extremeForTrail * (1 - trailPct / 100) : extremeForTrail * (1 + trailPct / 100);
           }
           if (position.trailLevel === 0) {
             position.trailLevel = newTrail;
@@ -408,11 +425,32 @@ export function runBacktest(
         }
       }
 
-      if (!pendingExit) {
-        const slHit = isLong ? close[i] <= position.stopLoss : close[i] >= position.stopLoss;
+      if (position && !pendingExit) {
+        const slHit = isLong ? loVal <= position.stopLoss : hiVal >= position.stopLoss;
         if (slHit) {
           const reason = position.beActive ? "BE Stop" : position.trailActive ? "Trail Stop" : "Stop Loss";
-          pendingExit = { exitReason: reason, signalBar: i };
+          const fillPrice = position.stopLoss;
+          const pnlPct = isLong
+            ? ((fillPrice - position.entryPrice) / position.entryPrice) * 100
+            : ((position.entryPrice - fillPrice) / position.entryPrice) * 100;
+          const pnlDollar = position.remainingQty * config.positionSize * (pnlPct / 100)
+            - 2 * position.remainingQty * config.positionSize * config.commission;
+          equity += pnlDollar;
+          trades.push({
+            entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
+            exitTime: new Date(candles[i].time).toISOString(),
+            direction: dir,
+            entryPrice: position.entryPrice,
+            exitPrice: fillPrice,
+            pnlPercent: Math.round(pnlPct * 100) / 100,
+            pnlDollar: Math.round(pnlDollar * 100) / 100,
+            exitReason: reason,
+            barsHeld: i - position.entryBar,
+          });
+          position = null;
+          barsSinceExit = 0;
+          equityValues[i] = equity;
+          continue;
         }
       }
 
@@ -450,9 +488,6 @@ export function runBacktest(
         }
       }
 
-      if (pendingExit) {
-        pendingPartials = [];
-      }
     }
 
     if (!position && !pendingEntry && !pendingExit && i > 0) {
