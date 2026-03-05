@@ -281,16 +281,27 @@ function formatTradeTime(iso: string): string {
 }
 
 function injectParamsIntoPineScript(code: string, params: Record<string, any>): string {
-  const inputPattern = /(?:(?:int|float|bool|string|var)\s+)?(\w+)\s*=\s*input\.(int|float|bool|string|time|source)\s*\(([^)]*(?:\([^)]*\))*[^)]*)\)/g;
+  const headerPattern = /(?:(?:int|float|bool|string|var)\s+)?(\w+)\s*=\s*input\.(int|float|bool|string|time|source)\s*\(/g;
   let result = code;
   let offset = 0;
   const originalCode = code;
   let match;
 
-  while ((match = inputPattern.exec(originalCode)) !== null) {
+  while ((match = headerPattern.exec(originalCode)) !== null) {
     const varName = match[1];
     const inputType = match[2];
-    const argsStr = match[3];
+    const argsStart = match.index + match[0].length;
+    let depth = 1, inStr = false, strCh = "";
+    let argsEnd = -1;
+    for (let i = argsStart; i < originalCode.length; i++) {
+      const ch = originalCode[i];
+      if (inStr) { if (ch === strCh && originalCode[i - 1] !== "\\") inStr = false; continue; }
+      if (ch === '"' || ch === "'") { inStr = true; strCh = ch; continue; }
+      if (ch === "(") { depth++; continue; }
+      if (ch === ")") { depth--; if (depth === 0) { argsEnd = i; break; } continue; }
+    }
+    if (argsEnd === -1) continue;
+    const argsStr = originalCode.substring(argsStart, argsEnd);
 
     if (!(varName in params)) continue;
 
@@ -308,14 +319,16 @@ function injectParamsIntoPineScript(code: string, params: Record<string, any>): 
     }
 
     let newArgsStr = argsStr;
-    let depth = 0, inStr = false, strCh = "", firstArgEnd = -1;
-    for (let i = 0; i < newArgsStr.length; i++) {
-      const ch = newArgsStr[i];
-      if (inStr) { if (ch === strCh && newArgsStr[i - 1] !== "\\") inStr = false; continue; }
-      if (ch === '"' || ch === "'") { inStr = true; strCh = ch; continue; }
-      if (ch === "(" || ch === "[") { depth++; continue; }
-      if (ch === ")" || ch === "]") { depth--; continue; }
-      if (ch === "," && depth === 0) { firstArgEnd = i; break; }
+    let firstArgEnd = -1;
+    { let d2 = 0, q = false, qc = "";
+      for (let i = 0; i < newArgsStr.length; i++) {
+        const ch = newArgsStr[i];
+        if (q) { if (ch === qc && newArgsStr[i - 1] !== "\\") q = false; continue; }
+        if (ch === '"' || ch === "'") { q = true; qc = ch; continue; }
+        if (ch === "(" || ch === "[") { d2++; continue; }
+        if (ch === ")" || ch === "]") { d2--; continue; }
+        if (ch === "," && d2 === 0) { firstArgEnd = i; break; }
+      }
     }
 
     if (firstArgEnd === -1) {
@@ -358,8 +371,8 @@ function injectParamsIntoPineScript(code: string, params: Record<string, any>): 
       });
     }
 
-    const argsStart = match.index + match[0].indexOf(argsStr) + offset;
-    result = result.substring(0, argsStart) + newArgsStr + result.substring(argsStart + argsStr.length);
+    const adjustedStart = argsStart + offset;
+    result = result.substring(0, adjustedStart) + newArgsStr + result.substring(adjustedStart + argsStr.length);
     offset += newArgsStr.length - argsStr.length;
   }
   return result;
