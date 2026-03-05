@@ -1232,7 +1232,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
                       <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${useInsights ? "translate-x-4" : "translate-x-0.5"}`} />
                     </div>
                   </button>
-                  <p className="text-[10px] text-white/30 mt-1 ml-5.5">Narrows parameter ranges based on past optimization data. Best used after several runs.</p>
+                  <p className="text-[10px] text-white/30 mt-1 pl-6">Narrows parameter ranges based on past optimization data. Best used after several runs.</p>
                 </div>
               )}
             </CollapsibleContent>
@@ -2962,6 +2962,102 @@ function Top10Leaderboard({ strategyId, pineScript, strategyName }: { strategyId
   );
 }
 
+function OptimizerGuide() {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-300 hover:bg-violet-500/20 hover:text-violet-200 transition-colors text-xs font-medium"
+          data-testid="btn-optimizer-guide"
+        >
+          <BookOpen className="w-3.5 h-3.5" />
+          How to Use
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        className="w-[420px] p-0 bg-slate-900 border-white/10 shadow-xl shadow-black/40"
+        align="end"
+        sideOffset={8}
+      >
+        <div className="px-4 py-3 border-b border-white/10 flex items-center gap-2">
+          <BookOpen className="w-4 h-4 text-violet-400" />
+          <span className="text-sm font-semibold text-white">Getting the Most Out of QuantumLab</span>
+        </div>
+        <ScrollArea className="max-h-[480px]">
+          <div className="p-4 space-y-4 text-xs text-white/70 leading-relaxed">
+
+            <div>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">1</span>
+                <span className="text-white font-medium text-[13px]">One ticker + one timeframe per run</span>
+              </div>
+              <p className="pl-7">Parameter sensitivity is calculated across all results together. Mixing multiple tickers and timeframes dilutes the analysis because each market has different optimal settings. Focused runs give you the sharpest, most actionable insights.</p>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">2</span>
+                <span className="text-white font-medium text-[13px]">Build data before using Guided Mode</span>
+              </div>
+              <p className="pl-7">Run 2-3 standard optimizations (2,000+ random samples each) before turning on "Use Insights." The sensitivity analysis needs enough data points to distinguish real patterns from noise. Minimum ~4,000 total configurations tested.</p>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">3</span>
+                <span className="text-white font-medium text-[13px]">The optimization cycle</span>
+              </div>
+              <div className="pl-7 space-y-1">
+                <p><span className="text-violet-300 font-medium">Random runs</span> — Start with standard random search to explore the full parameter space broadly.</p>
+                <p><span className="text-violet-300 font-medium">Generate Insights</span> — Review the report. Check which parameters have high impact scores and which ranges perform best.</p>
+                <p><span className="text-violet-300 font-medium">Guided runs</span> — Enable "Use Insights" in Advanced Settings. The optimizer will focus 80% of samples on the best ranges while keeping 20% fully random to avoid missing new opportunities.</p>
+                <p><span className="text-violet-300 font-medium">Regenerate Insights</span> — The new report will analyze ALL runs combined, refining the recommendations further. Each cycle sharpens the focus.</p>
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">4</span>
+                <span className="text-white font-medium text-[13px]">Reports build on each other</span>
+              </div>
+              <p className="pl-7">Every optimization run adds to your strategy's dataset. When you generate a new report, it analyzes all results from every past run. More data means more reliable recommendations. Old reports are saved so you can track how the analysis evolves over time.</p>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">5</span>
+                <span className="text-white font-medium text-[13px]">Use the Combo Fit section</span>
+              </div>
+              <p className="pl-7">If you do run multiple tickers, check the "Ticker/Timeframe Fit" section in the report. It rates each combo as strong, moderate, weak, or poor. Focus your effort on combos rated "strong" — those are where your strategy naturally works best.</p>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">6</span>
+                <span className="text-white font-medium text-[13px]">When to clear results</span>
+              </div>
+              <p className="pl-7">Use the clear button (<span className="inline-flex items-center"><RotateCcw className="w-2.5 h-2.5 inline" /></span>) on a strategy if the backtesting engine has been updated. Old results from a different engine version will mislead the Insights analysis and Guided Mode. After clearing, start fresh with new runs.</p>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">7</span>
+                <span className="text-white font-medium text-[13px]">Export and verify on TradingView</span>
+              </div>
+              <p className="pl-7">Always export your best result's Pine Script and run it on TradingView to verify. The optimizer finds the parameters — TradingView confirms they work in the real Pine Script environment. If trade counts or PnL don't match, something needs investigating.</p>
+            </div>
+
+            <div className="pt-2 border-t border-white/10">
+              <p className="text-[11px] text-white/40 italic">Recommended run sizes: 2,000-5,000 random samples, 30 top seeds, 60 refinements per seed. For quick validation, use Smoke Test first.</p>
+            </div>
+
+          </div>
+        </ScrollArea>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function InsightsPanel() {
   const { toast } = useToast();
   const [selectedStrategyId, setSelectedStrategyId] = useState<number | null>(null);
@@ -3106,12 +3202,15 @@ function InsightsPanel() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6 p-6" data-testid="insights-panel">
-      <div className="flex items-center gap-3 mb-2">
-        <Lightbulb className="w-6 h-6 text-violet-400" />
-        <div>
-          <h2 className="text-xl font-bold text-white">Strategy Insights</h2>
-          <p className="text-white/50 text-sm">Statistical analysis across all optimization runs for a strategy</p>
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-3">
+          <Lightbulb className="w-6 h-6 text-violet-400" />
+          <div>
+            <h2 className="text-xl font-bold text-white">Strategy Insights</h2>
+            <p className="text-white/50 text-sm">Statistical analysis across all optimization runs for a strategy</p>
+          </div>
         </div>
+        <OptimizerGuide />
       </div>
 
       <Card className="border-white/10 bg-white/[0.03] p-4">
