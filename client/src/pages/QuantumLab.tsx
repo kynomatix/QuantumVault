@@ -1949,6 +1949,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                 <SortHeader label="Max DD %" sortKey="maxDrawdownPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="PF" sortKey="profitFactor" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="Trades" sortKey="totalTrades" current={sortKey} dir={sortDir} onClick={handleSort} />
+                {strategy?.pineScript && <th className="w-8"></th>}
                 <th className="w-8"></th>
               </tr>
             </thead>
@@ -1979,6 +1980,25 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                       <td className={`py-2.5 px-2 text-right font-mono ${r.maxDrawdownPercent <= 30 ? "text-sky-400" : "text-purple-400"}`}>{r.maxDrawdownPercent.toFixed(1)}%</td>
                       <td className={`py-2.5 px-2 text-right font-mono ${r.profitFactor >= 1.5 ? "text-sky-400" : "text-white"}`}>{r.profitFactor.toFixed(2)}</td>
                       <td className="py-2.5 px-2 text-right font-mono text-white/60">{r.totalTrades}</td>
+                      {strategy?.pineScript && (
+                        <td className="py-2.5 px-2 text-center">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const injected = injectParamsIntoPineScript(strategy.pineScript, r.params as Record<string, any>);
+                              const t = r.ticker.split("/")[0];
+                              const tf = r.timeframe.toUpperCase();
+                              const sName = (strategy.name || "STRATEGY").replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase();
+                              downloadFile(injected, `${t}_${tf}_${sName}.pine`);
+                            }}
+                            className="text-violet-400 hover:text-violet-300 transition-colors p-0.5 rounded hover:bg-violet-500/10"
+                            title="Export .pine with these params"
+                            data-testid={`history-export-${r.id}`}
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      )}
                       <td className="py-2.5 px-2">
                         {subResults.length > 0 && (
                           <button onClick={(e) => { e.stopPropagation(); setExpandedCombos(prev => { const next = new Set(prev); if (next.has(comboKey)) next.delete(comboKey); else next.add(comboKey); return next; }); }}
@@ -2008,6 +2028,25 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.maxDrawdownPercent <= 30 ? "text-sky-400/70" : "text-purple-400/70"}`}>{sr.maxDrawdownPercent.toFixed(1)}%</td>
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.profitFactor >= 1.5 ? "text-sky-400/70" : "text-white/50"}`}>{sr.profitFactor.toFixed(2)}</td>
                           <td className="py-2 px-2 text-right font-mono text-xs text-white/40">{sr.totalTrades}</td>
+                          {strategy?.pineScript && (
+                            <td className="py-2 px-2 text-center">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const injected = injectParamsIntoPineScript(strategy.pineScript, sr.params as Record<string, any>);
+                                  const t = sr.ticker.split("/")[0];
+                                  const tf = sr.timeframe.toUpperCase();
+                                  const sName = (strategy.name || "STRATEGY").replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase();
+                                  downloadFile(injected, `${t}_${tf}_${sName}.pine`);
+                                }}
+                                className="text-violet-400/60 hover:text-violet-300 transition-colors p-0.5 rounded hover:bg-violet-500/10"
+                                title="Export .pine with these params"
+                                data-testid={`history-export-sub-${sr.id}`}
+                              >
+                                <Download className="w-3 h-3" />
+                              </button>
+                            </td>
+                          )}
                           <td></td>
                         </tr>
                       );
