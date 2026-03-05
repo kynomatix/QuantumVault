@@ -2028,11 +2028,11 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                             <td className="py-2 px-2 text-center">
                               <button
                                 onClick={(e) => { e.stopPropagation(); exportPineWithParams(strategy.pineScript, sr.params as Record<string, any>, sr.ticker, sr.timeframe, strategy.name); }}
-                                className="text-violet-400/60 hover:text-violet-300 transition-colors p-0.5 rounded hover:bg-violet-500/10"
+                                className="text-violet-400 hover:text-violet-300 transition-colors p-0.5 rounded hover:bg-violet-500/10"
                                 title="Export .pine with these params"
                                 data-testid={`history-export-sub-${sr.id}`}
                               >
-                                <Download className="w-3 h-3" />
+                                <Download className="w-3.5 h-3.5" />
                               </button>
                             </td>
                           )}
