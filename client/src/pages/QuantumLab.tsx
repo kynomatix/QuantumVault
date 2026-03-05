@@ -281,7 +281,7 @@ function formatTradeTime(iso: string): string {
 }
 
 function injectParamsIntoPineScript(code: string, params: Record<string, any>): string {
-  const headerPattern = /(?:(?:int|float|bool|string|var)\s+)?(\w+)\s*=\s*input\.(int|float|bool|string|time|source)\s*\(/g;
+  const headerPattern = /(?:(?:int|float|bool|string|var)\s+)?(\w+)\s*=\s*input\.(int|float|bool|string|source)\s*\(/g;
   let result = code;
   let offset = 0;
   const originalCode = code;
