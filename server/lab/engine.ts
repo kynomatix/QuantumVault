@@ -14,6 +14,7 @@ interface EngineConfig {
   initialCapital: number;
   commission: number;
   positionSize: number;
+  processOrdersOnClose?: boolean;
 }
 
 function p(params: Record<string, any>, name: string, fallback: string | null, defaultVal: any): any {
@@ -37,6 +38,8 @@ export function runBacktest(
       params, trades: [], equityCurve: [],
     };
   }
+
+  const onClose = config.processOrdersOnClose === true;
 
   const open = new Array(n);
   const close = new Array(n);
@@ -252,6 +255,7 @@ export function runBacktest(
     exitReason: string;
     signalBar: number;
   } | null = null;
+  let pendingPartials: { qty: number; fillPriceRef: number; signalBar: number }[] = [];
   let barsSinceExit = 999;
 
   for (let i = 0; i < n; i++) {
@@ -277,6 +281,19 @@ export function runBacktest(
         beActive: false,
       };
       pendingEntry = null;
+    }
+
+    if (onClose && pendingPartials.length > 0 && position && i > 0) {
+      for (const partial of pendingPartials) {
+        const fillPrice = open[i];
+        const dir = position.direction;
+        const pnl = dir === "long"
+          ? (fillPrice - position.entryPrice) / position.entryPrice
+          : (position.entryPrice - fillPrice) / position.entryPrice;
+        equity += partial.qty * config.positionSize * pnl - 2 * partial.qty * config.positionSize * config.commission;
+        position.remainingQty -= partial.qty;
+      }
+      pendingPartials = [];
     }
 
     if (pendingExit !== null && position && i > 0) {
@@ -313,63 +330,78 @@ export function runBacktest(
       const dir = position.direction;
       const isLong = dir === "long";
       const atrNow = isNaN(slAtr[i]) ? close[i] * 0.02 : slAtr[i];
-      const hiVal = high[i];
-      const loVal = low[i];
+
+      const tpCheck = onClose ? close[i] : (isLong ? high[i] : low[i]);
+      const slCheck = onClose ? close[i] : (isLong ? low[i] : high[i]);
+      const extremeCheck = onClose ? close[i] : (isLong ? high[i] : low[i]);
 
       if (useTP1 && !position.tp1Hit && position.tp1Level !== 0) {
-        const hit = isLong ? hiVal >= position.tp1Level : loVal <= position.tp1Level;
+        const hit = isLong ? tpCheck >= position.tp1Level : tpCheck <= position.tp1Level;
         if (hit) {
-          const fillPrice = position.tp1Level;
-          const partialQty = position.remainingQty * (tp1QtyPct / 100);
-          const pnl = isLong
-            ? (fillPrice - position.entryPrice) / position.entryPrice
-            : (position.entryPrice - fillPrice) / position.entryPrice;
-          equity += partialQty * config.positionSize * pnl - 2 * partialQty * config.positionSize * config.commission;
-          position.remainingQty -= partialQty;
+          if (onClose) {
+            pendingPartials.push({ qty: position.remainingQty * (tp1QtyPct / 100), fillPriceRef: close[i], signalBar: i });
+          } else {
+            const fillPrice = position.tp1Level;
+            const partialQty = position.remainingQty * (tp1QtyPct / 100);
+            const pnl = isLong
+              ? (fillPrice - position.entryPrice) / position.entryPrice
+              : (position.entryPrice - fillPrice) / position.entryPrice;
+            equity += partialQty * config.positionSize * pnl - 2 * partialQty * config.positionSize * config.commission;
+            position.remainingQty -= partialQty;
+          }
           position.tp1Hit = true;
         }
       }
 
       if (useTP2 && !position.tp2Hit && position.tp1Hit && position.tp2Level !== 0) {
-        const hit = isLong ? hiVal >= position.tp2Level : loVal <= position.tp2Level;
+        const hit = isLong ? tpCheck >= position.tp2Level : tpCheck <= position.tp2Level;
         if (hit) {
-          const fillPrice = position.tp2Level;
-          const partialQty = position.remainingQty * (tp2QtyPct / 100);
-          const pnl = isLong
-            ? (fillPrice - position.entryPrice) / position.entryPrice
-            : (position.entryPrice - fillPrice) / position.entryPrice;
-          equity += partialQty * config.positionSize * pnl - 2 * partialQty * config.positionSize * config.commission;
-          position.remainingQty -= partialQty;
+          if (onClose) {
+            const currentQty = position.remainingQty - pendingPartials.reduce((s, pp) => s + pp.qty, 0);
+            pendingPartials.push({ qty: currentQty * (tp2QtyPct / 100), fillPriceRef: close[i], signalBar: i });
+          } else {
+            const fillPrice = position.tp2Level;
+            const partialQty = position.remainingQty * (tp2QtyPct / 100);
+            const pnl = isLong
+              ? (fillPrice - position.entryPrice) / position.entryPrice
+              : (position.entryPrice - fillPrice) / position.entryPrice;
+            equity += partialQty * config.positionSize * pnl - 2 * partialQty * config.positionSize * config.commission;
+            position.remainingQty -= partialQty;
+          }
           position.tp2Hit = true;
         }
       }
 
       if (useTP3 && !position.tp3Hit && position.tp2Hit && position.tp3Level !== 0) {
-        const hit = isLong ? hiVal >= position.tp3Level : loVal <= position.tp3Level;
+        const hit = isLong ? tpCheck >= position.tp3Level : tpCheck <= position.tp3Level;
         if (hit) {
           position.tp3Hit = true;
-          const fillPrice = position.tp3Level;
-          const pnlPct = isLong
-            ? ((fillPrice - position.entryPrice) / position.entryPrice) * 100
-            : ((position.entryPrice - fillPrice) / position.entryPrice) * 100;
-          const pnlDollar = position.remainingQty * config.positionSize * (pnlPct / 100)
-            - 2 * position.remainingQty * config.positionSize * config.commission;
-          equity += pnlDollar;
-          trades.push({
-            entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
-            exitTime: new Date(candles[i].time).toISOString(),
-            direction: dir,
-            entryPrice: position.entryPrice,
-            exitPrice: fillPrice,
-            pnlPercent: Math.round(pnlPct * 100) / 100,
-            pnlDollar: Math.round(pnlDollar * 100) / 100,
-            exitReason: "TP3",
-            barsHeld: i - position.entryBar,
-          });
-          position = null;
-          barsSinceExit = 0;
-          equityValues[i] = equity;
-          continue;
+          if (onClose) {
+            pendingExit = { exitReason: "TP3", signalBar: i };
+          } else {
+            const fillPrice = position.tp3Level;
+            const pnlPct = isLong
+              ? ((fillPrice - position.entryPrice) / position.entryPrice) * 100
+              : ((position.entryPrice - fillPrice) / position.entryPrice) * 100;
+            const pnlDollar = position.remainingQty * config.positionSize * (pnlPct / 100)
+              - 2 * position.remainingQty * config.positionSize * config.commission;
+            equity += pnlDollar;
+            trades.push({
+              entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
+              exitTime: new Date(candles[i].time).toISOString(),
+              direction: dir,
+              entryPrice: position.entryPrice,
+              exitPrice: fillPrice,
+              pnlPercent: Math.round(pnlPct * 100) / 100,
+              pnlDollar: Math.round(pnlDollar * 100) / 100,
+              exitReason: "TP3",
+              barsHeld: i - position.entryBar,
+            });
+            position = null;
+            barsSinceExit = 0;
+            equityValues[i] = equity;
+            continue;
+          }
         }
       }
 
@@ -378,8 +410,7 @@ export function runBacktest(
         if (beActivation === "After TP1") shouldActivateBE = position.tp1Hit;
         else if (beActivation === "After TP2") shouldActivateBE = position.tp2Hit;
         else if (beActivation === "Custom ATR Distance") {
-          const extreme = isLong ? hiVal : loVal;
-          const dist = isLong ? extreme - position.refPrice : position.refPrice - extreme;
+          const dist = isLong ? extremeCheck - position.refPrice : position.refPrice - extremeCheck;
           shouldActivateBE = dist >= beActAtr * position.entryAtr;
         }
         if (shouldActivateBE) {
@@ -396,19 +427,18 @@ export function runBacktest(
         else if (trailActivation === "After TP1") shouldActivateTrail = position.tp1Hit;
         else if (trailActivation === "After TP2") shouldActivateTrail = position.tp2Hit;
         else if (trailActivation === "Custom ATR Distance") {
-          const extreme = isLong ? hiVal : loVal;
-          const dist = isLong ? extreme - position.refPrice : position.refPrice - extreme;
+          const dist = isLong ? extremeCheck - position.refPrice : position.refPrice - extremeCheck;
           shouldActivateTrail = dist >= trailActAtr * position.entryAtr;
         }
 
         if (shouldActivateTrail) {
           position.trailActive = true;
-          const extremeForTrail = isLong ? hiVal : loVal;
+          const trackPrice = onClose ? close[i] : (isLong ? high[i] : low[i]);
           let newTrail: number;
           if (trailMode === "ATR") {
-            newTrail = isLong ? extremeForTrail - trailAtrMult * atrNow : extremeForTrail + trailAtrMult * atrNow;
+            newTrail = isLong ? trackPrice - trailAtrMult * atrNow : trackPrice + trailAtrMult * atrNow;
           } else {
-            newTrail = isLong ? extremeForTrail * (1 - trailPct / 100) : extremeForTrail * (1 + trailPct / 100);
+            newTrail = isLong ? trackPrice * (1 - trailPct / 100) : trackPrice * (1 + trailPct / 100);
           }
           if (position.trailLevel === 0) {
             position.trailLevel = newTrail;
@@ -426,31 +456,35 @@ export function runBacktest(
       }
 
       if (position && !pendingExit) {
-        const slHit = isLong ? loVal <= position.stopLoss : hiVal >= position.stopLoss;
+        const slHit = isLong ? slCheck <= position.stopLoss : slCheck >= position.stopLoss;
         if (slHit) {
           const reason = position.beActive ? "BE Stop" : position.trailActive ? "Trail Stop" : "Stop Loss";
-          const fillPrice = position.stopLoss;
-          const pnlPct = isLong
-            ? ((fillPrice - position.entryPrice) / position.entryPrice) * 100
-            : ((position.entryPrice - fillPrice) / position.entryPrice) * 100;
-          const pnlDollar = position.remainingQty * config.positionSize * (pnlPct / 100)
-            - 2 * position.remainingQty * config.positionSize * config.commission;
-          equity += pnlDollar;
-          trades.push({
-            entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
-            exitTime: new Date(candles[i].time).toISOString(),
-            direction: dir,
-            entryPrice: position.entryPrice,
-            exitPrice: fillPrice,
-            pnlPercent: Math.round(pnlPct * 100) / 100,
-            pnlDollar: Math.round(pnlDollar * 100) / 100,
-            exitReason: reason,
-            barsHeld: i - position.entryBar,
-          });
-          position = null;
-          barsSinceExit = 0;
-          equityValues[i] = equity;
-          continue;
+          if (onClose) {
+            pendingExit = { exitReason: reason, signalBar: i };
+          } else {
+            const fillPrice = position.stopLoss;
+            const pnlPct = isLong
+              ? ((fillPrice - position.entryPrice) / position.entryPrice) * 100
+              : ((position.entryPrice - fillPrice) / position.entryPrice) * 100;
+            const pnlDollar = position.remainingQty * config.positionSize * (pnlPct / 100)
+              - 2 * position.remainingQty * config.positionSize * config.commission;
+            equity += pnlDollar;
+            trades.push({
+              entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
+              exitTime: new Date(candles[i].time).toISOString(),
+              direction: dir,
+              entryPrice: position.entryPrice,
+              exitPrice: fillPrice,
+              pnlPercent: Math.round(pnlPct * 100) / 100,
+              pnlDollar: Math.round(pnlDollar * 100) / 100,
+              exitReason: reason,
+              barsHeld: i - position.entryBar,
+            });
+            position = null;
+            barsSinceExit = 0;
+            equityValues[i] = equity;
+            continue;
+          }
         }
       }
 

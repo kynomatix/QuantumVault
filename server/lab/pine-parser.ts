@@ -166,6 +166,9 @@ export function parsePineScript(code: string): LabPineParseResult {
     if (args.keyword["commission_value"]) {
       strategySettings.commission = parseFloat(args.keyword["commission_value"]);
     }
+    if (args.keyword["process_orders_on_close"]) {
+      strategySettings.processOrdersOnClose = args.keyword["process_orders_on_close"].trim() === "true";
+    }
   }
 
   const headerPattern = /(?:(?:int|float|bool|string|var)\s+)?(\w+)\s*=\s*input\.(int|float|bool|string|time|source)\s*\(/g;

@@ -315,6 +315,7 @@ export function registerLabRoutes(app: Express): void {
     prefetchedCandles?: Record<string, OHLCV[]>,
     guidedInsights?: import("@shared/schema").GuidedInsights,
     guidedInsightsPerCombo?: Record<string, import("@shared/schema").GuidedInsights>,
+    processOrdersOnClose?: boolean,
   ) {
     const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
 
@@ -347,6 +348,7 @@ export function registerLabRoutes(app: Express): void {
           minTrades: config.minTrades,
           maxDrawdownCap: config.maxDrawdownCap,
           parsedInputs: config.parsedInputs,
+          processOrdersOnClose,
           guidedInsights,
           guidedInsightsPerCombo,
         },
@@ -517,6 +519,15 @@ export function registerLabRoutes(app: Express): void {
       }
 
       const config = parsed.data;
+
+      let processOrdersOnClose: boolean | undefined;
+      if (config.strategyId) {
+        const strategy = await labStorage.getStrategy(config.strategyId);
+        if (strategy?.strategySettings && typeof strategy.strategySettings === "object") {
+          processOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
+        }
+      }
+
       const job = labStorage.createJob(config);
 
       let guidedInsights: import("@shared/schema").GuidedInsights | undefined;
@@ -590,7 +601,7 @@ export function registerLabRoutes(app: Express): void {
         await labStorage.saveCheckpoint(runId, { completedCombos: [], configSnapshot: config });
       }
 
-      startOptimizationJob(config, job, runId, undefined, undefined, guidedInsights, guidedInsightsPerCombo);
+      startOptimizationJob(config, job, runId, undefined, undefined, guidedInsights, guidedInsightsPerCombo, processOrdersOnClose);
 
       res.json({ jobId: job.id, runId });
     } catch (err: any) {
@@ -640,13 +651,22 @@ export function registerLabRoutes(app: Express): void {
         (checkpoint as any).autoResumeAttempts = 0;
         await labStorage.saveCheckpoint(runId, checkpoint);
       }
+
+      let resumeProcessOrdersOnClose: boolean | undefined;
+      if (run.strategyId) {
+        const strategy = await labStorage.getStrategy(run.strategyId);
+        if (strategy?.strategySettings && typeof strategy.strategySettings === "object") {
+          resumeProcessOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
+        }
+      }
+
       const job = labStorage.createJob(config);
       job.runId = runId;
 
       await labStorage.resumeRun(runId);
       console.log(`[QuantumLab] Resuming run ${runId} — ${checkpoint.completedCombos.length} combos already done${checkpoint.currentCombo ? `, mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}` : ""}`);
 
-      startOptimizationJob(config, job, runId, checkpoint);
+      startOptimizationJob(config, job, runId, checkpoint, undefined, undefined, undefined, resumeProcessOrdersOnClose);
 
       res.json({ jobId: job.id, runId, resumedFrom: checkpoint.completedCombos.length });
     } catch (err: any) {
@@ -917,6 +937,14 @@ export function registerLabRoutes(app: Express): void {
         }
       }
 
+      let autoResumePooc: boolean | undefined;
+      if (run.strategyId) {
+        const strat = await labStorage.getStrategy(run.strategyId);
+        if (strat?.strategySettings && typeof strat.strategySettings === "object") {
+          autoResumePooc = (strat.strategySettings as any).processOrdersOnClose;
+        }
+      }
+
       const job = labStorage.createJob(config);
       job.runId = run.id;
       await labStorage.resumeRun(run.id);
@@ -924,7 +952,7 @@ export function registerLabRoutes(app: Express): void {
         ? `${cp.completedCombos.length} combos done`
         : `mid-combo ${cp.currentCombo} at iter ${cp.currentIteration}`;
       console.log(`[QuantumLab] Auto-resuming run ${run.id} (${detail}, attempt ${crashCount + 1}/${MAX_AUTO_RESUME_ATTEMPTS})`);
-      startOptimizationJob(config, job, run.id, checkpoint);
+      startOptimizationJob(config, job, run.id, checkpoint, undefined, undefined, undefined, autoResumePooc);
     } catch (err: any) {
       console.log(`[QuantumLab] Auto-resume error: ${err.message}`);
     }

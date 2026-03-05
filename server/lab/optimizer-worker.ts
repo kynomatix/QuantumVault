@@ -13,6 +13,7 @@ interface WorkerInput {
     minTrades: number;
     maxDrawdownCap: number;
     parsedInputs: LabPineInput[];
+    processOrdersOnClose?: boolean;
     guidedInsights?: GuidedInsights;
     guidedInsightsPerCombo?: Record<string, GuidedInsights>;
   };
@@ -300,11 +301,18 @@ async function run() {
       continue;
     }
 
+    const engineConfig = {
+      initialCapital: 1000,
+      commission: 0.0005,
+      positionSize: 1000,
+      processOrdersOnClose: config.processOrdersOnClose,
+    };
+
     const defaultParams: Record<string, any> = {};
     for (const input of inputs) {
       defaultParams[input.name] = input.default;
     }
-    const baseline = runBacktest(candles, defaultParams, combo.ticker, combo.timeframe);
+    const baseline = runBacktest(candles, defaultParams, combo.ticker, combo.timeframe, engineConfig);
 
     const isResumingThisCombo = resumeCombo === key;
     const skipRandomUntil = isResumingThisCombo && resumeStage === "random" ? resumeIteration : 0;
@@ -328,7 +336,7 @@ async function run() {
       const params = useGuided
         ? generateGuidedParams(inputs, comboInsights!)
         : generateRandomParams(inputs);
-      const result = runBacktest(candles, params, combo.ticker, combo.timeframe);
+      const result = runBacktest(candles, params, combo.ticker, combo.timeframe, engineConfig);
       if (result.totalTrades >= config.minTrades && result.maxDrawdownPercent <= config.maxDrawdownCap) {
         comboResults.push(result);
       }
@@ -379,7 +387,7 @@ async function run() {
         }
 
         const jitteredParams = jitterParams(seed.params, inputs);
-        const result = runBacktest(candles, jitteredParams, combo.ticker, combo.timeframe);
+        const result = runBacktest(candles, jitteredParams, combo.ticker, combo.timeframe, engineConfig);
         if (result.totalTrades >= config.minTrades && result.maxDrawdownPercent <= config.maxDrawdownCap) {
           comboResults.push(result);
         }

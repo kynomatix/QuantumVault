@@ -781,6 +781,7 @@ export interface LabPineParseResult {
     initialCapital?: number;
     defaultQtyValue?: number;
     commission?: number;
+    processOrdersOnClose?: boolean;
   };
 }
 
