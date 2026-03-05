@@ -375,6 +375,14 @@ function downloadFile(content: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+function exportPineWithParams(pineScript: string, params: Record<string, any>, ticker: string, timeframe: string, strategyName?: string) {
+  const injected = injectParamsIntoPineScript(pineScript, params);
+  const t = ticker.split("/")[0];
+  const tf = timeframe.toUpperCase();
+  const sName = (strategyName || "STRATEGY").replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase();
+  downloadFile(injected, `${t}_${tf}_${sName}.pine`);
+}
+
 export default function QuantumLab() {
   const [mainTab, setMainTab] = useState<MainTab>("main");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -1900,12 +1908,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
             </Button>
             {strategy?.pineScript && (
               <Button variant="secondary" size="sm" onClick={() => {
-                const params = selectedResult.params as Record<string, any>;
-                const injected = injectParamsIntoPineScript(strategy.pineScript, params);
-                const ticker = selectedResult.ticker.split("/")[0];
-                const tf = selectedResult.timeframe.toUpperCase();
-                const stratName = strategy.name?.replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase() || "STRATEGY";
-                downloadFile(injected, `${ticker}_${tf}_${stratName}.pine`);
+                exportPineWithParams(strategy.pineScript, selectedResult.params as Record<string, any>, selectedResult.ticker, selectedResult.timeframe, strategy.name);
               }} className="bg-violet-500/20 hover:bg-violet-500/30 text-violet-300" data-testid="button-export-pine">
                 <Download className="w-3 h-3 mr-1" /> Export .pine
               </Button>
@@ -1983,14 +1986,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                       {strategy?.pineScript && (
                         <td className="py-2.5 px-2 text-center">
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const injected = injectParamsIntoPineScript(strategy.pineScript, r.params as Record<string, any>);
-                              const t = r.ticker.split("/")[0];
-                              const tf = r.timeframe.toUpperCase();
-                              const sName = (strategy.name || "STRATEGY").replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase();
-                              downloadFile(injected, `${t}_${tf}_${sName}.pine`);
-                            }}
+                            onClick={(e) => { e.stopPropagation(); exportPineWithParams(strategy.pineScript, r.params as Record<string, any>, r.ticker, r.timeframe, strategy.name); }}
                             className="text-violet-400 hover:text-violet-300 transition-colors p-0.5 rounded hover:bg-violet-500/10"
                             title="Export .pine with these params"
                             data-testid={`history-export-${r.id}`}
@@ -2031,14 +2027,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           {strategy?.pineScript && (
                             <td className="py-2 px-2 text-center">
                               <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  const injected = injectParamsIntoPineScript(strategy.pineScript, sr.params as Record<string, any>);
-                                  const t = sr.ticker.split("/")[0];
-                                  const tf = sr.timeframe.toUpperCase();
-                                  const sName = (strategy.name || "STRATEGY").replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase();
-                                  downloadFile(injected, `${t}_${tf}_${sName}.pine`);
-                                }}
+                                onClick={(e) => { e.stopPropagation(); exportPineWithParams(strategy.pineScript, sr.params as Record<string, any>, sr.ticker, sr.timeframe, strategy.name); }}
                                 className="text-violet-400/60 hover:text-violet-300 transition-colors p-0.5 rounded hover:bg-violet-500/10"
                                 title="Export .pine with these params"
                                 data-testid={`history-export-sub-${sr.id}`}
@@ -2423,11 +2412,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
   const handleExportPine = useCallback((cfg: any, ticker: string, timeframe: string) => {
     const strat = strategyMap.get(cfg.strategyId);
     if (!strat?.pineScript) return;
-    const injected = injectParamsIntoPineScript(strat.pineScript, cfg.params);
-    const t = ticker.split("/")[0];
-    const tf = timeframe.toUpperCase();
-    const sName = strat.name?.replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase() || "STRATEGY";
-    downloadFile(injected, `${t}_${tf}_${sName}.pine`);
+    exportPineWithParams(strat.pineScript, cfg.params, ticker, timeframe, strat.name);
   }, [strategyMap]);
 
   if (isLoading) {
