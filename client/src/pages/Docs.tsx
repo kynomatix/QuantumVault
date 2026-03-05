@@ -1797,6 +1797,7 @@ function QuantumLabOptimizerSection() {
           <div className="space-y-2 text-white/60 text-sm">
             <p><strong className="text-white/80">Min Trades</strong> — Minimum number of trades a result must have to be considered valid. Filters out lucky one-trade wonders. Default: 10.</p>
             <p><strong className="text-white/80">Max Drawdown Cap</strong> — Maximum allowed drawdown percentage. Any configuration exceeding this is discarded. Default: 30%.</p>
+            <p><strong className="text-white/80">Min Avg Bars Held</strong> — Minimum average bars a position must be held. Filters out same-bar scalp artifacts that exploit intrabar fill mechanics. Default: 1. Set to 0 for 8h/12h timeframes where single-bar trades can be legitimate due to high volatility.</p>
             <p><strong className="text-white/80">Mode</strong> — "Random + Refine" runs both stages. "Random Only" skips the refinement phase for faster exploration.</p>
           </div>
         </div>

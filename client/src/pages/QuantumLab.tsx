@@ -1049,6 +1049,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
   const [refinements, setRefinements] = useState(60);
   const [minTrades, setMinTrades] = useState(10);
   const [maxDrawdown, setMaxDrawdown] = useState(85);
+  const [minBarsHeld, setMinBarsHeld] = useState(1);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [useInsights, setUseInsights] = useState(false);
@@ -1106,7 +1107,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
       const res = await apiRequest("POST", "/api/lab/run-optimization", {
         pineScript: code, parsedInputs: parsedResult.inputs, tickers, timeframes,
         startDate, endDate, randomSamples: samples, topK: top, refinementsPerSeed: refs,
-        minTrades, maxDrawdownCap: maxDrawdown, mode, strategyId: strategyId ?? undefined,
+        minTrades, maxDrawdownCap: maxDrawdown, minAvgBarsHeld: minBarsHeld, mode, strategyId: strategyId ?? undefined,
         useInsights: useInsights && hasInsights ? true : undefined,
       });
       const { jobId, runId } = await res.json();
@@ -1256,9 +1257,16 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
                   <Input type="number" value={minTrades} onChange={(e) => setMinTrades(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-min-trades" />
                 </div>
               </div>
-              <div>
-                <Label className="text-[10px] text-white/30 mb-1 block">Max Drawdown Cap (%)</Label>
-                <Input type="number" value={maxDrawdown} onChange={(e) => setMaxDrawdown(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-max-drawdown" />
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <Label className="text-[10px] text-white/30 mb-1 block">Max Drawdown Cap (%)</Label>
+                  <Input type="number" value={maxDrawdown} onChange={(e) => setMaxDrawdown(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-max-drawdown" />
+                </div>
+                <div>
+                  <Label className="text-[10px] text-white/30 mb-1 block">Min Avg Bars Held</Label>
+                  <Input type="number" min={0} step={0.5} value={minBarsHeld} onChange={(e) => setMinBarsHeld(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-min-bars-held" />
+                  <p className="text-[9px] text-white/20 mt-0.5">Set to 0 for 8h/12h timeframes</p>
+                </div>
               </div>
               {strategyId && hasInsights && (
                 <div className="pt-2 border-t border-white/5">

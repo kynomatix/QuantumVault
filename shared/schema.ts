@@ -806,6 +806,7 @@ export interface LabOptimizationConfig {
   refinementsPerSeed: number;
   minTrades: number;
   maxDrawdownCap: number;
+  minAvgBarsHeld: number;
   mode: "smoke" | "sweep";
   strategyId?: number;
   useInsights?: boolean;
@@ -977,6 +978,7 @@ export const labOptimizationConfigSchema = z.object({
   refinementsPerSeed: z.number().default(60),
   minTrades: z.number().default(10),
   maxDrawdownCap: z.number().default(85),
+  minAvgBarsHeld: z.number().default(1),
   mode: z.enum(["smoke", "sweep"]),
   strategyId: z.number().optional(),
   useInsights: z.boolean().optional(),

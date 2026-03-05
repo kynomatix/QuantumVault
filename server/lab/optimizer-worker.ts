@@ -12,6 +12,7 @@ interface WorkerInput {
     refinementsPerSeed: number;
     minTrades: number;
     maxDrawdownCap: number;
+    minAvgBarsHeld: number;
     parsedInputs: LabPineInput[];
     processOrdersOnClose?: boolean;
     guidedInsights?: GuidedInsights;
@@ -228,6 +229,16 @@ function scoreResult(r: LabBacktestResult): number {
   return r.netProfitPercent * 1000 + r.winRatePercent * 10 - r.maxDrawdownPercent * 5;
 }
 
+function meetsFilters(result: LabBacktestResult, config: WorkerInput["config"]): boolean {
+  if (result.totalTrades < config.minTrades) return false;
+  if (result.maxDrawdownPercent > config.maxDrawdownCap) return false;
+  if (config.minAvgBarsHeld > 0 && result.trades.length > 0) {
+    const avgBars = result.trades.reduce((sum, t) => sum + (t.barsHeld ?? 0), 0) / result.trades.length;
+    if (avgBars < config.minAvgBarsHeld) return false;
+  }
+  return true;
+}
+
 function estimateEta(startTime: number, current: number, total: number): number {
   if (current === 0) return 0;
   const elapsed = Date.now() - startTime;
@@ -337,7 +348,7 @@ async function run() {
         ? generateGuidedParams(inputs, comboInsights!)
         : generateRandomParams(inputs);
       const result = runBacktest(candles, params, combo.ticker, combo.timeframe, engineConfig);
-      if (result.totalTrades >= config.minTrades && result.maxDrawdownPercent <= config.maxDrawdownCap) {
+      if (meetsFilters(result, config)) {
         comboResults.push(result);
       }
       globalCurrent++;
@@ -388,7 +399,7 @@ async function run() {
 
         const jitteredParams = jitterParams(seed.params, inputs);
         const result = runBacktest(candles, jitteredParams, combo.ticker, combo.timeframe, engineConfig);
-        if (result.totalTrades >= config.minTrades && result.maxDrawdownPercent <= config.maxDrawdownCap) {
+        if (meetsFilters(result, config)) {
           comboResults.push(result);
         }
         globalCurrent++;

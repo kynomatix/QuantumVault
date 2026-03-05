@@ -347,6 +347,7 @@ export function registerLabRoutes(app: Express): void {
           refinementsPerSeed: config.refinementsPerSeed,
           minTrades: config.minTrades,
           maxDrawdownCap: config.maxDrawdownCap,
+          minAvgBarsHeld: config.minAvgBarsHeld ?? 1,
           parsedInputs: config.parsedInputs,
           processOrdersOnClose,
           guidedInsights,
