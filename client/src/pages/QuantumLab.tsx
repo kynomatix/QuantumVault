@@ -2975,15 +2975,17 @@ function OptimizerGuide() {
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-[420px] p-0 bg-slate-900 border-white/10 shadow-xl shadow-black/40"
+        className="w-[500px] p-0 bg-slate-900 border-white/10 shadow-xl shadow-black/40"
         align="end"
+        side="bottom"
         sideOffset={8}
+        style={{ maxHeight: "min(70vh, 600px)" }}
       >
-        <div className="px-4 py-3 border-b border-white/10 flex items-center gap-2">
+        <div className="px-4 py-3 border-b border-white/10 flex items-center gap-2 flex-shrink-0">
           <BookOpen className="w-4 h-4 text-violet-400" />
           <span className="text-sm font-semibold text-white">Getting the Most Out of QuantumLab</span>
         </div>
-        <ScrollArea className="max-h-[480px]">
+        <div className="overflow-y-auto" style={{ maxHeight: "min(calc(70vh - 52px), 548px)" }}>
           <div className="p-4 space-y-4 text-xs text-white/70 leading-relaxed">
 
             <div>
@@ -3052,7 +3054,7 @@ function OptimizerGuide() {
             </div>
 
           </div>
-        </ScrollArea>
+        </div>
       </PopoverContent>
     </Popover>
   );
