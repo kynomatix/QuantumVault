@@ -6,7 +6,8 @@ import {
   ChevronRight, ArrowLeft, Zap, DollarSign,
   Copy, Check, Menu, X,
   AlertTriangle, Info, CheckCircle2, ArrowDown, ArrowUp,
-  Shield, Lock, Key, RefreshCw, Sparkles, TrendingUp, TrendingDown, Cpu, Activity
+  Shield, Lock, Key, RefreshCw, Sparkles, TrendingUp, TrendingDown, Cpu, Activity,
+  FlaskConical, BarChart3, Lightbulb, Target, Layers, SlidersHorizontal
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -23,7 +24,13 @@ type DocSection =
   | 'settings'
   | 'security'
   | 'swift-execution'
-  | 'ai-agents';
+  | 'ai-agents'
+  | 'quantumlab-overview'
+  | 'quantumlab-strategies'
+  | 'quantumlab-optimizer'
+  | 'quantumlab-engine'
+  | 'quantumlab-results'
+  | 'quantumlab-insights';
 
 interface NavItem {
   id: DocSection;
@@ -43,6 +50,12 @@ const navItems: NavItem[] = [
   { id: 'security', label: 'Security', icon: Shield },
   { id: 'swift-execution', label: 'Swift Execution', icon: Zap },
   { id: 'ai-agents', label: 'AI Agent Integration', icon: Cpu },
+  { id: 'quantumlab-overview', label: 'QuantumLab Overview', icon: FlaskConical },
+  { id: 'quantumlab-strategies', label: 'Strategy Library', icon: Layers },
+  { id: 'quantumlab-optimizer', label: 'Optimizer', icon: SlidersHorizontal },
+  { id: 'quantumlab-engine', label: 'Backtesting Engine', icon: Target },
+  { id: 'quantumlab-results', label: 'Results & Heatmap', icon: BarChart3 },
+  { id: 'quantumlab-insights', label: 'Insights & Guided Mode', icon: Lightbulb },
 ];
 
 function CopyButton({ text }: { text: string }) {
@@ -1554,6 +1567,681 @@ POST {{QUANTUMVAULT_URL}}/api/webhook/{{BOT_ID}}
   );
 }
 
+function QuantumLabOverviewSection() {
+  return (
+    <div>
+      <SectionHeading>
+        <FlaskConical className="w-6 h-6 text-violet-400" />
+        QuantumLab Overview
+      </SectionHeading>
+      <Paragraph>
+        QuantumLab is QuantumVault's built-in backtesting and strategy optimization engine. It lets you take any 
+        Pine Script strategy from TradingView, import it directly, and run thousands of parameter combinations 
+        against historical data to find configurations that actually perform well before risking real capital.
+      </Paragraph>
+
+      <SubHeading>What Makes It Different</SubHeading>
+      <div className="grid gap-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Target className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Pine Script Native</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Paste your TradingView strategy code directly. QuantumLab's parser extracts all <code className="text-violet-400">input.int()</code>, 
+            <code className="text-violet-400"> input.float()</code>, <code className="text-violet-400"> input.bool()</code>, and 
+            <code className="text-violet-400"> input.string()</code> declarations automatically, preserving groups, min/max ranges, steps, and options.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <SlidersHorizontal className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Automated Optimization</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Instead of manually tweaking parameters one by one, the optimizer tests thousands of random configurations, 
+            finds the best performers, and then refines around them. A single run can explore more combinations than 
+            months of manual testing.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <BarChart3 className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Risk-Aware Scoring</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Results are ranked by a composite score that weighs low drawdown (40%), win rate (35%), profit factor (15%), 
+            and net profit (10%). This surfaces strategies that are consistent and survivable, not just the ones with 
+            the highest raw return.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Lightbulb className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Guided Mode</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            After a few optimization runs, the Insights system analyzes your results and can guide future runs toward 
+            the most promising parameter ranges automatically, dramatically improving search efficiency.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Accessing QuantumLab</SubHeading>
+      <Paragraph>
+        Navigate to <code className="text-violet-400">/quantumlab</code> in your browser. QuantumLab is a standalone tool 
+        that does not require a wallet connection or any live trading setup. It operates entirely on historical data.
+      </Paragraph>
+
+      <SubHeading>Workflow</SubHeading>
+      <StepList steps={[
+        'Import your Pine Script strategy into the Strategy Library.',
+        'Select a strategy, choose tickers and timeframes, and configure the optimizer.',
+        'Run an optimization — the engine backtests thousands of parameter combinations.',
+        'Review results sorted by composite score. Inspect individual trades and equity curves.',
+        'Use the Heatmap to compare performance across ticker/timeframe combinations.',
+        'Generate an Insights report to understand which parameters matter most.',
+        'Enable Guided Mode on subsequent runs to focus the search on the best ranges.',
+        'Export your best parameters back to Pine Script format for use in TradingView.',
+      ]} />
+
+      <SubHeading>Data Sources</SubHeading>
+      <Paragraph>
+        QuantumLab fetches historical OHLCV (open, high, low, close, volume) candle data from OKX perpetual futures markets. 
+        For tickers not listed on OKX (such as DRIFT, TNSR, CLOUD, IO, DBR, and MNT), it automatically falls back to Gate.io.
+      </Paragraph>
+      <Paragraph>
+        Fetched candle data is cached in the database so subsequent runs on the same ticker, timeframe, and date range 
+        are instant. You can view cache statistics and clear the cache from the settings area.
+      </Paragraph>
+
+      <Alert type="info">
+        QuantumLab runs backtests at true 1x leverage baseline ($1,000 initial capital with $1,000 position size). 
+        Risk analysis then calculates the maximum safe leverage from the observed drawdown, capped at 20x.
+      </Alert>
+    </div>
+  );
+}
+
+function QuantumLabStrategiesSection() {
+  const pineExample = `// Example Pine Script inputs that QuantumLab parses:
+string g_squeeze = "═══ SQUEEZE DETECTION ═══"
+int bbLen = input.int(20, "BB Length", minval=5, maxval=50, group=g_squeeze)
+float bbMult = input.float(2.0, "BB Mult", minval=0.5, maxval=4.0, step=0.1, group=g_squeeze)
+bool requireSqz = input.bool(true, "Require Squeeze", group=g_squeeze)
+string slMode = input.string("ATR", "SL Mode", options=["ATR","Percentage","BB Band","Keltner Band"], group=g_sl)`;
+
+  return (
+    <div>
+      <SectionHeading>
+        <Layers className="w-6 h-6 text-violet-400" />
+        Strategy Library
+      </SectionHeading>
+      <Paragraph>
+        The Strategy Library is where you store and manage your Pine Script strategies. Each strategy preserves its 
+        full source code, parsed parameter definitions, and optimization history across runs.
+      </Paragraph>
+
+      <SubHeading>Importing a Strategy</SubHeading>
+      <StepList steps={[
+        'Copy your full Pine Script strategy code from TradingView\'s Pine Editor.',
+        'Paste it into the code editor on the Main tab in QuantumLab.',
+        'Click "Parse" — the parser extracts all input declarations and displays them grouped by their Pine Script groups.',
+        'Give your strategy a name and click "Save" to add it to the library.',
+      ]} />
+
+      <SubHeading>What Gets Parsed</SubHeading>
+      <Paragraph>
+        The Pine Script parser uses a quote-aware character-by-character approach (not regex) to correctly handle 
+        parentheses inside quoted strings like titles and tooltips. It extracts:
+      </Paragraph>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Supported Input Types</h4>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-violet-400" />
+              <span className="text-white/70 text-sm"><code className="text-violet-400">input.int()</code> — Integer parameters</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-violet-400" />
+              <span className="text-white/70 text-sm"><code className="text-violet-400">input.float()</code> — Decimal parameters</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-violet-400" />
+              <span className="text-white/70 text-sm"><code className="text-violet-400">input.bool()</code> — Toggle parameters</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-violet-400" />
+              <span className="text-white/70 text-sm"><code className="text-violet-400">input.string()</code> — Dropdown parameters</span>
+            </div>
+          </div>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Extracted Properties</h4>
+          <p className="text-white/60 text-sm">
+            For each input: variable name, default value, title, min/max values, step size, group name, and 
+            options list (for string inputs). Date-related inputs like <code className="text-violet-400">input.time()</code> are 
+            automatically detected and excluded from optimization.
+          </p>
+        </div>
+      </div>
+
+      <CodeBlock code={pineExample} language="pine" />
+
+      <SubHeading>Strategy Settings</SubHeading>
+      <Paragraph>
+        The parser also reads settings from the <code className="text-violet-400">strategy()</code> header call. Currently 
+        it extracts <code className="text-violet-400">process_orders_on_close</code>, which controls how the engine handles 
+        TP/SL exits (see the Backtesting Engine section for details).
+      </Paragraph>
+
+      <SubHeading>Managing Strategies</SubHeading>
+      <Paragraph>
+        Saved strategies appear in the sidebar. Click a strategy to load it, edit the code and re-parse, or delete 
+        strategies you no longer need. Each strategy maintains a link to all its optimization runs, so you can track 
+        progress over time.
+      </Paragraph>
+
+      <Alert type="warning">
+        Make sure your Pine Script uses <code className="text-violet-400">minval</code> and <code className="text-violet-400">maxval</code> on 
+        your inputs. Without them, the optimizer has no range boundaries and will use very wide defaults, which leads 
+        to wasted iterations testing extreme or meaningless values.
+      </Alert>
+    </div>
+  );
+}
+
+function QuantumLabOptimizerSection() {
+  return (
+    <div>
+      <SectionHeading>
+        <SlidersHorizontal className="w-6 h-6 text-violet-400" />
+        Optimizer
+      </SectionHeading>
+      <Paragraph>
+        The optimizer is the core of QuantumLab. It takes your strategy's parsed parameters and systematically 
+        searches for combinations that produce the best risk-adjusted performance across your chosen markets and timeframes.
+      </Paragraph>
+
+      <SubHeading>Configuration</SubHeading>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <TrendingUp className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Tickers & Timeframes</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Select one or more tickers (SOL, BTC, ETH, AVAX, etc.) and timeframes (1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h). 
+            The optimizer runs each combination independently, so selecting 3 tickers and 2 timeframes means 6 separate 
+            optimization passes.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Settings className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Basic Settings</h4>
+          </div>
+          <div className="space-y-2 text-white/60 text-sm">
+            <p><strong className="text-white/80">Date Range</strong> — Historical period to backtest over. Longer ranges give more trades and more reliable statistics.</p>
+            <p><strong className="text-white/80">Random Samples</strong> — How many random parameter combinations to test per ticker/timeframe combo. More samples means a wider search but longer run times. Default: 2,000.</p>
+            <p><strong className="text-white/80">Top K</strong> — How many of the best random results to keep for refinement. Default: 10.</p>
+            <p><strong className="text-white/80">Refinements per Seed</strong> — How many jittered variations to test around each top result. Default: 50.</p>
+          </div>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <SlidersHorizontal className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Advanced Settings</h4>
+          </div>
+          <div className="space-y-2 text-white/60 text-sm">
+            <p><strong className="text-white/80">Min Trades</strong> — Minimum number of trades a result must have to be considered valid. Filters out lucky one-trade wonders. Default: 10.</p>
+            <p><strong className="text-white/80">Max Drawdown Cap</strong> — Maximum allowed drawdown percentage. Any configuration exceeding this is discarded. Default: 30%.</p>
+            <p><strong className="text-white/80">Mode</strong> — "Random + Refine" runs both stages. "Random Only" skips the refinement phase for faster exploration.</p>
+          </div>
+        </div>
+      </div>
+
+      <SubHeading>How the Search Works</SubHeading>
+      <div className="grid gap-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="w-8 h-8 rounded-full bg-violet-500/20 flex items-center justify-center">
+              <span className="text-violet-400 font-bold">1</span>
+            </div>
+            <h4 className="font-medium text-white">Random Search</h4>
+          </div>
+          <p className="text-white/60 text-sm ml-11">
+            The optimizer generates random parameter combinations within each input's min/max range, respecting step sizes 
+            and option lists. Each combination is backtested against the historical data and scored.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="w-8 h-8 rounded-full bg-violet-500/20 flex items-center justify-center">
+              <span className="text-violet-400 font-bold">2</span>
+            </div>
+            <h4 className="font-medium text-white">Refinement</h4>
+          </div>
+          <p className="text-white/60 text-sm ml-11">
+            The top K results become "seeds." The optimizer generates small jittered variations around each seed — tweaking 
+            values by small amounts to explore nearby configurations. This often finds improvements that random search misses.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Progress & Checkpointing</SubHeading>
+      <Paragraph>
+        During a run, you can monitor progress in real time via the live progress display showing the current 
+        stage (Random Search / Refinement), iteration count, elapsed time, and best score so far. The optimizer 
+        saves checkpoints every 60 seconds, so if your session disconnects or the server restarts, the run 
+        automatically resumes from where it left off.
+      </Paragraph>
+
+      <SubHeading>Worker Thread Isolation</SubHeading>
+      <Paragraph>
+        Optimization runs execute in a dedicated Node.js Worker Thread, completely isolated from the main server. 
+        This means even intensive multi-hour optimization jobs won't slow down your live trading, webhook processing, 
+        or position management. Only one optimization can run at a time.
+      </Paragraph>
+
+      <Alert type="info">
+        For a thorough initial exploration, run 2,000+ random samples per combo. For quick tests during development, 
+        200-500 samples give you a rough picture in a few minutes.
+      </Alert>
+    </div>
+  );
+}
+
+function QuantumLabEngineSection() {
+  return (
+    <div>
+      <SectionHeading>
+        <Target className="w-6 h-6 text-violet-400" />
+        Backtesting Engine
+      </SectionHeading>
+      <Paragraph>
+        The backtesting engine faithfully reproduces how a Pine Script strategy behaves on TradingView, including its 
+        entry/exit logic, indicator calculations, and order fill mechanics. Understanding these mechanics helps you 
+        interpret results accurately.
+      </Paragraph>
+
+      <SubHeading>Entry Logic</SubHeading>
+      <Paragraph>
+        The engine uses a <strong className="text-white/90">pending order system</strong> that matches TradingView's behavior. 
+        When the strategy generates a buy or sell signal on bar N, the entry is placed as a pending order and fills 
+        at the <strong className="text-white/90">open price of bar N+1</strong>. This prevents look-ahead bias — you can't 
+        enter a trade at prices you wouldn't have seen yet in real time.
+      </Paragraph>
+
+      <SubHeading>Exit Modes</SubHeading>
+      <Paragraph>
+        The engine supports two exit fill modes, controlled by the <code className="text-violet-400">process_orders_on_close</code> setting 
+        in your Pine Script's <code className="text-violet-400">strategy()</code> header:
+      </Paragraph>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-violet-500/10 border border-violet-500/30">
+          <h4 className="font-medium text-violet-200 mb-2">Intrabar Mode (default)</h4>
+          <p className="text-white/60 text-sm mb-2">
+            When <code className="text-violet-400">process_orders_on_close</code> is <code className="text-violet-400">false</code> (or not set):
+          </p>
+          <div className="space-y-1 text-white/60 text-sm pl-4">
+            <p>Take-profit levels are checked against the bar's <strong className="text-white/80">high</strong> (for longs) or <strong className="text-white/80">low</strong> (for shorts)</p>
+            <p>Stop-loss levels are checked against the bar's <strong className="text-white/80">low</strong> (for longs) or <strong className="text-white/80">high</strong> (for shorts)</p>
+            <p>Trailing stops track bar extremes via high/low</p>
+            <p>Fills happen at the exact TP/SL level price, not the next bar's open</p>
+          </div>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">On-Close Mode</h4>
+          <p className="text-white/60 text-sm mb-2">
+            When <code className="text-violet-400">process_orders_on_close = true</code> in the strategy header:
+          </p>
+          <div className="space-y-1 text-white/60 text-sm pl-4">
+            <p>TP/SL levels are checked against the bar's <strong className="text-white/80">close</strong> price only</p>
+            <p>Fills happen at the <strong className="text-white/80">next bar's open</strong> price</p>
+            <p>This is more conservative and may produce fewer stops than Intrabar mode</p>
+          </div>
+        </div>
+      </div>
+      <Alert type="info">
+        The exit mode is parsed automatically from your Pine Script's strategy header. You don't need to set it 
+        manually — just make sure your Pine Script matches the TradingView configuration you're using.
+      </Alert>
+
+      <SubHeading>Indicator Calculations</SubHeading>
+      <Paragraph>
+        The engine implements all indicators to match TradingView's exact formulas:
+      </Paragraph>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Core Indicators</h4>
+          <div className="grid gap-2 text-sm text-white/60">
+            <p><strong className="text-white/80">Squeeze Momentum</strong> — LazyBear formula: <code className="text-violet-400">close - avg(avg(highest, lowest), sma)</code></p>
+            <p><strong className="text-white/80">Bollinger Bands</strong> — Standard deviation bands around SMA</p>
+            <p><strong className="text-white/80">Keltner Channel</strong> — SMA-based center with ATR-based bands (not EMA-based)</p>
+            <p><strong className="text-white/80">ATR</strong> — RMA-based (Wilder's smoothing), matching TradingView's <code className="text-violet-400">ta.atr()</code></p>
+            <p><strong className="text-white/80">Hull MA</strong> — Weighted moving average for trend direction filtering</p>
+            <p><strong className="text-white/80">EMA</strong> — Exponential moving average for trend bias filtering</p>
+            <p><strong className="text-white/80">RSI</strong> — Relative Strength Index for extreme condition exits</p>
+            <p><strong className="text-white/80">ADX</strong> — Average Directional Index for trend strength exits</p>
+          </div>
+        </div>
+      </div>
+
+      <SubHeading>Stop Loss Modes</SubHeading>
+      <div className="flex flex-wrap gap-2 mb-6">
+        {['ATR-Based', 'Percentage', 'Bollinger Band', 'Keltner Band'].map(mode => (
+          <span key={mode} className="px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/30 text-violet-200 text-sm">
+            {mode}
+          </span>
+        ))}
+      </div>
+
+      <SubHeading>Take Profit Modes</SubHeading>
+      <Paragraph>
+        Up to 3 independent take-profit levels, each with configurable quantity percentage:
+      </Paragraph>
+      <div className="flex flex-wrap gap-2 mb-6">
+        {['ATR-Based', 'Percentage', 'Risk Multiple (R:R)'].map(mode => (
+          <span key={mode} className="px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/30 text-violet-200 text-sm">
+            {mode}
+          </span>
+        ))}
+      </div>
+
+      <SubHeading>Advanced Exit Features</SubHeading>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Trailing Stop</h4>
+          <p className="text-white/60 text-sm">
+            Activates immediately, after TP1, or after TP2. Tracks the bar's high (longs) or low (shorts) as the 
+            position moves in your favor, then closes if price retraces by the trail offset.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Breakeven Stop</h4>
+          <p className="text-white/60 text-sm">
+            Moves the stop loss to entry price (plus a configurable offset) after TP1 or TP2 is hit. Protects gains 
+            on partial exits.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Conditional Exits</h4>
+          <p className="text-white/60 text-sm">
+            Momentum flip, Hull MA flip, re-squeeze, RSI extreme, and ADX drop can each trigger a position close. 
+            These always use next-bar-open fills regardless of the exit mode setting.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Entry Filters</SubHeading>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Squeeze Detection</h4>
+          <p className="text-white/60 text-sm">
+            Standard mode requires Bollinger Bands to be inside Keltner Channels. Alternative mode uses BB Width 
+            Percentile ranking — if the current BB width is below a threshold percentile over a lookback window, 
+            compression is active.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Hull MA Trend Filter</h4>
+          <p className="text-white/60 text-sm">
+            When enabled, only allows long entries when the Hull MA slope is positive and short entries when negative.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">EMA Trend Bias</h4>
+          <p className="text-white/60 text-sm">
+            Filters entries based on price position relative to a configurable EMA. Longs only above the EMA, shorts only below.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Volume Surge Filter</h4>
+          <p className="text-white/60 text-sm">
+            Requires the current bar's volume to exceed the volume SMA by a configurable multiplier before allowing an entry.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Cooldown Bars</h4>
+          <p className="text-white/60 text-sm">
+            Enforces a waiting period after a position closes before the next entry is allowed. Prevents rapid 
+            re-entry in choppy conditions.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Leverage & Risk Math</SubHeading>
+      <Paragraph>
+        All backtests run at 1x leverage ($1,000 capital, $1,000 position size). After the backtest completes, risk 
+        analysis calculates the maximum safe leverage using the formula:
+      </Paragraph>
+      <div className="p-4 rounded-lg bg-black/40 border border-white/10 mb-4">
+        <pre className="text-sm font-mono text-violet-300">max_leverage = min(20, floor((100 / max_drawdown%) * 0.8))</pre>
+      </div>
+      <Paragraph>
+        The 0.8 safety factor provides a 20% buffer. The hard cap is 20x regardless of how low the drawdown is.
+      </Paragraph>
+    </div>
+  );
+}
+
+function QuantumLabResultsSection() {
+  return (
+    <div>
+      <SectionHeading>
+        <BarChart3 className="w-6 h-6 text-violet-400" />
+        Results & Heatmap
+      </SectionHeading>
+      <Paragraph>
+        After an optimization completes, the Results tab shows all runs for the selected strategy with their 
+        top-performing configurations. The Heatmap tab provides a bird's-eye view of how a strategy performs 
+        across different ticker/timeframe combinations.
+      </Paragraph>
+
+      <SubHeading>Results Tab</SubHeading>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Run History</h4>
+          <p className="text-white/60 text-sm">
+            Lists all completed and paused optimization runs with date, ticker/timeframe combos tested, number of 
+            results found, and status. Click any run to expand it and see its top results.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Result Cards</h4>
+          <p className="text-white/60 text-sm">
+            Each result shows the composite score, net profit %, win rate, max drawdown, profit factor, total trades, 
+            and the full parameter set used. Cards are color-coded by performance quality.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Trade Inspector</h4>
+          <p className="text-white/60 text-sm">
+            Click any result to see its full trade list — entry date, exit date, direction (long/short), entry price, 
+            exit price, PnL percentage, and exit reason (Stop Loss, Trail Stop, TP1, TP2, TP3, Breakeven Stop, or 
+            any conditional exit). This helps you understand <em>how</em> a strategy trades, not just its summary statistics.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Equity Curve</h4>
+          <p className="text-white/60 text-sm">
+            A visual plot of account equity over time for any individual result. Look for smooth, upward-trending curves 
+            with small drawdowns rather than jagged spikes — consistency matters more than peak equity.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Risk Analysis</SubHeading>
+      <Paragraph>
+        Each result includes a risk analysis panel showing:
+      </Paragraph>
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        <div className="p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
+          <span className="text-violet-200 text-sm font-medium">Max Safe Leverage</span>
+          <p className="text-white/50 text-xs mt-1">Based on observed drawdown, capped at 20x</p>
+        </div>
+        <div className="p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
+          <span className="text-violet-200 text-sm font-medium">Projected Return</span>
+          <p className="text-white/50 text-xs mt-1">Net profit scaled to max safe leverage</p>
+        </div>
+        <div className="p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
+          <span className="text-violet-200 text-sm font-medium">Max Drawdown at Leverage</span>
+          <p className="text-white/50 text-xs mt-1">What the worst drawdown would feel like leveraged</p>
+        </div>
+        <div className="p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
+          <span className="text-violet-200 text-sm font-medium">Risk Rating</span>
+          <p className="text-white/50 text-xs mt-1">Low / Medium / High based on drawdown severity</p>
+        </div>
+      </div>
+
+      <SubHeading>Export to Pine Script</SubHeading>
+      <Paragraph>
+        Click the export button on any result to generate Pine Script code with the optimized parameter values 
+        injected back into your original strategy. Copy this into TradingView to apply the optimized configuration 
+        directly.
+      </Paragraph>
+
+      <SubHeading>Heatmap Tab</SubHeading>
+      <Paragraph>
+        The Heatmap provides a grid visualization showing how your strategy performs across all tested ticker/timeframe 
+        combinations from a specific run. Each cell shows the best composite score for that combination, color-coded 
+        from red (poor) through yellow (average) to green (strong).
+      </Paragraph>
+      <Paragraph>
+        Use the Heatmap to identify which markets and timeframes are the best fit for your strategy. A strategy 
+        that scores well on SOL 2h but poorly on BTC 4h tells you something important about where to deploy it.
+      </Paragraph>
+
+      <Alert type="info">
+        You can click any cell in the Heatmap to jump directly to the detailed results for that ticker/timeframe combination.
+      </Alert>
+    </div>
+  );
+}
+
+function QuantumLabInsightsSection() {
+  return (
+    <div>
+      <SectionHeading>
+        <Lightbulb className="w-6 h-6 text-violet-400" />
+        Insights & Guided Mode
+      </SectionHeading>
+      <Paragraph>
+        The Insights system analyzes data across all optimization runs for a strategy to surface statistical patterns — 
+        which parameters matter most, which ticker/timeframe combinations work best, and which value ranges consistently 
+        produce strong results.
+      </Paragraph>
+
+      <SubHeading>Generating a Report</SubHeading>
+      <StepList steps={[
+        'Go to the Insights tab and select a strategy.',
+        'Optionally choose a specific ticker/timeframe focus (e.g., "SOL 2h") or leave on "All Results" for a general cross-market report.',
+        'Click "Generate Report." The report is auto-saved to the database for future reference.',
+      ]} />
+
+      <SubHeading>What the Report Contains</SubHeading>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <SlidersHorizontal className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Parameter Sensitivity</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            For each parameter, shows its impact score (how much it affects results), the best-performing value ranges 
+            split into buckets, and optimal direction. High-impact parameters are the ones worth focusing on; low-impact 
+            ones can often be left at defaults.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <BarChart3 className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Ticker & Timeframe Fit</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Ranks which tickers and timeframes consistently produce the strongest results for this strategy, helping 
+            you decide where to focus your trading.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <TrendingUp className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Directional Bias</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Shows whether the strategy performs better on long trades, short trades, or is balanced. Useful for 
+            understanding if you have an inherent directional edge.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Activity className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Trade Patterns</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Statistical analysis of trade duration, win streaks, loss streaks, and exit reason distribution across 
+            all tested configurations.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <CheckCircle2 className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Recommendations</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Actionable suggestions based on the analysis — which parameters to narrow, which to leave wide, and 
+            which markets to focus on. Use the "Copy Report" button to format the report as text for pasting into 
+            an AI assistant for further strategy improvement suggestions.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Saved Reports</SubHeading>
+      <Paragraph>
+        Reports auto-save when generated. Past reports are listed below the generate button with their timestamp, 
+        total results analyzed, and number of runs included. Click any saved report to load it without regenerating.
+        Reports with a specific ticker/timeframe focus are labeled accordingly.
+      </Paragraph>
+
+      <SubHeading>Guided Mode</SubHeading>
+      <Paragraph>
+        Guided Mode is an optional feature that uses your saved Insights reports to make future optimization runs 
+        smarter. Instead of searching completely randomly, the optimizer narrows parameter ranges to the 
+        best-performing buckets identified by the sensitivity analysis.
+      </Paragraph>
+      <div className="p-4 rounded-lg bg-violet-500/10 border border-violet-500/30 mb-6">
+        <h4 className="font-medium text-violet-200 mb-3">How Guided Mode Works</h4>
+        <div className="space-y-2 text-white/60 text-sm">
+          <p><strong className="text-white/80">80/20 Split</strong> — 80% of random samples use narrowed ranges from insights data, while 20% remain fully random to avoid getting trapped in local optima.</p>
+          <p><strong className="text-white/80">High-Impact Focus</strong> — Parameters with above-median impact scores get finer-grained step sizes within their best range, allowing more precise tuning where it matters most.</p>
+          <p><strong className="text-white/80">Per-Combo Preference</strong> — If a filtered insights report exists for the specific ticker/timeframe being optimized (e.g., a "SOL 2h" focused report), the optimizer prefers that over a general report. It falls back to the latest general report if no focused match exists.</p>
+          <p><strong className="text-white/80">Refinement Unchanged</strong> — The jitter/refinement stage around top results works the same way whether guided mode is on or off.</p>
+        </div>
+      </div>
+
+      <SubHeading>Enabling Guided Mode</SubHeading>
+      <StepList steps={[
+        'Run 2-3 standard optimization runs first (2,000+ random samples each) to build up enough data.',
+        'Generate an Insights report on the Insights tab.',
+        'On the Main tab, open Advanced Settings and toggle "Use Insights" on.',
+        'Run your optimization. The progress label will show "Guided Search" instead of "Random Search."',
+      ]} />
+
+      <Alert type="warning">
+        Don't enable Guided Mode on your first optimization runs. The sensitivity analysis needs at least ~4,000 
+        total configurations tested across multiple runs to distinguish real patterns from noise. Using it too early 
+        may narrow the search prematurely.
+      </Alert>
+
+      <Alert type="info">
+        Guided Mode is off by default. The toggle only appears when the selected strategy has at least one saved 
+        Insights report.
+      </Alert>
+    </div>
+  );
+}
+
 export default function DocsPage() {
   const [activeSection, setActiveSection] = useState<DocSection>('getting-started');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -1582,6 +2270,18 @@ export default function DocsPage() {
         return <SwiftExecutionSection />;
       case 'ai-agents':
         return <AIAgentsSection />;
+      case 'quantumlab-overview':
+        return <QuantumLabOverviewSection />;
+      case 'quantumlab-strategies':
+        return <QuantumLabStrategiesSection />;
+      case 'quantumlab-optimizer':
+        return <QuantumLabOptimizerSection />;
+      case 'quantumlab-engine':
+        return <QuantumLabEngineSection />;
+      case 'quantumlab-results':
+        return <QuantumLabResultsSection />;
+      case 'quantumlab-insights':
+        return <QuantumLabInsightsSection />;
       default:
         return <GettingStartedSection />;
     }
@@ -1641,24 +2341,34 @@ export default function DocsPage() {
               <nav className="space-y-1">
                 {navItems.map((item) => {
                   const Icon = item.icon;
+                  const isFirstQuantumLab = item.id === 'quantumlab-overview';
                   return (
-                    <button
-                      key={item.id}
-                      onClick={() => {
-                        setActiveSection(item.id);
-                        setMobileMenuOpen(false);
-                      }}
-                      className={cn(
-                        "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
-                        activeSection === item.id
-                          ? "bg-primary/20 text-primary"
-                          : "text-white/60 hover:text-white hover:bg-white/5"
+                    <div key={item.id}>
+                      {isFirstQuantumLab && (
+                        <div className="pt-3 pb-2 mt-2 mb-1 border-t border-white/10">
+                          <div className="flex items-center gap-2 px-3">
+                            <FlaskConical className="w-3.5 h-3.5 text-violet-400" />
+                            <span className="text-xs font-semibold text-violet-400 uppercase tracking-wider">QuantumLab</span>
+                          </div>
+                        </div>
                       )}
-                      data-testid={`nav-${item.id}`}
-                    >
-                      <Icon className="w-4 h-4" />
-                      {item.label}
-                    </button>
+                      <button
+                        onClick={() => {
+                          setActiveSection(item.id);
+                          setMobileMenuOpen(false);
+                        }}
+                        className={cn(
+                          "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
+                          activeSection === item.id
+                            ? "bg-primary/20 text-primary"
+                            : "text-white/60 hover:text-white hover:bg-white/5"
+                        )}
+                        data-testid={`nav-${item.id}`}
+                      >
+                        <Icon className="w-4 h-4" />
+                        {item.label}
+                      </button>
+                    </div>
                   );
                 })}
               </nav>
