@@ -138,9 +138,20 @@ export function parsePineScript(code: string): LabPineParseResult {
   }
 
   let strategyName: string | undefined;
-  const strategyMatch = code.match(/strategy\s*\(([^)]+)\)/);
-  if (strategyMatch) {
-    const args = parseArgString(strategyMatch[1]);
+  const strategyHeaderMatch = code.match(/strategy\s*\(/);
+  if (strategyHeaderMatch) {
+    const sStart = strategyHeaderMatch.index! + strategyHeaderMatch[0].length;
+    let sD = 1, sIS = false, sSC = "";
+    let sEnd = -1;
+    for (let ci = sStart; ci < code.length; ci++) {
+      const cc = code[ci];
+      if (sIS) { if (cc === sSC && code[ci - 1] !== "\\") sIS = false; continue; }
+      if (cc === '"' || cc === "'") { sIS = true; sSC = cc; continue; }
+      if (cc === "(") { sD++; continue; }
+      if (cc === ")") { sD--; if (sD === 0) { sEnd = ci; break; } }
+    }
+    const strategyArgsStr = sEnd > 0 ? code.substring(sStart, sEnd) : "";
+    const args = parseArgString(strategyArgsStr);
     if (args.keyword["title"]) {
       strategyName = stripQuotes(args.keyword["title"]);
     } else if (args.positional[0]) {
@@ -157,12 +168,27 @@ export function parsePineScript(code: string): LabPineParseResult {
     }
   }
 
-  const inputPattern = /(?:(?:int|float|bool|string|var)\s+)?(\w+)\s*=\s*input\.(int|float|bool|string|time|source)\s*\(([^)]*(?:\([^)]*\))*[^)]*)\)/g;
+  const headerPattern = /(?:(?:int|float|bool|string|var)\s+)?(\w+)\s*=\s*input\.(int|float|bool|string|time|source)\s*\(/g;
   let match;
-  while ((match = inputPattern.exec(code)) !== null) {
+  while ((match = headerPattern.exec(code)) !== null) {
     const varName = match[1];
     const rawType = match[2];
-    const argsStr = match[3];
+    const argsStart = match.index + match[0].length;
+    let d2 = 1, inStr = false, strCh = "";
+    let argsEnd = -1;
+    for (let ci = argsStart; ci < code.length; ci++) {
+      const cc = code[ci];
+      if (inStr) {
+        if (cc === strCh && code[ci - 1] !== "\\") inStr = false;
+        continue;
+      }
+      if (cc === '"' || cc === "'") { inStr = true; strCh = cc; continue; }
+      if (cc === "(") { d2++; continue; }
+      if (cc === ")") { d2--; if (d2 === 0) { argsEnd = ci; break; } }
+    }
+    if (argsEnd === -1) continue;
+    headerPattern.lastIndex = argsEnd + 1;
+    const argsStr = code.substring(argsStart, argsEnd);
     const { positional, keyword } = parseArgString(argsStr);
 
     const type: LabPineInput["type"] = rawType === "source" ? "string" : rawType as LabPineInput["type"];
@@ -221,11 +247,26 @@ export function parsePineScript(code: string): LabPineParseResult {
     inputs.push(input);
   }
 
-  const simpleInputPattern = /(?:(?:int|float|bool|string|var)\s+)?(\w+)\s*=\s*input\s*\(([^)]+)\)/g;
-  while ((match = simpleInputPattern.exec(code)) !== null) {
+  const simpleHeaderPattern = /(?:(?:int|float|bool|string|var)\s+)?(\w+)\s*=\s*input\s*\(/g;
+  while ((match = simpleHeaderPattern.exec(code)) !== null) {
     const varName = match[1];
     if (inputs.find(i => i.name === varName)) continue;
-    const argsStr = match[2];
+    const sArgsStart = match.index + match[0].length;
+    let sd = 1, sInStr = false, sStrCh = "";
+    let sArgsEnd = -1;
+    for (let ci = sArgsStart; ci < code.length; ci++) {
+      const cc = code[ci];
+      if (sInStr) {
+        if (cc === sStrCh && code[ci - 1] !== "\\") sInStr = false;
+        continue;
+      }
+      if (cc === '"' || cc === "'") { sInStr = true; sStrCh = cc; continue; }
+      if (cc === "(") { sd++; continue; }
+      if (cc === ")") { sd--; if (sd === 0) { sArgsEnd = ci; break; } }
+    }
+    if (sArgsEnd === -1) continue;
+    simpleHeaderPattern.lastIndex = sArgsEnd + 1;
+    const argsStr = code.substring(sArgsStart, sArgsEnd);
     const { positional, keyword } = parseArgString(argsStr);
     const defaultVal = positional[0] || keyword["defval"] || "0";
     const isNum = !isNaN(Number(defaultVal));
