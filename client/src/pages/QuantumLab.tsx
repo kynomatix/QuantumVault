@@ -301,6 +301,7 @@ function injectParamsIntoPineScript(code: string, params: Record<string, any>): 
       if (ch === ")") { depth--; if (depth === 0) { argsEnd = i; break; } continue; }
     }
     if (argsEnd === -1) continue;
+    headerPattern.lastIndex = argsEnd + 1;
     const argsStr = originalCode.substring(argsStart, argsEnd);
 
     if (!(varName in params)) continue;
