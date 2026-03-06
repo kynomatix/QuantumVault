@@ -1941,8 +1941,21 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
             </p>
           </div>
         </div>
-        {selectedResult && (
-          <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button variant="secondary" size="sm" onClick={() => {
+            if (confirm(`Delete entire Run #${runId} and all its results? This cannot be undone.`)) {
+              fetch(`/api/lab/runs/${runId}`, { method: "DELETE" }).then(res => {
+                if (res.ok) {
+                  queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+                  onBack();
+                }
+              });
+            }
+          }} className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20" data-testid="button-delete-run">
+            <Trash2 className="w-3 h-3 mr-1" /> Delete Run
+          </Button>
+          {selectedResult && (
+            <>
             <Button variant="secondary" size="sm" onClick={() => {
               const params = selectedResult.params as Record<string, any>;
               navigator.clipboard.writeText(Object.entries(params).map(([k, v]) => `${k} = ${v}`).join("\n"));
@@ -1956,8 +1969,9 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                 <Download className="w-3 h-3 mr-1" /> Export .pine
               </Button>
             )}
-          </div>
-        )}
+            </>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
