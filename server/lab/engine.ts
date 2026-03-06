@@ -326,7 +326,9 @@ export function runBacktest(
       continue;
     }
 
-    if (position && !pendingExit) {
+    const justEntered = position !== null && position.entryBar === i;
+
+    if (position && !pendingExit && !justEntered) {
       const dir = position.direction;
       const isLong = dir === "long";
       const atrNow = isNaN(slAtr[i]) ? close[i] * 0.02 : slAtr[i];
@@ -487,8 +489,13 @@ export function runBacktest(
           }
         }
       }
+    }
 
-      if (!pendingExit && exitOnMomFlip) {
+    if (position && !pendingExit) {
+      const dir = position.direction;
+      const isLong = dir === "long";
+
+      if (exitOnMomFlip) {
         const momBearish = !isNaN(mom[i]) && mom[i] < 0;
         const momFall = !isNaN(mom[i]) && !isNaN(mom[i - 1]) && mom[i] < mom[i - 1];
         const momBullish = !isNaN(mom[i]) && mom[i] > 0;
@@ -521,7 +528,6 @@ export function runBacktest(
           pendingExit = { exitReason: "ADX Drop", signalBar: i };
         }
       }
-
     }
 
     if (!position && !pendingEntry && !pendingExit && i > 0) {
