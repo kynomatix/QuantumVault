@@ -317,7 +317,7 @@ export function runBacktest(
       });
       position = null;
       pendingExit = null;
-      barsSinceExit = 0;
+      barsSinceExit = -1;
     }
 
     if (i < warmup) {
