@@ -38,6 +38,7 @@ export interface ILabStorage {
   pauseRun(id: number): Promise<void>;
   resumeRun(id: number): Promise<void>;
   deleteRun(id: number): Promise<void>;
+  deleteResult(resultId: number): Promise<void>;
   clearStrategyResults(strategyId: number): Promise<number>;
   saveCheckpoint(runId: number, checkpoint: LabCheckpoint): Promise<void>;
   getCheckpoint(runId: number): Promise<LabCheckpoint | null>;
@@ -241,6 +242,10 @@ export class LabDatabaseStorage implements ILabStorage {
   async deleteRun(id: number): Promise<void> {
     await db.delete(labOptimizationResults).where(eq(labOptimizationResults.runId, id));
     await db.delete(labOptimizationRuns).where(eq(labOptimizationRuns.id, id));
+  }
+
+  async deleteResult(resultId: number): Promise<void> {
+    await db.delete(labOptimizationResults).where(eq(labOptimizationResults.id, resultId));
   }
 
   async clearStrategyResults(strategyId: number): Promise<number> {

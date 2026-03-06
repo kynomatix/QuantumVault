@@ -1737,6 +1737,27 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [rankingMode, setRankingMode] = useState<RankingMode>("profit");
   const [expandedCombos, setExpandedCombos] = useState<Set<string>>(new Set());
+  const [deletingIds, setDeletingIds] = useState<Set<number>>(new Set());
+
+  const deleteResultMutation = useMutation({
+    mutationFn: async (resultId: number) => {
+      const res = await fetch(`/api/lab/results/${resultId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete result");
+    },
+    onMutate: (resultId) => {
+      setDeletingIds(prev => new Set(prev).add(resultId));
+    },
+    onSuccess: (_data, resultId) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs", runId, "results"] });
+      if (selectedResultSummary?.id === resultId) {
+        setSelectedResultSummary(null);
+        setSelectedResultFull(null);
+      }
+    },
+    onSettled: (_data, _err, resultId) => {
+      setDeletingIds(prev => { const next = new Set(prev); next.delete(resultId); return next; });
+    },
+  });
 
   const { data: run } = useQuery<LabOptimizationRun>({
     queryKey: ["/api/lab/runs", runId],
@@ -1976,6 +1997,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                 <SortHeader label="Trades" sortKey="totalTrades" current={sortKey} dir={sortDir} onClick={handleSort} />
                 {strategy?.pineScript && <th className="w-8"></th>}
                 <th className="w-8"></th>
+                <th className="w-8"></th>
               </tr>
             </thead>
             <tbody>
@@ -2025,6 +2047,17 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           </button>
                         )}
                       </td>
+                      <td className="py-2.5 px-2 text-center">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); if (confirm("Delete this result?")) deleteResultMutation.mutate(r.id); }}
+                          disabled={deletingIds.has(r.id)}
+                          className="text-white/20 hover:text-red-400 transition-colors p-0.5 rounded hover:bg-red-500/10 disabled:opacity-30"
+                          title="Delete result"
+                          data-testid={`delete-result-${r.id}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
                     </tr>
                     {isExpanded && subResults.map((sr, idx) => {
                       const subSelected = selectedResult?.id === sr.id;
@@ -2059,6 +2092,17 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                             </td>
                           )}
                           <td></td>
+                          <td className="py-2 px-2 text-center">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); if (confirm("Delete this result?")) deleteResultMutation.mutate(sr.id); }}
+                              disabled={deletingIds.has(sr.id)}
+                              className="text-white/20 hover:text-red-400 transition-colors p-0.5 rounded hover:bg-red-500/10 disabled:opacity-30"
+                              title="Delete result"
+                              data-testid={`delete-result-sub-${sr.id}`}
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </td>
                         </tr>
                       );
                     })}

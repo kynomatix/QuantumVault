@@ -263,6 +263,17 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  app.delete("/api/lab/results/:resultId", async (req: Request, res: Response) => {
+    try {
+      const resultId = parseInt(req.params.resultId);
+      if (isNaN(resultId)) return res.status(400).json({ error: "Invalid result ID" });
+      await labStorage.deleteResult(resultId);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.delete("/api/lab/runs/:id", async (req: Request, res: Response) => {
     try {
       await labStorage.deleteRun(parseInt(req.params.id));
