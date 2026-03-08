@@ -2208,14 +2208,15 @@ function QuantumLabInsightsSection() {
       <SubHeading>Guided Mode</SubHeading>
       <Paragraph>
         Guided Mode is an optional feature that uses your saved Insights reports to make future optimization runs 
-        smarter. Instead of searching completely randomly, the optimizer narrows parameter ranges to the 
-        best-performing buckets identified by the sensitivity analysis.
+        smarter. Instead of searching completely randomly, the optimizer perturbs proven winning configurations 
+        to explore nearby parameter space more effectively.
       </Paragraph>
       <div className="p-4 rounded-lg bg-violet-500/10 border border-violet-500/30 mb-6">
         <h4 className="font-medium text-violet-200 mb-3">How Guided Mode Works</h4>
         <div className="space-y-2 text-white/60 text-sm">
-          <p><strong className="text-white/80">80/20 Split</strong> — 80% of random samples use narrowed ranges from insights data, while 20% remain fully random to avoid getting trapped in local optima.</p>
-          <p><strong className="text-white/80">High-Impact Focus</strong> — Parameters with above-median impact scores get finer-grained step sizes within their best range, allowing more precise tuning where it matters most.</p>
+          <p><strong className="text-white/80">Perturbation Search (preferred)</strong> — When your Insights report contains top configurations (the best-performing parameter sets), the optimizer picks a random seed from the top 10 and applies gaussian noise to each parameter. High-impact parameters get small perturbations (8% of range), medium-impact get 15%, and low-impact get 30% — focusing exploration where precision matters most. Booleans keep the seed value 85% of the time, strings 80%.</p>
+          <p><strong className="text-white/80">Bucket Search (fallback)</strong> — If no top configurations are available (older reports), the optimizer falls back to narrowing parameter ranges to the best-performing quartile buckets from the sensitivity analysis.</p>
+          <p><strong className="text-white/80">80/20 Split</strong> — 80% of samples use guided parameters (perturbation or bucket), while 20% remain fully random to avoid getting trapped in local optima.</p>
           <p><strong className="text-white/80">Per-Combo Preference</strong> — If a filtered insights report exists for the specific ticker/timeframe being optimized (e.g., a "SOL 2h" focused report), the optimizer prefers that over a general report. It falls back to the latest general report if no focused match exists.</p>
           <p><strong className="text-white/80">Refinement Unchanged</strong> — The jitter/refinement stage around top results works the same way whether guided mode is on or off.</p>
         </div>
@@ -2226,7 +2227,7 @@ function QuantumLabInsightsSection() {
         'Run 2-3 standard optimization runs first (2,000+ random samples each) to build up enough data.',
         'Generate an Insights report on the Insights tab.',
         'On the Main tab, open Advanced Settings and toggle "Use Insights" on.',
-        'Run your optimization. The progress label will show "Guided Search" instead of "Random Search."',
+        'Run your optimization. The progress label will show "Perturbation Search" (with top configs) or "Guided Search" (bucket fallback) instead of "Random Search."',
       ]} />
 
       <Alert type="warning">
@@ -2237,7 +2238,7 @@ function QuantumLabInsightsSection() {
 
       <Alert type="info">
         Guided Mode is off by default. The toggle only appears when the selected strategy has at least one saved 
-        Insights report.
+        Insights report. Regenerate your report after running more optimizations to update the top configs that perturbation uses.
       </Alert>
     </div>
   );

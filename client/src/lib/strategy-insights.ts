@@ -647,7 +647,7 @@ export function formatReportAsText(report: StrategyInsightsReport, pineScript?: 
   }
   lines.push("");
 
-  lines.push("--- TOP 5 BEST CONFIGURATIONS ---");
+  lines.push("--- TOP 10 BEST CONFIGURATIONS ---");
   if (report.topBottomConfigs.top.length === 0) {
     lines.push("Not enough data (need configs with 5+ trades).");
   } else {
@@ -660,7 +660,7 @@ export function formatReportAsText(report: StrategyInsightsReport, pineScript?: 
   }
   lines.push("");
 
-  lines.push("--- TOP 5 WORST CONFIGURATIONS ---");
+  lines.push("--- TOP 5 WORST CONFIGURATIONS (for contrast) ---");
   if (report.topBottomConfigs.bottom.length === 0) {
     lines.push("Not enough data.");
   } else {
