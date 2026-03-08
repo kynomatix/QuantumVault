@@ -792,6 +792,10 @@ export interface GuidedInsights {
     impactScore: number;
     bestBucket: { rangeMin: number; rangeMax: number };
   }[];
+  topConfigs?: {
+    params: Record<string, any>;
+    score: number;
+  }[];
 }
 
 export interface LabOptimizationConfig {

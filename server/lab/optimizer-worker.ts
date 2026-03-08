@@ -75,12 +75,108 @@ function generateRandomParams(inputs: LabPineInput[]): Record<string, any> {
   return params;
 }
 
+function gaussianRandom(mean: number, stddev: number): number {
+  const u1 = Math.random();
+  const u2 = Math.random();
+  const z = Math.sqrt(-2 * Math.log(Math.max(u1, 1e-10))) * Math.cos(2 * Math.PI * u2);
+  return mean + z * stddev;
+}
+
 function generateGuidedParams(inputs: LabPineInput[], insights: GuidedInsights): Record<string, any> {
+  if (insights.topConfigs && insights.topConfigs.length > 0) {
+    return generatePerturbedParams(inputs, insights);
+  }
+  return generateBucketGuidedParams(inputs, insights);
+}
+
+function generatePerturbedParams(inputs: LabPineInput[], insights: GuidedInsights): Record<string, any> {
+  const params: Record<string, any> = {};
+  const topConfigs = insights.topConfigs!;
+  const seed = topConfigs[Math.floor(Math.random() * topConfigs.length)].params;
+
+  const sensitivityMap = new Map(insights.paramSensitivity.map(ps => [ps.name, ps]));
+  const impactScores = insights.paramSensitivity.map(ps => ps.impactScore);
+  const medianImpact = impactScores.length > 0
+    ? [...impactScores].sort((a, b) => a - b)[Math.floor(impactScores.length / 2)]
+    : 0;
+
+  for (const input of inputs) {
+    if (!input.optimizable) {
+      params[input.name] = input.default;
+      continue;
+    }
+
+    const seedVal = seed[input.name];
+    const sensitivity = sensitivityMap.get(input.name);
+    const impact = sensitivity?.impactScore ?? 0;
+
+    let perturbFraction: number;
+    if (impact > medianImpact * 1.5 && medianImpact > 0) {
+      perturbFraction = 0.08;
+    } else if (impact > medianImpact * 0.5 && medianImpact > 0) {
+      perturbFraction = 0.15;
+    } else {
+      perturbFraction = 0.30;
+    }
+
+    switch (input.type) {
+      case "int": {
+        const min = input.min ?? 1;
+        const max = input.max ?? 100;
+        const step = input.step ?? 1;
+        const range = max - min;
+        const stddev = range * perturbFraction;
+        const seedNum = typeof seedVal === "number" ? seedVal : (input.default ?? min);
+        const raw = gaussianRandom(seedNum, stddev);
+        const clamped = Math.max(min, Math.min(max, raw));
+        params[input.name] = Math.min(max, Math.max(min, Math.round((clamped - min) / step) * step + min));
+        break;
+      }
+      case "float": {
+        const min = input.min ?? 0.1;
+        const max = input.max ?? 10;
+        const step = input.step ?? 0.1;
+        const range = max - min;
+        const stddev = range * perturbFraction;
+        const seedNum = typeof seedVal === "number" ? seedVal : (input.default ?? min);
+        const raw = gaussianRandom(seedNum, stddev);
+        const clamped = Math.max(min, Math.min(max, raw));
+        const snapped = Math.min(max, Math.max(min, Math.round((clamped - min) / step) * step + min));
+        params[input.name] = Math.round(snapped * 10000) / 10000;
+        break;
+      }
+      case "bool": {
+        const seedBool = typeof seedVal === "boolean" ? seedVal : (input.default ?? false);
+        params[input.name] = Math.random() < 0.85 ? seedBool : !seedBool;
+        break;
+      }
+      case "string": {
+        if (input.options && input.options.length > 1) {
+          const seedStr = typeof seedVal === "string" ? seedVal : (input.default ?? input.options[0]);
+          if (Math.random() < 0.80) {
+            params[input.name] = seedStr;
+          } else {
+            const others = input.options.filter(o => o !== seedStr);
+            params[input.name] = others.length > 0 ? others[Math.floor(Math.random() * others.length)] : seedStr;
+          }
+        } else {
+          params[input.name] = input.options?.[0] ?? input.default;
+        }
+        break;
+      }
+      default:
+        params[input.name] = input.default;
+    }
+  }
+  return params;
+}
+
+function generateBucketGuidedParams(inputs: LabPineInput[], insights: GuidedInsights): Record<string, any> {
   const params: Record<string, any> = {};
   const sensitivityMap = new Map(insights.paramSensitivity.map(ps => [ps.name, ps]));
   const impactScores = insights.paramSensitivity.map(ps => ps.impactScore);
   const medianImpact = impactScores.length > 0
-    ? impactScores.sort((a, b) => a - b)[Math.floor(impactScores.length / 2)]
+    ? [...impactScores].sort((a, b) => a - b)[Math.floor(impactScores.length / 2)]
     : 0;
 
   for (const input of inputs) {
@@ -340,6 +436,8 @@ async function run() {
     const comboKey = `${combo.ticker}|${combo.timeframe}`;
     const comboInsights = config.guidedInsightsPerCombo?.[comboKey] ?? config.guidedInsights;
     const hasGuided = !!comboInsights && comboInsights.paramSensitivity.length > 0;
+    const hasPerturbation = hasGuided && !!comboInsights?.topConfigs && comboInsights.topConfigs.length > 0;
+    const searchLabel = hasPerturbation ? "Perturbation" : hasGuided ? "Guided" : "Random";
 
     for (let s = randomStart; s < config.randomSamples; s++) {
       if (aborted) { globalCurrent += (config.randomSamples - s); break; }
@@ -357,7 +455,7 @@ async function run() {
         const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
         send({ type: "progress", data: {
           jobId, status: "random_search",
-          stage: `${hasGuided ? "Guided" : "Random"} Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${s}/${config.randomSamples}`,
+          stage: `${searchLabel} Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${s}/${config.randomSamples}`,
           current: globalCurrent, total: totalSamples * combos.length,
           percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
           elapsed: Date.now() - startTime,

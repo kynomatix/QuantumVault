@@ -487,7 +487,7 @@ function analyzeTopBottomConfigs(results: ResultData[]): TopBottomConfigs {
     });
 
   const byProfit = [...scored].sort((a, b) => b.netProfitPercent - a.netProfitPercent);
-  const top = byProfit.slice(0, 5);
+  const top = byProfit.slice(0, 10);
   const topIds = new Set(top.map((_, i) => i));
   const bottomCandidates = byProfit.slice().reverse().filter((_, i) => !topIds.has(byProfit.length - 1 - i));
   return {

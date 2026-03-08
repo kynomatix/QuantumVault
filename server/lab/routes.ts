@@ -549,7 +549,7 @@ export function registerLabRoutes(app: Express): void {
 
         function extractInsights(rd: any): import("@shared/schema").GuidedInsights | null {
           if (!rd?.paramSensitivity || !Array.isArray(rd.paramSensitivity)) return null;
-          return {
+          const result: import("@shared/schema").GuidedInsights = {
             paramSensitivity: rd.paramSensitivity.map((ps: any) => ({
               name: ps.name,
               type: ps.type,
@@ -557,6 +557,13 @@ export function registerLabRoutes(app: Express): void {
               bestBucket: ps.bestBucket ? { rangeMin: ps.bestBucket.rangeMin, rangeMax: ps.bestBucket.rangeMax } : { rangeMin: 0, rangeMax: 0 },
             })),
           };
+          if (rd.topBottomConfigs?.top && Array.isArray(rd.topBottomConfigs.top) && rd.topBottomConfigs.top.length > 0) {
+            result.topConfigs = rd.topBottomConfigs.top.map((c: any) => ({
+              params: c.params,
+              score: c.netProfitPercent ?? 0,
+            }));
+          }
+          return result;
         }
 
         const perComboMap: Record<string, import("@shared/schema").GuidedInsights> = {};
@@ -587,7 +594,7 @@ export function registerLabRoutes(app: Express): void {
           const fallback = extractInsights(latestGeneral.reportData as any);
           if (fallback) {
             guidedInsights = fallback;
-            console.log(`[QuantumLab] Guided mode: fallback report loaded (${(latestGeneral.reportData as any)?.filter ? "filtered" : "general"}) with ${fallback.paramSensitivity.length} params`);
+            console.log(`[QuantumLab] Guided mode: fallback report loaded (${(latestGeneral.reportData as any)?.filter ? "filtered" : "general"}) with ${fallback.paramSensitivity.length} params, ${fallback.topConfigs?.length ?? 0} top configs`);
           }
         }
       }
