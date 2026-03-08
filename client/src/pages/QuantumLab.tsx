@@ -1041,7 +1041,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
 }) {
   const { toast } = useToast();
   const [selectedTickers, setSelectedTickers] = useState<string[]>(["SOL/USDT:USDT"]);
-  const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>(["15m"]);
+  const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>(["2h"]);
   const [startDate, setStartDate] = useState("2023-01-01");
   const [endDate, setEndDate] = useState(new Date().toISOString().split("T")[0]);
   const [randomSamples, setRandomSamples] = useState(2000);

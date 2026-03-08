@@ -22,6 +22,12 @@ export const DOCS_MARKDOWN = `# QuantumVault Documentation
 9. [Security](#security)
 10. [Swift Execution](#swift-execution)
 11. [AI Agent Integration](#ai-agent-integration)
+12. [QuantumLab Overview](#quantumlab-overview)
+13. [Strategy Library](#strategy-library)
+14. [Optimizer](#optimizer)
+15. [Backtesting Engine](#backtesting-engine)
+16. [Results & Heatmap](#results--heatmap)
+17. [Insights & Guided Mode](#insights--guided-mode)
 
 ---
 
@@ -712,6 +718,243 @@ Turn your AI trading signals into a subscription service:
 4. Earn automatically when subscribers profit
 
 > **Note:** For full API documentation including all endpoints, see the detailed integration guide at \`/docs/OPENCLAW_INTEGRATION.md\` in the repository.
+
+---
+
+## QuantumLab Overview
+
+QuantumLab is QuantumVault's built-in backtesting and strategy optimization engine. It lets you take any Pine Script strategy from TradingView, import it directly, and run thousands of parameter combinations against historical data to find configurations that actually perform well before risking real capital.
+
+### What Makes It Different
+
+- **Pine Script Native** — Paste your TradingView strategy code directly. QuantumLab's parser extracts all \`input.int()\`, \`input.float()\`, \`input.bool()\`, and \`input.string()\` declarations automatically, preserving groups, min/max ranges, steps, and options.
+- **Automated Optimization** — Instead of manually tweaking parameters one by one, the optimizer tests thousands of random configurations, finds the best performers, and then refines around them. A single run can explore more combinations than months of manual testing.
+- **Risk-Aware Scoring** — Results are ranked by a composite score that weighs low drawdown (40%), win rate (35%), profit factor (15%), and net profit (10%). This surfaces strategies that are consistent and survivable, not just the ones with the highest raw return.
+- **Guided Mode** — After a few optimization runs, the Insights system analyzes your results and can guide future runs toward the most promising parameter ranges automatically, dramatically improving search efficiency.
+
+### Accessing QuantumLab
+
+Navigate to \`/quantumlab\` in your browser. QuantumLab is a standalone tool that does not require a wallet connection or any live trading setup. It operates entirely on historical data.
+
+### Workflow
+
+1. Import your Pine Script strategy into the Strategy Library.
+2. Select a strategy, choose tickers and timeframes, and configure the optimizer.
+3. Run an optimization — the engine backtests thousands of parameter combinations.
+4. Review results sorted by composite score. Inspect individual trades and equity curves.
+5. Use the Heatmap to compare performance across ticker/timeframe combinations.
+6. Generate an Insights report to understand which parameters matter most.
+7. Enable Guided Mode on subsequent runs to focus the search on the best ranges.
+8. Export your best parameters back to Pine Script format for use in TradingView.
+
+### Data Sources
+
+QuantumLab fetches historical OHLCV (open, high, low, close, volume) candle data from OKX perpetual futures markets. For tickers not listed on OKX (such as DRIFT, TNSR, CLOUD, IO, DBR, and MNT), it automatically falls back to Gate.io.
+
+Fetched candle data is cached in the database so subsequent runs on the same ticker, timeframe, and date range are instant. You can view cache statistics and clear the cache from the settings area.
+
+> **Note:** QuantumLab runs backtests at true 1x leverage baseline ($1,000 initial capital with $1,000 position size). Risk analysis then calculates the maximum safe leverage from the observed drawdown, capped at 20x.
+
+---
+
+## Strategy Library
+
+The Strategy Library is where you store and manage your Pine Script strategies. Each strategy preserves its full source code, parsed parameter definitions, and optimization history across runs.
+
+### Importing a Strategy
+
+1. Copy your full Pine Script strategy code from TradingView's Pine Editor.
+2. Paste it into the code editor on the Main tab in QuantumLab.
+3. Click "Parse" — the parser extracts all input declarations and displays them grouped by their Pine Script groups.
+4. Give your strategy a name and click "Save" to add it to the library.
+
+### What Gets Parsed
+
+The Pine Script parser uses a quote-aware character-by-character approach (not regex) to correctly handle parentheses inside quoted strings like titles and tooltips. It extracts:
+
+**Supported Input Types:**
+- \`input.int()\` — Integer parameters
+- \`input.float()\` — Decimal parameters
+- \`input.bool()\` — Toggle parameters
+- \`input.string()\` — Dropdown parameters
+
+**Extracted Properties:** For each input: variable name, default value, title, min/max values, step size, group name, and options list (for string inputs). Date-related inputs like \`input.time()\` are automatically detected and excluded from optimization.
+
+> **Important:** Make sure your Pine Script uses \`minval\` and \`maxval\` on your inputs. Without them, the optimizer has no range boundaries and will use very wide defaults, which leads to wasted iterations testing extreme or meaningless values.
+
+---
+
+## Optimizer
+
+The optimizer is the core of QuantumLab. It takes your strategy's parsed parameters and systematically searches for combinations that produce the best risk-adjusted performance across your chosen markets and timeframes.
+
+### Configuration
+
+**Tickers & Timeframes:** Select one or more tickers (SOL, BTC, ETH, AVAX, etc.) and timeframes (1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h). The optimizer runs each combination independently, so selecting 3 tickers and 2 timeframes means 6 separate optimization passes.
+
+**Basic Settings:**
+- **Date Range** — Historical period to backtest over. Longer ranges give more trades and more reliable statistics.
+- **Random Samples** — How many random parameter combinations to test per ticker/timeframe combo. More samples means a wider search but longer run times. Default: 2,000.
+- **Top K** — How many of the best random results to keep for refinement. Default: 10.
+- **Refinements per Seed** — How many jittered variations to test around each top result. Default: 50.
+
+**Advanced Settings:**
+- **Min Trades** — Minimum number of trades a result must have to be considered valid. Filters out lucky one-trade wonders. Default: 10.
+- **Max Drawdown Cap** — Maximum allowed drawdown percentage. Any configuration exceeding this is discarded. Default: 30%.
+- **Min Avg Bars Held** — Minimum average bars a position must be held. Filters out same-bar scalp artifacts. Default: 1. Set to 0 for 8h/12h timeframes.
+- **Mode** — "Random + Refine" runs both stages. "Random Only" skips the refinement phase for faster exploration.
+
+### How the Search Works
+
+1. **Random Search** — The optimizer generates random parameter combinations within each input's min/max range, respecting step sizes and option lists. Each combination is backtested against the historical data and scored.
+2. **Refinement** — The top K results become "seeds." The optimizer generates small jittered variations around each seed — tweaking values by small amounts to explore nearby configurations. This often finds improvements that random search misses.
+
+### Progress & Checkpointing
+
+During a run, you can monitor progress in real time via the live progress display showing the current stage (Random Search / Refinement), iteration count, elapsed time, and best score so far. The optimizer saves checkpoints every 60 seconds, so if your session disconnects or the server restarts, the run automatically resumes from where it left off.
+
+### Worker Thread Isolation
+
+Optimization runs execute in a dedicated Node.js Worker Thread, completely isolated from the main server. This means even intensive multi-hour optimization jobs won't slow down your live trading, webhook processing, or position management. Only one optimization can run at a time.
+
+---
+
+## Backtesting Engine
+
+The backtesting engine faithfully reproduces how a Pine Script strategy behaves on TradingView, including its entry/exit logic, indicator calculations, and order fill mechanics.
+
+### Entry Logic
+
+The engine uses a pending order system that matches TradingView's behavior. When the strategy generates a buy or sell signal on bar N, the entry is placed as a pending order and fills at the open price of bar N+1. This prevents look-ahead bias.
+
+### Exit Modes
+
+The engine supports two exit fill modes, controlled by the \`process_orders_on_close\` setting in your Pine Script's \`strategy()\` header:
+
+**Intrabar Mode (default)** — When \`process_orders_on_close\` is \`false\` (or not set):
+- Take-profit levels are checked against the bar's high (for longs) or low (for shorts)
+- Stop-loss levels are checked against the bar's low (for longs) or high (for shorts)
+- Trailing stops track bar extremes via high/low
+- Fills happen at the exact TP/SL level price, not the next bar's open
+
+**On-Close Mode** — When \`process_orders_on_close = true\`:
+- TP/SL levels are checked against the bar's close price only
+- Fills happen at the next bar's open price
+- More conservative, may produce fewer stops than Intrabar mode
+
+### Indicator Calculations
+
+All indicators match TradingView's exact formulas:
+- **Squeeze Momentum** — LazyBear formula: \`close - avg(avg(highest, lowest), sma)\`
+- **Bollinger Bands** — Standard deviation bands around SMA
+- **Keltner Channel** — SMA-based center with ATR-based bands (not EMA-based)
+- **ATR** — RMA-based (Wilder's smoothing), matching TradingView's \`ta.atr()\`
+- **Hull MA** — Weighted moving average for trend direction filtering
+- **EMA** — Exponential moving average for trend bias filtering
+- **RSI** — Relative Strength Index for extreme condition exits
+- **ADX** — Average Directional Index for trend strength exits
+
+### Stop Loss Modes
+
+ATR-Based, Percentage, Bollinger Band, Keltner Band
+
+### Take Profit Modes
+
+Up to 3 independent take-profit levels, each with configurable quantity percentage: ATR-Based, Percentage, Risk Multiple (R:R)
+
+### Advanced Exit Features
+
+- **Trailing Stop** — Activates immediately, after TP1, or after TP2. Tracks close price as the position moves in your favor, then closes if price retraces by the trail offset. Trail tracking uses \`close\` (not high/low) per Pine's behavior.
+- **Breakeven Stop** — Moves the stop loss to entry price (plus a configurable offset) after TP1 or TP2 is hit.
+- **Conditional Exits** — Momentum flip, Hull MA flip, re-squeeze, RSI extreme, and ADX drop can each trigger a position close. These always use next-bar-open fills.
+
+### Entry Filters
+
+- **Squeeze Detection** — Standard mode requires BB inside KC. Alternative mode uses BB Width Percentile ranking.
+- **Hull MA Trend Filter** — Only allows long entries when Hull MA slope is positive and short when negative.
+- **EMA Trend Bias** — Longs only above the EMA, shorts only below.
+- **Volume Surge Filter** — Requires current bar's volume to exceed volume SMA by a configurable multiplier.
+- **Cooldown Bars** — Enforces a waiting period after a position closes before the next entry is allowed.
+- **Candle Body Filter** — Requires minimum body-to-range ratio on entry candles.
+
+### Leverage & Risk Math
+
+All backtests run at 1x leverage ($1,000 capital, $1,000 position size). After the backtest completes, risk analysis calculates the maximum safe leverage:
+
+\`\`\`
+max_leverage = min(20, floor((100 / max_drawdown%) * 0.8))
+\`\`\`
+
+The 0.8 safety factor provides a 20% buffer. The hard cap is 20x regardless of how low the drawdown is.
+
+---
+
+## Results & Heatmap
+
+### Results Tab
+
+- **Run History** — Lists all completed and paused optimization runs with date, ticker/timeframe combos tested, number of results found, and status.
+- **Result Cards** — Each result shows composite score, net profit %, win rate, max drawdown, profit factor, total trades, and the full parameter set used.
+- **Trade Inspector** — Click any result to see its full trade list with entry/exit dates, direction, prices, PnL, and exit reason.
+- **Equity Curve** — Visual plot of account equity over time for any individual result.
+- **Export to Pine Script** — Generates Pine Script code with optimized parameter values injected back into your original strategy.
+
+### Risk Analysis
+
+Each result includes: Max Safe Leverage, Projected Return (at leverage), Max Drawdown at Leverage, and Risk Rating (Low / Medium / High).
+
+### Heatmap Tab
+
+A grid visualization showing how your strategy performs across all tested ticker/timeframe combinations. Each cell shows the best composite score, color-coded from red (poor) through yellow (average) to green (strong). Click any cell to see detailed results for that combination.
+
+---
+
+## Insights & Guided Mode
+
+The Insights system analyzes data across all optimization runs for a strategy to surface statistical patterns — which parameters matter most, which ticker/timeframe combinations work best, and which value ranges consistently produce strong results.
+
+### Generating a Report
+
+1. Go to the Insights tab and select a strategy.
+2. Optionally choose a specific ticker/timeframe focus (e.g., "SOL 2h") or leave on "All Results" for a general cross-market report.
+3. Click "Generate Report." The report is auto-saved to the database for future reference.
+
+### What the Report Contains
+
+- **Parameter Sensitivity** — For each parameter, shows its impact score (how much it affects results), the best-performing value ranges split into buckets, and optimal direction. High-impact parameters are worth focusing on; low-impact ones can often be left at defaults.
+- **Ticker & Timeframe Fit** — Ranks which tickers and timeframes consistently produce the strongest results for this strategy.
+- **Directional Bias** — Shows whether the strategy performs better on long trades, short trades, or is balanced.
+- **Trade Patterns** — Statistical analysis of trade duration, win/loss ratio, and exit reason distribution across all tested configurations.
+- **Top 10 Best / Top 5 Worst Configurations** — The exact parameter sets that produced the best and worst results, with full metrics.
+- **Parameter Correlations** — Which parameter combinations work together vs against each other.
+- **Recommendations** — Actionable suggestions based on the analysis.
+
+### Saved Reports
+
+Reports auto-save when generated. Past reports are listed below the generate button with their timestamp, total results analyzed, and number of runs included. Click any saved report to load it without regenerating. Reports with a specific ticker/timeframe focus are labeled accordingly.
+
+### Guided Mode
+
+Guided Mode is an optional feature that uses your saved Insights reports to make future optimization runs smarter. Instead of searching completely randomly, the optimizer perturbs proven winning configurations to explore nearby parameter space more effectively.
+
+**How Guided Mode Works:**
+
+- **Perturbation Search (preferred)** — When your Insights report contains top configurations (the best-performing parameter sets), the optimizer picks a random seed from the top 10 and applies gaussian noise to each parameter. High-impact parameters get small perturbations (8% of range), medium-impact get 15%, and low-impact get 30% — focusing exploration where precision matters most. Booleans keep the seed value 85% of the time, strings 80%.
+- **Bucket Search (fallback)** — If no top configurations are available (older reports), the optimizer falls back to narrowing parameter ranges to the best-performing quartile buckets from the sensitivity analysis.
+- **80/20 Split** — 80% of samples use guided parameters (perturbation or bucket), while 20% remain fully random to avoid getting trapped in local optima.
+- **Per-Combo Preference** — If a filtered insights report exists for the specific ticker/timeframe being optimized (e.g., a "SOL 2h" focused report), the optimizer prefers that over a general report. It falls back to the latest general report if no focused match exists.
+- **Refinement Unchanged** — The jitter/refinement stage around top results works the same way whether guided mode is on or off.
+
+### Enabling Guided Mode
+
+1. Run 2-3 standard optimization runs first (2,000+ random samples each) to build up enough data.
+2. Generate an Insights report on the Insights tab.
+3. On the Main tab, open Advanced Settings and toggle "Use Insights" on.
+4. Run your optimization. The progress label will show "Perturbation Search" (with top configs) or "Guided Search" (bucket fallback) instead of "Random Search."
+
+> **Warning:** Don't enable Guided Mode on your first optimization runs. The sensitivity analysis needs at least ~4,000 total configurations tested across multiple runs to distinguish real patterns from noise. Using it too early may narrow the search prematurely.
+
+> **Note:** Guided Mode is off by default. The toggle only appears when the selected strategy has at least one saved Insights report. Regenerate your report after running more optimizations to update the top configs that perturbation uses.
 
 ---
 
