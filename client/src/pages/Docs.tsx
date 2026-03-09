@@ -7,7 +7,7 @@ import {
   Copy, Check, Menu, X,
   AlertTriangle, Info, CheckCircle2, ArrowDown, ArrowUp,
   Shield, Lock, Key, RefreshCw, Sparkles, TrendingUp, TrendingDown, Cpu, Activity,
-  FlaskConical, BarChart3, Lightbulb, Target, Layers, SlidersHorizontal
+  FlaskConical, BarChart3, Lightbulb, Target, Layers, SlidersHorizontal, FileText
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -2310,13 +2310,23 @@ export default function DocsPage() {
                 {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
               </Button>
               
-              <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
-                <ArrowLeft className="w-4 h-4" />
-                <span className="text-sm">Back</span>
-              </Link>
+              <div className="flex items-center gap-3">
+                <a href="/api/docs" target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-white/40 hover:text-violet-400 transition-colors" data-testid="link-plain-text-mobile">
+                  <FileText className="w-3.5 h-3.5" />
+                  <span className="text-xs">Plain text</span>
+                </a>
+                <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
+                  <ArrowLeft className="w-4 h-4" />
+                  <span className="text-sm">Back</span>
+                </Link>
+              </div>
             </div>
             
             <div className="hidden md:flex items-center gap-4">
+              <a href="/api/docs" target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-white/40 hover:text-violet-400 transition-colors" data-testid="link-plain-text-desktop">
+                <FileText className="w-3.5 h-3.5" />
+                <span className="text-sm">View as plain text</span>
+              </a>
               <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home-desktop">
                 <ArrowLeft className="w-4 h-4" />
                 <span className="text-sm">Back</span>
