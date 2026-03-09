@@ -44,6 +44,7 @@ export interface ParamBucket {
   avgWinRate: number;
   avgDrawdown: number;
   avgProfitFactor: number;
+  exitProfile?: ExitReasonBreakdown[];
 }
 
 export interface ParamSensitivity {
@@ -68,6 +69,7 @@ export interface ComboFit {
   bestLevProfit: number;
   bestLeverage: number;
   rating: "strong" | "moderate" | "weak" | "poor";
+  exitProfile?: ExitReasonBreakdown[];
 }
 
 export interface DirectionalBias {
@@ -179,6 +181,28 @@ function avg(arr: number[]): number {
   return arr.reduce((s, v) => s + v, 0) / arr.length;
 }
 
+function computeExitProfile(trades: TradeRecord[]): ExitReasonBreakdown[] {
+  if (trades.length === 0) return [];
+  const reasonMap = new Map<string, TradeRecord[]>();
+  for (const t of trades) {
+    const reason = t.exitReason || "unknown";
+    if (!reasonMap.has(reason)) reasonMap.set(reason, []);
+    reasonMap.get(reason)!.push(t);
+  }
+  const profile: ExitReasonBreakdown[] = [];
+  for (const [reason, group] of reasonMap) {
+    const wins = group.filter(t => t.pnlPercent > 0).length;
+    profile.push({
+      reason,
+      count: group.length,
+      percent: (group.length / trades.length) * 100,
+      avgPnl: avg(group.map(t => t.pnlPercent)),
+      winRate: group.length > 0 ? (wins / group.length) * 100 : 0,
+    });
+  }
+  return profile.sort((a, b) => b.count - a.count);
+}
+
 function analyzeParamSensitivity(results: ResultData[], inputs: LabPineInput[]): ParamSensitivity[] {
   const optimizable = inputs.filter(i => i.optimizable && (i.type === "int" || i.type === "float"));
   const sensitivities: ParamSensitivity[] = [];
@@ -205,6 +229,10 @@ function analyzeParamSensitivity(results: ResultData[], inputs: LabPineInput[]):
         const v = typeof raw === "number" ? raw : parseFloat(raw);
         return !isNaN(v) && v >= range.min && v <= range.max;
       });
+      const allTrades: TradeRecord[] = [];
+      for (const r of matching) {
+        if (r.trades) allTrades.push(...r.trades);
+      }
       return {
         range: range.min === range.max ? `${range.min}` : `${range.min}–${range.max}`,
         rangeMin: range.min,
@@ -214,6 +242,7 @@ function analyzeParamSensitivity(results: ResultData[], inputs: LabPineInput[]):
         avgWinRate: avg(matching.map(r => r.winRatePercent)),
         avgDrawdown: avg(matching.map(r => r.maxDrawdownPercent)),
         avgProfitFactor: avg(matching.map(r => r.profitFactor)),
+        exitProfile: allTrades.length > 0 ? computeExitProfile(allTrades) : undefined,
       };
     }).filter(b => b.count > 0);
 
@@ -275,12 +304,17 @@ function analyzeComboFit(results: ResultData[]): ComboFit[] {
       }
     }
 
+    const comboTrades: TradeRecord[] = [];
+    for (const r of group) {
+      if (r.trades) comboTrades.push(...r.trades);
+    }
+
     let rating: ComboFit["rating"] = "poor";
     if (avgProfit > 10 && avgWinRate > 50) rating = "strong";
     else if (avgProfit > 5 || avgWinRate > 50) rating = "moderate";
     else if (avgProfit > 0) rating = "weak";
 
-    fits.push({ ticker, timeframe, count: group.length, avgProfit, avgWinRate, avgDrawdown, avgProfitFactor, bestLevProfit, bestLeverage, rating });
+    fits.push({ ticker, timeframe, count: group.length, avgProfit, avgWinRate, avgDrawdown, avgProfitFactor, bestLevProfit, bestLeverage, rating, exitProfile: comboTrades.length > 0 ? computeExitProfile(comboTrades) : undefined });
   }
 
   return fits.sort((a, b) => b.avgProfit - a.avgProfit);
@@ -618,6 +652,10 @@ export function formatReportAsText(report: StrategyInsightsReport, pineScript?: 
       lines.push(`  All ranges:`);
       for (const b of param.buckets) {
         lines.push(`    ${b.range} (${b.count} configs): profit ${b.avgProfit.toFixed(1)}%, WR ${b.avgWinRate.toFixed(1)}%, DD ${b.avgDrawdown.toFixed(1)}%, PF ${b.avgProfitFactor.toFixed(2)}`);
+        if (b.exitProfile && b.exitProfile.length > 0) {
+          const exitSummary = b.exitProfile.slice(0, 4).map(e => `${e.reason} ${e.percent.toFixed(0)}%`).join(", ");
+          lines.push(`      exits: ${exitSummary}`);
+        }
       }
     }
   }
@@ -626,7 +664,12 @@ export function formatReportAsText(report: StrategyInsightsReport, pineScript?: 
   lines.push("--- TICKER/TIMEFRAME FIT ---");
   for (const combo of report.comboFit) {
     const ticker = combo.ticker.split("/")[0];
-    lines.push(`${ticker} ${combo.timeframe} [${combo.rating.toUpperCase()}] — ${combo.count} configs, avg profit ${combo.avgProfit.toFixed(1)}%, WR ${combo.avgWinRate.toFixed(1)}%, DD ${combo.avgDrawdown.toFixed(1)}%, best leveraged: ${combo.bestLevProfit.toFixed(0)}% @${combo.bestLeverage}x`);
+    lines.push(`\n${ticker} ${combo.timeframe} [${combo.rating.toUpperCase()}] — ${combo.count} configs, avg profit ${combo.avgProfit.toFixed(1)}%, WR ${combo.avgWinRate.toFixed(1)}%, DD ${combo.avgDrawdown.toFixed(1)}%, best leveraged: ${combo.bestLevProfit.toFixed(0)}% @${combo.bestLeverage}x`);
+    if (combo.exitProfile && combo.exitProfile.length > 0) {
+      for (const e of combo.exitProfile) {
+        lines.push(`  ${e.reason}: ${e.count} trades (${e.percent.toFixed(1)}%), WR ${e.winRate.toFixed(1)}%, avg PnL ${e.avgPnl.toFixed(2)}%`);
+      }
+    }
   }
   lines.push("");
 

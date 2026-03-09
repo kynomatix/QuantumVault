@@ -921,8 +921,8 @@ The Insights system analyzes data across all optimization runs for a strategy to
 
 ### What the Report Contains
 
-- **Parameter Sensitivity** — For each parameter, shows its impact score (how much it affects results), the best-performing value ranges split into buckets, and optimal direction. High-impact parameters are worth focusing on; low-impact ones can often be left at defaults.
-- **Ticker & Timeframe Fit** — Ranks which tickers and timeframes consistently produce the strongest results for this strategy.
+- **Parameter Sensitivity** — For each parameter, shows its impact score (how much it affects results), the best-performing value ranges split into buckets, and optimal direction. Each bucket also includes an exit profile showing how trades exit in that parameter range — whether configs with high values stop out more vs reaching TP, for example. High-impact parameters are worth focusing on; low-impact ones can often be left at defaults.
+- **Ticker & Timeframe Fit** — Ranks which tickers and timeframes consistently produce the strongest results for this strategy. Each combo includes a full exit reason breakdown so you can see if a poor-performing combo fails from stop outs, never reaching TP, or trades never qualifying.
 - **Directional Bias** — Shows whether the strategy performs better on long trades, short trades, or is balanced.
 - **Trade Patterns** — Statistical analysis of trade duration, win/loss ratio, and exit reason distribution across all tested configurations.
 - **Top 10 Best / Top 5 Worst Configurations** — The exact parameter sets that produced the best and worst results, with full metrics.
