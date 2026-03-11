@@ -12,6 +12,15 @@ import { eq } from "drizzle-orm";
 
 export function registerLabRoutes(app: Express): void {
 
+  const requireLabAuth = (req: any, res: any, next: any) => {
+    const walletAddress = req.session?.walletAddress;
+    if (!walletAddress) {
+      return res.status(401).json({ error: "Wallet not connected" });
+    }
+    req.walletAddress = walletAddress;
+    next();
+  };
+
   app.get("/api/lab/tickers", (_req: Request, res: Response) => {
     res.json(LAB_AVAILABLE_TICKERS);
   });
@@ -34,26 +43,29 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/strategies", async (_req: Request, res: Response) => {
+  app.get("/api/lab/strategies", requireLabAuth, async (req: Request, res: Response) => {
     try {
-      const list = await labStorage.getStrategies();
+      const list = await labStorage.getStrategies((req as any).walletAddress);
       res.json(list);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.get("/api/lab/strategies/:id", async (req: Request, res: Response) => {
+  app.get("/api/lab/strategies/:id", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const strategy = await labStorage.getStrategy(parseInt(req.params.id));
       if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+      if (strategy.userId && strategy.userId !== (req as any).walletAddress) {
+        return res.status(403).json({ error: "Access denied" });
+      }
       res.json(strategy);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.post("/api/lab/strategies", async (req: Request, res: Response) => {
+  app.post("/api/lab/strategies", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const parsed = insertLabStrategyBodySchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
@@ -65,6 +77,7 @@ export function registerLabRoutes(app: Express): void {
         parsedInputs: parsedInputs ?? {},
         groups: groups ?? null,
         strategySettings: strategySettings ?? null,
+        userId: (req as any).walletAddress,
       });
       res.json(strategy);
     } catch (err: any) {
@@ -72,20 +85,29 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.patch("/api/lab/strategies/:id", async (req: Request, res: Response) => {
+  app.patch("/api/lab/strategies/:id", requireLabAuth, async (req: Request, res: Response) => {
     try {
+      const strategy = await labStorage.getStrategy(parseInt(req.params.id));
+      if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+      if (strategy.userId && strategy.userId !== (req as any).walletAddress) {
+        return res.status(403).json({ error: "Access denied" });
+      }
       const parsed = updateLabStrategyBodySchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-      const strategy = await labStorage.updateStrategy(parseInt(req.params.id), parsed.data);
-      if (!strategy) return res.status(404).json({ error: "Strategy not found" });
-      res.json(strategy);
+      const updated = await labStorage.updateStrategy(parseInt(req.params.id), parsed.data);
+      res.json(updated);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.delete("/api/lab/strategies/:id", async (req: Request, res: Response) => {
+  app.delete("/api/lab/strategies/:id", requireLabAuth, async (req: Request, res: Response) => {
     try {
+      const strategy = await labStorage.getStrategy(parseInt(req.params.id));
+      if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+      if (strategy.userId && strategy.userId !== (req as any).walletAddress) {
+        return res.status(403).json({ error: "Access denied" });
+      }
       await labStorage.deleteStrategy(parseInt(req.params.id));
       res.json({ success: true });
     } catch (err: any) {
@@ -93,10 +115,15 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.delete("/api/lab/strategies/:id/results", async (req: Request, res: Response) => {
+  app.delete("/api/lab/strategies/:id/results", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const strategyId = parseInt(req.params.id);
       if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
+      const strategy = await labStorage.getStrategy(strategyId);
+      if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+      if (strategy.userId && strategy.userId !== (req as any).walletAddress) {
+        return res.status(403).json({ error: "Access denied" });
+      }
       const cleared = await labStorage.clearStrategyResults(strategyId);
       res.json({ success: true, runsCleared: cleared });
     } catch (err: any) {
@@ -104,10 +131,14 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/strategies/:id/top-results", async (req: Request, res: Response) => {
+  app.get("/api/lab/strategies/:id/top-results", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const strategyId = parseInt(req.params.id);
       if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
+      const strategy = await labStorage.getStrategy(strategyId);
+      if (strategy?.userId && strategy.userId !== (req as any).walletAddress) {
+        return res.status(403).json({ error: "Access denied" });
+      }
       const limit = Math.min(50, parseInt(req.query.limit as string) || 10);
       const results = await labStorage.getTopResultsForStrategy(strategyId, limit);
       res.json(results);
@@ -116,12 +147,15 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/strategies/:id/all-results", async (req: Request, res: Response) => {
+  app.get("/api/lab/strategies/:id/all-results", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const strategyId = parseInt(req.params.id);
       if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
       const data = await labStorage.getAllResultsForStrategy(strategyId);
       if (!data.strategy) return res.status(404).json({ error: "Strategy not found" });
+      if (data.strategy.userId && data.strategy.userId !== (req as any).walletAddress) {
+        return res.status(403).json({ error: "Access denied" });
+      }
       const lite = req.query.lite === "1";
       if (lite) {
         const slimResults = data.results.map(r => ({
@@ -152,10 +186,14 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.post("/api/lab/strategies/:id/insights-report", async (req: Request, res: Response) => {
+  app.post("/api/lab/strategies/:id/insights-report", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const strategyId = parseInt(req.params.id);
       if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
+      const strategy = await labStorage.getStrategy(strategyId);
+      if (strategy?.userId && strategy.userId !== (req as any).walletAddress) {
+        return res.status(403).json({ error: "Access denied" });
+      }
       const { reportData, totalResults, totalRuns } = req.body;
       if (!reportData || typeof reportData !== "object") return res.status(400).json({ error: "reportData is required" });
       if (!reportData.paramSensitivity || !Array.isArray(reportData.paramSensitivity)) return res.status(400).json({ error: "reportData must contain paramSensitivity array" });
@@ -166,10 +204,14 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/strategies/:id/insights-reports", async (req: Request, res: Response) => {
+  app.get("/api/lab/strategies/:id/insights-reports", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const strategyId = parseInt(req.params.id);
       if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
+      const strategy = await labStorage.getStrategy(strategyId);
+      if (strategy?.userId && strategy.userId !== (req as any).walletAddress) {
+        return res.status(403).json({ error: "Access denied" });
+      }
       const reports = await labStorage.getInsightsReports(strategyId);
       res.json(reports);
     } catch (err: any) {
@@ -177,7 +219,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/runs", async (req: Request, res: Response) => {
+  app.get("/api/lab/runs", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const strategyId = req.query.strategyId ? parseInt(req.query.strategyId as string) : undefined;
       const runs = await labStorage.getRuns(strategyId);
@@ -187,7 +229,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/runs/:id", async (req: Request, res: Response) => {
+  app.get("/api/lab/runs/:id", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const run = await labStorage.getRun(parseInt(req.params.id));
       if (!run) return res.status(404).json({ error: "Run not found" });
@@ -197,14 +239,14 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/runs/:id/job", (req: Request, res: Response) => {
+  app.get("/api/lab/runs/:id/job", requireLabAuth, (req: Request, res: Response) => {
     const runId = parseInt(req.params.id);
     const job = labStorage.getJobByRunId(runId);
     if (!job) return res.status(404).json({ error: "No active job for this run" });
     res.json({ jobId: job.id });
   });
 
-  app.post("/api/lab/runs/:id/fail", async (req: Request, res: Response) => {
+  app.post("/api/lab/runs/:id/fail", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const runId = parseInt(req.params.id);
       const run = await labStorage.getRun(runId);
@@ -229,7 +271,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/runs/:id/results", async (req: Request, res: Response) => {
+  app.get("/api/lab/runs/:id/results", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const results = await labStorage.getRunResults(parseInt(req.params.id));
       const slim = results.map(r => ({
@@ -251,7 +293,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/results/:resultId", async (req: Request, res: Response) => {
+  app.get("/api/lab/results/:resultId", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const resultId = parseInt(req.params.resultId);
       if (isNaN(resultId)) return res.status(400).json({ error: "Invalid result ID" });
@@ -263,7 +305,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.delete("/api/lab/results/:resultId", async (req: Request, res: Response) => {
+  app.delete("/api/lab/results/:resultId", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const resultId = parseInt(req.params.resultId);
       if (isNaN(resultId)) return res.status(400).json({ error: "Invalid result ID" });
@@ -274,7 +316,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.delete("/api/lab/runs/:id", async (req: Request, res: Response) => {
+  app.delete("/api/lab/runs/:id", requireLabAuth, async (req: Request, res: Response) => {
     try {
       await labStorage.deleteRun(parseInt(req.params.id));
       res.json({ success: true });
@@ -523,7 +565,7 @@ export function registerLabRoutes(app: Express): void {
     });
   }
 
-  app.post("/api/lab/run-optimization", async (req: Request, res: Response) => {
+  app.post("/api/lab/run-optimization", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const parsed = labOptimizationConfigSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -603,6 +645,7 @@ export function registerLabRoutes(app: Express): void {
       if (config.strategyId) {
         const run = await labStorage.createRun({
           strategyId: config.strategyId,
+          userId: (req as any).walletAddress,
           tickers: config.tickers,
           timeframes: config.timeframes,
           startDate: config.startDate,
@@ -629,7 +672,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.post("/api/lab/runs/:id/resume", async (req: Request, res: Response) => {
+  app.post("/api/lab/runs/:id/resume", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const runId = parseInt(req.params.id);
       const run = await labStorage.getRun(runId);
@@ -763,7 +806,7 @@ export function registerLabRoutes(app: Express): void {
     res.json({ success: true, evictedJobs: evicted, cleanedRuns: staleRuns.length });
   });
 
-  app.post("/api/lab/job/:id/cancel", async (req: Request, res: Response) => {
+  app.post("/api/lab/job/:id/cancel", requireLabAuth, async (req: Request, res: Response) => {
     const job = labStorage.getJob(req.params.id);
     if (activeWorker) {
       activeWorker.postMessage({ type: "abort" });
@@ -783,7 +826,7 @@ export function registerLabRoutes(app: Express): void {
     res.json({ success: true });
   });
 
-  app.get("/api/lab/export/csv/:id", (req: Request, res: Response) => {
+  app.get("/api/lab/export/csv/:id", requireLabAuth, (req: Request, res: Response) => {
     const results = labStorage.getJobResult(req.params.id);
     if (!results) {
       return res.status(404).json({ error: "Results not found" });
@@ -809,7 +852,7 @@ export function registerLabRoutes(app: Express): void {
     res.send(csv);
   });
 
-  app.get("/api/lab/heatmap", async (_req: Request, res: Response) => {
+  app.get("/api/lab/heatmap", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const runs = await labStorage.getRuns();
       const completedRuns = runs.filter(r => r.status === "complete" || r.status === "paused");

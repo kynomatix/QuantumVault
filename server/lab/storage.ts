@@ -25,7 +25,7 @@ export interface LabJob {
 
 export interface ILabStorage {
   createStrategy(data: InsertLabStrategy): Promise<LabStrategy>;
-  getStrategies(): Promise<LabStrategy[]>;
+  getStrategies(walletAddress?: string): Promise<LabStrategy[]>;
   getStrategy(id: number): Promise<LabStrategy | undefined>;
   updateStrategy(id: number, data: Partial<InsertLabStrategy>): Promise<LabStrategy | undefined>;
   deleteStrategy(id: number): Promise<void>;
@@ -143,7 +143,12 @@ export class LabDatabaseStorage implements ILabStorage {
     return strategy;
   }
 
-  async getStrategies(): Promise<LabStrategy[]> {
+  async getStrategies(walletAddress?: string): Promise<LabStrategy[]> {
+    if (walletAddress) {
+      return db.select().from(labStrategies)
+        .where(eq(labStrategies.userId, walletAddress))
+        .orderBy(desc(labStrategies.createdAt));
+    }
     return db.select().from(labStrategies).orderBy(desc(labStrategies.createdAt));
   }
 
