@@ -901,18 +901,18 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
   return (
     <div className="space-y-6">
       <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
-        <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-white/10">
-          <div className="flex items-center gap-2 flex-1 min-w-[140px]">
+        <div className="flex items-center justify-between gap-1 px-4 py-3 border-b border-white/10">
+          <div className="flex items-center gap-2 flex-1 min-w-0">
             <FileCode className="w-4 h-4 text-violet-400 flex-shrink-0" />
             <Input
               value={strategyName}
               onChange={(e) => setStrategyName(e.target.value)}
               placeholder="Strategy name..."
-              className="h-7 text-sm border-none bg-transparent px-1 text-white"
+              className="h-7 text-sm border-none bg-transparent px-1 max-w-[200px] text-white"
               data-testid="input-strategy-name"
             />
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2">
             {parsedResult && (
               <Button variant="secondary" size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} data-testid="button-save-strategy" className="bg-white/5 hover:bg-white/10 text-white/70">
                 {saveMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
@@ -922,11 +922,11 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
             <input ref={fileInputRef} type="file" accept=".pine,.txt,.ps" className="hidden" onChange={handleFileUpload} data-testid="input-file-upload" aria-label="Upload Pine Script file" />
             <Button size="sm" onClick={() => fileInputRef.current?.click()} disabled={isParsing} data-testid="button-upload-pine" className="bg-white/5 hover:bg-white/10 text-white/70 border border-white/10">
               <Upload className="w-3 h-3 mr-1" />
-              Upload
+              Upload Pine
             </Button>
             <Button size="sm" onClick={() => handleParse()} disabled={isParsing} data-testid="button-parse" className="bg-violet-600 hover:bg-violet-500 text-white">
               {isParsing ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <CheckCircle2 className="w-3 h-3 mr-1" />}
-              {isParsing ? "Parsing..." : "Parse"}
+              {isParsing ? "Parsing..." : "Parse Script"}
             </Button>
           </div>
         </div>
