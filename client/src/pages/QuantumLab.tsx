@@ -754,7 +754,7 @@ function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, onClearRe
           <div className="px-3 py-2 border-b border-white/10">
             <p className="text-[11px] text-white/40">{strategies.length} saved {strategies.length === 1 ? "strategy" : "strategies"}</p>
           </div>
-          <ScrollArea className="max-h-[240px]">
+          <div className="max-h-[240px] overflow-y-auto overscroll-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
             <div className="p-1" role="listbox" aria-label="Saved strategies">
               {strategies.map((s) => {
                 const paramCount = (s.parsedInputs as any[])?.filter((i: any) => i.optimizable).length ?? 0;
@@ -803,7 +803,7 @@ function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, onClearRe
                 );
               })}
             </div>
-          </ScrollArea>
+          </div>
         </PopoverContent>
       </Popover>
     </div>
