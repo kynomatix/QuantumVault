@@ -52,3 +52,7 @@ mockupState = "FULLSTACK"
 NODE_OPTIONS = "--max-old-space-size=4096"
 SWIFT_ENABLED = "true"
 SWIFT_MIN_NOTIONAL = "25"
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 60000
