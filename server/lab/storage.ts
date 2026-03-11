@@ -7,7 +7,7 @@ import {
   type LabCheckpoint, type LabInsightsReport,
 } from "@shared/schema";
 import { db } from "../db";
-import { eq, desc, inArray } from "drizzle-orm";
+import { eq, desc, inArray, isNull } from "drizzle-orm";
 import { randomUUID } from "crypto";
 
 const MAX_CONCURRENT_JOBS = 1;
@@ -71,7 +71,27 @@ export class LabDatabaseStorage implements ILabStorage {
 
   constructor() {
     this.jobs = new Map();
-    this.cleanupStaleRuns();
+    this.backfillOwnership().then(() => this.cleanupStaleRuns());
+  }
+
+  private async backfillOwnership(): Promise<void> {
+    const DEFAULT_OWNER = "BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41";
+    try {
+      const unownedStrategies = await db.select({ id: labStrategies.id })
+        .from(labStrategies).where(isNull(labStrategies.userId));
+      if (unownedStrategies.length > 0) {
+        await db.update(labStrategies).set({ userId: DEFAULT_OWNER }).where(isNull(labStrategies.userId));
+        console.log(`[QuantumLab] Backfill: assigned ${unownedStrategies.length} unowned strategies to ${DEFAULT_OWNER.slice(0, 8)}...`);
+      }
+      const unownedRuns = await db.select({ id: labOptimizationRuns.id })
+        .from(labOptimizationRuns).where(isNull(labOptimizationRuns.userId));
+      if (unownedRuns.length > 0) {
+        await db.update(labOptimizationRuns).set({ userId: DEFAULT_OWNER }).where(isNull(labOptimizationRuns.userId));
+        console.log(`[QuantumLab] Backfill: assigned ${unownedRuns.length} unowned runs to ${DEFAULT_OWNER.slice(0, 8)}...`);
+      }
+    } catch (err: any) {
+      console.log(`[QuantumLab] Ownership backfill error: ${err.message}`);
+    }
   }
 
   private async cleanupStaleRuns(): Promise<void> {

@@ -29,7 +29,7 @@ export function registerLabRoutes(app: Express): void {
     res.json(LAB_AVAILABLE_TIMEFRAMES);
   });
 
-  app.post("/api/lab/parse-pine", (req: Request, res: Response) => {
+  app.post("/api/lab/parse-pine", requireLabAuth, (req: Request, res: Response) => {
     try {
       const { code } = req.body;
       if (!code || typeof code !== "string") {
@@ -229,17 +229,27 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  const verifyRunOwnership = async (req: any, res: any): Promise<any | null> => {
+    const runId = parseInt(req.params.id);
+    const run = await labStorage.getRun(runId);
+    if (!run) { res.status(404).json({ error: "Run not found" }); return null; }
+    if (run.userId && run.userId !== req.walletAddress) { res.status(403).json({ error: "Access denied" }); return null; }
+    return run;
+  };
+
   app.get("/api/lab/runs/:id", requireLabAuth, async (req: Request, res: Response) => {
     try {
-      const run = await labStorage.getRun(parseInt(req.params.id));
-      if (!run) return res.status(404).json({ error: "Run not found" });
+      const run = await verifyRunOwnership(req, res);
+      if (!run) return;
       res.json(run);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.get("/api/lab/runs/:id/job", requireLabAuth, (req: Request, res: Response) => {
+  app.get("/api/lab/runs/:id/job", requireLabAuth, async (req: Request, res: Response) => {
+    const run = await verifyRunOwnership(req, res);
+    if (!run) return;
     const runId = parseInt(req.params.id);
     const job = labStorage.getJobByRunId(runId);
     if (!job) return res.status(404).json({ error: "No active job for this run" });
@@ -248,9 +258,9 @@ export function registerLabRoutes(app: Express): void {
 
   app.post("/api/lab/runs/:id/fail", requireLabAuth, async (req: Request, res: Response) => {
     try {
+      const run = await verifyRunOwnership(req, res);
+      if (!run) return;
       const runId = parseInt(req.params.id);
-      const run = await labStorage.getRun(runId);
-      if (!run) return res.status(404).json({ error: "Run not found" });
       if (run.status === "complete" || run.status === "paused") {
         return res.json({ ok: true, status: run.status });
       }
@@ -273,6 +283,8 @@ export function registerLabRoutes(app: Express): void {
 
   app.get("/api/lab/runs/:id/results", requireLabAuth, async (req: Request, res: Response) => {
     try {
+      const run = await verifyRunOwnership(req, res);
+      if (!run) return;
       const results = await labStorage.getRunResults(parseInt(req.params.id));
       const slim = results.map(r => ({
         id: r.id,
@@ -318,6 +330,8 @@ export function registerLabRoutes(app: Express): void {
 
   app.delete("/api/lab/runs/:id", requireLabAuth, async (req: Request, res: Response) => {
     try {
+      const run = await verifyRunOwnership(req, res);
+      if (!run) return;
       await labStorage.deleteRun(parseInt(req.params.id));
       res.json({ success: true });
     } catch (err: any) {
@@ -675,8 +689,8 @@ export function registerLabRoutes(app: Express): void {
   app.post("/api/lab/runs/:id/resume", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const runId = parseInt(req.params.id);
-      const run = await labStorage.getRun(runId);
-      if (!run) return res.status(404).json({ error: "Run not found" });
+      const run = await verifyRunOwnership(req, res);
+      if (!run) return;
       if (run.status === "running") {
         const existingJob = labStorage.getJobByRunId(runId);
         if (existingJob) {
@@ -737,7 +751,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/job/:id/progress", (req: Request, res: Response) => {
+  app.get("/api/lab/job/:id/progress", requireLabAuth, (req: Request, res: Response) => {
     const job = labStorage.getJob(req.params.id);
     if (!job) {
       return res.status(404).json({ error: "Job not found" });
@@ -773,7 +787,7 @@ export function registerLabRoutes(app: Express): void {
     });
   });
 
-  app.get("/api/lab/job/:id/results", (req: Request, res: Response) => {
+  app.get("/api/lab/job/:id/results", requireLabAuth, (req: Request, res: Response) => {
     const results = labStorage.getJobResult(req.params.id);
     if (!results) {
       return res.status(404).json({ error: "Results not found" });
@@ -781,7 +795,7 @@ export function registerLabRoutes(app: Express): void {
     res.json(results);
   });
 
-  app.post("/api/lab/jobs/force-clear", async (req: Request, res: Response) => {
+  app.post("/api/lab/jobs/force-clear", requireLabAuth, async (req: Request, res: Response) => {
     if (activeWorker) {
       activeWorker.postMessage({ type: "abort" });
       try { activeWorker.terminate(); } catch {}
@@ -933,7 +947,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/cache/stats", async (_req: Request, res: Response) => {
+  app.get("/api/lab/cache/stats", requireLabAuth, async (_req: Request, res: Response) => {
     try {
       const stats = await getCacheStats();
       res.json(stats);
