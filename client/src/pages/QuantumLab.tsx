@@ -19,7 +19,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter,
+  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -1053,6 +1053,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [useInsights, setUseInsights] = useState(false);
+  const [deepSearch, setDeepSearch] = useState(false);
 
   const { data: allInsightsReports } = useQuery<any[]>({
     queryKey: ["/api/lab/strategies", strategyId, "latest-insights"],
@@ -1109,6 +1110,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
         startDate, endDate, randomSamples: samples, topK: top, refinementsPerSeed: refs,
         minTrades, maxDrawdownCap: maxDrawdown, minAvgBarsHeld: minBarsHeld, mode, strategyId: strategyId ?? undefined,
         useInsights: useInsights && hasInsights ? true : undefined,
+        deepSearch: deepSearch && mode !== "smoke" ? true : undefined,
       });
       const { jobId, runId } = await res.json();
       onJobStarted(jobId, runId);
@@ -1267,6 +1269,26 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
                   <Input type="number" min={0} step={0.5} value={minBarsHeld} onChange={(e) => setMinBarsHeld(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-min-bars-held" />
                   <p className="text-[9px] text-white/20 mt-0.5">Set to 0 for 8h/12h timeframes</p>
                 </div>
+              </div>
+              <div className="pt-2 border-t border-white/5">
+                <button
+                  onClick={() => setDeepSearch(!deepSearch)}
+                  className="flex items-center justify-between w-full group"
+                  data-testid="toggle-deep-search"
+                >
+                  <div className="flex items-center gap-2">
+                    <Crosshair className={`w-3.5 h-3.5 ${deepSearch ? "text-sky-400" : "text-white/30"}`} />
+                    <span className={`text-xs font-medium ${deepSearch ? "text-white" : "text-white/50"}`}>Deep Search</span>
+                  </div>
+                  <div className={`w-8 h-4.5 rounded-full transition-colors relative ${deepSearch ? "bg-sky-600" : "bg-white/10"}`}>
+                    <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${deepSearch ? "translate-x-4" : "translate-x-0.5"}`} />
+                  </div>
+                </button>
+                {deepSearch && (
+                  <p className="text-[10px] text-sky-400/60 mt-1.5 pl-6">
+                    3 extra refinement rounds with narrowing radius (10% → 7% → 5%) after the standard pass. Disabled in Smoke Test.
+                  </p>
+                )}
               </div>
               {strategyId && hasInsights && (
                 <div className="pt-2 border-t border-white/5">

@@ -419,6 +419,7 @@ export function registerLabRoutes(app: Express): void {
           processOrdersOnClose,
           guidedInsights,
           guidedInsightsPerCombo,
+          deepSearch: config.deepSearch ?? false,
         },
         candlesByCombo,
         resumeCheckpoint,

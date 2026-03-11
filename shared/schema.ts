@@ -814,6 +814,7 @@ export interface LabOptimizationConfig {
   mode: "smoke" | "sweep";
   strategyId?: number;
   useInsights?: boolean;
+  deepSearch?: boolean;
 }
 
 export interface LabTradeRecord {
@@ -986,4 +987,5 @@ export const labOptimizationConfigSchema = z.object({
   mode: z.enum(["smoke", "sweep"]),
   strategyId: z.number().optional(),
   useInsights: z.boolean().optional(),
+  deepSearch: z.boolean().optional(),
 });
