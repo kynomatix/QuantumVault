@@ -489,8 +489,8 @@ export class LabDatabaseStorage implements ILabStorage {
     }
 
     const deepRounds = job.config.deepSearch ? 3 : 0;
-    const deepSeedsPerRound = Math.min(job.config.topK, 20);
-    const deepRefinesPerSeed = Math.ceil(job.config.refinementsPerSeed * 0.5);
+    const deepSeedsPerRound = job.config.topK;
+    const deepRefinesPerSeed = job.config.refinementsPerSeed;
     const totalSamples = job.config.randomSamples + job.config.topK * job.config.refinementsPerSeed + deepRounds * deepSeedsPerRound * deepRefinesPerSeed;
     const combos = job.config.tickers.length * job.config.timeframes.length;
 

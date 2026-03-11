@@ -1286,7 +1286,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
                 </button>
                 {deepSearch && (
                   <p className="text-[10px] text-sky-400/60 mt-1.5 pl-6">
-                    3 extra refinement rounds with narrowing radius (10% → 7% → 5%) after the standard pass. Disabled in Smoke Test.
+                    3 extra refinement rounds (10% → 6% → 3% radius) that re-rank and re-refine all top seeds after the standard pass. ~4x total iterations. Disabled in Smoke Test.
                   </p>
                 )}
               </div>

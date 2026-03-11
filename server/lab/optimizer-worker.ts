@@ -377,8 +377,8 @@ async function run() {
   }
 
   const deepRounds = config.deepSearch ? 3 : 0;
-  const deepSeedsPerRound = Math.min(config.topK, 20);
-  const deepRefinesPerSeed = Math.ceil(config.refinementsPerSeed * 0.5);
+  const deepSeedsPerRound = config.topK;
+  const deepRefinesPerSeed = config.refinementsPerSeed;
   const deepSamplesTotal = deepRounds * deepSeedsPerRound * deepRefinesPerSeed;
   const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed + deepSamplesTotal;
   let globalCurrent = completedCombos.size * totalSamples;
@@ -533,13 +533,14 @@ async function run() {
     }
 
     if (config.deepSearch && !aborted) {
-      const deepRadii = [0.10, 0.07, 0.05];
+      const deepRadii = [0.10, 0.06, 0.03];
+      const numOptimizable = inputs.filter(i => i.optimizable && (i.type === "int" || i.type === "float")).length;
       for (let round = 0; round < deepRounds; round++) {
         if (aborted) {
           globalCurrent += (deepRounds - round) * deepSeedsPerRound * deepRefinesPerSeed;
           break;
         }
-        const radius = deepRadii[round] ?? 0.05;
+        const radius = deepRadii[round] ?? 0.03;
         comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
         const deepSeeds = comboResults.slice(0, deepSeedsPerRound);
 
@@ -551,7 +552,7 @@ async function run() {
           const seed = deepSeeds[seedIdx];
           for (let r = 0; r < deepRefinesPerSeed; r++) {
             if (aborted) { globalCurrent += (deepRefinesPerSeed - r); break; }
-            const jittered = jitterParams(seed.params, inputs, inputs.filter(i => i.optimizable && (i.type === "int" || i.type === "float")).length, radius);
+            const jittered = jitterParams(seed.params, inputs, numOptimizable, radius);
             const result = runBacktest(candles, jittered, combo.ticker, combo.timeframe, engineConfig);
             if (meetsFilters(result, config)) {
               comboResults.push(result);
@@ -559,29 +560,27 @@ async function run() {
             globalCurrent++;
           }
 
-          if (seedIdx % 2 === 0) {
-            const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
-            send({ type: "progress", data: {
-              jobId, status: "refinement",
-              stage: `Deep Search R${round + 1} (${Math.round(radius * 100)}%) — seed ${seedIdx + 1}/${deepSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
-              current: globalCurrent, total: totalSamples * combos.length,
-              percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
-              elapsed: Date.now() - startTime,
-              bestSoFar: best ? {
-                netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
-                maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
-              } : undefined,
-              tickerProgress,
-              eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
-            }});
-          }
-        }
+          const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
+          send({ type: "progress", data: {
+            jobId, status: "refinement",
+            stage: `Deep R${round + 1} (${Math.round(radius * 100)}%) — seed ${seedIdx + 1}/${deepSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
+            current: globalCurrent, total: totalSamples * combos.length,
+            percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
+            elapsed: Date.now() - startTime,
+            bestSoFar: best ? {
+              netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
+              maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
+            } : undefined,
+            tickerProgress,
+            eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
+          }});
 
-        const deepNow = Date.now();
-        if (deepNow - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS) {
-          lastCheckpointTime = deepNow;
-          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
-          send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: totalSamples, results: topPartial });
+          const deepNow = Date.now();
+          if (deepNow - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS) {
+            lastCheckpointTime = deepNow;
+            const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+            send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: totalSamples, results: topPartial });
+          }
         }
       }
     }
