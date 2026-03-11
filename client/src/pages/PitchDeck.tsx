@@ -38,7 +38,12 @@ import {
   LineChart,
   ShieldCheck,
   Cpu,
-  RefreshCw
+  RefreshCw,
+  FlaskConical,
+  TestTubes,
+  BrainCircuit,
+  Microscope,
+  SlidersHorizontal
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
@@ -784,6 +789,130 @@ function CompetitiveSlide() {
   );
 }
 
+function QuantumLabSlide() {
+  const pipelineSteps = [
+    { icon: <ArrowRight className="w-5 h-5" />, label: "Import Strategy", desc: "Pine Script parsing" },
+    { icon: <SlidersHorizontal className="w-5 h-5" />, label: "Extract Parameters", desc: "Auto-detect ranges" },
+    { icon: <BrainCircuit className="w-5 h-5" />, label: "Optimize", desc: "1000s of combos" },
+    { icon: <Microscope className="w-5 h-5" />, label: "Backtest", desc: "Historical data" },
+    { icon: <ShieldCheck className="w-5 h-5" />, label: "Deploy", desc: "With confidence" },
+  ];
+
+  const stats = [
+    { value: "80+", label: "Markets Supported", sub: "OKX & Gate.io perpetuals" },
+    { value: "1,000+", label: "Combinations Tested", sub: "Per optimization run" },
+    { value: "100%", label: "Risk-Adjusted", sub: "Safe leverage recommendations" },
+  ];
+
+  return (
+    <Slide className="relative overflow-hidden">
+      <GradientOrb className="w-[600px] h-[600px] -top-48 -left-48" />
+      <GradientOrb className="w-[500px] h-[500px] -bottom-32 -right-32" color="accent" />
+      <GradientOrb className="w-[400px] h-[400px] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" color="sky" />
+
+      <SectionBadge color="accent"><FlaskConical className="w-4 h-4" /> Competitive Moat</SectionBadge>
+
+      <motion.div variants={fadeIn} className="relative mb-2">
+        <motion.div
+          className="absolute -inset-4 rounded-2xl bg-gradient-to-r from-violet-500/20 via-fuchsia-500/20 to-indigo-500/20 blur-xl"
+          animate={{ opacity: [0.4, 0.7, 0.4] }}
+          transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+        />
+        <motion.h2 variants={fadeIn} className="relative text-4xl md:text-5xl lg:text-6xl font-display font-bold text-center bg-gradient-to-r from-violet-300 via-fuchsia-300 to-indigo-300 bg-clip-text text-transparent">
+          QuantumLab
+        </motion.h2>
+      </motion.div>
+
+      <motion.p variants={fadeIn} className="text-lg md:text-xl text-muted-foreground mb-3 text-center max-w-2xl">
+        Built-in backtesting & strategy optimization engine
+      </motion.p>
+
+      <motion.div variants={fadeIn} className="mb-10">
+        <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-gradient-to-r from-fuchsia-500/20 to-violet-500/20 border border-fuchsia-500/30 text-fuchsia-300 text-sm font-semibold">
+          <TestTubes className="w-4 h-4" />
+          No Competitor Offers This Natively
+        </span>
+      </motion.div>
+
+      <motion.div variants={fadeIn} className="flex flex-wrap items-center justify-center gap-2 md:gap-0 max-w-4xl w-full mb-10">
+        {pipelineSteps.map((step, i) => (
+          <motion.div
+            key={i}
+            variants={fadeInScale}
+            className="flex items-center gap-2"
+          >
+            <div className="relative group">
+              <div className="absolute -inset-1 rounded-xl bg-gradient-to-br from-violet-500/30 to-fuchsia-500/30 blur-sm opacity-0 group-hover:opacity-100 transition-opacity" />
+              <div className="relative flex flex-col items-center gap-1.5 px-4 py-3 rounded-xl bg-white/[0.04] border border-white/[0.08] hover:border-violet-500/30 transition-colors min-w-[110px]">
+                <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-violet-500/20 to-fuchsia-500/20 flex items-center justify-center text-violet-300">
+                  {step.icon}
+                </div>
+                <span className="text-xs font-bold text-white">{step.label}</span>
+                <span className="text-[10px] text-muted-foreground">{step.desc}</span>
+              </div>
+            </div>
+            {i < pipelineSteps.length - 1 && (
+              <motion.div
+                className="text-violet-500/40 hidden md:block mx-1"
+                animate={{ x: [0, 4, 0] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: i * 0.2 }}
+              >
+                <ChevronRight className="w-4 h-4" />
+              </motion.div>
+            )}
+          </motion.div>
+        ))}
+      </motion.div>
+
+      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-3xl w-full mb-10">
+        {stats.map((stat, i) => (
+          <motion.div
+            key={i}
+            variants={fadeInScale}
+            className="relative group"
+          >
+            <div className="absolute -inset-0.5 rounded-2xl bg-gradient-to-br from-violet-500/40 via-fuchsia-500/40 to-indigo-500/40 opacity-0 group-hover:opacity-100 blur-sm transition-opacity" />
+            <div className="relative p-5 rounded-2xl bg-white/[0.03] border border-white/[0.08] text-center backdrop-blur-sm">
+              <div className="text-3xl md:text-4xl font-display font-bold bg-gradient-to-r from-violet-300 to-fuchsia-300 bg-clip-text text-transparent mb-1">
+                {stat.value}
+              </div>
+              <div className="text-sm font-semibold text-white mb-0.5">{stat.label}</div>
+              <div className="text-xs text-muted-foreground">{stat.sub}</div>
+            </div>
+          </motion.div>
+        ))}
+      </motion.div>
+
+      <motion.div variants={fadeIn} className="max-w-3xl w-full">
+        <div className="p-5 rounded-2xl bg-gradient-to-r from-violet-500/[0.08] via-fuchsia-500/[0.06] to-indigo-500/[0.08] border border-violet-500/20 backdrop-blur-sm">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500/30 to-fuchsia-500/30 flex items-center justify-center flex-shrink-0">
+              <FlaskConical className="w-5 h-5 text-violet-300" />
+            </div>
+            <div>
+              <h3 className="font-bold text-white mb-2">Why This Is a Moat</h3>
+              <ul className="space-y-1.5 text-sm text-muted-foreground">
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-fuchsia-400 mt-0.5 flex-shrink-0" />
+                  <span>Users import Pine Script strategies and instantly get optimized parameters — no coding required</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-fuchsia-400 mt-0.5 flex-shrink-0" />
+                  <span>Risk analysis with safe leverage recommendations prevents catastrophic losses</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-fuchsia-400 mt-0.5 flex-shrink-0" />
+                  <span>Dramatically increases user stickiness — once calibrated, users won't leave</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </Slide>
+  );
+}
+
 function TechStackSlide() {
   const tech = [
     { name: "Solana", desc: "400ms blocks, sub-cent fees" },
@@ -1138,6 +1267,7 @@ export default function PitchDeck() {
     <AIAgentsSlide key="ai-agents" />,
     <BusinessModelSlide key="business" />,
     <CompetitiveSlide key="competitive" />,
+    <QuantumLabSlide key="quantumlab" />,
     <TechStackSlide key="tech" />,
     <RoadmapSlide key="roadmap" />,
     <VaultsSlide key="vaults" />,
