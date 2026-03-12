@@ -65,14 +65,31 @@ export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapsho
       }
     }
     
+    let finalVolume = totalVolumeFromDrift;
+    let finalTrades = statsData.totalTrades;
+    try {
+      const prevMetrics = await storage.getLatestPlatformMetrics();
+      const prevMap = new Map(prevMetrics.map(m => [m.metricType, parseFloat(m.value)]));
+      const prevVolume = prevMap.get('total_volume') || 0;
+      const prevTrades = prevMap.get('total_trades') || 0;
+      if (prevVolume > finalVolume) {
+        console.log(`[Analytics] Volume high-water mark applied: keeping $${prevVolume.toFixed(2)} (new was $${finalVolume.toFixed(2)})`);
+        finalVolume = prevVolume;
+      }
+      if (prevTrades > finalTrades) {
+        console.log(`[Analytics] Trades high-water mark applied: keeping ${prevTrades} (new was ${finalTrades})`);
+        finalTrades = prevTrades;
+      }
+    } catch {}
+
     const metrics: PlatformMetricsSnapshot = {
       tvl: tvlFromDrift,
-      totalVolume: totalVolumeFromDrift,
+      totalVolume: finalVolume,
       volume24h: volumeData.volume24h,
       volume7d: volumeData.volume7d,
       activeBots: statsData.activeBots,
       activeUsers: statsData.activeUsers,
-      totalTrades: statsData.totalTrades,
+      totalTrades: finalTrades,
       lastUpdated: new Date(),
     };
     
