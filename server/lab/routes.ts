@@ -455,6 +455,7 @@ export function registerLabRoutes(app: Express): void {
                 currentCombo: msg.combo,
                 currentStage: msg.stage,
                 currentIteration: msg.iteration,
+                currentDeepRound: msg.deepRound,
               };
               await labStorage.saveCheckpoint(runId, checkpoint);
             } catch (err: any) {
@@ -750,8 +751,9 @@ export function registerLabRoutes(app: Express): void {
       }
 
       const config = checkpoint.configSnapshot;
-      if ((checkpoint as any).autoResumeAttempts) {
+      if ((checkpoint as any).autoResumeAttempts || (checkpoint as any).userCancelled) {
         (checkpoint as any).autoResumeAttempts = 0;
+        (checkpoint as any).userCancelled = false;
         await labStorage.saveCheckpoint(runId, checkpoint);
       }
 
@@ -829,6 +831,8 @@ export function registerLabRoutes(app: Express): void {
     res.json(results);
   });
 
+  const MAX_AUTO_RESUME_ATTEMPTS = 2;
+
   app.post("/api/lab/jobs/force-clear", requireLabAuth, async (req: Request, res: Response) => {
     if (activeWorker) {
       activeWorker.postMessage({ type: "abort" });
@@ -856,20 +860,37 @@ export function registerLabRoutes(app: Express): void {
 
   app.post("/api/lab/job/:id/cancel", requireLabAuth, async (req: Request, res: Response) => {
     const job = labStorage.getJob(req.params.id);
+    if (job?.runId) {
+      const run = await labStorage.getRun(job.runId);
+      const walletAddress = (req as any).walletAddress;
+      if (run && run.userId && run.userId !== walletAddress) {
+        return res.status(403).json({ error: "Not authorized to cancel this run" });
+      }
+    }
     if (activeWorker) {
       activeWorker.postMessage({ type: "abort" });
     }
     labStorage.cancelJob(req.params.id);
-    if (job?.runId && activeWorker) {
-      setTimeout(async () => {
-        try {
-          const run = await labStorage.getRun(job.runId!);
-          if (run && run.status === "running") {
-            await labStorage.pauseRun(job.runId!);
-            console.log(`[QuantumLab] Cancel safety net: run ${job.runId} → paused`);
-          }
-        } catch {}
-      }, 5000);
+    if (job?.runId) {
+      try {
+        const cp = await labStorage.getCheckpoint(job.runId);
+        if (cp) {
+          (cp as any).userCancelled = true;
+          (cp as any).autoResumeAttempts = MAX_AUTO_RESUME_ATTEMPTS;
+          await labStorage.saveCheckpoint(job.runId, cp);
+        }
+      } catch {}
+      if (activeWorker) {
+        setTimeout(async () => {
+          try {
+            const run = await labStorage.getRun(job.runId!);
+            if (run && run.status === "running") {
+              await labStorage.pauseRun(job.runId!);
+              console.log(`[QuantumLab] Cancel safety net: run ${job.runId} → paused (user-cancelled, no auto-resume)`);
+            }
+          } catch {}
+        }, 5000);
+      }
     }
     res.json({ success: true });
   });
@@ -1001,8 +1022,6 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  const MAX_AUTO_RESUME_ATTEMPTS = 2;
-
   setTimeout(async () => {
     try {
       if (activeWorker) {
@@ -1032,6 +1051,10 @@ export function registerLabRoutes(app: Express): void {
       const hasMidComboCheckpoint = cp?.currentCombo && cp?.currentIteration != null;
       if (!hasComboCheckpoint && !hasMidComboCheckpoint) return;
 
+      if (cp.userCancelled) {
+        console.log(`[QuantumLab] Skipping auto-resume for run ${run.id} — user cancelled. Manual resume required.`);
+        return;
+      }
       const crashCount = (cp.autoResumeAttempts as number) ?? 0;
       if (crashCount >= MAX_AUTO_RESUME_ATTEMPTS) {
         console.log(`[QuantumLab] Skipping auto-resume for run ${run.id} — crashed ${crashCount} times (max ${MAX_AUTO_RESUME_ATTEMPTS}). Manual resume required.`);

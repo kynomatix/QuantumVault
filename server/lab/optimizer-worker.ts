@@ -25,7 +25,7 @@ interface WorkerInput {
 
 type WorkerMessage =
   | { type: "progress"; data: LabJobProgress }
-  | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine"; iteration: number; results: LabBacktestResult[] }
+  | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep"; iteration: number; deepRound?: number; results: LabBacktestResult[] }
   | { type: "combo-complete"; combo: string; results: LabBacktestResult[] }
   | { type: "done"; results: LabBacktestResult[] }
   | { type: "error"; message: string };
@@ -368,6 +368,7 @@ async function run() {
   const resumeCombo = resumeCheckpoint?.currentCombo ?? null;
   const resumeStage = resumeCheckpoint?.currentStage ?? null;
   const resumeIteration = resumeCheckpoint?.currentIteration ?? 0;
+  const resumeDeepRound = resumeCheckpoint?.currentDeepRound ?? 0;
   const resumePartialResults = resumeCheckpoint?.partialResults ?? [];
 
   const tickerProgress: Record<string, { status: "pending" | "running" | "complete"; best?: number }> = {};
@@ -429,7 +430,8 @@ async function run() {
 
     const isResumingThisCombo = resumeCombo === key;
     const skipRandomUntil = isResumingThisCombo && resumeStage === "random" ? resumeIteration : 0;
-    const skipRefineEntirely = isResumingThisCombo && resumeStage === "refine";
+    const skipRefineEntirely = isResumingThisCombo && (resumeStage === "refine" || resumeStage === "deep");
+    const skipDeepUntilRound = isResumingThisCombo && resumeStage === "deep" ? resumeDeepRound : 0;
     let comboResults: LabBacktestResult[] = isResumingThisCombo && resumePartialResults.length > 0
       ? [...resumePartialResults]
       : [baseline];
@@ -488,47 +490,53 @@ async function run() {
     const topSeeds = comboResults.slice(0, config.topK);
 
     const refineStartIteration = config.randomSamples;
+    const skipStandardRefine = isResumingThisCombo && resumeStage === "deep";
 
-    for (let seedIdx = 0; seedIdx < topSeeds.length; seedIdx++) {
-      if (aborted) break;
-      const seed = topSeeds[seedIdx];
-      for (let r = 0; r < config.refinementsPerSeed; r++) {
-        if (aborted) { globalCurrent += (config.refinementsPerSeed - r); break; }
+    if (skipStandardRefine) {
+      globalCurrent += totalSamples - config.randomSamples;
+    } else {
+      for (let seedIdx = 0; seedIdx < topSeeds.length; seedIdx++) {
+        if (aborted) break;
+        const seed = topSeeds[seedIdx];
+        for (let r = 0; r < config.refinementsPerSeed; r++) {
+          if (aborted) { globalCurrent += (config.refinementsPerSeed - r); break; }
 
-        const currentRefineIter = refineStartIteration + seedIdx * config.refinementsPerSeed + r;
-        if (isResumingThisCombo && resumeStage === "refine" && currentRefineIter < resumeIteration) {
-          continue;
+          const currentRefineIter = refineStartIteration + seedIdx * config.refinementsPerSeed + r;
+          if (isResumingThisCombo && resumeStage === "refine" && currentRefineIter < resumeIteration) {
+            continue;
+          }
+
+          const jitteredParams = jitterParams(seed.params, inputs);
+          const result = runBacktest(candles, jitteredParams, combo.ticker, combo.timeframe, engineConfig);
+          if (meetsFilters(result, config)) {
+            comboResults.push(result);
+          }
+          globalCurrent++;
         }
 
-        const jitteredParams = jitterParams(seed.params, inputs);
-        const result = runBacktest(candles, jitteredParams, combo.ticker, combo.timeframe, engineConfig);
-        if (meetsFilters(result, config)) {
-          comboResults.push(result);
+        const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
+        send({ type: "progress", data: {
+          jobId, status: "refinement",
+          stage: `Refining seed ${seedIdx + 1}/${topSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
+          current: Math.min(globalCurrent, grandTotal), total: grandTotal,
+          percent: Math.min(99, Math.round((globalCurrent / grandTotal) * 100)),
+          elapsed: Date.now() - startTime,
+          bestSoFar: best ? {
+            netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
+            maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
+          } : undefined,
+          tickerProgress,
+          eta: estimateEta(startTime, globalCurrent, grandTotal),
+        }});
+
+        const refNow = Date.now();
+        if (refNow - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS) {
+          lastCheckpointTime = refNow;
+          const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
+          const checkpointCount = Math.max(10, config.topK);
+          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, checkpointCount);
+          send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: actualIter, results: topPartial });
         }
-        globalCurrent++;
-      }
-
-      const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
-      send({ type: "progress", data: {
-        jobId, status: "refinement",
-        stage: `Refining seed ${seedIdx + 1}/${topSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
-        current: Math.min(globalCurrent, grandTotal), total: grandTotal,
-        percent: Math.min(99, Math.round((globalCurrent / grandTotal) * 100)),
-        elapsed: Date.now() - startTime,
-        bestSoFar: best ? {
-          netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
-          maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
-        } : undefined,
-        tickerProgress,
-        eta: estimateEta(startTime, globalCurrent, grandTotal),
-      }});
-
-      const refNow = Date.now();
-      if (refNow - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS) {
-        lastCheckpointTime = refNow;
-        const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
-        const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
-        send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: actualIter, results: topPartial });
       }
     }
 
@@ -539,6 +547,10 @@ async function run() {
         if (aborted) {
           globalCurrent += (deepRounds - round) * deepSeedsPerRound * deepRefinesPerSeed;
           break;
+        }
+        if (round < skipDeepUntilRound) {
+          globalCurrent += deepSeedsPerRound * deepRefinesPerSeed;
+          continue;
         }
         const radius = deepRadii[round] ?? 0.03;
         comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
@@ -578,10 +590,16 @@ async function run() {
           const deepNow = Date.now();
           if (deepNow - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS) {
             lastCheckpointTime = deepNow;
-            const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
-            send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: totalSamples, results: topPartial });
+            const deepCheckpointCount = Math.max(10, config.topK);
+            const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, deepCheckpointCount);
+            send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round, results: topPartial });
           }
         }
+
+        const deepCheckpointCount = Math.max(10, config.topK);
+        const topAfterRound = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, deepCheckpointCount);
+        send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round + 1, results: topAfterRound });
+        lastCheckpointTime = Date.now();
       }
     }
 

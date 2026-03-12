@@ -846,8 +846,9 @@ export interface LabCheckpoint {
   completedCombos: string[];
   configSnapshot: LabOptimizationConfig;
   currentCombo?: string;
-  currentStage?: "random" | "refine";
+  currentStage?: "random" | "refine" | "deep";
   currentIteration?: number;
+  currentDeepRound?: number;
   partialResults?: LabBacktestResult[];
 }
 
