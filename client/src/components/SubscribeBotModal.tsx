@@ -34,7 +34,7 @@ import {
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction } from '@solana/web3.js';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
-import { MARKET_MAX_LEVERAGE } from '@/lib/drift-constants';
+import { useLeverageLimits } from '@/hooks/useLeverageLimits';
 
 interface SubscribeBotModalProps {
   isOpen: boolean;
@@ -48,6 +48,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const subscribe = useSubscribeToPublishedBot();
   const wallet = useWallet();
   const { connection } = useConnection();
+  const { getMaxLeverage } = useLeverageLimits();
   
   const [capitalInvested, setCapitalInvested] = useState('');
   const [leverage, setLeverage] = useState(1);
@@ -63,7 +64,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   } | null>(null);
   const [isDepositingSol, setIsDepositingSol] = useState(false);
 
-  const maxLeverage = MARKET_MAX_LEVERAGE[bot.market] || 20;
+  const maxLeverage = getMaxLeverage(bot.market);
   
   useEffect(() => {
     if (isOpen) {

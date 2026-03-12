@@ -5,7 +5,7 @@ import { useWallet } from '@solana/wallet-adapter-react';
 import { useConnection } from '@solana/wallet-adapter-react';
 import { Transaction } from '@solana/web3.js';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
-import { MARKET_MAX_LEVERAGE } from '@/lib/drift-constants';
+import { useLeverageLimits } from '@/hooks/useLeverageLimits';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -97,6 +97,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   const wallet = useWallet();
   const { connection } = useConnection();
   const { executionEnabled, executionLoading, enableExecution, refetchStatus } = useExecutionAuthorization();
+  const { getMaxLeverage } = useLeverageLimits();
   const [isCreating, setIsCreating] = useState(false);
   const [isDepositingSol, setIsDepositingSol] = useState(false);
   const [step, setStep] = useState<'create' | 'success' | 'enable_execution'>('create');
@@ -159,11 +160,11 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   
   // Clamp leverage to market's max when market changes
   useEffect(() => {
-    const maxLev = MARKET_MAX_LEVERAGE[newBot.market] || 20;
+    const maxLev = getMaxLeverage(newBot.market);
     if (newBot.leverage > maxLev) {
       setNewBot(prev => ({ ...prev, leverage: maxLev }));
     }
-  }, [newBot.market]);
+  }, [newBot.market, getMaxLeverage]);
   
   // Calculate max position size (investment × leverage)
   const investmentValue = parseFloat(newBot.investmentAmount) || 0;
@@ -565,7 +566,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
             <Label className="flex items-center gap-1.5">
               Leverage
               {(() => {
-                const maxLev = MARKET_MAX_LEVERAGE[newBot.market] || 20;
+                const maxLev = getMaxLeverage(newBot.market);
                 if (maxLev < 10) {
                   return (
                     <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400">
@@ -579,22 +580,22 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
             <span className="text-sm font-medium text-primary">{newBot.leverage}x</span>
           </div>
           <Slider
-            value={[Math.min(newBot.leverage, MARKET_MAX_LEVERAGE[newBot.market] || 20)]}
+            value={[Math.min(newBot.leverage, getMaxLeverage(newBot.market))]}
             onValueChange={(v) => setNewBot({ ...newBot, leverage: v[0] })}
             min={1}
-            max={MARKET_MAX_LEVERAGE[newBot.market] || 20}
+            max={getMaxLeverage(newBot.market)}
             step={1}
             data-testid="slider-leverage"
           />
           <div className="flex justify-between text-xs text-muted-foreground">
             <span>1x (Safe)</span>
-            <span>{MARKET_MAX_LEVERAGE[newBot.market] || 20}x (Max for {newBot.market.replace('-PERP', '')})</span>
+            <span>{getMaxLeverage(newBot.market)}x (Max for {newBot.market.replace('-PERP', '')})</span>
           </div>
-          {(MARKET_MAX_LEVERAGE[newBot.market] || 20) < 10 && (
+          {getMaxLeverage(newBot.market) < 10 && (
             <div className="flex items-start gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs">
               <Info className="w-3.5 h-3.5 text-amber-400 mt-0.5 flex-shrink-0" />
               <p className="text-muted-foreground">
-                {newBot.market.replace('-PERP', '')} has a max leverage of {MARKET_MAX_LEVERAGE[newBot.market]}x on Drift. 
+                {newBot.market.replace('-PERP', '')} has a max leverage of {getMaxLeverage(newBot.market)}x on Drift. 
                 Trades exceeding this will fail with "insufficient margin".
               </p>
             </div>

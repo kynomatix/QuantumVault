@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { MARKET_MAX_LEVERAGE } from '@/lib/drift-constants';
+import { useLeverageLimits } from '@/hooks/useLeverageLimits';
 import {
   Sheet,
   SheetContent,
@@ -177,6 +177,7 @@ export function BotManagementDrawer({
   xUsername,
 }: BotManagementDrawerProps) {
   const { toast } = useToast();
+  const { getMaxLeverage } = useLeverageLimits();
 
   const [activeTab, setActiveTab] = useState('overview');
   const [botBalance, setBotBalance] = useState<number>(0);
@@ -305,7 +306,7 @@ export function BotManagementDrawer({
       setLocalBot(bot);
       setEditName(bot.name);
       // Clamp leverage to market's max
-      const maxLev = MARKET_MAX_LEVERAGE[bot.market] || 20;
+      const maxLev = getMaxLeverage(bot.market);
       setEditLeverage(Math.min(bot.leverage, maxLev));
       // Convert stored maxPositionSize (leveraged) to investment amount (raw)
       const storedMaxPos = parseFloat(bot.maxPositionSize || '0');
@@ -815,7 +816,7 @@ export function BotManagementDrawer({
   const handleSaveSettings = async () => {
     if (!localBot) return;
     
-    const maxLev = MARKET_MAX_LEVERAGE[localBot.market] || 20;
+    const maxLev = getMaxLeverage(localBot.market);
     if (editLeverage < 1 || editLeverage > maxLev) {
       toast({ title: `Leverage must be between 1 and ${maxLev}x for ${localBot.market}`, variant: 'destructive' });
       return;
@@ -896,7 +897,7 @@ export function BotManagementDrawer({
     if (localBot) {
       setEditName(localBot.name);
       // Clamp leverage to market's max when resetting
-      const maxLev = MARKET_MAX_LEVERAGE[localBot.market] || 20;
+      const maxLev = getMaxLeverage(localBot.market);
       setEditLeverage(Math.min(localBot.leverage, maxLev));
       // Convert stored maxPositionSize (leveraged) to investment amount (raw)
       const storedMaxPos = parseFloat(localBot.maxPositionSize || '0');
@@ -919,7 +920,7 @@ export function BotManagementDrawer({
   
   const hasSettingsChanges = localBot ? (
     editName !== localBot.name || 
-    editLeverage !== Math.min(localBot.leverage, MARKET_MAX_LEVERAGE[localBot.market] || 20) || 
+    editLeverage !== Math.min(localBot.leverage, getMaxLeverage(localBot.market)) || 
     editMaxPositionSize !== getStoredInvestmentAmount() ||
     editProfitReinvest !== (localBot.profitReinvest ?? false) ||
     editAutoWithdrawThreshold !== (localBot.autoWithdrawThreshold ?? '') ||
@@ -2053,7 +2054,7 @@ export function BotManagementDrawer({
                     <label className="text-sm text-muted-foreground flex items-center gap-1.5">
                       Leverage
                       {(() => {
-                        const maxLev = MARKET_MAX_LEVERAGE[localBot?.market || ''] || 20;
+                        const maxLev = getMaxLeverage(localBot?.market || '');
                         if (maxLev < 10) {
                           return (
                             <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400">
@@ -2067,22 +2068,22 @@ export function BotManagementDrawer({
                     <span className="text-sm font-semibold" data-testid="text-edit-leverage">{editLeverage}x</span>
                   </div>
                   <Slider
-                    value={[Math.min(editLeverage, MARKET_MAX_LEVERAGE[localBot?.market || ''] || 20)]}
+                    value={[Math.min(editLeverage, getMaxLeverage(localBot?.market || ''))]}
                     onValueChange={(value) => setEditLeverage(value[0])}
                     min={1}
-                    max={MARKET_MAX_LEVERAGE[localBot?.market || ''] || 20}
+                    max={getMaxLeverage(localBot?.market || '')}
                     step={1}
                     className="w-full"
                     data-testid="slider-leverage"
                   />
                   <div className="flex justify-between text-xs text-muted-foreground">
                     <span>1x</span>
-                    <span>{MARKET_MAX_LEVERAGE[localBot?.market || ''] || 20}x (Max)</span>
+                    <span>{getMaxLeverage(localBot?.market || '')}x (Max)</span>
                   </div>
-                  {(MARKET_MAX_LEVERAGE[localBot?.market || ''] || 20) < 10 && (
+                  {getMaxLeverage(localBot?.market || '') < 10 && (
                     <p className="text-xs text-amber-400 flex items-center gap-1">
                       <Info className="w-3 h-3" />
-                      {localBot?.market.replace('-PERP', '')} has a {MARKET_MAX_LEVERAGE[localBot?.market || '']}x max leverage limit on Drift
+                      {localBot?.market.replace('-PERP', '')} has a {getMaxLeverage(localBot?.market || '')}x max leverage limit on Drift
                     </p>
                   )}
                 </div>

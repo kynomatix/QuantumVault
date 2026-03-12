@@ -8,6 +8,7 @@ import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
 import { startRetryWorker, backfillRecoveredClosePnl } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
+import { initLeverageCache } from "./leverage-cache-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 
 const app = express();
@@ -164,6 +165,9 @@ app.use((req, res, next) => {
       } catch (error) {
         console.error("Error cleaning up orphaned trades:", error);
       }
+      
+      // Initialize leverage cache from on-chain data (and refresh every 30 minutes)
+      initLeverageCache().catch(err => console.error('Failed to initialize leverage cache:', err));
       
       // Start periodic position reconciliation (syncs DB with on-chain Drift positions)
       startPeriodicReconciliation();

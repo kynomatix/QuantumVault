@@ -160,7 +160,7 @@ export interface StrategyInsightsReport {
 
 function computeMaxSafeLeverage(dd: number, ticker?: string): number {
   if (dd <= 0) return 1;
-  const maxLev = ticker ? getDriftMaxLeverage(ticker) : 20;
+  const maxLev = ticker ? getDriftMaxLeverage(ticker) : 5;
   return Math.min(maxLev, Math.max(1, Math.floor((100 / dd) * 0.8)));
 }
 

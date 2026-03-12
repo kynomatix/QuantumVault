@@ -30,7 +30,9 @@ import { motion } from "framer-motion";
 import { Link } from "wouter";
 import { cn } from "@/lib/utils";
 import { getDriftMaxLeverage, tickerToDriftMarket } from "@/lib/drift-constants";
+import { useLeverageLimits } from "@/hooks/useLeverageLimits";
 import { generateInsightsReport, formatReportAsText, type StrategyInsightsReport, type ParamSensitivity, type ComboFit, type Suggestion } from "@/lib/strategy-insights";
+
 import type {
   LabPineInput, LabPineParseResult, LabStrategy, LabBacktestResult,
   LabJobProgress, LabJobResult, LabOptimizationRun, LabOptResult,
@@ -39,6 +41,8 @@ import type {
 import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
 
 type MainTab = "main" | "results" | "heatmap" | "insights";
+const CONSERVATIVE_FALLBACK = 5;
+
 type SortKey = "netProfitPercent" | "levProfit" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades";
 type SortDir = "asc" | "desc";
 type RankingMode = "profit" | "winrate" | "balanced" | "conservative";
@@ -164,7 +168,8 @@ function calculateRiskAnalysis(
   maxDrawdownPercent: number,
   winRatePercent: number,
   equityCurve?: { time: string; equity: number }[],
-  ticker?: string
+  ticker?: string,
+  maxLeverageOverride?: number
 ): LabRiskAnalysis {
   const closedTrades = trades.filter(t => t.exitReason !== "Open Position");
   if (closedTrades.length === 0) {
@@ -216,7 +221,7 @@ function calculateRiskAnalysis(
 
   const recoveryFactor = maxDrawdownPercent > 0 ? netProfitPercent / maxDrawdownPercent : 0;
 
-  const MAX_LEVERAGE_CAP = ticker ? getDriftMaxLeverage(ticker) : 20;
+  const MAX_LEVERAGE_CAP = maxLeverageOverride ?? (ticker ? getDriftMaxLeverage(ticker) : CONSERVATIVE_FALLBACK);
   const maxSafeLeverage = maxDrawdownPercent > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor((100 / maxDrawdownPercent) * 0.8))) : 1;
   const streakSafety = streakDrawdownPercent > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor(100 / (streakDrawdownPercent * 1.5)))) : maxSafeLeverage;
   const recommendedLeverage = Math.max(1, Math.min(maxSafeLeverage, streakSafety));
@@ -408,6 +413,7 @@ export default function QuantumLab() {
   const [targetCombo, setTargetCombo] = useState<{ ticker: string; timeframe: string } | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<LabStrategy | null>(null);
   const { toast } = useToast();
+  const { getMaxLeverage } = useLeverageLimits();
 
   const [code, setCode] = useState(EXAMPLE_PINE);
   const [strategyName, setStrategyName] = useState("");
@@ -1552,6 +1558,7 @@ function SortHeader({ label, sortKey, current, dir, onClick }: { label: string; 
 
 function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJob }: { onSelectRun: (id: number) => void; onViewRunning: (jobId: string) => void; liveProgress?: LabJobProgress | null; onGoToLiveJob?: () => void }) {
   const { toast } = useToast();
+  const { getMaxLeverage } = useLeverageLimits();
   const { data: runs, isLoading } = useQuery<LabOptimizationRun[]>({
     queryKey: ["/api/lab/runs"],
     refetchInterval: 5000,
@@ -1780,6 +1787,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
   const [selectedResultFull, setSelectedResultFull] = useState<LabOptResult | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [rankingMode, setRankingMode] = useState<RankingMode>("profit");
+  const { getMaxLeverage } = useLeverageLimits();
   const [expandedCombos, setExpandedCombos] = useState<Set<string>>(new Set());
   const [deletingIds, setDeletingIds] = useState<Set<number>>(new Set());
 
@@ -1853,7 +1861,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       if (comboArr.length > 0) arr.push(comboArr[0]);
     }
     const getLevProfit = (r: LabOptResult) => {
-      const maxLev = getDriftMaxLeverage(r.ticker);
+      const maxLev = getMaxLeverage(r.ticker);
       const lev = r.maxDrawdownPercent > 0 ? Math.min(maxLev, Math.max(1, Math.floor((100 / r.maxDrawdownPercent) * 0.8))) : 1;
       return r.netProfitPercent * lev;
     };
@@ -1932,8 +1940,9 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     if (!selectedResult) return null;
     const trades = (selectedResult.trades as LabTradeRecord[]) ?? [];
     const equityCurve = (selectedResult.equityCurve as { time: string; equity: number }[]) ?? [];
-    return calculateRiskAnalysis(trades, selectedResult.netProfitPercent, selectedResult.maxDrawdownPercent, selectedResult.winRatePercent, equityCurve, selectedResult.ticker);
-  }, [selectedResult]);
+    const maxLev = selectedResult.ticker ? getMaxLeverage(selectedResult.ticker) : undefined;
+    return calculateRiskAnalysis(trades, selectedResult.netProfitPercent, selectedResult.maxDrawdownPercent, selectedResult.winRatePercent, equityCurve, selectedResult.ticker, maxLev);
+  }, [selectedResult, getMaxLeverage]);
 
   if (isLoading) return <div className="flex items-center justify-center h-96"><Loader2 className="w-6 h-6 animate-spin text-violet-400" /></div>;
 
@@ -2076,7 +2085,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                       <td className={`py-2.5 px-2 text-right font-mono font-medium ${r.netProfitPercent >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                         {r.netProfitPercent > 0 ? "+" : ""}{r.netProfitPercent.toFixed(2)}%
                       </td>
-                      {(() => { const maxLev = getDriftMaxLeverage(r.ticker); const lev = r.maxDrawdownPercent > 0 ? Math.min(maxLev, Math.max(1, Math.floor((100 / r.maxDrawdownPercent) * 0.8))) : 1; const levProfit = r.netProfitPercent * lev; return (
+                      {(() => { const maxLev = getMaxLeverage(r.ticker); const lev = r.maxDrawdownPercent > 0 ? Math.min(maxLev, Math.max(1, Math.floor((100 / r.maxDrawdownPercent) * 0.8))) : 1; const levProfit = r.netProfitPercent * lev; return (
                         <td className={`py-2.5 px-2 text-right font-mono font-medium ${levProfit >= 0 ? "text-sky-400" : "text-purple-400"}`} data-testid={`lev-profit-${r.id}`}>
                           {levProfit > 0 ? "+" : ""}{levProfit.toFixed(1)}%
                           <span className="text-[10px] text-white/30 ml-1">{lev}x</span>
@@ -2128,7 +2137,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.netProfitPercent >= 0 ? "text-sky-400/70" : "text-purple-400/70"}`}>
                             {sr.netProfitPercent > 0 ? "+" : ""}{sr.netProfitPercent.toFixed(2)}%
                           </td>
-                          {(() => { const maxLev = getDriftMaxLeverage(sr.ticker); const lev = sr.maxDrawdownPercent > 0 ? Math.min(maxLev, Math.max(1, Math.floor((100 / sr.maxDrawdownPercent) * 0.8))) : 1; const levProfit = sr.netProfitPercent * lev; return (
+                          {(() => { const maxLev = getMaxLeverage(sr.ticker); const lev = sr.maxDrawdownPercent > 0 ? Math.min(maxLev, Math.max(1, Math.floor((100 / sr.maxDrawdownPercent) * 0.8))) : 1; const levProfit = sr.netProfitPercent * lev; return (
                             <td className={`py-2 px-2 text-right font-mono text-xs ${levProfit >= 0 ? "text-sky-400/70" : "text-purple-400/70"}`}>
                               {levProfit > 0 ? "+" : ""}{levProfit.toFixed(1)}%
                               <span className="text-[10px] text-white/20 ml-1">{lev}x</span>
@@ -2292,6 +2301,7 @@ function HistStatCard({ label, value, color, icon, sublabel }: { label: string; 
 
 function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, backtestDrawdown, strategyName }: { analysis: LabRiskAnalysis; ticker?: string; timeframe?: string; backtestProfit: number; backtestDrawdown: number; strategyName?: string }) {
   const [showLeverageView, setShowLeverageView] = useState(false);
+  const { getMaxLeverage } = useLeverageLimits();
   const ratingColors: Record<LabRiskAnalysis["riskRating"], { text: string; bg: string; border: string }> = {
     LOW: { text: "text-sky-400", bg: "bg-sky-500/10", border: "border-sky-500/30" },
     MODERATE: { text: "text-indigo-400", bg: "bg-indigo-500/10", border: "border-indigo-500/30" },
@@ -2300,7 +2310,7 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
   };
   const rc = ratingColors[analysis.riskRating];
 
-  const driftMaxLeverage = ticker ? getDriftMaxLeverage(ticker) : 20;
+  const driftMaxLeverage = ticker ? getMaxLeverage(ticker) : CONSERVATIVE_FALLBACK;
   const leverageLevels = [
     { label: "No Leverage (1x)", lev: 1, isCurrent: true },
     { label: `Recommended (${analysis.recommendedLeverage}x)`, lev: analysis.recommendedLeverage, isRecommended: true },
@@ -2548,6 +2558,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
   const [metric, setMetric] = useState<HeatmapMetric>("bestProfit");
   const [selectedCell, setSelectedCell] = useState<any | null>(null);
   const [selectedTopIdx, setSelectedTopIdx] = useState<number>(0);
+  const { getMaxLeverage } = useLeverageLimits();
 
   const { data, isLoading } = useQuery<any>({
     queryKey: ["/api/lab/heatmap"],
@@ -2578,7 +2589,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
     if (!selectedCell?.allResults) return [];
     const results = [...selectedCell.allResults];
     const cellTicker = selectedCell?.ticker;
-    const cellMaxLev = cellTicker ? getDriftMaxLeverage(cellTicker) : 20;
+    const cellMaxLev = cellTicker ? getMaxLeverage(cellTicker) : CONSERVATIVE_FALLBACK;
     const getLevProfit = (r: any) => {
       const dd = r.maxDrawdownPercent || 0;
       const lev = dd > 0 ? Math.min(cellMaxLev, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
@@ -2642,7 +2653,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
   for (const c of cells) {
     const key = `${c.ticker}|${c.timeframe}`;
     cellLookup.set(key, c);
-    const cMaxLev = getDriftMaxLeverage(c.ticker);
+    const cMaxLev = getMaxLeverage(c.ticker);
     const best = c.allResults?.reduce((best: any, r: any) => {
       const dd = r.maxDrawdownPercent || 0;
       const lev = dd > 0 ? Math.min(cMaxLev, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
@@ -2798,7 +2809,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
               <p className="text-[9px] text-white/30 mt-1">avg {selectedCell.avgProfit.toFixed(1)}%</p>
             </Card>
             {(() => {
-              const selMaxLev = getDriftMaxLeverage(selectedCell.ticker);
+              const selMaxLev = getMaxLeverage(selectedCell.ticker);
               const bestLev = selectedCell.allResults?.reduce((best: any, r: any) => {
                 const dd = r.maxDrawdownPercent || 0;
                 const lev = dd > 0 ? Math.min(selMaxLev, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
@@ -2852,7 +2863,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                   const hasStrategy = strat?.pineScript;
                   const isActive = idx === selectedTopIdx;
                   const dd = cfg.maxDrawdownPercent || 0;
-                  const cfgMaxLev = selectedCell?.ticker ? getDriftMaxLeverage(selectedCell.ticker) : 20;
+                  const cfgMaxLev = selectedCell?.ticker ? getMaxLeverage(selectedCell.ticker) : CONSERVATIVE_FALLBACK;
                   const safeLev = dd > 0 ? Math.min(cfgMaxLev, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
                   const levProfit = cfg.netProfitPercent * safeLev;
                   return (
@@ -3375,11 +3386,12 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
 
 function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName }: { config: any; idx: number; ticker?: string; timeframe?: string; strategyName?: string }) {
   const [showProjection, setShowProjection] = useState(true);
+  const { getMaxLeverage } = useLeverageLimits();
   const dd = config.maxDrawdownPercent || 0;
   const profit = config.netProfitPercent || 0;
   const winRate = config.winRatePercent || 0;
 
-  const MAX_LEVERAGE_CAP = ticker ? getDriftMaxLeverage(ticker) : 20;
+  const MAX_LEVERAGE_CAP = ticker ? getMaxLeverage(ticker) : CONSERVATIVE_FALLBACK;
   const maxSafe = dd > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
   const recommended = Math.max(1, Math.min(maxSafe, MAX_LEVERAGE_CAP));
   const recDD = dd * recommended;
