@@ -14,7 +14,7 @@ import { desc, eq, sql } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getMarketPrice, getAllPrices, forceRefreshPrices } from "./drift-price";
 import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, getBatchDriftAccountInfo, getBatchPerpPositions, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
-import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
+import { reconcileBotPosition, syncPositionFromOnChain, backfillLiquidationRecords } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMarketMaxLeverage } from "./market-liquidity-service";
@@ -3105,6 +3105,16 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     } catch (error) {
       console.error("Get positions error:", error);
       res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/positions/backfill-liquidations", requireWallet, async (req, res) => {
+    try {
+      const result = await backfillLiquidationRecords();
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Backfill] Error:", error);
+      res.status(500).json({ error: error.message });
     }
   });
 

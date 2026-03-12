@@ -3,7 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { storage } from "./storage";
-import { startPeriodicReconciliation } from "./reconciliation-service";
+import { startPeriodicReconciliation, backfillLiquidationRecords } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
 import { startRetryWorker, backfillRecoveredClosePnl } from "./trade-retry-service";
@@ -171,6 +171,11 @@ app.use((req, res, next) => {
       
       // Start periodic position reconciliation (syncs DB with on-chain Drift positions)
       startPeriodicReconciliation();
+      
+      // One-time backfill of historical liquidation records
+      setTimeout(() => {
+        backfillLiquidationRecords().catch(err => console.error('[Backfill] Startup backfill error:', err));
+      }, 15_000);
       
       // Start orphaned subaccount cleanup (retries closing subaccounts that failed during bot deletion)
       startOrphanedSubaccountCleanup();

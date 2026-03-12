@@ -421,3 +421,72 @@ export function stopPeriodicReconciliation(): void {
     console.log("[Reconcile] Stopped periodic reconciliation");
   }
 }
+
+export async function backfillLiquidationRecords(): Promise<{ created: number; errors: string[] }> {
+  const errors: string[] = [];
+  let created = 0;
+
+  const suspects = [
+    { botId: 'cbd05f9a-f0a6-49d6-a8c8-47ba102c284f', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ', market: 'RENDER-PERP', size: '4.83146276', price: '1.362564', pnl: '-4.736811', liqTime: '2026-02-25 12:00:00', name: 'RNDR 45m BB Pro (Copy)' },
+    { botId: '4c7d6610-4322-4dbf-afeb-ef1dc009cb87', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ', market: 'FARTCOIN-PERP', size: '22.06741024', price: '0.147129', pnl: '-0.215464', liqTime: '2026-02-25 00:00:00', name: 'FARTCOIN 4H OI Skalpa (Copy)' },
+    { botId: 'ce22aa00-45d0-4758-add8-9986300be854', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ', market: 'SUI-PERP', size: '5.69608751', price: '0.964165', pnl: '-2.536312', liqTime: '2026-02-17 00:00:00', name: 'SUI 1H OI Skalpa (Copy)' },
+    { botId: 'b4d43164-9b59-45bc-ba5a-747e31655a9e', wallet: '6ULLaZkuWoML1qN23TqSw9ANBBCGFXaAvKbFzXj2Kehh', market: 'DOGE-PERP', size: '202.85178424', price: '0.103303', pnl: '-7.253335', liqTime: '2026-02-02 10:00:00', name: 'DOGE 2H OI Skalpa' },
+    { botId: 'a69ce267-fa8b-4e48-b5d6-757b5788680d', wallet: '6ULLaZkuWoML1qN23TqSw9ANBBCGFXaAvKbFzXj2Kehh', market: 'SOL-PERP', size: '0.11505717', price: '112.226520', pnl: '-10.512226', liqTime: '2026-01-31 16:30:00', name: 'SOL 45m OI Skalpa V3' },
+    { botId: '5747b024-e6df-471f-a842-6ee67977cbd0', wallet: 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez', market: 'SOL-PERP', size: '0.05286352', price: '144.879464', pnl: '-1.803745', liqTime: '2026-01-15 21:30:00', name: 'SOL 1m AR37' },
+    { botId: '46ab51cb-9f61-40c6-9dbc-c962d8e7d8ec', wallet: 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez', market: 'SOL-PERP', size: '0.13947183', price: '145.883416', pnl: '-1.207287', liqTime: '2026-01-15 21:00:00', name: 'SOL 5m AR37' },
+    { botId: '718fa880-bdfb-4d23-a498-88f32996d977', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41', market: 'JUP-PERP', size: '2602.95022413', price: '0.187364', pnl: '-2.00', liqTime: '2026-02-15 00:00:00', name: 'JUP 8H BB Trend Pro (gap liquidation)' },
+  ];
+
+  for (const s of suspects) {
+    try {
+      const existing = await storage.getBotTrades(s.botId, 100);
+      const hasLiq = existing.some(t => t.status === 'liquidated' || t.executionMethod === 'liquidation');
+      if (hasLiq) {
+        console.log(`[Backfill] Skipping ${s.name} — already has liquidation record`);
+        continue;
+      }
+
+      const trade = await storage.createBotTrade({
+        tradingBotId: s.botId,
+        walletAddress: s.wallet,
+        market: s.market,
+        side: 'CLOSE',
+        size: s.size,
+        price: s.price,
+        fee: "0",
+        pnl: s.pnl,
+        status: "liquidated",
+        txSignature: null,
+        webhookPayload: null,
+        errorMessage: `Position liquidated (backfilled): ${parseFloat(s.size).toFixed(4)} ${s.market} at ~$${parseFloat(s.price).toFixed(4)}. Estimated loss: $${Math.abs(parseFloat(s.pnl)).toFixed(2)}`,
+        executionMethod: "liquidation",
+      });
+
+      const pos = await storage.getBotPosition(s.botId, s.market);
+      if (pos) {
+        await storage.upsertBotPosition({
+          tradingBotId: s.botId,
+          walletAddress: s.wallet,
+          market: s.market,
+          baseSize: pos.baseSize,
+          avgEntryPrice: pos.avgEntryPrice,
+          costBasis: pos.costBasis,
+          realizedPnl: pos.realizedPnl,
+          totalFees: pos.totalFees,
+          lastTradeId: trade.id,
+          lastTradeAt: new Date(s.liqTime),
+        });
+      }
+
+      console.log(`[Backfill] Created liquidation record for ${s.name}: trade ${trade.id}`);
+      created++;
+    } catch (err: any) {
+      const msg = `Failed to backfill ${s.name}: ${err.message}`;
+      console.error(`[Backfill] ${msg}`);
+      errors.push(msg);
+    }
+  }
+
+  console.log(`[Backfill] Complete: ${created} records created, ${errors.length} errors`);
+  return { created, errors };
+}
