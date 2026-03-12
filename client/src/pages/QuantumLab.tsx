@@ -14,6 +14,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useWallet } from "@/hooks/useWallet";
 import {
   Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
@@ -28,7 +29,7 @@ import {
 import { motion } from "framer-motion";
 import { Link } from "wouter";
 import { cn } from "@/lib/utils";
-import { getDriftMaxLeverage } from "@/lib/drift-constants";
+import { getDriftMaxLeverage, tickerToDriftMarket } from "@/lib/drift-constants";
 import { generateInsightsReport, formatReportAsText, type StrategyInsightsReport, type ParamSensitivity, type ComboFit, type Suggestion } from "@/lib/strategy-insights";
 import type {
   LabPineInput, LabPineParseResult, LabStrategy, LabBacktestResult,
@@ -2194,7 +2195,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
           </TabsContent>
 
           <TabsContent value="risk">
-            {riskAnalysis && <RiskManagementPanel analysis={riskAnalysis} ticker={selectedResult.ticker} timeframe={selectedResult.timeframe} backtestProfit={selectedResult.netProfitPercent} backtestDrawdown={selectedResult.maxDrawdownPercent} />}
+            {riskAnalysis && <RiskManagementPanel analysis={riskAnalysis} ticker={selectedResult.ticker} timeframe={selectedResult.timeframe} backtestProfit={selectedResult.netProfitPercent} backtestDrawdown={selectedResult.maxDrawdownPercent} strategyName={strategy?.name} />}
           </TabsContent>
 
           <TabsContent value="params">
@@ -2270,7 +2271,7 @@ function HistStatCard({ label, value, color, icon, sublabel }: { label: string; 
 }
 
 
-function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, backtestDrawdown }: { analysis: LabRiskAnalysis; ticker?: string; timeframe?: string; backtestProfit: number; backtestDrawdown: number }) {
+function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, backtestDrawdown, strategyName }: { analysis: LabRiskAnalysis; ticker?: string; timeframe?: string; backtestProfit: number; backtestDrawdown: number; strategyName?: string }) {
   const [showLeverageView, setShowLeverageView] = useState(false);
   const ratingColors: Record<LabRiskAnalysis["riskRating"], { text: string; bg: string; border: string }> = {
     LOW: { text: "text-sky-400", bg: "bg-sky-500/10", border: "border-sky-500/30" },
@@ -2332,7 +2333,7 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
                   )}
                   data-testid={`leverage-card-${l.lev}x`}
                 >
-                  <BotSetupAdvisor leverage={l.lev} drawdownPercent={backtestDrawdown} streakDrawdownPercent={analysis.streakDrawdownPercent} profitPercent={backtestProfit} isRecommended={l.isRecommended} />
+                  <BotSetupAdvisor leverage={l.lev} drawdownPercent={backtestDrawdown} streakDrawdownPercent={analysis.streakDrawdownPercent} profitPercent={backtestProfit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} />
                   <p className={cn("text-[10px] font-medium mb-1.5", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
                   <p className={cn("text-lg font-bold tabular-nums", adjProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
                     {adjProfit >= 0 ? "+" : ""}{adjProfit.toFixed(1)}%
@@ -2889,7 +2890,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
             </div>
           )}
 
-          {activeConfig && <HeatmapRiskSummary config={activeConfig} idx={selectedTopIdx} ticker={selectedCell?.ticker} />}
+          {activeConfig && <HeatmapRiskSummary config={activeConfig} idx={selectedTopIdx} ticker={selectedCell?.ticker} timeframe={selectedCell?.timeframe} strategyName={activeConfig.strategyId ? strategyMap.get(activeConfig.strategyId)?.name : undefined} />}
 
           {activeConfig?.params && (
             <Collapsible>
@@ -2915,9 +2916,23 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
   );
 }
 
-function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended }: { leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean }) {
+function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended, ticker, timeframe, strategyName }: { leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean; ticker?: string; timeframe?: string; strategyName?: string }) {
   const [capital, setCapital] = useState("1000");
   const capitalNum = parseFloat(capital) || 0;
+  const { toast } = useToast();
+  const { publicKeyString: walletAddress, sessionConnected } = useWallet();
+
+  const [isCreating, setIsCreating] = useState(false);
+  const [createdBot, setCreatedBot] = useState<any>(null);
+  const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [agentBalance, setAgentBalance] = useState<string | null>(null);
+  const [agentSolBalance, setAgentSolBalance] = useState<number | null>(null);
+  const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
+  const [balanceLoading, setBalanceLoading] = useState(false);
+  const [balanceChecked, setBalanceChecked] = useState(false);
+  const [solRequired, setSolRequired] = useState(0.04);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
 
   const levDD = drawdownPercent * leverage;
   const levStreakDD = (streakDrawdownPercent || drawdownPercent) * leverage;
@@ -2933,8 +2948,175 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const enableTopUp = bufferPercent > 30;
   const enableReinvest = leverage <= 5 && drawdownPercent < 15;
 
+  const canShowCreateButton = capitalNum > 0 && survivable && ticker && timeframe;
+
+  const fetchBalanceAndAgent = useCallback(async () => {
+    if (!walletAddress || balanceChecked) return;
+    setBalanceLoading(true);
+    try {
+      const balRes = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
+      if (balRes.ok) {
+        const data = await balRes.json();
+        setAgentBalance(data.balance?.toString() || '0');
+        setAgentSolBalance(data.solBalance ?? null);
+        setAgentPublicKey(data.agentPublicKey || null);
+        if (data.botCreationSolRequirement?.required) {
+          setSolRequired(data.botCreationSolRequirement.required);
+        }
+        setBalanceChecked(true);
+      } else if (balRes.status === 400) {
+        setBalanceChecked(true);
+      }
+    } catch {
+    } finally {
+      setBalanceLoading(false);
+    }
+  }, [walletAddress, balanceChecked]);
+
+  const generateBotName = () => {
+    const base = (ticker || "").split("/")[0].toUpperCase();
+    const tf = (timeframe || "").toUpperCase();
+    const sName = (strategyName || "STRATEGY").replace(/_/g, " ").toUpperCase();
+    return `${base} ${tf} ${sName}`;
+  };
+
+  const copyToClipboard = async (text: string, field: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopiedField(field);
+    toast({ title: `${field} copied to clipboard` });
+    setTimeout(() => setCopiedField(null), 2000);
+  };
+
+  const getMessageTemplate = (botId: string) => {
+    return `{
+  "botId": "${botId}",
+  "action": "{{strategy.order.action}}",
+  "contracts": "{{strategy.order.contracts}}",
+  "symbol": "{{ticker}}",
+  "price": "{{close}}",
+  "time": "{{timenow}}",
+  "position_size": "{{strategy.position_size}}"
+}`;
+  };
+
+  const handleCreateBot = async () => {
+    if (!walletAddress || !ticker) return;
+    setCreateError(null);
+
+    const usdcBal = parseFloat(agentBalance || '0');
+    const solBal = agentSolBalance ?? 0;
+
+    if (effectiveTradeSize > usdcBal) {
+      setCreateError(`Insufficient USDC. Need $${effectiveTradeSize.toLocaleString()}, have $${usdcBal.toFixed(2)}`);
+      return;
+    }
+    if (solBal < solRequired) {
+      setCreateError(`Insufficient SOL for gas. Need ~${solRequired} SOL, have ${solBal.toFixed(4)} SOL`);
+      return;
+    }
+
+    setIsCreating(true);
+    try {
+      const market = tickerToDriftMarket(ticker);
+      const botName = generateBotName();
+
+      const res = await fetch('/api/trading-bots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          walletAddress,
+          name: botName,
+          market,
+          leverage,
+          totalInvestment: String(effectiveTradeSize),
+        }),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        setCreateError(error.error || 'Failed to create bot');
+        return;
+      }
+
+      const bot = await res.json();
+
+      const settingsRes = await fetch(`/api/trading-bots/${bot.id}?wallet=${walletAddress}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          leverage,
+          maxPositionSize: effectiveTradeSize * leverage,
+          autoTopUp: enableTopUp,
+          profitReinvest: enableReinvest,
+        }),
+      });
+
+      if (!settingsRes.ok) {
+        console.error('Failed to update bot settings, but bot was created');
+      }
+
+      const depositRes = await fetch('/api/agent/drift-deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ amount: effectiveTradeSize, botId: bot.id }),
+      });
+
+      let fundingFailed = false;
+      if (!depositRes.ok) {
+        const err = await depositRes.json();
+        fundingFailed = true;
+        setCreateError(`Bot created but funding failed: ${err.error || 'Unknown error'}. You can fund it later from the bot details page.`);
+      }
+
+      setCreatedBot(bot);
+
+      try {
+        const webhookRes = await fetch(`/api/user/webhook-url?wallet=${walletAddress}`, { credentials: 'include' });
+        if (webhookRes.ok) {
+          const data = await webhookRes.json();
+          setWebhookUrl(data.webhookUrl);
+        }
+      } catch {}
+
+      queryClient.invalidateQueries({ queryKey: ["/api/trading-bots"] });
+
+      if (!fundingFailed) {
+        toast({
+          title: 'Bot created and funded!',
+          description: `${botName} — $${effectiveTradeSize} at ${leverage}x leverage`,
+        });
+      } else {
+        toast({
+          title: 'Bot created but not funded',
+          description: 'You can fund it later from the bot details page',
+          variant: 'destructive',
+        });
+      }
+    } catch (error: any) {
+      setCreateError(error.message || 'Failed to create bot');
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const isAuthenticated = !!walletAddress && sessionConnected;
+  const hasAgentWallet = !!agentPublicKey;
+  const usdcBal = parseFloat(agentBalance || '0');
+  const hasSufficientBalance = usdcBal >= effectiveTradeSize && (agentSolBalance ?? 0) >= solRequired;
+
+  const getDisabledReason = () => {
+    if (!isAuthenticated) return "Connect your wallet to create a bot";
+    if (balanceLoading) return "Checking wallet balance...";
+    if (!hasAgentWallet) return "Set up your agent wallet first (go to Wallet page)";
+    if (!hasSufficientBalance) return `Need $${effectiveTradeSize.toLocaleString()} USDC and ${solRequired} SOL in agent wallet`;
+    return null;
+  };
+  const disabledReason = getDisabledReason();
+
   return (
-    <Popover>
+    <Popover onOpenChange={(open) => { if (open && isAuthenticated && !balanceChecked) fetchBalanceAndAgent(); }}>
       <PopoverTrigger asChild>
         <button
           className={cn(
@@ -2947,98 +3129,209 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-72 bg-slate-900 border-white/10 p-0" align="center" side="top" sideOffset={8}>
-        <div className="p-3 border-b border-white/10">
-          <div className="flex items-center gap-2 mb-2">
-            <Wallet className="w-3.5 h-3.5 text-violet-400" />
-            <h4 className="text-xs font-semibold text-white">Bot Setup at {leverage}x</h4>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-white/40 shrink-0">Capital $</span>
-            <Input
-              type="number"
-              value={capital}
-              onChange={(e) => setCapital(e.target.value)}
-              className="h-6 text-xs bg-white/5 border-white/10 text-white px-2"
-              min="1"
-              data-testid={`setup-capital-${leverage}x`}
-            />
-          </div>
-        </div>
-        {capitalNum > 0 && (
+        {createdBot ? (
           <div className="p-3 space-y-2.5">
+            <div className="flex items-center gap-2">
+              {createError ? (
+                <AlertTriangle className="w-4 h-4 text-yellow-400" />
+              ) : (
+                <CheckCircle2 className="w-4 h-4 text-sky-400" />
+              )}
+              <h4 className="text-xs font-semibold text-white">{createError ? 'Bot Created (Unfunded)' : 'Bot Created!'}</h4>
+            </div>
+            {createError && (
+              <div className="flex items-start gap-1.5 p-2 rounded bg-yellow-500/10 border border-yellow-500/20">
+                <AlertTriangle className="w-3 h-3 text-yellow-400 shrink-0 mt-0.5" />
+                <p className="text-[10px] text-yellow-300 leading-relaxed">{createError}</p>
+              </div>
+            )}
+            <div className={cn("p-2 rounded", createError ? "bg-yellow-500/10 border border-yellow-500/20" : "bg-sky-500/10 border border-sky-500/20")}>
+              <p className={cn("text-[10px] font-medium", createError ? "text-yellow-300" : "text-sky-300")}>{createdBot.name}</p>
+              <p className="text-[9px] text-white/40 mt-0.5">ID: {createdBot.id}</p>
+            </div>
+
             <div className="space-y-1.5">
-              <div className="flex justify-between items-center">
-                <span className="text-[10px] text-white/40">Investment Amount</span>
-                <span className="text-xs font-bold text-white tabular-nums">${effectiveTradeSize.toLocaleString()}</span>
+              <p className="text-[10px] text-white/50 font-medium">Alert Message</p>
+              <div className="p-1.5 rounded bg-white/5 border border-white/10">
+                <pre className="text-[9px] text-white/70 font-mono whitespace-pre-wrap break-all leading-relaxed">{getMessageTemplate(createdBot.id)}</pre>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="text-[10px] text-white/40">Equity Buffer</span>
-                <span className="text-xs font-bold text-indigo-400 tabular-nums">+${equityBuffer.toLocaleString()}</span>
-              </div>
-              <div className="w-full h-1.5 bg-white/5 rounded-full overflow-hidden">
-                <div className="h-full bg-violet-500 rounded-full" style={{ width: `${Math.min(100, ((effectiveTradeSize / capitalNum) * 100))}%` }} />
-              </div>
-              <div className="flex justify-between text-[9px] text-white/30">
-                <span>{((effectiveTradeSize / capitalNum) * 100).toFixed(0)}% trading</span>
-                <span>{bufferPercent.toFixed(0)}% buffer</span>
-              </div>
+              <Button
+                size="sm"
+                className="w-full h-6 text-[10px] bg-violet-600 hover:bg-violet-500"
+                onClick={() => copyToClipboard(getMessageTemplate(createdBot.id), 'Message')}
+                data-testid={`copy-alert-msg-${leverage}x`}
+              >
+                {copiedField === 'Message' ? <Check className="w-3 h-3 mr-1" /> : <Copy className="w-3 h-3 mr-1" />}
+                {copiedField === 'Message' ? 'Copied!' : 'Copy Alert Message'}
+              </Button>
             </div>
 
-            <div className="border-t border-white/5 pt-2 space-y-1.5">
-              <div className="flex justify-between items-center">
-                <span className="text-[10px] text-white/40">Set Leverage</span>
-                <span className="text-xs font-semibold text-violet-400">{leverage}x</span>
+            <div className="space-y-1.5">
+              <p className="text-[10px] text-white/50 font-medium">Webhook URL</p>
+              <div className="p-1.5 rounded bg-white/5 border border-white/10">
+                <p className="text-[9px] text-white/70 font-mono break-all">{webhookUrl || 'Loading...'}</p>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="text-[10px] text-white/40">Projected Profit</span>
-                <span className={cn("text-xs font-semibold tabular-nums", projectedProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
-                  {projectedProfit >= 0 ? "+" : ""}${projectedProfit.toFixed(2)}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-[10px] text-white/40">Worst-Case Loss</span>
-                <span className="text-xs font-semibold text-purple-400 tabular-nums">-${projectedLoss.toFixed(2)}</span>
-              </div>
+              <Button
+                size="sm"
+                className="w-full h-6 text-[10px] bg-violet-600 hover:bg-violet-500"
+                onClick={() => webhookUrl && copyToClipboard(webhookUrl, 'Webhook URL')}
+                disabled={!webhookUrl}
+                data-testid={`copy-webhook-${leverage}x`}
+              >
+                {copiedField === 'Webhook URL' ? <Check className="w-3 h-3 mr-1" /> : <Copy className="w-3 h-3 mr-1" />}
+                {copiedField === 'Webhook URL' ? 'Copied!' : 'Copy Webhook URL'}
+              </Button>
             </div>
 
-            <div className="border-t border-white/5 pt-2 space-y-1">
-              <p className="text-[10px] text-white/50 font-medium mb-1">Recommended Settings</p>
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-white/40">Auto Top-Up</span>
-                <Badge className={cn("text-[9px] h-4", enableTopUp ? "bg-sky-500/10 text-sky-400 border-sky-500/30" : "bg-white/5 text-white/40 border-white/10")}>{enableTopUp ? "ON" : "OFF"}</Badge>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-white/40">Profit Reinvest</span>
-                <Badge className={cn("text-[9px] h-4", enableReinvest ? "bg-sky-500/10 text-sky-400 border-sky-500/30" : "bg-white/5 text-white/40 border-white/10")}>{enableReinvest ? "ON" : "OFF"}</Badge>
-              </div>
-            </div>
-
-            {!survivable && (
-              <div className="flex items-start gap-1.5 p-2 rounded bg-purple-500/10 border border-purple-500/20">
-                <AlertTriangle className="w-3 h-3 text-purple-400 shrink-0 mt-0.5" />
-                <p className="text-[10px] text-purple-300 leading-relaxed">Drawdown at {leverage}x exceeds 80%. High liquidation risk — consider lower leverage.</p>
-              </div>
-            )}
-            {survivable && enableTopUp && (
-              <div className="flex items-start gap-1.5 p-2 rounded bg-indigo-500/10 border border-indigo-500/20">
-                <Info className="w-3 h-3 text-indigo-400 shrink-0 mt-0.5" />
-                <p className="text-[10px] text-indigo-300 leading-relaxed">Keep ${equityBuffer.toLocaleString()} as buffer in your agent wallet with Auto Top-Up enabled to survive drawdown periods.</p>
-              </div>
-            )}
-            {survivable && !enableTopUp && equityBuffer > 0 && (
-              <div className="flex items-start gap-1.5 p-2 rounded bg-sky-500/10 border border-sky-500/20">
-                <Info className="w-3 h-3 text-sky-400 shrink-0 mt-0.5" />
-                <p className="text-[10px] text-sky-300 leading-relaxed">Deposit full ${capitalNum.toLocaleString()} into the bot. The ${equityBuffer.toLocaleString()} buffer absorbs drawdowns before recovery.</p>
-              </div>
-            )}
+            <p className="text-[9px] text-white/30 leading-relaxed">Paste the alert message in TradingView Alert → Message, and the webhook URL in Notifications → Webhook URL.</p>
           </div>
+        ) : (
+          <>
+            <div className="p-3 border-b border-white/10">
+              <div className="flex items-center gap-2 mb-2">
+                <Wallet className="w-3.5 h-3.5 text-violet-400" />
+                <h4 className="text-xs font-semibold text-white">Bot Setup at {leverage}x</h4>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-white/40 shrink-0">Capital $</span>
+                <Input
+                  type="number"
+                  value={capital}
+                  onChange={(e) => { setCapital(e.target.value); setBalanceChecked(false); }}
+                  className="h-6 text-xs bg-white/5 border-white/10 text-white px-2"
+                  min="1"
+                  data-testid={`setup-capital-${leverage}x`}
+                />
+              </div>
+            </div>
+            {capitalNum > 0 && (
+              <div className="p-3 space-y-2.5">
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-white/40">Investment Amount</span>
+                    <span className="text-xs font-bold text-white tabular-nums">${effectiveTradeSize.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-white/40">Equity Buffer</span>
+                    <span className="text-xs font-bold text-indigo-400 tabular-nums">+${equityBuffer.toLocaleString()}</span>
+                  </div>
+                  <div className="w-full h-1.5 bg-white/5 rounded-full overflow-hidden">
+                    <div className="h-full bg-violet-500 rounded-full" style={{ width: `${Math.min(100, ((effectiveTradeSize / capitalNum) * 100))}%` }} />
+                  </div>
+                  <div className="flex justify-between text-[9px] text-white/30">
+                    <span>{((effectiveTradeSize / capitalNum) * 100).toFixed(0)}% trading</span>
+                    <span>{bufferPercent.toFixed(0)}% buffer</span>
+                  </div>
+                </div>
+
+                <div className="border-t border-white/5 pt-2 space-y-1.5">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-white/40">Set Leverage</span>
+                    <span className="text-xs font-semibold text-violet-400">{leverage}x</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-white/40">Projected Profit</span>
+                    <span className={cn("text-xs font-semibold tabular-nums", projectedProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
+                      {projectedProfit >= 0 ? "+" : ""}${projectedProfit.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-white/40">Worst-Case Loss</span>
+                    <span className="text-xs font-semibold text-purple-400 tabular-nums">-${projectedLoss.toFixed(2)}</span>
+                  </div>
+                </div>
+
+                <div className="border-t border-white/5 pt-2 space-y-1">
+                  <p className="text-[10px] text-white/50 font-medium mb-1">Recommended Settings</p>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-white/40">Auto Top-Up</span>
+                    <Badge className={cn("text-[9px] h-4", enableTopUp ? "bg-sky-500/10 text-sky-400 border-sky-500/30" : "bg-white/5 text-white/40 border-white/10")}>{enableTopUp ? "ON" : "OFF"}</Badge>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-white/40">Profit Reinvest</span>
+                    <Badge className={cn("text-[9px] h-4", enableReinvest ? "bg-sky-500/10 text-sky-400 border-sky-500/30" : "bg-white/5 text-white/40 border-white/10")}>{enableReinvest ? "ON" : "OFF"}</Badge>
+                  </div>
+                </div>
+
+                {!survivable && (
+                  <div className="flex items-start gap-1.5 p-2 rounded bg-purple-500/10 border border-purple-500/20">
+                    <AlertTriangle className="w-3 h-3 text-purple-400 shrink-0 mt-0.5" />
+                    <p className="text-[10px] text-purple-300 leading-relaxed">Drawdown at {leverage}x exceeds 80%. High liquidation risk — consider lower leverage.</p>
+                  </div>
+                )}
+                {survivable && enableTopUp && (
+                  <div className="flex items-start gap-1.5 p-2 rounded bg-indigo-500/10 border border-indigo-500/20">
+                    <Info className="w-3 h-3 text-indigo-400 shrink-0 mt-0.5" />
+                    <p className="text-[10px] text-indigo-300 leading-relaxed">Keep ${equityBuffer.toLocaleString()} as buffer in your agent wallet with Auto Top-Up enabled to survive drawdown periods.</p>
+                  </div>
+                )}
+                {survivable && !enableTopUp && equityBuffer > 0 && (
+                  <div className="flex items-start gap-1.5 p-2 rounded bg-sky-500/10 border border-sky-500/20">
+                    <Info className="w-3 h-3 text-sky-400 shrink-0 mt-0.5" />
+                    <p className="text-[10px] text-sky-300 leading-relaxed">Deposit full ${capitalNum.toLocaleString()} into the bot. The ${equityBuffer.toLocaleString()} buffer absorbs drawdowns before recovery.</p>
+                  </div>
+                )}
+
+                {canShowCreateButton && (
+                  <div className="border-t border-white/5 pt-2">
+                    {createError && (
+                      <div className="flex items-start gap-1.5 p-2 rounded bg-purple-500/10 border border-purple-500/20 mb-2">
+                        <AlertTriangle className="w-3 h-3 text-purple-400 shrink-0 mt-0.5" />
+                        <p className="text-[10px] text-purple-300 leading-relaxed">{createError}</p>
+                      </div>
+                    )}
+                    {disabledReason ? (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <div>
+                            <Button
+                              size="sm"
+                              className="w-full h-7 text-[10px] bg-violet-600/50 text-white/50 cursor-not-allowed"
+                              disabled
+                              data-testid={`create-bot-btn-${leverage}x`}
+                            >
+                              <Rocket className="w-3 h-3 mr-1" />
+                              Create Bot
+                            </Button>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom" className="text-xs max-w-[200px]">
+                          {disabledReason}
+                        </TooltipContent>
+                      </Tooltip>
+                    ) : (
+                      <Button
+                        size="sm"
+                        className="w-full h-7 text-[10px] bg-violet-600 hover:bg-violet-500 text-white"
+                        onClick={handleCreateBot}
+                        disabled={isCreating}
+                        data-testid={`create-bot-btn-${leverage}x`}
+                      >
+                        {isCreating ? (
+                          <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Creating...</>
+                        ) : (
+                          <><Rocket className="w-3 h-3 mr-1" /> Create Bot — {generateBotName()}</>
+                        )}
+                      </Button>
+                    )}
+                    {balanceChecked && isAuthenticated && hasAgentWallet && (
+                      <div className="flex justify-between text-[9px] text-white/30 mt-1">
+                        <span>Wallet: ${usdcBal.toFixed(2)} USDC</span>
+                        <span>{(agentSolBalance ?? 0).toFixed(4)} SOL</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
       </PopoverContent>
     </Popover>
   );
 }
 
-function HeatmapRiskSummary({ config, idx, ticker }: { config: any; idx: number; ticker?: string }) {
+function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName }: { config: any; idx: number; ticker?: string; timeframe?: string; strategyName?: string }) {
   const [showProjection, setShowProjection] = useState(true);
   const dd = config.maxDrawdownPercent || 0;
   const profit = config.netProfitPercent || 0;
@@ -3133,7 +3426,7 @@ function HeatmapRiskSummary({ config, idx, ticker }: { config: any; idx: number;
               )}
               data-testid={`heatmap-lev-${l.lev}x-${idx}`}
             >
-              <BotSetupAdvisor leverage={l.lev} drawdownPercent={dd} profitPercent={profit} isRecommended={l.isRecommended} />
+              <BotSetupAdvisor leverage={l.lev} drawdownPercent={dd} profitPercent={profit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} />
               <p className={cn("text-[10px] font-medium mb-1", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
               <p className={cn("text-sm font-bold tabular-nums", profit * l.lev >= 0 ? "text-sky-400" : "text-purple-400")}>
                 {profit * l.lev >= 0 ? "+" : ""}{(profit * l.lev).toFixed(1)}%
