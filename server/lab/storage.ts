@@ -49,7 +49,7 @@ export interface ILabStorage {
   getResult(resultId: number): Promise<LabOptResult | undefined>;
   getAllResultsForStrategy(strategyId: number): Promise<{ strategy: LabStrategy | undefined; totalRuns: number; totalResults: number; results: LabOptResult[] }>;
 
-  createJob(config: LabOptimizationConfig): LabJob;
+  createJob(config: LabOptimizationConfig, options?: { forRunId?: number; hasActiveWorker?: boolean }): LabJob;
   getJob(id: string): LabJob | undefined;
   forceEvictAllJobs(): number;
   getJobByRunId(runId: number): LabJob | undefined;
@@ -380,17 +380,33 @@ export class LabDatabaseStorage implements ILabStorage {
     return { strategy, totalRuns: completedRuns.length, totalResults: results.length, results };
   }
 
-  createJob(config: LabOptimizationConfig, forRunId?: number): LabJob {
+  createJob(config: LabOptimizationConfig, options?: { forRunId?: number; hasActiveWorker?: boolean }): LabJob {
     const STALE_TIMEOUT_MS = 5 * 60 * 1000;
     const now = Date.now();
+    const forRunId = options?.forRunId;
+    const hasActiveWorker = options?.hasActiveWorker ?? false;
+
+    if (forRunId) {
+      const existingJob = this.getJobByRunId(forRunId);
+      if (existingJob && existingJob.progress.status !== "complete" && existingJob.progress.status !== "error") {
+        console.log(`[QuantumLab] Reusing existing job ${existingJob.id} for run ${forRunId}`);
+        return existingJob;
+      }
+    }
+
     const activeJobs = Array.from(this.jobs.values()).filter(
       (j) => j.progress.status !== "complete" && j.progress.status !== "error"
     );
     for (const staleJob of activeJobs) {
-      if (now - staleJob.lastUpdated > STALE_TIMEOUT_MS) {
-        console.log(`[QuantumLab] Evicting stale job ${staleJob.id} (last updated ${Math.round((now - staleJob.lastUpdated) / 1000)}s ago, status: ${staleJob.progress.status})`);
+      const isStaleByTime = now - staleJob.lastUpdated > STALE_TIMEOUT_MS;
+      const isOrphanedJob = !hasActiveWorker && staleJob.progress.status !== "fetching";
+      if (isStaleByTime || isOrphanedJob) {
+        const reason = isStaleByTime
+          ? `stale (last updated ${Math.round((now - staleJob.lastUpdated) / 1000)}s ago)`
+          : `orphaned (no active worker, status: ${staleJob.progress.status})`;
+        console.log(`[QuantumLab] Evicting ${reason} job ${staleJob.id}`);
         staleJob.progress.status = "error";
-        staleJob.progress.stage = "Evicted: stale job";
+        staleJob.progress.stage = `Evicted: ${reason}`;
         this.scheduleCleanup(staleJob.id);
       }
     }

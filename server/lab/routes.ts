@@ -607,7 +607,7 @@ export function registerLabRoutes(app: Express): void {
         }
       }
 
-      const job = labStorage.createJob(config);
+      const job = labStorage.createJob(config, { hasActiveWorker: !!activeWorker });
 
       let guidedInsights: import("@shared/schema").GuidedInsights | undefined;
       let guidedInsightsPerCombo: Record<string, import("@shared/schema").GuidedInsights> | undefined;
@@ -763,7 +763,7 @@ export function registerLabRoutes(app: Express): void {
         }
       }
 
-      const job = labStorage.createJob(config);
+      const job = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: !!activeWorker });
       job.runId = runId;
 
       await labStorage.resumeRun(runId);
@@ -1071,7 +1071,7 @@ export function registerLabRoutes(app: Express): void {
         }
       }
 
-      const job = labStorage.createJob(config);
+      const job = labStorage.createJob(config, { forRunId: run.id, hasActiveWorker: !!activeWorker });
       job.runId = run.id;
       await labStorage.resumeRun(run.id);
       const detail = hasComboCheckpoint
