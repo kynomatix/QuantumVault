@@ -1421,7 +1421,7 @@ function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel
   return (
     <Card className="bg-violet-500/5 border border-violet-500/20 p-0 overflow-hidden" data-testid="job-monitor">
       <div className="relative w-full h-1.5 bg-white/5">
-        <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-violet-600 to-violet-400 transition-all duration-500 ease-out" style={{ width: `${Math.round(progress.percent ?? 0)}%` }} />
+        <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-violet-600 to-violet-400 transition-all duration-500 ease-out" style={{ width: `${Math.min(100, Math.round(progress.percent ?? 0))}%` }} />
       </div>
 
       <div className="p-5 space-y-4">
@@ -1436,7 +1436,7 @@ function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel
             </div>
           </div>
           <div className="flex items-center gap-3 flex-shrink-0">
-            <span className="text-2xl font-bold font-mono tabular-nums text-white" data-testid="text-percent">{Math.round(progress.percent ?? 0)}%</span>
+            <span className="text-2xl font-bold font-mono tabular-nums text-white" data-testid="text-percent">{Math.min(100, Math.round(progress.percent ?? 0))}%</span>
             <Button variant="destructive" size="sm" onClick={handleCancel} disabled={cancelling || progress.status === "complete" || progress.status === "error"} data-testid="button-cancel">
               {cancelling ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <X className="w-3 h-3 mr-1" />} Cancel
             </Button>
@@ -1606,10 +1606,10 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
             )}
           </div>
           <div className="w-full bg-white/10 rounded-full h-2 mb-3">
-            <div className="bg-violet-500 h-2 rounded-full transition-all duration-500" style={{ width: `${liveProgress.percent ?? 0}%` }} />
+            <div className="bg-violet-500 h-2 rounded-full transition-all duration-500" style={{ width: `${Math.min(100, liveProgress.percent ?? 0)}%` }} />
           </div>
           <div className="flex items-center gap-4 text-xs text-white/60">
-            <span>{liveProgress.percent ?? 0}% complete</span>
+            <span>{Math.min(100, liveProgress.percent ?? 0)}% complete</span>
             <span>{liveProgress.current?.toLocaleString() ?? 0} / {liveProgress.total?.toLocaleString() ?? 0} configs</span>
             {liveProgress.eta && <span>ETA: {Math.ceil(liveProgress.eta / 60000)}m</span>}
           </div>

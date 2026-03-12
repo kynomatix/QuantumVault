@@ -809,6 +809,22 @@ The optimizer is the core of QuantumLab. It takes your strategy's parsed paramet
 1. **Random Search** — The optimizer generates random parameter combinations within each input's min/max range, respecting step sizes and option lists. Each combination is backtested against the historical data and scored.
 2. **Refinement** — The top K results become "seeds." The optimizer generates small jittered variations around each seed — tweaking values by small amounts to explore nearby configurations. This often finds improvements that random search misses.
 
+### Deep Search
+
+Deep Search is an optional mode that adds 3 additional refinement rounds after the standard random + refine pass. Each round re-ranks all results and refines the top seeds again with a progressively tighter jitter radius:
+
+- **Round 1** — 10% jitter radius, all optimizable parameters perturbed
+- **Round 2** — 6% jitter radius, re-ranked seeds from Round 1
+- **Round 3** — 3% jitter radius, fine-tuning the absolute best configurations
+
+Unlike the standard refinement (which only jitters 4 random parameters at 15% radius), Deep Search jitters **all** numeric parameters simultaneously at each step, making it much more thorough at exploring the neighborhood around a good configuration.
+
+**Iteration math:** Deep Search uses the same Top K and Refinements/Seed settings as the standard pass for each round. With settings of 6000/60/120, Deep Search adds 3 × 60 × 120 = 21,600 additional iterations on top of the standard 13,200, for a total of 34,800. That's roughly 2.6x the work of a standard run.
+
+**When to use it:** Deep Search is most valuable when you've already found a promising configuration and want to squeeze out every last improvement. It's automatically disabled in Smoke Test mode.
+
+**Combining with Guided Mode:** Deep Search and Guided Mode (Use Insights) work independently and can be used together. Guided Mode improves the random search phase by seeding it with known-good configurations from past runs, while Deep Search improves the refinement phase by adding more rounds of narrowing perturbation. Using both gives you the best of both approaches.
+
 ### Progress & Checkpointing
 
 During a run, you can monitor progress in real time via the live progress display showing the current stage (Random Search / Refinement), iteration count, elapsed time, and best score so far. The optimizer saves checkpoints every 60 seconds, so if your session disconnects or the server restarts, the run automatically resumes from where it left off.
