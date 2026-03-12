@@ -1,4 +1,7 @@
 import { storage } from "./storage";
+import { db } from "./db";
+import { botTrades } from "@shared/schema";
+import { eq } from "drizzle-orm";
 import { getPerpPositions } from "./drift-service";
 import { getMarketPrice } from "./drift-price";
 import type { TradingBot } from "@shared/schema";
@@ -422,71 +425,238 @@ export function stopPeriodicReconciliation(): void {
   }
 }
 
-export async function backfillLiquidationRecords(): Promise<{ created: number; errors: string[] }> {
+export async function backfillLiquidationRecords(): Promise<{ created: number; skipped: number; errors: string[] }> {
   const errors: string[] = [];
   let created = 0;
+  let skipped = 0;
 
-  const suspects = [
-    { botId: 'cbd05f9a-f0a6-49d6-a8c8-47ba102c284f', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ', market: 'RENDER-PERP', size: '4.83146276', price: '1.362564', pnl: '-4.736811', liqTime: '2026-02-25 12:00:00', name: 'RNDR 45m BB Pro (Copy)' },
-    { botId: '4c7d6610-4322-4dbf-afeb-ef1dc009cb87', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ', market: 'FARTCOIN-PERP', size: '22.06741024', price: '0.147129', pnl: '-0.215464', liqTime: '2026-02-25 00:00:00', name: 'FARTCOIN 4H OI Skalpa (Copy)' },
-    { botId: 'ce22aa00-45d0-4758-add8-9986300be854', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ', market: 'SUI-PERP', size: '5.69608751', price: '0.964165', pnl: '-2.536312', liqTime: '2026-02-17 00:00:00', name: 'SUI 1H OI Skalpa (Copy)' },
-    { botId: 'b4d43164-9b59-45bc-ba5a-747e31655a9e', wallet: '6ULLaZkuWoML1qN23TqSw9ANBBCGFXaAvKbFzXj2Kehh', market: 'DOGE-PERP', size: '202.85178424', price: '0.103303', pnl: '-7.253335', liqTime: '2026-02-02 10:00:00', name: 'DOGE 2H OI Skalpa' },
-    { botId: 'a69ce267-fa8b-4e48-b5d6-757b5788680d', wallet: '6ULLaZkuWoML1qN23TqSw9ANBBCGFXaAvKbFzXj2Kehh', market: 'SOL-PERP', size: '0.11505717', price: '112.226520', pnl: '-10.512226', liqTime: '2026-01-31 16:30:00', name: 'SOL 45m OI Skalpa V3' },
-    { botId: '5747b024-e6df-471f-a842-6ee67977cbd0', wallet: 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez', market: 'SOL-PERP', size: '0.05286352', price: '144.879464', pnl: '-1.803745', liqTime: '2026-01-15 21:30:00', name: 'SOL 1m AR37' },
-    { botId: '46ab51cb-9f61-40c6-9dbc-c962d8e7d8ec', wallet: 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez', market: 'SOL-PERP', size: '0.13947183', price: '145.883416', pnl: '-1.207287', liqTime: '2026-01-15 21:00:00', name: 'SOL 5m AR37' },
-    { botId: '718fa880-bdfb-4d23-a498-88f32996d977', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41', market: 'JUP-PERP', size: '2602.95022413', price: '0.187364', pnl: '-2.00', liqTime: '2026-02-15 00:00:00', name: 'JUP 8H BB Trend Pro (gap liquidation)' },
+  interface BackfillRecord {
+    botId: string;
+    wallet: string;
+    market: string;
+    side: string;
+    size: string;
+    entryPrice: string;
+    exitPrice: string;
+    pnl: string;
+    time: string;
+    name: string;
+    type: 'liquidation' | 'implicit_close' | 'partial_liquidation';
+  }
+
+  const records: BackfillRecord[] = [
+    // ── FULL LIQUIDATIONS ──
+    // Position went to zero without a CLOSE trade (on-chain liquidation ate entire remaining position)
+
+    { botId: 'b4d43164-9b59-45bc-ba5a-747e31655a9e', wallet: '6ULLaZkuWoML1qN23TqSw9ANBBCGFXaAvKbFzXj2Kehh',
+      market: 'DOGE-PERP', side: 'CLOSE', size: '202.85178424', entryPrice: '0.103303', exitPrice: '0.103303',
+      pnl: '-7.25', time: '2026-02-02 10:00:00', name: 'DOGE 2H OI Skalpa', type: 'liquidation' },
+
+    { botId: 'a69ce267-fa8b-4e48-b5d6-757b5788680d', wallet: '6ULLaZkuWoML1qN23TqSw9ANBBCGFXaAvKbFzXj2Kehh',
+      market: 'SOL-PERP', side: 'CLOSE', size: '0.11505717', entryPrice: '112.226520', exitPrice: '112.226520',
+      pnl: '-10.51', time: '2026-01-31 16:30:00', name: 'SOL 45m OI Skalpa V3', type: 'liquidation' },
+
+    { botId: '5747b024-e6df-471f-a842-6ee67977cbd0', wallet: 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
+      market: 'SOL-PERP', side: 'CLOSE', size: '0.05286352', entryPrice: '144.879464', exitPrice: '144.879464',
+      pnl: '-1.80', time: '2026-01-15 21:30:00', name: 'SOL 1m AR37', type: 'liquidation' },
+
+    { botId: '46ab51cb-9f61-40c6-9dbc-c962d8e7d8ec', wallet: 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
+      market: 'SOL-PERP', side: 'CLOSE', size: '0.13947183', entryPrice: '145.883416', exitPrice: '145.883416',
+      pnl: '-1.21', time: '2026-01-15 21:00:00', name: 'SOL 5m AR37', type: 'liquidation' },
+
+    { botId: 'cbd05f9a-f0a6-49d6-a8c8-47ba102c284f', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'RENDER-PERP', side: 'CLOSE', size: '26.37013681', entryPrice: '1.450430', exitPrice: '1.450430',
+      pnl: '-4.74', time: '2026-02-25 12:00:00', name: 'RNDR 45m BB Pro (Copy)', type: 'liquidation' },
+
+    { botId: '4c7d6610-4322-4dbf-afeb-ef1dc009cb87', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'FARTCOIN-PERP', side: 'CLOSE', size: '22.06741024', entryPrice: '0.147129', exitPrice: '0.147129',
+      pnl: '-0.22', time: '2026-02-25 00:00:00', name: 'FARTCOIN 4H OI Skalpa (Copy)', type: 'liquidation' },
+
+    { botId: 'ce22aa00-45d0-4758-add8-9986300be854', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'SUI-PERP', side: 'CLOSE', size: '5.69608751', entryPrice: '0.964165', exitPrice: '0.964165',
+      pnl: '-2.54', time: '2026-02-17 00:00:00', name: 'SUI 1H OI Skalpa (Copy)', type: 'liquidation' },
+
+    // ── PARTIAL LIQUIDATION ──
+    // DRIFT: LONG 4381 reduced to ~778 by on-chain partial liq before Mar 6 SHORT 190
+
+    { botId: 'e9ac3a91-9d89-4be2-b11d-ae8e02f974e5', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'DRIFT-PERP', side: 'CLOSE', size: '3602.86', entryPrice: '0.095500', exitPrice: '0.085000',
+      pnl: '-37.83', time: '2026-03-04 00:00:00', name: 'DRIFT 8H BB Pro (partial liq)', type: 'partial_liquidation' },
+
+    // ── IMPLICIT CLOSES (direction flips where the close was not recorded) ──
+    // On Drift, sending opposite-direction order closes old position + opens new in one tx.
+    // The old close PnL was never tracked. These are normal trades, not liquidations.
+
+    // RNDR 2H OI Skalpa (Copy) — 3 direction flips
+    { botId: '2afe9363-e7f1-4d3c-b32e-da2672929dba', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'RENDER-PERP', side: 'CLOSE', size: '34.30', entryPrice: '1.442710', exitPrice: '1.461638',
+      pnl: '-0.65', time: '2026-02-17 16:00:36', name: 'RNDR 2H Copy: close SHORT before LONG flip', type: 'implicit_close' },
+    { botId: '2afe9363-e7f1-4d3c-b32e-da2672929dba', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'RENDER-PERP', side: 'CLOSE', size: '41.68', entryPrice: '1.460558', exitPrice: '1.446603',
+      pnl: '-0.58', time: '2026-02-19 02:01:10', name: 'RNDR 2H Copy: close LONG before SHORT flip', type: 'implicit_close' },
+    { botId: '2afe9363-e7f1-4d3c-b32e-da2672929dba', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'RENDER-PERP', side: 'CLOSE', size: '28.32', entryPrice: '1.392532', exitPrice: '1.416956',
+      pnl: '0.69', time: '2026-02-20 02:00:22', name: 'RNDR 2H Copy: close LONG before SHORT flip', type: 'implicit_close' },
+
+    // RNDR 4H AR37 — 2 direction flips
+    { botId: '34617bf6-df22-49b0-a86f-62d5591a1984', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'RENDER-PERP', side: 'CLOSE', size: '72.27', entryPrice: '1.383082', exitPrice: '1.383082',
+      pnl: '0.00', time: '2026-02-24 08:00:06', name: 'RNDR 4H AR37: close LONG before SHORT flip', type: 'implicit_close' },
+    { botId: '34617bf6-df22-49b0-a86f-62d5591a1984', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'RENDER-PERP', side: 'CLOSE', size: '73.78', entryPrice: '1.345176', exitPrice: '1.356984',
+      pnl: '0.87', time: '2026-03-06 20:00:06', name: 'RNDR 4H AR37: close LONG before SHORT flip', type: 'implicit_close' },
+
+    // FARTCOIN 4H OI Skalpa (Copy) — 6 direction flips
+    { botId: '4c7d6610-4322-4dbf-afeb-ef1dc009cb87', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'FARTCOIN-PERP', side: 'CLOSE', size: '108.39', entryPrice: '0.175000', exitPrice: '0.212522',
+      pnl: '4.07', time: '2026-02-15 06:00:18', name: 'FARTCOIN Copy: close LONG before SHORT flip', type: 'implicit_close' },
+    { botId: '4c7d6610-4322-4dbf-afeb-ef1dc009cb87', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'FARTCOIN-PERP', side: 'CLOSE', size: '96.54', entryPrice: '0.198077', exitPrice: '0.194651',
+      pnl: '0.33', time: '2026-02-17 10:00:26', name: 'FARTCOIN Copy: close SHORT before LONG flip', type: 'implicit_close' },
+    { botId: '4c7d6610-4322-4dbf-afeb-ef1dc009cb87', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'FARTCOIN-PERP', side: 'CLOSE', size: '81.01', entryPrice: '0.194651', exitPrice: '0.193243',
+      pnl: '-0.11', time: '2026-02-17 16:00:31', name: 'FARTCOIN Copy: close LONG before SHORT flip', type: 'implicit_close' },
+    { botId: '4c7d6610-4322-4dbf-afeb-ef1dc009cb87', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'FARTCOIN-PERP', side: 'CLOSE', size: '74.19', entryPrice: '0.194100', exitPrice: '0.193828',
+      pnl: '0.02', time: '2026-02-18 18:00:32', name: 'FARTCOIN Copy: close SHORT before LONG flip', type: 'implicit_close' },
+    { botId: '4c7d6610-4322-4dbf-afeb-ef1dc009cb87', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'FARTCOIN-PERP', side: 'CLOSE', size: '68.08', entryPrice: '0.185599', exitPrice: '0.161917',
+      pnl: '1.61', time: '2026-02-23 02:00:23', name: 'FARTCOIN Copy: close SHORT before LONG flip', type: 'implicit_close' },
+    { botId: '4c7d6610-4322-4dbf-afeb-ef1dc009cb87', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'FARTCOIN-PERP', side: 'CLOSE', size: '33.41', entryPrice: '0.140081', exitPrice: '0.147129',
+      pnl: '0.24', time: '2026-02-24 21:00:23', name: 'FARTCOIN Copy: close LONG before SHORT flip', type: 'implicit_close' },
+
+    // SOL 1m AR37 — 2 direction flips
+    { botId: '5747b024-e6df-471f-a842-6ee67977cbd0', wallet: 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
+      market: 'SOL-PERP', side: 'CLOSE', size: '0.0587', entryPrice: '146.231506', exitPrice: '145.308006',
+      pnl: '-0.05', time: '2026-01-14 04:11:00', name: 'SOL 1m AR37: close LONG before SHORT flip', type: 'implicit_close' },
+    { botId: '5747b024-e6df-471f-a842-6ee67977cbd0', wallet: 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
+      market: 'SOL-PERP', side: 'CLOSE', size: '0.0530', entryPrice: '144.475000', exitPrice: '146.776733',
+      pnl: '0.12', time: '2026-01-14 17:34:01', name: 'SOL 1m AR37: close LONG before SHORT flip', type: 'implicit_close' },
+
+    // XPL 45m Adaptive — 1 direction flip
+    { botId: '62a5ff6e-d364-45ef-9b53-7bf8eadcbc67', wallet: '6ULLaZkuWoML1qN23TqSw9ANBBCGFXaAvKbFzXj2Kehh',
+      market: 'XPL-PERP', side: 'CLOSE', size: '157.61', entryPrice: '0.129149', exitPrice: '0.129150',
+      pnl: '0.00', time: '2026-01-21 21:00:13', name: 'XPL 45m: close LONG before SHORT flip', type: 'implicit_close' },
+
+    // JUP 8H BB Trend Pro — direction flip, NOT a liquidation (LONG 2603 closed at $0.1704)
+    { botId: '718fa880-bdfb-4d23-a498-88f32996d977', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'JUP-PERP', side: 'CLOSE', size: '2602.95', entryPrice: '0.187364', exitPrice: '0.170400',
+      pnl: '-44.16', time: '2026-03-08 00:00:05', name: 'JUP 8H BB: close LONG before SHORT flip', type: 'implicit_close' },
+
+    // SOL 45m OI Skalpa — 3 direction flips
+    { botId: '961b804b-164f-4d54-8373-3dcbbeb525e7', wallet: '6ULLaZkuWoML1qN23TqSw9ANBBCGFXaAvKbFzXj2Kehh',
+      market: 'SOL-PERP', side: 'CLOSE', size: '0.3614', entryPrice: '115.358602', exitPrice: '115.187231',
+      pnl: '0.06', time: '2026-01-30 07:30:01', name: 'SOL 45m Skalpa: close SHORT before LONG flip', type: 'implicit_close' },
+    { botId: '961b804b-164f-4d54-8373-3dcbbeb525e7', wallet: '6ULLaZkuWoML1qN23TqSw9ANBBCGFXaAvKbFzXj2Kehh',
+      market: 'SOL-PERP', side: 'CLOSE', size: '0.2115', entryPrice: '101.719611', exitPrice: '101.623643',
+      pnl: '-0.02', time: '2026-02-02 01:30:00', name: 'SOL 45m Skalpa: close LONG before SHORT flip', type: 'implicit_close' },
+    { botId: '961b804b-164f-4d54-8373-3dcbbeb525e7', wallet: '6ULLaZkuWoML1qN23TqSw9ANBBCGFXaAvKbFzXj2Kehh',
+      market: 'SOL-PERP', side: 'CLOSE', size: '0.1839', entryPrice: '97.315000', exitPrice: '96.994772',
+      pnl: '0.06', time: '2026-02-04 11:15:00', name: 'SOL 45m Skalpa: close SHORT before LONG flip', type: 'implicit_close' },
+
+    // DOGE 4H FluxMomentum — 3 partial closes (reduce-only, not direction flips)
+    { botId: '9ad9f2c1-7fb9-4668-8f4e-98abd7fb153b', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'DOGE-PERP', side: 'CLOSE', size: '51.28', entryPrice: '0.096913', exitPrice: '0.096913',
+      pnl: '0.00', time: '2026-02-23 04:00:08', name: 'DOGE FluxMom: partial close SHORT 51/977', type: 'implicit_close' },
+    { botId: '9ad9f2c1-7fb9-4668-8f4e-98abd7fb153b', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'DOGE-PERP', side: 'CLOSE', size: '849.69', entryPrice: '0.093798', exitPrice: '0.093798',
+      pnl: '0.00', time: '2026-02-28 08:00:05', name: 'DOGE FluxMom: partial close SHORT 850/1063', type: 'implicit_close' },
+    { botId: '9ad9f2c1-7fb9-4668-8f4e-98abd7fb153b', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'DOGE-PERP', side: 'CLOSE', size: '212.34', entryPrice: '0.094908', exitPrice: '0.094908',
+      pnl: '0.00', time: '2026-03-10 16:00:10', name: 'DOGE FluxMom: partial close LONG 212/550', type: 'implicit_close' },
+
+    // SUI 4H FluxMomentum — 1 direction flip
+    { botId: 'b703b0bf-97a8-4557-ab09-e5b132eead22', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'SUI-PERP', side: 'CLOSE', size: '193.74', entryPrice: '0.892100', exitPrice: '0.849100',
+      pnl: '8.33', time: '2026-02-28 08:00:07', name: 'SUI FluxMom: close SHORT before LONG flip', type: 'implicit_close' },
+
+    // RNDR 45m BB Pro (Copy) — 1 direction flip (first flip already has PnL on SHORT trade, skip it)
+    { botId: 'cbd05f9a-f0a6-49d6-a8c8-47ba102c284f', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'RENDER-PERP', side: 'CLOSE', size: '18.49', entryPrice: '1.471078', exitPrice: '1.450430',
+      pnl: '0.38', time: '2026-02-20 06:45:23', name: 'RNDR 45m Copy: close SHORT before LONG flip', type: 'implicit_close' },
+
+    // SUI 1H OI Skalpa (Copy) — 2 direction flips
+    { botId: 'ce22aa00-45d0-4758-add8-9986300be854', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'SUI-PERP', side: 'CLOSE', size: '78.03', entryPrice: '0.931640', exitPrice: '1.005252',
+      pnl: '5.74', time: '2026-02-14 12:00:13', name: 'SUI 1H Copy: close LONG before SHORT flip', type: 'implicit_close' },
+    { botId: 'ce22aa00-45d0-4758-add8-9986300be854', wallet: 'F7H3mBZRjhYeEc4HH1ry1vL9BbBs6GntHBknUGgnwrGZ',
+      market: 'SUI-PERP', side: 'CLOSE', size: '42.06', entryPrice: '1.023059', exitPrice: '0.962097',
+      pnl: '-2.56', time: '2026-02-16 12:00:14', name: 'SUI 1H Copy: close LONG before SHORT flip', type: 'implicit_close' },
+
+    // SOL 5m OI Scalpa V2 — 3 direction flips
+    { botId: 'f4ca4805-fdcf-4744-a85b-014cb31cc50b', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'SOL-PERP', side: 'CLOSE', size: '1.5637', entryPrice: '104.610018', exitPrice: '103.215000',
+      pnl: '2.18', time: '2026-02-03 09:20:01', name: 'SOL 5m V2: close SHORT before LONG flip', type: 'implicit_close' },
+    { botId: 'f4ca4805-fdcf-4744-a85b-014cb31cc50b', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'SOL-PERP', side: 'CLOSE', size: '1.3946', entryPrice: '87.779000', exitPrice: '87.779000',
+      pnl: '0.00', time: '2026-02-15 21:10:01', name: 'SOL 5m V2: close LONG before SHORT flip', type: 'implicit_close' },
+    { botId: 'f4ca4805-fdcf-4744-a85b-014cb31cc50b', wallet: 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41',
+      market: 'SOL-PERP', side: 'CLOSE', size: '0.3816', entryPrice: '80.190900', exitPrice: '80.190900',
+      pnl: '0.00', time: '2026-02-28 13:50:02', name: 'SOL 5m V2: close LONG before SHORT flip', type: 'implicit_close' },
   ];
 
-  for (const s of suspects) {
+  for (const r of records) {
     try {
-      const existing = await storage.getBotTrades(s.botId, 100);
-      const hasLiq = existing.some(t => t.status === 'liquidated' || t.executionMethod === 'liquidation');
-      if (hasLiq) {
-        console.log(`[Backfill] Skipping ${s.name} — already has liquidation record`);
+      const existing = await storage.getBotTrades(r.botId, 200);
+      const hasMatchingBackfill = existing.some(t => {
+        if (r.type === 'liquidation' || r.type === 'partial_liquidation') {
+          return (t.status === 'liquidated' || t.executionMethod === 'liquidation') &&
+            t.errorMessage?.includes('backfilled');
+        }
+        return t.executionMethod === 'backfill-implicit-close' &&
+          Math.abs(parseFloat(t.size) - parseFloat(r.size)) < 1 &&
+          t.errorMessage?.includes(r.name);
+      });
+
+      if (hasMatchingBackfill) {
+        console.log(`[Backfill] Skipping ${r.name} — already backfilled`);
+        skipped++;
         continue;
       }
 
-      const trade = await storage.createBotTrade({
-        tradingBotId: s.botId,
-        walletAddress: s.wallet,
-        market: s.market,
-        side: 'CLOSE',
-        size: s.size,
-        price: s.price,
-        fee: "0",
-        pnl: s.pnl,
-        status: "liquidated",
-        txSignature: null,
-        webhookPayload: null,
-        errorMessage: `Position liquidated (backfilled): ${parseFloat(s.size).toFixed(4)} ${s.market} at ~$${parseFloat(s.price).toFixed(4)}. Estimated loss: $${Math.abs(parseFloat(s.pnl)).toFixed(2)}`,
-        executionMethod: "liquidation",
-      });
+      const isLiq = r.type === 'liquidation' || r.type === 'partial_liquidation';
+      const status = isLiq ? 'liquidated' : 'executed';
+      const method = isLiq ? 'liquidation' : 'backfill-implicit-close';
 
-      const pos = await storage.getBotPosition(s.botId, s.market);
-      if (pos) {
-        await storage.upsertBotPosition({
-          tradingBotId: s.botId,
-          walletAddress: s.wallet,
-          market: s.market,
-          baseSize: pos.baseSize,
-          avgEntryPrice: pos.avgEntryPrice,
-          costBasis: pos.costBasis,
-          realizedPnl: pos.realizedPnl,
-          totalFees: pos.totalFees,
-          lastTradeId: trade.id,
-          lastTradeAt: new Date(s.liqTime),
-        });
+      let msg: string;
+      if (r.type === 'liquidation') {
+        msg = `Position liquidated (backfilled): ${parseFloat(r.size).toFixed(4)} ${r.market} at ~$${parseFloat(r.exitPrice).toFixed(6)}. Estimated loss: $${Math.abs(parseFloat(r.pnl)).toFixed(2)}`;
+      } else if (r.type === 'partial_liquidation') {
+        msg = `Partial liquidation (backfilled): ${parseFloat(r.size).toFixed(4)} ${r.market} reduced from entry $${parseFloat(r.entryPrice).toFixed(6)} to ~$${parseFloat(r.exitPrice).toFixed(6)}. Estimated loss: $${Math.abs(parseFloat(r.pnl)).toFixed(2)}. ${r.name}`;
+      } else {
+        msg = `Implicit close (backfilled): ${parseFloat(r.size).toFixed(4)} ${r.market} closed at $${parseFloat(r.exitPrice).toFixed(6)} (entry $${parseFloat(r.entryPrice).toFixed(6)}). PnL: $${parseFloat(r.pnl).toFixed(2)}. ${r.name}`;
       }
 
-      console.log(`[Backfill] Created liquidation record for ${s.name}: trade ${trade.id}`);
+      const trade = await storage.createBotTrade({
+        tradingBotId: r.botId,
+        walletAddress: r.wallet,
+        market: r.market,
+        side: r.side,
+        size: r.size,
+        price: r.exitPrice,
+        fee: "0",
+        pnl: r.pnl,
+        status,
+        txSignature: null,
+        webhookPayload: null,
+        errorMessage: msg,
+        executionMethod: method,
+      });
+
+      await db.update(botTrades)
+        .set({ executedAt: new Date(r.time) })
+        .where(eq(botTrades.id, trade.id));
+
+      console.log(`[Backfill] Created ${r.type} record: ${r.name} (PnL: $${r.pnl}, at: ${r.time})`);
       created++;
     } catch (err: any) {
-      const msg = `Failed to backfill ${s.name}: ${err.message}`;
+      const msg = `Failed to backfill ${r.name}: ${err.message}`;
       console.error(`[Backfill] ${msg}`);
       errors.push(msg);
     }
   }
 
-  console.log(`[Backfill] Complete: ${created} records created, ${errors.length} errors`);
-  return { created, errors };
+  console.log(`[Backfill] Complete: ${created} created, ${skipped} skipped, ${errors.length} errors`);
+  return { created, skipped, errors };
 }
