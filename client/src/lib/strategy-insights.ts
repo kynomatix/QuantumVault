@@ -1,4 +1,5 @@
 import type { LabPineInput } from "@shared/schema";
+import { getDriftMaxLeverage } from "@/lib/drift-constants";
 
 interface TradeRecord {
   direction: "long" | "short";
@@ -157,9 +158,10 @@ export interface StrategyInsightsReport {
   paramCorrelations: ParamCorrelations;
 }
 
-function computeMaxSafeLeverage(dd: number): number {
+function computeMaxSafeLeverage(dd: number, ticker?: string): number {
   if (dd <= 0) return 1;
-  return Math.min(20, Math.max(1, Math.floor((100 / dd) * 0.8)));
+  const maxLev = ticker ? getDriftMaxLeverage(ticker) : 20;
+  return Math.min(maxLev, Math.max(1, Math.floor((100 / dd) * 0.8)));
 }
 
 function bucketize(values: number[], numBuckets: number = 4): { min: number; max: number }[] {
@@ -296,7 +298,7 @@ function analyzeComboFit(results: ResultData[]): ComboFit[] {
     let bestLevProfit = -Infinity;
     let bestLeverage = 1;
     for (const r of group) {
-      const lev = computeMaxSafeLeverage(r.maxDrawdownPercent);
+      const lev = computeMaxSafeLeverage(r.maxDrawdownPercent, ticker);
       const levP = r.netProfitPercent * lev;
       if (levP > bestLevProfit) {
         bestLevProfit = levP;
@@ -505,7 +507,7 @@ function analyzeTopBottomConfigs(results: ResultData[]): TopBottomConfigs {
   const scored = results
     .filter(r => r.totalTrades >= 5)
     .map(r => {
-      const lev = computeMaxSafeLeverage(r.maxDrawdownPercent);
+      const lev = computeMaxSafeLeverage(r.maxDrawdownPercent, r.ticker);
       return {
         params: r.params,
         ticker: r.ticker,
