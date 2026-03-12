@@ -2446,6 +2446,80 @@ function formatHeatVal(value: number, metric: HeatmapMetric): string {
   return `${value.toFixed(1)}%`;
 }
 
+function EquityCurvePopup({ resultId, ticker, timeframe }: { resultId: number; ticker: string; timeframe: string }) {
+  const [open, setOpen] = useState(false);
+  const [curveData, setCurveData] = useState<{ time: string; equity: number }[] | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setCurveData(null);
+    setOpen(false);
+  }, [resultId]);
+
+  const loadCurve = useCallback(async () => {
+    if (curveData) { setOpen(true); return; }
+    setOpen(true);
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/lab/results/${resultId}`);
+      if (res.ok) {
+        const full = await res.json();
+        setCurveData(full.equityCurve ?? []);
+      }
+    } catch {} finally {
+      setLoading(false);
+    }
+  }, [resultId, curveData]);
+
+  return (
+    <Popover open={open} onOpenChange={(v) => { if (v) loadCurve(); else setOpen(false); }}>
+      <PopoverTrigger asChild>
+        <button
+          className="p-1 rounded hover:bg-sky-500/20 text-white/40 hover:text-sky-400 transition-colors"
+          title="Quick equity curve"
+          data-testid={`heatmap-equity-${resultId}`}
+        >
+          <Activity className="w-3.5 h-3.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        className="w-[380px] p-3 bg-slate-900 border-white/10 shadow-xl shadow-black/50"
+        side="left"
+        align="center"
+        sideOffset={8}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <Activity className="w-3.5 h-3.5 text-violet-400" />
+          <span className="text-xs font-medium text-white">{ticker.replace("/USDT:USDT", "").replace("-PERP", "")} {timeframe} Equity Curve</span>
+        </div>
+        {loading ? (
+          <div className="h-[180px] flex items-center justify-center"><Loader2 className="w-5 h-5 animate-spin text-violet-400" /></div>
+        ) : curveData && curveData.length > 0 ? (
+          <div className="h-[180px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={curveData}>
+                <defs>
+                  <linearGradient id={`eqGradPop${resultId}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(225, 10%, 18%)" />
+                <XAxis dataKey="time" tick={{ fill: "hsl(220, 10%, 50%)", fontSize: 9 }} stroke="hsl(225, 10%, 18%)" tickFormatter={(v) => new Date(v).toLocaleDateString(undefined, { month: "short", year: "2-digit" })} interval="preserveStartEnd" />
+                <YAxis tick={{ fill: "hsl(220, 10%, 50%)", fontSize: 9 }} stroke="hsl(225, 10%, 18%)" tickFormatter={(v) => `$${v.toFixed(0)}`} width={45} />
+                <RechartsTooltip contentStyle={{ backgroundColor: "hsl(228, 14%, 10%)", border: "1px solid hsl(225, 10%, 18%)", borderRadius: "6px", fontSize: "11px", color: "hsl(220, 13%, 91%)" }} formatter={(value: number) => [`$${value.toFixed(2)}`, "Equity"]} labelFormatter={(l) => new Date(l).toLocaleDateString()} />
+                <Area type="monotone" dataKey="equity" stroke="#8b5cf6" strokeWidth={1.5} fill={`url(#eqGradPop${resultId})`} dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <p className="text-xs text-white/40 text-center py-6">No equity curve data</p>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: string, timeframe: string) => void }) {
   const [metric, setMetric] = useState<HeatmapMetric>("bestProfit");
   const [selectedCell, setSelectedCell] = useState<any | null>(null);
@@ -2734,7 +2808,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
             <div>
               <h4 className="text-sm font-medium text-white/60 mb-2">Top 5 Configurations</h4>
               <div className="space-y-1">
-                <div className="grid gap-2 text-[10px] text-white/40 px-3 py-1" style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 0.8fr 3.5rem" }}>
+                <div className="grid gap-2 text-[10px] text-white/40 px-3 py-1" style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 0.8fr 5rem" }}>
                   <span>#</span>
                   <span>Strategy</span>
                   <span>Profit (1x)</span>
@@ -2757,7 +2831,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                       key={idx}
                       onClick={() => setSelectedTopIdx(idx)}
                       className={`grid gap-2 text-xs px-3 py-2 rounded-lg cursor-pointer transition-colors items-center ${isActive ? "bg-violet-500/10 ring-1 ring-violet-500/30" : "bg-white/[0.03] hover:bg-white/[0.06]"}`}
-                      style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 0.8fr 3.5rem" }}
+                      style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 0.8fr 5rem" }}
                       data-testid={`heatmap-top-${idx}`}
                     >
                       <span className={`font-mono ${isActive ? "text-violet-400" : "text-white/50"}`}>{idx + 1}</span>
@@ -2773,6 +2847,11 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                       <span className="font-mono text-violet-400">{cfg.profitFactor.toFixed(2)}</span>
                       <span className="font-mono text-white/60">{cfg.totalTrades}</span>
                       <span className="flex items-center justify-end gap-0.5">
+                        {cfg.id && selectedCell && (
+                          <span onClick={(e) => e.stopPropagation()}>
+                            <EquityCurvePopup resultId={cfg.id} ticker={selectedCell.ticker} timeframe={selectedCell.timeframe} />
+                          </span>
+                        )}
                         {cfg.runId && onViewRun && (
                           <button
                             onClick={(e) => { e.stopPropagation(); onViewRun(cfg.runId, selectedCell.ticker, selectedCell.timeframe); }}

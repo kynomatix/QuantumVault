@@ -311,6 +311,10 @@ export function registerLabRoutes(app: Express): void {
       if (isNaN(resultId)) return res.status(400).json({ error: "Invalid result ID" });
       const result = await labStorage.getResult(resultId);
       if (!result) return res.status(404).json({ error: "Result not found" });
+      const run = await labStorage.getRun(result.runId);
+      if (run && run.userId && run.userId !== (req.session as any).walletAddress) {
+        return res.status(403).json({ error: "Not authorized" });
+      }
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -321,6 +325,12 @@ export function registerLabRoutes(app: Express): void {
     try {
       const resultId = parseInt(req.params.resultId);
       if (isNaN(resultId)) return res.status(400).json({ error: "Invalid result ID" });
+      const result = await labStorage.getResult(resultId);
+      if (!result) return res.status(404).json({ error: "Result not found" });
+      const run = await labStorage.getRun(result.runId);
+      if (run && run.userId && run.userId !== (req.session as any).walletAddress) {
+        return res.status(403).json({ error: "Not authorized" });
+      }
       await labStorage.deleteResult(resultId);
       res.json({ success: true });
     } catch (err: any) {
@@ -885,6 +895,7 @@ export function registerLabRoutes(app: Express): void {
             cellMap.set(key, { ticker: r.ticker, timeframe: r.timeframe, results: [] });
           }
           cellMap.get(key)!.results.push({
+            id: r.id,
             runId: run.id,
             strategyId: run.strategyId,
             rank: r.rank,
@@ -925,6 +936,7 @@ export function registerLabRoutes(app: Express): void {
           avgPF,
           runsCount: new Set(sorted.map((r: any) => r.runId)).size,
           allResults: sorted.map((r: any) => ({
+            id: r.id,
             netProfitPercent: r.netProfitPercent,
             winRatePercent: r.winRatePercent,
             maxDrawdownPercent: r.maxDrawdownPercent,
