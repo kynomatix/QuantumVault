@@ -1368,7 +1368,8 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
             const paramCombos = calcParamCombinations(parsedResult.inputs);
             const marketCombos = selectedTickers.length * selectedTimeframes.length;
             const totalSearch = paramCombos * marketCombos;
-            const totalTests = (randomSamples + topK * refinements) * marketCombos;
+            const deepMultiplier = deepSearch ? 4 : 1;
+            const totalTests = (randomSamples + topK * refinements * deepMultiplier) * marketCombos;
             const latestReport = allInsightsReports?.[0];
             const isGuided = useInsights && hasInsights && latestReport?.reportData;
             const guidedCombos = isGuided

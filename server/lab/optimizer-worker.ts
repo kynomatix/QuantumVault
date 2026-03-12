@@ -381,6 +381,7 @@ async function run() {
   const deepRefinesPerSeed = config.refinementsPerSeed;
   const deepSamplesTotal = deepRounds * deepSeedsPerRound * deepRefinesPerSeed;
   const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed + deepSamplesTotal;
+  const grandTotal = totalSamples * combos.length;
   let globalCurrent = completedCombos.size * totalSamples;
 
   if (resumeCombo && !completedCombos.has(resumeCombo)) {
@@ -395,8 +396,8 @@ async function run() {
     if (aborted) {
       send({ type: "progress", data: {
         jobId, status: "error", stage: "Cancelled by user",
-        current: globalCurrent, total: totalSamples * combos.length,
-        percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
+        current: Math.min(globalCurrent, grandTotal), total: grandTotal,
+        percent: Math.round((Math.min(globalCurrent, grandTotal) / grandTotal) * 100),
         elapsed: Date.now() - startTime, tickerProgress, error: "Cancelled",
       }});
       send({ type: "done", results: allResults });
@@ -461,15 +462,15 @@ async function run() {
         send({ type: "progress", data: {
           jobId, status: "random_search",
           stage: `${searchLabel} Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${s}/${config.randomSamples}`,
-          current: globalCurrent, total: totalSamples * combos.length,
-          percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
+          current: Math.min(globalCurrent, grandTotal), total: grandTotal,
+          percent: Math.min(99, Math.round((globalCurrent / grandTotal) * 100)),
           elapsed: Date.now() - startTime,
           bestSoFar: best ? {
             netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
             maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
           } : undefined,
           tickerProgress,
-          eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
+          eta: estimateEta(startTime, globalCurrent, grandTotal),
         }});
       }
 
@@ -496,7 +497,6 @@ async function run() {
 
         const currentRefineIter = refineStartIteration + seedIdx * config.refinementsPerSeed + r;
         if (isResumingThisCombo && resumeStage === "refine" && currentRefineIter < resumeIteration) {
-          globalCurrent++;
           continue;
         }
 
@@ -512,15 +512,15 @@ async function run() {
       send({ type: "progress", data: {
         jobId, status: "refinement",
         stage: `Refining seed ${seedIdx + 1}/${topSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
-        current: globalCurrent, total: totalSamples * combos.length,
-        percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
+        current: Math.min(globalCurrent, grandTotal), total: grandTotal,
+        percent: Math.min(99, Math.round((globalCurrent / grandTotal) * 100)),
         elapsed: Date.now() - startTime,
         bestSoFar: best ? {
           netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
           maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
         } : undefined,
         tickerProgress,
-        eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
+        eta: estimateEta(startTime, globalCurrent, grandTotal),
       }});
 
       const refNow = Date.now();
@@ -564,15 +564,15 @@ async function run() {
           send({ type: "progress", data: {
             jobId, status: "refinement",
             stage: `Deep R${round + 1} (${Math.round(radius * 100)}%) — seed ${seedIdx + 1}/${deepSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
-            current: globalCurrent, total: totalSamples * combos.length,
-            percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
+            current: Math.min(globalCurrent, grandTotal), total: grandTotal,
+            percent: Math.min(99, Math.round((globalCurrent / grandTotal) * 100)),
             elapsed: Date.now() - startTime,
             bestSoFar: best ? {
               netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
               maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
             } : undefined,
             tickerProgress,
-            eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
+            eta: estimateEta(startTime, globalCurrent, grandTotal),
           }});
 
           const deepNow = Date.now();
@@ -598,7 +598,7 @@ async function run() {
 
   send({ type: "progress", data: {
     jobId, status: "complete", stage: "Optimization complete",
-    current: totalSamples * combos.length, total: totalSamples * combos.length,
+    current: grandTotal, total: grandTotal,
     percent: 100, elapsed: Date.now() - startTime,
     bestSoFar: allResults[0] ? {
       netProfitPercent: allResults[0].netProfitPercent, winRatePercent: allResults[0].winRatePercent,
