@@ -3024,8 +3024,9 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
     const usdcBal = parseFloat(agentBalance || '0');
     const solBal = agentSolBalance ?? 0;
 
-    if (effectiveTradeSize > usdcBal) {
-      setCreateError(`Insufficient USDC. Need $${effectiveTradeSize.toLocaleString()}, have $${usdcBal.toFixed(2)}`);
+    const totalCapitalNeeded = effectiveTradeSize + equityBuffer;
+    if (totalCapitalNeeded > usdcBal) {
+      setCreateError(`Insufficient USDC. Need $${totalCapitalNeeded.toLocaleString()} ($${effectiveTradeSize.toLocaleString()} investment + $${equityBuffer.toLocaleString()} DD protection), have $${usdcBal.toFixed(2)}`);
       return;
     }
     if (solBal < solRequired) {
@@ -3082,10 +3083,25 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       });
 
       let fundingFailed = false;
+      let equityDepositFailed = false;
       if (!depositRes.ok) {
         const err = await depositRes.json();
         fundingFailed = true;
         setCreateError(`Bot created but funding failed: ${err.error || 'Unknown error'}. You can fund it later from the bot details page.`);
+      }
+
+      if (!fundingFailed && equityBuffer > 0) {
+        const equityDepositRes = await fetch('/api/agent/drift-deposit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ amount: equityBuffer, botId: bot.id }),
+        });
+
+        if (!equityDepositRes.ok) {
+          equityDepositFailed = true;
+          setCreateError(`Bot created and investment deposited ($${effectiveTradeSize}), but DD protection equity deposit ($${equityBuffer}) failed. You can add it manually from the bot management drawer.`);
+        }
       }
 
       setCreatedBot(bot);
@@ -3100,10 +3116,17 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
 
       queryClient.invalidateQueries({ queryKey: ["/api/trading-bots"] });
 
-      if (!fundingFailed) {
+      const totalDeposited = effectiveTradeSize + equityBuffer;
+      if (!fundingFailed && !equityDepositFailed) {
         toast({
           title: 'Bot created and funded!',
-          description: `${botName} — $${effectiveTradeSize} at ${leverage}x leverage`,
+          description: `${botName} — $${totalDeposited.toLocaleString()} deposited ($${effectiveTradeSize.toLocaleString()} investment + $${equityBuffer.toLocaleString()} DD protection) at ${leverage}x leverage`,
+        });
+      } else if (equityDepositFailed) {
+        toast({
+          title: 'Bot created — DD protection not deposited',
+          description: `Investment of $${effectiveTradeSize.toLocaleString()} deposited, but DD protection equity ($${equityBuffer.toLocaleString()}) failed. Add it from the bot management drawer.`,
+          variant: 'destructive',
         });
       } else {
         toast({
@@ -3122,13 +3145,13 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const isAuthenticated = !!walletAddress && sessionConnected;
   const hasAgentWallet = !!agentPublicKey;
   const usdcBal = parseFloat(agentBalance || '0');
-  const hasSufficientBalance = usdcBal >= effectiveTradeSize && (agentSolBalance ?? 0) >= solRequired;
+  const hasSufficientBalance = usdcBal >= (effectiveTradeSize + equityBuffer) && (agentSolBalance ?? 0) >= solRequired;
 
   const getDisabledReason = () => {
     if (!isAuthenticated) return "Connect your wallet to create a bot";
     if (balanceLoading) return "Checking wallet balance...";
     if (!hasAgentWallet) return "Set up your agent wallet first (go to Wallet page)";
-    if (!hasSufficientBalance) return `Need $${effectiveTradeSize.toLocaleString()} USDC and ${solRequired} SOL in agent wallet`;
+    if (!hasSufficientBalance) return `Need $${(effectiveTradeSize + equityBuffer).toLocaleString()} USDC ($${effectiveTradeSize.toLocaleString()} investment + $${equityBuffer.toLocaleString()} DD protection) and ${solRequired} SOL in agent wallet`;
     return null;
   };
   const disabledReason = getDisabledReason();
