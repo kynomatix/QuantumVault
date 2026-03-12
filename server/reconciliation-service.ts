@@ -1,7 +1,10 @@
 import { storage } from "./storage";
 import { getPerpPositions } from "./drift-service";
+import { getMarketPrice } from "./drift-price";
+import type { TradingBot } from "@shared/schema";
 
 const STALE_THRESHOLD_MS = 60 * 1000; // 60 seconds
+const LIQUIDATION_TRADE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 
 function normalizeMarket(market: string): string {
   return market.toUpperCase()
@@ -130,13 +133,130 @@ export async function syncPositionFromOnChain(
   }
 }
 
+async function detectAndRecordLiquidation(
+  botId: string,
+  walletAddress: string,
+  market: string,
+  dbBaseSize: number,
+  onChainBaseSize: number,
+  dbEntryPrice: number,
+  onChainEntryPrice: number,
+  dbPosition: { realizedPnl: string; totalFees: string } | null
+): Promise<boolean> {
+  try {
+    const recentTrades = await storage.getBotTrades(botId, 10);
+    const now = Date.now();
+    const normalizedMkt = normalizeMarket(market);
+    const recentExecutedTrades = recentTrades.filter(t => {
+      const tradeTime = new Date(t.executedAt).getTime();
+      return (now - tradeTime) < LIQUIDATION_TRADE_WINDOW_MS &&
+        (t.status === 'executed' || t.status === 'pending') &&
+        normalizeMarket(t.market) === normalizedMkt;
+    });
+
+    const sizeDelta = Math.abs(dbBaseSize) - Math.abs(onChainBaseSize);
+    if (sizeDelta <= 0.0001) {
+      return false;
+    }
+
+    if (recentExecutedTrades.length > 0) {
+      const recentTradeVolume = recentExecutedTrades.reduce((sum, t) => sum + Math.abs(parseFloat(t.size)), 0);
+      if (recentTradeVolume >= sizeDelta * 0.5) {
+        return false;
+      }
+      console.log(`[Reconcile] Recent trades (${recentTradeVolume.toFixed(4)}) don't explain position drop (${sizeDelta.toFixed(4)}) for ${market} - likely liquidation`);
+    }
+
+    const markPrice = await getMarketPrice(market) || dbEntryPrice;
+    const liquidatedSize = sizeDelta;
+    let estimatedPnl = 0;
+
+    if (dbEntryPrice > 0 && markPrice > 0) {
+      if (dbBaseSize > 0) {
+        estimatedPnl = (markPrice - dbEntryPrice) * liquidatedSize;
+      } else {
+        estimatedPnl = (dbEntryPrice - markPrice) * liquidatedSize;
+      }
+    }
+
+    const side = Math.abs(onChainBaseSize) < 0.0001 ? 'CLOSE' : (dbBaseSize > 0 ? 'SHORT' : 'LONG');
+
+    const liquidationTrade = await storage.createBotTrade({
+      tradingBotId: botId,
+      walletAddress,
+      market,
+      side,
+      size: String(liquidatedSize),
+      price: String(markPrice),
+      fee: "0",
+      pnl: String(estimatedPnl),
+      status: "liquidated",
+      txSignature: null,
+      webhookPayload: null,
+      errorMessage: `Position liquidated: ${liquidatedSize.toFixed(4)} ${market} at ~$${markPrice.toFixed(2)}. Estimated loss: $${estimatedPnl.toFixed(2)}`,
+      executionMethod: "liquidation",
+    });
+
+    console.log(`[Reconcile] LIQUIDATION DETECTED for bot ${botId}: ${liquidatedSize.toFixed(4)} ${market} liquidated at ~$${markPrice.toFixed(2)}, est PnL: $${estimatedPnl.toFixed(2)}`);
+
+    const bot = await storage.getTradingBotById(botId);
+    if (bot) {
+      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
+      await storage.updateTradingBotStats(botId, {
+        ...stats,
+        totalTrades: (stats.totalTrades || 0) + 1,
+        losingTrades: (stats.losingTrades || 0) + 1,
+        totalPnl: (stats.totalPnl || 0) + estimatedPnl,
+        totalVolume: (stats.totalVolume || 0) + (liquidatedSize * markPrice),
+        lastTradeAt: new Date().toISOString(),
+      });
+    }
+
+    const currentPnl = dbPosition ? parseFloat(dbPosition.realizedPnl) : 0;
+    const newPnl = currentPnl + estimatedPnl;
+
+    if (Math.abs(onChainBaseSize) > 0.0001) {
+      await storage.upsertBotPosition({
+        tradingBotId: botId,
+        walletAddress,
+        market,
+        baseSize: String(onChainBaseSize),
+        avgEntryPrice: String(onChainEntryPrice || dbEntryPrice),
+        costBasis: String(Math.abs(onChainBaseSize) * (onChainEntryPrice || dbEntryPrice)),
+        realizedPnl: String(newPnl),
+        totalFees: dbPosition?.totalFees || "0",
+        lastTradeId: liquidationTrade.id,
+        lastTradeAt: new Date(),
+      });
+    } else {
+      await storage.upsertBotPosition({
+        tradingBotId: botId,
+        walletAddress,
+        market,
+        baseSize: "0",
+        avgEntryPrice: "0",
+        costBasis: "0",
+        realizedPnl: String(newPnl),
+        totalFees: dbPosition?.totalFees || "0",
+        lastTradeId: liquidationTrade.id,
+        lastTradeAt: new Date(),
+      });
+    }
+
+    return true;
+  } catch (error) {
+    console.error(`[Reconcile] Error detecting liquidation for bot ${botId}:`, error);
+    return false;
+  }
+}
+
 export async function reconcileBotPosition(
   botId: string,
   walletAddress: string,
   agentPublicKey: string,
   subAccountId: number,
   market: string
-): Promise<{ synced: boolean; discrepancy: boolean }> {
+): Promise<{ synced: boolean; discrepancy: boolean; liquidation?: boolean }> {
   try {
     const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
     const normalizedMarket = normalizeMarket(market);
@@ -151,6 +271,22 @@ export async function reconcileBotPosition(
     if (hasDiscrepancy) {
       console.log(`[Reconcile] Bot ${botId}: DB=${dbBaseSize}, OnChain=${onChainBaseSize} - syncing`);
       
+      const positionDecreased = Math.abs(dbBaseSize) > Math.abs(onChainBaseSize) + 0.0001;
+      if (positionDecreased && Math.abs(dbBaseSize) > 0.0001) {
+        const dbEntryPrice = dbPosition ? parseFloat(dbPosition.avgEntryPrice) : 0;
+        const onChainEntryPrice = onChainPos?.entryPrice || 0;
+        const wasLiquidation = await detectAndRecordLiquidation(
+          botId, walletAddress, market,
+          dbBaseSize, onChainBaseSize, dbEntryPrice, onChainEntryPrice,
+          dbPosition ? { realizedPnl: dbPosition.realizedPnl, totalFees: dbPosition.totalFees } : null
+        );
+
+        if (wasLiquidation) {
+          lastReconcileTime.set(botId, Date.now());
+          return { synced: true, discrepancy: true, liquidation: true };
+        }
+      }
+
       if (onChainPos && Math.abs(onChainBaseSize) > 0.0001) {
         await storage.upsertBotPosition({
           tradingBotId: botId,

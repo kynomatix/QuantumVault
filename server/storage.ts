@@ -456,7 +456,7 @@ export class DatabaseStorage implements IStorage {
   async getBotPerformanceSeries(tradingBotId: string, since?: Date): Promise<{ timestamp: Date; pnl: number; cumulativePnl: number }[]> {
     const conditions = [
       eq(botTrades.tradingBotId, tradingBotId),
-      eq(botTrades.status, 'executed'),
+      or(eq(botTrades.status, 'executed'), eq(botTrades.status, 'liquidated')),
       sql`${botTrades.pnl} IS NOT NULL`,
     ];
     if (since) {

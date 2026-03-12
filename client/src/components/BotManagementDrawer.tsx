@@ -111,13 +111,19 @@ interface BotTrade {
   side: string;
   size: string;
   price: string;
+  pnl?: string | null;
+  fee?: string | null;
   status: string;
+  errorMessage?: string | null;
+  executionMethod?: string | null;
   executedAt: string;
   webhookPayload?: {
     data?: {
       action?: string;
+      position_size?: string | number;
     };
     action?: string;
+    position_size?: string | number;
   } | null;
 }
 
@@ -477,8 +483,10 @@ export function BotManagementDrawer({
   }, [isOpen, bot?.id]);
 
   useEffect(() => {
-    if (isOpen && bot && activeTab === 'history') {
+    if (isOpen && bot && (activeTab === 'history' || activeTab === 'overview')) {
       fetchTrades();
+    }
+    if (isOpen && bot && activeTab === 'history') {
       fetchEquityEvents();
     }
   }, [isOpen, bot?.id, activeTab]);
@@ -1203,6 +1211,23 @@ export function BotManagementDrawer({
               </div>
             </div>
             
+            {(() => {
+              const liquidationTrades = trades.filter(t => t.status === 'liquidated');
+              if (liquidationTrades.length === 0) return null;
+              const totalLiquidationLoss = liquidationTrades.reduce((sum, t) => sum + parseFloat(t.pnl || '0'), 0);
+              return (
+                <div className="p-3 rounded-lg border border-orange-500/30 bg-orange-500/5" data-testid="liquidation-summary">
+                  <div className="flex items-center gap-2 mb-1">
+                    <AlertTriangle className="w-4 h-4 text-orange-500" />
+                    <span className="text-sm font-semibold text-orange-500">Liquidation Events</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {liquidationTrades.length} liquidation{liquidationTrades.length > 1 ? 's' : ''} detected — estimated total loss: <span className="text-orange-500 font-medium">${Math.abs(totalLiquidationLoss).toFixed(2)}</span>
+                  </p>
+                </div>
+              );
+            })()}
+
             {/* Current Position Section */}
             <div className="p-4 rounded-xl border bg-muted/20">
               <div className="flex items-center justify-between mb-3">
@@ -1813,12 +1838,16 @@ export function BotManagementDrawer({
                   {trades.map((trade) => {
                     const isLong = trade.side === 'LONG';
                     const isFailed = trade.status === 'failed';
+                    const isLiquidated = trade.status === 'liquidated';
                     const payload = trade.webhookPayload as any;
                     const action = payload?.data?.action?.toLowerCase() || payload?.action?.toLowerCase() || '';
                     const positionSize = payload?.position_size || payload?.data?.position_size;
                     const isClose = action === 'close' || trade.side === 'CLOSE' || positionSize === '0' || positionSize === 0;
                     
                     const getTradeIcon = () => {
+                      if (isLiquidated) {
+                        return <AlertTriangle className="h-4 w-4 text-orange-500" />;
+                      }
                       if (isClose) {
                         return <XCircle className="h-4 w-4 text-amber-500" />;
                       }
@@ -1829,17 +1858,20 @@ export function BotManagementDrawer({
                     };
                     
                     const getTradeLabel = () => {
+                      if (isLiquidated) return 'LIQUIDATED';
                       if (isClose) return 'CLOSE';
                       return trade.side;
                     };
                     
                     const getIconBgClass = () => {
+                      if (isLiquidated) return 'bg-orange-500/10';
                       if (isClose) return 'bg-amber-500/10';
                       if (isLong) return 'bg-emerald-500/10';
                       return 'bg-red-500/10';
                     };
                     
                     const getLabelColor = () => {
+                      if (isLiquidated) return 'text-orange-500';
                       if (isClose) return 'text-amber-500';
                       if (isLong) return 'text-emerald-500';
                       return 'text-red-500';
@@ -1885,12 +1917,17 @@ export function BotManagementDrawer({
                           <div>
                             <p className="text-sm font-medium flex items-center gap-2">
                               <span className={getLabelColor()}>{getTradeLabel()}</span> {trade.market}
-                              {isFailed && (
+                              {isLiquidated && (
+                                <span className="text-xs px-1.5 py-0.5 bg-orange-500/20 text-orange-500 rounded font-semibold" data-testid={`badge-liquidated-${trade.id}`}>
+                                  Liquidated
+                                </span>
+                              )}
+                              {isFailed && !isLiquidated && (
                                 <span className="text-xs px-1.5 py-0.5 bg-red-500/20 text-red-500 rounded">
                                   Failed
                                 </span>
                               )}
-                              {isClose && !isFailed && (
+                              {isClose && !isFailed && !isLiquidated && (
                                 <span className="text-xs px-1.5 py-0.5 bg-amber-500/20 text-amber-500 rounded">
                                   Exit
                                 </span>
@@ -1899,9 +1936,14 @@ export function BotManagementDrawer({
                             <p className="text-xs text-muted-foreground">
                               {formatDate(trade.executedAt)}
                             </p>
-                            {isFailed && (trade as any).errorMessage && (
+                            {isLiquidated && trade.errorMessage && (
+                              <p className="text-xs text-orange-400 mt-0.5">
+                                {trade.errorMessage}
+                              </p>
+                            )}
+                            {isFailed && !isLiquidated && trade.errorMessage && (
                               <p className="text-xs text-red-400 mt-0.5">
-                                {getErrorExplanation((trade as any).errorMessage)}
+                                {getErrorExplanation(trade.errorMessage)}
                               </p>
                             )}
                           </div>
@@ -1910,10 +1952,12 @@ export function BotManagementDrawer({
                           <span className="font-mono text-sm font-medium">
                             {parseFloat(trade.size).toFixed(4)}
                           </span>
-                          <p className="text-xs text-muted-foreground">contracts @ ${parseFloat(trade.price || '0').toFixed(2)}</p>
-                          {(trade as any).pnl !== null && (trade as any).pnl !== undefined && (
-                            <p className={`text-xs font-medium ${parseFloat((trade as any).pnl) >= 0 ? 'text-emerald-500' : 'text-red-500'}`} title="Gross PnL (excludes fees, slippage, funding)">
-                              {parseFloat((trade as any).pnl) >= 0 ? '+' : ''}${parseFloat((trade as any).pnl).toFixed(2)}
+                          <p className="text-xs text-muted-foreground">
+                            {isLiquidated ? 'liquidated' : 'contracts'} @ ${parseFloat(trade.price || '0').toFixed(2)}
+                          </p>
+                          {trade.pnl !== null && trade.pnl !== undefined && (
+                            <p className={`text-xs font-medium ${isLiquidated ? 'text-orange-500' : parseFloat(trade.pnl) >= 0 ? 'text-emerald-500' : 'text-red-500'}`} title={isLiquidated ? "Estimated liquidation loss" : "Gross PnL (excludes fees, slippage, funding)"}>
+                              {isLiquidated ? 'Est. loss: ' : ''}{parseFloat(trade.pnl) >= 0 ? '+' : ''}${parseFloat(trade.pnl).toFixed(2)}
                             </p>
                           )}
                         </div>
