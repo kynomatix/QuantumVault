@@ -693,6 +693,13 @@ export function registerLabRoutes(app: Express): void {
       res.json({ jobId: job.id, runId });
     } catch (err: any) {
       console.log(`[QuantumLab] Run error: ${err.message}`);
+      if ((err as any).blockingJobId) {
+        return res.status(409).json({
+          error: "Another optimization is already running",
+          blockingJobId: (err as any).blockingJobId,
+          blockingRunId: (err as any).blockingRunId,
+        });
+      }
       res.status(500).json({ error: err.message });
     }
   });
@@ -702,13 +709,22 @@ export function registerLabRoutes(app: Express): void {
       const runId = parseInt(req.params.id);
       const run = await verifyRunOwnership(req, res);
       if (!run) return;
-      if (run.status === "running") {
-        const existingJob = labStorage.getJobByRunId(runId);
-        if (existingJob) {
-          return res.json({ jobId: existingJob.id, runId, alreadyRunning: true });
+
+      const existingJob = labStorage.getJobByRunId(runId);
+      if (existingJob && existingJob.progress.status !== "complete" && existingJob.progress.status !== "error") {
+        console.log(`[QuantumLab] Resume request for run ${runId} — already has active job ${existingJob.id}, reconnecting`);
+        if (run.status !== "running") {
+          await labStorage.resumeRun(runId);
         }
+        return res.json({ jobId: existingJob.id, runId, alreadyRunning: true });
       }
-      if (run.status !== "paused") return res.status(400).json({ error: `Run is ${run.status}, not paused` });
+
+      if (run.status === "running") {
+        console.log(`[QuantumLab] Run ${runId} has status "running" in DB but no active in-memory job — auto-pausing for resume`);
+        await labStorage.pauseRun(runId);
+      } else if (run.status !== "paused") {
+        return res.status(400).json({ error: `Run is ${run.status}, not paused` });
+      }
 
       const checkpoint = await labStorage.getCheckpoint(runId);
       if (!checkpoint?.configSnapshot) return res.status(400).json({ error: "No checkpoint data found for this run" });
@@ -758,6 +774,13 @@ export function registerLabRoutes(app: Express): void {
       res.json({ jobId: job.id, runId, resumedFrom: checkpoint.completedCombos.length });
     } catch (err: any) {
       console.log(`[QuantumLab] Resume error: ${err.message}`);
+      if ((err as any).blockingJobId) {
+        return res.status(409).json({
+          error: "Another optimization is already running",
+          blockingJobId: (err as any).blockingJobId,
+          blockingRunId: (err as any).blockingRunId,
+        });
+      }
       res.status(500).json({ error: err.message });
     }
   });
@@ -982,6 +1005,20 @@ export function registerLabRoutes(app: Express): void {
 
   setTimeout(async () => {
     try {
+      if (activeWorker) {
+        console.log(`[QuantumLab] Skipping auto-resume — worker already active`);
+        return;
+      }
+      const allJobs = (labStorage as any).jobs as Map<string, any> | undefined;
+      if (allJobs) {
+        for (const [, j] of Array.from(allJobs.entries())) {
+          if (j.progress?.status !== "complete" && j.progress?.status !== "error") {
+            console.log(`[QuantumLab] Skipping auto-resume — in-memory job ${j.id} still active (status: ${j.progress?.status})`);
+            return;
+          }
+        }
+      }
+
       const interruptedIds = (labStorage as any).interruptedRunIds as number[] | undefined;
       if (!interruptedIds || interruptedIds.length === 0) return;
 

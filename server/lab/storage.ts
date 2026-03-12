@@ -380,7 +380,7 @@ export class LabDatabaseStorage implements ILabStorage {
     return { strategy, totalRuns: completedRuns.length, totalResults: results.length, results };
   }
 
-  createJob(config: LabOptimizationConfig): LabJob {
+  createJob(config: LabOptimizationConfig, forRunId?: number): LabJob {
     const STALE_TIMEOUT_MS = 5 * 60 * 1000;
     const now = Date.now();
     const activeJobs = Array.from(this.jobs.values()).filter(
@@ -398,7 +398,11 @@ export class LabDatabaseStorage implements ILabStorage {
       (j) => j.progress.status !== "complete" && j.progress.status !== "error"
     );
     if (reallyActive.length >= MAX_CONCURRENT_JOBS) {
-      throw new Error(`Maximum concurrent jobs limit reached (${MAX_CONCURRENT_JOBS}). Please wait for the current job to finish.`);
+      const blockingJob = reallyActive[0];
+      const err = new Error(`Maximum concurrent jobs limit reached (${MAX_CONCURRENT_JOBS}). Please wait for the current job to finish.`);
+      (err as any).blockingJobId = blockingJob.id;
+      (err as any).blockingRunId = blockingJob.runId;
+      throw err;
     }
 
     const id = randomUUID();

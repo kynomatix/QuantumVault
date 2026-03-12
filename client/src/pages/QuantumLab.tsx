@@ -1118,7 +1118,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
       const { jobId, runId } = await res.json();
       onJobStarted(jobId, runId);
     } catch (err: any) {
-      const isConcurrencyError = err.message?.includes("concurrent") || err.message?.includes("Maximum");
+      const isConcurrencyError = err.message?.includes("concurrent") || err.message?.includes("Maximum") || err.message?.includes("already running");
       toast({
         title: "Failed to start optimization",
         description: isConcurrencyError
@@ -1565,17 +1565,35 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
 
   const resumeMutation = useMutation({
     mutationFn: async (id: number) => {
-      const res = await apiRequest("POST", `/api/lab/runs/${id}/resume`);
-      return res.json();
+      const res = await fetch(`/api/lab/runs/${id}/resume`, { method: "POST", credentials: "include" });
+      const data = await res.json();
+      if (!res.ok) {
+        const err = new Error(data.error || "Resume failed");
+        (err as any).status = res.status;
+        (err as any).blockingJobId = data.blockingJobId;
+        (err as any).blockingRunId = data.blockingRunId;
+        throw err;
+      }
+      return data;
     },
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
-      toast({ title: data.alreadyRunning ? "Optimization already running" : "Optimization resumed" });
+      toast({ title: data.alreadyRunning ? "Reconnected to running optimization" : "Optimization resumed" });
       if (data.jobId) {
         onViewRunning(data.jobId);
       }
     },
-    onError: () => { toast({ title: "Failed to resume run", variant: "destructive" }); },
+    onError: (err: any) => {
+      if (err.status === 409 && err.blockingJobId) {
+        toast({
+          title: "Another optimization is running",
+          description: "Reconnecting to the active job...",
+        });
+        onViewRunning(err.blockingJobId);
+      } else {
+        toast({ title: "Failed to resume run", description: err.message, variant: "destructive" });
+      }
+    },
   });
 
   const strategyMap = new Map<number, LabStrategy>();
