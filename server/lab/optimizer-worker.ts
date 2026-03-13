@@ -439,6 +439,8 @@ async function run() {
     const randomStart = skipRefineEntirely ? config.randomSamples : skipRandomUntil;
 
     let lastCheckpointTime = Date.now();
+    let checkpointCount = 0;
+    const FIRST_CHECKPOINT_MS = 10_000;
     const CHECKPOINT_INTERVAL_MS = 60_000;
 
     const comboKey = `${combo.ticker}|${combo.timeframe}`;
@@ -477,8 +479,10 @@ async function run() {
       }
 
       const now = Date.now();
-      if (now - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS) {
+      const interval = checkpointCount === 0 ? FIRST_CHECKPOINT_MS : CHECKPOINT_INTERVAL_MS;
+      if (now - lastCheckpointTime >= interval) {
         lastCheckpointTime = now;
+        checkpointCount++;
         const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
         send({ type: "partial-checkpoint", combo: key, stage: "random", iteration: s + 1, results: topPartial });
       }
@@ -530,11 +534,13 @@ async function run() {
         }});
 
         const refNow = Date.now();
-        if (refNow - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS) {
+        const refInterval = checkpointCount === 0 ? FIRST_CHECKPOINT_MS : CHECKPOINT_INTERVAL_MS;
+        if (refNow - lastCheckpointTime >= refInterval) {
           lastCheckpointTime = refNow;
+          checkpointCount++;
           const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
-          const checkpointCount = Math.max(10, config.topK);
-          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, checkpointCount);
+          const refineKeepCount = Math.max(10, config.topK);
+          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, refineKeepCount);
           send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: actualIter, results: topPartial });
         }
       }
@@ -588,8 +594,10 @@ async function run() {
           }});
 
           const deepNow = Date.now();
-          if (deepNow - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS) {
+          const deepInterval = checkpointCount === 0 ? FIRST_CHECKPOINT_MS : CHECKPOINT_INTERVAL_MS;
+          if (deepNow - lastCheckpointTime >= deepInterval) {
             lastCheckpointTime = deepNow;
+            checkpointCount++;
             const deepCheckpointCount = Math.max(10, config.topK);
             const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, deepCheckpointCount);
             send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round, results: topPartial });
