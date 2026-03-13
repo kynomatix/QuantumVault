@@ -25,7 +25,7 @@ interface WorkerInput {
 
 type WorkerMessage =
   | { type: "progress"; data: LabJobProgress }
-  | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep"; iteration: number; deepRound?: number; results: LabBacktestResult[] }
+  | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep"; iteration: number; deepRound?: number; results: LabBacktestResult[]; refineSeeds?: Record<string, any>[] }
   | { type: "combo-complete"; combo: string; results: LabBacktestResult[] }
   | { type: "done"; results: LabBacktestResult[] }
   | { type: "error"; message: string };
@@ -370,6 +370,7 @@ async function run() {
   const resumeIteration = resumeCheckpoint?.currentIteration ?? 0;
   const resumeDeepRound = resumeCheckpoint?.currentDeepRound ?? 0;
   const resumePartialResults = resumeCheckpoint?.partialResults ?? [];
+  const resumeRefineSeeds = resumeCheckpoint?.refineSeeds ?? null;
 
   const tickerProgress: Record<string, { status: "pending" | "running" | "complete"; best?: number }> = {};
   for (const combo of combos) {
@@ -491,7 +492,10 @@ async function run() {
     if (aborted) continue;
 
     comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
-    const topSeeds = comboResults.slice(0, config.topK);
+    const topSeeds = isResumingThisCombo && resumeRefineSeeds && (resumeStage === "refine" || resumeStage === "deep")
+      ? resumeRefineSeeds.map(params => ({ params } as LabBacktestResult))
+      : comboResults.slice(0, config.topK);
+    const refineSeedParams = topSeeds.map(s => s.params);
 
     const refineStartIteration = config.randomSamples;
     const skipStandardRefine = isResumingThisCombo && resumeStage === "deep";
@@ -533,16 +537,12 @@ async function run() {
           eta: estimateEta(startTime, globalCurrent, grandTotal),
         }});
 
-        const refNow = Date.now();
-        const refInterval = checkpointCount === 0 ? FIRST_CHECKPOINT_MS : CHECKPOINT_INTERVAL_MS;
-        if (refNow - lastCheckpointTime >= refInterval) {
-          lastCheckpointTime = refNow;
-          checkpointCount++;
-          const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
-          const refineKeepCount = Math.max(10, config.topK);
-          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, refineKeepCount);
-          send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: actualIter, results: topPartial });
-        }
+        const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
+        const refineKeepCount = Math.max(10, config.topK);
+        const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, refineKeepCount);
+        send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: actualIter, results: topPartial, refineSeeds: refineSeedParams });
+        lastCheckpointTime = Date.now();
+        checkpointCount++;
       }
     }
 
@@ -593,20 +593,16 @@ async function run() {
             eta: estimateEta(startTime, globalCurrent, grandTotal),
           }});
 
-          const deepNow = Date.now();
-          const deepInterval = checkpointCount === 0 ? FIRST_CHECKPOINT_MS : CHECKPOINT_INTERVAL_MS;
-          if (deepNow - lastCheckpointTime >= deepInterval) {
-            lastCheckpointTime = deepNow;
-            checkpointCount++;
-            const deepCheckpointCount = Math.max(10, config.topK);
-            const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, deepCheckpointCount);
-            send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round, results: topPartial });
-          }
+          const deepCheckpointCount = Math.max(10, config.topK);
+          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, deepCheckpointCount);
+          send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round, results: topPartial, refineSeeds: refineSeedParams });
+          lastCheckpointTime = Date.now();
+          checkpointCount++;
         }
 
-        const deepCheckpointCount = Math.max(10, config.topK);
-        const topAfterRound = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, deepCheckpointCount);
-        send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round + 1, results: topAfterRound });
+        const deepCheckpointCount2 = Math.max(10, config.topK);
+        const topAfterRound = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, deepCheckpointCount2);
+        send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round + 1, results: topAfterRound, refineSeeds: refineSeedParams });
         lastCheckpointTime = Date.now();
       }
     }

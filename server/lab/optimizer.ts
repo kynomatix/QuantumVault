@@ -85,7 +85,7 @@ function scoreResult(r: LabBacktestResult): number {
 export interface OptimizationCallbacks {
   onProgress: (progress: LabJobProgress) => void;
   onComboCheckpoint: (completedCombo: string, comboResults: LabBacktestResult[]) => Promise<void>;
-  onPartialCheckpoint?: (combo: string, stage: "random" | "refine", iteration: number, partialResults: LabBacktestResult[]) => Promise<void>;
+  onPartialCheckpoint?: (combo: string, stage: "random" | "refine", iteration: number, partialResults: LabBacktestResult[], refineSeeds?: Record<string, any>[]) => Promise<void>;
 }
 
 export async function runOptimization(
@@ -114,6 +114,7 @@ export async function runOptimization(
   const resumeStage = resumeCheckpoint?.currentStage ?? null;
   const resumeIteration = resumeCheckpoint?.currentIteration ?? 0;
   const resumePartialResults = resumeCheckpoint?.partialResults ?? [];
+  const resumeRefineSeeds = resumeCheckpoint?.refineSeeds ?? null;
 
   const tickerProgress: Record<string, { status: "pending" | "running" | "complete"; best?: number }> = {};
   for (const combo of combos) {
@@ -286,7 +287,10 @@ export async function runOptimization(
     if (abortSignal?.aborted) continue;
 
     comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
-    const topSeeds = comboResults.slice(0, config.topK);
+    const topSeeds = isResumingThisCombo && resumeRefineSeeds && resumeStage === "refine"
+      ? resumeRefineSeeds.map(params => ({ params } as LabBacktestResult))
+      : comboResults.slice(0, config.topK);
+    const refineSeedParams = topSeeds.map(s => s.params);
 
     effectiveOnProgress({
       jobId,
@@ -343,14 +347,13 @@ export async function runOptimization(
         eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
       });
 
-      const refNow = Date.now();
-      if (refNow - lastCheckpointTime >= CHECKPOINT_INTERVAL_MS && callbacks?.onPartialCheckpoint) {
-        lastCheckpointTime = refNow;
+      if (callbacks?.onPartialCheckpoint) {
         const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
         const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
-        await callbacks.onPartialCheckpoint(key, "refine", actualIter, topPartial).catch(e =>
+        await callbacks.onPartialCheckpoint(key, "refine", actualIter, topPartial, refineSeedParams).catch(e =>
           console.log(`[QuantumLab] Partial checkpoint error: ${e.message}`)
         );
+        lastCheckpointTime = Date.now();
       }
     }
 

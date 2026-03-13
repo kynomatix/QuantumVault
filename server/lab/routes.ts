@@ -456,6 +456,7 @@ export function registerLabRoutes(app: Express): void {
                 currentStage: msg.stage,
                 currentIteration: msg.iteration,
                 currentDeepRound: msg.deepRound,
+                refineSeeds: msg.refineSeeds,
               };
               await labStorage.saveCheckpoint(runId, checkpoint);
             } catch (err: any) {

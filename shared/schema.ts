@@ -850,6 +850,7 @@ export interface LabCheckpoint {
   currentIteration?: number;
   currentDeepRound?: number;
   partialResults?: LabBacktestResult[];
+  refineSeeds?: Record<string, any>[];
 }
 
 export interface LabJobProgress {
