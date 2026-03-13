@@ -854,7 +854,7 @@ export interface LabCheckpoint {
 
 export interface LabJobProgress {
   jobId: string;
-  status: "fetching" | "baseline" | "random_search" | "refinement" | "complete" | "error";
+  status: "fetching" | "baseline" | "random_search" | "refinement" | "complete" | "error" | "retrying";
   stage: string;
   current: number;
   total: number;
@@ -868,6 +868,7 @@ export interface LabJobProgress {
   eta?: number;
   elapsed: number;
   error?: string;
+  newJobId?: string;
   tickerProgress?: Record<string, {
     status: "pending" | "running" | "complete";
     best?: number;

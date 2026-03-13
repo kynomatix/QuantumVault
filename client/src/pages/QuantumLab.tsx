@@ -492,6 +492,16 @@ export default function QuantumLab() {
             setMainTab("results");
             queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
           }
+          if (data.status === "retrying") {
+            if (data.newJobId && data.newJobId !== currentJobId) {
+              es.close();
+              toast({ title: "Retrying automatically", description: data.stage || "Resuming from checkpoint...", variant: "default" });
+              setActiveJobId(data.newJobId);
+            } else {
+              setJobProgress(data);
+            }
+            return;
+          }
           if (data.status === "error") {
             es.close();
             setActiveJobId(null);
@@ -1425,8 +1435,9 @@ function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel
     setCancelling(false);
   };
 
-  const statusColor = progress.status === "error" ? "text-purple-400" : progress.status === "complete" ? "text-sky-400" : "text-violet-400";
-  const statusIcon = progress.status === "error" ? <AlertCircle className="w-5 h-5" /> : progress.status === "complete" ? <CheckCircle2 className="w-5 h-5" /> : <Loader2 className="w-5 h-5 animate-spin" />;
+  const isRetrying = progress.status === "retrying";
+  const statusColor = progress.status === "error" && !isRetrying ? "text-purple-400" : progress.status === "complete" ? "text-sky-400" : isRetrying ? "text-amber-400" : "text-violet-400";
+  const statusIcon = progress.status === "error" && !isRetrying ? <AlertCircle className="w-5 h-5" /> : progress.status === "complete" ? <CheckCircle2 className="w-5 h-5" /> : <Loader2 className="w-5 h-5 animate-spin" />;
 
   return (
     <Card className="bg-violet-500/5 border border-violet-500/20 p-0 overflow-hidden" data-testid="job-monitor">
@@ -1440,14 +1451,14 @@ function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel
             <div className={statusColor}>{statusIcon}</div>
             <div className="min-w-0">
               <h2 className="text-base font-semibold text-white truncate" data-testid="text-running-title">
-                {progress.error === "Cancelled" ? "Cancelled" : progress.status === "complete" ? "Complete" : progress.status === "error" ? "Error" : "Optimization Running"}
+                {progress.error === "Cancelled" ? "Cancelled" : progress.status === "complete" ? "Complete" : isRetrying ? "Retrying..." : progress.status === "error" ? "Error" : "Optimization Running"}
               </h2>
               <p className="text-xs text-white/50 truncate" data-testid="text-running-stage">{progress.stage || "Initializing..."}</p>
             </div>
           </div>
           <div className="flex items-center gap-3 flex-shrink-0">
             <span className="text-2xl font-bold font-mono tabular-nums text-white" data-testid="text-percent">{Math.min(100, Math.round(progress.percent ?? 0))}%</span>
-            <Button variant="destructive" size="sm" onClick={handleCancel} disabled={cancelling || progress.status === "complete" || progress.status === "error"} data-testid="button-cancel">
+            <Button variant="destructive" size="sm" onClick={handleCancel} disabled={cancelling || progress.status === "complete" || progress.status === "error" || isRetrying} data-testid="button-cancel">
               {cancelling ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <X className="w-3 h-3 mr-1" />} Cancel
             </Button>
           </div>

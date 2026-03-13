@@ -525,7 +525,10 @@ export function registerLabRoutes(app: Express): void {
                 const hasCheckpoint = cp?.completedCombos?.length || (cp?.currentCombo && cp?.currentIteration != null);
                 if (savedResults.length > 0 || hasCheckpoint) {
                   await labStorage.pauseRun(runId);
-                  console.log(`[QuantumLab] Run ${runId} error but has progress → paused`);
+                  console.log(`[QuantumLab] Run ${runId} error but has progress → paused, will auto-retry`);
+                  activeWorker = null;
+                  autoRetryAfterCrash(runId, job.id, msg.message);
+                  break;
                 } else {
                   await labStorage.failRun(runId);
                 }
@@ -549,7 +552,10 @@ export function registerLabRoutes(app: Express): void {
             const hasCheckpoint = cp?.completedCombos?.length || (cp?.currentCombo && cp?.currentIteration != null);
             if (savedResults.length > 0 || hasCheckpoint) {
               await labStorage.pauseRun(runId);
-              console.log(`[QuantumLab] Worker error but run ${runId} has progress → paused`);
+              console.log(`[QuantumLab] Worker error but run ${runId} has progress → paused, will auto-retry`);
+              activeWorker = null;
+              autoRetryAfterCrash(runId, job.id, err.message);
+              return;
             } else {
               await labStorage.failRun(runId);
             }
@@ -568,7 +574,10 @@ export function registerLabRoutes(app: Express): void {
               const hasCheckpoint = cp?.completedCombos?.length || (cp?.currentCombo && cp?.currentIteration != null);
               if (savedResults.length > 0 || hasCheckpoint) {
                 await labStorage.pauseRun(runId);
-                console.log(`[QuantumLab] Worker exit(${code}) but run ${runId} has progress → paused`);
+                console.log(`[QuantumLab] Worker exit(${code}) but run ${runId} has progress → paused, will auto-retry`);
+                activeWorker = null;
+                autoRetryAfterCrash(runId, job.id, `Worker exited with code ${code}`);
+                return;
               } else {
                 await labStorage.failRun(runId);
               }
@@ -589,6 +598,108 @@ export function registerLabRoutes(app: Express): void {
         await labStorage.failRun(runId).catch(() => {});
       }
     });
+  }
+
+  let pendingRetryRunId: number | null = null;
+
+  async function autoRetryAfterCrash(runId: number, oldJobId: string, errorMsg: string) {
+    if (pendingRetryRunId === runId) {
+      console.log(`[QuantumLab] Auto-retry already pending for run ${runId}, skipping duplicate`);
+      return;
+    }
+    pendingRetryRunId = runId;
+
+    try {
+      const run = await labStorage.getRun(runId);
+      if (!run || run.status !== "paused") return;
+
+      const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+      if (!cp?.configSnapshot) return;
+      if (cp.userCancelled) return;
+
+      const crashCount = (cp.autoResumeAttempts as number) ?? 0;
+      if (crashCount >= MAX_AUTO_RESUME_ATTEMPTS) {
+        console.log(`[QuantumLab] Auto-retry exhausted for run ${runId} (${crashCount}/${MAX_AUTO_RESUME_ATTEMPTS}). Manual resume required.`);
+        labStorage.updateProgress(oldJobId, {
+          jobId: oldJobId, status: "error", stage: `Failed after ${crashCount} retries: ${errorMsg}`,
+          current: 0, total: 0, percent: 0, elapsed: 0, error: `Failed after ${crashCount} retries: ${errorMsg}`,
+        });
+        return;
+      }
+
+      cp.autoResumeAttempts = crashCount + 1;
+      await labStorage.saveCheckpoint(runId, cp);
+
+      const retryIn = 3;
+      const attempt = crashCount + 1;
+      console.log(`[QuantumLab] Auto-retry run ${runId} in ${retryIn}s (attempt ${attempt}/${MAX_AUTO_RESUME_ATTEMPTS})`);
+      labStorage.updateProgress(oldJobId, {
+        jobId: oldJobId, status: "retrying", stage: `Retrying in ${retryIn}s (attempt ${attempt}/${MAX_AUTO_RESUME_ATTEMPTS})...`,
+        current: 0, total: 0, percent: 0, elapsed: 0,
+      });
+
+      await new Promise(resolve => setTimeout(resolve, retryIn * 1000));
+
+      const freshRun = await labStorage.getRun(runId);
+      if (!freshRun || freshRun.status !== "paused") {
+        console.log(`[QuantumLab] Auto-retry aborted — run ${runId} status changed to ${freshRun?.status}`);
+        return;
+      }
+      const freshCp = freshRun.checkpoint && typeof freshRun.checkpoint === "object" ? freshRun.checkpoint as any : null;
+      if (freshCp?.userCancelled) {
+        console.log(`[QuantumLab] Auto-retry aborted — run ${runId} was cancelled during delay`);
+        return;
+      }
+
+      if (activeWorker) {
+        console.log(`[QuantumLab] Auto-retry skipped — another worker already active`);
+        return;
+      }
+
+      const checkpoint: LabCheckpoint = freshCp ?? cp;
+      const config = checkpoint.configSnapshot!;
+
+      if (checkpoint.currentCombo && !checkpoint.partialResults?.length) {
+        const dbResults = await labStorage.getRunResults(runId);
+        const comboResults = dbResults.filter(r => `${r.ticker}|${r.timeframe}` === checkpoint.currentCombo);
+        if (comboResults.length > 0) {
+          checkpoint.partialResults = comboResults.map(r => ({
+            ticker: r.ticker, timeframe: r.timeframe,
+            netProfitPercent: r.netProfitPercent, winRatePercent: r.winRatePercent,
+            maxDrawdownPercent: r.maxDrawdownPercent, profitFactor: r.profitFactor,
+            totalTrades: r.totalTrades, params: r.params as Record<string, any>,
+            trades: (r.trades as any[]) ?? [], equityCurve: (r.equityCurve as any[]) ?? [],
+          }));
+        }
+      }
+
+      let retryPooc: boolean | undefined;
+      if (freshRun.strategyId) {
+        const strat = await labStorage.getStrategy(freshRun.strategyId);
+        if (strat?.strategySettings && typeof strat.strategySettings === "object") {
+          retryPooc = (strat.strategySettings as any).processOrdersOnClose;
+        }
+      }
+
+      const newJob = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: false });
+      newJob.runId = runId;
+      await labStorage.resumeRun(runId);
+
+      labStorage.updateProgress(oldJobId, {
+        jobId: oldJobId, status: "retrying", stage: `Retrying...`,
+        current: 0, total: 0, percent: 0, elapsed: 0, newJobId: newJob.id,
+      });
+
+      const detail = checkpoint.completedCombos?.length
+        ? `${checkpoint.completedCombos.length} combos done`
+        : `mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}`;
+      console.log(`[QuantumLab] Auto-retrying run ${runId} (${detail}, attempt ${attempt}/${MAX_AUTO_RESUME_ATTEMPTS})`);
+      startOptimizationJob(config, newJob, runId, checkpoint, undefined, undefined, undefined, retryPooc);
+    } catch (err: any) {
+      console.log(`[QuantumLab] Auto-retry error: ${err.message}`);
+    } finally {
+      pendingRetryRunId = null;
+    }
   }
 
   app.post("/api/lab/run-optimization", requireLabAuth, async (req: Request, res: Response) => {
@@ -831,7 +942,7 @@ export function registerLabRoutes(app: Express): void {
     res.json(results);
   });
 
-  const MAX_AUTO_RESUME_ATTEMPTS = 2;
+  const MAX_AUTO_RESUME_ATTEMPTS = 3;
 
   app.post("/api/lab/jobs/force-clear", requireLabAuth, async (req: Request, res: Response) => {
     if (activeWorker) {
