@@ -109,7 +109,8 @@ export class LabDatabaseStorage implements ILabStorage {
           .limit(1);
         const hasPersistedResults = savedResults.length > 0;
 
-        const canResume = hasAnyCheckpoint || hasPersistedResults;
+        const hasConfigSnapshot = !!cp?.configSnapshot;
+        const canResume = hasAnyCheckpoint || hasPersistedResults || hasConfigSnapshot;
         const newStatus = canResume ? "paused" : "failed";
         await db.update(labOptimizationRuns).set({
           status: newStatus,
@@ -122,7 +123,9 @@ export class LabDatabaseStorage implements ILabStorage {
             ? `mid-combo ${cp.currentCombo} at ${cp.currentStage} iter ${cp.currentIteration}`
             : hasPersistedResults
               ? `has persisted results in DB`
-              : "";
+              : hasConfigSnapshot
+                ? `config snapshot only (no progress)`
+                : "";
         console.log(`[QuantumLab] Stale run ${run.id} → ${newStatus}${detail ? ` (${detail})` : ""}`);
         if (canResume) {
           this.interruptedRunIds.push(run.id);
@@ -137,16 +140,19 @@ export class LabDatabaseStorage implements ILabStorage {
       for (const run of failedRuns) {
         const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
         const hasCheckpoint = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
+        const hasConfigSnapshot = !!cp?.configSnapshot;
         const savedResults = await db.select({ id: labOptimizationResults.id })
           .from(labOptimizationResults)
           .where(eq(labOptimizationResults.runId, run.id))
           .limit(1);
-        if (hasCheckpoint || savedResults.length > 0) {
+        if (hasCheckpoint || savedResults.length > 0 || hasConfigSnapshot) {
           await db.update(labOptimizationRuns).set({
             status: "paused",
             completedAt: null,
           }).where(eq(labOptimizationRuns.id, run.id));
-          console.log(`[QuantumLab] Recovered failed run ${run.id} → paused (has ${hasCheckpoint ? "checkpoint" : ""}${savedResults.length > 0 ? " results" : ""})`);
+          const reason = hasCheckpoint ? "checkpoint" : savedResults.length > 0 ? "results" : "config snapshot";
+          console.log(`[QuantumLab] Recovered failed run ${run.id} → paused (has ${reason})`);
+          this.interruptedRunIds.push(run.id);
           recovered++;
         }
       }
