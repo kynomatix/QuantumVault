@@ -32,6 +32,7 @@ Preferred communication style: Simple, everyday language.
 
 ### Core Architecture
 -   **Monorepo Structure**: Organized into `client/`, `server/`, and `shared/` directories.
+-   **QuantumLab Child Process**: The lab runs as an isolated forked child process (`server/lab/index.ts`) on port 5050. The main server proxies all `/api/lab/*` requests via `http-proxy-middleware`. Auth is translated from session cookies to trusted `x-lab-wallet`/`x-lab-auth` headers. A supervisor (`server/lab/supervisor.ts`) manages lifecycle: auto-restart with exponential backoff, periodic health checks, graceful shutdown. The lab process has its own smaller DB pool (`DB_POOL_SIZE=5`) vs the main server's default (`DB_POOL_SIZE=20`). Build produces `dist/lab-server.cjs` alongside `dist/index.cjs`.
 -   **Agent Wallet Architecture**: Server-managed Solana wallet per user for autonomous trading, with encrypted private keys and simplified capital flow.
 -   **On-Chain-First Architecture**: Drift positions on-chain are the single source of truth, with the database acting as a cache and automated reconciliation.
 -   **Drift Subaccounts**: Each bot operates on a unique `driftSubaccountId` for isolation, with auto-initialization upon user deposits.

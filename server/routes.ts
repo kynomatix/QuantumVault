@@ -1,8 +1,5 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import session from "express-session";
-import connectPgSimple from "connect-pg-simple";
-import pg from "pg";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { encrypt as legacyEncrypt } from "./crypto";
@@ -26,7 +23,6 @@ import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { getSwiftMetrics } from "./swift-metrics";
 import { DOCS_MARKDOWN } from "./docs-markdown";
 import { getSwiftDiagnostics } from "./swift-config";
-import { registerLabRoutes } from "./lab/routes";
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
@@ -1345,29 +1341,8 @@ export async function registerRoutes(
     app.set('trust proxy', 1);
   }
 
-  const PgStore = connectPgSimple(session);
-  const pgPool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-  });
-  
-  app.use(
-    session({
-      store: new PgStore({
-        pool: pgPool,
-        tableName: 'user_sessions',
-        createTableIfMissing: true,
-      }),
-      secret: process.env.SESSION_SECRET || "quantum-vault-secret-change-in-production",
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: process.env.NODE_ENV === "production" ? 'lax' : undefined,
-        maxAge: 1000 * 60 * 60 * 24 * 7,
-      },
-    })
-  );
+  const { sessionMiddleware } = await import("./session");
+  app.use(sessionMiddleware);
 
   const requireAuth = (req: any, res: any, next: any) => {
     if (!req.session.userId) {
@@ -10433,8 +10408,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       res.status(500).json({ error: error.message });
     }
   });
-
-  registerLabRoutes(app);
 
   return httpServer;
 }

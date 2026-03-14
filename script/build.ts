@@ -4,8 +4,6 @@ import { rm, readFile, stat, symlink, unlink } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 
-// server deps to bundle to reduce openat(2) syscalls
-// which helps cold start times
 const allowlist = [
   "@google/generative-ai",
   "axios",
@@ -17,6 +15,7 @@ const allowlist = [
   "express",
   "express-rate-limit",
   "express-session",
+  "http-proxy-middleware",
   "jsonwebtoken",
   "multer",
   "nanoid",
@@ -73,6 +72,24 @@ async function buildAll() {
     bundle: true,
     format: "cjs",
     outfile: "dist/index.cjs",
+    target: "node20",
+    define: {
+      "process.env.NODE_ENV": '"production"',
+      "import.meta.url": '""',
+      "__ESBUILD_CJS_BUNDLE__": "true",
+    },
+    minify: true,
+    external: externals,
+    logLevel: "info",
+  });
+
+  console.log("building lab server...");
+  await esbuild({
+    entryPoints: ["server/lab/index.ts"],
+    platform: "node",
+    bundle: true,
+    format: "cjs",
+    outfile: "dist/lab-server.cjs",
     target: "node20",
     define: {
       "process.env.NODE_ENV": '"production"',

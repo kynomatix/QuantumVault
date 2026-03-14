@@ -10,9 +10,12 @@ import { startRetryWorker, backfillRecoveredClosePnl } from "./trade-retry-servi
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
 import { initLeverageCache } from "./leverage-cache-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
+import { createLabSupervisor, getLabAuthSecret } from "./lab/supervisor";
+import { createProxyMiddleware } from "http-proxy-middleware";
 
 const app = express();
 const httpServer = createServer(app);
+const labSupervisor = createLabSupervisor();
 
 declare module "http" {
   interface IncomingMessage {
@@ -36,6 +39,61 @@ app.use((req, res, next) => {
     console.log(`[early-log] ${req.method} ${req.path} - Content-Type: ${req.headers['content-type']} - Cookie: ${req.headers.cookie?.slice(0, 50)}...`);
   }
   next();
+});
+
+// Lab proxy — runs BEFORE the JSON body parser so request bodies are
+// forwarded as-is (no double-parse). Session middleware is applied inline
+// to extract the wallet address for the trusted header.
+import { sessionMiddleware } from "./session";
+
+const labProxy = createProxyMiddleware({
+  target: `http://127.0.0.1:5050`,
+  router: () => `http://127.0.0.1:${labSupervisor.labPort}`,
+  changeOrigin: false,
+  selfHandleResponse: false,
+  timeout: 300_000,
+  proxyTimeout: 3_600_000,
+  on: {
+    proxyReq: (proxyReq, _req) => {
+      proxyReq.removeHeader("x-lab-auth");
+      proxyReq.removeHeader("x-lab-wallet");
+
+      const req = _req as any;
+      const walletAddress = req.session?.walletAddress;
+      if (walletAddress) {
+        proxyReq.setHeader("x-lab-wallet", walletAddress);
+      }
+      proxyReq.setHeader("x-lab-auth", getLabAuthSecret());
+    },
+    error: (err, _req, res) => {
+      console.error(`[LabProxy] Proxy error: ${err.message}`);
+      if (res && "writeHead" in res && !res.headersSent) {
+        const body = JSON.stringify({
+          error: "QuantumLab service unavailable",
+          message: "The lab process is starting up or temporarily unavailable. Please try again.",
+        });
+        (res as any).writeHead(503, {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        });
+        (res as any).end(body);
+      }
+    },
+  },
+});
+
+app.use("/api/lab", (req: Request, res: Response, next: NextFunction) => {
+  sessionMiddleware(req, res, (err) => {
+    if (err) return next(err);
+    if (!labSupervisor.isReady) {
+      return res.status(503).json({
+        error: "QuantumLab service unavailable",
+        message: "The lab process is starting up. Please try again shortly.",
+      });
+    }
+    req.url = req.originalUrl;
+    labProxy(req, res, next);
+  });
 });
 
 app.use(
@@ -92,6 +150,10 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  labSupervisor.start().catch((err) => {
+    console.error(`[LabSupervisor] Initial start failed: ${err.message}`);
+  });
+
   await registerRoutes(httpServer, app);
 
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
@@ -137,6 +199,14 @@ app.use((req, res, next) => {
       console.log('[SECURITY] SERVER_EXECUTION_KEY format is valid');
     }
   }
+
+  const shutdownHandler = async () => {
+    console.log("[Main] Shutting down (lab process will continue running)...");
+    await labSupervisor.shutdown();
+    httpServer.close();
+  };
+  process.on("SIGTERM", () => shutdownHandler().catch(() => process.exit(1)));
+  process.on("SIGINT", () => shutdownHandler().catch(() => process.exit(1)));
 
   httpServer.listen(
     {

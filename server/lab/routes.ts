@@ -10,9 +10,28 @@ import type { OHLCV } from "./engine";
 import { db } from "../db";
 import { eq } from "drizzle-orm";
 
+let labCleanup: ((reason: string) => Promise<void>) | null = null;
+
+export function getLabCleanup(): ((reason: string) => Promise<void>) | null {
+  return labCleanup;
+}
+
 export function registerLabRoutes(app: Express): void {
 
   const requireLabAuth = (req: any, res: any, next: any) => {
+    const labSecret = process.env.LAB_AUTH_SECRET;
+    if (labSecret) {
+      const inboundSecret = req.headers["x-lab-auth"];
+      if (inboundSecret !== labSecret) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const walletAddress = req.headers["x-lab-wallet"] as string | undefined;
+      if (!walletAddress) {
+        return res.status(401).json({ error: "Wallet not connected" });
+      }
+      req.walletAddress = walletAddress;
+      return next();
+    }
     const walletAddress = req.session?.walletAddress;
     if (!walletAddress) {
       return res.status(401).json({ error: "Wallet not connected" });
@@ -312,7 +331,7 @@ export function registerLabRoutes(app: Express): void {
       const result = await labStorage.getResult(resultId);
       if (!result) return res.status(404).json({ error: "Result not found" });
       const run = await labStorage.getRun(result.runId);
-      if (run && run.userId && run.userId !== (req.session as any).walletAddress) {
+      if (run && run.userId && run.userId !== (req as any).walletAddress) {
         return res.status(403).json({ error: "Not authorized" });
       }
       res.json(result);
@@ -328,7 +347,7 @@ export function registerLabRoutes(app: Express): void {
       const result = await labStorage.getResult(resultId);
       if (!result) return res.status(404).json({ error: "Result not found" });
       const run = await labStorage.getRun(result.runId);
-      if (run && run.userId && run.userId !== (req.session as any).walletAddress) {
+      if (run && run.userId && run.userId !== (req as any).walletAddress) {
         return res.status(403).json({ error: "Not authorized" });
       }
       await labStorage.deleteResult(resultId);
@@ -1117,7 +1136,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.delete("/api/lab/cache", async (_req: Request, res: Response) => {
+  app.delete("/api/lab/cache", requireLabAuth, async (_req: Request, res: Response) => {
     try {
       const deleted = await clearCandleCache();
       res.json({ success: true, deletedRows: deleted });
@@ -1214,8 +1233,8 @@ export function registerLabRoutes(app: Express): void {
     }
   }, 5000);
 
-  const gracefulShutdown = async (signal: string) => {
-    console.log(`[QuantumLab] ${signal} received — pausing active jobs...`);
+  labCleanup = async (reason: string) => {
+    console.log(`[QuantumLab] ${reason} — pausing active jobs...`);
     if (activeWorker) {
       activeWorker.postMessage({ type: "abort" });
       try {
@@ -1238,8 +1257,8 @@ export function registerLabRoutes(app: Express): void {
         if (job.runId) {
           pausePromises.push(
             labStorage.pauseRun(job.runId)
-              .then(() => console.log(`[QuantumLab] Job ${jobId} (run ${job.runId}) → paused on ${signal}`))
-              .catch((err: any) => console.log(`[QuantumLab] Failed to pause run ${job.runId} on ${signal}: ${err.message}`))
+              .then(() => console.log(`[QuantumLab] Job ${jobId} (run ${job.runId}) → paused on ${reason}`))
+              .catch((err: any) => console.log(`[QuantumLab] Failed to pause run ${job.runId} on ${reason}: ${err.message}`))
           );
         }
       }
@@ -1251,7 +1270,4 @@ export function registerLabRoutes(app: Express): void {
       ]);
     }
   };
-
-  process.on("SIGTERM", () => { gracefulShutdown("SIGTERM").catch(() => {}); });
-  process.on("SIGINT", () => { gracefulShutdown("SIGINT").catch(() => {}); });
 }
