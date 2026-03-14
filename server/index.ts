@@ -3,10 +3,10 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { storage } from "./storage";
-import { startPeriodicReconciliation, backfillLiquidationRecords } from "./reconciliation-service";
+import { startPeriodicReconciliation } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
-import { startRetryWorker, backfillRecoveredClosePnl } from "./trade-retry-service";
+import { startRetryWorker } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
 import { initLeverageCache } from "./leverage-cache-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
@@ -217,9 +217,9 @@ app.use((req, res, next) => {
     async () => {
       log(`serving on port ${port}`);
       
-      // Cleanup orphaned pending trades on startup
-      // Note: These are marked as needs_review since we can't verify Drift execution status
-      // A future improvement would be to check on-chain fills before marking status
+      // Staggered startup: services start in sequence with delays to avoid RPC rate-limit bursts
+
+      // Immediately: orphaned trade cleanup (DB-only, no RPC calls)
       try {
         const orphanedTrades = await storage.getOrphanedPendingTrades(2);
         if (orphanedTrades.length > 0) {
@@ -235,35 +235,40 @@ app.use((req, res, next) => {
       } catch (error) {
         console.error("Error cleaning up orphaned trades:", error);
       }
-      
-      // Initialize leverage cache from on-chain data (and refresh every 30 minutes)
-      initLeverageCache().catch(err => console.error('Failed to initialize leverage cache:', err));
-      
-      // Start periodic position reconciliation (syncs DB with on-chain Drift positions)
-      startPeriodicReconciliation();
-      
-      // One-time backfill of historical liquidation records
+
+      // ~5s: trade retry worker (recovers in-flight trades soonest)
       setTimeout(() => {
-        backfillLiquidationRecords().catch(err => console.error('[Backfill] Startup backfill error:', err));
+        log('[Staggered startup] Starting retry worker');
+        startRetryWorker();
+      }, 5_000);
+
+      // ~15s: periodic position reconciliation (important but can wait a few seconds)
+      setTimeout(() => {
+        log('[Staggered startup] Starting periodic reconciliation');
+        startPeriodicReconciliation();
       }, 15_000);
-      
-      // Start orphaned subaccount cleanup (retries closing subaccounts that failed during bot deletion)
-      startOrphanedSubaccountCleanup();
-      
-      // Start PnL snapshot job for marketplace time-based metrics (7d/30d/90d)
-      startPnlSnapshotJob();
-      
-      // Start trade retry worker for rate-limited trade recovery
-      startRetryWorker();
-      
-      // One-time backfill: fix recovered close trades missing PnL
-      backfillRecoveredClosePnl();
-      
-      // Start profit share retry job for IOU failover system
-      startProfitShareRetryJob();
-      
-      // Start portfolio snapshot job for daily performance tracking
-      startPortfolioSnapshotJob();
+
+      // ~20s: leverage cache (single batch RPC call to read perp market accounts)
+      setTimeout(() => {
+        log('[Staggered startup] Initializing leverage cache');
+        initLeverageCache().catch(err => console.error('Failed to initialize leverage cache:', err));
+      }, 20_000);
+
+      // ~30s: orphaned subaccount cleanup (low priority, on-chain calls)
+      setTimeout(() => {
+        log('[Staggered startup] Starting orphaned subaccount cleanup');
+        startOrphanedSubaccountCleanup();
+      }, 30_000);
+
+      // ~45s: periodic snapshot/retry jobs (don't need to run immediately)
+      setTimeout(() => {
+        log('[Staggered startup] Starting PnL snapshot job');
+        startPnlSnapshotJob();
+        log('[Staggered startup] Starting portfolio snapshot job');
+        startPortfolioSnapshotJob();
+        log('[Staggered startup] Starting profit share retry job');
+        startProfitShareRetryJob();
+      }, 45_000);
     },
   );
 })();
