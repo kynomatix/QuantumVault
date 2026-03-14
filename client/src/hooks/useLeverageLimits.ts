@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useQuery } from "@tanstack/react-query";
 import { setLeverageLimitsCache } from "@/lib/drift-constants";
 
@@ -16,7 +17,7 @@ export function useLeverageLimits() {
     queryFn: async () => {
       const res = await fetch("/api/drift/leverage-limits");
       if (!res.ok) throw new Error("Failed to fetch leverage limits");
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       if (data?.leverageLimits && Object.keys(data.leverageLimits).length > 0) {
         setLeverageLimitsCache(data.leverageLimits);
       }

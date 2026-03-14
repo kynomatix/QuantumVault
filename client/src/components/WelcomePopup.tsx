@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect } from 'react';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
@@ -130,11 +131,11 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'SOL deposit failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
       
       setProcessingStep('signing');
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
@@ -241,11 +242,11 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'USDC deposit failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
       
       setUsdcProcessingStep('signing');
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));

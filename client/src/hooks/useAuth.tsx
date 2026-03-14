@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";
 import { useLocation } from "wouter";
 
@@ -27,7 +28,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     fetch("/api/auth/me", { credentials: "include" })
       .then((res) => {
         if (res.ok) {
-          return res.json();
+          return safeResponseJson(res);
         }
         throw new Error("Not authenticated");
       })
@@ -45,11 +46,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     if (!res.ok) {
-      const error = await res.json();
+      const error = await safeResponseJson(res);
       throw new Error(error.error || "Login failed");
     }
 
-    const data = await res.json();
+    const data = await safeResponseJson(res);
     setUser(data);
     navigate("/app");
   };
@@ -63,11 +64,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     if (!res.ok) {
-      const error = await res.json();
+      const error = await safeResponseJson(res);
       throw new Error(error.error || "Registration failed");
     }
 
-    const data = await res.json();
+    const data = await safeResponseJson(res);
     setUser(data);
     navigate("/app");
   };

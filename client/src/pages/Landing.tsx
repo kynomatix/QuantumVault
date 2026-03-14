@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useEffect, useRef, useState } from 'react';
 import { motion, useScroll, useTransform, useMotionTemplate } from 'framer-motion';
 import { useLocation } from 'wouter';
@@ -100,7 +101,7 @@ export default function Landing() {
     queryFn: async () => {
       const response = await fetch('/api/metrics');
       if (!response.ok) throw new Error('Failed to fetch metrics');
-      return response.json();
+      return safeResponseJson(response);
     },
     staleTime: 5 * 60 * 1000,
     refetchInterval: 5 * 60 * 1000,

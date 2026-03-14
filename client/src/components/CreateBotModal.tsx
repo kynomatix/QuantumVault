@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
@@ -134,7 +135,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       try {
         const res = await fetch('/api/drift/markets');
         if (res.ok) {
-          const data = await res.json();
+          const data = await safeResponseJson(res);
           setMarkets(data.markets || []);
         }
       } catch (error) {
@@ -177,7 +178,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     try {
       const res = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
       if (res.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         setAgentBalance(data.balance?.toString() || '0');
         setAgentSolBalance(data.solBalance ?? null);
         if (data.botCreationSolRequirement) {
@@ -233,11 +234,11 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'SOL deposit failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await safeResponseJson(response);
       
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
       const signedTx = await wallet.signTransaction(transaction);
@@ -305,12 +306,12 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       });
       
       if (!res.ok) {
-        const error = await res.json();
+        const error = await safeResponseJson(res);
         toast({ title: 'Failed to create bot', description: error.error, variant: 'destructive' });
         return;
       }
       
-      const bot = await res.json();
+      const bot = await safeResponseJson(res);
       setCreatedBot(bot);
       
       // Step 2: If funding amount provided, deposit to the bot's subaccount
@@ -344,7 +345,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
             description: `Invested $${fundingAmount.toFixed(2)} with ${newBot.leverage}x leverage = $${(fundingAmount * newBot.leverage).toFixed(2)} max position` 
           });
         } else {
-          const err = await depositRes.json();
+          const err = await safeResponseJson(depositRes);
           toast({ 
             title: 'Bot created but funding failed', 
             description: err.error || 'You can fund it later from the bot details',
@@ -390,7 +391,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     try {
       const res = await fetch(`/api/user/webhook-url?wallet=${walletAddress}`, { credentials: 'include' });
       if (res.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         setUserWebhookUrl(data.webhookUrl);
       }
     } catch (error) {

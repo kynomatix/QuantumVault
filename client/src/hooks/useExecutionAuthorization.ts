@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect, useCallback } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import bs58 from 'bs58';
@@ -23,7 +24,7 @@ export function useExecutionAuthorization() {
     try {
       const res = await fetch('/api/auth/execution-status', { credentials: 'include' });
       if (res.ok) {
-        const data: ExecutionStatus = await res.json();
+        const data: ExecutionStatus = await safeResponseJson(res);
         setExecutionEnabled(data.executionEnabled);
         setEmergencyStopTriggered(data.emergencyStopTriggered);
         return data;
@@ -56,7 +57,7 @@ export function useExecutionAuthorization() {
       if (!nonceRes.ok) {
         throw new Error('Failed to get signing nonce');
       }
-      const { nonce, message } = await nonceRes.json();
+      const { nonce, message } = await safeResponseJson(nonceRes);
       
       toast({ title: 'Session expired', description: 'Please sign to reconnect your wallet.' });
       
@@ -80,7 +81,7 @@ export function useExecutionAuthorization() {
         throw new Error('Failed to reconnect session');
       }
       
-      const verifyData = await verifyRes.json();
+      const verifyData = await safeResponseJson(verifyRes);
       return verifyData.sessionId || null;
     } catch (err) {
       console.error('Failed to unlock session:', err);
@@ -103,7 +104,7 @@ export function useExecutionAuthorization() {
       if (!sessionRes.ok) {
         throw new Error('Session check failed');
       }
-      let sessionData = await sessionRes.json();
+      let sessionData = await safeResponseJson(sessionRes);
       console.log('[EnableExecution] Session check:', { hasSession: sessionData.hasSession, sessionMissing: sessionData.sessionMissing });
       
       // Step 2: Unlock session if missing (user signs first message)
@@ -120,7 +121,7 @@ export function useExecutionAuthorization() {
         if (!refreshRes.ok) {
           throw new Error('Failed to refresh session after unlock');
         }
-        sessionData = await refreshRes.json();
+        sessionData = await safeResponseJson(refreshRes);
         console.log('[EnableExecution] Refreshed session:', { hasSession: sessionData.hasSession, sessionId: sessionData.sessionId?.slice(0, 8) });
       }
       
@@ -140,7 +141,7 @@ export function useExecutionAuthorization() {
         const errText = await nonceRes.text();
         throw new Error(`Failed to get signing nonce: ${errText}`);
       }
-      const { nonce, message } = await nonceRes.json();
+      const { nonce, message } = await safeResponseJson(nonceRes);
       console.log('[EnableExecution] Got nonce, requesting signature...');
       
       // Step 4: Sign message (user signs second message)
@@ -211,7 +212,7 @@ export function useExecutionAuthorization() {
       if (!sessionRes.ok) {
         throw new Error('Session check failed');
       }
-      let sessionData = await sessionRes.json();
+      let sessionData = await safeResponseJson(sessionRes);
       
       if (sessionData.sessionMissing) {
         const newSessionId = await unlockSession();
@@ -223,7 +224,7 @@ export function useExecutionAuthorization() {
         if (!refreshRes.ok) {
           throw new Error('Failed to refresh session after unlock');
         }
-        sessionData = await refreshRes.json();
+        sessionData = await safeResponseJson(refreshRes);
       }
       
       if (!sessionData.hasSession || !sessionData.sessionId) {
@@ -239,7 +240,7 @@ export function useExecutionAuthorization() {
       if (!nonceRes.ok) {
         throw new Error('Failed to get signing nonce');
       }
-      const { nonce, message } = await nonceRes.json();
+      const { nonce, message } = await safeResponseJson(nonceRes);
       
       const messageBytes = new TextEncoder().encode(message);
       const signatureBytes = await wallet.signMessage(messageBytes);
@@ -257,7 +258,7 @@ export function useExecutionAuthorization() {
       });
       
       if (!revokeRes.ok) {
-        const errorData = await revokeRes.json();
+        const errorData = await safeResponseJson(revokeRes);
         throw new Error(errorData.error || 'Failed to revoke execution');
       }
       

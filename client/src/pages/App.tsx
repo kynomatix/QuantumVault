@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
@@ -268,7 +269,7 @@ export default function AppPage() {
       try {
         const res = await fetch('/api/total-equity', { credentials: 'include' });
         if (res.ok) {
-          const data = await res.json();
+          const data = await safeResponseJson(res);
           setTotalEquity(data.totalEquity ?? 0);
           setAgentBalance(data.agentBalance ?? 0);
           setDriftBalance(data.driftBalance ?? 0);
@@ -303,7 +304,7 @@ export default function AppPage() {
       try {
         const res = await fetch('/api/wallet/settings', { credentials: 'include' });
         if (res.ok) {
-          const data = await res.json();
+          const data = await safeResponseJson(res);
           setDisplayName(data.displayName || '');
           setXUsername(data.xUsername || '');
           setNotificationsEnabled(data.notificationsEnabled ?? false);
@@ -336,7 +337,7 @@ export default function AppPage() {
       try {
         const res = await fetch('/api/rpc-status');
         if (res.ok) {
-          const data = await res.json();
+          const data = await safeResponseJson(res);
           setRpcStatus(data);
         }
       } catch (error) {
@@ -365,7 +366,7 @@ export default function AppPage() {
       });
       
       if (!res.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         throw new Error(data.error || 'Failed to save settings');
       }
       
@@ -560,7 +561,7 @@ export default function AppPage() {
         credentials: 'include',
       });
       
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       
       if (!res.ok) {
         throw new Error(data.error || 'Failed to close positions');
@@ -630,7 +631,7 @@ export default function AppPage() {
       clearInterval(stepTimer);
       setResetStep('complete');
       
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       
       if (res.status === 400 || res.status === 500) {
         throw new Error(data.message || data.error || 'Failed to reset Drift account');
@@ -676,7 +677,7 @@ export default function AppPage() {
       // Step 1: Get current session
       const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
       if (!sessionRes.ok) throw new Error('Failed to check session');
-      const sessionData = await sessionRes.json();
+      const sessionData = await safeResponseJson(sessionRes);
       
       if (!sessionData.hasSession || !sessionData.sessionId) {
         throw new Error('No active session. Please reconnect your wallet.');
@@ -691,7 +692,7 @@ export default function AppPage() {
         credentials: 'include',
       });
       
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       
       if (!res.ok) {
         throw new Error(data.error || 'Failed to reset agent wallet');
@@ -741,7 +742,7 @@ export default function AppPage() {
       try {
         const res = await fetch('/api/agent/balance', { credentials: 'include' });
         if (res.ok) {
-          const data = await res.json();
+          const data = await safeResponseJson(res);
           setAgentPublicKey(data.agentPublicKey);
           
           // Check if agent wallet is low on SOL for gas (0.035 SOL needed for bot creation)
@@ -769,7 +770,7 @@ export default function AppPage() {
           // Agent wallet not initialized - need to trigger full auth with signature
           // This happens when session was restored from cookie but agent wallet was never created
           // (e.g., connecting from a new device where auth/verify was skipped)
-          const errorData = await res.json().catch(() => ({}));
+          const errorData = await safeResponseJson(res).catch(() => ({}));
           if (errorData.error === 'Agent wallet not initialized') {
             console.log('[Welcome] Agent wallet not initialized, re-authenticating to create agent wallet');
             if (publicKeyString && authenticateWallet) {
@@ -778,7 +779,7 @@ export default function AppPage() {
                 // Retry balance check now that auth/verify should have created the agent wallet
                 const retryRes = await fetch('/api/agent/balance', { credentials: 'include' });
                 if (retryRes.ok) {
-                  const retryData = await retryRes.json();
+                  const retryData = await safeResponseJson(retryRes);
                   setAgentPublicKey(retryData.agentPublicKey);
                   setWelcomePopupOpen(true);
                 }
@@ -810,7 +811,7 @@ export default function AppPage() {
           try {
             const res = await fetch(`/api/bot/${bot.id}/balance`, { credentials: 'include' });
             if (res.ok) {
-              const data = await res.json();
+              const data = await safeResponseJson(res);
               balances[bot.id] = { balance: data.usdcBalance ?? 0, exists: data.subaccountExists ?? false };
             }
           } catch (error) {
@@ -856,7 +857,7 @@ export default function AppPage() {
       // Step 1: Check session status
       const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
       if (!sessionRes.ok) throw new Error('Session check failed');
-      let sessionData = await sessionRes.json();
+      let sessionData = await safeResponseJson(sessionRes);
       
       // Step 2: Unlock session if missing
       if (sessionData.sessionMissing) {
@@ -867,7 +868,7 @@ export default function AppPage() {
           body: JSON.stringify({ walletAddress: solanaWallet.publicKey.toBase58(), purpose: 'unlock_umk' }),
         });
         if (!nonceRes.ok) throw new Error('Failed to get signing nonce');
-        const { nonce: unlockNonce, message: unlockMessage } = await nonceRes.json();
+        const { nonce: unlockNonce, message: unlockMessage } = await safeResponseJson(nonceRes);
         
         toast({ title: 'Session expired', description: 'Please sign to reconnect.' });
         
@@ -891,7 +892,7 @@ export default function AppPage() {
         // Re-fetch session
         const refreshRes = await fetch('/api/auth/session', { credentials: 'include' });
         if (!refreshRes.ok) throw new Error('Failed to refresh session');
-        sessionData = await refreshRes.json();
+        sessionData = await safeResponseJson(refreshRes);
       }
       
       if (!sessionData.hasSession || !sessionData.sessionId) {
@@ -906,7 +907,7 @@ export default function AppPage() {
         body: JSON.stringify({ walletAddress: solanaWallet.publicKey.toBase58(), purpose: 'reveal_mnemonic' }),
       });
       if (!nonceRes.ok) throw new Error('Failed to get signing nonce');
-      const { nonce, message } = await nonceRes.json();
+      const { nonce, message } = await safeResponseJson(nonceRes);
       
       // Step 4: Sign the message
       const msgBytes = new TextEncoder().encode(message);
@@ -926,7 +927,7 @@ export default function AppPage() {
       });
       
       if (!revealRes.ok) {
-        const errData = await revealRes.json();
+        const errData = await safeResponseJson(revealRes);
         if (errData.retryAfterMs) {
           const retryMinutes = Math.ceil(errData.retryAfterMs / 60000);
           throw new Error(`Rate limited. Please wait ${retryMinutes} minute(s) before trying again.`);
@@ -934,7 +935,7 @@ export default function AppPage() {
         throw new Error(errData.error || 'Failed to reveal recovery phrase');
       }
       
-      const { mnemonic: revealedMnemonic, expiresAt } = await revealRes.json();
+      const { mnemonic: revealedMnemonic, expiresAt } = await safeResponseJson(revealRes);
       setMnemonic(revealedMnemonic);
       setMnemonicExpiresAt(new Date(expiresAt));
       toast({ title: 'Recovery phrase revealed', description: 'Write it down and store securely. It will auto-hide in 60 seconds.' });
@@ -987,11 +988,11 @@ export default function AppPage() {
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'Withdrawal failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
       
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
       const signedTx = await solanaWallet.signTransaction(transaction);
@@ -1042,7 +1043,7 @@ export default function AppPage() {
         credentials: 'include',
       });
 
-      const data = await response.json();
+      const data = await safeResponseJson(response);
 
       if (response.ok && data.success) {
         toast({ title: 'Bot deleted successfully' });
@@ -1105,7 +1106,7 @@ export default function AppPage() {
         });
 
         if (!response.ok) {
-          const error = await response.json();
+          const error = await safeResponseJson(response);
           throw new Error(error.error || 'Failed to delete bot');
         }
 
@@ -1127,7 +1128,7 @@ export default function AppPage() {
         credentials: 'include',
       });
 
-      const forceData = await forceResponse.json();
+      const forceData = await safeResponseJson(forceResponse);
 
       if (forceResponse.ok && forceData.success) {
         toast({ title: 'Bot deleted successfully' });
@@ -1165,7 +1166,7 @@ export default function AppPage() {
         });
 
         if (!confirmResponse.ok) {
-          const error = await confirmResponse.json();
+          const error = await safeResponseJson(confirmResponse);
           throw new Error(error.error || 'Failed to confirm deletion');
         }
 
@@ -2053,7 +2054,7 @@ export default function AppPage() {
                                                     method: 'POST',
                                                     credentials: 'include',
                                                   });
-                                                  const data = await res.json();
+                                                  const data = await safeResponseJson(res);
                                                   if (res.ok && data.success) {
                                                     toast({
                                                       title: "Trade Executed",
@@ -3370,7 +3371,7 @@ export default function AppPage() {
                                                 method: 'POST',
                                                 credentials: 'include' 
                                               });
-                                              const data = await res.json();
+                                              const data = await safeResponseJson(res);
                                               
                                               if (res.ok && data.deepLink) {
                                                 window.open(data.deepLink, '_blank');
@@ -3407,7 +3408,7 @@ export default function AppPage() {
                                                 method: 'GET',
                                                 credentials: 'include' 
                                               });
-                                              const data = await res.json();
+                                              const data = await safeResponseJson(res);
                                               
                                               if (data.connected) {
                                                 setTelegramConnected(true);
@@ -4350,7 +4351,7 @@ export default function AppPage() {
               // Note: Don't close popup here - let user complete USDC deposit step or skip
               const settingsRes = await fetch('/api/wallet/settings', { credentials: 'include' });
               if (settingsRes.ok) {
-                const settingsData = await settingsRes.json();
+                const settingsData = await safeResponseJson(settingsRes);
                 setDisplayName(settingsData.displayName || '');
                 setXUsername(settingsData.xUsername || '');
               }

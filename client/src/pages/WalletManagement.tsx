@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useLocation } from 'wouter';
@@ -111,7 +112,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
         credentials: 'include',
       });
       if (!res.ok) throw new Error('Failed to fetch capital pool');
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       setCapitalPool(data);
     } catch (error) {
       console.error('Error fetching capital pool:', error);
@@ -126,7 +127,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     try {
       const res = await fetch('/api/agent/balance', { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to fetch agent balance');
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       setAgentWallet(data);
     } catch (error) {
       console.error('Error fetching agent balance:', error);
@@ -200,11 +201,11 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'Deposit failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
       
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
       const signedTx = await solanaWallet.signTransaction(transaction);
@@ -278,11 +279,11 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'Withdrawal failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
       
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
       const signedTx = await solanaWallet.signTransaction(transaction);
@@ -389,11 +390,11 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'SOL withdrawal failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
       
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
@@ -474,11 +475,11 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'SOL deposit failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
       
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
       const signedTx = await solanaWallet.signTransaction(transaction);
@@ -547,11 +548,11 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'Drift deposit failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
       
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
@@ -610,11 +611,11 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'Drift withdrawal failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
       
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
@@ -673,11 +674,11 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'Withdrawal failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
       
       const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);

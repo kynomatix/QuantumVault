@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
@@ -64,7 +65,7 @@ export function useWallet() {
         throw new Error('Failed to get signing nonce');
       }
       
-      const { nonce, message } = await nonceRes.json();
+      const { nonce, message } = await safeResponseJson(nonceRes);
       
       // Step 2: Sign message with wallet (use ref to avoid stale closure)
       const messageBytes = new TextEncoder().encode(message);
@@ -85,7 +86,7 @@ export function useWallet() {
       });
       
       if (!verifyRes.ok) {
-        const error = await verifyRes.json();
+        const error = await safeResponseJson(verifyRes);
         throw new Error(error.error || 'Signature verification failed');
       }
       
@@ -102,7 +103,7 @@ export function useWallet() {
       });
       
       if (connectRes.ok) {
-        const data = await connectRes.json();
+        const data = await safeResponseJson(connectRes);
         setReferralCode(data.referralCode || null);
       }
       
@@ -170,7 +171,7 @@ export function useWallet() {
             });
             
             if (statusRes.ok) {
-              const statusData = await statusRes.json();
+              const statusData = await safeResponseJson(statusRes);
               if (statusData.authenticated) {
                 // Session already exists - skip signature, just connect
                 const referredByCode = getReferralCodeFromUrl();
@@ -185,7 +186,7 @@ export function useWallet() {
                 });
                 
                 if (connectRes.ok) {
-                  const data = await connectRes.json();
+                  const data = await safeResponseJson(connectRes);
                   setReferralCode(data.referralCode || null);
                 }
                 

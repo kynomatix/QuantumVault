@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect } from 'react';
 import { format } from 'date-fns';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -34,7 +35,7 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
         credentials: 'include',
       });
       if (response.ok) {
-        const data = await response.json();
+        const data = await safeResponseJson(response);
         setEvents(data);
       }
     } catch (error) {

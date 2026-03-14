@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useQuery } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
 import { ArrowUpRight } from 'lucide-react';
@@ -186,7 +187,7 @@ export default function Analytics() {
     queryFn: async () => {
       const res = await fetch('/api/metrics');
       if (!res.ok) throw new Error('Failed to fetch metrics');
-      return res.json();
+      return safeResponseJson(res);
     },
     refetchInterval: 60000,
   });
@@ -196,7 +197,7 @@ export default function Analytics() {
     queryFn: async () => {
       const res = await fetch('/api/metrics/history');
       if (!res.ok) throw new Error('Failed to fetch history');
-      return res.json();
+      return safeResponseJson(res);
     },
     refetchInterval: 300000,
   });

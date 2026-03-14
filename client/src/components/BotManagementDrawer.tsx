@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { useLeverageLimits } from '@/hooks/useLeverageLimits';
@@ -234,7 +235,7 @@ export function BotManagementDrawer({
     try {
       const response = await fetch('/api/drift/usdc-apy');
       if (response.ok) {
-        const data = await response.json();
+        const data = await safeResponseJson(response);
         setUsdcApy(data.apy);
       }
     } catch (error) {
@@ -248,7 +249,7 @@ export function BotManagementDrawer({
     try {
       const response = await fetch(`/api/trading-bots/${bot.id}/published`, { credentials: 'include' });
       if (response.ok) {
-        const data = await response.json();
+        const data = await safeResponseJson(response);
         if (data.isPublished && data.publishedBot?.id) {
           setPublishedBotId(data.publishedBot.id);
         } else {
@@ -276,7 +277,7 @@ export function BotManagementDrawer({
         credentials: 'include',
       });
       if (res.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         setPerformanceData(data.series || []);
         setPerformanceTotalPnl(data.totalPnl || 0);
         setPerformanceTradeCount(data.tradeCount || 0);
@@ -348,7 +349,7 @@ export function BotManagementDrawer({
       );
       
       if (res?.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         
         // Balance data
         setBotBalance(data.usdcBalance ?? 0);
@@ -397,7 +398,7 @@ export function BotManagementDrawer({
     try {
       const res = await fetch(`/api/user/webhook-url?wallet=${walletAddress}`, { credentials: 'include' });
       if (res.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         setUserWebhookUrl(data.webhookUrl);
       }
     } catch (error) {
@@ -415,7 +416,7 @@ export function BotManagementDrawer({
         credentials: 'include' 
       });
       if (res?.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         setBotPosition(data);
       }
     } catch (error) {
@@ -438,25 +439,25 @@ export function BotManagementDrawer({
       ]);
 
       if (balanceRes?.ok) {
-        const data = await balanceRes.json();
+        const data = await safeResponseJson(balanceRes);
         setBotBalance(data.usdcBalance ?? 0);
         setInterestEarned(data.estimatedDailyInterest ?? 0);
       }
 
       if (agentRes?.ok) {
-        const data = await agentRes.json();
+        const data = await safeResponseJson(agentRes);
         setMainAccountBalance(data.balance ?? 0);
       }
 
       if (botDriftRes?.ok) {
-        const data = await botDriftRes.json();
+        const data = await safeResponseJson(botDriftRes);
         setDriftBalance(data.totalCollateral ?? data.balance ?? 0);
         setDriftFreeCollateral(data.freeCollateral ?? 0);
         setHasOpenPositions(data.hasOpenPositions ?? false);
       }
 
       if (netDepositedRes?.ok) {
-        const data = await netDepositedRes.json();
+        const data = await safeResponseJson(netDepositedRes);
         setNetDeposited(data.netDeposited ?? 0);
       }
     } catch (error) {
@@ -508,7 +509,7 @@ export function BotManagementDrawer({
         body: JSON.stringify({ amount, botId: bot?.id }),
       });
 
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       
       if (!res.ok) {
         throw new Error(data.error || 'Failed to add to Drift');
@@ -550,7 +551,7 @@ export function BotManagementDrawer({
         body: JSON.stringify({ amount, botId: bot?.id }),
       });
 
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       
       if (!res.ok) {
         // Map Drift errors to friendly messages
@@ -581,7 +582,7 @@ export function BotManagementDrawer({
         credentials: 'include',
       });
       if (res.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         setTrades(data);
       }
     } catch (error) {
@@ -599,7 +600,7 @@ export function BotManagementDrawer({
         credentials: 'include',
       });
       if (res.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         setEquityEvents(data);
       }
     } catch (error) {
@@ -648,11 +649,11 @@ export function BotManagementDrawer({
       });
 
       if (!res.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         throw new Error(data.error || 'Failed to update bot');
       }
 
-      const updatedBot = await res.json();
+      const updatedBot = await safeResponseJson(res);
       setLocalBot(updatedBot);
       toast({
         title: updatedBot.isActive ? 'Bot resumed' : 'Bot paused',
@@ -680,7 +681,7 @@ export function BotManagementDrawer({
       });
 
       if (!res.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         throw new Error(data.error || data.message || 'Failed to delete bot');
       }
 
@@ -717,7 +718,7 @@ export function BotManagementDrawer({
         credentials: 'include',
       });
 
-      const data = await res.json();
+      const data = await safeResponseJson(res);
 
       if (!res.ok) {
         throw new Error(data.error || 'Failed to close position');
@@ -754,7 +755,7 @@ export function BotManagementDrawer({
         body: JSON.stringify({ side }),
       });
 
-      const data = await res.json();
+      const data = await safeResponseJson(res);
 
       if (!res.ok) {
         throw new Error(data.error || 'Failed to execute trade');
@@ -789,7 +790,7 @@ export function BotManagementDrawer({
         credentials: 'include',
       });
 
-      const data = await res.json();
+      const data = await safeResponseJson(res);
 
       if (!res.ok) {
         throw new Error(data.error || 'Failed to refresh position');
@@ -871,11 +872,11 @@ export function BotManagementDrawer({
       });
 
       if (!res.ok) {
-        const data = await res.json();
+        const data = await safeResponseJson(res);
         throw new Error(data.error || 'Failed to save settings');
       }
 
-      const updatedBot = await res.json();
+      const updatedBot = await safeResponseJson(res);
       setLocalBot(updatedBot);
       toast({
         title: 'Settings saved',

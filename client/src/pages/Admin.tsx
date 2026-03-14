@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
@@ -53,7 +54,7 @@ function AdminPage() {
     queryFn: async () => {
       const res = await fetch('/api/admin/stats', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: authenticated,
     refetchInterval: 30000,
@@ -64,7 +65,7 @@ function AdminPage() {
     queryFn: async () => {
       const res = await fetch('/api/admin/webhook-logs?limit=100', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: authenticated && activeTab === 'webhooks',
   });
@@ -74,7 +75,7 @@ function AdminPage() {
     queryFn: async () => {
       const res = await fetch('/api/admin/trades?limit=100', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: authenticated && activeTab === 'trades',
   });
@@ -84,7 +85,7 @@ function AdminPage() {
     queryFn: async () => {
       const res = await fetch('/api/admin/bots', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: authenticated && activeTab === 'bots',
   });
@@ -94,7 +95,7 @@ function AdminPage() {
     queryFn: async () => {
       const res = await fetch('/api/admin/subscriptions', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: authenticated && activeTab === 'subscriptions',
   });
@@ -104,7 +105,7 @@ function AdminPage() {
     queryFn: async () => {
       const res = await fetch('/api/admin/published-bots', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: authenticated && activeTab === 'marketplace',
   });
@@ -114,7 +115,7 @@ function AdminPage() {
     queryFn: async () => {
       const res = await fetch('/api/admin/pending-profit-shares', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: authenticated && activeTab === 'profit-shares',
   });
@@ -604,7 +605,7 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
     queryFn: async () => {
       const res = await fetch('/api/admin/superteam/agent', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
-      return res.json();
+      return safeResponseJson(res);
     },
   });
 
@@ -613,7 +614,7 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
     queryFn: async () => {
       const res = await fetch('/api/admin/superteam/listings?take=20', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: !!agentData?.agent,
   });
@@ -623,7 +624,7 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
     queryFn: async () => {
       const res = await fetch('/api/admin/superteam/submissions', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: !!agentData?.agent,
   });
@@ -636,10 +637,10 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
         body: JSON.stringify({ name }),
       });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await safeResponseJson(res);
         throw new Error(err.error || 'Registration failed');
       }
-      return res.json();
+      return safeResponseJson(res);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['superteam-agent'] });
@@ -650,7 +651,7 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
     mutationFn: async (slug: string) => {
       const res = await fetch(`/api/admin/superteam/listings/${slug}`, { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch details');
-      return res.json();
+      return safeResponseJson(res);
     },
     onSuccess: (data) => {
       setSelectedListing(data.listing);
@@ -665,10 +666,10 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
         body: JSON.stringify(params),
       });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await safeResponseJson(res);
         throw new Error(err.error || 'Submission failed');
       }
-      return res.json();
+      return safeResponseJson(res);
     },
     onSuccess: () => {
       refetchSubmissions();
@@ -687,10 +688,10 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
         body: JSON.stringify(params),
       });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await safeResponseJson(res);
         throw new Error(err.error || 'Update failed');
       }
-      return res.json();
+      return safeResponseJson(res);
     },
     onSuccess: () => {
       refetchSubmissions();

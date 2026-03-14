@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { useSubscribeToPublishedBot, type PublishedBot } from '@/hooks/useApi';
@@ -70,8 +71,8 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
     if (isOpen) {
       setBalanceLoading(true);
       Promise.all([
-        fetch('/api/total-equity', { credentials: 'include' }).then(res => res.ok ? res.json() : Promise.reject()),
-        fetch('/api/agent/balance', { credentials: 'include' }).then(res => res.ok ? res.json() : Promise.reject())
+        fetch('/api/total-equity', { credentials: 'include' }).then(res => res.ok ? safeResponseJson(res) : Promise.reject()),
+        fetch('/api/agent/balance', { credentials: 'include' }).then(res => res.ok ? safeResponseJson(res) : Promise.reject())
       ])
         .then(([equityData, balanceData]) => {
           setAvailableBalance(equityData.agentBalance ?? 0);
@@ -107,11 +108,11 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await safeResponseJson(response);
         throw new Error(error.error || 'SOL deposit failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await response.json();
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await safeResponseJson(response);
       
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
       const signedTx = await wallet.signTransaction(transaction);
@@ -129,7 +130,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       // Refresh SOL balance
       const balanceRes = await fetch('/api/agent/balance', { credentials: 'include' });
       if (balanceRes.ok) {
-        const data = await balanceRes.json();
+        const data = await safeResponseJson(balanceRes);
         if (data.botCreationSolRequirement) {
           setSolRequirement(data.botCreationSolRequirement);
         }

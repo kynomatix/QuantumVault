@@ -1,3 +1,4 @@
+import { safeResponseJson } from "./safe-fetch";
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
 async function throwIfResNotOk(res: Response) {
@@ -38,7 +39,7 @@ export const getQueryFn: <T>(options: {
     }
 
     await throwIfResNotOk(res);
-    return await res.json();
+    return await safeResponseJson(res);
   };
 
 export const queryClient = new QueryClient({

@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, Loader2, Wallet, Bot, TrendingUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -28,7 +29,7 @@ export function DepositWithdraw({ onShowWalletTab }: DepositWithdrawProps) {
         credentials: 'include',
       });
       if (!res.ok) throw new Error('Failed to fetch capital pool');
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       setCapitalPool(data);
     } catch (error) {
       console.error('Error fetching capital pool:', error);

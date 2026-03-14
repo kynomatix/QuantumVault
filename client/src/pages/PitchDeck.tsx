@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
@@ -1250,7 +1251,7 @@ export default function PitchDeck() {
     queryFn: async () => {
       const res = await fetch('/api/metrics?refresh=true');
       if (!res.ok) throw new Error('Failed to fetch metrics');
-      return res.json();
+      return safeResponseJson(res);
     },
     staleTime: 30000,
     retry: 2

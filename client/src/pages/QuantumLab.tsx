@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useCallback, useEffect, useRef, useMemo, Fragment, memo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
@@ -436,7 +437,7 @@ export default function QuantumLab() {
       try {
         const runsRes = await fetch("/api/lab/runs");
         if (runsRes.ok) {
-          const runs = await runsRes.json();
+          const runs = await safeResponseJson(runsRes);
           const sortedRuns = [...runs].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
           const matchedRun = sortedRuns.find((r: any) => r.status === "paused" || r.status === "failed");
           if (matchedRun?.status === "paused") {
@@ -580,7 +581,7 @@ export default function QuantumLab() {
   const clearResultsMutation = useMutation({
     mutationFn: async (id: number) => {
       const res = await apiRequest("DELETE", `/api/lab/strategies/${id}/results`);
-      return res.json();
+      return safeResponseJson(res);
     },
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
@@ -850,10 +851,10 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
       const body = { name, pineScript: code, parsedInputs: parsedResult.inputs, groups: parsedResult.groups, strategySettings: parsedResult.strategySettings };
       if (strategyId) {
         const res = await apiRequest("PATCH", `/api/lab/strategies/${strategyId}`, body);
-        return res.json();
+        return safeResponseJson(res);
       } else {
         const res = await apiRequest("POST", "/api/lab/strategies", body);
-        return res.json();
+        return safeResponseJson(res);
       }
     },
     onSuccess: (strategy: LabStrategy) => {
@@ -879,7 +880,7 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
     setParseError(null);
     try {
       const res = await apiRequest("POST", "/api/lab/parse-pine", { code: scriptCode });
-      const result = await res.json();
+      const result = await safeResponseJson(res);
       setParsedResult(result);
       if (result.strategyName) {
         setStrategyName(result.strategyName);
@@ -1080,7 +1081,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
       if (!strategyId) return [];
       const res = await fetch(`/api/lab/strategies/${strategyId}/insights-reports`);
       if (!res.ok) return [];
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: !!strategyId,
     staleTime: 0,
@@ -1131,7 +1132,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
         useInsights: useInsights && hasInsights ? true : undefined,
         deepSearch: deepSearch && mode !== "smoke" ? true : undefined,
       });
-      const { jobId, runId } = await res.json();
+      const { jobId, runId } = await safeResponseJson(res);
       onJobStarted(jobId, runId);
     } catch (err: any) {
       const isConcurrencyError = err.message?.includes("concurrent") || err.message?.includes("Maximum") || err.message?.includes("already running");
@@ -1585,7 +1586,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
   const resumeMutation = useMutation({
     mutationFn: async (id: number) => {
       const res = await fetch(`/api/lab/runs/${id}/resume`, { method: "POST", credentials: "include" });
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       if (!res.ok) {
         const err = new Error(data.error || "Resume failed");
         (err as any).status = res.status;
@@ -1717,11 +1718,11 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
                     try {
                       const res = await fetch(`/api/lab/runs/${run.id}/job`);
                       if (res.ok) {
-                        const { jobId } = await res.json();
+                        const { jobId } = await safeResponseJson(res);
                         onViewRunning(jobId);
                       } else {
                         const failRes = await apiRequest("POST", `/api/lab/runs/${run.id}/fail`);
-                        const failData = await failRes.json();
+                        const failData = await safeResponseJson(failRes);
                         queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
                         if (failData.status === "paused") {
                           onSelectRun(run.id);
@@ -1827,7 +1828,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     queryFn: async () => {
       const res = await fetch(`/api/lab/runs/${runId}`);
       if (!res.ok) throw new Error("Run not found");
-      return res.json();
+      return safeResponseJson(res);
     },
   });
 
@@ -1836,7 +1837,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     queryFn: async () => {
       const res = await fetch(`/api/lab/strategies/${run!.strategyId}`);
       if (!res.ok) throw new Error("Strategy not found");
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: !!run?.strategyId,
   });
@@ -1847,7 +1848,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       const res = await fetch(`/api/lab/runs/${runId}/results`);
       if (res.status === 404) return [];
       if (!res.ok) throw new Error("Failed to load results");
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: run?.status !== "running",
   });
@@ -1893,7 +1894,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     try {
       const res = await fetch(`/api/lab/results/${r.id}`);
       if (res.ok) {
-        const full = await res.json();
+        const full = await safeResponseJson(res);
         setSelectedResultFull(full);
       }
     } catch {
@@ -2508,7 +2509,7 @@ function EquityCurvePopup({ resultId, ticker, timeframe }: { resultId: number; t
     try {
       const res = await fetch(`/api/lab/results/${resultId}`);
       if (res.ok) {
-        const full = await res.json();
+        const full = await safeResponseJson(res);
         setCurveData(full.equityCurve ?? []);
       }
     } catch {} finally {
@@ -2576,7 +2577,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
     queryFn: async () => {
       const res = await fetch("/api/lab/heatmap");
       if (!res.ok) throw new Error("Failed to load heatmap");
-      return res.json();
+      return safeResponseJson(res);
     },
     refetchInterval: 30000,
   });
@@ -2586,7 +2587,7 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
     queryFn: async () => {
       const res = await fetch("/api/lab/strategies");
       if (!res.ok) return [];
-      return res.json();
+      return safeResponseJson(res);
     },
   });
 
@@ -2997,7 +2998,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
     try {
       const balRes = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
       if (balRes.ok) {
-        const data = await balRes.json();
+        const data = await safeResponseJson(balRes);
         setAgentBalance(data.balance?.toString() || '0');
         setAgentSolBalance(data.solBalance ?? null);
         setAgentPublicKey(data.agentPublicKey || null);
@@ -3075,12 +3076,12 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       });
 
       if (!res.ok) {
-        const error = await res.json();
+        const error = await safeResponseJson(res);
         setCreateError(error.error || 'Failed to create bot');
         return;
       }
 
-      const bot = await res.json();
+      const bot = await safeResponseJson(res);
 
       const settingsRes = await fetch(`/api/trading-bots/${bot.id}?wallet=${walletAddress}`, {
         method: 'PATCH',
@@ -3108,7 +3109,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       let fundingFailed = false;
       let equityDepositFailed = false;
       if (!depositRes.ok) {
-        const err = await depositRes.json();
+        const err = await safeResponseJson(depositRes);
         fundingFailed = true;
         setCreateError(`Bot created but funding failed: ${err.error || 'Unknown error'}. You can fund it later from the bot details page.`);
       }
@@ -3132,7 +3133,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       try {
         const webhookRes = await fetch(`/api/user/webhook-url?wallet=${walletAddress}`, { credentials: 'include' });
         if (webhookRes.ok) {
-          const data = await webhookRes.json();
+          const data = await safeResponseJson(webhookRes);
           setWebhookUrl(data.webhookUrl);
         }
       } catch {}
@@ -3515,7 +3516,7 @@ function Top10Leaderboard({ strategyId, pineScript, strategyName }: { strategyId
     queryFn: async () => {
       const res = await fetch(`/api/lab/strategies/${strategyId}/top-results?limit=10`);
       if (!res.ok) return [];
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: !!strategyId,
   });
@@ -3711,7 +3712,7 @@ function InsightsPanel() {
     queryFn: async () => {
       const res = await fetch("/api/lab/strategies");
       if (!res.ok) return [];
-      return res.json();
+      return safeResponseJson(res);
     },
   });
 
@@ -3722,7 +3723,7 @@ function InsightsPanel() {
     queryFn: async () => {
       const res = await fetch(`/api/lab/runs?strategyId=${selectedStrategyId}`);
       if (!res.ok) return null;
-      const runs: any[] = await res.json();
+      const runs: any[] = await safeResponseJson(res);
       const completedRuns = runs.filter(r => r.status === "complete" || r.status === "paused");
       const tickers = new Set<string>();
       const timeframes = new Set<string>();
@@ -3749,7 +3750,7 @@ function InsightsPanel() {
     queryFn: async () => {
       const res = await fetch(`/api/lab/strategies/${selectedStrategyId}/insights-reports`);
       if (!res.ok) return [];
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: !!selectedStrategyId,
   });
@@ -3776,7 +3777,7 @@ function InsightsPanel() {
     try {
       const res = await fetch(`/api/lab/strategies/${selectedStrategyId}/all-results?lite=1`);
       if (!res.ok) throw new Error("Failed to fetch results");
-      const data = await res.json();
+      const data = await safeResponseJson(res);
       if (!data.results || data.results.length === 0) {
         toast({ title: "No results", description: "Run some optimizations first to generate insights", variant: "destructive" });
         setLoading(false);

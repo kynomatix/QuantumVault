@@ -1,3 +1,4 @@
+import { safeResponseJson } from "@/lib/safe-fetch";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "./useWallet";
 
@@ -6,25 +7,25 @@ async function fetchBots(featured?: boolean) {
   const url = featured ? "/api/bots?featured=true" : "/api/bots";
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch bots");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function fetchSubscriptions(walletAddress: string) {
   const res = await fetch(`/api/subscriptions?wallet=${walletAddress}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch subscriptions");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function fetchPortfolio(walletAddress: string) {
   const res = await fetch(`/api/portfolio?wallet=${walletAddress}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch portfolio");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function fetchPositions(walletAddress: string) {
   const res = await fetch(`/api/positions`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch positions");
-  const data = await res.json();
+  const data = await safeResponseJson(res);
   return data.positions || [];
 }
 
@@ -34,27 +35,27 @@ async function reconcilePositions() {
     credentials: "include" 
   });
   if (!res.ok) throw new Error("Failed to reconcile positions");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function fetchTrades(walletAddress: string, limit?: number) {
   const url = limit ? `/api/bot-trades?limit=${limit}` : `/api/bot-trades`;
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch trades");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function fetchLeaderboard(limit?: number) {
   const url = limit ? `/api/leaderboard?limit=${limit}` : "/api/leaderboard";
   const res = await fetch(url);
   if (!res.ok) throw new Error("Failed to fetch leaderboard");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function fetchPrices(): Promise<Record<string, number>> {
   const res = await fetch("/api/prices");
   if (!res.ok) throw new Error("Failed to fetch prices");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 export interface HealthMetrics {
@@ -78,7 +79,7 @@ async function fetchHealthMetrics(): Promise<HealthMetrics | null> {
   try {
     const res = await fetch("/api/health-metrics", { credentials: "include" });
     if (!res.ok) return null;
-    return res.json();
+    return safeResponseJson(res);
   } catch {
     return null;
   }
@@ -87,7 +88,7 @@ async function fetchHealthMetrics(): Promise<HealthMetrics | null> {
 async function fetchTradingBots(walletAddress: string) {
   const res = await fetch(`/api/trading-bots?wallet=${walletAddress}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch trading bots");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function subscribeToBot(botId: string, walletAddress: string) {
@@ -98,10 +99,10 @@ async function subscribeToBot(botId: string, walletAddress: string) {
     credentials: "include",
   });
   if (!res.ok) {
-    const error = await res.json();
+    const error = await safeResponseJson(res);
     throw new Error(error.error || "Failed to subscribe");
   }
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function updateSubscriptionStatus(id: string, status: string) {
@@ -112,7 +113,7 @@ async function updateSubscriptionStatus(id: string, status: string) {
     credentials: "include",
   });
   if (!res.ok) throw new Error("Failed to update subscription");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 // Hooks
@@ -257,7 +258,7 @@ async function fetchBotHealth(botId: string): Promise<BotHealthMetrics | null> {
   try {
     const res = await fetch(`/api/trading-bots/${botId}/position`, { credentials: "include" });
     if (!res.ok) return null;
-    const data = await res.json();
+    const data = await safeResponseJson(res);
     if (!data.hasPosition) return null;
     
     return {
@@ -339,25 +340,25 @@ async function fetchMarketplace(options?: { search?: string; market?: string; so
   const url = `/api/marketplace${params.toString() ? '?' + params.toString() : ''}`;
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch marketplace");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function fetchPublishedBot(id: string): Promise<PublishedBot> {
   const res = await fetch(`/api/marketplace/${id}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch published bot");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function fetchMySubscriptions(): Promise<MarketplaceSubscription[]> {
   const res = await fetch("/api/my-subscriptions", { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch subscriptions");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function checkBotPublished(botId: string): Promise<{ published: boolean; publishedBotId?: string }> {
   const res = await fetch(`/api/trading-bots/${botId}/published`, { credentials: "include" });
   if (!res.ok) return { published: false };
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function publishBot(botId: string, data: { name: string; description?: string; profitSharePercent?: number }): Promise<PublishedBot> {
@@ -368,10 +369,10 @@ async function publishBot(botId: string, data: { name: string; description?: str
     credentials: "include",
   });
   if (!res.ok) {
-    const error = await res.json();
+    const error = await safeResponseJson(res);
     throw new Error(error.error || "Failed to publish bot");
   }
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function unpublishBot(publishedBotId: string): Promise<void> {
@@ -380,7 +381,7 @@ async function unpublishBot(publishedBotId: string): Promise<void> {
     credentials: "include",
   });
   if (!res.ok) {
-    const error = await res.json();
+    const error = await safeResponseJson(res);
     throw new Error(error.error || "Failed to unpublish bot");
   }
 }
@@ -393,10 +394,10 @@ async function subscribeToPublishedBot(publishedBotId: string, data: { capitalIn
     credentials: "include",
   });
   if (!res.ok) {
-    const error = await res.json();
+    const error = await safeResponseJson(res);
     throw new Error(error.error || "Failed to subscribe");
   }
-  return res.json();
+  return safeResponseJson(res);
 }
 
 async function unsubscribeFromBot(publishedBotId: string): Promise<void> {
@@ -405,7 +406,7 @@ async function unsubscribeFromBot(publishedBotId: string): Promise<void> {
     credentials: "include",
   });
   if (!res.ok) {
-    const error = await res.json();
+    const error = await safeResponseJson(res);
     throw new Error(error.error || "Failed to unsubscribe");
   }
 }
@@ -500,7 +501,7 @@ export function useUnsubscribeFromBot() {
 async function fetchMyPublishedBots(): Promise<PublishedBot[]> {
   const res = await fetch("/api/marketplace/my-published", { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch my published bots");
-  return res.json();
+  return safeResponseJson(res);
 }
 
 export function useMyPublishedBots() {
@@ -541,7 +542,7 @@ export function useBotPerformance(botId: string | null) {
       if (!botId) return null;
       const res = await fetch(`/api/marketplace/${botId}/performance`, { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to fetch performance');
-      return res.json();
+      return safeResponseJson(res);
     },
     enabled: !!botId,
   });
@@ -565,7 +566,7 @@ async function fetchPortfolioPerformance(): Promise<PortfolioPerformanceData | n
   try {
     const res = await fetch("/api/portfolio-performance", { credentials: "include" });
     if (!res.ok) return null;
-    return res.json();
+    return safeResponseJson(res);
   } catch {
     return null;
   }
@@ -608,7 +609,7 @@ async function fetchPerformanceHeatmap(): Promise<HeatmapData | null> {
   try {
     const res = await fetch("/api/performance-heatmap", { credentials: "include" });
     if (!res.ok) return null;
-    return res.json();
+    return safeResponseJson(res);
   } catch {
     return null;
   }
