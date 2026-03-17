@@ -684,18 +684,18 @@ export default function QuantumLab() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
       <header className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/80 backdrop-blur-xl">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-3">
+        <div className="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between h-12 sm:h-16">
+            <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
               <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
                 <ArrowLeft className="w-4 h-4" />
               </Link>
-              <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-8 h-8 rounded-lg" />
-              <span className="font-display font-bold text-white">QuantumVault</span>
-              <span className="text-white/40 text-sm">Lab</span>
+              <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg" />
+              <span className="font-display font-bold text-white text-sm sm:text-base">QV</span>
+              <span className="text-white/40 text-xs sm:text-sm">Lab</span>
             </div>
 
-            <nav className="flex items-center gap-1" data-testid="nav-tabs">
+            <nav className="flex items-center gap-0.5 sm:gap-1" data-testid="nav-tabs">
               {labNavItems.map((item) => {
                 const Icon = item.icon;
                 return (
@@ -703,24 +703,24 @@ export default function QuantumLab() {
                     key={item.id}
                     onClick={() => setMainTab(item.id)}
                     className={cn(
-                      "flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+                      "flex items-center gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors",
                       mainTab === item.id
                         ? "bg-violet-500/20 text-violet-300"
                         : "text-white/50 hover:text-white hover:bg-white/5"
                     )}
                     data-testid={`nav-${item.id}`}
                   >
-                    <Icon className="w-4 h-4" />
+                    <Icon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                     <span className="hidden sm:inline">{item.label}</span>
                   </button>
                 );
               })}
               <button
                 onClick={() => setQueueOpen(true)}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-white/50 hover:text-white hover:bg-white/5 relative"
+                className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors text-white/50 hover:text-white hover:bg-white/5 relative"
                 data-testid="nav-queue"
               >
-                <ListOrdered className="w-4 h-4" />
+                <ListOrdered className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                 <span className="hidden sm:inline">Queue</span>
               </button>
             </nav>
