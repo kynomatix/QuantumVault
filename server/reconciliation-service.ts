@@ -1,13 +1,14 @@
 import { storage } from "./storage";
 import { db } from "./db";
 import { botTrades } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { eq, and, or, sql, gte } from "drizzle-orm";
 import { getPerpPositions } from "./drift-service";
 import { getMarketPrice } from "./drift-price";
 import type { TradingBot } from "@shared/schema";
 
 const STALE_THRESHOLD_MS = 60 * 1000; // 60 seconds
 const LIQUIDATION_TRADE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+const RECENT_TRADE_COOLDOWN_MS = 30 * 1000; // 30 seconds cooldown after recent trade activity
 
 function normalizeMarket(market: string): string {
   return market.toUpperCase()
@@ -136,6 +137,40 @@ export async function syncPositionFromOnChain(
   }
 }
 
+const PENDING_TRADE_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes max age for pending trades to block liquidation detection
+
+async function hasInFlightOrRecentCloseTrade(
+  botId: string,
+  market: string
+): Promise<boolean> {
+  const recentTrades = await storage.getBotTrades(botId, 20);
+  const now = Date.now();
+  const normalizedMkt = normalizeMarket(market);
+
+  for (const t of recentTrades) {
+    const tradeTime = new Date(t.executedAt).getTime();
+    const tradeMarket = normalizeMarket(t.market);
+    if (tradeMarket !== normalizedMkt) continue;
+
+    const isCloseTrade = t.side === 'CLOSE' || t.side === 'close';
+
+    if (!isCloseTrade) continue;
+
+    if (t.status === 'pending' && (now - tradeTime) < PENDING_TRADE_MAX_AGE_MS) {
+      console.log(`[Reconcile] Skipping liquidation check — pending CLOSE trade ${t.id} (${((now - tradeTime) / 1000).toFixed(0)}s old) exists for ${market}`);
+      return true;
+    }
+
+    if ((t.status === 'executed' || t.status === 'recovered') && (now - tradeTime) < RECENT_TRADE_COOLDOWN_MS) {
+      console.log(`[Reconcile] Skipping liquidation check — recently ${t.status} CLOSE trade ${t.id} (${((now - tradeTime) / 1000).toFixed(0)}s ago) for ${market}`);
+      return true;
+    }
+  }
+  return false;
+}
+
+type LiquidationResult = 'liquidated' | 'skipped_in_flight' | 'not_liquidation';
+
 async function detectAndRecordLiquidation(
   botId: string,
   walletAddress: string,
@@ -145,29 +180,33 @@ async function detectAndRecordLiquidation(
   dbEntryPrice: number,
   onChainEntryPrice: number,
   dbPosition: { realizedPnl: string; totalFees: string } | null
-): Promise<boolean> {
+): Promise<LiquidationResult> {
   try {
-    const recentTrades = await storage.getBotTrades(botId, 10);
+    if (await hasInFlightOrRecentCloseTrade(botId, market)) {
+      return 'skipped_in_flight';
+    }
+
+    const recentTrades = await storage.getBotTrades(botId, 20);
     const now = Date.now();
     const normalizedMkt = normalizeMarket(market);
     const recentExecutedTrades = recentTrades.filter(t => {
       const tradeTime = new Date(t.executedAt).getTime();
       return (now - tradeTime) < LIQUIDATION_TRADE_WINDOW_MS &&
-        (t.status === 'executed' || t.status === 'pending') &&
+        (t.status === 'executed' || t.status === 'pending' || t.status === 'recovered') &&
         normalizeMarket(t.market) === normalizedMkt;
     });
 
     const sizeDelta = Math.abs(dbBaseSize) - Math.abs(onChainBaseSize);
     if (sizeDelta <= 0.0001) {
-      return false;
+      return 'not_liquidation';
     }
 
     if (recentExecutedTrades.length > 0) {
       const recentTradeVolume = recentExecutedTrades.reduce((sum, t) => sum + Math.abs(parseFloat(t.size)), 0);
-      if (recentTradeVolume >= sizeDelta * 0.5) {
-        return false;
+      if (recentTradeVolume >= sizeDelta * 0.3) {
+        return 'not_liquidation';
       }
-      console.log(`[Reconcile] Recent trades (${recentTradeVolume.toFixed(4)}) don't explain position drop (${sizeDelta.toFixed(4)}) for ${market} - likely liquidation`);
+      console.log(`[Reconcile] Recent trades (${recentTradeVolume.toFixed(4)}) don't explain position drop (${sizeDelta.toFixed(4)}) for ${market} - checking further`);
     }
 
     const markPrice = await getMarketPrice(market) || dbEntryPrice;
@@ -180,6 +219,11 @@ async function detectAndRecordLiquidation(
       } else {
         estimatedPnl = (dbEntryPrice - markPrice) * liquidatedSize;
       }
+    }
+
+    if (estimatedPnl > 0) {
+      console.log(`[Reconcile] NOT a liquidation for bot ${botId} ${market}: estimated PnL is positive ($${estimatedPnl.toFixed(2)}). Likely a normal trade closure — syncing position without liquidation record.`);
+      return 'not_liquidation';
     }
 
     const side = Math.abs(onChainBaseSize) < 0.0001 ? 'CLOSE' : (dbBaseSize > 0 ? 'SHORT' : 'LONG');
@@ -246,10 +290,10 @@ async function detectAndRecordLiquidation(
       });
     }
 
-    return true;
+    return 'liquidated';
   } catch (error) {
     console.error(`[Reconcile] Error detecting liquidation for bot ${botId}:`, error);
-    return false;
+    return 'not_liquidation';
   }
 }
 
@@ -278,15 +322,20 @@ export async function reconcileBotPosition(
       if (positionDecreased && Math.abs(dbBaseSize) > 0.0001) {
         const dbEntryPrice = dbPosition ? parseFloat(dbPosition.avgEntryPrice) : 0;
         const onChainEntryPrice = onChainPos?.entryPrice || 0;
-        const wasLiquidation = await detectAndRecordLiquidation(
+        const liquidationResult = await detectAndRecordLiquidation(
           botId, walletAddress, market,
           dbBaseSize, onChainBaseSize, dbEntryPrice, onChainEntryPrice,
           dbPosition ? { realizedPnl: dbPosition.realizedPnl, totalFees: dbPosition.totalFees } : null
         );
 
-        if (wasLiquidation) {
+        if (liquidationResult === 'liquidated') {
           lastReconcileTime.set(botId, Date.now());
           return { synced: true, discrepancy: true, liquidation: true };
+        }
+
+        if (liquidationResult === 'skipped_in_flight') {
+          console.log(`[Reconcile] Deferring position sync for bot ${botId} ${market} — trade in flight or awaiting confirmation. Will re-check next cycle.`);
+          return { synced: false, discrepancy: true };
         }
       }
 
@@ -423,6 +472,66 @@ export function stopPeriodicReconciliation(): void {
     reconcileInterval = null;
     console.log("[Reconcile] Stopped periodic reconciliation");
   }
+}
+
+export async function correctFalseLiquidations(walletAddress?: string): Promise<{ corrected: number; statsFixed: number; errors: string[] }> {
+  const errors: string[] = [];
+  let corrected = 0;
+  let statsFixed = 0;
+
+  try {
+    const conditions = [
+      eq(botTrades.status, 'liquidated'),
+      sql`CAST(${botTrades.pnl} AS numeric) > 0`,
+    ];
+    if (walletAddress) {
+      conditions.push(eq(botTrades.walletAddress, walletAddress));
+    }
+    const falseLiquidations = await db
+      .select()
+      .from(botTrades)
+      .where(and(...conditions));
+
+    console.log(`[CorrectFalseLiqs] Found ${falseLiquidations.length} liquidation-tagged trades with positive PnL`);
+
+    for (const trade of falseLiquidations) {
+      try {
+        await db.update(botTrades)
+          .set({
+            status: 'executed',
+            executionMethod: 'corrected-from-liquidation',
+            errorMessage: `${trade.errorMessage || ''} [Corrected: was falsely tagged as liquidation, PnL=$${trade.pnl}]`.trim(),
+          })
+          .where(eq(botTrades.id, trade.id));
+
+        corrected++;
+        console.log(`[CorrectFalseLiqs] Corrected trade ${trade.id} for bot ${trade.tradingBotId} (PnL: $${trade.pnl})`);
+
+        const bot = await storage.getTradingBotById(trade.tradingBotId);
+        if (bot) {
+          const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
+          await storage.updateTradingBotStats(trade.tradingBotId, {
+            ...stats,
+            losingTrades: Math.max(0, (stats.losingTrades || 0) - 1),
+            winningTrades: (stats.winningTrades || 0) + 1,
+          });
+          statsFixed++;
+          console.log(`[CorrectFalseLiqs] Fixed stats for bot ${trade.tradingBotId}: moved trade from losing to winning`);
+        }
+      } catch (err: any) {
+        const msg = `Failed to correct trade ${trade.id}: ${err.message}`;
+        console.error(`[CorrectFalseLiqs] ${msg}`);
+        errors.push(msg);
+      }
+    }
+  } catch (err: any) {
+    const msg = `Failed to query false liquidations: ${err.message}`;
+    console.error(`[CorrectFalseLiqs] ${msg}`);
+    errors.push(msg);
+  }
+
+  console.log(`[CorrectFalseLiqs] Complete: ${corrected} trades corrected, ${statsFixed} bot stats fixed, ${errors.length} errors`);
+  return { corrected, statsFixed, errors };
 }
 
 export async function backfillLiquidationRecords(): Promise<{ created: number; skipped: number; errors: string[] }> {
