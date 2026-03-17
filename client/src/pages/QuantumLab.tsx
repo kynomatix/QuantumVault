@@ -20,7 +20,7 @@ import {
   Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
-  History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown,
+  History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2,
   Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair,
 } from "lucide-react";
 import {
@@ -621,6 +621,7 @@ export default function QuantumLab() {
                   setStrategyId={setStrategyId}
                   parsedResult={parsedResult}
                   setParsedResult={setParsedResult}
+                  setSelectedStrategy={setSelectedStrategy}
                 />
               </div>
 
@@ -834,7 +835,7 @@ function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, onClearRe
   );
 }
 
-function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, setStrategyId, parsedResult, setParsedResult }: {
+function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, setStrategyId, parsedResult, setParsedResult, setSelectedStrategy }: {
   code: string;
   setCode: (code: string) => void;
   strategyName: string;
@@ -843,6 +844,7 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
   setStrategyId: (id: number | null) => void;
   parsedResult: LabPineParseResult | null;
   setParsedResult: (result: LabPineParseResult | null) => void;
+  setSelectedStrategy: (strategy: LabStrategy | null) => void;
 }) {
   const { toast } = useToast();
   const [isParsing, setIsParsing] = useState(false);
@@ -937,6 +939,10 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
             />
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => { setStrategyId(null); setCode(EXAMPLE_PINE); setStrategyName(""); setParsedResult(null); setSelectedStrategy(null); }} data-testid="button-new-script" className="bg-white/5 hover:bg-white/10 text-white/70">
+              <FilePlus2 className="w-3 h-3 mr-1" />
+              New
+            </Button>
             {parsedResult && (
               <Button variant="secondary" size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} data-testid="button-save-strategy" className="bg-white/5 hover:bg-white/10 text-white/70">
                 {saveMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
