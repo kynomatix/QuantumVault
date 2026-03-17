@@ -864,6 +864,13 @@ export interface LabCheckpoint {
   partialResults?: LabBacktestResult[];
   refineSeeds?: Record<string, any>[];
   coordinateCompleted?: string[];
+  bestDiscovery?: {
+    combo: string;
+    stage: "deep";
+    deepRound: number;
+    score: number;
+    params: Record<string, any>;
+  };
 }
 
 export interface LabJobProgress {

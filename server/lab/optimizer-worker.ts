@@ -28,6 +28,7 @@ type WorkerMessage =
   | { type: "progress"; data: LabJobProgress }
   | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep" | "coordinate"; iteration: number; deepRound?: number; results: LabBacktestResult[]; refineSeeds?: Record<string, any>[]; coordinateCompleted?: string[] }
   | { type: "combo-complete"; combo: string; results: LabBacktestResult[] }
+  | { type: "best-discovery"; combo: string; stage: "deep"; deepRound: number; score: number; params: Record<string, any> }
   | { type: "done"; results: LabBacktestResult[]; totalConfigsTested?: number }
   | { type: "error"; message: string; isResourceError?: boolean };
 
@@ -1039,6 +1040,7 @@ async function run() {
       const deepRadii = [0.12, 0.08, 0.05];
       const numOptimizable = inputs.filter(i => i.optimizable && (i.type === "int" || i.type === "float")).length;
       let previousRoundBest: LabBacktestResult[] = [];
+      let injectedResumeBest = false;
 
       for (let round = 0; round < deepRounds; round++) {
         if (aborted) {
@@ -1106,7 +1108,27 @@ async function run() {
           }
         }
 
+        if (!injectedResumeBest && resumeCheckpoint?.bestDiscovery?.params) {
+          const bd = resumeCheckpoint.bestDiscovery;
+          if (bd.combo === key) {
+            const bdSig = canonicalizeParams(bd.params, inputs);
+            if (!testedSignatures.has(bdSig)) {
+              const bdResult = runBacktest(candles, bd.params, combo.ticker, combo.timeframe, engineConfig);
+              const existingSigs = new Set(deepSeeds.map(s => canonicalizeParams(s.params, inputs)));
+              if (!existingSigs.has(bdSig)) {
+                deepSeeds = [bdResult, ...deepSeeds.filter(s => canonicalizeParams(s.params, inputs) !== bdSig)].slice(0, deepSeedsPerRound);
+              }
+              comboResults.push(bdResult);
+              testedSignatures.add(bdSig);
+            }
+          }
+          injectedResumeBest = true;
+        }
+
         const roundDiscoveries: LabBacktestResult[] = [];
+        let comboBestScore = comboResults.length > 0
+          ? Math.max(...comboResults.map(r => scoreResult(r)))
+          : -Infinity;
 
         for (let seedIdx = 0; seedIdx < deepSeeds.length; seedIdx++) {
           if (aborted) {
@@ -1137,6 +1159,11 @@ async function run() {
             if (meetsFilters(result, config)) {
               comboResults.push(result);
               roundDiscoveries.push(result);
+              const resultScore = scoreResult(result);
+              if (resultScore > comboBestScore + 1e-9) {
+                comboBestScore = resultScore;
+                send({ type: "best-discovery", combo: key, stage: "deep", deepRound: round, score: resultScore, params: { ...result.params } });
+              }
             }
             globalCurrent++;
           }

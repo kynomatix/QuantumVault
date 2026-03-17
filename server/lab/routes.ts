@@ -432,6 +432,8 @@ export function registerLabRoutes(app: Express): void {
     processOrdersOnClose?: boolean,
   ) {
     const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
+    let checkpointState: Partial<LabCheckpoint> = resumeCheckpoint ? { ...resumeCheckpoint } : {};
+    let checkpointWriteChain: Promise<void> = Promise.resolve();
 
     const doStart = async () => {
       let candlesByCombo: Record<string, OHLCV[]>;
@@ -482,51 +484,90 @@ export function registerLabRoutes(app: Express): void {
             labStorage.updateProgress(job.id, msg.data);
             break;
 
+          case "best-discovery":
+            if (!runId) break;
+            checkpointWriteChain = checkpointWriteChain.then(async () => {
+              try {
+                const existing = checkpointState.bestDiscovery;
+                if (!existing || existing.combo !== msg.combo || msg.score > existing.score) {
+                  checkpointState.bestDiscovery = {
+                    combo: msg.combo,
+                    stage: msg.stage,
+                    deepRound: msg.deepRound,
+                    score: msg.score,
+                    params: msg.params,
+                  };
+                  const checkpoint: LabCheckpoint = {
+                    completedCombos: [...completedCombos],
+                    configSnapshot: config,
+                    ...checkpointState,
+                  } as LabCheckpoint;
+                  await labStorage.saveCheckpoint(runId!, checkpoint);
+                }
+              } catch (err: any) {
+                console.log(`[QuantumLab] Best-discovery checkpoint warning: ${err.message}`);
+              }
+            });
+            break;
+
           case "partial-checkpoint":
             if (!runId) break;
-            try {
-              if (msg.results.length > 0) {
-                await labStorage.saveComboResults(runId, msg.results, true);
+            checkpointWriteChain = checkpointWriteChain.then(async () => {
+              try {
+                if (msg.results.length > 0) {
+                  await labStorage.saveComboResults(runId!, msg.results, true);
+                }
+                checkpointState = {
+                  ...checkpointState,
+                  currentCombo: msg.combo,
+                  currentStage: msg.stage,
+                  currentIteration: msg.iteration,
+                  currentDeepRound: msg.deepRound,
+                  refineSeeds: msg.refineSeeds,
+                  coordinateCompleted: msg.coordinateCompleted,
+                };
+                const checkpoint: LabCheckpoint = {
+                  completedCombos: [...completedCombos],
+                  configSnapshot: config,
+                  ...checkpointState,
+                } as LabCheckpoint;
+                await labStorage.saveCheckpoint(runId!, checkpoint);
+              } catch (err: any) {
+                console.log(`[QuantumLab] Partial checkpoint error: ${err.message}`);
               }
-              const checkpoint: LabCheckpoint = {
-                completedCombos: [...completedCombos],
-                configSnapshot: config,
-                currentCombo: msg.combo,
-                currentStage: msg.stage,
-                currentIteration: msg.iteration,
-                currentDeepRound: msg.deepRound,
-                refineSeeds: msg.refineSeeds,
-                coordinateCompleted: msg.coordinateCompleted,
-              };
-              await labStorage.saveCheckpoint(runId, checkpoint);
-            } catch (err: any) {
-              console.log(`[QuantumLab] Partial checkpoint error: ${err.message}`);
-            }
+            });
             break;
 
           case "combo-complete":
             completedCombos.push(msg.combo);
             if (!runId) break;
-            try {
-              if (msg.results.length > 0) {
-                await labStorage.saveComboResults(runId, msg.results);
+            checkpointWriteChain = checkpointWriteChain.then(async () => {
+              try {
+                if (msg.results.length > 0) {
+                  await labStorage.saveComboResults(runId!, msg.results);
+                }
+                checkpointState = {
+                  currentCombo: undefined,
+                  currentStage: undefined,
+                  currentIteration: undefined,
+                  partialResults: undefined,
+                  bestDiscovery: undefined,
+                };
+                const checkpoint: LabCheckpoint = {
+                  completedCombos: [...completedCombos],
+                  configSnapshot: config,
+                  ...checkpointState,
+                } as LabCheckpoint;
+                await labStorage.saveCheckpoint(runId!, checkpoint);
+                console.log(`[QuantumLab] Checkpoint saved: ${completedCombos.length} combos done (run ${runId})`);
+              } catch (err: any) {
+                console.log(`[QuantumLab] Checkpoint save error: ${err.message}`);
               }
-              const checkpoint: LabCheckpoint = {
-                completedCombos: [...completedCombos],
-                configSnapshot: config,
-                currentCombo: undefined,
-                currentStage: undefined,
-                currentIteration: undefined,
-                partialResults: undefined,
-              };
-              await labStorage.saveCheckpoint(runId, checkpoint);
-              console.log(`[QuantumLab] Checkpoint saved: ${completedCombos.length} combos done (run ${runId})`);
-            } catch (err: any) {
-              console.log(`[QuantumLab] Checkpoint save error: ${err.message}`);
-            }
+            });
             break;
 
           case "done": {
+            await checkpointWriteChain.catch(() => {});
             const results = msg.results as LabBacktestResult[];
             if (job.abortSignal.aborted) {
               console.log(`[QuantumLab] Job ${job.id} was cancelled with ${results.length} results found`);
@@ -574,6 +615,7 @@ export function registerLabRoutes(app: Express): void {
           }
 
           case "error": {
+            await checkpointWriteChain.catch(() => {});
             const isResource = msg.isResourceError || isOOMError(msg.message || "");
             const errorLabel = isResource ? "Resource limit exceeded" : "Error";
             console.log(`[QuantumLab] Worker error (resource=${isResource}): ${msg.message}`);
@@ -602,6 +644,7 @@ export function registerLabRoutes(app: Express): void {
       });
 
       worker.on("error", async (err: Error) => {
+        await checkpointWriteChain.catch(() => {});
         const oom = isOOMError(err);
         if (oom) lastWorkerOOM = true;
         const errorLabel = oom ? "Resource limit exceeded" : "Worker error";
@@ -629,6 +672,7 @@ export function registerLabRoutes(app: Express): void {
 
       worker.on("exit", async (code: number) => {
         if (code !== 0 && activeWorker === worker) {
+          await checkpointWriteChain.catch(() => {});
           const exitMsg = `Worker exited with code ${code}`;
           const oom = lastWorkerOOM;
           console.log(`[QuantumLab] ${exitMsg} (oom=${oom})`);
