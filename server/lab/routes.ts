@@ -987,6 +987,7 @@ export function registerLabRoutes(app: Express): void {
           configSnapshot: { type: "new", config, processOrdersOnClose, ...snapshotInsights } as any,
         }).where(eq(labOptimizationRuns.id, run.id));
         console.log(`[QuantumLab] Queued new run ${run.id} (order: ${queueOrder})`);
+        setTimeout(() => pumpQueue(), 500);
         return res.json({ queued: true, runId: run.id, queueOrder });
       }
 
@@ -1316,6 +1317,7 @@ export function registerLabRoutes(app: Express): void {
           } as any,
         }).where(eq(labOptimizationRuns.id, newRun.id));
         console.log(`[QuantumLab] Queued refine run ${newRun.id} for ${ticker} ${timeframe} (order: ${queueOrder})`);
+        setTimeout(() => pumpQueue(), 500);
         return res.json({ queued: true, runId: newRun.id, queueOrder });
       }
 
