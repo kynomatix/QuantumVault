@@ -889,6 +889,19 @@ export function registerLabRoutes(app: Express): void {
     }
     pumpQueueRunning = true;
     try {
+      if (activeWorker) {
+        console.log(`[QuantumLab] pumpQueue: worker still active, skipping until it finishes`);
+        return;
+      }
+
+      const activeJobs = Array.from((labStorage as any).jobs?.values?.() ?? []).filter(
+        (j: any) => j.progress?.status !== "complete" && j.progress?.status !== "error"
+      );
+      if (activeJobs.length > 0) {
+        console.log(`[QuantumLab] pumpQueue: ${activeJobs.length} in-memory job(s) still active, skipping`);
+        return;
+      }
+
       const claimed = await labStorage.claimNextQueuedRun();
       if (!claimed) {
         console.log(`[QuantumLab] pumpQueue: no eligible queued runs (or active/paused run blocking)`);
@@ -928,9 +941,14 @@ export function registerLabRoutes(app: Express): void {
         startOptimizationJob(config, job, claimed.id, undefined, undefined, guidedInsights, guidedInsightsPerCombo, processOrdersOnClose);
         console.log(`[QuantumLab] pumpQueue: started run ${claimed.id} (type=${snapshotType})`);
       } catch (startErr: any) {
-        console.log(`[QuantumLab] pumpQueue: failed to start run ${claimed.id}: ${startErr.message}`);
-        await labStorage.failRun(claimed.id).catch(() => {});
-        setTimeout(() => pumpQueue(), 1000);
+        console.log(`[QuantumLab] pumpQueue: failed to start run ${claimed.id}: ${startErr.message} — requeueing`);
+        const requeueOrder = await labStorage.getNextQueueOrder(claimed.userId ?? "system");
+        await db.update(labOptimizationRuns).set({
+          status: "queued",
+          queueOrder: requeueOrder,
+        }).where(eq(labOptimizationRuns.id, claimed.id)).catch(() => {});
+        console.log(`[QuantumLab] pumpQueue: run ${claimed.id} requeued (order: ${requeueOrder}), will retry in 5s`);
+        setTimeout(() => pumpQueue(), 5000);
       }
     } catch (err: any) {
       console.log(`[QuantumLab] pumpQueue error: ${err.message}`);
