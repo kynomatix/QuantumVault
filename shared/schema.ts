@@ -572,6 +572,15 @@ export type PlatformMetricType =
   | "volume_24h"       // 24-hour trading volume
   | "volume_7d";       // 7-day trading volume
 
+export const platformCumulativeStats = pgTable("platform_cumulative_stats", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  totalVolume: decimal("total_volume", { precision: 30, scale: 6 }).notNull().default("0"),
+  totalTrades: integer("total_trades").notNull().default(0),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type PlatformCumulativeStats = typeof platformCumulativeStats.$inferSelect;
+
 // Profit Sharing: IOU records for failed profit share transfers
 // Tracks pending transfers that need to be retried (SOL starvation, RPC failures, etc.)
 export const pendingProfitShares = pgTable("pending_profit_shares", {

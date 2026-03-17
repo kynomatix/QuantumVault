@@ -75,6 +75,8 @@ import {
   type InsertPendingProfitShare,
   type PortfolioDailySnapshot,
   type InsertPortfolioDailySnapshot,
+  platformCumulativeStats,
+  type PlatformCumulativeStats,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -257,6 +259,11 @@ export interface IStorage {
   calculatePlatformStats(): Promise<{ activeBots: number; activeUsers: number; totalTrades: number }>;
   getAllAgentWalletAddresses(): Promise<string[]>;
 
+  getCumulativeStats(): Promise<PlatformCumulativeStats | undefined>;
+  incrementCumulativeStats(volumeDelta: number, tradesDelta: number): Promise<void>;
+  seedCumulativeStats(volume: number, trades: number): Promise<void>;
+  snapshotBotStatsBeforeDeletion(botId: string): Promise<void>;
+
   // Profit Sharing: IOU records for failed profit share transfers
   createPendingProfitShare(data: InsertPendingProfitShare): Promise<PendingProfitShare>;
   getPendingProfitSharesBySubscriber(subscriberWalletAddress: string): Promise<PendingProfitShare[]>;
@@ -432,6 +439,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteTradingBot(id: string): Promise<void> {
+    await this.snapshotBotStatsBeforeDeletion(id);
     await db.delete(tradingBots).where(eq(tradingBots.id, id));
   }
 
@@ -504,12 +512,56 @@ export class DatabaseStorage implements IStorage {
     }));
   }
 
+  private async incrementCumulativeStatsInTx(tx: Parameters<Parameters<typeof db.transaction>[0]>[0], volumeDelta: number, tradesDelta: number): Promise<void> {
+    await tx.insert(platformCumulativeStats).values({
+      id: DatabaseStorage.CUMULATIVE_STATS_SINGLETON_ID,
+      totalVolume: volumeDelta.toString(),
+      totalTrades: tradesDelta,
+    }).onConflictDoUpdate({
+      target: platformCumulativeStats.id,
+      set: {
+        totalVolume: sql`CAST(${platformCumulativeStats.totalVolume} AS DECIMAL) + ${volumeDelta}`,
+        totalTrades: sql`${platformCumulativeStats.totalTrades} + ${tradesDelta}`,
+        updatedAt: sql`NOW()`,
+      },
+    });
+  }
+
   async createBotTrade(trade: InsertBotTrade): Promise<BotTrade> {
+    if (trade.status === 'executed' && trade.size && trade.price) {
+      const volume = Math.abs(parseFloat(String(trade.size)) * parseFloat(String(trade.price)));
+      if (volume > 0) {
+        const result = await db.transaction(async (tx) => {
+          const tradeResult = await tx.insert(botTrades).values(trade).returning();
+          await this.incrementCumulativeStatsInTx(tx, volume, 1);
+          return tradeResult[0];
+        });
+        return result;
+      }
+    }
+
     const result = await db.insert(botTrades).values(trade).returning();
     return result[0];
   }
 
   async updateBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<void> {
+    if (updates.status === 'executed') {
+      const existing = await this.getBotTrade(id);
+      if (existing && existing.status !== 'executed') {
+        const size = updates.size ?? existing.size;
+        const price = updates.price ?? existing.price;
+        if (size && price) {
+          const volume = Math.abs(parseFloat(String(size)) * parseFloat(String(price)));
+          if (volume > 0) {
+            await db.transaction(async (tx) => {
+              await tx.update(botTrades).set(updates).where(eq(botTrades.id, id));
+              await this.incrementCumulativeStatsInTx(tx, volume, 1);
+            });
+            return;
+          }
+        }
+      }
+    }
     await db.update(botTrades).set(updates).where(eq(botTrades.id, id));
   }
 
@@ -1345,6 +1397,29 @@ export class DatabaseStorage implements IStorage {
   // Platform Analytics
   async upsertPlatformMetric(metricType: PlatformMetricType, value: number, metadata?: Record<string, unknown>): Promise<PlatformMetric> {
     const now = new Date();
+    const isCumulative = metricType === 'total_volume' || metricType === 'total_trades';
+
+    if (isCumulative) {
+      return await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${metricType}))`);
+
+        const prev = await tx.select({ value: platformMetrics.value })
+          .from(platformMetrics)
+          .where(eq(platformMetrics.metricType, metricType))
+          .orderBy(desc(platformMetrics.calculatedAt))
+          .limit(1);
+        const prevValue = prev.length > 0 ? parseFloat(prev[0].value) : 0;
+        const finalValue = Math.max(value, prevValue);
+
+        const result = await tx.insert(platformMetrics).values({
+          metricType,
+          value: finalValue.toString(),
+          metadata: metadata ?? null,
+          calculatedAt: now,
+        }).returning();
+        return result[0];
+      });
+    }
     
     const result = await db.insert(platformMetrics).values({
       metricType,
@@ -1483,6 +1558,63 @@ export class DatabaseStorage implements IStorage {
       activeUsers: parseInt(activeUsers[0]?.count || '0'),
       totalTrades: parseInt(totalTrades[0]?.count || '0'),
     };
+  }
+
+  private static readonly CUMULATIVE_STATS_SINGLETON_ID = 'singleton';
+
+  async getCumulativeStats(): Promise<PlatformCumulativeStats | undefined> {
+    const result = await db.select().from(platformCumulativeStats)
+      .where(eq(platformCumulativeStats.id, DatabaseStorage.CUMULATIVE_STATS_SINGLETON_ID))
+      .limit(1);
+    return result[0];
+  }
+
+  async incrementCumulativeStats(volumeDelta: number, tradesDelta: number): Promise<void> {
+    await db.insert(platformCumulativeStats).values({
+      id: DatabaseStorage.CUMULATIVE_STATS_SINGLETON_ID,
+      totalVolume: volumeDelta.toString(),
+      totalTrades: tradesDelta,
+    }).onConflictDoUpdate({
+      target: platformCumulativeStats.id,
+      set: {
+        totalVolume: sql`CAST(${platformCumulativeStats.totalVolume} AS DECIMAL) + ${volumeDelta}`,
+        totalTrades: sql`${platformCumulativeStats.totalTrades} + ${tradesDelta}`,
+        updatedAt: sql`NOW()`,
+      },
+    });
+  }
+
+  async seedCumulativeStats(volume: number, trades: number): Promise<void> {
+    await db.insert(platformCumulativeStats).values({
+      id: DatabaseStorage.CUMULATIVE_STATS_SINGLETON_ID,
+      totalVolume: volume.toString(),
+      totalTrades: trades,
+    }).onConflictDoUpdate({
+      target: platformCumulativeStats.id,
+      set: {
+        totalVolume: sql`GREATEST(CAST(${platformCumulativeStats.totalVolume} AS DECIMAL), ${volume})`,
+        totalTrades: sql`GREATEST(${platformCumulativeStats.totalTrades}, ${trades})`,
+        updatedAt: sql`NOW()`,
+      },
+    });
+  }
+
+  async snapshotBotStatsBeforeDeletion(botId: string): Promise<void> {
+    const bot = await this.getTradingBotById(botId);
+    if (!bot) return;
+
+    const allBots = await db.select({ stats: tradingBots.stats }).from(tradingBots);
+    let liveVolume = 0;
+    for (const b of allBots) {
+      const s = b.stats as { totalVolume?: number } | null;
+      liveVolume += s?.totalVolume || 0;
+    }
+    const liveTrades = await db.select({ count: sql<string>`COUNT(*)` })
+      .from(botTrades).where(eq(botTrades.status, 'executed'));
+    const liveTradeCount = parseInt(liveTrades[0]?.count || '0');
+
+    await this.seedCumulativeStats(liveVolume, liveTradeCount);
+    console.log(`[CumulativeStats] Ensured ledger >= live totals before deleting bot ${botId}: volume=$${liveVolume.toFixed(2)}, trades=${liveTradeCount}`);
   }
 
   // Profit Sharing: IOU records for failed profit share transfers
