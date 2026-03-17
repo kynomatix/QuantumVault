@@ -54,13 +54,27 @@ export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapsho
     console.log('[Analytics] Calculating platform metrics...');
     const startTime = Date.now();
     
-    const [tvl, volumeData, statsData, agentWallets, cumulativeStats] = await Promise.all([
+    const [tvl, volumeData, statsData, agentWallets] = await Promise.all([
       storage.calculatePlatformTVL(),
       storage.calculatePlatformVolume(),
       storage.calculatePlatformStats(),
       storage.getAllAgentWalletAddresses(),
-      storage.getCumulativeStats(),
     ]);
+
+    let cumulativeStats: Awaited<ReturnType<typeof storage.getCumulativeStats>> | null = null;
+    try {
+      cumulativeStats = await storage.getCumulativeStats();
+    } catch (cumulativeError: unknown) {
+      const errObj = cumulativeError instanceof Error ? cumulativeError : null;
+      const pgCode = (cumulativeError as Record<string, unknown>)?.code;
+      const isTableMissing = pgCode === '42P01' ||
+        (errObj?.message && /relation.*does not exist/i.test(errObj.message));
+      if (isTableMissing) {
+        console.warn('[Analytics] platform_cumulative_stats table does not exist, using calculated values');
+      } else {
+        console.error('[Analytics] Unexpected error fetching cumulative stats, using calculated values:', cumulativeError);
+      }
+    }
     
     let totalVolumeFromDrift = volumeData.total;
     let driftTVLSuccess = false;
