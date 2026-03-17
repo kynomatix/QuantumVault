@@ -15,3 +15,27 @@ const pool = new Pool({
 });
 
 export const db = drizzle(pool, { schema });
+
+export async function ensureSchema() {
+  const client = await pool.connect();
+  try {
+    const migrations = [
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS queue_order integer`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS config_snapshot jsonb`,
+      `CREATE TABLE IF NOT EXISTS platform_cumulative_stats (
+        id text PRIMARY KEY DEFAULT 'singleton',
+        cumulative_volume numeric(20,2) NOT NULL DEFAULT 0,
+        cumulative_trades integer NOT NULL DEFAULT 0,
+        updated_at timestamp DEFAULT now()
+      )`,
+    ];
+    for (const sql of migrations) {
+      await client.query(sql);
+    }
+    console.log("[DB] Schema check complete");
+  } catch (err: any) {
+    console.warn("[DB] Schema check warning:", err.message);
+  } finally {
+    client.release();
+  }
+}
