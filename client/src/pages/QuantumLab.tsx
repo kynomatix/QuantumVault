@@ -654,6 +654,10 @@ export default function QuantumLab() {
             onBack={() => { setActiveHistoryRunId(null); setTargetCombo(null); }}
             targetCombo={targetCombo}
             onTargetConsumed={() => setTargetCombo(null)}
+            onRefine={(jobId, newRunId) => {
+              handleJobStarted(jobId, newRunId);
+              setMainTab("main");
+            }}
           />
         ) : (
           <RunHistoryPanel
@@ -1792,7 +1796,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
   );
 }
 
-const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, targetCombo, onTargetConsumed }: { runId: number; onBack: () => void; targetCombo?: { ticker: string; timeframe: string } | null; onTargetConsumed?: () => void }) {
+const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, targetCombo, onTargetConsumed, onRefine }: { runId: number; onBack: () => void; targetCombo?: { ticker: string; timeframe: string } | null; onTargetConsumed?: () => void; onRefine?: (jobId: string, runId: number) => void }) {
   const [sortKey, setSortKey] = useState<SortKey>("netProfitPercent");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedResultSummary, setSelectedResultSummary] = useState<LabOptResult | null>(null);
@@ -1802,6 +1806,8 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
   const { getMaxLeverage } = useLeverageLimits();
   const [expandedCombos, setExpandedCombos] = useState<Set<string>>(new Set());
   const [deletingIds, setDeletingIds] = useState<Set<number>>(new Set());
+  const [refiningCombo, setRefiningCombo] = useState<string | null>(null);
+  const { toast } = useToast();
 
   const deleteResultMutation = useMutation({
     mutationFn: async (resultId: number) => {
@@ -1841,6 +1847,64 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     },
     enabled: !!run?.strategyId,
   });
+
+  const handleRefine = useCallback(async (ticker: string, timeframe: string) => {
+    const comboKey = `${ticker}|${timeframe}`;
+    setRefiningCombo(comboKey);
+    try {
+      let reportData: any = undefined;
+      if (run?.strategyId) {
+        try {
+          const allRes = await fetch(`/api/lab/strategies/${run.strategyId}/all-results?lite=1`);
+          if (allRes.ok) {
+            const data = await safeResponseJson(allRes);
+            if (data.results && data.results.length > 0) {
+              const strat = await fetch(`/api/lab/strategies/${run.strategyId}`);
+              if (strat.ok) {
+                const stratData = await safeResponseJson(strat);
+                const inputs = (stratData.parsedInputs || []) as LabPineInput[];
+                const resultData = data.results.map((r: LabOptResult) => ({
+                  ticker: r.ticker,
+                  timeframe: r.timeframe,
+                  netProfitPercent: r.netProfitPercent,
+                  winRatePercent: r.winRatePercent,
+                  maxDrawdownPercent: r.maxDrawdownPercent,
+                  profitFactor: r.profitFactor,
+                  totalTrades: r.totalTrades,
+                  params: r.params as Record<string, any>,
+                  trades: ((r.trades || []) as any[]),
+                }));
+                const rpt = generateInsightsReport(resultData, inputs, stratData.name, data.totalRuns, { ticker, timeframe });
+                reportData = rpt;
+              }
+            }
+          }
+        } catch (insightsErr: any) {
+          console.log("[Refine] Failed to generate insights:", insightsErr.message);
+        }
+      }
+
+      const res = await apiRequest("POST", `/api/lab/runs/${runId}/refine`, {
+        ticker,
+        timeframe,
+        reportData,
+      });
+      const { jobId, runId: newRunId } = await safeResponseJson(res);
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+      onRefine?.(jobId, newRunId);
+    } catch (err: any) {
+      const isConcurrencyError = err.message?.includes("concurrent") || err.message?.includes("already running") || err.message?.includes("Maximum");
+      toast({
+        title: "Refine failed",
+        description: isConcurrencyError
+          ? "Another optimization is already running. Please wait for it to finish or force clear stuck jobs."
+          : err.message,
+        variant: "destructive",
+      });
+    } finally {
+      setRefiningCombo(null);
+    }
+  }, [runId, run?.strategyId, onRefine, toast]);
 
   const { data: results, isLoading } = useQuery<LabOptResult[]>({
     queryKey: ["/api/lab/runs", runId, "results"],
@@ -2075,6 +2139,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                 <SortHeader label="Max DD %" sortKey="maxDrawdownPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="PF" sortKey="profitFactor" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="Trades" sortKey="totalTrades" current={sortKey} dir={sortDir} onClick={handleSort} />
+                {onRefine && <th className="w-8"></th>}
                 {strategy?.pineScript && <th className="w-8"></th>}
                 <th className="w-8"></th>
                 <th className="w-8"></th>
@@ -2107,6 +2172,19 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                       <td className={`py-2.5 px-2 text-right font-mono ${r.maxDrawdownPercent <= 30 ? "text-sky-400" : "text-purple-400"}`}>{r.maxDrawdownPercent.toFixed(1)}%</td>
                       <td className={`py-2.5 px-2 text-right font-mono ${r.profitFactor >= 1.5 ? "text-sky-400" : "text-white"}`}>{r.profitFactor.toFixed(2)}</td>
                       <td className="py-2.5 px-2 text-right font-mono text-white/60">{r.totalTrades}</td>
+                      {onRefine && (
+                        <td className="py-2.5 px-2 text-center">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleRefine(r.ticker, r.timeframe); }}
+                            disabled={refiningCombo === comboKey}
+                            className="text-sky-400 hover:text-sky-300 transition-colors p-0.5 rounded hover:bg-sky-500/10 disabled:opacity-50"
+                            title="Refine: deep search + insights for this combo"
+                            data-testid={`button-refine-${comboKey}`}
+                          >
+                            {refiningCombo === comboKey ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                          </button>
+                        </td>
+                      )}
                       {strategy?.pineScript && (
                         <td className="py-2.5 px-2 text-center">
                           <button
@@ -2159,6 +2237,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.maxDrawdownPercent <= 30 ? "text-sky-400/70" : "text-purple-400/70"}`}>{sr.maxDrawdownPercent.toFixed(1)}%</td>
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.profitFactor >= 1.5 ? "text-sky-400/70" : "text-white/50"}`}>{sr.profitFactor.toFixed(2)}</td>
                           <td className="py-2 px-2 text-right font-mono text-xs text-white/40">{sr.totalTrades}</td>
+                          {onRefine && <td></td>}
                           {strategy?.pineScript && (
                             <td className="py-2 px-2 text-center">
                               <button

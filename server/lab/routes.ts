@@ -956,6 +956,200 @@ export function registerLabRoutes(app: Express): void {
 
   const MAX_AUTO_RESUME_ATTEMPTS = 3;
 
+  app.post("/api/lab/runs/:id/refine", requireLabAuth, async (req: Request, res: Response) => {
+    try {
+      const runId = parseInt(req.params.id);
+      const run = await verifyRunOwnership(req, res);
+      if (!run) return;
+
+      const { ticker, timeframe, reportData } = req.body;
+      if (!ticker || !timeframe) {
+        return res.status(400).json({ error: "ticker and timeframe are required" });
+      }
+
+      const strategyId = run.strategyId;
+      const strategy = await labStorage.getStrategy(strategyId);
+      if (!strategy) {
+        return res.status(404).json({ error: "Strategy not found" });
+      }
+
+      const walletAddress = (req as any).walletAddress;
+
+      let clearedConflicts = 0;
+
+      const staleUserRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "running"));
+      for (const staleRun of staleUserRuns) {
+        if (staleRun.userId !== walletAddress) continue;
+        const existingJob = labStorage.getJobByRunId(staleRun.id);
+        if (existingJob && existingJob.progress.status !== "complete" && existingJob.progress.status !== "error") {
+          const isStale = Date.now() - existingJob.lastUpdated > 5 * 60 * 1000;
+          const isOrphan = !activeWorker && existingJob.progress.status !== "fetching";
+          if (isStale || isOrphan) {
+            existingJob.progress.status = "error";
+            existingJob.progress.stage = "Force-evicted for refine";
+            const savedResults = await db.select({ id: labOptimizationResults.id })
+              .from(labOptimizationResults)
+              .where(eq(labOptimizationResults.runId, staleRun.id))
+              .limit(1);
+            if (savedResults.length > 0) {
+              await labStorage.pauseRun(staleRun.id);
+            } else {
+              await labStorage.failRun(staleRun.id);
+            }
+            clearedConflicts++;
+            console.log(`[QuantumLab] Refine: cleared user's stuck job ${existingJob.id} (run ${staleRun.id})`);
+          }
+        } else if (!existingJob) {
+          const savedResults = await db.select({ id: labOptimizationResults.id })
+            .from(labOptimizationResults)
+            .where(eq(labOptimizationResults.runId, staleRun.id))
+            .limit(1);
+          if (savedResults.length > 0) {
+            await labStorage.pauseRun(staleRun.id);
+          } else {
+            await labStorage.failRun(staleRun.id);
+          }
+          clearedConflicts++;
+          console.log(`[QuantumLab] Refine: cleared user's orphaned run ${staleRun.id}`);
+        }
+      }
+
+      if (clearedConflicts > 0) {
+        console.log(`[QuantumLab] Refine: cleared ${clearedConflicts} conflicting jobs/runs for user ${walletAddress?.slice(0, 8)}...`);
+      }
+
+      if (reportData && typeof reportData === "object" && reportData.paramSensitivity) {
+        try {
+          await labStorage.saveInsightsReport(strategyId, reportData, reportData.totalResults ?? 0, reportData.totalRuns ?? 0);
+          console.log(`[QuantumLab] Refine: saved focused insights report for ${ticker} ${timeframe}`);
+        } catch (saveErr: any) {
+          console.log(`[QuantumLab] Refine: failed to save insights report: ${saveErr.message}`);
+        }
+      }
+
+      const sourceConfig = run.checkpoint && typeof run.checkpoint === "object"
+        ? (run.checkpoint as any).configSnapshot
+        : null;
+
+      const sourceSamples = sourceConfig?.randomSamples ?? run.randomSamples;
+      const sourceTopK = sourceConfig?.topK ?? run.topK;
+      const sourceRefinements = sourceConfig?.refinementsPerSeed ?? run.refinementsPerSeed;
+
+      const randomSamples = sourceSamples && sourceSamples !== 900 ? sourceSamples : 2000;
+      const topK = sourceTopK && sourceTopK !== 20 ? sourceTopK : 30;
+      const refinementsPerSeed = sourceRefinements && sourceRefinements !== 60 ? sourceRefinements : 60;
+
+      const parsedInputs = strategy.parsedInputs as any[];
+      if (!parsedInputs || parsedInputs.length === 0) {
+        return res.status(400).json({ error: "Strategy has no parsed inputs" });
+      }
+
+      const config: LabOptimizationConfig = {
+        pineScript: strategy.pineScript,
+        parsedInputs,
+        tickers: [ticker],
+        timeframes: [timeframe],
+        startDate: sourceConfig?.startDate ?? run.startDate ?? new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+        endDate: sourceConfig?.endDate ?? run.endDate ?? new Date().toISOString().split("T")[0],
+        randomSamples,
+        topK,
+        refinementsPerSeed,
+        minTrades: sourceConfig?.minTrades ?? run.minTrades ?? 10,
+        maxDrawdownCap: sourceConfig?.maxDrawdownCap ?? run.maxDrawdownCap ?? 85,
+        minAvgBarsHeld: sourceConfig?.minAvgBarsHeld ?? (run as any).minAvgBarsHeld ?? 1,
+        mode: "sweep",
+        strategyId,
+        useInsights: true,
+        deepSearch: true,
+      };
+
+      let processOrdersOnClose: boolean | undefined;
+      if (strategy.strategySettings && typeof strategy.strategySettings === "object") {
+        processOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
+      }
+
+      const job = labStorage.createJob(config, { hasActiveWorker: !!activeWorker });
+
+      const newRun = await labStorage.createRun({
+        strategyId,
+        userId: walletAddress,
+        tickers: [ticker],
+        timeframes: [timeframe],
+        startDate: config.startDate,
+        endDate: config.endDate,
+        randomSamples: config.randomSamples,
+        topK: config.topK,
+        refinementsPerSeed: config.refinementsPerSeed,
+        minTrades: config.minTrades,
+        maxDrawdownCap: config.maxDrawdownCap,
+        mode: "sweep",
+        status: "running",
+      });
+      job.runId = newRun.id;
+      await labStorage.saveCheckpoint(newRun.id, { completedCombos: [], configSnapshot: config });
+
+      let guidedInsights: import("@shared/schema").GuidedInsights | undefined;
+      let guidedInsightsPerCombo: Record<string, import("@shared/schema").GuidedInsights> | undefined;
+
+      const allReports = await labStorage.getInsightsReports(strategyId);
+
+      function extractInsights(rd: any): import("@shared/schema").GuidedInsights | null {
+        if (!rd?.paramSensitivity || !Array.isArray(rd.paramSensitivity)) return null;
+        const result: import("@shared/schema").GuidedInsights = {
+          paramSensitivity: rd.paramSensitivity.map((ps: any) => ({
+            name: ps.name,
+            type: ps.type,
+            impactScore: ps.impactScore ?? 0,
+            bestBucket: ps.bestBucket ? { rangeMin: ps.bestBucket.rangeMin, rangeMax: ps.bestBucket.rangeMax } : { rangeMin: 0, rangeMax: 0 },
+          })),
+        };
+        if (rd.topBottomConfigs?.top && Array.isArray(rd.topBottomConfigs.top) && rd.topBottomConfigs.top.length > 0) {
+          result.topConfigs = rd.topBottomConfigs.top.map((c: any) => ({
+            params: c.params,
+            score: c.netProfitPercent ?? 0,
+          }));
+        }
+        return result;
+      }
+
+      const comboKey = `${ticker}|${timeframe}`;
+      const matchingReport = allReports.find(r => {
+        const rd = r.reportData as any;
+        return rd?.filter?.ticker === ticker && rd?.filter?.timeframe === timeframe;
+      });
+      if (matchingReport) {
+        const insights = extractInsights(matchingReport.reportData as any);
+        if (insights) {
+          guidedInsightsPerCombo = { [comboKey]: insights };
+          console.log(`[QuantumLab] Refine: loaded focused insights for ${comboKey}`);
+        }
+      }
+
+      const latestGeneral = allReports.find(r => !(r.reportData as any)?.filter?.ticker) ?? allReports[0];
+      if (latestGeneral) {
+        const fallback = extractInsights(latestGeneral.reportData as any);
+        if (fallback) {
+          guidedInsights = fallback;
+        }
+      }
+
+      startOptimizationJob(config, job, newRun.id, undefined, undefined, guidedInsights, guidedInsightsPerCombo, processOrdersOnClose);
+
+      console.log(`[QuantumLab] Refine: started run ${newRun.id} for ${ticker} ${timeframe} (deep+insights, ${randomSamples} samples, ${topK} topK, ${refinementsPerSeed} refinements)`);
+      res.json({ jobId: job.id, runId: newRun.id });
+    } catch (err: any) {
+      console.log(`[QuantumLab] Refine error: ${err.message}`);
+      if ((err as any).blockingJobId) {
+        return res.status(409).json({
+          error: "Another optimization is already running. Please wait for it to finish or manually clear stuck jobs first.",
+          blockingJobId: (err as any).blockingJobId,
+          blockingRunId: (err as any).blockingRunId,
+        });
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post("/api/lab/jobs/force-clear", requireLabAuth, async (req: Request, res: Response) => {
     if (activeWorker) {
       activeWorker.postMessage({ type: "abort" });
