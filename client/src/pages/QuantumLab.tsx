@@ -668,7 +668,7 @@ export default function QuantumLab() {
           />
         );
       case "heatmap":
-        return <HeatmapPanel onViewRun={(runId, ticker, timeframe) => { setActiveHistoryRunId(runId); setTargetCombo({ ticker, timeframe }); setMainTab("results"); }} />;
+        return <HeatmapPanel onViewRun={(runId, ticker, timeframe) => { setActiveHistoryRunId(runId); setTargetCombo({ ticker, timeframe }); setMainTab("results"); }} onRefine={(jobId, newRunId) => { handleJobStarted(jobId, newRunId); setMainTab("main"); }} />;
       case "insights":
         return <InsightsPanel />;
       default:
@@ -2645,11 +2645,13 @@ function EquityCurvePopup({ resultId, ticker, timeframe }: { resultId: number; t
   );
 }
 
-function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: string, timeframe: string) => void }) {
+function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, ticker: string, timeframe: string) => void; onRefine?: (jobId: string, runId: number) => void }) {
   const [metric, setMetric] = useState<HeatmapMetric>("bestProfit");
   const [selectedCell, setSelectedCell] = useState<any | null>(null);
   const [selectedTopIdx, setSelectedTopIdx] = useState<number>(0);
+  const [refiningCombo, setRefiningCombo] = useState<string | null>(null);
   const { getMaxLeverage } = useLeverageLimits();
+  const { toast } = useToast();
 
   const { data, isLoading } = useQuery<any>({
     queryKey: ["/api/lab/heatmap"],
@@ -2718,6 +2720,54 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
     if (!strat?.pineScript) return;
     exportPineWithParams(strat.pineScript, cfg.params, ticker, timeframe, strat.name);
   }, [strategyMap]);
+
+  const handleRefine = useCallback(async (cfg: any, ticker: string, timeframe: string) => {
+    if (!cfg.runId) return;
+    const comboKey = `${ticker}|${timeframe}`;
+    setRefiningCombo(comboKey);
+    try {
+      let reportData: any = undefined;
+      if (cfg.strategyId) {
+        try {
+          const allRes = await fetch(`/api/lab/strategies/${cfg.strategyId}/all-results?lite=1`);
+          if (allRes.ok) {
+            const data = await safeResponseJson(allRes);
+            if (data.results && data.results.length > 0) {
+              const strat = strategyMap.get(cfg.strategyId);
+              if (strat) {
+                const inputs = (strat.parsedInputs || []) as LabPineInput[];
+                const resultData = data.results.map((r: LabOptResult) => ({
+                  ticker: r.ticker, timeframe: r.timeframe,
+                  netProfitPercent: r.netProfitPercent, winRatePercent: r.winRatePercent,
+                  maxDrawdownPercent: r.maxDrawdownPercent, profitFactor: r.profitFactor,
+                  totalTrades: r.totalTrades, params: r.params as Record<string, any>,
+                  trades: ((r.trades || []) as any[]),
+                }));
+                reportData = generateInsightsReport(resultData, inputs, strat.name, data.totalRuns, { ticker, timeframe });
+              }
+            }
+          }
+        } catch (insightsErr: any) {
+          console.log("[Heatmap Refine] Failed to generate insights:", insightsErr.message);
+        }
+      }
+
+      const res = await apiRequest("POST", `/api/lab/runs/${cfg.runId}/refine`, {
+        ticker, timeframe, reportData,
+      });
+      const { jobId, runId: newRunId } = await safeResponseJson(res);
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+      onRefine?.(jobId, newRunId);
+    } catch (err: any) {
+      toast({
+        title: "Refine failed",
+        description: err.message,
+        variant: "destructive",
+      });
+    } finally {
+      setRefiningCombo(null);
+    }
+  }, [strategyMap, onRefine, toast]);
 
   if (isLoading) {
     return (
@@ -3001,6 +3051,17 @@ function HeatmapPanel({ onViewRun }: { onViewRun?: (runId: number, ticker: strin
                             data-testid={`heatmap-export-pine-${idx}`}
                           >
                             <Download className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {cfg.runId && onRefine && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleRefine(cfg, selectedCell.ticker, selectedCell.timeframe); }}
+                            disabled={refiningCombo === `${selectedCell.ticker}|${selectedCell.timeframe}`}
+                            className="p-1 rounded hover:bg-sky-500/10 text-sky-400 hover:text-sky-300 transition-colors disabled:opacity-50"
+                            title="Refine: deep search + insights for this combo"
+                            data-testid={`heatmap-refine-${idx}`}
+                          >
+                            {refiningCombo === `${selectedCell.ticker}|${selectedCell.timeframe}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
                           </button>
                         )}
                       </span>

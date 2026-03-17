@@ -8,7 +8,7 @@ import { Worker } from "worker_threads";
 import { resolve, dirname } from "path";
 import type { OHLCV } from "./engine";
 import { db } from "../db";
-import { eq } from "drizzle-orm";
+import { eq, or } from "drizzle-orm";
 
 let labCleanup: ((reason: string) => Promise<void>) | null = null;
 
@@ -604,12 +604,14 @@ export function registerLabRoutes(app: Express): void {
   }
 
   let pendingRetryRunId: number | null = null;
+  let retryGeneration = 0;
 
   async function autoRetryAfterCrash(runId: number, oldJobId: string, errorMsg: string) {
     if (pendingRetryRunId === runId) {
       console.log(`[QuantumLab] Auto-retry already pending for run ${runId}, skipping duplicate`);
       return;
     }
+    const myGeneration = retryGeneration;
     pendingRetryRunId = runId;
 
     try {
@@ -647,6 +649,11 @@ export function registerLabRoutes(app: Express): void {
       });
 
       await new Promise(resolve => setTimeout(resolve, retryIn * 1000));
+
+      if (myGeneration !== retryGeneration) {
+        console.log(`[QuantumLab] Auto-retry aborted after delay for run ${runId} — generation changed (${myGeneration} → ${retryGeneration})`);
+        return;
+      }
 
       const freshRun = await labStorage.getRun(runId);
       if (!freshRun || freshRun.status !== "paused") {
@@ -975,47 +982,32 @@ export function registerLabRoutes(app: Express): void {
 
       const walletAddress = (req as any).walletAddress;
 
-      let clearedConflicts = 0;
-
-      const staleUserRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "running"));
-      for (const staleRun of staleUserRuns) {
-        if (staleRun.userId !== walletAddress) continue;
-        const existingJob = labStorage.getJobByRunId(staleRun.id);
-        if (existingJob && existingJob.progress.status !== "complete" && existingJob.progress.status !== "error") {
-          const isStale = Date.now() - existingJob.lastUpdated > 5 * 60 * 1000;
-          const isOrphan = !activeWorker && existingJob.progress.status !== "fetching";
-          if (isStale || isOrphan) {
-            existingJob.progress.status = "error";
-            existingJob.progress.stage = "Force-evicted for refine";
-            const savedResults = await db.select({ id: labOptimizationResults.id })
-              .from(labOptimizationResults)
-              .where(eq(labOptimizationResults.runId, staleRun.id))
-              .limit(1);
-            if (savedResults.length > 0) {
-              await labStorage.pauseRun(staleRun.id);
-            } else {
-              await labStorage.failRun(staleRun.id);
-            }
-            clearedConflicts++;
-            console.log(`[QuantumLab] Refine: cleared user's stuck job ${existingJob.id} (run ${staleRun.id})`);
-          }
-        } else if (!existingJob) {
-          const savedResults = await db.select({ id: labOptimizationResults.id })
-            .from(labOptimizationResults)
-            .where(eq(labOptimizationResults.runId, staleRun.id))
-            .limit(1);
-          if (savedResults.length > 0) {
-            await labStorage.pauseRun(staleRun.id);
-          } else {
-            await labStorage.failRun(staleRun.id);
-          }
-          clearedConflicts++;
-          console.log(`[QuantumLab] Refine: cleared user's orphaned run ${staleRun.id}`);
-        }
+      retryGeneration++;
+      pendingRetryRunId = null;
+      if (activeWorker) {
+        activeWorker.postMessage({ type: "abort" });
+        try { activeWorker.terminate(); } catch {}
+        activeWorker = null;
       }
-
-      if (clearedConflicts > 0) {
-        console.log(`[QuantumLab] Refine: cleared ${clearedConflicts} conflicting jobs/runs for user ${walletAddress?.slice(0, 8)}...`);
+      const evicted = labStorage.forceEvictAllJobs();
+      const staleRuns = await db.select().from(labOptimizationRuns).where(
+        or(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.status, "paused"))!
+      );
+      let clearedConflicts = 0;
+      for (const staleRun of staleRuns) {
+        const savedResults = await db.select({ id: labOptimizationResults.id })
+          .from(labOptimizationResults)
+          .where(eq(labOptimizationResults.runId, staleRun.id))
+          .limit(1);
+        if (savedResults.length > 0) {
+          await labStorage.pauseRun(staleRun.id);
+        } else {
+          await labStorage.failRun(staleRun.id);
+        }
+        clearedConflicts++;
+      }
+      if (evicted > 0 || clearedConflicts > 0) {
+        console.log(`[QuantumLab] Refine: force-cleared ${evicted} in-memory jobs, ${clearedConflicts} DB runs`);
       }
 
       if (reportData && typeof reportData === "object" && reportData.paramSensitivity) {
@@ -1151,13 +1143,17 @@ export function registerLabRoutes(app: Express): void {
   });
 
   app.post("/api/lab/jobs/force-clear", requireLabAuth, async (req: Request, res: Response) => {
+    retryGeneration++;
+    pendingRetryRunId = null;
     if (activeWorker) {
       activeWorker.postMessage({ type: "abort" });
       try { activeWorker.terminate(); } catch {}
       activeWorker = null;
     }
     const evicted = labStorage.forceEvictAllJobs();
-    const staleRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "running"));
+    const staleRuns = await db.select().from(labOptimizationRuns).where(
+      or(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.status, "paused"))!
+    );
     for (const run of staleRuns) {
       const savedResults = await db.select({ id: labOptimizationResults.id })
         .from(labOptimizationResults)
