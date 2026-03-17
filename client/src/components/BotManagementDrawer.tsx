@@ -512,14 +512,14 @@ export function BotManagementDrawer({
       const data = await safeResponseJson(res);
       
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to add to Drift');
+        throw new Error(data.error || 'Failed to add to bot');
       }
 
       toast({ title: `Successfully added $${amount} to bot`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
       setAddEquityAmount('');
       setTimeout(() => fetchBotOverview(), 1500);
     } catch (error) {
-      toast({ title: 'Failed to add to Drift', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
+      toast({ title: 'Failed to add to bot', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
     } finally {
       setAddEquityLoading(false);
     }
@@ -555,7 +555,7 @@ export function BotManagementDrawer({
       
       if (!res.ok) {
         // Map Drift errors to friendly messages
-        let friendlyMessage = data.error || 'Failed to remove from Drift';
+        let friendlyMessage = data.error || 'Failed to remove from bot';
         if (data.error?.includes('InsufficientCollateral') || data.error?.includes('0x1773')) {
           friendlyMessage = 'Not enough available balance. Try a smaller amount.';
         } else if (data.error?.includes('Simulation failed')) {
@@ -1612,7 +1612,7 @@ export function BotManagementDrawer({
             <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
               <div className="flex items-center gap-2">
                 <ArrowUp className="w-4 h-4 text-emerald-500" />
-                <h3 className="font-semibold text-sm">Add to Drift</h3>
+                <h3 className="font-semibold text-sm">Add to Bot</h3>
               </div>
               <div className="flex gap-2">
                 <div className="flex-1 relative">
@@ -1643,14 +1643,14 @@ export function BotManagementDrawer({
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                Transfer USDC from your agent wallet to Drift for trading
+                Transfer USDC from your wallet to the bot for trading
               </p>
             </div>
 
             <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
               <div className="flex items-center gap-2">
                 <ArrowDown className="w-4 h-4 text-orange-500" />
-                <h3 className="font-semibold text-sm">Remove from Drift</h3>
+                <h3 className="font-semibold text-sm">Remove from Bot</h3>
               </div>
               <div className="flex gap-2">
                 <div className="flex-1 relative">
@@ -1691,7 +1691,7 @@ export function BotManagementDrawer({
                 </p>
               )}
               <p className="text-xs text-muted-foreground">
-                Withdraw USDC from Drift back to your agent wallet
+                Withdraw USDC from the bot back to your wallet
               </p>
               {hasOpenPositions && driftBalance > driftFreeCollateral && (
                 <p className="text-xs text-amber-500">
@@ -1706,7 +1706,7 @@ export function BotManagementDrawer({
                 <div className="space-y-1">
                   <h3 className="font-semibold text-sm">How It Works</h3>
                   <p className="text-sm text-muted-foreground">
-                    Funds in Drift are used for trading. Transfer from your agent wallet to Drift to enable trading, or withdraw profits back to your agent wallet.
+                    Funds in the bot are used for trading. Transfer from your wallet to the bot to enable trading, or withdraw profits back to your wallet.
                   </p>
                 </div>
               </div>
