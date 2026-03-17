@@ -34,6 +34,127 @@ function send(msg: WorkerMessage) {
   parentPort?.postMessage(msg);
 }
 
+function canonicalizeParams(params: Record<string, any>, inputs: LabPineInput[]): string {
+  const parts: string[] = [];
+  for (const input of inputs) {
+    if (!input.optimizable) continue;
+    const val = params[input.name];
+    if (input.type === "float") {
+      parts.push(`${input.name}=${Math.round((val ?? 0) * 10000)}`);
+    } else {
+      parts.push(`${input.name}=${val}`);
+    }
+  }
+  return parts.join("|");
+}
+
+function normalizedParamDistance(a: Record<string, any>, b: Record<string, any>, inputs: LabPineInput[]): number {
+  let sumSq = 0;
+  let count = 0;
+  for (const input of inputs) {
+    if (!input.optimizable) continue;
+    count++;
+    switch (input.type) {
+      case "int":
+      case "float": {
+        const min = input.min ?? 0;
+        const max = input.max ?? 100;
+        const range = max - min;
+        if (range === 0) continue;
+        const va = typeof a[input.name] === "number" ? a[input.name] : (input.default ?? min);
+        const vb = typeof b[input.name] === "number" ? b[input.name] : (input.default ?? min);
+        const diff = (va - vb) / range;
+        sumSq += diff * diff;
+        break;
+      }
+      case "bool": {
+        const va = a[input.name] ?? input.default;
+        const vb = b[input.name] ?? input.default;
+        if (va !== vb) sumSq += 1;
+        break;
+      }
+      case "string": {
+        const va = a[input.name] ?? input.default;
+        const vb = b[input.name] ?? input.default;
+        if (va !== vb) sumSq += 1;
+        break;
+      }
+    }
+  }
+  return count > 0 ? Math.sqrt(sumSq / count) : 0;
+}
+
+function selectDiverseSeeds(results: LabBacktestResult[], count: number, inputs: LabPineInput[]): LabBacktestResult[] {
+  if (results.length <= count) return [...results];
+  const selected: LabBacktestResult[] = [results[0]];
+  const remaining = new Set(results.slice(1).map((_, i) => i + 1));
+
+  while (selected.length < count && remaining.size > 0) {
+    let bestIdx = -1;
+    let bestMinDist = -1;
+    for (const idx of Array.from(remaining)) {
+      let minDist = Infinity;
+      for (const sel of selected) {
+        const d = normalizedParamDistance(results[idx].params, sel.params, inputs);
+        if (d < minDist) minDist = d;
+      }
+      if (minDist > bestMinDist) {
+        bestMinDist = minDist;
+        bestIdx = idx;
+      }
+    }
+    if (bestIdx >= 0) {
+      selected.push(results[bestIdx]);
+      remaining.delete(bestIdx);
+    } else {
+      break;
+    }
+  }
+  return selected;
+}
+
+function perturbNumericValue(
+  currentVal: number,
+  min: number,
+  max: number,
+  step: number,
+  fraction: number,
+  useGaussian: boolean = false
+): number {
+  const range = max - min;
+  const stepsInRange = Math.floor(range / step);
+  if (stepsInRange <= 0) return currentVal;
+
+  const rawAmount = range * fraction;
+  const minMovement = step;
+  const effectiveAmount = Math.max(rawAmount, minMovement);
+
+  let delta: number;
+  if (useGaussian) {
+    delta = gaussianRandom(0, effectiveAmount);
+  } else {
+    delta = (Math.random() - 0.5) * 2 * effectiveAmount;
+  }
+
+  if (Math.abs(delta) < step) {
+    delta = delta >= 0 ? step : -step;
+  }
+
+  const newVal = currentVal + delta;
+  const clamped = Math.max(min, Math.min(max, newVal));
+  let snapped = Math.min(max, Math.max(min, Math.round((clamped - min) / step) * step + min));
+
+  if (snapped === currentVal) {
+    if (currentVal + step <= max) {
+      snapped = currentVal + step;
+    } else if (currentVal - step >= min) {
+      snapped = currentVal - step;
+    }
+  }
+
+  return snapped;
+}
+
 function generateRandomParams(inputs: LabPineInput[]): Record<string, any> {
   const params: Record<string, any> = {};
   for (const input of inputs) {
@@ -113,11 +234,11 @@ function generatePerturbedParams(inputs: LabPineInput[], insights: GuidedInsight
 
     let perturbFraction: number;
     if (impact > medianImpact * 1.5 && medianImpact > 0) {
-      perturbFraction = 0.08;
+      perturbFraction = 0.18;
     } else if (impact > medianImpact * 0.5 && medianImpact > 0) {
-      perturbFraction = 0.15;
+      perturbFraction = 0.25;
     } else {
-      perturbFraction = 0.30;
+      perturbFraction = 0.35;
     }
 
     switch (input.type) {
@@ -125,36 +246,27 @@ function generatePerturbedParams(inputs: LabPineInput[], insights: GuidedInsight
         const min = input.min ?? 1;
         const max = input.max ?? 100;
         const step = input.step ?? 1;
-        const range = max - min;
-        const stddev = range * perturbFraction;
         const seedNum = typeof seedVal === "number" ? seedVal : (input.default ?? min);
-        const raw = gaussianRandom(seedNum, stddev);
-        const clamped = Math.max(min, Math.min(max, raw));
-        params[input.name] = Math.min(max, Math.max(min, Math.round((clamped - min) / step) * step + min));
+        params[input.name] = perturbNumericValue(seedNum, min, max, step, perturbFraction, true);
         break;
       }
       case "float": {
         const min = input.min ?? 0.1;
         const max = input.max ?? 10;
         const step = input.step ?? 0.1;
-        const range = max - min;
-        const stddev = range * perturbFraction;
         const seedNum = typeof seedVal === "number" ? seedVal : (input.default ?? min);
-        const raw = gaussianRandom(seedNum, stddev);
-        const clamped = Math.max(min, Math.min(max, raw));
-        const snapped = Math.min(max, Math.max(min, Math.round((clamped - min) / step) * step + min));
-        params[input.name] = Math.round(snapped * 10000) / 10000;
+        params[input.name] = Math.round(perturbNumericValue(seedNum, min, max, step, perturbFraction, true) * 10000) / 10000;
         break;
       }
       case "bool": {
         const seedBool = typeof seedVal === "boolean" ? seedVal : (input.default ?? false);
-        params[input.name] = Math.random() < 0.85 ? seedBool : !seedBool;
+        params[input.name] = Math.random() < 0.65 ? seedBool : !seedBool;
         break;
       }
       case "string": {
         if (input.options && input.options.length > 1) {
           const seedStr = typeof seedVal === "string" ? seedVal : (input.default ?? input.options[0]);
-          if (Math.random() < 0.80) {
+          if (Math.random() < 0.65) {
             params[input.name] = seedStr;
           } else {
             const others = input.options.filter(o => o !== seedStr);
@@ -296,27 +408,31 @@ function jitterParams(baseParams: Record<string, any>, inputs: LabPineInput[], j
   for (const input of toJitter) {
     const min = input.min ?? 0;
     const max = input.max ?? 100;
-    const range = max - min;
-    const jitterAmount = range * jitterRadius;
+    const step = input.type === "int" ? (input.step ?? 1) : (input.step ?? 0.1);
+    const currentVal = params[input.name] ?? input.default;
+    const newVal = perturbNumericValue(currentVal, min, max, step, jitterRadius);
 
-    if (input.type === "int") {
-      const step = input.step ?? 1;
-      const currentVal = params[input.name] ?? input.default;
-      const newVal = currentVal + (Math.random() - 0.5) * 2 * jitterAmount;
-      params[input.name] = Math.max(min, Math.min(max, Math.round(newVal / step) * step));
+    if (input.type === "float") {
+      params[input.name] = Math.round(newVal * 10000) / 10000;
     } else {
-      const step = input.step ?? 0.1;
-      const currentVal = params[input.name] ?? input.default;
-      const newVal = currentVal + (Math.random() - 0.5) * 2 * jitterAmount;
-      params[input.name] = Math.max(min, Math.min(max, Math.round(newVal / step) * step));
-      params[input.name] = Math.round(params[input.name] * 10000) / 10000;
+      params[input.name] = newVal;
     }
   }
 
   const boolInputs = inputs.filter(i => i.optimizable && i.type === "bool");
-  if (boolInputs.length > 0 && Math.random() < 0.2) {
+  if (boolInputs.length > 0 && Math.random() < 0.35) {
     const toBool = boolInputs[Math.floor(Math.random() * boolInputs.length)];
     params[toBool.name] = !params[toBool.name];
+  }
+
+  const stringInputs = inputs.filter(i => i.optimizable && i.type === "string" && i.options && i.options.length > 1);
+  if (stringInputs.length > 0 && Math.random() < 0.35) {
+    const toStr = stringInputs[Math.floor(Math.random() * stringInputs.length)];
+    const currentStr = params[toStr.name];
+    const others = toStr.options!.filter(o => o !== currentStr);
+    if (others.length > 0) {
+      params[toStr.name] = others[Math.floor(Math.random() * others.length)];
+    }
   }
 
   return params;
@@ -437,6 +553,20 @@ async function run() {
       ? [...resumePartialResults]
       : [baseline];
 
+    const testedSignatures = new Set<string>();
+    testedSignatures.add(canonicalizeParams(defaultParams, inputs));
+
+    if (isResumingThisCombo && resumePartialResults.length > 0) {
+      for (const pr of resumePartialResults) {
+        testedSignatures.add(canonicalizeParams(pr.params, inputs));
+      }
+    }
+    if (isResumingThisCombo && resumeRefineSeeds) {
+      for (const rs of resumeRefineSeeds) {
+        testedSignatures.add(canonicalizeParams(rs, inputs));
+      }
+    }
+
     const randomStart = skipRefineEntirely ? config.randomSamples : skipRandomUntil;
 
     let lastCheckpointTime = Date.now();
@@ -452,11 +582,30 @@ async function run() {
 
     for (let s = randomStart; s < config.randomSamples; s++) {
       if (aborted) { globalCurrent += (config.randomSamples - s); break; }
-      const useGuided = hasGuided && Math.random() < 0.8;
-      const params = useGuided
-        ? generateGuidedParams(inputs, comboInsights!)
-        : generateRandomParams(inputs);
-      const result = runBacktest(candles, params, combo.ticker, combo.timeframe, engineConfig);
+
+      const progress = s / config.randomSamples;
+      const guidedRatio = hasGuided ? (0.50 + progress * 0.20) : 0;
+      const useGuided = hasGuided && Math.random() < guidedRatio;
+
+      let params: Record<string, any>;
+      let isDuplicate = true;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        params = useGuided
+          ? generateGuidedParams(inputs, comboInsights!)
+          : generateRandomParams(inputs);
+        const sig = canonicalizeParams(params, inputs);
+        if (!testedSignatures.has(sig)) {
+          testedSignatures.add(sig);
+          isDuplicate = false;
+          break;
+        }
+      }
+      if (isDuplicate) {
+        globalCurrent++;
+        continue;
+      }
+
+      const result = runBacktest(candles, params!, combo.ticker, combo.timeframe, engineConfig);
       if (meetsFilters(result, config)) {
         comboResults.push(result);
       }
@@ -494,7 +643,7 @@ async function run() {
     comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
     const topSeeds = isResumingThisCombo && resumeRefineSeeds && (resumeStage === "refine" || resumeStage === "deep")
       ? resumeRefineSeeds.map(params => ({ params } as LabBacktestResult))
-      : comboResults.slice(0, config.topK);
+      : selectDiverseSeeds(comboResults, config.topK, inputs);
     const refineSeedParams = topSeeds.map(s => s.params);
 
     const refineStartIteration = config.randomSamples;
@@ -514,8 +663,23 @@ async function run() {
             continue;
           }
 
-          const jitteredParams = jitterParams(seed.params, inputs);
-          const result = runBacktest(candles, jitteredParams, combo.ticker, combo.timeframe, engineConfig);
+          let jitteredParams: Record<string, any>;
+          let isDuplicate = true;
+          for (let attempt = 0; attempt < 4; attempt++) {
+            jitteredParams = jitterParams(seed.params, inputs);
+            const sig = canonicalizeParams(jitteredParams, inputs);
+            if (!testedSignatures.has(sig)) {
+              testedSignatures.add(sig);
+              isDuplicate = false;
+              break;
+            }
+          }
+          if (isDuplicate) {
+            globalCurrent++;
+            continue;
+          }
+
+          const result = runBacktest(candles, jitteredParams!, combo.ticker, combo.timeframe, engineConfig);
           if (meetsFilters(result, config)) {
             comboResults.push(result);
           }
@@ -547,8 +711,10 @@ async function run() {
     }
 
     if (config.deepSearch && !aborted) {
-      const deepRadii = [0.10, 0.06, 0.03];
+      const deepRadii = [0.12, 0.08, 0.05];
       const numOptimizable = inputs.filter(i => i.optimizable && (i.type === "int" || i.type === "float")).length;
+      let previousRoundBest: LabBacktestResult[] = [];
+
       for (let round = 0; round < deepRounds; round++) {
         if (aborted) {
           globalCurrent += (deepRounds - round) * deepSeedsPerRound * deepRefinesPerSeed;
@@ -558,9 +724,64 @@ async function run() {
           globalCurrent += deepSeedsPerRound * deepRefinesPerSeed;
           continue;
         }
-        const radius = deepRadii[round] ?? 0.03;
+        const radius = deepRadii[round] ?? 0.05;
         comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
-        const deepSeeds = comboResults.slice(0, deepSeedsPerRound);
+
+        let deepSeeds: LabBacktestResult[];
+        const eliteCount = Math.max(1, Math.ceil(deepSeedsPerRound * 0.30));
+        const novelCount = deepSeedsPerRound - eliteCount;
+
+        if (round === 0) {
+          deepSeeds = selectDiverseSeeds(comboResults, deepSeedsPerRound, inputs);
+        } else if (round === 1) {
+          const elites = comboResults.slice(0, eliteCount);
+          const novelPool = previousRoundBest.length > 0 ? previousRoundBest : comboResults;
+          const novelCandidates = selectDiverseSeeds(novelPool, novelCount + eliteCount, inputs);
+          const novelOnly = novelCandidates.filter(
+            c => !elites.some(e => canonicalizeParams(e.params, inputs) === canonicalizeParams(c.params, inputs))
+          ).slice(0, novelCount);
+          deepSeeds = [...elites, ...novelOnly];
+          while (deepSeeds.length < deepSeedsPerRound && comboResults.length > deepSeeds.length) {
+            deepSeeds.push(comboResults[deepSeeds.length]);
+          }
+        } else {
+          const elites = comboResults.slice(0, eliteCount);
+          const exploratoryCount = Math.max(1, Math.ceil(deepSeedsPerRound * 0.25));
+          const remainingNovel = deepSeedsPerRound - eliteCount - exploratoryCount;
+          const novelCandidates = selectDiverseSeeds(
+            previousRoundBest.length > 0 ? previousRoundBest : comboResults,
+            remainingNovel + eliteCount, inputs
+          );
+          const novelOnly = novelCandidates.filter(
+            c => !elites.some(e => canonicalizeParams(e.params, inputs) === canonicalizeParams(c.params, inputs))
+          ).slice(0, remainingNovel);
+          const exploratory: LabBacktestResult[] = [];
+          for (let e = 0; e < exploratoryCount; e++) {
+            let rp: Record<string, any>;
+            let isDup = true;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              rp = generateRandomParams(inputs);
+              const sig = canonicalizeParams(rp, inputs);
+              if (!testedSignatures.has(sig)) {
+                testedSignatures.add(sig);
+                isDup = false;
+                break;
+              }
+            }
+            if (isDup) continue;
+            const er = runBacktest(candles, rp!, combo.ticker, combo.timeframe, engineConfig);
+            if (meetsFilters(er, config)) {
+              exploratory.push(er);
+              comboResults.push(er);
+            }
+          }
+          deepSeeds = [...elites, ...novelOnly, ...exploratory];
+          while (deepSeeds.length < deepSeedsPerRound && comboResults.length > deepSeeds.length) {
+            deepSeeds.push(comboResults[deepSeeds.length]);
+          }
+        }
+
+        const roundDiscoveries: LabBacktestResult[] = [];
 
         for (let seedIdx = 0; seedIdx < deepSeeds.length; seedIdx++) {
           if (aborted) {
@@ -570,10 +791,27 @@ async function run() {
           const seed = deepSeeds[seedIdx];
           for (let r = 0; r < deepRefinesPerSeed; r++) {
             if (aborted) { globalCurrent += (deepRefinesPerSeed - r); break; }
-            const jittered = jitterParams(seed.params, inputs, numOptimizable, radius);
-            const result = runBacktest(candles, jittered, combo.ticker, combo.timeframe, engineConfig);
+
+            let jittered: Record<string, any>;
+            let isDuplicate = true;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              jittered = jitterParams(seed.params, inputs, numOptimizable, radius);
+              const sig = canonicalizeParams(jittered, inputs);
+              if (!testedSignatures.has(sig)) {
+                testedSignatures.add(sig);
+                isDuplicate = false;
+                break;
+              }
+            }
+            if (isDuplicate) {
+              globalCurrent++;
+              continue;
+            }
+
+            const result = runBacktest(candles, jittered!, combo.ticker, combo.timeframe, engineConfig);
             if (meetsFilters(result, config)) {
               comboResults.push(result);
+              roundDiscoveries.push(result);
             }
             globalCurrent++;
           }
@@ -599,6 +837,8 @@ async function run() {
           lastCheckpointTime = Date.now();
           checkpointCount++;
         }
+
+        previousRoundBest = [...roundDiscoveries].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, Math.max(10, deepSeedsPerRound));
 
         const deepCheckpointCount2 = Math.max(10, config.topK);
         const topAfterRound = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, deepCheckpointCount2);
