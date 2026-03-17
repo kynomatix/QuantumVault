@@ -3,6 +3,7 @@ import { build as viteBuild } from "vite";
 import { rm, readFile, stat, symlink, unlink } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
+import { execSync } from "child_process";
 
 const allowlist = [
   "@google/generative-ai",
@@ -51,8 +52,19 @@ async function fixNestedDependencies() {
   }
 }
 
+async function pushSchema() {
+  console.log("pushing database schema...");
+  try {
+    execSync("npx drizzle-kit push --force", { stdio: "inherit" });
+    console.log("schema push complete");
+  } catch (err) {
+    console.warn("schema push failed (non-fatal):", err);
+  }
+}
+
 async function buildAll() {
   await fixNestedDependencies();
+  await pushSchema();
   await rm("dist", { recursive: true, force: true });
 
   console.log("building client...");
