@@ -1577,10 +1577,27 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
       if (Array.isArray(data)) return { items: data, activeRun: null };
       return data;
     },
-    refetchInterval: open ? 5000 : false,
+    refetchInterval: open ? 2000 : 10000,
   });
   const queueItems = queueData?.items ?? [];
   const activeRun = queueData?.activeRun ?? null;
+
+  const resumeMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/lab/runs/${id}/resume`, { method: "POST", credentials: "include" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Resume failed");
+      return data;
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+      toast({ title: data.alreadyRunning ? "Reconnected to running optimization" : "Optimization resumed" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to resume", description: err.message, variant: "destructive" });
+    },
+  });
 
   const cancelMutation = useMutation({
     mutationFn: async (id: number) => {
@@ -1672,14 +1689,31 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
                 )}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <Badge variant="outline" className="text-[10px] px-1.5 border-violet-500/40 text-violet-300">
+                    <Badge variant="outline" className={cn(
+                      "text-[10px] px-1.5",
+                      activeRun.status === "running" ? "border-violet-500/40 text-violet-300" : "border-indigo-500/40 text-indigo-300"
+                    )}>
                       {activeRun.status === "running" ? "Running" : "Paused"}
                     </Badge>
+                    {activeRun.strategyName && <span className="text-[11px] text-white/40 truncate">{activeRun.strategyName}</span>}
                   </div>
                   <p className="text-sm text-white/70 truncate mt-1">
                     {activeRun.tickers?.map((t: string) => t.replace("-PERP", "").replace("/USDT", "")).join(", ")} · {activeRun.timeframes?.join(", ")}
                   </p>
                 </div>
+                {activeRun.status === "paused" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-3 text-xs border-violet-500/30 text-violet-300 hover:bg-violet-500/10"
+                    onClick={() => resumeMutation.mutate(activeRun.id)}
+                    disabled={resumeMutation.isPending}
+                    data-testid={`queue-resume-${activeRun.id}`}
+                  >
+                    {resumeMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 mr-1" />}
+                    Resume
+                  </Button>
+                )}
               </div>
             </div>
           )}
