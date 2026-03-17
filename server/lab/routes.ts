@@ -8,7 +8,7 @@ import { Worker } from "worker_threads";
 import { resolve, dirname } from "path";
 import type { OHLCV } from "./engine";
 import { db } from "../db";
-import { eq, or } from "drizzle-orm";
+import { eq, or, and } from "drizzle-orm";
 
 let labCleanup: ((reason: string) => Promise<void>) | null = null;
 
@@ -368,19 +368,35 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  const WORKER_MAX_OLD_GEN_SIZE_MB = parseInt(process.env.LAB_WORKER_MAX_OLD_GEN_MB || "512", 10);
+
+  function isOOMError(err: Error | string): boolean {
+    const msg = typeof err === "string" ? err : (err.message || "");
+    const code = typeof err === "object" ? (err as any).code : "";
+    return code === "ERR_WORKER_OUT_OF_MEMORY"
+      || msg.includes("ERR_WORKER_OUT_OF_MEMORY")
+      || msg.includes("heap allocation")
+      || msg.includes("JavaScript heap out of memory")
+      || msg.includes("Allocation failed");
+  }
+
   function createWorker(workerDataPayload: any): Worker {
     const isProd = typeof (globalThis as any).__ESBUILD_CJS_BUNDLE__ !== "undefined";
+    const resourceLimits = {
+      maxOldGenerationSizeMb: WORKER_MAX_OLD_GEN_SIZE_MB,
+    };
     if (isProd) {
       const workerPath = resolve(dirname(process.argv[1] || __filename), "optimizer-worker.cjs");
-      return new Worker(workerPath, { workerData: workerDataPayload });
+      return new Worker(workerPath, { workerData: workerDataPayload, resourceLimits });
     }
     return new Worker(
       `require('tsx/cjs'); require('${resolve(process.cwd(), "server", "lab", "optimizer-worker.ts").replace(/\\/g, "/")}');`,
-      { eval: true, workerData: workerDataPayload }
+      { eval: true, workerData: workerDataPayload, resourceLimits }
     );
   }
 
   let activeWorker: Worker | null = null;
+  let lastWorkerOOM = false;
 
   async function fetchAllCandles(
     config: LabOptimizationConfig,
@@ -456,6 +472,7 @@ export function registerLabRoutes(app: Express): void {
       });
 
       activeWorker = worker;
+      lastWorkerOOM = false;
 
       worker.on("message", async (msg: any) => {
         switch (msg.type) {
@@ -528,27 +545,47 @@ export function registerLabRoutes(app: Express): void {
                     const combos = config.tickers.length * config.timeframes.length;
                     totalConfigsTested = totalSamples * combos;
                   }
-                  await labStorage.completeRun(runId, totalConfigsTested);
-                  await labStorage.saveCheckpoint(runId, { completedCombos: [], configSnapshot: config });
+                  const finalCheckpoint: LabCheckpoint = { completedCombos: [], configSnapshot: config };
+                  await labStorage.finalizeSuccessfulRun(runId, totalConfigsTested, finalCheckpoint);
                   console.log(`[QuantumLab] Run ${runId} completed`);
                 } catch (err: any) {
                   console.log(`[QuantumLab] Failed to complete run: ${err.stack || err.message}`);
+                  try {
+                    await labStorage.pauseRun(runId);
+                  } catch {}
+                  labStorage.updateProgress(job.id, {
+                    jobId: job.id, status: "error", stage: `DB finalization failed: ${err.message}`,
+                    current: 0, total: 0, percent: 0, elapsed: 0, error: err.message,
+                  });
+                  activeWorker = null;
+                  break;
                 }
               }
+              labStorage.updateProgress(job.id, {
+                jobId: job.id, status: "complete", stage: "Optimization complete",
+                current: 0, total: 0, percent: 100, elapsed: 0,
+              });
             }
             activeWorker = null;
             break;
           }
 
-          case "error":
-            console.log(`[QuantumLab] Worker error: ${msg.message}`);
+          case "error": {
+            const isResource = msg.isResourceError || isOOMError(msg.message || "");
+            const errorLabel = isResource ? "Resource limit exceeded" : "Error";
+            console.log(`[QuantumLab] Worker error (resource=${isResource}): ${msg.message}`);
             labStorage.updateProgress(job.id, {
-              jobId: job.id, status: "error", stage: `Error: ${msg.message}`,
+              jobId: job.id, status: "error", stage: `${errorLabel}: ${msg.message}`,
               current: 0, total: 0, percent: 0, elapsed: 0, error: msg.message,
             });
             if (runId) {
               try {
                 await labStorage.pauseRun(runId);
+                if (isResource) {
+                  console.log(`[QuantumLab] Run ${runId} resource error → paused (no auto-retry)`);
+                  activeWorker = null;
+                  break;
+                }
                 console.log(`[QuantumLab] Run ${runId} error → paused, will auto-retry`);
                 activeWorker = null;
                 autoRetryAfterCrash(runId, job.id, msg.message);
@@ -557,18 +594,27 @@ export function registerLabRoutes(app: Express): void {
             }
             activeWorker = null;
             break;
+          }
         }
       });
 
       worker.on("error", async (err: Error) => {
-        console.log(`[QuantumLab] Worker thread error: ${err.message}`);
+        const oom = isOOMError(err);
+        if (oom) lastWorkerOOM = true;
+        const errorLabel = oom ? "Resource limit exceeded" : "Worker error";
+        console.log(`[QuantumLab] Worker thread error (oom=${oom}): ${err.message}`);
         labStorage.updateProgress(job.id, {
-          jobId: job.id, status: "error", stage: `Worker error: ${err.message}`,
+          jobId: job.id, status: "error", stage: `${errorLabel}: ${err.message}`,
           current: 0, total: 0, percent: 0, elapsed: 0, error: err.message,
         });
         if (runId) {
           try {
             await labStorage.pauseRun(runId);
+            if (oom) {
+              console.log(`[QuantumLab] Worker OOM run ${runId} → paused (no auto-retry)`);
+              activeWorker = null;
+              return;
+            }
             console.log(`[QuantumLab] Worker error run ${runId} → paused, will auto-retry`);
             activeWorker = null;
             autoRetryAfterCrash(runId, job.id, err.message);
@@ -580,13 +626,24 @@ export function registerLabRoutes(app: Express): void {
 
       worker.on("exit", async (code: number) => {
         if (code !== 0 && activeWorker === worker) {
-          console.log(`[QuantumLab] Worker exited with code ${code}`);
+          const exitMsg = `Worker exited with code ${code}`;
+          const oom = lastWorkerOOM;
+          console.log(`[QuantumLab] ${exitMsg} (oom=${oom})`);
           if (runId) {
             try {
               await labStorage.pauseRun(runId);
+              if (oom) {
+                labStorage.updateProgress(job.id, {
+                  jobId: job.id, status: "error", stage: `Resource limit exceeded: ${exitMsg}`,
+                  current: 0, total: 0, percent: 0, elapsed: 0, error: exitMsg,
+                });
+                console.log(`[QuantumLab] Worker OOM exit run ${runId} → paused (no auto-retry)`);
+                activeWorker = null;
+                return;
+              }
               console.log(`[QuantumLab] Worker exit(${code}) run ${runId} → paused, will auto-retry`);
               activeWorker = null;
-              autoRetryAfterCrash(runId, job.id, `Worker exited with code ${code}`);
+              autoRetryAfterCrash(runId, job.id, exitMsg);
               return;
             } catch { await labStorage.failRun(runId).catch(() => {}); }
           }
@@ -707,6 +764,7 @@ export function registerLabRoutes(app: Express): void {
 
       const newJob = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: false });
       newJob.runId = runId;
+      newJob.walletAddress = freshRun.userId ?? undefined;
       await labStorage.resumeRun(runId);
 
       labStorage.updateProgress(oldJobId, {
@@ -747,6 +805,7 @@ export function registerLabRoutes(app: Express): void {
       }
 
       const job = labStorage.createJob(config, { hasActiveWorker: !!activeWorker });
+      job.walletAddress = (req as any).walletAddress;
 
       let guidedInsights: import("@shared/schema").GuidedInsights | undefined;
       let guidedInsightsPerCombo: Record<string, import("@shared/schema").GuidedInsights> | undefined;
@@ -905,6 +964,7 @@ export function registerLabRoutes(app: Express): void {
 
       const job = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: !!activeWorker });
       job.runId = runId;
+      job.walletAddress = (req as any).walletAddress;
 
       await labStorage.resumeRun(runId);
       console.log(`[QuantumLab] Resuming run ${runId} — ${checkpoint.completedCombos.length} combos already done${checkpoint.currentCombo ? `, mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}` : ""}`);
@@ -1069,6 +1129,7 @@ export function registerLabRoutes(app: Express): void {
       }
 
       const job = labStorage.createJob(config, { hasActiveWorker: !!activeWorker });
+      job.walletAddress = walletAddress;
 
       const newRun = await labStorage.createRun({
         strategyId,
@@ -1151,17 +1212,73 @@ export function registerLabRoutes(app: Express): void {
   });
 
   app.post("/api/lab/jobs/force-clear", requireLabAuth, async (req: Request, res: Response) => {
+    const { jobId, runId: targetRunId } = req.body || {};
+    const walletAddress = (req as any).walletAddress as string | undefined;
+
     retryGeneration++;
     pendingRetryRunId = null;
-    if (activeWorker) {
+
+    let shouldTerminateWorker = false;
+    let evicted: number;
+    let targetDbRunId: number | undefined;
+
+    if (jobId) {
+      const job = labStorage.getJob(jobId);
+      if (job && job.progress.status !== "complete" && job.progress.status !== "error") {
+        if (walletAddress) {
+          let jobOwner = job.walletAddress;
+          if (!jobOwner && job.runId) {
+            const jobRun = await labStorage.getRun(job.runId);
+            if (jobRun?.userId) jobOwner = jobRun.userId;
+          }
+          if (jobOwner && jobOwner !== walletAddress) {
+            return res.status(403).json({ error: "Access denied: job belongs to another user" });
+          }
+        }
+        labStorage.updateProgress(jobId, {
+          jobId, status: "error", stage: "Force-evicted by user",
+          current: 0, total: 0, percent: 0, elapsed: 0, error: "Force-evicted by user",
+        });
+        targetDbRunId = job.runId;
+        shouldTerminateWorker = true;
+        evicted = 1;
+      } else {
+        evicted = 0;
+      }
+    } else if (walletAddress) {
+      evicted = labStorage.forceEvictJobsByWallet(walletAddress);
+      shouldTerminateWorker = evicted > 0;
+    } else {
+      evicted = labStorage.forceEvictAllJobs();
+      shouldTerminateWorker = evicted > 0 || !!activeWorker;
+    }
+
+    if (shouldTerminateWorker && activeWorker) {
       activeWorker.postMessage({ type: "abort" });
       try { activeWorker.terminate(); } catch {}
       activeWorker = null;
     }
-    const evicted = labStorage.forceEvictAllJobs();
-    const staleRuns = await db.select().from(labOptimizationRuns).where(
-      or(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.status, "paused"))!
-    );
+
+    let staleRuns;
+    if (targetDbRunId) {
+      staleRuns = await db.select().from(labOptimizationRuns).where(
+        and(eq(labOptimizationRuns.id, targetDbRunId), eq(labOptimizationRuns.status, "running"))!
+      );
+    } else if (targetRunId) {
+      const whereClause = walletAddress
+        ? and(eq(labOptimizationRuns.id, targetRunId), eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.userId, walletAddress))
+        : and(eq(labOptimizationRuns.id, targetRunId), eq(labOptimizationRuns.status, "running"));
+      staleRuns = await db.select().from(labOptimizationRuns).where(whereClause!);
+    } else if (walletAddress) {
+      staleRuns = await db.select().from(labOptimizationRuns).where(
+        and(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.userId, walletAddress))!
+      );
+    } else {
+      staleRuns = await db.select().from(labOptimizationRuns).where(
+        or(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.status, "paused"))!
+      );
+    }
+
     for (const run of staleRuns) {
       const savedResults = await db.select({ id: labOptimizationResults.id })
         .from(labOptimizationResults)
@@ -1418,6 +1535,7 @@ export function registerLabRoutes(app: Express): void {
       const resumeCheckpoint = hasProgress ? checkpoint : undefined;
       const job = labStorage.createJob(config, { forRunId: run.id, hasActiveWorker: !!activeWorker });
       job.runId = run.id;
+      job.walletAddress = run.userId ?? undefined;
       await labStorage.resumeRun(run.id);
       const detail = hasProgress
         ? (hasComboCheckpoint

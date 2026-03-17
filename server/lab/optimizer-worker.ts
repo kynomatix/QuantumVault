@@ -29,7 +29,7 @@ type WorkerMessage =
   | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep" | "coordinate"; iteration: number; deepRound?: number; results: LabBacktestResult[]; refineSeeds?: Record<string, any>[]; coordinateCompleted?: string[] }
   | { type: "combo-complete"; combo: string; results: LabBacktestResult[] }
   | { type: "done"; results: LabBacktestResult[]; totalConfigsTested?: number }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; isResourceError?: boolean };
 
 function send(msg: WorkerMessage) {
   parentPort?.postMessage(msg);
@@ -1197,6 +1197,14 @@ async function run() {
 
   send({ type: "done", results: allResults, totalConfigsTested: config.coordinateTune ? coordinateTotalTests : undefined });
 }
+
+process.on("uncaughtException", (err: Error) => {
+  const isResource = err.message?.includes("heap") || err.message?.includes("Allocation failed") || err.message?.includes("out of memory");
+  try {
+    send({ type: "error", message: `Uncaught: ${err.message || String(err)}`, isResourceError: isResource });
+  } catch {}
+  process.exit(1);
+});
 
 run().catch((err: any) => {
   send({ type: "error", message: err.message || String(err) });

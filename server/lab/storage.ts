@@ -7,7 +7,7 @@ import {
   type LabCheckpoint, type LabInsightsReport,
 } from "@shared/schema";
 import { db } from "../db";
-import { eq, desc, inArray, isNull } from "drizzle-orm";
+import { eq, desc, inArray, isNull, and, or } from "drizzle-orm";
 import { randomUUID } from "crypto";
 
 const MAX_CONCURRENT_JOBS = 1;
@@ -20,6 +20,7 @@ export interface LabJob {
   abortSignal: { aborted: boolean };
   listeners: Set<(progress: LabJobProgress) => void>;
   runId?: number;
+  walletAddress?: string;
   lastUpdated: number;
 }
 
@@ -34,6 +35,7 @@ export interface ILabStorage {
   getRuns(strategyId?: number): Promise<LabOptimizationRun[]>;
   getRun(id: number): Promise<LabOptimizationRun | undefined>;
   completeRun(id: number, totalConfigsTested: number): Promise<void>;
+  finalizeSuccessfulRun(id: number, totalConfigsTested: number, checkpoint: LabCheckpoint): Promise<void>;
   failRun(id: number): Promise<void>;
   pauseRun(id: number): Promise<void>;
   resumeRun(id: number): Promise<void>;
@@ -52,6 +54,7 @@ export interface ILabStorage {
   createJob(config: LabOptimizationConfig, options?: { forRunId?: number; hasActiveWorker?: boolean }): LabJob;
   getJob(id: string): LabJob | undefined;
   forceEvictAllJobs(): number;
+  forceEvictJobsByWallet(walletAddress: string): number;
   getJobByRunId(runId: number): LabJob | undefined;
   updateProgress(id: string, progress: LabJobProgress): void;
   setResults(id: string, results: LabBacktestResult[]): void;
@@ -215,6 +218,19 @@ export class LabDatabaseStorage implements ILabStorage {
       totalConfigsTested,
       completedAt: new Date(),
     }).where(eq(labOptimizationRuns.id, id));
+  }
+
+  async finalizeSuccessfulRun(id: number, totalConfigsTested: number, checkpoint: LabCheckpoint): Promise<void> {
+    await db.transaction(async (tx) => {
+      await tx.update(labOptimizationRuns).set({
+        status: "complete",
+        totalConfigsTested,
+        completedAt: new Date(),
+      }).where(eq(labOptimizationRuns.id, id));
+      await tx.update(labOptimizationRuns).set({
+        checkpoint: checkpoint as any,
+      }).where(eq(labOptimizationRuns.id, id));
+    });
   }
 
   async failRun(id: number): Promise<void> {
@@ -413,7 +429,7 @@ export class LabDatabaseStorage implements ILabStorage {
         console.log(`[QuantumLab] Evicting ${reason} job ${staleJob.id}`);
         staleJob.progress.status = "error";
         staleJob.progress.stage = `Evicted: ${reason}`;
-        this.scheduleCleanup(staleJob.id);
+        this.scheduleCleanup(staleJob.id, "error");
       }
     }
     const reallyActive = Array.from(this.jobs.values()).filter(
@@ -455,12 +471,26 @@ export class LabDatabaseStorage implements ILabStorage {
 
   forceEvictAllJobs(): number {
     let evicted = 0;
-    for (const [id, job] of this.jobs.entries()) {
+    for (const [id, job] of Array.from(this.jobs.entries())) {
       if (job.progress.status !== "complete" && job.progress.status !== "error") {
         console.log(`[QuantumLab] Force-evicting job ${id} (status: ${job.progress.status})`);
         job.progress.status = "error";
         job.progress.stage = "Force-evicted by admin";
-        this.scheduleCleanup(id);
+        this.scheduleCleanup(id, "error");
+        evicted++;
+      }
+    }
+    return evicted;
+  }
+
+  forceEvictJobsByWallet(walletAddress: string): number {
+    let evicted = 0;
+    for (const [id, job] of Array.from(this.jobs.entries())) {
+      if (job.progress.status !== "complete" && job.progress.status !== "error" && job.walletAddress === walletAddress) {
+        console.log(`[QuantumLab] Force-evicting job ${id} for wallet ${walletAddress}`);
+        job.progress.status = "error";
+        job.progress.stage = "Force-evicted by user";
+        this.scheduleCleanup(id, "error");
         evicted++;
       }
     }
@@ -474,10 +504,19 @@ export class LabDatabaseStorage implements ILabStorage {
     return undefined;
   }
 
-  private scheduleCleanup(id: string): void {
-    setTimeout(() => {
+  private cleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  private scheduleCleanup(id: string, status?: string): void {
+    if (this.cleanupTimers.has(id)) {
+      clearTimeout(this.cleanupTimers.get(id)!);
+      this.cleanupTimers.delete(id);
+    }
+    const ttl = status === "complete" ? 30_000 : status === "error" ? 15_000 : 30_000;
+    const timer = setTimeout(() => {
       this.jobs.delete(id);
-    }, 5 * 60 * 1000);
+      this.cleanupTimers.delete(id);
+    }, ttl);
+    this.cleanupTimers.set(id, timer);
   }
 
   updateProgress(id: string, progress: LabJobProgress): void {
@@ -489,7 +528,7 @@ export class LabDatabaseStorage implements ILabStorage {
         try { listener(progress); } catch {}
       }
       if (progress.status === "complete" || progress.status === "error") {
-        this.scheduleCleanup(id);
+        this.scheduleCleanup(id, progress.status);
       }
     }
   }
@@ -555,7 +594,7 @@ export class LabDatabaseStorage implements ILabStorage {
           this.failRun(job.runId!).catch(() => {});
         });
       }
-      this.scheduleCleanup(id);
+      this.scheduleCleanup(id, "error");
     }
   }
 

@@ -15,7 +15,7 @@ const PID_FILE = "/tmp/quantumlab.pid";
 const MIN_RESTART_DELAY = 1000;
 const MAX_RESTART_DELAY = 30000;
 const HEALTH_CHECK_INTERVAL = 15000;
-const READY_TIMEOUT = 20000;
+const READY_TIMEOUT = 120000;
 
 function deriveLabAuthSecret(): string {
   const base = process.env.SESSION_SECRET || "quantum-vault-secret-change-in-production";
@@ -74,6 +74,7 @@ export function createLabSupervisor(): LabSupervisor {
   let healthTimer: ReturnType<typeof setInterval> | null = null;
   let shuttingDown = false;
   let ownsChild = false;
+  let spawnInFlight = false;
 
   function getRestartDelay(): number {
     const base = Math.min(MIN_RESTART_DELAY * Math.pow(2, restartCount), MAX_RESTART_DELAY);
@@ -118,6 +119,12 @@ export function createLabSupervisor(): LabSupervisor {
   }
 
   function spawnAndWaitForReady(): Promise<void> {
+    if (spawnInFlight) {
+      console.log(`[LabSupervisor] Spawn already in flight, skipping duplicate`);
+      return Promise.resolve();
+    }
+    spawnInFlight = true;
+
     return new Promise((resolveReady, rejectReady) => {
       const isProd = typeof (globalThis as any).__ESBUILD_CJS_BUNDLE__ !== "undefined";
       const entryPath = isProd
@@ -133,53 +140,82 @@ export function createLabSupervisor(): LabSupervisor {
 
       const args = isProd ? [entryPath] : ["--import", "tsx", entryPath];
 
-      child = spawn("node", args, {
+      const spawnedChild = spawn("node", args, {
         env,
         stdio: ["ignore", "inherit", "inherit", "ipc"],
         detached: true,
       });
 
+      child = spawnedChild;
       ownsChild = true;
 
-      if (child.pid) {
-        writePidFile(child.pid);
-        console.log(`[LabSupervisor] Spawned lab process (pid: ${child.pid})`);
+      if (spawnedChild.pid) {
+        writePidFile(spawnedChild.pid);
+        console.log(`[LabSupervisor] Spawned lab process (pid: ${spawnedChild.pid})`);
       }
 
-      const readyTimeout = setTimeout(() => {
-        console.log(`[LabSupervisor] Child did not send ready within ${READY_TIMEOUT}ms, falling back to health poll`);
-        child?.unref();
-        try { child?.disconnect?.(); } catch {}
-        rejectReady(new Error("Lab child process IPC ready timeout"));
+      const readyTimeout = setTimeout(async () => {
+        console.log(`[LabSupervisor] Child did not send IPC ready within ${READY_TIMEOUT}ms, falling back to bounded health poll`);
+        spawnedChild.unref();
+        try { spawnedChild.disconnect?.(); } catch {}
+
+        const HEALTH_POLL_TIMEOUT = 180_000;
+        const HEALTH_POLL_INTERVAL = 5_000;
+        const deadline = Date.now() + HEALTH_POLL_TIMEOUT;
+        let resolved = false;
+        const poll = async () => {
+          while (Date.now() < deadline && !resolved) {
+            const healthy = await probeHealth(labPort);
+            if (healthy) {
+              isReady = true;
+              restartCount = 0;
+              resolved = true;
+              spawnInFlight = false;
+              console.log(`[LabSupervisor] Lab process became healthy via poll on port ${labPort}`);
+              resolveReady();
+              return;
+            }
+            await new Promise(r => setTimeout(r, HEALTH_POLL_INTERVAL));
+          }
+          if (!resolved) {
+            spawnInFlight = false;
+            rejectReady(new Error("Lab child process health poll timeout"));
+          }
+        };
+        poll();
       }, READY_TIMEOUT);
 
-      child.on("message", (msg: any) => {
+      spawnedChild.on("message", (msg: any) => {
         if (msg?.type === "ready") {
           clearTimeout(readyTimeout);
           labPort = msg.port || labPort;
           isReady = true;
           restartCount = 0;
-          console.log(`[LabSupervisor] Lab process ready on port ${labPort} (pid: ${child?.pid})`);
-          child?.unref();
-          try { child?.disconnect?.(); } catch {}
+          spawnInFlight = false;
+          console.log(`[LabSupervisor] Lab process ready on port ${labPort} (pid: ${spawnedChild.pid})`);
+          spawnedChild.unref();
+          try { spawnedChild.disconnect?.(); } catch {}
           resolveReady();
         }
       });
 
-      child.on("exit", (code, signal) => {
+      spawnedChild.on("exit", (code, signal) => {
         isReady = false;
         clearTimeout(readyTimeout);
         console.log(`[LabSupervisor] Lab process exited (code: ${code}, signal: ${signal})`);
         removePidFile();
+
+        const isCurrentChild = child === spawnedChild;
         child = null;
         ownsChild = false;
+        spawnInFlight = false;
 
-        if (!shuttingDown) {
+        if (!shuttingDown && isCurrentChild) {
           const delay = getRestartDelay();
           restartCount++;
           console.log(`[LabSupervisor] Restarting in ${Math.round(delay)}ms (attempt ${restartCount})`);
           setTimeout(() => {
-            if (!shuttingDown) {
+            if (!shuttingDown && !spawnInFlight) {
               spawnAndWaitForReady().catch((err) => {
                 console.error(`[LabSupervisor] Failed to restart lab: ${err.message}`);
               });
@@ -188,9 +224,10 @@ export function createLabSupervisor(): LabSupervisor {
         }
       });
 
-      child.on("error", (err) => {
+      spawnedChild.on("error", (err) => {
         console.error(`[LabSupervisor] Child process error: ${err.message}`);
         clearTimeout(readyTimeout);
+        spawnInFlight = false;
         rejectReady(err);
       });
     });
