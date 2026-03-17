@@ -21,7 +21,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair,
+  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair, ListOrdered, GripVertical,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -645,6 +645,7 @@ export default function QuantumLab() {
                   onJobStarted={handleJobStarted}
                   isRunning={!!activeJobId}
                 />
+                <QueuePanel />
               </div>
             </div>
           </div>
@@ -1199,7 +1200,13 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
         useInsights: useInsights && hasInsights ? true : undefined,
         deepSearch: deepSearch && mode !== "smoke" ? true : undefined,
       });
-      const { jobId, runId } = await safeResponseJson(res);
+      const data = await safeResponseJson(res);
+      if (data.queued) {
+        toast({ title: "Run queued", description: `Position #${data.queueOrder} in queue` });
+        queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+        return;
+      }
+      const { jobId, runId } = data;
       onJobStarted(jobId, runId);
     } catch (err: any) {
       const isConcurrencyError = err.message?.includes("concurrent") || err.message?.includes("Maximum") || err.message?.includes("already running");
@@ -1532,17 +1539,177 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
             );
           })()}
         </div>
-        <Button className="w-full bg-white/5 hover:bg-white/10 text-white/70 border border-white/10" onClick={() => handleRun("smoke")} disabled={isSubmitting || isRunning || !parsedResult} data-testid="button-smoke-test">
+        <Button className="w-full bg-white/5 hover:bg-white/10 text-white/70 border border-white/10" onClick={() => handleRun("smoke")} disabled={isSubmitting || !parsedResult} data-testid="button-smoke-test">
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
-          Smoke Test
+          {isRunning ? "Queue Smoke Test" : "Smoke Test"}
         </Button>
-        <Button className="w-full bg-violet-600 hover:bg-violet-500 text-white" onClick={() => handleRun("sweep")} disabled={isSubmitting || isRunning || !parsedResult} data-testid="button-full-sweep">
+        <Button className="w-full bg-violet-600 hover:bg-violet-500 text-white" onClick={() => handleRun("sweep")} disabled={isSubmitting || !parsedResult} data-testid="button-full-sweep">
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Rocket className="w-4 h-4 mr-2" />}
-          Full Sweep
+          {isRunning ? "Queue Full Sweep" : "Full Sweep"}
         </Button>
-        <p className="text-[10px] text-white/30 text-center">{isRunning ? "Optimization in progress — see monitor above" : "Smoke test uses first ticker/timeframe only"}</p>
+        <p className="text-[10px] text-white/30 text-center">{isRunning ? "Run will be queued and start automatically when the current one finishes" : "Smoke test uses first ticker/timeframe only"}</p>
       </Card>
     </>
+  );
+}
+
+function QueuePanel() {
+  const { toast } = useToast();
+  const [isOpen, setIsOpen] = useState(true);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const { data: queueData, isLoading } = useQuery<{ items: any[]; activeRun: any | null }>({
+    queryKey: ["/api/lab/queue"],
+    queryFn: async () => {
+      const res = await fetch("/api/lab/queue", { credentials: "include" });
+      if (!res.ok) return { items: [], activeRun: null };
+      const data = await res.json();
+      if (Array.isArray(data)) return { items: data, activeRun: null };
+      return data;
+    },
+    refetchInterval: 5000,
+  });
+  const queueItems = queueData?.items ?? [];
+  const activeRun = queueData?.activeRun ?? null;
+
+  const cancelMutation = useMutation({
+    mutationFn: async (id: number) => {
+      await apiRequest("DELETE", `/api/lab/queue/${id}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+      toast({ title: "Queued run removed" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to remove", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const reorderMutation = useMutation({
+    mutationFn: async (orderedIds: number[]) => {
+      await apiRequest("POST", "/api/lab/queue/reorder", { orderedIds });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+    },
+  });
+
+  const moveItem = (index: number, direction: "up" | "down") => {
+    const newItems = [...queueItems];
+    const targetIndex = direction === "up" ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= newItems.length) return;
+    [newItems[index], newItems[targetIndex]] = [newItems[targetIndex], newItems[index]];
+    reorderMutation.mutate(newItems.map((item: any) => item.id));
+  };
+
+  const handleDragStart = (e: React.DragEvent, index: number) => {
+    setDragIndex(index);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", String(index));
+  };
+
+  const handleDragOver = (e: React.DragEvent, index: number) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOverIndex(index);
+  };
+
+  const handleDragEnd = () => {
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  const handleDrop = (e: React.DragEvent, targetIndex: number) => {
+    e.preventDefault();
+    const sourceIndex = dragIndex;
+    setDragIndex(null);
+    setDragOverIndex(null);
+    if (sourceIndex === null || sourceIndex === targetIndex) return;
+    const newItems = [...queueItems];
+    const [moved] = newItems.splice(sourceIndex, 1);
+    newItems.splice(targetIndex, 0, moved);
+    reorderMutation.mutate(newItems.map((item: any) => item.id));
+  };
+
+  if (isLoading || (queueItems.length === 0 && !activeRun)) return null;
+
+  return (
+    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+      <Card className="bg-amber-500/5 border border-amber-500/20 p-0 overflow-hidden" data-testid="queue-panel">
+        <CollapsibleTrigger asChild>
+          <button className="w-full px-4 py-3 border-b border-amber-500/10 hover:bg-white/5 transition-colors cursor-pointer">
+            <div className="flex items-center gap-2">
+              <ListOrdered className="w-4 h-4 text-amber-400" />
+              <span className="text-sm font-medium text-white">Run Queue</span>
+              <Badge variant="outline" className="text-[10px] border-amber-500/30 text-amber-400 ml-auto" data-testid="badge-queue-count">
+                {activeRun ? 1 : 0} active · {queueItems.length} queued
+              </Badge>
+              <ChevronDown className={`w-3.5 h-3.5 text-white/40 transition-transform ${isOpen ? "rotate-180" : ""}`} />
+            </div>
+          </button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <ScrollArea className="max-h-[240px]">
+            <div className="p-2 space-y-1.5">
+              {activeRun && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-violet-500/10 border border-violet-500/20" data-testid={`queue-active-run-${activeRun.id}`}>
+                  {activeRun.status === "running" ? (
+                    <Loader2 className="w-3.5 h-3.5 text-violet-400 animate-spin flex-shrink-0" />
+                  ) : (
+                    <PauseCircle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+                  )}
+                  <Badge variant="outline" className="text-[9px] px-1.5 flex-shrink-0 border-violet-500/40 text-violet-300">
+                    {activeRun.status === "running" ? "Running" : "Paused"}
+                  </Badge>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[11px] text-white/70 truncate">
+                      {activeRun.tickers?.map((t: string) => t.replace("-PERP", "").replace("/USDT", "")).join(", ")} · {activeRun.timeframes?.join(", ")}
+                    </p>
+                  </div>
+                </div>
+              )}
+              {queueItems.map((item: any, index: number) => (
+                <div
+                  key={item.id}
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, index)}
+                  onDragOver={(e) => handleDragOver(e, index)}
+                  onDragEnd={handleDragEnd}
+                  onDrop={(e) => handleDrop(e, index)}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-md bg-white/5 border group cursor-grab active:cursor-grabbing transition-all ${
+                    dragOverIndex === index && dragIndex !== index ? "border-amber-400/50 bg-amber-500/10" : "border-white/5"
+                  } ${dragIndex === index ? "opacity-40" : "opacity-100"}`}
+                  data-testid={`queue-item-${item.id}`}
+                >
+                  <GripVertical className="w-3 h-3 text-white/20 flex-shrink-0 hidden sm:block" />
+                  <span className="text-[10px] text-white/30 font-mono w-4 text-center flex-shrink-0">{index + 1}</span>
+                  <Badge variant="outline" className={`text-[9px] px-1.5 flex-shrink-0 ${item.type === "refine" ? "border-sky-500/30 text-sky-400" : "border-violet-500/30 text-violet-400"}`}>
+                    {item.type === "refine" ? "Refine" : "New Run"}
+                  </Badge>
+                  <div className="flex-1 min-w-0">
+                    {item.strategyName && <p className="text-[10px] text-white/40 truncate">{item.strategyName}</p>}
+                    <p className="text-[11px] text-white/70 truncate">
+                      {item.tickers?.map((t: string) => t.replace("-PERP", "").replace("/USDT", "")).join(", ")} · {item.timeframes?.join(", ")}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-0.5 sm:hidden">
+                    <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); moveItem(index, "up"); }} disabled={index === 0 || reorderMutation.isPending} data-testid={`queue-move-up-${item.id}`}>
+                      <ChevronUp className="w-3 h-3 text-white/50" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); moveItem(index, "down"); }} disabled={index === queueItems.length - 1 || reorderMutation.isPending} data-testid={`queue-move-down-${item.id}`}>
+                      <ChevronDown className="w-3 h-3 text-white/50" />
+                    </Button>
+                  </div>
+                  <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); cancelMutation.mutate(item.id); }} disabled={cancelMutation.isPending} data-testid={`queue-remove-${item.id}`}>
+                    <X className="w-3 h-3 text-red-400/70" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        </CollapsibleContent>
+      </Card>
+    </Collapsible>
   );
 }
 
@@ -2004,9 +2171,14 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
         timeframe,
         reportData,
       });
-      const { jobId, runId: newRunId } = await safeResponseJson(res);
+      const data = await safeResponseJson(res);
+      if (data.queued) {
+        toast({ title: "Refine queued", description: `${ticker} ${timeframe} queued at position #${data.queueOrder}` });
+        queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+        return;
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
-      onRefine?.(jobId, newRunId);
+      onRefine?.(data.jobId, data.runId);
     } catch (err: any) {
       const isConcurrencyError = err.message?.includes("concurrent") || err.message?.includes("already running") || err.message?.includes("Maximum");
       toast({
@@ -2870,9 +3042,14 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
       const res = await apiRequest("POST", `/api/lab/runs/${cfg.runId}/refine`, {
         ticker, timeframe, reportData,
       });
-      const { jobId, runId: newRunId } = await safeResponseJson(res);
+      const data = await safeResponseJson(res);
+      if (data.queued) {
+        toast({ title: "Refine queued", description: `${ticker} ${timeframe} queued at position #${data.queueOrder}` });
+        queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+        return;
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
-      onRefine?.(jobId, newRunId);
+      onRefine?.(data.jobId, data.runId);
     } catch (err: any) {
       toast({
         title: "Refine failed",

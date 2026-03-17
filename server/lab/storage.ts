@@ -7,7 +7,7 @@ import {
   type LabCheckpoint, type LabInsightsReport,
 } from "@shared/schema";
 import { db } from "../db";
-import { eq, desc, inArray, isNull, and, or } from "drizzle-orm";
+import { eq, desc, inArray, isNull, and, or, asc, sql } from "drizzle-orm";
 import { randomUUID } from "crypto";
 
 const MAX_CONCURRENT_JOBS = 1;
@@ -66,6 +66,14 @@ export interface ILabStorage {
   getInsightsReports(strategyId: number): Promise<LabInsightsReport[]>;
 
   getTopResultsForStrategy(strategyId: number, limit?: number): Promise<any[]>;
+
+  getQueuedRuns(walletAddress: string): Promise<LabOptimizationRun[]>;
+  getNextQueueOrder(walletAddress: string): Promise<number>;
+  reorderQueue(walletAddress: string, orderedIds: number[]): Promise<void>;
+  cancelQueuedRun(id: number, walletAddress: string): Promise<boolean>;
+  claimNextQueuedRun(walletAddress?: string): Promise<LabOptimizationRun | null>;
+  hasActiveRun(walletAddress?: string): Promise<boolean>;
+  hasActiveOrPausedRun(): Promise<boolean>;
 }
 
 export class LabDatabaseStorage implements ILabStorage {
@@ -200,9 +208,12 @@ export class LabDatabaseStorage implements ILabStorage {
     return run;
   }
 
-  async getRuns(strategyId?: number): Promise<LabOptimizationRun[]> {
-    if (strategyId) {
-      return db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.strategyId, strategyId)).orderBy(desc(labOptimizationRuns.createdAt));
+  async getRuns(strategyId?: number, userId?: string): Promise<LabOptimizationRun[]> {
+    const conditions = [];
+    if (strategyId) conditions.push(eq(labOptimizationRuns.strategyId, strategyId));
+    if (userId) conditions.push(eq(labOptimizationRuns.userId, userId));
+    if (conditions.length > 0) {
+      return db.select().from(labOptimizationRuns).where(and(...conditions)).orderBy(desc(labOptimizationRuns.createdAt));
     }
     return db.select().from(labOptimizationRuns).orderBy(desc(labOptimizationRuns.createdAt));
   }
@@ -670,6 +681,128 @@ export class LabDatabaseStorage implements ILabStorage {
       levProfit: r._levProfit,
       leverage: r._lev,
     }));
+  }
+  async getQueuedRuns(walletAddress: string): Promise<LabOptimizationRun[]> {
+    return db.select().from(labOptimizationRuns)
+      .where(and(eq(labOptimizationRuns.status, "queued"), eq(labOptimizationRuns.userId, walletAddress))!)
+      .orderBy(asc(labOptimizationRuns.queueOrder));
+  }
+
+  async getNextQueueOrder(_walletAddress?: string): Promise<number> {
+    const result = await db.select({ maxOrder: sql<number>`COALESCE(MAX(${labOptimizationRuns.queueOrder}), 0)` })
+      .from(labOptimizationRuns)
+      .where(eq(labOptimizationRuns.status, "queued"));
+    return (result[0]?.maxOrder ?? 0) + 1;
+  }
+
+  async reorderQueue(walletAddress: string, orderedIds: number[]): Promise<void> {
+    const queued = await this.getQueuedRuns(walletAddress);
+    const queuedIdSet = new Set(queued.map(r => r.id));
+    if (orderedIds.length !== queuedIdSet.size) {
+      throw new Error(`Must provide all ${queuedIdSet.size} queued run IDs`);
+    }
+    for (const id of orderedIds) {
+      if (!queuedIdSet.has(id)) {
+        throw new Error(`Run ${id} is not in the queue or does not belong to this user`);
+      }
+    }
+    const existingOrders = queued.map(r => r.queueOrder ?? 0).sort((a, b) => a - b);
+    await db.transaction(async (tx) => {
+      for (let i = 0; i < orderedIds.length; i++) {
+        await tx.update(labOptimizationRuns)
+          .set({ queueOrder: existingOrders[i] })
+          .where(eq(labOptimizationRuns.id, orderedIds[i]));
+      }
+    });
+  }
+
+  async cancelQueuedRun(id: number, walletAddress: string): Promise<boolean> {
+    const run = await this.getRun(id);
+    if (!run) return false;
+    if (run.status !== "queued") return false;
+    if (run.userId !== walletAddress) return false;
+    await db.update(labOptimizationRuns).set({
+      status: "failed",
+      completedAt: new Date(),
+      queueOrder: null,
+      configSnapshot: null,
+    }).where(eq(labOptimizationRuns.id, id));
+    return true;
+  }
+
+  async claimNextQueuedRun(walletAddress?: string): Promise<LabOptimizationRun | null> {
+    const walletFilter = walletAddress
+      ? sql`AND ${labOptimizationRuns.userId} = ${walletAddress}`
+      : sql``;
+
+    const result = await db.execute(sql`
+      UPDATE ${labOptimizationRuns}
+      SET status = 'running', queue_order = NULL
+      WHERE id = (
+        SELECT q.id FROM ${labOptimizationRuns} q
+        WHERE q.status = 'queued' ${walletFilter}
+          AND NOT EXISTS (
+            SELECT 1 FROM ${labOptimizationRuns} blocker
+            WHERE blocker.status IN ('running', 'paused')
+          )
+        ORDER BY q.queue_order ASC NULLS LAST, q.id ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING *
+    `);
+    const rows = result.rows as any[];
+    if (!rows || rows.length === 0) return null;
+    const row = rows[0];
+    return {
+      id: row.id,
+      userId: row.user_id,
+      strategyId: row.strategy_id,
+      tickers: row.tickers,
+      timeframes: row.timeframes,
+      startDate: row.start_date,
+      endDate: row.end_date,
+      randomSamples: row.random_samples,
+      topK: row.top_k,
+      refinementsPerSeed: row.refinements_per_seed,
+      minTrades: row.min_trades,
+      maxDrawdownCap: row.max_drawdown_cap,
+      mode: row.mode,
+      status: row.status,
+      totalConfigsTested: row.total_configs_tested,
+      checkpoint: row.checkpoint,
+      queueOrder: row.queue_order,
+      configSnapshot: row.config_snapshot,
+      createdAt: row.created_at,
+      completedAt: row.completed_at,
+    } as LabOptimizationRun;
+  }
+
+  async hasActiveRun(walletAddress?: string): Promise<boolean> {
+    const whereClause = walletAddress
+      ? and(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.userId, walletAddress))!
+      : eq(labOptimizationRuns.status, "running");
+    const rows = await db.select({ id: labOptimizationRuns.id })
+      .from(labOptimizationRuns)
+      .where(whereClause)
+      .limit(1);
+    if (rows.length > 0) return true;
+    const activeJobs = Array.from(this.jobs.values()).filter(
+      (j) => j.progress.status !== "complete" && j.progress.status !== "error"
+    );
+    return activeJobs.length > 0;
+  }
+
+  async hasActiveOrPausedRun(): Promise<boolean> {
+    const rows = await db.select({ id: labOptimizationRuns.id })
+      .from(labOptimizationRuns)
+      .where(or(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.status, "paused"))!)
+      .limit(1);
+    if (rows.length > 0) return true;
+    const activeJobs = Array.from(this.jobs.values()).filter(
+      (j) => j.progress.status !== "complete" && j.progress.status !== "error"
+    );
+    return activeJobs.length > 0;
   }
 }
 

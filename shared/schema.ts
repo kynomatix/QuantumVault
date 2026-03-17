@@ -710,6 +710,8 @@ export const labOptimizationRuns = pgTable("lab_optimization_runs", {
   status: text("status").notNull().default("running"),
   totalConfigsTested: integer("total_configs_tested"),
   checkpoint: jsonb("checkpoint"),
+  queueOrder: integer("queue_order"),
+  configSnapshot: jsonb("config_snapshot"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   completedAt: timestamp("completed_at"),
 });
