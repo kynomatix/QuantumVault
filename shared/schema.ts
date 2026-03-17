@@ -824,6 +824,7 @@ export interface LabOptimizationConfig {
   strategyId?: number;
   useInsights?: boolean;
   deepSearch?: boolean;
+  coordinateTune?: boolean;
 }
 
 export interface LabTradeRecord {
@@ -855,11 +856,12 @@ export interface LabCheckpoint {
   completedCombos: string[];
   configSnapshot: LabOptimizationConfig;
   currentCombo?: string;
-  currentStage?: "random" | "refine" | "deep";
+  currentStage?: "random" | "refine" | "deep" | "coordinate";
   currentIteration?: number;
   currentDeepRound?: number;
   partialResults?: LabBacktestResult[];
   refineSeeds?: Record<string, any>[];
+  coordinateCompleted?: string[];
 }
 
 export interface LabJobProgress {
@@ -1000,4 +1002,5 @@ export const labOptimizationConfigSchema = z.object({
   strategyId: z.number().optional(),
   useInsights: z.boolean().optional(),
   deepSearch: z.boolean().optional(),
+  coordinateTune: z.boolean().optional(),
 });

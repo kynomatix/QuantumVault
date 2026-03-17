@@ -18,6 +18,7 @@ interface WorkerInput {
     guidedInsights?: GuidedInsights;
     guidedInsightsPerCombo?: Record<string, GuidedInsights>;
     deepSearch?: boolean;
+    coordinateTune?: boolean;
   };
   candlesByCombo: Record<string, OHLCV[]>;
   resumeCheckpoint?: LabCheckpoint;
@@ -25,9 +26,9 @@ interface WorkerInput {
 
 type WorkerMessage =
   | { type: "progress"; data: LabJobProgress }
-  | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep"; iteration: number; deepRound?: number; results: LabBacktestResult[]; refineSeeds?: Record<string, any>[] }
+  | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep" | "coordinate"; iteration: number; deepRound?: number; results: LabBacktestResult[]; refineSeeds?: Record<string, any>[]; coordinateCompleted?: string[] }
   | { type: "combo-complete"; combo: string; results: LabBacktestResult[] }
-  | { type: "done"; results: LabBacktestResult[] }
+  | { type: "done"; results: LabBacktestResult[]; totalConfigsTested?: number }
   | { type: "error"; message: string };
 
 function send(msg: WorkerMessage) {
@@ -459,6 +460,285 @@ function estimateEta(startTime: number, current: number, total: number): number 
   return Math.round((total - current) / rate);
 }
 
+interface CoordinateTuneContext {
+  jobId: string;
+  candles: OHLCV[];
+  ticker: string;
+  timeframe: string;
+  inputs: LabPineInput[];
+  config: WorkerInput["config"];
+  engineConfig: { initialCapital: number; commission: number; positionSize: number; processOrdersOnClose?: boolean };
+  seedResult: LabBacktestResult;
+  seedScore: number;
+  testedSignatures: Set<string>;
+  startTime: number;
+  comboKey: string;
+  tickerProgress: Record<string, { status: "pending" | "running" | "complete"; best?: number }>;
+  completedParams: string[];
+  resumePartialResults?: LabBacktestResult[];
+}
+
+function generateParamGrid(input: LabPineInput, currentVal: any): any[] {
+  switch (input.type) {
+    case "int": {
+      const min = input.min ?? 1;
+      const max = input.max ?? 100;
+      const step = input.step ?? 1;
+      const totalSteps = Math.floor((max - min) / step);
+      const values = new Set<number>();
+      values.add(currentVal);
+
+      if (totalSteps <= 30) {
+        for (let v = min; v <= max; v += step) {
+          values.add(v);
+        }
+      } else {
+        const range = max - min;
+        const nearRadius = range * 0.15;
+        const nearMin = Math.max(min, currentVal - nearRadius);
+        const nearMax = Math.min(max, currentVal + nearRadius);
+        const nearStep = step;
+        for (let v = nearMin; v <= nearMax; v += nearStep) {
+          const snapped = Math.max(min, Math.min(max, Math.round((v - min) / step) * step + min));
+          values.add(snapped);
+        }
+
+        const coarseStep = Math.max(step, Math.ceil((range / 15) / step) * step);
+        for (let v = min; v <= max; v += coarseStep) {
+          values.add(v);
+        }
+        values.add(max);
+      }
+
+      return Array.from(values).sort((a, b) => a - b);
+    }
+    case "float": {
+      const min = input.min ?? 0.1;
+      const max = input.max ?? 10;
+      const step = input.step ?? 0.1;
+      const totalSteps = Math.floor((max - min) / step);
+      const values = new Set<number>();
+      values.add(Math.round(currentVal * 10000) / 10000);
+
+      if (totalSteps <= 30) {
+        for (let v = min; v <= max + step * 0.01; v += step) {
+          values.add(Math.round(Math.min(max, v) * 10000) / 10000);
+        }
+      } else {
+        const range = max - min;
+        const nearRadius = range * 0.15;
+        const nearMin = Math.max(min, currentVal - nearRadius);
+        const nearMax = Math.min(max, currentVal + nearRadius);
+        for (let v = nearMin; v <= nearMax + step * 0.01; v += step) {
+          const snapped = Math.round(Math.min(max, Math.max(min, v)) * 10000) / 10000;
+          values.add(snapped);
+        }
+
+        const coarseStep = Math.max(step, Math.ceil((range / 15) / step) * step);
+        for (let v = min; v <= max + coarseStep * 0.01; v += coarseStep) {
+          values.add(Math.round(Math.min(max, v) * 10000) / 10000);
+        }
+        values.add(Math.round(max * 10000) / 10000);
+      }
+
+      return Array.from(values).sort((a, b) => a - b);
+    }
+    case "bool":
+      return [true, false];
+    case "string":
+      if (input.options && input.options.length > 0) {
+        return [...input.options];
+      }
+      return [currentVal];
+    default:
+      return [currentVal];
+  }
+}
+
+function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResult[]; totalTests: number } {
+  const {
+    jobId, candles, ticker, timeframe, inputs, config, engineConfig,
+    seedResult, testedSignatures, startTime, comboKey, tickerProgress, completedParams,
+  } = ctx;
+  let bestScore = ctx.seedScore;
+  let bestResult = seedResult;
+  const allResults: LabBacktestResult[] = [seedResult];
+  if (ctx.resumePartialResults && ctx.resumePartialResults.length > 0) {
+    for (const pr of ctx.resumePartialResults) {
+      const sig = canonicalizeParams(pr.params, inputs);
+      if (!testedSignatures.has(sig)) {
+        testedSignatures.add(sig);
+      }
+      allResults.push(pr);
+      const prScore = scoreResult(pr);
+      if (prScore > bestScore) {
+        bestScore = prScore;
+        bestResult = pr;
+      }
+    }
+  }
+  const completedParamSet = new Set(completedParams);
+
+  const optimizable = inputs.filter(i => i.optimizable);
+  const paramImpact: { name: string; improvement: number }[] = [];
+
+  const totalGridSizes: number[] = optimizable
+    .filter(i => !completedParamSet.has(i.name))
+    .map(i => generateParamGrid(i, seedResult.params[i.name]).length);
+  const totalSingleTests = totalGridSizes.reduce((a, b) => a + b, 0);
+
+  const pairGridEstimate = Math.min(3, optimizable.length) * 15 * 15;
+  const grandTotal = totalSingleTests + pairGridEstimate;
+  let currentTest = 0;
+
+  for (const input of optimizable) {
+    if (aborted) break;
+    if (completedParamSet.has(input.name)) {
+      const grid = generateParamGrid(input, seedResult.params[input.name]);
+      currentTest += grid.length;
+      continue;
+    }
+
+    const grid = generateParamGrid(input, bestResult.params[input.name]);
+    let paramBestScore = bestScore;
+    let paramBestResult = bestResult;
+    const paramStartScore = bestScore;
+
+    for (let gi = 0; gi < grid.length; gi++) {
+      if (aborted) break;
+      const val = grid[gi];
+      const testParams = { ...bestResult.params, [input.name]: val };
+      const sig = canonicalizeParams(testParams, inputs);
+      currentTest++;
+
+      if (testedSignatures.has(sig)) continue;
+      testedSignatures.add(sig);
+
+      const result = runBacktest(candles, testParams, ticker, timeframe, engineConfig);
+      if (!meetsFilters(result, config)) continue;
+
+      const score = scoreResult(result);
+      allResults.push(result);
+      if (score > paramBestScore) {
+        paramBestScore = score;
+        paramBestResult = result;
+      }
+    }
+
+    const improvement = paramBestScore - paramStartScore;
+    paramImpact.push({ name: input.name, improvement });
+
+    if (paramBestScore > bestScore) {
+      bestScore = paramBestScore;
+      bestResult = paramBestResult;
+    }
+
+    completedParamSet.add(input.name);
+
+    const best = allResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0];
+    send({ type: "progress", data: {
+      jobId, status: "refinement",
+      stage: `Coordinate Tune — ${input.name} — ${ticker.split("/")[0]} ${timeframe} — best Δ${improvement > 0 ? "+" : ""}${improvement.toFixed(1)}`,
+      current: Math.min(currentTest, grandTotal), total: grandTotal,
+      percent: Math.min(99, Math.round((currentTest / grandTotal) * 100)),
+      elapsed: Date.now() - startTime,
+      bestSoFar: best ? {
+        netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
+        maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
+      } : undefined,
+      tickerProgress,
+      eta: estimateEta(startTime, currentTest, grandTotal),
+    }});
+
+    const topPartial = [...allResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+    send({ type: "partial-checkpoint", combo: comboKey, stage: "coordinate", iteration: currentTest, results: topPartial, coordinateCompleted: Array.from(completedParamSet) });
+  }
+
+  if (!aborted) {
+    paramImpact.sort((a, b) => b.improvement - a.improvement);
+    const topPairParams = paramImpact
+      .filter(p => {
+        const inp = inputs.find(i => i.name === p.name);
+        return inp && inp.optimizable && (inp.type === "int" || inp.type === "float");
+      })
+      .slice(0, 3);
+
+    if (topPairParams.length >= 2) {
+      for (let i = 0; i < topPairParams.length - 1 && !aborted; i++) {
+        for (let j = i + 1; j < topPairParams.length && !aborted; j++) {
+          const inputA = inputs.find(inp => inp.name === topPairParams[i].name)!;
+          const inputB = inputs.find(inp => inp.name === topPairParams[j].name)!;
+
+          const gridA = generateParamGrid(inputA, bestResult.params[inputA.name]);
+          const gridB = generateParamGrid(inputB, bestResult.params[inputB.name]);
+
+          const limitA = gridA.length > 15 ? evenSample(gridA, 15, bestResult.params[inputA.name]) : gridA;
+          const limitB = gridB.length > 15 ? evenSample(gridB, 15, bestResult.params[inputB.name]) : gridB;
+
+          for (const valA of limitA) {
+            if (aborted) break;
+            for (const valB of limitB) {
+              if (aborted) break;
+              const testParams = { ...bestResult.params, [inputA.name]: valA, [inputB.name]: valB };
+              const sig = canonicalizeParams(testParams, inputs);
+              currentTest++;
+
+              if (testedSignatures.has(sig)) continue;
+              testedSignatures.add(sig);
+
+              const result = runBacktest(candles, testParams, ticker, timeframe, engineConfig);
+              if (!meetsFilters(result, config)) continue;
+
+              const score = scoreResult(result);
+              allResults.push(result);
+              if (score > bestScore) {
+                bestScore = score;
+                bestResult = result;
+              }
+            }
+          }
+
+          const best = allResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0];
+          send({ type: "progress", data: {
+            jobId, status: "refinement",
+            stage: `Pair Tune — ${inputA.name} × ${inputB.name} — ${ticker.split("/")[0]} ${timeframe}`,
+            current: Math.min(currentTest, grandTotal), total: grandTotal,
+            percent: Math.min(99, Math.round((currentTest / grandTotal) * 100)),
+            elapsed: Date.now() - startTime,
+            bestSoFar: best ? {
+              netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
+              maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
+            } : undefined,
+            tickerProgress,
+            eta: estimateEta(startTime, currentTest, grandTotal),
+          }});
+
+          const topPartial = [...allResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+          send({ type: "partial-checkpoint", combo: comboKey, stage: "coordinate", iteration: currentTest, results: topPartial, coordinateCompleted: Array.from(completedParamSet) });
+        }
+      }
+    }
+  }
+
+  return { results: allResults, totalTests: currentTest };
+}
+
+function evenSample<T>(arr: T[], count: number, preferVal?: T): T[] {
+  if (arr.length <= count) return arr;
+  const result: T[] = [];
+  const step = (arr.length - 1) / (count - 1);
+  for (let i = 0; i < count; i++) {
+    result.push(arr[Math.round(i * step)]);
+  }
+  if (preferVal !== undefined) {
+    const idx = arr.indexOf(preferVal);
+    if (idx >= 0 && !result.includes(preferVal)) {
+      result[Math.floor(count / 2)] = preferVal;
+    }
+  }
+  return result;
+}
+
 let aborted = false;
 
 parentPort?.on("message", (msg: any) => {
@@ -471,6 +751,7 @@ async function run() {
   const { jobId, config, candlesByCombo, resumeCheckpoint } = workerData as WorkerInput;
   const startTime = Date.now();
   const allResults: LabBacktestResult[] = [];
+  let coordinateTotalTests = 0;
   const inputs = config.parsedInputs;
 
   const combos: { ticker: string; timeframe: string }[] = [];
@@ -544,6 +825,50 @@ async function run() {
       defaultParams[input.name] = input.default;
     }
     const baseline = runBacktest(candles, defaultParams, combo.ticker, combo.timeframe, engineConfig);
+
+    if (config.coordinateTune) {
+      const isResumingCoordinate = resumeCombo === key && resumeStage === "coordinate";
+      const resumeCoordinateCompleted = isResumingCoordinate ? (resumeCheckpoint?.coordinateCompleted ?? []) : [];
+
+      let seedResult: LabBacktestResult;
+      if (isResumingCoordinate && resumePartialResults.length > 0) {
+        seedResult = [...resumePartialResults].sort((a, b) => scoreResult(b) - scoreResult(a))[0];
+      } else {
+        const comboInsights = config.guidedInsightsPerCombo?.[key] ?? config.guidedInsights;
+        if (comboInsights?.topConfigs && comboInsights.topConfigs.length > 0) {
+          const bestConfig = comboInsights.topConfigs.sort((a, b) => b.score - a.score)[0];
+          seedResult = runBacktest(candles, bestConfig.params, combo.ticker, combo.timeframe, engineConfig);
+        } else {
+          seedResult = baseline;
+        }
+      }
+
+      const testedSignatures = new Set<string>();
+      testedSignatures.add(canonicalizeParams(defaultParams, inputs));
+      testedSignatures.add(canonicalizeParams(seedResult.params, inputs));
+      if (isResumingCoordinate && resumePartialResults.length > 0) {
+        for (const pr of resumePartialResults) {
+          testedSignatures.add(canonicalizeParams(pr.params, inputs));
+        }
+      }
+
+      const tuneResult = coordinateTune({
+        jobId, candles, ticker: combo.ticker, timeframe: combo.timeframe,
+        inputs, config, engineConfig,
+        seedResult, seedScore: scoreResult(seedResult),
+        testedSignatures, startTime, comboKey: key,
+        tickerProgress, completedParams: resumeCoordinateCompleted,
+        resumePartialResults: isResumingCoordinate ? resumePartialResults : undefined,
+      });
+
+      coordinateTotalTests += tuneResult.totalTests;
+      const topForCombo = tuneResult.results.sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+      allResults.push(...topForCombo);
+      tickerProgress[key] = { status: "complete", best: topForCombo[0]?.netProfitPercent ?? 0 };
+      completedCombos.add(key);
+      send({ type: "combo-complete", combo: key, results: topForCombo });
+      continue;
+    }
 
     const isResumingThisCombo = resumeCombo === key;
     const skipRandomUntil = isResumingThisCombo && resumeStage === "random" ? resumeIteration : 0;
@@ -858,9 +1183,10 @@ async function run() {
 
   allResults.sort((a, b) => scoreResult(b) - scoreResult(a));
 
+  const finalTotal = config.coordinateTune ? coordinateTotalTests : grandTotal;
   send({ type: "progress", data: {
     jobId, status: "complete", stage: "Optimization complete",
-    current: grandTotal, total: grandTotal,
+    current: finalTotal, total: finalTotal,
     percent: 100, elapsed: Date.now() - startTime,
     bestSoFar: allResults[0] ? {
       netProfitPercent: allResults[0].netProfitPercent, winRatePercent: allResults[0].winRatePercent,
@@ -869,7 +1195,7 @@ async function run() {
     tickerProgress,
   }});
 
-  send({ type: "done", results: allResults });
+  send({ type: "done", results: allResults, totalConfigsTested: config.coordinateTune ? coordinateTotalTests : undefined });
 }
 
 run().catch((err: any) => {

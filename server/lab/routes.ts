@@ -449,6 +449,7 @@ export function registerLabRoutes(app: Express): void {
           guidedInsights,
           guidedInsightsPerCombo,
           deepSearch: config.deepSearch ?? false,
+          coordinateTune: config.coordinateTune ?? false,
         },
         candlesByCombo,
         resumeCheckpoint,
@@ -476,6 +477,7 @@ export function registerLabRoutes(app: Express): void {
                 currentIteration: msg.iteration,
                 currentDeepRound: msg.deepRound,
                 refineSeeds: msg.refineSeeds,
+                coordinateCompleted: msg.coordinateCompleted,
               };
               await labStorage.saveCheckpoint(runId, checkpoint);
             } catch (err: any) {
@@ -518,9 +520,15 @@ export function registerLabRoutes(app: Express): void {
               labStorage.setResults(job.id, results);
               if (runId) {
                 try {
-                  const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed;
-                  const combos = config.tickers.length * config.timeframes.length;
-                  await labStorage.completeRun(runId, totalSamples * combos);
+                  let totalConfigsTested: number;
+                  if (msg.totalConfigsTested !== undefined) {
+                    totalConfigsTested = msg.totalConfigsTested;
+                  } else {
+                    const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed;
+                    const combos = config.tickers.length * config.timeframes.length;
+                    totalConfigsTested = totalSamples * combos;
+                  }
+                  await labStorage.completeRun(runId, totalConfigsTested);
                   await labStorage.saveCheckpoint(runId, { completedCombos: [], configSnapshot: config });
                   console.log(`[QuantumLab] Run ${runId} completed`);
                 } catch (err: any) {
@@ -1052,7 +1060,7 @@ export function registerLabRoutes(app: Express): void {
         mode: "sweep",
         strategyId,
         useInsights: true,
-        deepSearch: true,
+        coordinateTune: true,
       };
 
       let processOrdersOnClose: boolean | undefined;
@@ -1127,7 +1135,7 @@ export function registerLabRoutes(app: Express): void {
 
       startOptimizationJob(config, job, newRun.id, undefined, undefined, guidedInsights, guidedInsightsPerCombo, processOrdersOnClose);
 
-      console.log(`[QuantumLab] Refine: started run ${newRun.id} for ${ticker} ${timeframe} (deep+insights, ${randomSamples} samples, ${topK} topK, ${refinementsPerSeed} refinements)`);
+      console.log(`[QuantumLab] Refine: started run ${newRun.id} for ${ticker} ${timeframe} (coordinate-tune, ${randomSamples} samples, ${topK} topK, ${refinementsPerSeed} refinements)`);
       res.json({ jobId: job.id, runId: newRun.id });
     } catch (err: any) {
       console.log(`[QuantumLab] Refine error: ${err.message}`);
