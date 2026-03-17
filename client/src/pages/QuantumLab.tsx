@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
@@ -417,6 +418,7 @@ export default function QuantumLab() {
   const { toast } = useToast();
   const { getMaxLeverage } = useLeverageLimits();
 
+  const [queueOpen, setQueueOpen] = useState(false);
   const [code, setCode] = useState(EXAMPLE_PINE);
   const [strategyName, setStrategyName] = useState("");
   const [strategyId, setStrategyId] = useState<number | null>(null);
@@ -645,7 +647,6 @@ export default function QuantumLab() {
                   onJobStarted={handleJobStarted}
                   isRunning={!!activeJobId}
                 />
-                <QueuePanel />
               </div>
             </div>
           </div>
@@ -714,6 +715,14 @@ export default function QuantumLab() {
                   </button>
                 );
               })}
+              <button
+                onClick={() => setQueueOpen(true)}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-white/50 hover:text-white hover:bg-white/5 relative"
+                data-testid="nav-queue"
+              >
+                <ListOrdered className="w-4 h-4" />
+                <span className="hidden sm:inline">Queue</span>
+              </button>
             </nav>
           </div>
         </div>
@@ -729,6 +738,8 @@ export default function QuantumLab() {
           {renderContent()}
         </motion.div>
       </div>
+
+      <QueueDrawer open={queueOpen} onOpenChange={setQueueOpen} />
     </div>
   );
 }
@@ -1553,9 +1564,8 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
   );
 }
 
-function QueuePanel() {
+function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const { toast } = useToast();
-  const [isOpen, setIsOpen] = useState(true);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const { data: queueData, isLoading } = useQuery<{ items: any[]; activeRun: any | null }>({
@@ -1567,7 +1577,7 @@ function QueuePanel() {
       if (Array.isArray(data)) return { items: data, activeRun: null };
       return data;
     },
-    refetchInterval: 5000,
+    refetchInterval: open ? 5000 : false,
   });
   const queueItems = queueData?.items ?? [];
   const activeRun = queueData?.activeRun ?? null;
@@ -1631,85 +1641,111 @@ function QueuePanel() {
     reorderMutation.mutate(newItems.map((item: any) => item.id));
   };
 
-  if (isLoading || (queueItems.length === 0 && !activeRun)) return null;
+  const totalCount = (activeRun ? 1 : 0) + queueItems.length;
 
   return (
-    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-      <Card className="bg-amber-500/5 border border-amber-500/20 p-0 overflow-hidden" data-testid="queue-panel">
-        <CollapsibleTrigger asChild>
-          <button className="w-full px-4 py-3 border-b border-amber-500/10 hover:bg-white/5 transition-colors cursor-pointer">
-            <div className="flex items-center gap-2">
-              <ListOrdered className="w-4 h-4 text-amber-400" />
-              <span className="text-sm font-medium text-white">Run Queue</span>
-              <Badge variant="outline" className="text-[10px] border-amber-500/30 text-amber-400 ml-auto" data-testid="badge-queue-count">
-                {activeRun ? 1 : 0} active · {queueItems.length} queued
-              </Badge>
-              <ChevronDown className={`w-3.5 h-3.5 text-white/40 transition-transform ${isOpen ? "rotate-180" : ""}`} />
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="w-full sm:max-w-[440px] overflow-y-auto bg-slate-950 border-white/10" data-testid="queue-panel">
+        <SheetHeader className="space-y-3 pb-4 border-b border-white/10">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-violet-500/10">
+              <ListOrdered className="w-5 h-5 text-violet-400" />
             </div>
-          </button>
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          <ScrollArea className="max-h-[240px]">
-            <div className="p-2 space-y-1.5">
-              {activeRun && (
-                <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-violet-500/10 border border-violet-500/20" data-testid={`queue-active-run-${activeRun.id}`}>
-                  {activeRun.status === "running" ? (
-                    <Loader2 className="w-3.5 h-3.5 text-violet-400 animate-spin flex-shrink-0" />
-                  ) : (
-                    <PauseCircle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
-                  )}
-                  <Badge variant="outline" className="text-[9px] px-1.5 flex-shrink-0 border-violet-500/40 text-violet-300">
-                    {activeRun.status === "running" ? "Running" : "Paused"}
-                  </Badge>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[11px] text-white/70 truncate">
-                      {activeRun.tickers?.map((t: string) => t.replace("-PERP", "").replace("/USDT", "")).join(", ")} · {activeRun.timeframes?.join(", ")}
-                    </p>
-                  </div>
-                </div>
-              )}
-              {queueItems.map((item: any, index: number) => (
-                <div
-                  key={item.id}
-                  draggable
-                  onDragStart={(e) => handleDragStart(e, index)}
-                  onDragOver={(e) => handleDragOver(e, index)}
-                  onDragEnd={handleDragEnd}
-                  onDrop={(e) => handleDrop(e, index)}
-                  className={`flex items-center gap-2 px-3 py-2 rounded-md bg-white/5 border group cursor-grab active:cursor-grabbing transition-all ${
-                    dragOverIndex === index && dragIndex !== index ? "border-amber-400/50 bg-amber-500/10" : "border-white/5"
-                  } ${dragIndex === index ? "opacity-40" : "opacity-100"}`}
-                  data-testid={`queue-item-${item.id}`}
-                >
-                  <GripVertical className="w-3 h-3 text-white/20 flex-shrink-0 hidden sm:block" />
-                  <span className="text-[10px] text-white/30 font-mono w-4 text-center flex-shrink-0">{index + 1}</span>
-                  <Badge variant="outline" className={`text-[9px] px-1.5 flex-shrink-0 ${item.type === "refine" ? "border-sky-500/30 text-sky-400" : "border-violet-500/30 text-violet-400"}`}>
-                    {item.type === "refine" ? "Refine" : "New Run"}
-                  </Badge>
-                  <div className="flex-1 min-w-0">
-                    {item.strategyName && <p className="text-[10px] text-white/40 truncate">{item.strategyName}</p>}
-                    <p className="text-[11px] text-white/70 truncate">
-                      {item.tickers?.map((t: string) => t.replace("-PERP", "").replace("/USDT", "")).join(", ")} · {item.timeframes?.join(", ")}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-0.5 sm:hidden">
-                    <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); moveItem(index, "up"); }} disabled={index === 0 || reorderMutation.isPending} data-testid={`queue-move-up-${item.id}`}>
-                      <ChevronUp className="w-3 h-3 text-white/50" />
-                    </Button>
-                    <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); moveItem(index, "down"); }} disabled={index === queueItems.length - 1 || reorderMutation.isPending} data-testid={`queue-move-down-${item.id}`}>
-                      <ChevronDown className="w-3 h-3 text-white/50" />
-                    </Button>
-                  </div>
-                  <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); cancelMutation.mutate(item.id); }} disabled={cancelMutation.isPending} data-testid={`queue-remove-${item.id}`}>
-                    <X className="w-3 h-3 text-red-400/70" />
-                  </Button>
-                </div>
-              ))}
+            <div>
+              <SheetTitle className="text-lg text-white">Run Queue</SheetTitle>
+              <p className="text-sm text-white/40" data-testid="badge-queue-count">
+                {totalCount === 0 ? "No runs queued" : `${activeRun ? 1 : 0} active · ${queueItems.length} queued`}
+              </p>
             </div>
-          </ScrollArea>
-        </CollapsibleContent>
-      </Card>
-    </Collapsible>
+          </div>
+        </SheetHeader>
+
+        <div className="py-4 space-y-4">
+          {activeRun && (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-white/40 uppercase tracking-wider">Active</p>
+              <div className="flex items-center gap-3 px-4 py-3 rounded-lg bg-violet-500/10 border border-violet-500/20" data-testid={`queue-active-run-${activeRun.id}`}>
+                {activeRun.status === "running" ? (
+                  <Loader2 className="w-4 h-4 text-violet-400 animate-spin flex-shrink-0" />
+                ) : (
+                  <PauseCircle className="w-4 h-4 text-indigo-400 flex-shrink-0" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-[10px] px-1.5 border-violet-500/40 text-violet-300">
+                      {activeRun.status === "running" ? "Running" : "Paused"}
+                    </Badge>
+                  </div>
+                  <p className="text-sm text-white/70 truncate mt-1">
+                    {activeRun.tickers?.map((t: string) => t.replace("-PERP", "").replace("/USDT", "")).join(", ")} · {activeRun.timeframes?.join(", ")}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {queueItems.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-white/40 uppercase tracking-wider">Queued</p>
+              <div className="space-y-2">
+                {queueItems.map((item: any, index: number) => (
+                  <div
+                    key={item.id}
+                    draggable
+                    onDragStart={(e) => handleDragStart(e, index)}
+                    onDragOver={(e) => handleDragOver(e, index)}
+                    onDragEnd={handleDragEnd}
+                    onDrop={(e) => handleDrop(e, index)}
+                    className={cn(
+                      "flex items-center gap-3 px-4 py-3 rounded-lg bg-white/[0.03] border group cursor-grab active:cursor-grabbing transition-all",
+                      dragOverIndex === index && dragIndex !== index ? "border-violet-400/50 bg-violet-500/10" : "border-white/5",
+                      dragIndex === index ? "opacity-40" : "opacity-100"
+                    )}
+                    data-testid={`queue-item-${item.id}`}
+                  >
+                    <GripVertical className="w-3.5 h-3.5 text-white/20 flex-shrink-0 hidden sm:block" />
+                    <span className="text-xs text-white/30 font-mono w-5 text-center flex-shrink-0">{index + 1}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <Badge variant="outline" className={cn(
+                          "text-[10px] px-1.5",
+                          item.type === "refine" ? "border-sky-500/30 text-sky-400" : "border-violet-500/30 text-violet-400"
+                        )}>
+                          {item.type === "refine" ? "Refine" : "New Run"}
+                        </Badge>
+                        {item.strategyName && <span className="text-[11px] text-white/40 truncate">{item.strategyName}</span>}
+                      </div>
+                      <p className="text-sm text-white/70 truncate">
+                        {item.tickers?.map((t: string) => t.replace("-PERP", "").replace("/USDT", "")).join(", ")} · {item.timeframes?.join(", ")}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1 sm:hidden">
+                      <Button variant="ghost" size="icon" className="h-6 w-6" onClick={(e) => { e.stopPropagation(); moveItem(index, "up"); }} disabled={index === 0 || reorderMutation.isPending} data-testid={`queue-move-up-${item.id}`}>
+                        <ChevronUp className="w-3 h-3 text-white/50" />
+                      </Button>
+                      <Button variant="ghost" size="icon" className="h-6 w-6" onClick={(e) => { e.stopPropagation(); moveItem(index, "down"); }} disabled={index === queueItems.length - 1 || reorderMutation.isPending} data-testid={`queue-move-down-${item.id}`}>
+                        <ChevronDown className="w-3 h-3 text-white/50" />
+                      </Button>
+                    </div>
+                    <Button variant="ghost" size="icon" className="h-6 w-6 hover:bg-red-500/10" onClick={(e) => { e.stopPropagation(); cancelMutation.mutate(item.id); }} disabled={cancelMutation.isPending} data-testid={`queue-remove-${item.id}`}>
+                      <X className="w-3.5 h-3.5 text-red-400/60 hover:text-red-400" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {!activeRun && queueItems.length === 0 && !isLoading && (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <ListOrdered className="w-8 h-8 text-white/10 mb-3" />
+              <p className="text-sm text-white/40">No runs in the queue</p>
+              <p className="text-xs text-white/20 mt-1">Runs will appear here when you start an optimization while another is active</p>
+            </div>
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }
 
