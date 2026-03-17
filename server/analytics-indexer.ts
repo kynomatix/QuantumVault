@@ -52,8 +52,9 @@ export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapsho
         ]);
         
         if (volumeDriftData.totalVolume > 0) {
-          totalVolumeFromDrift = volumeDriftData.totalVolume;
-          console.log(`[Analytics] Fetched real volume from Drift API: $${volumeDriftData.totalVolume.toFixed(2)}`);
+          const localVolume = totalVolumeFromDrift;
+          totalVolumeFromDrift = Math.max(totalVolumeFromDrift, volumeDriftData.totalVolume);
+          console.log(`[Analytics] Drift API volume: $${volumeDriftData.totalVolume.toFixed(2)}, Local volume: $${localVolume.toFixed(2)}, Using: $${totalVolumeFromDrift.toFixed(2)}`);
         }
         
         if (tvlDriftData.totalTVL > 0) {
