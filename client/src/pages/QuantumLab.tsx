@@ -33,6 +33,7 @@ import { cn } from "@/lib/utils";
 import { getDriftMaxLeverage, tickerToDriftMarket } from "@/lib/drift-constants";
 import { useLeverageLimits } from "@/hooks/useLeverageLimits";
 import { generateInsightsReport, formatReportAsText, type StrategyInsightsReport, type ParamSensitivity, type ComboFit, type Suggestion } from "@/lib/strategy-insights";
+import { generateAndSaveInsightsReport, insightsReportsQueryKey, type GenerateReportError } from "@/lib/insights-report-workflow";
 
 import type {
   LabPineInput, LabPineParseResult, LabStrategy, LabBacktestResult,
@@ -640,6 +641,7 @@ export default function QuantumLab() {
                   code={code}
                   parsedResult={parsedResult}
                   strategyId={strategyId}
+                  strategyName={strategyName}
                   onJobStarted={handleJobStarted}
                   isRunning={!!activeJobId}
                 />
@@ -1062,10 +1064,11 @@ const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
   { label: "Commodities / Other", tickers: ["PAXG", "ZEC", "TAO"] },
 ];
 
-function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunning }: {
+function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobStarted, isRunning }: {
   code: string;
   parsedResult: LabPineParseResult | null;
   strategyId: number | null;
+  strategyName: string;
   onJobStarted: (jobId: string, runId?: number) => void;
   isRunning: boolean;
 }) {
@@ -1086,7 +1089,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
   const [deepSearch, setDeepSearch] = useState(false);
 
   const { data: allInsightsReports } = useQuery<any[]>({
-    queryKey: ["/api/lab/strategies", strategyId, "latest-insights"],
+    queryKey: insightsReportsQueryKey(strategyId),
     queryFn: async () => {
       if (!strategyId) return [];
       const res = await fetch(`/api/lab/strategies/${strategyId}/insights-reports`);
@@ -1099,8 +1102,61 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
   });
   const hasInsights = Array.isArray(allInsightsReports) && allInsightsReports.length > 0;
 
+  const { data: runConfigSummary } = useQuery({
+    queryKey: ["/api/lab/strategies", strategyId, "summary"],
+    queryFn: async () => {
+      const res = await fetch(`/api/lab/runs?strategyId=${strategyId}`);
+      if (!res.ok) return null;
+      const runs: any[] = await safeResponseJson(res);
+      const completedRuns = runs.filter(r => r.status === "complete" || r.status === "paused");
+      return { totalRuns: completedRuns.length };
+    },
+    enabled: !!strategyId,
+  });
+
+  const singleComboStaleness = useMemo(() => {
+    if (selectedTickers.length !== 1 || selectedTimeframes.length !== 1) return null;
+    const ticker = selectedTickers[0];
+    const timeframe = selectedTimeframes[0];
+    if (!Array.isArray(allInsightsReports)) return { ticker, timeframe, report: null, isStale: false, newRunsSince: 0, exists: false };
+    const matchingReport = allInsightsReports.find(r => {
+      const f = (r.reportData as any)?.filter;
+      return f?.ticker === ticker && f?.timeframe === timeframe;
+    });
+    if (!matchingReport) return { ticker, timeframe, report: null, isStale: false, newRunsSince: 0, exists: false };
+    const reportTotalRuns = matchingReport.totalRuns;
+    const currentTotalRuns = runConfigSummary?.totalRuns ?? 0;
+    const isStale = reportTotalRuns == null || reportTotalRuns === undefined || currentTotalRuns > reportTotalRuns;
+    const newRunsSince = reportTotalRuns != null ? Math.max(0, currentTotalRuns - reportTotalRuns) : currentTotalRuns;
+    return { ticker, timeframe, report: matchingReport, isStale, newRunsSince, exists: true };
+  }, [selectedTickers, selectedTimeframes, allInsightsReports, runConfigSummary]);
+
+  const inlineGenerateMutation = useMutation({
+    mutationFn: async (combo: { ticker: string; timeframe: string }) => {
+      if (!strategyId || !parsedResult) throw new Error("Strategy not ready");
+      return generateAndSaveInsightsReport(
+        strategyId,
+        strategyName || "Untitled Strategy",
+        parsedResult.inputs,
+        { ticker: combo.ticker, timeframe: combo.timeframe },
+      );
+    },
+    onSuccess: (result) => {
+      if (result.saveFailed) {
+        toast({ title: "Report generated but failed to save", description: "The report was created but could not be persisted. Try again.", variant: "destructive" });
+      } else {
+        toast({ title: "Insights report generated", description: "Coverage updated" });
+      }
+    },
+    onError: (err: any) => {
+      const reportErr = err as GenerateReportError;
+      const message = reportErr?.message || err?.message || "Unknown error";
+      toast({ title: "Failed to generate report", description: message, variant: "destructive" });
+    },
+  });
+
   const insightsCoverage = useMemo(() => {
-    if (!Array.isArray(allInsightsReports) || allInsightsReports.length === 0 || selectedTickers.length === 0 || selectedTimeframes.length === 0) {
+    if (selectedTickers.length === 0 || selectedTimeframes.length === 0) {
       return { covered: [], missing: [], total: 0 };
     }
     const combos: { ticker: string; timeframe: string; label: string }[] = [];
@@ -1109,10 +1165,11 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
         combos.push({ ticker: t, timeframe: tf, label: `${t.replace("-PERP", "").replace("/USDT", "")} ${tf}` });
       }
     }
+    const reports = Array.isArray(allInsightsReports) ? allInsightsReports : [];
     const covered: typeof combos = [];
     const missing: typeof combos = [];
     for (const combo of combos) {
-      const found = allInsightsReports.some(r => {
+      const found = reports.some(r => {
         const f = (r.reportData as any)?.filter;
         return f?.ticker === combo.ticker && f?.timeframe === combo.timeframe;
       });
@@ -1320,7 +1377,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
                   </p>
                 )}
               </div>
-              {strategyId && hasInsights && (
+              {strategyId && (
                 <div className="pt-2 border-t border-white/5">
                   <button
                     onClick={() => setUseInsights(!useInsights)}
@@ -1338,22 +1395,74 @@ function RunConfigPanel({ code, parsedResult, strategyId, onJobStarted, isRunnin
                   {useInsights && insightsCoverage.total > 0 && (
                     <div className="mt-2 pl-6 space-y-1">
                       {insightsCoverage.missing.length === 0 ? (
-                        <p className="text-[10px] text-sky-400 flex items-center gap-1">
-                          <CheckCircle2 className="w-3 h-3" />
-                          {insightsCoverage.total === 1
-                            ? `Focused report found for ${insightsCoverage.covered[0].label}`
-                            : `All ${insightsCoverage.total} combos have focused reports`}
-                        </p>
+                        (() => {
+                          if (singleComboStaleness && singleComboStaleness.exists && singleComboStaleness.isStale) {
+                            return (
+                              <div>
+                                <p className="text-[10px] text-amber-400 flex items-center gap-1">
+                                  <AlertTriangle className="w-3 h-3" />
+                                  Report exists but is outdated
+                                  {singleComboStaleness.newRunsSince > 0 && (
+                                    <span className="text-white/30 ml-1">({singleComboStaleness.newRunsSince} new run{singleComboStaleness.newRunsSince !== 1 ? "s" : ""} since last report)</span>
+                                  )}
+                                </p>
+                                <button
+                                  onClick={() => {
+                                    const requestCombo = { ticker: singleComboStaleness.ticker, timeframe: singleComboStaleness.timeframe };
+                                    inlineGenerateMutation.mutate(requestCombo);
+                                  }}
+                                  disabled={inlineGenerateMutation.isPending}
+                                  className="mt-1.5 flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/20 text-amber-400 text-[10px] font-medium transition-colors disabled:opacity-50"
+                                  data-testid="btn-update-insights-report"
+                                >
+                                  {inlineGenerateMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+                                  Update Report
+                                </button>
+                              </div>
+                            );
+                          }
+                          return (
+                            <p className="text-[10px] text-sky-400 flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3" />
+                              {insightsCoverage.total === 1
+                                ? `Focused report found for ${insightsCoverage.covered[0].label}`
+                                : `All ${insightsCoverage.total} combos have focused reports`}
+                            </p>
+                          );
+                        })()
                       ) : insightsCoverage.covered.length === 0 ? (
                         <div>
-                          <p className="text-[10px] text-violet-400 flex items-center gap-1">
-                            <AlertTriangle className="w-3 h-3" />
-                            No focused reports — will use general report
-                          </p>
-                          <p className="text-[10px] text-white/30 mt-0.5">
-                            Go to Insights tab and generate reports for {insightsCoverage.missing.slice(0, 3).map(m => m.label).join(", ")}
-                            {insightsCoverage.missing.length > 3 ? ` +${insightsCoverage.missing.length - 3} more` : ""} for best results.
-                          </p>
+                          {singleComboStaleness && !singleComboStaleness.exists ? (
+                            <>
+                              <p className="text-[10px] text-violet-400 flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" />
+                                No focused report for {singleComboStaleness.ticker.replace("-PERP", "").replace("/USDT", "")} {singleComboStaleness.timeframe}
+                              </p>
+                              <button
+                                onClick={() => {
+                                  const requestCombo = { ticker: singleComboStaleness.ticker, timeframe: singleComboStaleness.timeframe };
+                                  inlineGenerateMutation.mutate(requestCombo);
+                                }}
+                                disabled={inlineGenerateMutation.isPending}
+                                className="mt-1.5 flex items-center gap-1.5 px-2.5 py-1 rounded bg-violet-500/15 hover:bg-violet-500/25 border border-violet-500/20 text-violet-400 text-[10px] font-medium transition-colors disabled:opacity-50"
+                                data-testid="btn-generate-insights-report"
+                              >
+                                {inlineGenerateMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+                                Generate Now
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-[10px] text-violet-400 flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" />
+                                No focused reports — will use general report
+                              </p>
+                              <p className="text-[10px] text-white/30 mt-0.5">
+                                Go to Insights tab and generate reports for {insightsCoverage.missing.slice(0, 3).map(m => m.label).join(", ")}
+                                {insightsCoverage.missing.length > 3 ? ` +${insightsCoverage.missing.length - 3} more` : ""} for best results.
+                              </p>
+                            </>
+                          )}
                         </div>
                       ) : (
                         <div>
@@ -3892,7 +4001,7 @@ function InsightsPanel() {
   });
 
   const { data: savedReports, refetch: refetchSavedReports } = useQuery<any[]>({
-    queryKey: ["/api/lab/strategies", selectedStrategyId, "insights-reports"],
+    queryKey: insightsReportsQueryKey(selectedStrategyId),
     queryFn: async () => {
       const res = await fetch(`/api/lab/strategies/${selectedStrategyId}/insights-reports`);
       if (!res.ok) return [];
@@ -3921,56 +4030,25 @@ function InsightsPanel() {
     if (!selectedStrategyId || !selectedStrategy) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/lab/strategies/${selectedStrategyId}/all-results?lite=1`);
-      if (!res.ok) throw new Error("Failed to fetch results");
-      const data = await safeResponseJson(res);
-      if (!data.results || data.results.length === 0) {
-        toast({ title: "No results", description: "Run some optimizations first to generate insights", variant: "destructive" });
-        setLoading(false);
-        return;
-      }
       const filterParsed = insightsFilter !== "all" ? (() => {
         const [t, tf] = insightsFilter.split("|");
         return { ticker: t || undefined, timeframe: tf || undefined };
       })() : null;
-      if (filterParsed) {
-        const matchCount = data.results.filter((r: any) =>
-          (!filterParsed.ticker || r.ticker === filterParsed.ticker) &&
-          (!filterParsed.timeframe || r.timeframe === filterParsed.timeframe)
-        ).length;
-        if (matchCount === 0) {
-          toast({ title: "No matching results", description: `No results found for ${insightsFilter.replace("|", " ")}. Try "All Results" or run optimizations with this ticker/timeframe first.`, variant: "destructive" });
-          setLoading(false);
-          return;
-        }
-      }
-      const resultData = data.results.map((r: LabOptResult) => ({
-        ticker: r.ticker,
-        timeframe: r.timeframe,
-        netProfitPercent: r.netProfitPercent,
-        winRatePercent: r.winRatePercent,
-        maxDrawdownPercent: r.maxDrawdownPercent,
-        profitFactor: r.profitFactor,
-        totalTrades: r.totalTrades,
-        params: r.params as Record<string, any>,
-        trades: (r.trades || []) as any[],
-      }));
       const inputs = (selectedStrategy.parsedInputs || []) as LabPineInput[];
-      const rpt = generateInsightsReport(resultData, inputs, selectedStrategy.name, data.totalRuns, filterParsed);
-      setReport(rpt);
-      try {
-        await apiRequest("POST", `/api/lab/strategies/${selectedStrategyId}/insights-report`, {
-          reportData: rpt,
-          totalResults: rpt.totalResults,
-          totalRuns: rpt.totalRuns,
-        });
-        refetchSavedReports();
-        queryClient.invalidateQueries({ queryKey: ["/api/lab/strategies", selectedStrategyId, "latest-insights"] });
-      } catch (saveErr: any) {
-        console.log("[Insights] Failed to auto-save report:", saveErr.message);
+      const result = await generateAndSaveInsightsReport(
+        selectedStrategyId,
+        selectedStrategy.name,
+        inputs,
+        filterParsed,
+      );
+      setReport(result.report);
+      if (result.saveFailed) {
+        toast({ title: "Report generated but failed to save", description: "The report is shown below but could not be persisted.", variant: "destructive" });
       }
+      refetchSavedReports();
     } catch (err: any) {
-      toast({ title: "Error generating report", description: err.message, variant: "destructive" });
+      const message = err?.message || "Unknown error";
+      toast({ title: "Error generating report", description: message, variant: "destructive" });
     } finally {
       setLoading(false);
     }
