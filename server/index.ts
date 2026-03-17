@@ -6,7 +6,7 @@ import { storage } from "./storage";
 import { startPeriodicReconciliation } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
-import { startRetryWorker } from "./trade-retry-service";
+import { startRetryWorker, queueTradeRetry } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
 import { initLeverageCache } from "./leverage-cache-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
@@ -219,17 +219,84 @@ app.use((req, res, next) => {
       
       // Staggered startup: services start in sequence with delays to avoid RPC rate-limit bursts
 
-      // Immediately: orphaned trade cleanup (DB-only, no RPC calls)
+      // Immediately: orphaned trade cleanup — queue interrupted trades for retry
+      const OPEN_STALENESS_MS = 5 * 60 * 1000;
+      const CLOSE_STALENESS_MS = 30 * 60 * 1000;
       try {
         const orphanedTrades = await storage.getOrphanedPendingTrades(2);
         if (orphanedTrades.length > 0) {
-          log(`Found ${orphanedTrades.length} orphaned pending trades, marking for review`);
+          log(`Found ${orphanedTrades.length} orphaned pending trades, queueing for retry`);
           for (const trade of orphanedTrades) {
-            await storage.updateBotTrade(trade.id, {
-              status: "needs_review",
-              errorMessage: "Trade interrupted by server restart - verify on Drift if executed",
-            });
-            log(`Marked trade ${trade.id} as needs_review (orphaned during restart)`);
+            const rawSide = trade.side.toLowerCase();
+            if (rawSide !== "long" && rawSide !== "short" && rawSide !== "close") {
+              await storage.updateBotTrade(trade.id, {
+                status: "failed",
+                errorMessage: `Trade interrupted by server restart — unrecognized side '${trade.side}', cannot retry`,
+              });
+              log(`Trade ${trade.id} has unrecognized side '${trade.side}', marked failed`);
+              continue;
+            }
+            const normalizedSide = rawSide as "long" | "short" | "close";
+            const isClose = normalizedSide === "close";
+            const tradeAge = Date.now() - new Date(trade.executedAt).getTime();
+            const maxAge = isClose ? CLOSE_STALENESS_MS : OPEN_STALENESS_MS;
+
+            if (tradeAge > maxAge) {
+              const ageMin = Math.round(tradeAge / 60000);
+              await storage.updateBotTrade(trade.id, {
+                status: "failed",
+                errorMessage: `Trade interrupted by server restart and too stale to retry (age: ${ageMin}min, limit: ${Math.round(maxAge / 60000)}min)`,
+              });
+              log(`Trade ${trade.id} too stale to retry (${ageMin}min old, side=${trade.side}) — marked failed`);
+              continue;
+            }
+
+            const bot = await storage.getTradingBotById(trade.tradingBotId);
+            const wallet = await storage.getWallet(trade.walletAddress);
+            if (!bot || !wallet) {
+              await storage.updateBotTrade(trade.id, {
+                status: "failed",
+                errorMessage: "Trade interrupted by server restart — bot or wallet not found for retry",
+              });
+              log(`Trade ${trade.id} cannot retry — bot or wallet not found, marked failed`);
+              continue;
+            }
+
+            if (bot.driftSubaccountId == null) {
+              await storage.updateBotTrade(trade.id, {
+                status: "failed",
+                errorMessage: "Trade interrupted by server restart — bot has no subaccount ID, cannot safely retry",
+              });
+              log(`Trade ${trade.id} cannot retry — bot ${bot.id} missing driftSubaccountId, marked failed`);
+              continue;
+            }
+
+            try {
+              const retryJobId = await queueTradeRetry({
+                botId: trade.tradingBotId,
+                walletAddress: trade.walletAddress,
+                agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted || "",
+                agentPublicKey: bot.agentPublicKey || wallet.agentPublicKey || "",
+                market: trade.market,
+                side: normalizedSide,
+                size: parseFloat(trade.size),
+                subAccountId: bot.driftSubaccountId,
+                reduceOnly: isClose,
+                slippageBps: wallet.slippageBps || 50,
+                priority: isClose ? "critical" : "normal",
+                lastError: "Trade interrupted by server restart",
+                originalTradeId: trade.id,
+                webhookPayload: trade.webhookPayload,
+                entryPrice: undefined,
+              });
+              log(`Queued orphaned trade ${trade.id} for ${isClose ? "critical" : "normal"} retry (job ${retryJobId})`);
+            } catch (retryErr) {
+              await storage.updateBotTrade(trade.id, {
+                status: "failed",
+                errorMessage: `Trade interrupted by server restart — failed to queue retry: ${retryErr}`,
+              });
+              log(`Failed to queue retry for trade ${trade.id}: ${retryErr}`);
+            }
           }
         }
       } catch (error) {
