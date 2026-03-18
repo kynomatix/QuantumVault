@@ -9,7 +9,7 @@ import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
 import { startRetryWorker, queueTradeRetry } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
-import { initLeverageCache } from "./leverage-cache-service";
+import { initLeverageCache, setOnCacheRefreshed } from "./leverage-cache-service";
 import { syncMarketRegistry } from "./drift-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 import { createLabSupervisor, getLabAuthSecret } from "./lab/supervisor";
@@ -454,8 +454,13 @@ app.use((req, res, next) => {
       }, 15_000);
 
       // ~20s: leverage cache (single batch RPC call to read perp market accounts)
-      setTimeout(() => {
+      setTimeout(async () => {
         log('[Staggered startup] Initializing leverage cache');
+        const { invalidateMarketCache } = await import('./market-liquidity-service');
+        setOnCacheRefreshed(() => {
+          invalidateMarketCache();
+          log('[LeverageCache] Market cache invalidated after leverage/status refresh');
+        });
         initLeverageCache().catch(err => console.error('Failed to initialize leverage cache:', err));
       }, 20_000);
 

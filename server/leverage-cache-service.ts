@@ -1,9 +1,11 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import path from "path";
 import fs from "fs";
+import { createRequire } from "module";
 
 interface LeverageCache {
   leverageMap: Record<string, number>;
+  nonTradableMarkets: Set<string>;
   lastUpdated: Date;
   expiresAt: Date;
 }
@@ -15,15 +17,26 @@ const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn3
 let leverageCache: LeverageCache | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let isRefreshing = false;
+let onCacheRefreshed: (() => void) | null = null;
 
-async function fetchOnChainLeverageLimits(): Promise<Record<string, number> | null> {
+export function setOnCacheRefreshed(cb: () => void): void {
+  onCacheRefreshed = cb;
+}
+
+interface OnChainMarketData {
+  leverageMap: Record<string, number>;
+  nonTradableMarkets: Set<string>;
+}
+
+async function fetchOnChainMarketData(): Promise<OnChainMarketData | null> {
   try {
-    console.log('[LeverageCache] Fetching leverage limits from Drift...');
+    console.log('[LeverageCache] Fetching market data from Drift on-chain...');
 
     const sdkModule = await import('@drift-labs/sdk');
     const { PerpMarkets, getPerpMarketPublicKeySync, CustomBorshAccountsCoder } = sdkModule;
 
-    const sdkPath = path.dirname(require.resolve('@drift-labs/sdk/package.json'));
+    const _require = typeof require !== 'undefined' ? require : createRequire(import.meta.url);
+    const sdkPath = path.dirname(_require.resolve('@drift-labs/sdk/package.json'));
     const idl = JSON.parse(fs.readFileSync(path.join(sdkPath, 'lib/node/idl/drift.json'), 'utf8'));
     const coder = new CustomBorshAccountsCoder(idl);
 
@@ -36,15 +49,28 @@ async function fetchOnChainLeverageLimits(): Promise<Record<string, number> | nu
     const accounts = await connection.getMultipleAccountsInfo(keys);
 
     const leverageMap: Record<string, number> = {};
+    const nonTradableMarkets = new Set<string>();
+
     for (let i = 0; i < accounts.length; i++) {
       if (!accounts[i]) continue;
       try {
         const decoded = coder.decode('PerpMarket', accounts[i]!.data);
+        const symbol = perpMarkets[i].symbol.toUpperCase();
+        const key = symbol.endsWith('-PERP') ? symbol : `${symbol}-PERP`;
+
         if (decoded.marginRatioInitial > 0) {
           const maxLeverage = Math.floor(10000 / decoded.marginRatioInitial);
-          const symbol = perpMarkets[i].symbol.toUpperCase();
-          const key = symbol.endsWith('-PERP') ? symbol : `${symbol}-PERP`;
           leverageMap[key] = maxLeverage;
+        }
+
+        const status = decoded.status;
+        if (status) {
+          const isReduceOnly = 'reduceOnly' in status;
+          const isDelisted = 'delisted' in status;
+          const isSettlement = 'settlement' in status;
+          if (isReduceOnly || isDelisted || isSettlement) {
+            nonTradableMarkets.add(key);
+          }
         }
       } catch (e: any) {
         console.warn(`[LeverageCache] Skipping market ${perpMarkets[i].symbol}: ${e.message}`);
@@ -53,13 +79,16 @@ async function fetchOnChainLeverageLimits(): Promise<Record<string, number> | nu
 
     if (Object.keys(leverageMap).length > 0) {
       console.log(`[LeverageCache] Fetched leverage for ${Object.keys(leverageMap).length} markets`);
-      return leverageMap;
+      if (nonTradableMarkets.size > 0) {
+        console.log(`[LeverageCache] Non-tradable markets (reduce-only/delisted/settlement): ${[...nonTradableMarkets].join(', ')}`);
+      }
+      return { leverageMap, nonTradableMarkets };
     }
 
     console.warn('[LeverageCache] No leverage data obtained');
     return null;
   } catch (error: any) {
-    console.error('[LeverageCache] Failed to fetch leverage limits:', error.message);
+    console.error('[LeverageCache] Failed to fetch market data:', error.message);
     return null;
   }
 }
@@ -69,16 +98,18 @@ export async function refreshLeverageCache(): Promise<void> {
   isRefreshing = true;
 
   try {
-    const onChainData = await fetchOnChainLeverageLimits();
+    const data = await fetchOnChainMarketData();
     const now = new Date();
 
-    if (onChainData && Object.keys(onChainData).length > 0) {
+    if (data && Object.keys(data.leverageMap).length > 0) {
       leverageCache = {
-        leverageMap: onChainData,
+        leverageMap: data.leverageMap,
+        nonTradableMarkets: data.nonTradableMarkets,
         lastUpdated: now,
         expiresAt: new Date(now.getTime() + REFRESH_INTERVAL_MS),
       };
-      console.log(`[LeverageCache] Cache updated (${Object.keys(onChainData).length} markets)`);
+      console.log(`[LeverageCache] Cache updated (${Object.keys(data.leverageMap).length} markets, ${data.nonTradableMarkets.size} non-tradable)`);
+      if (onCacheRefreshed) onCacheRefreshed();
     } else {
       console.warn(`[LeverageCache] Fetch failed; using conservative ${CONSERVATIVE_FALLBACK}x fallback`);
     }
@@ -118,15 +149,38 @@ export function getAllCachedLeverageLimits(): Record<string, number> {
   return {};
 }
 
+export function isMarketNonTradable(symbol: string): boolean | null {
+  const normalizedSymbol = symbol.toUpperCase().includes('-PERP')
+    ? symbol.toUpperCase()
+    : `${symbol.toUpperCase()}-PERP`;
+  if (leverageCache) {
+    return leverageCache.nonTradableMarkets.has(normalizedSymbol);
+  }
+  return null;
+}
+
+export function isLeverageCacheReady(): boolean {
+  return leverageCache !== null;
+}
+
+export function getNonTradableMarkets(): string[] {
+  if (leverageCache) {
+    return [...leverageCache.nonTradableMarkets];
+  }
+  return [];
+}
+
 export function getLeverageCacheStatus(): {
   cached: boolean;
   source: 'on-chain' | null;
   lastUpdated: string | null;
   expiresAt: string | null;
   marketCount: number;
+  nonTradableCount: number;
+  nonTradableMarkets: string[];
 } {
   if (!leverageCache) {
-    return { cached: false, source: null, lastUpdated: null, expiresAt: null, marketCount: 0 };
+    return { cached: false, source: null, lastUpdated: null, expiresAt: null, marketCount: 0, nonTradableCount: 0, nonTradableMarkets: [] };
   }
   return {
     cached: true,
@@ -134,5 +188,7 @@ export function getLeverageCacheStatus(): {
     lastUpdated: leverageCache.lastUpdated.toISOString(),
     expiresAt: leverageCache.expiresAt.toISOString(),
     marketCount: Object.keys(leverageCache.leverageMap).length,
+    nonTradableCount: leverageCache.nonTradableMarkets.size,
+    nonTradableMarkets: [...leverageCache.nonTradableMarkets],
   };
 }

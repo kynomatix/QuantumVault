@@ -529,7 +529,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
                   <span className="text-sm">Loading markets...</span>
                 </div>
               ) : (
-                markets.filter((m: any) => !m.reduceOnly).map((market) => (
+                markets.map((market) => (
                   <SelectItem key={market.symbol} value={market.symbol} className="py-2">
                     <div className="flex items-center justify-between w-full gap-3">
                       <span className="font-medium">{market.symbol}</span>

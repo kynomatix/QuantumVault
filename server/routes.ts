@@ -15,7 +15,7 @@ import { reconcileBotPosition, syncPositionFromOnChain, backfillLiquidationRecor
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMarketMaxLeverage } from "./market-liquidity-service";
-import { getAllCachedLeverageLimits, getLeverageCacheStatus } from "./leverage-cache-service";
+import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
@@ -4465,9 +4465,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Name and market are required" });
       }
 
-      const marketMeta = await getMarketBySymbol(market);
-      if (marketMeta && marketMeta.reduceOnly) {
-        return res.status(400).json({ error: `${market} is reduce-only on Drift — new positions cannot be opened` });
+      const nonTradable = isMarketNonTradable(market);
+      if (nonTradable === true) {
+        return res.status(400).json({ error: `${market} is reduce-only or delisted on Drift — new positions cannot be opened` });
       }
 
       // Ensure wallet exists before creating bot
@@ -8073,6 +8073,19 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     } catch (error) {
       console.error("Get cache status error:", error);
       res.status(500).json({ error: "Failed to get cache status" });
+    }
+  });
+
+  app.get("/api/drift/non-tradable-markets", async (req, res) => {
+    try {
+      const cacheStatus = getLeverageCacheStatus();
+      res.json({
+        nonTradableMarkets: cacheStatus.nonTradableMarkets,
+        lastUpdated: cacheStatus.lastUpdated,
+      });
+    } catch (error) {
+      console.error("Get non-tradable markets error:", error);
+      res.status(500).json({ error: "Failed to get non-tradable markets" });
     }
   });
 

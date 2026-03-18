@@ -1086,8 +1086,6 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
   );
 }
 
-const REDUCE_ONLY_TICKERS = new Set(["HNT", "INJ", "DYM", "CLOUD", "IO", "ZEX", "WEN", "MOTHER", "DBR", "FWOG", "GOAT", "PNUT", "MICHI", "MELANIA", "KAITO", "IP", "RLB"]);
-
 const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
   { label: "Major", tickers: ["SOL", "BTC", "ETH", "XRP", "ADA", "LTC", "BNB", "AVAX", "LINK", "DOGE", "BONK", "PEPE"] },
   { label: "Layer 1 / Infra", tickers: ["SUI", "APT", "SEI", "TON", "BERA", "OP", "ARB", "POL", "MNT", "TIA", "INJ", "DYM", "XPL", "MON"] },
@@ -1120,6 +1118,27 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [useInsights, setUseInsights] = useState(false);
   const [deepSearch, setDeepSearch] = useState(false);
+
+  const { data: nonTradableData } = useQuery<{ nonTradableMarkets: string[] }>({
+    queryKey: ["/api/drift/non-tradable-markets"],
+    queryFn: async () => {
+      const res = await fetch("/api/drift/non-tradable-markets");
+      if (!res.ok) return { nonTradableMarkets: [] };
+      return res.json();
+    },
+    staleTime: 60 * 60 * 1000,
+  });
+  const nonTradableSet = useMemo(() => {
+    const symbols = nonTradableData?.nonTradableMarkets || [];
+    const set = new Set<string>();
+    const aliasMap: Record<string, string> = { '1KWEN': 'WEN', '1KMEW': 'MEW', '1MBONK': 'BONK', '1MPEPE': 'PEPE', '1KMON': 'MON', '1KPUMP': 'PUMP' };
+    for (const s of symbols) {
+      const base = s.replace('-PERP', '');
+      set.add(base);
+      if (aliasMap[base]) set.add(aliasMap[base]);
+    }
+    return set;
+  }, [nonTradableData]);
 
   const { data: allInsightsReports } = useQuery<any[]>({
     queryKey: insightsReportsQueryKey(strategyId),
@@ -1275,23 +1294,19 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                 <div key={group.label}>
                   <p className="text-[10px] uppercase tracking-wider text-white/30 mb-1.5">{group.label}</p>
                   <div className="flex flex-wrap gap-1.5">
-                    {group.tickers.map((name) => {
+                    {group.tickers.filter((name) => !nonTradableSet.has(name)).map((name) => {
                       const ticker = LAB_AVAILABLE_TICKERS.find(t => t.name === name);
                       if (!ticker) return null;
                       const isSelected = selectedTickers.includes(ticker.symbol);
-                      const isReduceOnly = REDUCE_ONLY_TICKERS.has(name);
                       return (
                         <button
                           key={ticker.symbol}
                           onClick={() => toggleTicker(ticker.symbol)}
-                          title={isReduceOnly ? `${name}: Reduce-only on Drift — no candle data` : undefined}
                           className={cn(
                             "px-2.5 py-1 rounded text-xs font-medium transition-all",
                             isSelected
                               ? "bg-violet-600 text-white shadow-sm shadow-violet-500/20"
-                              : isReduceOnly
-                                ? "bg-white/[0.02] text-white/25 hover:bg-white/5 border border-white/5 line-through"
-                                : "bg-white/5 text-white/50 hover:bg-white/10 border border-white/10"
+                              : "bg-white/5 text-white/50 hover:bg-white/10 border border-white/10"
                           )}
                           data-testid={`button-ticker-${name}`}
                         >
