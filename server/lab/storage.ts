@@ -856,11 +856,26 @@ export class LabDatabaseStorage implements ILabStorage {
         FROM lab_optimization_results r
         INNER JOIN eligible_runs er ON er.id = r.run_id
       ),
-      deduped AS (
+      deduped_params AS (
         SELECT DISTINCT ON (ticker, timeframe, params::text)
           *
         FROM filtered
         ORDER BY ticker, timeframe, params::text, net_profit_percent DESC, result_id DESC
+      ),
+      deduped AS (
+        SELECT DISTINCT ON (ticker, timeframe, strategy_id,
+          ROUND(net_profit_percent::numeric, 2),
+          ROUND(win_rate_percent::numeric, 2),
+          ROUND(max_drawdown_percent::numeric, 2),
+          total_trades)
+          *
+        FROM deduped_params
+        ORDER BY ticker, timeframe, strategy_id,
+          ROUND(net_profit_percent::numeric, 2),
+          ROUND(win_rate_percent::numeric, 2),
+          ROUND(max_drawdown_percent::numeric, 2),
+          total_trades,
+          net_profit_percent DESC, result_id DESC
       ),
       ranked AS (
         SELECT *,
