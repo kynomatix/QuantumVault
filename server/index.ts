@@ -212,6 +212,30 @@ app.post("/api/lab/runs/:id/refine", (req: Request, res: Response, next: NextFun
   });
 });
 
+app.post("/api/lab/job/:id/cancel", (req: Request, res: Response, next: NextFunction) => {
+  if (labSupervisor.isReady) return next();
+  sessionMiddleware(req, res, async (err) => {
+    if (err) return next(err);
+    const walletAddress = (req as any).session?.walletAddress;
+    if (!walletAddress) return res.status(401).json({ error: "Not authenticated" });
+    try {
+      const runningRuns = await db.select().from(labOptimizationRuns)
+        .where(eq(labOptimizationRuns.status, sql`'running'`));
+      const userRun = runningRuns.find(r => r.userId === walletAddress);
+      if (userRun) {
+        await db.update(labOptimizationRuns)
+          .set({ status: "paused" })
+          .where(eq(labOptimizationRuns.id, userRun.id));
+        console.log(`[LabCancel] Lab not ready — force-paused run ${userRun.id} for ${walletAddress}`);
+      }
+      res.json({ success: true });
+    } catch (e: any) {
+      console.error(`[LabCancel] Direct cancel failed: ${e.message}`);
+      res.status(500).json({ error: e.message });
+    }
+  });
+});
+
 app.use("/api/lab", (req: Request, res: Response, next: NextFunction) => {
   sessionMiddleware(req, res, (err) => {
     if (err) return next(err);

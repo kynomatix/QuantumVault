@@ -1712,9 +1712,9 @@ export function registerLabRoutes(app: Express): void {
 
   app.post("/api/lab/job/:id/cancel", requireLabAuth, async (req: Request, res: Response) => {
     const job = labStorage.getJob(req.params.id);
+    const walletAddress = (req as any).walletAddress;
     if (job?.runId) {
       const run = await labStorage.getRun(job.runId);
-      const walletAddress = (req as any).walletAddress;
       if (run && run.userId && run.userId !== walletAddress) {
         return res.status(403).json({ error: "Not authorized to cancel this run" });
       }
@@ -1747,6 +1747,26 @@ export function registerLabRoutes(app: Express): void {
         }, 5000);
       } else {
         pumpQueue();
+      }
+    } else {
+      try {
+        const allRuns = await labStorage.getRuns();
+        const userRun = allRuns.find(r => r.status === "running" && r.userId === walletAddress);
+        if (userRun) {
+          try {
+            const cp = await labStorage.getCheckpoint(userRun.id);
+            if (cp) {
+              (cp as any).userCancelled = true;
+              (cp as any).autoResumeAttempts = MAX_AUTO_RESUME_ATTEMPTS;
+              await labStorage.saveCheckpoint(userRun.id, cp);
+            }
+          } catch {}
+          await labStorage.pauseRun(userRun.id);
+          console.log(`[QuantumLab] Cancel fallback: no job in memory — force-paused run ${userRun.id} for ${walletAddress}`);
+          pumpQueue();
+        }
+      } catch (e: any) {
+        console.error(`[QuantumLab] Cancel fallback error: ${e.message}`);
       }
     }
     res.json({ success: true });
