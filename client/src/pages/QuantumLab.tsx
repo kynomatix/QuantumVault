@@ -2281,6 +2281,9 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       return safeResponseJson(res);
     },
     enabled: run?.status !== "running",
+    retry: 3,
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
+    staleTime: 30_000,
   });
 
   const resultsByCombo = useMemo(() => {

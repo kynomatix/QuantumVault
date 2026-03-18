@@ -348,45 +348,42 @@ export class LabDatabaseStorage implements ILabStorage {
     if (results.length === 0) return;
     const combo = results[0];
     const comboKey = `${combo.ticker}|${combo.timeframe}`;
-    const existing = await db.select({ id: labOptimizationResults.id, ticker: labOptimizationResults.ticker, timeframe: labOptimizationResults.timeframe })
-      .from(labOptimizationResults)
-      .where(eq(labOptimizationResults.runId, runId));
-    const existingForCombo = existing.filter(r => `${r.ticker}|${r.timeframe}` === comboKey);
 
-    if (existingForCombo.length > 0) {
-      if (!isPartial) {
+    await db.transaction(async (tx) => {
+      const existing = await tx.select({ id: labOptimizationResults.id, ticker: labOptimizationResults.ticker, timeframe: labOptimizationResults.timeframe })
+        .from(labOptimizationResults)
+        .where(eq(labOptimizationResults.runId, runId));
+      const existingForCombo = existing.filter(r => `${r.ticker}|${r.timeframe}` === comboKey);
+
+      if (existingForCombo.length > 0) {
         const idsToDelete = existingForCombo.map(r => r.id);
-        await db.delete(labOptimizationResults).where(inArray(labOptimizationResults.id, idsToDelete));
-        console.log(`[QuantumLab] Combo ${comboKey} run ${runId}: replaced ${idsToDelete.length} partial results with ${results.length} final results`);
-      } else {
-        const idsToDelete = existingForCombo.map(r => r.id);
-        await db.delete(labOptimizationResults).where(inArray(labOptimizationResults.id, idsToDelete));
-        console.log(`[QuantumLab] Combo ${comboKey} run ${runId}: updating ${results.length} partial results`);
+        await tx.delete(labOptimizationResults).where(inArray(labOptimizationResults.id, idsToDelete));
+        console.log(`[QuantumLab] Combo ${comboKey} run ${runId}: ${isPartial ? "updating" : "replaced"} ${idsToDelete.length} ${isPartial ? "partial" : ""} results with ${results.length} ${isPartial ? "partial" : "final"} results`);
       }
-    }
 
-    const otherCount = existing.length - existingForCombo.length;
-    const startRank = otherCount + 1;
-    const insertData: InsertLabResult[] = results.map((r, idx) => ({
-      runId,
-      ticker: r.ticker,
-      timeframe: r.timeframe,
-      rank: startRank + idx,
-      netProfitPercent: r.netProfitPercent,
-      winRatePercent: r.winRatePercent,
-      maxDrawdownPercent: r.maxDrawdownPercent,
-      profitFactor: r.profitFactor,
-      totalTrades: r.totalTrades,
-      params: r.params,
-      trades: r.trades,
-      equityCurve: r.equityCurve,
-    }));
+      const otherCount = existing.length - existingForCombo.length;
+      const startRank = otherCount + 1;
+      const insertData: InsertLabResult[] = results.map((r, idx) => ({
+        runId,
+        ticker: r.ticker,
+        timeframe: r.timeframe,
+        rank: startRank + idx,
+        netProfitPercent: r.netProfitPercent,
+        winRatePercent: r.winRatePercent,
+        maxDrawdownPercent: r.maxDrawdownPercent,
+        profitFactor: r.profitFactor,
+        totalTrades: r.totalTrades,
+        params: r.params,
+        trades: r.trades,
+        equityCurve: r.equityCurve,
+      }));
 
-    const batchSize = 50;
-    for (let i = 0; i < insertData.length; i += batchSize) {
-      const batch = insertData.slice(i, i + batchSize);
-      await db.insert(labOptimizationResults).values(batch);
-    }
+      const batchSize = 50;
+      for (let i = 0; i < insertData.length; i += batchSize) {
+        const batch = insertData.slice(i, i + batchSize);
+        await tx.insert(labOptimizationResults).values(batch);
+      }
+    });
   }
 
   async getRunResults(runId: number): Promise<LabOptResult[]> {
