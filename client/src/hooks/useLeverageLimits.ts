@@ -1,8 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useQuery } from "@tanstack/react-query";
-import { setLeverageLimitsCache } from "@/lib/drift-constants";
-
-const CONSERVATIVE_FALLBACK = 5;
+import { setLeverageLimitsCache, tickerToDriftMarket, getDriftMaxLeverage } from "@/lib/drift-constants";
 
 interface LeverageLimitsResponse {
   leverageLimits: Record<string, number>;
@@ -31,15 +29,13 @@ export function useLeverageLimits() {
   });
 
   const getMaxLeverage = (market: string): number => {
-    const normalized = market.toUpperCase().includes('-PERP')
-      ? market.toUpperCase()
-      : `${market.toUpperCase()}-PERP`;
+    const normalized = tickerToDriftMarket(market);
 
     if (query.data?.leverageLimits) {
-      return query.data.leverageLimits[normalized] ?? CONSERVATIVE_FALLBACK;
+      return query.data.leverageLimits[normalized] ?? getDriftMaxLeverage(market);
     }
 
-    return CONSERVATIVE_FALLBACK;
+    return getDriftMaxLeverage(market);
   };
 
   return {
