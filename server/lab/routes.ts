@@ -627,6 +627,8 @@ export function registerLabRoutes(app: Express): void {
               try {
                 await labStorage.pauseRun(runId);
                 if (isResource) {
+                  const cpData = await labStorage.getCheckpoint(runId);
+                  if (cpData) { cpData.resourceError = true; await labStorage.saveCheckpoint(runId, cpData); }
                   console.log(`[QuantumLab] Run ${runId} resource error → paused (no auto-retry)`);
                   activeWorker = null;
                   setTimeout(() => pumpQueue(), 1000);
@@ -659,6 +661,8 @@ export function registerLabRoutes(app: Express): void {
           try {
             await labStorage.pauseRun(runId);
             if (oom) {
+              const cpData = await labStorage.getCheckpoint(runId);
+              if (cpData) { cpData.resourceError = true; await labStorage.saveCheckpoint(runId, cpData); }
               console.log(`[QuantumLab] Worker OOM run ${runId} → paused (no auto-retry)`);
               activeWorker = null;
               setTimeout(() => pumpQueue(), 1000);
@@ -684,6 +688,8 @@ export function registerLabRoutes(app: Express): void {
             try {
               await labStorage.pauseRun(runId);
               if (oom) {
+                const cpData = await labStorage.getCheckpoint(runId);
+                if (cpData) { cpData.resourceError = true; await labStorage.saveCheckpoint(runId, cpData); }
                 labStorage.updateProgress(job.id, {
                   jobId: job.id, status: "error", stage: `Resource limit exceeded: ${exitMsg}`,
                   current: 0, total: 0, percent: 0, elapsed: 0, error: exitMsg,
@@ -1885,7 +1891,7 @@ export function registerLabRoutes(app: Express): void {
         console.log(`[QuantumLab] Boot: worker already active, skipping queue pump`);
         return;
       }
-      console.log(`[QuantumLab] Boot: pumping queue (paused runs require manual resume)`);
+      console.log(`[QuantumLab] Boot: pumping queue (interrupted paused runs will auto-resume after ~75s)`);
       pumpQueue();
     } catch (err: any) {
       console.log(`[QuantumLab] Boot queue pump error: ${err.message}`);
@@ -1910,6 +1916,123 @@ export function registerLabRoutes(app: Express): void {
       }
     } catch {}
   }, 30_000);
+
+  async function lazyRecoveryCycle() {
+    if (labStorage.interruptedRunIds.length === 0) return;
+    if (activeWorker || pumpQueueRunning) {
+      console.log(`[QuantumLab] Lazy recovery: skipping cycle — worker active or pump running`);
+      return;
+    }
+
+    const candidateIds = [...labStorage.interruptedRunIds];
+    for (const runId of candidateIds) {
+      try {
+        const run = await labStorage.getRun(runId);
+        if (!run || run.status !== "paused") {
+          labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
+          console.log(`[QuantumLab] Lazy recovery: run ${runId} no longer paused (status=${run?.status}), removed from interrupted list`);
+          continue;
+        }
+
+        const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+        if (cp?.userCancelled) {
+          labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
+          console.log(`[QuantumLab] Lazy recovery: run ${runId} was user-cancelled, removed from interrupted list`);
+          continue;
+        }
+
+        if (cp?.resourceError) {
+          labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
+          console.log(`[QuantumLab] Lazy recovery: run ${runId} was resource/OOM-paused, skipping (needs manual intervention)`);
+          continue;
+        }
+
+        if (!cp?.configSnapshot) {
+          console.log(`[QuantumLab] Lazy recovery: run ${runId} has no config snapshot, force-failing`);
+          await db.update(labOptimizationRuns).set({
+            status: "failed",
+            completedAt: new Date(),
+          }).where(eq(labOptimizationRuns.id, runId));
+          labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
+          setTimeout(() => pumpQueue(), 1000);
+          break;
+        }
+
+        const crashCount = (cp.autoResumeAttempts as number) ?? 0;
+        if (crashCount >= MAX_AUTO_RESUME_ATTEMPTS) {
+          console.log(`[QuantumLab] Lazy recovery: run ${runId} exhausted auto-resume attempts (${crashCount}/${MAX_AUTO_RESUME_ATTEMPTS}), force-failing`);
+          await db.update(labOptimizationRuns).set({
+            status: "failed",
+            completedAt: new Date(),
+          }).where(eq(labOptimizationRuns.id, runId));
+          labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
+          setTimeout(() => pumpQueue(), 1000);
+          break;
+        }
+
+        if (activeWorker || pumpQueueRunning) {
+          console.log(`[QuantumLab] Lazy recovery: worker became active during check, aborting cycle`);
+          break;
+        }
+
+        cp.autoResumeAttempts = crashCount + 1;
+        await labStorage.saveCheckpoint(runId, cp);
+
+        const hasProgress = cp.completedCombos?.length > 0 || (cp.currentCombo && cp.currentIteration != null);
+        const config = cp.configSnapshot;
+        const checkpoint: LabCheckpoint = cp;
+
+        if (hasProgress && checkpoint.currentCombo && !checkpoint.partialResults?.length) {
+          const dbResults = await labStorage.getRunResults(runId);
+          const comboResults = dbResults.filter(r => `${r.ticker}|${r.timeframe}` === checkpoint.currentCombo);
+          if (comboResults.length > 0) {
+            checkpoint.partialResults = comboResults.map(r => ({
+              ticker: r.ticker, timeframe: r.timeframe,
+              netProfitPercent: r.netProfitPercent, winRatePercent: r.winRatePercent,
+              maxDrawdownPercent: r.maxDrawdownPercent, profitFactor: r.profitFactor,
+              totalTrades: r.totalTrades, params: r.params as Record<string, any>,
+              trades: (r.trades as any[]) ?? [], equityCurve: (r.equityCurve as any[]) ?? [],
+            }));
+          }
+        }
+
+        let retryPooc: boolean | undefined;
+        if (run.strategyId) {
+          const strat = await labStorage.getStrategy(run.strategyId);
+          if (strat?.strategySettings && typeof strat.strategySettings === "object") {
+            retryPooc = (strat.strategySettings as any).processOrdersOnClose;
+          }
+        }
+
+        const newJob = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: false });
+        newJob.runId = runId;
+        newJob.walletAddress = run.userId ?? undefined;
+        await labStorage.resumeRun(runId);
+
+        const resumeCheckpoint = hasProgress ? checkpoint : undefined;
+        const attempt = crashCount + 1;
+        const detail = hasProgress
+          ? (checkpoint.completedCombos?.length
+            ? `${checkpoint.completedCombos.length} combos done`
+            : `mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}`)
+          : "from scratch";
+        console.log(`[QuantumLab] Lazy recovery: auto-resuming run ${runId} (${detail}, attempt ${attempt}/${MAX_AUTO_RESUME_ATTEMPTS})`);
+        startOptimizationJob(config, newJob, runId, resumeCheckpoint, undefined, undefined, undefined, retryPooc);
+
+        labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
+        break;
+      } catch (err: any) {
+        console.log(`[QuantumLab] Lazy recovery error for run ${runId}: ${err.message}`);
+        break;
+      }
+    }
+  }
+
+  setTimeout(() => {
+    console.log(`[QuantumLab] Lazy recovery loop started (checking every 60s for interrupted runs)`);
+    lazyRecoveryCycle();
+    setInterval(lazyRecoveryCycle, 60_000);
+  }, 75_000);
 
   labCleanup = async (reason: string) => {
     console.log(`[QuantumLab] ${reason} — pausing active jobs...`);

@@ -871,6 +871,7 @@ export interface LabCheckpoint {
     score: number;
     params: Record<string, any>;
   };
+  resourceError?: boolean;
 }
 
 export interface LabJobProgress {
