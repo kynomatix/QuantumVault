@@ -880,7 +880,7 @@ export class LabDatabaseStorage implements ILabStorage {
       ranked AS (
         SELECT *,
           ROW_NUMBER() OVER (
-            PARTITION BY ticker, timeframe
+            PARTITION BY ticker, timeframe, strategy_id
             ORDER BY net_profit_percent DESC, result_id DESC
           ) AS rn
         FROM deduped
