@@ -280,7 +280,9 @@ export function executePine(
   const userFunctions: Record<string, { params: string[]; body: Stmt[] }> = {};
   let currentBar = 0;
   let opsCount = 0;
+  let totalOps = 0;
   const MAX_OPS = 500000;
+  const MAX_TOTAL_OPS = 50_000_000;
 
   function setVar(name: string, value: any) {
     if (!vars[name]) vars[name] = new Array(n);
@@ -663,7 +665,7 @@ export function executePine(
   }
 
   function evalExpr(e: Expr): any {
-    if (++opsCount > MAX_OPS) throw new Error("Execution budget exceeded");
+    if (++opsCount > MAX_OPS || ++totalOps > MAX_TOTAL_OPS) throw new Error("Execution budget exceeded");
 
     switch (e.k) {
       case "num": return e.v;
@@ -741,7 +743,7 @@ export function executePine(
           case "short": return "short";
           case "position_size": return broker.positionSize;
           case "position_avg_price": return broker.positionAvgPrice;
-          case "equity": return broker.equity;
+          case "equity": return broker.getEquityWithUnrealized(closeArr[currentBar]);
           case "cash": return "cash";
           case "percent_of_equity": return "percent_of_equity";
           case "fixed": return "fixed";
@@ -1291,11 +1293,27 @@ export function executePine(
     return min === Infinity ? NA : min;
   }
 
+  function getSrcForBb(e: Expr): number[] | null {
+    if (e.k === "id") {
+      if (builtinSeries[e.name]) return Array.from(builtinSeries[e.name]);
+      if (precomputed[e.name]) return precomputed[e.name];
+    }
+    return null;
+  }
+
+  function argKeyForTa(a: Expr): string {
+    if (a.k === "id") return a.name;
+    if (a.k === "num") return String(a.v);
+    return "expr";
+  }
+
   function evalTaCall(fn: string, args: Expr[], kw: [string, Expr][]): any {
     switch (fn) {
       case "sma": case "ema": case "rma": case "wma": case "rsi":
       case "atr": case "stdev": case "highest": case "lowest":
-      case "pivothigh": case "pivotlow": case "vwap": case "tr": {
+      case "pivothigh": case "pivotlow": case "vwap": case "tr":
+      case "linreg": case "percentrank": case "cum":
+      case "falling": case "rising": case "dev": case "median": case "mfi": {
         return computeOnFly(fn, args, kw);
       }
       case "dmi": {
@@ -1306,6 +1324,50 @@ export function executePine(
           isNaN(diPlus[currentBar]) ? NA : diPlus[currentBar],
           isNaN(diMinus[currentBar]) ? NA : diMinus[currentBar],
           isNaN(adxVal[currentBar]) ? NA : adxVal[currentBar],
+        ];
+      }
+      case "adx": {
+        const len = toNum(evalExpr(args[0]));
+        const ck = `adx_${len}`;
+        if (!indicatorCache.has(ck)) indicatorCache.set(ck, ind.adx(
+          Array.from(highArr), Array.from(lowArr), Array.from(closeArr), Math.round(len)));
+        const vals = indicatorCache.get(ck);
+        return currentBar < vals.length && !isNaN(vals[currentBar]) ? vals[currentBar] : NA;
+      }
+      case "bb": {
+        const srcArr = getSrcForBb(args[0]);
+        const len = args.length > 1 ? toNum(evalExpr(args[1])) : 20;
+        const mult = args.length > 2 ? toNum(evalExpr(args[2])) : 2.0;
+        const ck = `bb_${argKeyForTa(args[0])}_${len}_${mult}`;
+        if (!indicatorCache.has(ck) && srcArr) {
+          indicatorCache.set(ck, ind.bollingerBands(srcArr, Math.round(len), mult));
+        }
+        const bands = indicatorCache.get(ck);
+        if (!bands) return [NA, NA, NA];
+        const b = currentBar;
+        return [
+          b < bands.basis.length && !isNaN(bands.basis[b]) ? bands.basis[b] : NA,
+          b < bands.upper.length && !isNaN(bands.upper[b]) ? bands.upper[b] : NA,
+          b < bands.lower.length && !isNaN(bands.lower[b]) ? bands.lower[b] : NA,
+        ];
+      }
+      case "kc": {
+        const srcArr = getSrcForBb(args[0]);
+        const len = args.length > 1 ? toNum(evalExpr(args[1])) : 20;
+        const mult = args.length > 2 ? toNum(evalExpr(args[2])) : 1.5;
+        const ck = `kc_${argKeyForTa(args[0])}_${len}_${mult}`;
+        if (!indicatorCache.has(ck)) {
+          indicatorCache.set(ck, ind.keltnerChannel(
+            srcArr || Array.from(closeArr),
+            Array.from(highArr), Array.from(lowArr),
+            Math.round(len), Math.round(len), mult));
+        }
+        const bands = indicatorCache.get(ck);
+        const b = currentBar;
+        return [
+          b < bands.basis.length && !isNaN(bands.basis[b]) ? bands.basis[b] : NA,
+          b < bands.upper.length && !isNaN(bands.upper[b]) ? bands.upper[b] : NA,
+          b < bands.lower.length && !isNaN(bands.lower[b]) ? bands.lower[b] : NA,
         ];
       }
       case "crossover": {
@@ -1500,7 +1562,7 @@ export function executePine(
   }
 
   function execStmt(stmt: Stmt): "break" | "continue" | null {
-    if (++opsCount > MAX_OPS) throw new Error("Execution budget exceeded");
+    if (++opsCount > MAX_OPS || ++totalOps > MAX_TOTAL_OPS) throw new Error("Execution budget exceeded");
 
     switch (stmt.k) {
       case "decl": {
