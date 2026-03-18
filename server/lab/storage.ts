@@ -173,6 +173,25 @@ export class LabDatabaseStorage implements ILabStorage {
       if (recovered > 0) {
         console.log(`[QuantumLab] Recovered ${recovered} failed run(s) with salvageable data`);
       }
+
+      const completedRuns = await db.select({
+        id: labOptimizationRuns.id,
+        checkpoint: labOptimizationRuns.checkpoint,
+        configSnapshot: labOptimizationRuns.configSnapshot,
+      }).from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "complete"));
+      let trimmed = 0;
+      for (const run of completedRuns) {
+        const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+        if (cp && (cp.completedCombos || cp.currentCombo || cp.currentIteration != null)) {
+          const csType = cp?.configSnapshot?.type || (run.configSnapshot as any)?.type || null;
+          const slimCp = csType ? { configSnapshot: { type: csType } } : null;
+          await db.update(labOptimizationRuns).set({ checkpoint: slimCp as any }).where(eq(labOptimizationRuns.id, run.id));
+          trimmed++;
+        }
+      }
+      if (trimmed > 0) {
+        console.log(`[QuantumLab] Trimmed checkpoint bloat from ${trimmed} completed run(s)`);
+      }
     } catch (err: any) {
       console.log(`[QuantumLab] Stale run cleanup error: ${err.message}`);
     }
@@ -227,24 +246,29 @@ export class LabDatabaseStorage implements ILabStorage {
   }
 
   async completeRun(id: number, totalConfigsTested: number): Promise<void> {
+    const [run] = await db.select({ configSnapshot: labOptimizationRuns.configSnapshot }).from(labOptimizationRuns).where(eq(labOptimizationRuns.id, id));
+    const slimCheckpoint = run?.configSnapshot && typeof run.configSnapshot === "object"
+      ? { configSnapshot: { type: (run.configSnapshot as any).type } }
+      : null;
     await db.update(labOptimizationRuns).set({
       status: "complete",
       totalConfigsTested,
       completedAt: new Date(),
+      checkpoint: slimCheckpoint as any,
     }).where(eq(labOptimizationRuns.id, id));
   }
 
-  async finalizeSuccessfulRun(id: number, totalConfigsTested: number, checkpoint: LabCheckpoint): Promise<void> {
-    await db.transaction(async (tx) => {
-      await tx.update(labOptimizationRuns).set({
-        status: "complete",
-        totalConfigsTested,
-        completedAt: new Date(),
-      }).where(eq(labOptimizationRuns.id, id));
-      await tx.update(labOptimizationRuns).set({
-        checkpoint: checkpoint as any,
-      }).where(eq(labOptimizationRuns.id, id));
-    });
+  async finalizeSuccessfulRun(id: number, totalConfigsTested: number, _checkpoint: LabCheckpoint): Promise<void> {
+    const [run] = await db.select({ configSnapshot: labOptimizationRuns.configSnapshot }).from(labOptimizationRuns).where(eq(labOptimizationRuns.id, id));
+    const slimCheckpoint = run?.configSnapshot && typeof run.configSnapshot === "object"
+      ? { configSnapshot: { type: (run.configSnapshot as any).type } }
+      : null;
+    await db.update(labOptimizationRuns).set({
+      status: "complete",
+      totalConfigsTested,
+      completedAt: new Date(),
+      checkpoint: slimCheckpoint as any,
+    }).where(eq(labOptimizationRuns.id, id));
   }
 
   async failRun(id: number): Promise<void> {
