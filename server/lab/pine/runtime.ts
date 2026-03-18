@@ -279,31 +279,34 @@ export function executePine(
   const inputDefaults: Record<string, any> = {};
   const userFunctions: Record<string, { params: string[]; body: Stmt[] }> = {};
   let currentBar = 0;
-  let opsCount = 0;
+  let opsThrottle = 0;
   let totalOps = 0;
+  const OPS_CHECK_INTERVAL = 64;
   const MAX_OPS = 500000;
   const MAX_TOTAL_OPS = 50_000_000;
 
-  function setVar(name: string, value: any) {
+  function checkBudget() {
+    if (totalOps > MAX_TOTAL_OPS) throw new Error("Global execution budget exceeded");
+    if (opsThrottle > MAX_OPS) throw new Error("Execution budget exceeded");
+  }
+
+  function allocVar(name: string) {
     if (!vars[name]) vars[name] = new Array(n);
+  }
+
+  function setVar(name: string, value: any) {
     vars[name][currentBar] = value;
   }
 
-  function getVar(name: string, offset: number = 0): any {
+  function getVar(name: string, offset: number): any {
     const idx = currentBar - offset;
     if (idx < 0) return NA;
-    if (precomputed[name]) {
-      const arr = precomputed[name];
-      return idx < arr.length ? (isNaN(arr[idx]) ? NA : arr[idx]) : NA;
-    }
-    if (builtinSeries[name]) {
-      const arr = builtinSeries[name];
-      return idx < arr.length ? arr[idx] : NA;
-    }
-    if (vars[name]) {
-      const v = vars[name][idx];
-      return v === undefined ? NA : v;
-    }
+    const pc = precomputed[name];
+    if (pc) return idx < pc.length ? (isNaN(pc[idx]) ? NA : pc[idx]) : NA;
+    const bs = builtinSeries[name];
+    if (bs) return idx < bs.length ? bs[idx] : NA;
+    const va = vars[name];
+    if (va) { const v = va[idx]; return v === undefined ? NA : v; }
     return NA;
   }
 
@@ -665,8 +668,7 @@ export function executePine(
   }
 
   function evalExpr(e: Expr): any {
-    if (++totalOps > MAX_TOTAL_OPS) throw new Error("Global execution budget exceeded");
-    if (++opsCount > MAX_OPS) throw new Error("Execution budget exceeded");
+    if ((++totalOps & 63) === 0) { opsThrottle += 64; checkBudget(); }
 
     switch (e.k) {
       case "num": return e.v;
@@ -711,20 +713,15 @@ export function executePine(
   }
 
   function resolveId(name: string): any {
+    const bs = builtinSeries[name];
+    if (bs) return (bs as any)[currentBar];
+    const pc = precomputed[name];
+    if (pc) { const v = pc[currentBar]; return isNaN(v) ? NA : v; }
     if (params[name] !== undefined) return params[name];
-    const barVal = getVar(name, 0);
-    if (barVal !== NA) return barVal;
-
+    const va = vars[name];
+    if (va) { const v = va[currentBar]; return v === undefined ? NA : v; }
     switch (name) {
       case "bar_index": return currentBar;
-      case "close": return closeArr[currentBar];
-      case "open": return openArr[currentBar];
-      case "high": return highArr[currentBar];
-      case "low": return lowArr[currentBar];
-      case "volume": return volArr[currentBar];
-      case "hl2": return hl2Arr[currentBar];
-      case "hlc3": return hlc3Arr[currentBar];
-      case "ohlc4": return ohlc4Arr[currentBar];
       case "time": return candles[currentBar].time;
       case "na": return NA;
       case "true": return true;
@@ -862,6 +859,7 @@ export function executePine(
         const fn = userFunctions[name];
         const savedVars: Record<string, any> = {};
         for (let i = 0; i < fn.params.length; i++) {
+          allocVar(fn.params[i]);
           savedVars[fn.params[i]] = vars[fn.params[i]] ? vars[fn.params[i]][currentBar] : undefined;
           setVar(fn.params[i], i < e.args.length ? evalExpr(e.args[i]) : NA);
         }
@@ -1435,9 +1433,11 @@ export function executePine(
       }
       case "cum": {
         const v = toNum(evalExpr(args[0]));
-        const prevCum = currentBar > 0 ? toNum(getVar("__ta_cum_" + (args[0].k === "id" ? args[0].name : "x"), 1)) : 0;
+        const cumKey = "__ta_cum_" + (args[0].k === "id" ? args[0].name : "x");
+        const prevCum = currentBar > 0 ? toNum(getVar(cumKey, 1)) : 0;
         const result = (isNaN(prevCum) ? 0 : prevCum) + (isNaN(v) ? 0 : v);
-        setVar("__ta_cum_" + (args[0].k === "id" ? args[0].name : "x"), result);
+        allocVar(cumKey);
+        setVar(cumKey, result);
         return result;
       }
       default: return NA;
@@ -1563,14 +1563,14 @@ export function executePine(
   }
 
   function execStmt(stmt: Stmt): "break" | "continue" | null {
-    if (++totalOps > MAX_TOTAL_OPS) throw new Error("Global execution budget exceeded");
-    if (++opsCount > MAX_OPS) throw new Error("Execution budget exceeded");
+    if ((++totalOps & 63) === 0) { opsThrottle += 64; checkBudget(); }
 
     switch (stmt.k) {
       case "decl": {
         currentDeclName = stmt.name;
         if (stmt.isVar) {
           if (currentBar === 0) {
+            allocVar(stmt.name);
             const v = evalExpr(stmt.e);
             setVar(stmt.name, v);
             varIsVar.add(stmt.name);
@@ -1579,10 +1579,13 @@ export function executePine(
             setVar(stmt.name, prev);
           }
         } else {
-          if (precomputed[stmt.name]) {
-            const v = precomputed[stmt.name][currentBar];
+          const pc = precomputed[stmt.name];
+          if (pc) {
+            const v = pc[currentBar];
+            allocVar(stmt.name);
             setVar(stmt.name, isNaN(v) ? NA : v);
           } else {
+            if (currentBar === 0) allocVar(stmt.name);
             const v = evalExpr(stmt.e);
             setVar(stmt.name, v);
           }
@@ -1591,6 +1594,7 @@ export function executePine(
         break;
       }
       case "multi_decl": {
+        if (currentBar === 0) for (const nm of stmt.names) allocVar(nm);
         const result = evalExpr(stmt.e);
         if (Array.isArray(result)) {
           for (let i = 0; i < stmt.names.length; i++) {
@@ -1657,6 +1661,7 @@ export function executePine(
         if (step === 0) break;
         let iterations = 0;
         const maxIter = 10000;
+        allocVar(stmt.v);
         for (let i = start; step > 0 ? i <= end : i >= end; i += step) {
           if (++iterations > maxIter) break;
           setVar(stmt.v, i);
@@ -1785,7 +1790,7 @@ export function executePine(
   const equityValues = new Array(n);
 
   for (currentBar = 0; currentBar < n; currentBar++) {
-    opsCount = 0;
+    opsThrottle = 0;
 
     if (!config.processOrdersOnClose && currentBar > 0) {
       broker.fillPendingCloses(openArr[currentBar], currentBar, candles[currentBar].time);
