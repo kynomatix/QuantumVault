@@ -51,6 +51,7 @@ class Broker {
   position: Position | null = null;
   pendingExits: PendingExit[] = [];
   pendingEntries: PendingEntry[] = [];
+  pendingCloses: { id: string; qtyPercent: number; comment: string; isCloseAll: boolean }[] = [];
   trades: LabTradeRecord[] = [];
   equity: number;
   private config: PineEngineConfig;
@@ -73,6 +74,21 @@ class Broker {
       this.applyEntry(pe.id, pe.direction, bar, price, time);
     }
     this.pendingEntries = [];
+  }
+
+  queueClose(id: string, qtyPercent: number, comment: string, isCloseAll: boolean) {
+    this.pendingCloses.push({ id, qtyPercent, comment, isCloseAll });
+  }
+
+  fillPendingCloses(price: number, bar: number, time: number) {
+    for (const pc of this.pendingCloses) {
+      if (pc.isCloseAll) {
+        this.closeAll(bar, price, time, pc.comment);
+      } else {
+        this.close(pc.id, bar, price, time, pc.qtyPercent, pc.comment);
+      }
+    }
+    this.pendingCloses = [];
   }
 
   applyEntry(id: string, direction: "long" | "short", bar: number, price: number, time: number) {
@@ -261,6 +277,7 @@ export function executePine(
   const precomputed: PrecomputedSeries = {};
   const indicatorCache: Map<string, any> = new Map();
   const inputDefaults: Record<string, any> = {};
+  const userFunctions: Record<string, { params: string[]; body: Stmt[] }> = {};
   let currentBar = 0;
   let opsCount = 0;
   const MAX_OPS = 500000;
@@ -306,6 +323,19 @@ export function executePine(
       const l = resolveConst(e.l);
       const r = resolveConst(e.r);
       if (typeof l === "number" && typeof r === "number") return evalBinOp(e.op, l, r);
+    }
+    if (e.k === "call" && e.fn.k === "id" && e.fn.name === "timestamp") {
+      const tsArgs = e.args.map(a => resolveConst(a));
+      if (tsArgs.length >= 3 && tsArgs.every((a: any) => typeof a === "number")) {
+        return Date.UTC(tsArgs[0], tsArgs[1] - 1, tsArgs[2],
+          tsArgs.length > 3 ? tsArgs[3] : 0,
+          tsArgs.length > 4 ? tsArgs[4] : 0,
+          tsArgs.length > 5 ? tsArgs[5] : 0);
+      }
+      if (tsArgs.length === 1 && typeof tsArgs[0] === "string") {
+        const d = Date.parse(tsArgs[0]);
+        return isNaN(d) ? undefined : d;
+      }
     }
     return undefined;
   }
@@ -559,9 +589,38 @@ export function executePine(
         }
         precomputed[name] = result; return true;
       }
+      case "linreg": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.linreg(src, len); return true;
+      }
+      case "percentrank": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.percentRank(src, len); return true;
+      }
+      case "cum": {
+        const src = getSource(0);
+        if (!src) return false;
+        const result = new Array(n).fill(NaN);
+        let total = 0;
+        for (let i = 0; i < n; i++) { total += isNaN(src[i]) ? 0 : src[i]; result[i] = total; }
+        precomputed[name] = result; return true;
+      }
+      case "median": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        const result = new Array(n).fill(NaN);
+        for (let i = len - 1; i < n; i++) {
+          const window = src.slice(i - len + 1, i + 1).filter(v => !isNaN(v)).sort((a, b) => a - b);
+          if (window.length > 0) result[i] = window[Math.floor(window.length / 2)];
+        }
+        precomputed[name] = result; return true;
+      }
       case "dmi": return false;
       case "crossover": case "crossunder": case "cross": return false;
       case "barssince": case "change": return false;
+      case "falling": case "rising": case "mfi": case "dev": return false;
       default: return false;
     }
   }
@@ -779,9 +838,55 @@ export function executePine(
       if (name === "float" || name === "int" || name === "bool" || name === "string") {
         return e.args.length > 0 ? evalExpr(e.args[0]) : NA;
       }
-      if (name === "timestamp") return Date.now();
+      if (name === "timestamp") {
+        const tsArgs = e.args.map(a => evalExpr(a));
+        if (tsArgs.length >= 3) {
+          const yr = toNum(tsArgs[0]), mo = toNum(tsArgs[1]) - 1, dy = toNum(tsArgs[2]);
+          const hr = tsArgs.length > 3 ? toNum(tsArgs[3]) : 0;
+          const mn = tsArgs.length > 4 ? toNum(tsArgs[4]) : 0;
+          const sc = tsArgs.length > 5 ? toNum(tsArgs[5]) : 0;
+          return Date.UTC(yr, mo, dy, hr, mn, sc);
+        }
+        if (tsArgs.length === 1 && typeof tsArgs[0] === "string") {
+          const d = Date.parse(tsArgs[0]);
+          return isNaN(d) ? Date.now() : d;
+        }
+        return Date.now();
+      }
       if (name === "alert" || name === "alertcondition" || name === "runtime") return NA;
       if (name === "__array_literal") return e.args.map(a => evalExpr(a));
+      if (userFunctions[name]) {
+        const fn = userFunctions[name];
+        const savedVars: Record<string, any> = {};
+        for (let i = 0; i < fn.params.length; i++) {
+          savedVars[fn.params[i]] = vars[fn.params[i]] ? vars[fn.params[i]][currentBar] : undefined;
+          setVar(fn.params[i], i < e.args.length ? evalExpr(e.args[i]) : NA);
+        }
+        for (const [kwName, kwExpr] of e.kw) {
+          if (fn.params.includes(kwName)) {
+            setVar(kwName, evalExpr(kwExpr));
+          }
+        }
+        let result: any = NA;
+        for (const stmt of fn.body) {
+          const r = execStmt(stmt);
+          if (r === "break" || r === "continue") break;
+        }
+        const lastStmt = fn.body[fn.body.length - 1];
+        if (lastStmt && lastStmt.k === "expr") {
+          result = evalExpr(lastStmt.e);
+        } else {
+          result = fn.params.length > 0 && vars[fn.params[fn.params.length - 1]]
+            ? vars[fn.params[fn.params.length - 1]][currentBar]
+            : NA;
+        }
+        for (const p of fn.params) {
+          if (savedVars[p] !== undefined) {
+            setVar(p, savedVars[p]);
+          }
+        }
+        return result;
+      }
     }
 
     if (e.fn.k === "mem" && e.fn.obj.k === "id") {
@@ -1004,6 +1109,69 @@ export function executePine(
           for (let j = pi - leftBars; j < pi; j++) if (src[j] <= src[pi]) { ok = false; break; }
           if (ok) for (let j = pi + 1; j <= pi + rightBars; j++) if (src[j] <= src[pi]) { ok = false; break; }
           if (ok) result[i] = src[pi];
+        }
+        break;
+      }
+      case "linreg": { const src = getSrc(0); const len = getL(1); if (src) result = ind.linreg(src, len); break; }
+      case "percentrank": { const src = getSrc(0); const len = getL(1); if (src) result = ind.percentRank(src, len); break; }
+      case "cum": {
+        const src = getSrc(0);
+        if (src) {
+          result = new Array(n).fill(NaN);
+          let total = 0;
+          for (let i = 0; i < n; i++) { total += isNaN(src[i]) ? 0 : src[i]; result[i] = total; }
+        }
+        break;
+      }
+      case "falling": {
+        const src = getSrc(0); const len = getL(1);
+        if (src) {
+          result = new Array(n).fill(0);
+          for (let i = len; i < n; i++) {
+            let ok = true;
+            for (let j = 1; j <= len; j++) { if (src[i - j + 1] >= src[i - j]) { ok = false; break; } }
+            result[i] = ok ? 1 : 0;
+          }
+        }
+        break;
+      }
+      case "rising": {
+        const src = getSrc(0); const len = getL(1);
+        if (src) {
+          result = new Array(n).fill(0);
+          for (let i = len; i < n; i++) {
+            let ok = true;
+            for (let j = 1; j <= len; j++) { if (src[i - j + 1] <= src[i - j]) { ok = false; break; } }
+            result[i] = ok ? 1 : 0;
+          }
+        }
+        break;
+      }
+      case "dev": { const src = getSrc(0); const len = getL(1); if (src) result = ind.stdev(src, len); break; }
+      case "median": {
+        const src = getSrc(0); const len = getL(1);
+        if (src) {
+          result = new Array(n).fill(NaN);
+          for (let i = len - 1; i < n; i++) {
+            const window = src.slice(i - len + 1, i + 1).filter(v => !isNaN(v)).sort((a, b) => a - b);
+            if (window.length > 0) result[i] = window[Math.floor(window.length / 2)];
+          }
+        }
+        break;
+      }
+      case "mfi": {
+        const len = getL(0);
+        const typPrice = new Array(n);
+        for (let i = 0; i < n; i++) typPrice[i] = (h[i] + l[i] + cl[i]) / 3;
+        result = new Array(n).fill(NaN);
+        for (let i = len; i < n; i++) {
+          let posMF = 0, negMF = 0;
+          for (let j = i - len + 1; j <= i; j++) {
+            const mf = typPrice[j] * (volArr[j] || 1);
+            if (typPrice[j] > typPrice[j - 1]) posMF += mf;
+            else if (typPrice[j] < typPrice[j - 1]) negMF += mf;
+          }
+          result[i] = negMF === 0 ? 100 : 100 - (100 / (1 + posMF / negMF));
         }
         break;
       }
@@ -1300,12 +1468,20 @@ export function executePine(
         const comment = getKw("comment") ?? id;
         const when = getKw("when");
         if (when !== undefined && !when) return NA;
-        broker.close(id, bar, price, time, toNum(qtyPct), String(comment));
+        if (config.processOrdersOnClose) {
+          broker.close(id, bar, price, time, toNum(qtyPct), String(comment));
+        } else {
+          broker.queueClose(id, toNum(qtyPct), String(comment), false);
+        }
         return NA;
       }
       case "close_all": {
         const comment = getKw("comment") ?? "Close All";
-        broker.closeAll(bar, price, time, String(comment));
+        if (config.processOrdersOnClose) {
+          broker.closeAll(bar, price, time, String(comment));
+        } else {
+          broker.queueClose("", 100, String(comment), true);
+        }
         return NA;
       }
       case "exit": {
@@ -1464,6 +1640,10 @@ export function executePine(
         }
         break;
       }
+      case "func_decl": {
+        userFunctions[stmt.name] = { params: stmt.params, body: stmt.body };
+        break;
+      }
       case "expr": {
         evalExpr(stmt.e);
         break;
@@ -1490,12 +1670,17 @@ export function executePine(
       case "bool": return false;
       case "string": return "";
       case "source": return "close";
+      case "time": return 0;
       default: return 0;
     }
   }
 
   function precomputePhase() {
     for (const stmt of ast) {
+      if (stmt.k === "func_decl") {
+        userFunctions[stmt.name] = { params: stmt.params, body: stmt.body };
+        continue;
+      }
       if (stmt.k === "decl" && !stmt.isVar) {
         if (stmt.e.k === "call" && stmt.e.fn.k === "mem" && stmt.e.fn.obj.k === "id" && stmt.e.fn.obj.name === "input") {
           if (params[stmt.name] !== undefined) {
@@ -1527,6 +1712,7 @@ export function executePine(
     opsCount = 0;
 
     if (!config.processOrdersOnClose && currentBar > 0) {
+      broker.fillPendingCloses(openArr[currentBar], currentBar, candles[currentBar].time);
       broker.fillPendingEntries(openArr[currentBar], currentBar, candles[currentBar].time);
       broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
     }

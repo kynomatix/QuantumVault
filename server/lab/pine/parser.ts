@@ -23,6 +23,7 @@ export type Stmt =
   | { k: "for"; v: string; start: Expr; end: Expr; step: Expr | null; body: Stmt[] }
   | { k: "while"; c: Expr; body: Stmt[] }
   | { k: "switch"; e: Expr | null; cases: { vals: (Expr | null)[]; body: Stmt[] }[] }
+  | { k: "func_decl"; name: string; params: string[]; body: Stmt[] }
   | { k: "expr"; e: Expr }
   | { k: "break" }
   | { k: "continue" }
@@ -80,6 +81,7 @@ export function parse(tokens: Token[]): Stmt[] {
     if (c.t === TT.LBrack && isMultiDecl()) return parseMultiDecl();
 
     if (c.t === TT.Id) {
+      if (isFuncDecl()) return parseFuncDecl();
       if (isTypeAnnotatedDecl()) return parseTypedDecl();
       if (isPlainDecl()) return parsePlainDecl();
     }
@@ -163,6 +165,34 @@ export function parse(tokens: Token[]): Stmt[] {
     eat(TT.Assign);
     const e = parseExpr();
     return { k: "decl", isVar: false, ty: null, name, e };
+  }
+
+  function isFuncDecl(): boolean {
+    if (cur().t !== TT.Id || peek(1).t !== TT.LParen) return false;
+    let j = pos + 2;
+    let depth = 1;
+    while (j < tokens.length && depth > 0) {
+      if (tokens[j].t === TT.LParen) depth++;
+      if (tokens[j].t === TT.RParen) depth--;
+      j++;
+    }
+    return j < tokens.length && tokens[j].t === TT.Arrow;
+  }
+
+  function parseFuncDecl(): Stmt {
+    const name = eat(TT.Id).v;
+    eat(TT.LParen);
+    const params: string[] = [];
+    if (cur().t !== TT.RParen) {
+      params.push(eat(TT.Id).v);
+      while (match(TT.Comma)) {
+        params.push(eat(TT.Id).v);
+      }
+    }
+    eat(TT.RParen);
+    eat(TT.Arrow);
+    const body = parseBlock();
+    return { k: "func_decl", name, params, body };
   }
 
   function parseIf(): Stmt {
