@@ -1770,6 +1770,18 @@ export function executePine(
 
   precomputePhase();
 
+  const hotStmts: Stmt[] = [];
+  for (const stmt of ast) {
+    if (stmt.k === "func_decl") continue;
+    if (stmt.k === "decl" && !stmt.isVar) {
+      if (precomputed[stmt.name]) continue;
+      if (inputDefaults[stmt.name] !== undefined) continue;
+      if (stmt.e.k === "call" && stmt.e.fn.k === "id" && stmt.e.fn.name === "strategy") continue;
+      if (stmt.e.k === "id" && builtinSeries[stmt.name]) continue;
+    }
+    hotStmts.push(stmt);
+  }
+
   const equityValues = new Array(n);
 
   for (currentBar = 0; currentBar < n; currentBar++) {
@@ -1781,7 +1793,7 @@ export function executePine(
       broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
     }
 
-    for (const stmt of ast) {
+    for (const stmt of hotStmts) {
       try {
         execStmt(stmt);
       } catch (e: any) {
