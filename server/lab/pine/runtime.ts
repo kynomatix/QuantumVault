@@ -1502,7 +1502,6 @@ export function executePine(
       return found ? evalExpr(found[1]) : undefined;
     };
 
-    const price = config.processOrdersOnClose ? closeArr[currentBar] : (currentBar + 1 < n ? openArr[currentBar + 1] : closeArr[currentBar]);
     const time = candles[currentBar].time;
     const bar = currentBar;
 
@@ -1513,11 +1512,7 @@ export function executePine(
         const when = getKw("when");
         if (when !== undefined && !when) return NA;
         const direction = dir === "long" ? "long" as const : "short" as const;
-        if (config.processOrdersOnClose) {
-          broker.applyEntry(id, direction, bar, price, time);
-        } else {
-          broker.queueEntry(id, direction, bar, time);
-        }
+        broker.queueEntry(id, direction, bar, time);
         return NA;
       }
       case "close": {
@@ -1526,20 +1521,12 @@ export function executePine(
         const comment = getKw("comment") ?? id;
         const when = getKw("when");
         if (when !== undefined && !when) return NA;
-        if (config.processOrdersOnClose) {
-          broker.close(id, bar, price, time, toNum(qtyPct), String(comment));
-        } else {
-          broker.queueClose(id, toNum(qtyPct), String(comment), false);
-        }
+        broker.queueClose(id, toNum(qtyPct), String(comment), false);
         return NA;
       }
       case "close_all": {
         const comment = getKw("comment") ?? "Close All";
-        if (config.processOrdersOnClose) {
-          broker.closeAll(bar, price, time, String(comment));
-        } else {
-          broker.queueClose("", 100, String(comment), true);
-        }
+        broker.queueClose("", 100, String(comment), true);
         return NA;
       }
       case "exit": {
@@ -1802,6 +1789,8 @@ export function executePine(
     }
 
     if (config.processOrdersOnClose) {
+      broker.fillPendingCloses(closeArr[currentBar], currentBar, candles[currentBar].time);
+      broker.fillPendingEntries(closeArr[currentBar], currentBar, candles[currentBar].time);
       broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
     }
 
