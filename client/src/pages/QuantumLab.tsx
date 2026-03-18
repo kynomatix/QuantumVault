@@ -2002,21 +2002,31 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
   const { data: strategies } = useQuery<LabStrategy[]>({ queryKey: ["/api/lab/strategies"] });
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const loadingRef = useRef(false);
+
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [runs?.length]);
 
   useEffect(() => {
     const el = sentinelRef.current;
     if (!el) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting) {
-          setVisibleCount(prev => prev + PAGE_SIZE);
+        if (entry.isIntersecting && !loadingRef.current) {
+          loadingRef.current = true;
+          setVisibleCount(prev => {
+            const next = prev + PAGE_SIZE;
+            setTimeout(() => { loadingRef.current = false; }, 100);
+            return next;
+          });
         }
       },
-      { rootMargin: "200px" }
+      { threshold: 0.1 }
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [runs]);
+  }, [runs?.length, visibleCount]);
 
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => { await apiRequest("DELETE", `/api/lab/runs/${id}`); },
