@@ -83,6 +83,134 @@ const labProxy = createProxyMiddleware({
   },
 });
 
+import { db } from "./db";
+import { labOptimizationRuns, labStrategies, labOptimizationConfigSchema } from "@shared/schema";
+import { eq, sql } from "drizzle-orm";
+
+const labQueueBodyParser = express.json({ limit: "10mb" });
+
+app.post("/api/lab/run-optimization", (req: Request, res: Response, next: NextFunction) => {
+  if (labSupervisor.isReady) return next();
+  sessionMiddleware(req, res, (err) => {
+    if (err) return next(err);
+    labQueueBodyParser(req, res, async () => {
+      try {
+        const walletAddress = (req as any).session?.walletAddress;
+        if (!walletAddress) return res.status(401).json({ error: "Not authenticated" });
+        const parsed = labOptimizationConfigSchema.safeParse(req.body);
+        if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+        const config = parsed.data;
+        if (!config.strategyId) return res.status(400).json({ error: "strategyId is required for queuing" });
+
+        const orderResult = await db.select({ maxOrder: sql<number>`COALESCE(MAX(${labOptimizationRuns.queueOrder}), 0)` })
+          .from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "queued"));
+        const queueOrder = (orderResult[0]?.maxOrder ?? 0) + 1;
+
+        const [run] = await db.insert(labOptimizationRuns).values({
+          strategyId: config.strategyId,
+          userId: walletAddress,
+          tickers: config.tickers,
+          timeframes: config.timeframes,
+          startDate: config.startDate,
+          endDate: config.endDate,
+          randomSamples: config.randomSamples,
+          topK: config.topK,
+          refinementsPerSeed: config.refinementsPerSeed,
+          minTrades: config.minTrades,
+          maxDrawdownCap: config.maxDrawdownCap,
+          mode: config.mode,
+          status: "queued",
+          queueOrder,
+          configSnapshot: { type: "new", config } as any,
+        }).returning();
+
+        console.log(`[LabQueue] Lab not ready — queued run ${run.id} directly (order: ${queueOrder})`);
+        res.json({ queued: true, runId: run.id, queueOrder });
+      } catch (e: any) {
+        console.error(`[LabQueue] Direct queue failed: ${e.message}`);
+        res.status(500).json({ error: e.message });
+      }
+    });
+  });
+});
+
+app.post("/api/lab/runs/:id/refine", (req: Request, res: Response, next: NextFunction) => {
+  if (labSupervisor.isReady) return next();
+  sessionMiddleware(req, res, (err) => {
+    if (err) return next(err);
+    labQueueBodyParser(req, res, async () => {
+      try {
+        const walletAddress = (req as any).session?.walletAddress;
+        if (!walletAddress) return res.status(401).json({ error: "Not authenticated" });
+        const runId = parseInt(req.params.id);
+        const { ticker, timeframe } = req.body;
+        if (!ticker || !timeframe) return res.status(400).json({ error: "ticker and timeframe required" });
+
+        const [sourceRun] = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.id, runId));
+        if (!sourceRun) return res.status(404).json({ error: "Source run not found" });
+        if (sourceRun.userId !== walletAddress) return res.status(403).json({ error: "Not your run" });
+
+        const [strategy] = await db.select().from(labStrategies).where(eq(labStrategies.id, sourceRun.strategyId));
+        if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+
+        const parsedInputs = strategy.parsedInputs as any[];
+        if (!parsedInputs?.length) return res.status(400).json({ error: "Strategy has no parsed inputs" });
+
+        const sourceConfig = sourceRun.checkpoint && typeof sourceRun.checkpoint === "object"
+          ? (sourceRun.checkpoint as any).configSnapshot : null;
+        const randomSamples = sourceConfig?.randomSamples ?? sourceRun.randomSamples ?? 2000;
+        const topK = sourceConfig?.topK ?? sourceRun.topK ?? 30;
+        const refinementsPerSeed = sourceConfig?.refinementsPerSeed ?? sourceRun.refinementsPerSeed ?? 60;
+
+        const config = {
+          pineScript: strategy.pineScript,
+          parsedInputs,
+          tickers: [ticker],
+          timeframes: [timeframe],
+          startDate: sourceConfig?.startDate ?? sourceRun.startDate ?? new Date(Date.now() - 365*24*60*60*1000).toISOString().split("T")[0],
+          endDate: sourceConfig?.endDate ?? sourceRun.endDate ?? new Date().toISOString().split("T")[0],
+          randomSamples, topK, refinementsPerSeed,
+          minTrades: sourceConfig?.minTrades ?? sourceRun.minTrades ?? 10,
+          maxDrawdownCap: sourceConfig?.maxDrawdownCap ?? sourceRun.maxDrawdownCap ?? 85,
+          mode: "sweep" as const,
+          strategyId: sourceRun.strategyId,
+          useInsights: true,
+          coordinateTune: true,
+        };
+
+        const orderResult = await db.select({ maxOrder: sql<number>`COALESCE(MAX(${labOptimizationRuns.queueOrder}), 0)` })
+          .from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "queued"));
+        const queueOrder = (orderResult[0]?.maxOrder ?? 0) + 1;
+
+        const [newRun] = await db.insert(labOptimizationRuns).values({
+          strategyId: sourceRun.strategyId,
+          userId: walletAddress,
+          tickers: [ticker],
+          timeframes: [timeframe],
+          startDate: config.startDate,
+          endDate: config.endDate,
+          randomSamples, topK, refinementsPerSeed,
+          minTrades: config.minTrades,
+          maxDrawdownCap: config.maxDrawdownCap,
+          mode: "sweep",
+          status: "queued",
+          queueOrder,
+          configSnapshot: {
+            type: "refine", config, sourceRunId: runId,
+            targetTicker: ticker, targetTimeframe: timeframe,
+          } as any,
+        }).returning();
+
+        console.log(`[LabQueue] Lab not ready — queued refine run ${newRun.id} for ${ticker} ${timeframe} (order: ${queueOrder})`);
+        res.json({ queued: true, runId: newRun.id, queueOrder });
+      } catch (e: any) {
+        console.error(`[LabQueue] Direct refine queue failed: ${e.message}`);
+        res.status(500).json({ error: e.message });
+      }
+    });
+  });
+});
+
 app.use("/api/lab", (req: Request, res: Response, next: NextFunction) => {
   sessionMiddleware(req, res, (err) => {
     if (err) return next(err);
