@@ -665,7 +665,8 @@ export function executePine(
   }
 
   function evalExpr(e: Expr): any {
-    if (++opsCount > MAX_OPS || ++totalOps > MAX_TOTAL_OPS) throw new Error("Execution budget exceeded");
+    if (++totalOps > MAX_TOTAL_OPS) throw new Error("Global execution budget exceeded");
+    if (++opsCount > MAX_OPS) throw new Error("Execution budget exceeded");
 
     switch (e.k) {
       case "num": return e.v;
@@ -1562,7 +1563,8 @@ export function executePine(
   }
 
   function execStmt(stmt: Stmt): "break" | "continue" | null {
-    if (++opsCount > MAX_OPS || ++totalOps > MAX_TOTAL_OPS) throw new Error("Execution budget exceeded");
+    if (++totalOps > MAX_TOTAL_OPS) throw new Error("Global execution budget exceeded");
+    if (++opsCount > MAX_OPS) throw new Error("Execution budget exceeded");
 
     switch (stmt.k) {
       case "decl": {
@@ -1783,6 +1785,11 @@ export function executePine(
       try {
         execStmt(stmt);
       } catch (e: any) {
+        if (e.message === "Global execution budget exceeded") {
+          console.log(`[PineScript] Global budget exceeded at bar ${currentBar}/${n}`);
+          currentBar = n;
+          break;
+        }
         if (e.message === "Execution budget exceeded") break;
       }
     }
