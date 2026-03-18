@@ -3052,14 +3052,16 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
   const { getMaxLeverage } = useLeverageLimits();
   const { toast } = useToast();
 
-  const { data, isLoading } = useQuery<any>({
+  const { data, isLoading, isError, error } = useQuery<any>({
     queryKey: ["/api/lab/heatmap"],
     queryFn: async () => {
       const res = await fetch("/api/lab/heatmap");
       if (!res.ok) throw new Error("Failed to load heatmap");
       return safeResponseJson(res);
     },
-    refetchInterval: 30000,
+    refetchInterval: 120000,
+    refetchOnWindowFocus: true,
+    retry: 2,
   });
 
   const { data: strategies } = useQuery<LabStrategy[]>({
@@ -3173,48 +3175,43 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
     }
   }, [strategyMap, onRefine, toast]);
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="w-6 h-6 animate-spin text-violet-400" />
-        <span className="ml-3 text-white/50">Loading heatmap data...</span>
-      </div>
-    );
-  }
+  const cells = data?.cells ?? [];
+  const tickers = data?.tickers ?? [];
+  const timeframes = data?.timeframes ?? [];
 
-  if (!data || data.cells.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center py-20 text-white/50">
-        <Grid3X3 className="w-16 h-16 mb-4 opacity-30" />
-        <h3 className="text-lg font-semibold text-white/70 mb-2">No Heatmap Data Yet</h3>
-        <p className="text-sm">Run some optimizations across different tickers and timeframes to see the heatmap.</p>
-      </div>
-    );
-  }
+  const { cellLookup, cellLevProfit } = useMemo(() => {
+    const lookup = new Map<string, any>();
+    const levProfit = new Map<string, { levProfit: number; leverage: number }>();
+    for (const c of cells) {
+      const key = `${c.ticker}|${c.timeframe}`;
+      lookup.set(key, c);
+      const cMaxLev = getMaxLeverage(c.ticker);
+      const best = c.allResults?.reduce((best: any, r: any) => {
+        const dd = r.maxDrawdownPercent || 0;
+        const lev = dd > 0 ? Math.min(cMaxLev, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
+        const levP = r.netProfitPercent * lev;
+        return (!best || levP > best.levProfit) ? { levProfit: levP, leverage: lev } : best;
+      }, null);
+      if (best) levProfit.set(key, best);
+    }
+    return { cellLookup: lookup, cellLevProfit: levProfit };
+  }, [cells, getMaxLeverage]);
 
-  const { cells, tickers, timeframes } = data;
-  const cellLookup = new Map<string, any>();
-  const cellLevProfit = new Map<string, { levProfit: number; leverage: number }>();
-  for (const c of cells) {
-    const key = `${c.ticker}|${c.timeframe}`;
-    cellLookup.set(key, c);
-    const cMaxLev = getMaxLeverage(c.ticker);
-    const best = c.allResults?.reduce((best: any, r: any) => {
-      const dd = r.maxDrawdownPercent || 0;
-      const lev = dd > 0 ? Math.min(cMaxLev, Math.max(1, Math.floor((100 / dd) * 0.8))) : 1;
-      const levP = r.netProfitPercent * lev;
-      return (!best || levP > best.levProfit) ? { levProfit: levP, leverage: lev } : best;
-    }, null);
-    if (best) cellLevProfit.set(key, best);
-  }
+  const { levMin, levMax } = useMemo(() => {
+    const levValues = [...cellLevProfit.values()].map(v => v.levProfit);
+    return {
+      levMin: levValues.length > 0 ? Math.min(...levValues) : 0,
+      levMax: levValues.length > 0 ? Math.max(...levValues) : 0,
+    };
+  }, [cellLevProfit]);
 
-  const levValues = [...cellLevProfit.values()].map(v => v.levProfit);
-  const levMin = levValues.length > 0 ? Math.min(...levValues) : 0;
-  const levMax = levValues.length > 0 ? Math.max(...levValues) : 0;
-
-  const values = cells.map((c: any) => c[metric] as number);
-  const minVal = Math.min(...values);
-  const maxVal = Math.max(...values);
+  const { minVal, maxVal } = useMemo(() => {
+    const values = cells.map((c: any) => c[metric] as number);
+    return {
+      minVal: values.length > 0 ? Math.min(...values) : 0,
+      maxVal: values.length > 0 ? Math.max(...values) : 0,
+    };
+  }, [cells, metric]);
 
   const isInverseMetric = metric === "lowestDrawdown" || metric === "avgDrawdown";
   const isProfitMetricSort = metric === "bestProfit" || metric === "avgProfit";
@@ -3248,7 +3245,43 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
       return cmp !== 0 ? cmp : a.localeCompare(b);
     });
     return sorted;
-  }, [tickers, sortByTimeframe, metric, cells, isInverseMetric, isProfitMetricSort]);
+  }, [tickers, sortByTimeframe, metric, cellLookup, cellLevProfit, isInverseMetric, isProfitMetricSort]);
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="w-6 h-6 animate-spin text-violet-400" />
+        <span className="ml-3 text-white/50">Loading heatmap data...</span>
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-white/50" data-testid="heatmap-error">
+        <Grid3X3 className="w-16 h-16 mb-4 opacity-30 text-red-400" />
+        <h3 className="text-lg font-semibold text-white/70 mb-2">Failed to Load Heatmap</h3>
+        <p className="text-sm mb-4">{(error as Error)?.message || "An unexpected error occurred."}</p>
+        <button
+          className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-sm"
+          onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/lab/heatmap"] })}
+          data-testid="button-retry-heatmap"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (!data || cells.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-white/50">
+        <Grid3X3 className="w-16 h-16 mb-4 opacity-30" />
+        <h3 className="text-lg font-semibold text-white/70 mb-2">No Heatmap Data Yet</h3>
+        <p className="text-sm">Run some optimizations across different tickers and timeframes to see the heatmap.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6" data-testid="heatmap-panel">

@@ -1776,34 +1776,52 @@ export function registerLabRoutes(app: Express): void {
   app.get("/api/lab/heatmap", requireLabAuth, async (req: Request, res: Response) => {
     try {
       const walletAddress = (req as any).walletAddress;
-      const runs = await labStorage.getRuns(undefined, walletAddress);
-      const completedRuns = runs.filter(r => r.status === "complete" || r.status === "paused");
-      if (completedRuns.length === 0) {
+      const TOP_N = 10;
+
+      const [allResults, runsTotal] = await Promise.all([
+        labStorage.getHeatmapBulkResults(walletAddress),
+        labStorage.getCompletedRunCount(walletAddress),
+      ]);
+
+      if (runsTotal === 0) {
         return res.json({ cells: [], tickers: [], timeframes: [], runs: 0 });
       }
 
-      const cellMap = new Map<string, { ticker: string; timeframe: string; results: any[] }>();
+      const cellMap = new Map<string, {
+        ticker: string; timeframe: string;
+        results: typeof allResults;
+        sumProfit: number; sumWinRate: number; sumDrawdown: number; sumPF: number;
+        bestProfit: number; bestWinRate: number; bestPF: number; lowestDrawdown: number;
+        runIds: Set<number>;
+      }>();
 
-      for (const run of completedRuns) {
-        const results = await labStorage.getRunResults(run.id);
-        for (const r of results) {
-          const key = `${r.ticker}|${r.timeframe}`;
-          if (!cellMap.has(key)) {
-            cellMap.set(key, { ticker: r.ticker, timeframe: r.timeframe, results: [] });
-          }
-          cellMap.get(key)!.results.push({
-            id: r.id,
-            runId: run.id,
-            strategyId: run.strategyId,
-            rank: r.rank,
-            netProfitPercent: r.netProfitPercent,
-            winRatePercent: r.winRatePercent,
-            maxDrawdownPercent: r.maxDrawdownPercent,
-            profitFactor: r.profitFactor,
-            totalTrades: r.totalTrades,
-            params: r.params,
-          });
+      for (const r of allResults) {
+        const key = `${r.ticker}|${r.timeframe}`;
+        let cell = cellMap.get(key);
+        if (!cell) {
+          cell = {
+            ticker: r.ticker, timeframe: r.timeframe,
+            results: [],
+            sumProfit: 0, sumWinRate: 0, sumDrawdown: 0, sumPF: 0,
+            bestProfit: -Infinity, bestWinRate: -Infinity, bestPF: -Infinity, lowestDrawdown: Infinity,
+            runIds: new Set(),
+          };
+          cellMap.set(key, cell);
         }
+        const np = r.netProfitPercent ?? 0;
+        const wr = r.winRatePercent ?? 0;
+        const dd = r.maxDrawdownPercent ?? 0;
+        const pf = r.profitFactor ?? 0;
+        cell.sumProfit += np;
+        cell.sumWinRate += wr;
+        cell.sumDrawdown += dd;
+        cell.sumPF += pf;
+        if (np > cell.bestProfit) cell.bestProfit = np;
+        if (wr > cell.bestWinRate) cell.bestWinRate = wr;
+        if (pf > cell.bestPF) cell.bestPF = pf;
+        if (dd < cell.lowestDrawdown) cell.lowestDrawdown = dd;
+        cell.runIds.add(r.runId);
+        cell.results.push(r);
       }
 
       const tickers = new Set<string>();
@@ -1813,32 +1831,33 @@ export function registerLabRoutes(app: Express): void {
       for (const [, cell] of cellMap) {
         tickers.add(cell.ticker);
         timeframes.add(cell.timeframe);
-        const sorted = cell.results.sort((a: any, b: any) => b.netProfitPercent - a.netProfitPercent);
-        const best = sorted[0];
-        const avgProfit = sorted.reduce((s: number, r: any) => s + r.netProfitPercent, 0) / sorted.length;
-        const avgWinRate = sorted.reduce((s: number, r: any) => s + r.winRatePercent, 0) / sorted.length;
-        const avgDrawdown = sorted.reduce((s: number, r: any) => s + r.maxDrawdownPercent, 0) / sorted.length;
-        const avgPF = sorted.reduce((s: number, r: any) => s + r.profitFactor, 0) / sorted.length;
+        const count = cell.results.length;
+        cell.results.sort((a, b) => {
+          const diff = (b.netProfitPercent ?? 0) - (a.netProfitPercent ?? 0);
+          return diff !== 0 ? diff : b.resultId - a.resultId;
+        });
+        const top = cell.results.slice(0, TOP_N);
         cells.push({
           ticker: cell.ticker,
           timeframe: cell.timeframe,
-          totalConfigs: sorted.length,
-          bestProfit: best.netProfitPercent,
-          bestWinRate: Math.max(...sorted.map((r: any) => r.winRatePercent)),
-          bestPF: Math.max(...sorted.map((r: any) => r.profitFactor)),
-          lowestDrawdown: Math.min(...sorted.map((r: any) => r.maxDrawdownPercent)),
-          avgProfit,
-          avgWinRate,
-          avgDrawdown,
-          avgPF,
-          runsCount: new Set(sorted.map((r: any) => r.runId)).size,
-          allResults: sorted.map((r: any) => ({
-            id: r.id,
-            netProfitPercent: r.netProfitPercent,
-            winRatePercent: r.winRatePercent,
-            maxDrawdownPercent: r.maxDrawdownPercent,
-            profitFactor: r.profitFactor,
-            totalTrades: r.totalTrades,
+          totalConfigs: count,
+          totalResults: count,
+          bestProfit: cell.bestProfit === -Infinity ? 0 : cell.bestProfit,
+          bestWinRate: cell.bestWinRate === -Infinity ? 0 : cell.bestWinRate,
+          bestPF: cell.bestPF === -Infinity ? 0 : cell.bestPF,
+          lowestDrawdown: cell.lowestDrawdown === Infinity ? 0 : cell.lowestDrawdown,
+          avgProfit: count > 0 ? cell.sumProfit / count : 0,
+          avgWinRate: count > 0 ? cell.sumWinRate / count : 0,
+          avgDrawdown: count > 0 ? cell.sumDrawdown / count : 0,
+          avgPF: count > 0 ? cell.sumPF / count : 0,
+          runsCount: cell.runIds.size,
+          allResults: top.map(r => ({
+            id: r.resultId,
+            netProfitPercent: r.netProfitPercent ?? 0,
+            winRatePercent: r.winRatePercent ?? 0,
+            maxDrawdownPercent: r.maxDrawdownPercent ?? 0,
+            profitFactor: r.profitFactor ?? 0,
+            totalTrades: r.totalTrades ?? 0,
             params: r.params,
             runId: r.runId,
             strategyId: r.strategyId,
@@ -1850,7 +1869,7 @@ export function registerLabRoutes(app: Express): void {
       const sortedTimeframes = [...timeframes].sort((a, b) => tfOrder.indexOf(a) - tfOrder.indexOf(b));
       const sortedTickers = [...tickers].sort();
 
-      res.json({ cells, tickers: sortedTickers, timeframes: sortedTimeframes, runs: completedRuns.length });
+      res.json({ cells, tickers: sortedTickers, timeframes: sortedTimeframes, runs: runsTotal });
     } catch (err: any) {
       console.log(`[QuantumLab] Heatmap error: ${err.message}`);
       res.status(500).json({ error: err.message });

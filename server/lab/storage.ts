@@ -74,6 +74,8 @@ export interface ILabStorage {
   claimNextQueuedRun(walletAddress?: string): Promise<LabOptimizationRun | null>;
   hasActiveRun(walletAddress?: string): Promise<boolean>;
   hasActiveOrPausedRun(): Promise<boolean>;
+  getHeatmapBulkResults(walletAddress: string): Promise<{ runId: number; strategyId: number; resultId: number; ticker: string; timeframe: string; netProfitPercent: number; winRatePercent: number; maxDrawdownPercent: number; profitFactor: number; totalTrades: number; params: any }[]>;
+  getCompletedRunCount(walletAddress: string): Promise<number>;
 }
 
 export class LabDatabaseStorage implements ILabStorage {
@@ -800,6 +802,39 @@ export class LabDatabaseStorage implements ILabStorage {
       (j) => j.progress.status !== "complete" && j.progress.status !== "error"
     );
     return activeJobs.length > 0;
+  }
+
+  async getHeatmapBulkResults(walletAddress: string): Promise<{ runId: number; strategyId: number; resultId: number; ticker: string; timeframe: string; netProfitPercent: number; winRatePercent: number; maxDrawdownPercent: number; profitFactor: number; totalTrades: number; params: any }[]> {
+    const rows = await db.select({
+      runId: labOptimizationResults.runId,
+      strategyId: labOptimizationRuns.strategyId,
+      resultId: labOptimizationResults.id,
+      ticker: labOptimizationResults.ticker,
+      timeframe: labOptimizationResults.timeframe,
+      netProfitPercent: labOptimizationResults.netProfitPercent,
+      winRatePercent: labOptimizationResults.winRatePercent,
+      maxDrawdownPercent: labOptimizationResults.maxDrawdownPercent,
+      profitFactor: labOptimizationResults.profitFactor,
+      totalTrades: labOptimizationResults.totalTrades,
+      params: labOptimizationResults.params,
+    })
+    .from(labOptimizationResults)
+    .innerJoin(labOptimizationRuns, eq(labOptimizationResults.runId, labOptimizationRuns.id))
+    .where(and(
+      eq(labOptimizationRuns.userId, walletAddress),
+      or(eq(labOptimizationRuns.status, "complete"), eq(labOptimizationRuns.status, "paused"))!
+    ));
+    return rows;
+  }
+
+  async getCompletedRunCount(walletAddress: string): Promise<number> {
+    const rows = await db.select({ count: sql<number>`count(*)::int` })
+      .from(labOptimizationRuns)
+      .where(and(
+        eq(labOptimizationRuns.userId, walletAddress),
+        or(eq(labOptimizationRuns.status, "complete"), eq(labOptimizationRuns.status, "paused"))!
+      ));
+    return rows[0]?.count ?? 0;
   }
 }
 
