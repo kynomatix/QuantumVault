@@ -1087,12 +1087,12 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
 }
 
 const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
-  { label: "Major", tickers: ["SOL", "BTC", "ETH", "XRP", "ADA", "LTC", "BNB", "AVAX", "LINK", "DOGE"] },
-  { label: "Layer 1 / Infra", tickers: ["SUI", "APT", "SEI", "TON", "BERA", "OP", "ARB", "POL", "MNT", "TIA", "INJ"] },
-  { label: "Solana DeFi", tickers: ["JUP", "DRIFT", "RAY", "JTO", "PYTH", "W", "KMNO", "TNSR", "CLOUD", "IO", "ME", "RENDER", "HNT", "DBR"] },
-  { label: "Memes", tickers: ["WIF", "POPCAT", "MOODENG", "FWOG", "GOAT", "PNUT", "MEW", "MICHI", "MOTHER", "FARTCOIN", "PENGU"] },
-  { label: "New / Trending", tickers: ["HYPE", "TRUMP", "AI16Z", "KAITO", "IP"] },
-  { label: "Commodities / Other", tickers: ["PAXG", "ZEC", "TAO"] },
+  { label: "Major", tickers: ["SOL", "BTC", "ETH", "XRP", "ADA", "LTC", "BNB", "AVAX", "LINK", "DOGE", "BONK", "PEPE"] },
+  { label: "Layer 1 / Infra", tickers: ["SUI", "APT", "SEI", "TON", "BERA", "OP", "ARB", "POL", "MNT", "TIA", "INJ", "DYM", "XPL", "MON"] },
+  { label: "Solana DeFi", tickers: ["JUP", "DRIFT", "RAY", "JTO", "PYTH", "W", "KMNO", "TNSR", "CLOUD", "IO", "ME", "RENDER", "HNT", "DBR", "ZEX", "LAUNCHCOIN", "PUMP", "MET"] },
+  { label: "Memes", tickers: ["WIF", "POPCAT", "MOODENG", "FWOG", "GOAT", "PNUT", "MEW", "MICHI", "MOTHER", "FARTCOIN", "PENGU", "WEN", "MELANIA", "2Z", "LIT"] },
+  { label: "New / Trending", tickers: ["HYPE", "TRUMP", "AI16Z", "KAITO", "IP", "ASTER"] },
+  { label: "Commodities / Other", tickers: ["PAXG", "ZEC", "TAO", "RLB"] },
 ];
 
 function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobStarted, isRunning }: {

@@ -10,6 +10,7 @@ import { startPnlSnapshotJob } from "./pnl-snapshot-job";
 import { startRetryWorker, queueTradeRetry } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
 import { initLeverageCache } from "./leverage-cache-service";
+import { syncMarketRegistry } from "./drift-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 import { createLabSupervisor, getLabAuthSecret } from "./lab/supervisor";
 import { createProxyMiddleware } from "http-proxy-middleware";
@@ -444,6 +445,12 @@ app.use((req, res, next) => {
       setTimeout(() => {
         log('[Staggered startup] Starting periodic reconciliation');
         startPeriodicReconciliation();
+      }, 15_000);
+
+      // ~15s: market registry sync (reads SDK PerpMarkets, writes executor JSON)
+      setTimeout(() => {
+        log('[Staggered startup] Syncing market registry from SDK');
+        syncMarketRegistry().catch(err => console.error('Failed to sync market registry:', err));
       }, 15_000);
 
       // ~20s: leverage cache (single batch RPC call to read perp market accounts)

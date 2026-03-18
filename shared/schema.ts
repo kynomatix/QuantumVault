@@ -980,6 +980,21 @@ export const LAB_AVAILABLE_TICKERS = [
   { symbol: "PAXG/USDT:USDT", name: "PAXG" },
   { symbol: "ZEC/USDT:USDT", name: "ZEC" },
   { symbol: "MNT/USDT:USDT", name: "MNT" },
+  { symbol: "BONK/USDT:USDT", name: "BONK" },
+  { symbol: "PEPE/USDT:USDT", name: "PEPE" },
+  { symbol: "WEN/USDT:USDT", name: "WEN" },
+  { symbol: "MON/USDT:USDT", name: "MON" },
+  { symbol: "RLB/USDT:USDT", name: "RLB" },
+  { symbol: "DYM/USDT:USDT", name: "DYM" },
+  { symbol: "ZEX/USDT:USDT", name: "ZEX" },
+  { symbol: "MELANIA/USDT:USDT", name: "MELANIA" },
+  { symbol: "LAUNCHCOIN/USDT:USDT", name: "LAUNCHCOIN" },
+  { symbol: "PUMP/USDT:USDT", name: "PUMP" },
+  { symbol: "ASTER/USDT:USDT", name: "ASTER" },
+  { symbol: "XPL/USDT:USDT", name: "XPL" },
+  { symbol: "2Z/USDT:USDT", name: "2Z" },
+  { symbol: "MET/USDT:USDT", name: "MET" },
+  { symbol: "LIT/USDT:USDT", name: "LIT" },
 ] as const;
 
 export const LAB_AVAILABLE_TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h"] as const;

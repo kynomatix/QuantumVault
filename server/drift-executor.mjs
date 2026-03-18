@@ -962,9 +962,7 @@ async function fetchUserReferrerFromStats(connection, userPubkey) {
 
 // AUTHORITATIVE Drift Protocol perp market indices (mainnet-beta) - SOURCED FROM SDK
 // https://github.com/drift-labs/protocol-v2/blob/master/sdk/src/constants/perpMarkets.ts
-// Last synced: 2025-01-18 via: node -e "require('@drift-labs/sdk').PerpMarkets['mainnet-beta'].forEach(m => console.log(m.marketIndex + ': ' + m.symbol))"
-// WARNING: Prediction markets (36-41, 43, 46, 48-50, 57-58, 67-68) are BETs, not tradeable PERPs
-const PERP_MARKET_INDICES = {
+const PERP_MARKET_INDICES_FALLBACK = {
   'SOL': 0, 'SOL-PERP': 0,
   'BTC': 1, 'BTC-PERP': 1,
   'ETH': 2, 'ETH-PERP': 2,
@@ -1000,13 +998,12 @@ const PERP_MARKET_INDICES = {
   'IO': 32, 'IO-PERP': 32,
   'ZEX': 33, 'ZEX-PERP': 33,
   'POPCAT': 34, 'POPCAT-PERP': 34,
-  '1KWEN': 35, '1KWEN-PERP': 35,
-  // 36-41, 43, 46, 48-50, 57-58, 67-68 are prediction market BETs - not supported for trading
+  '1KWEN': 35, '1KWEN-PERP': 35, 'WEN': 35, 'WEN-PERP': 35,
   'TON': 42, 'TON-PERP': 42,
   'MOTHER': 44, 'MOTHER-PERP': 44,
   'MOODENG': 45, 'MOODENG-PERP': 45,
   'DBR': 47, 'DBR-PERP': 47,
-  '1KMEW': 51, '1KMEW-PERP': 51,
+  '1KMEW': 51, '1KMEW-PERP': 51, 'MEW': 51, 'MEW-PERP': 51,
   'MICHI': 52, 'MICHI-PERP': 52,
   'GOAT': 53, 'GOAT-PERP': 53,
   'FWOG': 54, 'FWOG-PERP': 54,
@@ -1034,9 +1031,27 @@ const PERP_MARKET_INDICES = {
   'MNT': 80, 'MNT-PERP': 80,
   '1KPUMP': 81, '1KPUMP-PERP': 81,
   'MET': 82, 'MET-PERP': 82,
-  '1KMON': 83, '1KMON-PERP': 83,
+  '1KMON': 83, '1KMON-PERP': 83, 'MON': 83, 'MON-PERP': 83,
   'LIT': 84, 'LIT-PERP': 84,
 };
+
+function loadPerpMarketIndices() {
+  try {
+    const jsonPath = path.join(path.dirname(new URL(import.meta.url).pathname), 'market-indices.json');
+    if (fs.existsSync(jsonPath)) {
+      const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+      if (data && Object.keys(data).length >= Object.keys(PERP_MARKET_INDICES_FALLBACK).length) {
+        console.log(`[Executor] Loaded ${Object.keys(data).length} market indices from JSON`);
+        return data;
+      }
+    }
+  } catch (err) {
+    console.warn('[Executor] Failed to load market-indices.json, using fallback:', err.message);
+  }
+  return PERP_MARKET_INDICES_FALLBACK;
+}
+
+const PERP_MARKET_INDICES = loadPerpMarketIndices();
 
 // Must match server/crypto.ts encryption exactly
 function getEncryptionKey() {

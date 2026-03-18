@@ -13,6 +13,7 @@ import { executeSwiftOrder, type SwiftOrderResult } from './swift-executor';
 import { recordSwiftAttempt, recordSwiftSuccess as recordSwiftMetricSuccess, recordSwiftFailure as recordSwiftMetricFailure, recordSwiftFallback } from './swift-metrics';
 import { decrypt } from './crypto';
 import { getMarketPrice } from './drift-price';
+import { buildPerpMarketNames, buildPerpMarketIndices, syncFromSdk, writeExecutorJson, CANONICAL_PERP_MARKETS, PERP_ALIASES } from './market-registry';
 
 // ============================================================================
 // ERROR CATEGORIES - Clear, distinguishable error prefixes for debugging
@@ -1834,96 +1835,7 @@ export async function getBatchPerpPositions(
   }
 }
 
-// Market index to name mapping for Drift perpetuals - SOURCED FROM OFFICIAL DRIFT SDK
-// https://github.com/drift-labs/protocol-v2/blob/master/sdk/src/constants/perpMarkets.ts
-// Last synced: 2025-01-18 via: node -e "require('@drift-labs/sdk').PerpMarkets['mainnet-beta'].forEach(m => console.log(m.marketIndex + ': ' + m.symbol))"
-const PERP_MARKET_NAMES: Record<number, string> = {
-  0: 'SOL-PERP',
-  1: 'BTC-PERP',
-  2: 'ETH-PERP',
-  3: 'APT-PERP',
-  4: '1MBONK-PERP',
-  5: 'POL-PERP',
-  6: 'ARB-PERP',
-  7: 'DOGE-PERP',
-  8: 'BNB-PERP',
-  9: 'SUI-PERP',
-  10: '1MPEPE-PERP',
-  11: 'OP-PERP',
-  12: 'RENDER-PERP',
-  13: 'XRP-PERP',
-  14: 'HNT-PERP',
-  15: 'INJ-PERP',
-  16: 'LINK-PERP',
-  17: 'RLB-PERP',
-  18: 'PYTH-PERP',
-  19: 'TIA-PERP',
-  20: 'JTO-PERP',
-  21: 'SEI-PERP',
-  22: 'AVAX-PERP',
-  23: 'WIF-PERP',
-  24: 'JUP-PERP',
-  25: 'DYM-PERP',
-  26: 'TAO-PERP',
-  27: 'W-PERP',
-  28: 'KMNO-PERP',
-  29: 'TNSR-PERP',
-  30: 'DRIFT-PERP',
-  31: 'CLOUD-PERP',
-  32: 'IO-PERP',
-  33: 'ZEX-PERP',
-  34: 'POPCAT-PERP',
-  35: '1KWEN-PERP',
-  36: 'TRUMP-WIN-2024-BET',
-  37: 'KAMALA-POPULAR-VOTE-2024-BET',
-  38: 'FED-CUT-50-SEPT-2024-BET',
-  39: 'REPUBLICAN-POPULAR-AND-WIN-BET',
-  40: 'BREAKPOINT-IGGYERIC-BET',
-  41: 'DEMOCRATS-WIN-MICHIGAN-BET',
-  42: 'TON-PERP',
-  43: 'LANDO-F1-SGP-WIN-BET',
-  44: 'MOTHER-PERP',
-  45: 'MOODENG-PERP',
-  46: 'WARWICK-FIGHT-WIN-BET',
-  47: 'DBR-PERP',
-  48: 'WLF-5B-1W-BET',
-  49: 'VRSTPN-WIN-F1-24-DRVRS-CHMP-BET',
-  50: 'LNDO-WIN-F1-24-US-GP-BET',
-  51: '1KMEW-PERP',
-  52: 'MICHI-PERP',
-  53: 'GOAT-PERP',
-  54: 'FWOG-PERP',
-  55: 'PNUT-PERP',
-  56: 'RAY-PERP',
-  57: 'SUPERBOWL-LIX-LIONS-BET',
-  58: 'SUPERBOWL-LIX-CHIEFS-BET',
-  59: 'HYPE-PERP',
-  60: 'LTC-PERP',
-  61: 'ME-PERP',
-  62: 'PENGU-PERP',
-  63: 'AI16Z-PERP',
-  64: 'TRUMP-PERP',
-  65: 'MELANIA-PERP',
-  66: 'BERA-PERP',
-  67: 'NBAFINALS25-OKC-BET',
-  68: 'NBAFINALS25-BOS-BET',
-  69: 'KAITO-PERP',
-  70: 'IP-PERP',
-  71: 'FARTCOIN-PERP',
-  72: 'ADA-PERP',
-  73: 'PAXG-PERP',
-  74: 'LAUNCHCOIN-PERP',
-  75: 'PUMP-PERP',
-  76: 'ASTER-PERP',
-  77: 'XPL-PERP',
-  78: '2Z-PERP',
-  79: 'ZEC-PERP',
-  80: 'MNT-PERP',
-  81: '1KPUMP-PERP',
-  82: 'MET-PERP',
-  83: '1KMON-PERP',
-  84: 'LIT-PERP',
-};
+let PERP_MARKET_NAMES: Record<number, string> = buildPerpMarketNames();
 
 export interface PerpPosition {
   marketIndex: number;
@@ -3014,84 +2926,14 @@ export async function getAgentDriftBalance(
   return getDriftBalance(agentPublicKey, 0);
 }
 
-// AUTHORITATIVE Drift Protocol perp market indices (mainnet-beta) - SOURCED FROM SDK
-// https://github.com/drift-labs/protocol-v2/blob/master/sdk/src/constants/perpMarkets.ts
-// Last synced: 2025-01-18 via: node -e "require('@drift-labs/sdk').PerpMarkets['mainnet-beta'].forEach(m => console.log(m.marketIndex + ': ' + m.symbol))"
-// MUST be kept in sync with server/drift-executor.mjs
-// WARNING: Prediction markets (36-41, 43, 46, 48-50, 57-58, 67-68) are BETs, not tradeable PERPs
-const PERP_MARKET_INDICES: Record<string, number> = {
-  'SOL': 0, 'SOL-PERP': 0, 'SOLUSD': 0,
-  'BTC': 1, 'BTC-PERP': 1, 'BTCUSD': 1,
-  'ETH': 2, 'ETH-PERP': 2, 'ETHUSD': 2,
-  'APT': 3, 'APT-PERP': 3, 'APTUSD': 3,
-  '1MBONK': 4, '1MBONK-PERP': 4, 'BONK': 4, 'BONK-PERP': 4, 'BONKUSD': 4,
-  'POL': 5, 'POL-PERP': 5, 'MATIC': 5, 'MATIC-PERP': 5, 'POLUSD': 5,
-  'ARB': 6, 'ARB-PERP': 6, 'ARBUSD': 6,
-  'DOGE': 7, 'DOGE-PERP': 7, 'DOGEUSD': 7,
-  'BNB': 8, 'BNB-PERP': 8, 'BNBUSD': 8,
-  'SUI': 9, 'SUI-PERP': 9, 'SUIUSD': 9,
-  '1MPEPE': 10, '1MPEPE-PERP': 10, 'PEPE': 10, 'PEPE-PERP': 10, 'PEPEUSD': 10,
-  'OP': 11, 'OP-PERP': 11, 'OPUSD': 11,
-  'RENDER': 12, 'RENDER-PERP': 12, 'RNDR': 12, 'RNDR-PERP': 12, 'RNDRUSD': 12,
-  'XRP': 13, 'XRP-PERP': 13, 'XRPUSD': 13,
-  'HNT': 14, 'HNT-PERP': 14, 'HNTUSD': 14,
-  'INJ': 15, 'INJ-PERP': 15, 'INJUSD': 15,
-  'LINK': 16, 'LINK-PERP': 16, 'LINKUSD': 16,
-  'RLB': 17, 'RLB-PERP': 17, 'RLBUSD': 17,
-  'PYTH': 18, 'PYTH-PERP': 18, 'PYTHUSD': 18,
-  'TIA': 19, 'TIA-PERP': 19, 'TIAUSD': 19,
-  'JTO': 20, 'JTO-PERP': 20, 'JTOUSD': 20,
-  'SEI': 21, 'SEI-PERP': 21, 'SEIUSD': 21,
-  'AVAX': 22, 'AVAX-PERP': 22, 'AVAXUSD': 22,
-  'WIF': 23, 'WIF-PERP': 23, 'WIFUSD': 23,
-  'JUP': 24, 'JUP-PERP': 24, 'JUPUSD': 24,
-  'DYM': 25, 'DYM-PERP': 25, 'DYMUSD': 25,
-  'TAO': 26, 'TAO-PERP': 26, 'TAOUSD': 26,
-  'W': 27, 'W-PERP': 27, 'WUSD': 27,
-  'KMNO': 28, 'KMNO-PERP': 28, 'KMNOUSD': 28,
-  'TNSR': 29, 'TNSR-PERP': 29, 'TNSRUSD': 29,
-  'DRIFT': 30, 'DRIFT-PERP': 30, 'DRIFTUSD': 30,
-  'CLOUD': 31, 'CLOUD-PERP': 31, 'CLOUDUSD': 31,
-  'IO': 32, 'IO-PERP': 32, 'IOUSD': 32,
-  'ZEX': 33, 'ZEX-PERP': 33, 'ZEXUSD': 33,
-  'POPCAT': 34, 'POPCAT-PERP': 34, 'POPCATUSD': 34,
-  '1KWEN': 35, '1KWEN-PERP': 35, '1KWENUSD': 35,
-  // 36-41, 43, 46, 48-50, 57-58, 67-68 are prediction market BETs - not supported for trading
-  'TON': 42, 'TON-PERP': 42, 'TONUSD': 42,
-  'MOTHER': 44, 'MOTHER-PERP': 44, 'MOTHERUSD': 44,
-  'MOODENG': 45, 'MOODENG-PERP': 45, 'MOODENGUSD': 45,
-  'DBR': 47, 'DBR-PERP': 47, 'DBRUSD': 47,
-  '1KMEW': 51, '1KMEW-PERP': 51, '1KMEWUSD': 51,
-  'MICHI': 52, 'MICHI-PERP': 52, 'MICHIUSD': 52,
-  'GOAT': 53, 'GOAT-PERP': 53, 'GOATUSD': 53,
-  'FWOG': 54, 'FWOG-PERP': 54, 'FWOGUSD': 54,
-  'PNUT': 55, 'PNUT-PERP': 55, 'PNUTUSD': 55,
-  'RAY': 56, 'RAY-PERP': 56, 'RAYUSD': 56,
-  'HYPE': 59, 'HYPE-PERP': 59, 'HYPEUSD': 59,
-  'LTC': 60, 'LTC-PERP': 60, 'LTCUSD': 60,
-  'ME': 61, 'ME-PERP': 61, 'MEUSD': 61,
-  'PENGU': 62, 'PENGU-PERP': 62, 'PENGUUSD': 62,
-  'AI16Z': 63, 'AI16Z-PERP': 63, 'AI16ZUSD': 63,
-  'TRUMP': 64, 'TRUMP-PERP': 64, 'TRUMPUSD': 64,
-  'MELANIA': 65, 'MELANIA-PERP': 65, 'MELANIAUSD': 65,
-  'BERA': 66, 'BERA-PERP': 66, 'BERAUSD': 66,
-  'KAITO': 69, 'KAITO-PERP': 69, 'KAITOUSD': 69,
-  'IP': 70, 'IP-PERP': 70, 'IPUSD': 70,
-  'FARTCOIN': 71, 'FARTCOIN-PERP': 71, 'FARTCOINUSD': 71,
-  'ADA': 72, 'ADA-PERP': 72, 'ADAUSD': 72,
-  'PAXG': 73, 'PAXG-PERP': 73, 'PAXGUSD': 73,
-  'LAUNCHCOIN': 74, 'LAUNCHCOIN-PERP': 74, 'LAUNCHCOINUSD': 74,
-  'PUMP': 75, 'PUMP-PERP': 75, 'PUMPUSD': 75,
-  'ASTER': 76, 'ASTER-PERP': 76, 'ASTERUSD': 76,
-  'XPL': 77, 'XPL-PERP': 77, 'XPLUSD': 77,
-  '2Z': 78, '2Z-PERP': 78, '2ZUSD': 78,
-  'ZEC': 79, 'ZEC-PERP': 79, 'ZECUSD': 79,
-  'MNT': 80, 'MNT-PERP': 80, 'MNTUSD': 80,
-  '1KPUMP': 81, '1KPUMP-PERP': 81, '1KPUMPUSD': 81,
-  'MET': 82, 'MET-PERP': 82, 'METUSD': 82,
-  '1KMON': 83, '1KMON-PERP': 83, '1KMONUSD': 83,
-  'LIT': 84, 'LIT-PERP': 84, 'LITUSD': 84,
-};
+let PERP_MARKET_INDICES: Record<string, number> = buildPerpMarketIndices();
+
+export async function syncMarketRegistry(): Promise<void> {
+  const result = await syncFromSdk(PERP_MARKET_NAMES, PERP_MARKET_INDICES);
+  PERP_MARKET_NAMES = result.names;
+  PERP_MARKET_INDICES = result.indices;
+  writeExecutorJson(result.indices);
+}
 
 // Helper: Normalize error messages - now uses proper error categories
 // DEPRECATED: No longer adds misleading "429 rate limit" prefix to timeouts
