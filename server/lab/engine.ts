@@ -1,5 +1,9 @@
 import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "./indicators";
+import { runPineBacktest, type PinePlan } from "./pine/index";
+
+export type { PinePlan } from "./pine/index";
+export { compilePine } from "./pine/index";
 
 export interface OHLCV {
   time: number;
@@ -10,11 +14,12 @@ export interface OHLCV {
   volume: number;
 }
 
-interface EngineConfig {
+export interface EngineConfig {
   initialCapital: number;
   commission: number;
   positionSize: number;
   processOrdersOnClose?: boolean;
+  pinePlan?: PinePlan;
 }
 
 function p(params: Record<string, any>, name: string, fallback: string | null, defaultVal: any): any {
@@ -30,6 +35,15 @@ export function runBacktest(
   timeframe: string,
   config: EngineConfig = { initialCapital: 1000, commission: 0.0005, positionSize: 1000 }
 ): LabBacktestResult {
+  if (config.pinePlan) {
+    return runPineBacktest(config.pinePlan, candles, params, ticker, timeframe, {
+      initialCapital: config.initialCapital,
+      commission: config.commission,
+      positionSize: config.positionSize,
+      processOrdersOnClose: config.processOrdersOnClose,
+    });
+  }
+
   const n = candles.length;
   if (n < 10) {
     return {

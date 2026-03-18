@@ -470,6 +470,7 @@ export function registerLabRoutes(app: Express): void {
           guidedInsightsPerCombo,
           deepSearch: config.deepSearch ?? false,
           coordinateTune: config.coordinateTune ?? false,
+          pineScript: config.pineScript,
         },
         candlesByCombo,
         resumeCheckpoint,
@@ -825,6 +826,9 @@ export function registerLabRoutes(app: Express): void {
         if (strat?.strategySettings && typeof strat.strategySettings === "object") {
           retryPooc = (strat.strategySettings as any).processOrdersOnClose;
         }
+        if (!config.pineScript && strat?.pineScript) {
+          config.pineScript = strat.pineScript;
+        }
       }
 
       const newJob = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: false });
@@ -940,6 +944,11 @@ export function registerLabRoutes(app: Express): void {
       const processOrdersOnClose: boolean | undefined = snapshot.processOrdersOnClose;
       const guidedInsights: import("@shared/schema").GuidedInsights | undefined = snapshot.guidedInsights;
       const guidedInsightsPerCombo: Record<string, import("@shared/schema").GuidedInsights> | undefined = snapshot.guidedInsightsPerCombo;
+
+      if (!config.pineScript && claimed.strategyId) {
+        const strat = await labStorage.getStrategy(claimed.strategyId);
+        if (strat?.pineScript) config.pineScript = strat.pineScript;
+      }
 
       if (snapshotType === "refine") {
         config.coordinateTune = true;
@@ -1218,6 +1227,9 @@ export function registerLabRoutes(app: Express): void {
         const strategy = await labStorage.getStrategy(run.strategyId);
         if (strategy?.strategySettings && typeof strategy.strategySettings === "object") {
           resumeProcessOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
+        }
+        if (!config.pineScript && strategy?.pineScript) {
+          config.pineScript = strategy.pineScript;
         }
       }
 

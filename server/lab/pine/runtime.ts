@@ -1,0 +1,1546 @@
+import type { Expr, Stmt } from "./parser";
+import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
+import * as ind from "../indicators";
+
+export interface OHLCV {
+  time: number; open: number; high: number; low: number; close: number; volume: number;
+}
+
+export interface PineEngineConfig {
+  initialCapital: number;
+  commission: number;
+  positionSize: number;
+  processOrdersOnClose?: boolean;
+}
+
+const NA = null as any;
+function isNa(v: any): boolean { return v === null || v === undefined || (typeof v === 'number' && isNaN(v)); }
+function toNum(v: any): number { return isNa(v) ? NaN : Number(v); }
+
+interface PendingExit {
+  id: string;
+  fromEntry: string;
+  stop: number | null;
+  limit: number | null;
+  trailPrice: number | null;
+  trailOffset: number | null;
+  qtyPercent: number;
+  trailActivated: boolean;
+  trailExtreme: number;
+}
+
+interface Position {
+  direction: "long" | "short";
+  size: number;
+  avgPrice: number;
+  entryBar: number;
+  entryTime: number;
+  entries: { id: string; qty: number; price: number; bar: number }[];
+}
+
+class Broker {
+  position: Position | null = null;
+  pendingExits: PendingExit[] = [];
+  trades: LabTradeRecord[] = [];
+  equity: number;
+  private config: PineEngineConfig;
+  private partialCloses: { qty: number; price: number; reason: string }[] = [];
+
+  constructor(config: PineEngineConfig) {
+    this.config = config;
+    this.equity = config.initialCapital;
+  }
+
+  get positionSize(): number { return this.position ? (this.position.direction === "long" ? this.position.size : -this.position.size) : 0; }
+  get positionAvgPrice(): number { return this.position ? this.position.avgPrice : NaN; }
+
+  entry(id: string, direction: "long" | "short", bar: number, price: number, time: number) {
+    if (this.position && this.position.direction !== direction) {
+      this.closeAll(bar, price, time, "Reversal");
+    }
+    if (!this.position) {
+      this.position = {
+        direction, size: 1, avgPrice: price, entryBar: bar, entryTime: time,
+        entries: [{ id, qty: 1, price, bar }],
+      };
+      this.pendingExits = [];
+    }
+  }
+
+  close(id: string, bar: number, price: number, time: number, qtyPercent: number = 100, comment: string = "") {
+    if (!this.position) return;
+    const closeQty = Math.min(this.position.size, this.position.size * (qtyPercent / 100));
+    if (closeQty <= 0) return;
+    this.recordClose(closeQty, price, bar, time, comment || "Close");
+  }
+
+  closeAll(bar: number, price: number, time: number, reason: string = "Close All") {
+    if (!this.position) return;
+    this.recordClose(this.position.size, price, bar, time, reason);
+  }
+
+  addExit(id: string, fromEntry: string, stop: number | null, limit: number | null,
+          trailPrice: number | null, trailOffset: number | null, qtyPercent: number) {
+    const existing = this.pendingExits.findIndex(e => e.id === id);
+    const exit: PendingExit = {
+      id, fromEntry,
+      stop: isNa(stop) ? null : stop,
+      limit: isNa(limit) ? null : limit,
+      trailPrice: isNa(trailPrice) ? null : trailPrice,
+      trailOffset: isNa(trailOffset) ? null : trailOffset,
+      qtyPercent: isNa(qtyPercent) ? 100 : qtyPercent,
+      trailActivated: false,
+      trailExtreme: 0,
+    };
+    if (existing >= 0) this.pendingExits[existing] = exit;
+    else this.pendingExits.push(exit);
+  }
+
+  evaluateExits(bar: number, o: number, h: number, l: number, c: number, time: number) {
+    if (!this.position || this.pendingExits.length === 0) return;
+    const isLong = this.position.direction === "long";
+    const toRemove: number[] = [];
+
+    for (let i = 0; i < this.pendingExits.length; i++) {
+      const ex = this.pendingExits[i];
+      if (!this.position) break;
+
+      let fillPrice: number | null = null;
+      let reason = ex.id;
+
+      if (ex.stop !== null) {
+        if (isLong && l <= ex.stop) { fillPrice = Math.min(o, ex.stop); reason = "Stop"; }
+        if (!isLong && h >= ex.stop) { fillPrice = Math.max(o, ex.stop); reason = "Stop"; }
+      }
+
+      if (fillPrice === null && ex.limit !== null) {
+        if (isLong && h >= ex.limit) { fillPrice = Math.max(o, ex.limit); reason = "TP"; }
+        if (!isLong && l <= ex.limit) { fillPrice = Math.min(o, ex.limit); reason = "TP"; }
+      }
+
+      if (fillPrice === null && ex.trailPrice !== null && ex.trailOffset !== null) {
+        if (!ex.trailActivated) {
+          if (isLong && h >= ex.trailPrice) { ex.trailActivated = true; ex.trailExtreme = h; }
+          if (!isLong && l <= ex.trailPrice) { ex.trailActivated = true; ex.trailExtreme = l; }
+        }
+        if (ex.trailActivated) {
+          if (isLong) {
+            ex.trailExtreme = Math.max(ex.trailExtreme, h);
+            const trailStop = ex.trailExtreme - ex.trailOffset;
+            if (l <= trailStop) { fillPrice = Math.min(o, trailStop); reason = "Trail"; }
+          } else {
+            ex.trailExtreme = Math.min(ex.trailExtreme, l);
+            const trailStop = ex.trailExtreme + ex.trailOffset;
+            if (h >= trailStop) { fillPrice = Math.max(o, trailStop); reason = "Trail"; }
+          }
+        }
+      }
+
+      if (fillPrice !== null && this.position) {
+        const closeQty = this.position.size * (ex.qtyPercent / 100);
+        this.recordClose(Math.min(closeQty, this.position.size), fillPrice, bar, time, reason);
+        toRemove.push(i);
+        if (!this.position) break;
+      }
+    }
+
+    for (let i = toRemove.length - 1; i >= 0; i--) {
+      this.pendingExits.splice(toRemove[i], 1);
+    }
+  }
+
+  private recordClose(qty: number, price: number, bar: number, time: number, reason: string) {
+    if (!this.position) return;
+    const pos = this.position;
+    const isLong = pos.direction === "long";
+    const pnlPct = isLong
+      ? ((price - pos.avgPrice) / pos.avgPrice) * 100
+      : ((pos.avgPrice - price) / pos.avgPrice) * 100;
+    const pnlDollar = qty * this.config.positionSize * (pnlPct / 100)
+      - 2 * qty * this.config.positionSize * this.config.commission;
+    this.equity += pnlDollar;
+    this.trades.push({
+      entryTime: new Date(pos.entryTime).toISOString(),
+      exitTime: new Date(time).toISOString(),
+      direction: pos.direction,
+      entryPrice: pos.avgPrice,
+      exitPrice: price,
+      pnlPercent: Math.round(pnlPct * 100) / 100,
+      pnlDollar: Math.round(pnlDollar * 100) / 100,
+      exitReason: reason,
+      barsHeld: bar - pos.entryBar,
+    });
+    pos.size -= qty;
+    if (pos.size <= 0.0001) {
+      this.position = null;
+      this.pendingExits = [];
+    }
+  }
+
+  getEquityWithUnrealized(price: number): number {
+    if (!this.position) return this.equity;
+    const isLong = this.position.direction === "long";
+    const pnl = isLong
+      ? ((price - this.position.avgPrice) / this.position.avgPrice) * this.position.size * this.config.positionSize
+      : ((this.position.avgPrice - price) / this.position.avgPrice) * this.position.size * this.config.positionSize;
+    return this.equity + pnl;
+  }
+}
+
+type Series = number[];
+interface PrecomputedSeries { [name: string]: Series }
+
+export function executePine(
+  ast: Stmt[],
+  candles: OHLCV[],
+  params: Record<string, any>,
+  ticker: string,
+  timeframe: string,
+  config: PineEngineConfig,
+): LabBacktestResult {
+  const n = candles.length;
+  if (n < 10) {
+    return { ticker, timeframe, netProfitPercent: 0, winRatePercent: 0, maxDrawdownPercent: 0, profitFactor: 0, totalTrades: 0, params, trades: [], equityCurve: [] };
+  }
+
+  const openArr = new Float64Array(n);
+  const highArr = new Float64Array(n);
+  const lowArr = new Float64Array(n);
+  const closeArr = new Float64Array(n);
+  const volArr = new Float64Array(n);
+  const hl2Arr = new Float64Array(n);
+  const hlc3Arr = new Float64Array(n);
+  const ohlc4Arr = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = candles[i];
+    openArr[i] = c.open; highArr[i] = c.high; lowArr[i] = c.low;
+    closeArr[i] = c.close; volArr[i] = c.volume;
+    hl2Arr[i] = (c.high + c.low) / 2;
+    hlc3Arr[i] = (c.high + c.low + c.close) / 3;
+    ohlc4Arr[i] = (c.open + c.high + c.low + c.close) / 4;
+  }
+
+  const builtinSeries: Record<string, Series | Float64Array> = {
+    close: closeArr as any, open: openArr as any, high: highArr as any, low: lowArr as any,
+    volume: volArr as any, hl2: hl2Arr as any, hlc3: hlc3Arr as any, ohlc4: ohlc4Arr as any,
+  };
+
+  const broker = new Broker(config);
+  const vars: Record<string, any[]> = {};
+  const varIsVar: Set<string> = new Set();
+  const precomputed: PrecomputedSeries = {};
+  const indicatorCache: Map<string, any> = new Map();
+  const inputDefaults: Record<string, any> = {};
+  let currentBar = 0;
+  let opsCount = 0;
+  const MAX_OPS = 500000;
+
+  function setVar(name: string, value: any) {
+    if (!vars[name]) vars[name] = new Array(n);
+    vars[name][currentBar] = value;
+  }
+
+  function getVar(name: string, offset: number = 0): any {
+    const idx = currentBar - offset;
+    if (idx < 0) return NA;
+    if (precomputed[name]) {
+      const arr = precomputed[name];
+      return idx < arr.length ? (isNaN(arr[idx]) ? NA : arr[idx]) : NA;
+    }
+    if (builtinSeries[name]) {
+      const arr = builtinSeries[name];
+      return idx < arr.length ? arr[idx] : NA;
+    }
+    if (vars[name]) {
+      const v = vars[name][idx];
+      return v === undefined ? NA : v;
+    }
+    return NA;
+  }
+
+  function resolveConst(e: Expr): any {
+    if (e.k === "num") return e.v;
+    if (e.k === "str") return e.v;
+    if (e.k === "bool") return e.v;
+    if (e.k === "na") return NA;
+    if (e.k === "id") {
+      if (params[e.name] !== undefined) return params[e.name];
+      if (inputDefaults[e.name] !== undefined) return inputDefaults[e.name];
+      return undefined;
+    }
+    if (e.k === "un" && e.op === "-") {
+      const inner = resolveConst(e.e);
+      if (typeof inner === "number") return -inner;
+    }
+    if (e.k === "bin") {
+      const l = resolveConst(e.l);
+      const r = resolveConst(e.r);
+      if (typeof l === "number" && typeof r === "number") return evalBinOp(e.op, l, r);
+    }
+    return undefined;
+  }
+
+  function resolveSeries(e: Expr): Series | null {
+    if (e.k === "id") {
+      if (builtinSeries[e.name]) return Array.from(builtinSeries[e.name]) as Series;
+      if (precomputed[e.name]) return precomputed[e.name];
+      if (inputDefaults[e.name] !== undefined) {
+        const src = inputDefaults[e.name];
+        if (typeof src === "string" && builtinSeries[src]) return Array.from(builtinSeries[src]) as Series;
+      }
+      return null;
+    }
+    return null;
+  }
+
+  function tryPrecompute(name: string, e: Expr): boolean {
+    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
+      return precomputeIndicator(name, e.fn.prop, e.args, e.kw);
+    }
+    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "input") {
+      return false;
+    }
+    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "mem") {
+      return false;
+    }
+    if (e.k === "sub") {
+      const src = resolveSeries(e.obj);
+      const offset = resolveConst(e.idx);
+      if (src && typeof offset === 'number' && !isNaN(offset)) {
+        const shifted = new Array(n).fill(NaN);
+        for (let i = offset; i < n; i++) shifted[i] = src[i - offset];
+        precomputed[name] = shifted;
+        return true;
+      }
+      if (e.obj.k === "id" && e.idx.k === "bin" && e.idx.op === "+") {
+        const src2 = resolveSeries(e.obj);
+        const l = resolveConst(e.idx.l);
+        const r = resolveConst(e.idx.r);
+        if (src2 && typeof l === 'number' && typeof r === 'number') {
+          const totalOffset = l + r;
+          const shifted = new Array(n).fill(NaN);
+          for (let i = totalOffset; i < n; i++) shifted[i] = src2[i - totalOffset];
+          precomputed[name] = shifted;
+          return true;
+        }
+      }
+    }
+    if (e.k === "bin") {
+      const lSeries = tryGetSeries(e.l);
+      const rSeries = tryGetSeries(e.r);
+      if (lSeries && rSeries) {
+        const result = new Array(n).fill(NaN);
+        for (let i = 0; i < n; i++) {
+          const lv = lSeries[i], rv = rSeries[i];
+          if (isNaN(lv) || isNaN(rv)) continue;
+          result[i] = evalBinOp(e.op, lv, rv);
+        }
+        precomputed[name] = result;
+        return true;
+      }
+      const lConst = resolveConst(e.l);
+      if (lConst !== undefined && rSeries) {
+        const result = new Array(n).fill(NaN);
+        for (let i = 0; i < n; i++) {
+          if (isNaN(rSeries[i])) continue;
+          result[i] = evalBinOp(e.op, toNum(lConst), rSeries[i]);
+        }
+        precomputed[name] = result;
+        return true;
+      }
+      const rConst = resolveConst(e.r);
+      if (lSeries && rConst !== undefined) {
+        const result = new Array(n).fill(NaN);
+        for (let i = 0; i < n; i++) {
+          if (isNaN(lSeries[i])) continue;
+          result[i] = evalBinOp(e.op, lSeries[i], toNum(rConst));
+        }
+        precomputed[name] = result;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function tryGetSeries(e: Expr): Series | null {
+    if (e.k === "id") {
+      if (builtinSeries[e.name]) return Array.from(builtinSeries[e.name]);
+      if (precomputed[e.name]) return precomputed[e.name];
+      if (inputDefaults[e.name] !== undefined && typeof inputDefaults[e.name] === "string" && builtinSeries[inputDefaults[e.name]]) {
+        return Array.from(builtinSeries[inputDefaults[e.name]]) as Series;
+      }
+    }
+    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
+      return resolveNestedTaSeries(e.fn.prop, e.args, e.kw);
+    }
+    if (e.k === "num") return new Array(n).fill(e.v);
+    return null;
+  }
+
+  function evalBinOp(op: string, l: any, r: any): any {
+    if (op === "and") return l && r;
+    if (op === "or") return l || r;
+    const ln = toNum(l), rn = toNum(r);
+    switch (op) {
+      case "+": return typeof l === 'string' || typeof r === 'string' ? String(l) + String(r) : ln + rn;
+      case "-": return ln - rn;
+      case "*": return ln * rn;
+      case "/": return rn === 0 ? NaN : ln / rn;
+      case "%": return rn === 0 ? NaN : ln % rn;
+      case "==": return l === r || (isNa(l) && isNa(r));
+      case "!=": return l !== r && !(isNa(l) && isNa(r));
+      case ">": return ln > rn;
+      case "<": return ln < rn;
+      case ">=": return ln >= rn;
+      case "<=": return ln <= rn;
+      default: return NaN;
+    }
+  }
+
+  function precomputeIndicator(name: string, fn: string, args: Expr[], kw: [string, Expr][]): boolean {
+    const h = Array.from(highArr) as number[];
+    const l = Array.from(lowArr) as number[];
+    const cl = Array.from(closeArr) as number[];
+
+    function getSource(idx: number): Series | null {
+      const arg = args[idx];
+      if (!arg) return cl;
+      const s = resolveSeries(arg);
+      if (s) return s;
+      const c = resolveConst(arg);
+      if (typeof c === 'string' && builtinSeries[c]) return Array.from(builtinSeries[c]) as Series;
+      return null;
+    }
+
+    function getLen(idx: number, def: number = 14): number {
+      if (idx >= args.length) {
+        const kwVal = kw.find(k => k[0] === 'length');
+        if (kwVal) { const v = resolveConst(kwVal[1]); return typeof v === 'number' ? v : def; }
+        return def;
+      }
+      const v = resolveConst(args[idx]);
+      return typeof v === 'number' ? v : def;
+    }
+
+    switch (fn) {
+      case "sma": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.sma(src, len); return true;
+      }
+      case "ema": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.ema(src, len); return true;
+      }
+      case "rma": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.rma(src, len); return true;
+      }
+      case "wma": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.wma(src, len); return true;
+      }
+      case "rsi": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.rsi(src, len); return true;
+      }
+      case "atr": {
+        const len = getLen(0);
+        precomputed[name] = ind.atr(h, l, cl, len); return true;
+      }
+      case "stdev": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.stdev(src, len); return true;
+      }
+      case "highest": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.highest(src, len); return true;
+      }
+      case "lowest": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.lowest(src, len); return true;
+      }
+      case "vwap": {
+        const src = getSource(0) || cl;
+        const result = new Array(n).fill(NaN);
+        let cumPV = 0, cumV = 0;
+        for (let i = 0; i < n; i++) {
+          cumPV += src[i] * (volArr[i] || 1);
+          cumV += (volArr[i] || 1);
+          result[i] = cumV !== 0 ? cumPV / cumV : src[i];
+        }
+        precomputed[name] = result; return true;
+      }
+      case "tr": {
+        precomputed[name] = ind.trueRange(h, l, cl); return true;
+      }
+      case "pivothigh": {
+        let src = h, leftBars: number, rightBars: number;
+        if (args.length >= 3) {
+          const s = getSource(0); if (s) src = s;
+          leftBars = getLen(1, 5); rightBars = getLen(2, 5);
+        } else {
+          leftBars = getLen(0, 5); rightBars = getLen(1, 5);
+        }
+        const result = new Array(n).fill(NaN);
+        for (let i = leftBars + rightBars; i < n; i++) {
+          const pivotIdx = i - rightBars;
+          let isPivot = true;
+          for (let j = pivotIdx - leftBars; j < pivotIdx; j++) {
+            if (src[j] >= src[pivotIdx]) { isPivot = false; break; }
+          }
+          if (isPivot) {
+            for (let j = pivotIdx + 1; j <= pivotIdx + rightBars; j++) {
+              if (src[j] >= src[pivotIdx]) { isPivot = false; break; }
+            }
+          }
+          if (isPivot) result[i] = src[pivotIdx];
+        }
+        precomputed[name] = result; return true;
+      }
+      case "pivotlow": {
+        let src = l, leftBars: number, rightBars: number;
+        if (args.length >= 3) {
+          const s = getSource(0); if (s) src = s;
+          leftBars = getLen(1, 5); rightBars = getLen(2, 5);
+        } else {
+          leftBars = getLen(0, 5); rightBars = getLen(1, 5);
+        }
+        const result = new Array(n).fill(NaN);
+        for (let i = leftBars + rightBars; i < n; i++) {
+          const pivotIdx = i - rightBars;
+          let isPivot = true;
+          for (let j = pivotIdx - leftBars; j < pivotIdx; j++) {
+            if (src[j] <= src[pivotIdx]) { isPivot = false; break; }
+          }
+          if (isPivot) {
+            for (let j = pivotIdx + 1; j <= pivotIdx + rightBars; j++) {
+              if (src[j] <= src[pivotIdx]) { isPivot = false; break; }
+            }
+          }
+          if (isPivot) result[i] = src[pivotIdx];
+        }
+        precomputed[name] = result; return true;
+      }
+      case "dmi": return false;
+      case "crossover": case "crossunder": case "cross": return false;
+      case "barssince": case "change": return false;
+      default: return false;
+    }
+  }
+
+  function computeDmi(diLen: number, adxSmoothing: number): { diPlus: Series; diMinus: Series; adxVal: Series } {
+    const cacheKey = `dmi_${diLen}_${adxSmoothing}`;
+    if (indicatorCache.has(cacheKey)) return indicatorCache.get(cacheKey);
+
+    const h = Array.from(highArr) as number[];
+    const l = Array.from(lowArr) as number[];
+    const cl = Array.from(closeArr) as number[];
+
+    const plusDM: number[] = [0];
+    const minusDM: number[] = [0];
+    for (let i = 1; i < n; i++) {
+      const upMove = h[i] - h[i - 1];
+      const downMove = l[i - 1] - l[i];
+      plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
+      minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
+    }
+    const atrVals = ind.atr(h, l, cl, diLen);
+    const smoothPlus = ind.rma(plusDM, diLen);
+    const smoothMinus = ind.rma(minusDM, diLen);
+
+    const diPlus = new Array(n).fill(NaN);
+    const diMinus = new Array(n).fill(NaN);
+    const dx = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) {
+      if (!isNaN(atrVals[i]) && atrVals[i] !== 0 && !isNaN(smoothPlus[i])) {
+        diPlus[i] = (smoothPlus[i] / atrVals[i]) * 100;
+        diMinus[i] = (smoothMinus[i] / atrVals[i]) * 100;
+        const sum = diPlus[i] + diMinus[i];
+        dx[i] = sum === 0 ? 0 : (Math.abs(diPlus[i] - diMinus[i]) / sum) * 100;
+      }
+    }
+    const adxVal = ind.rma(dx, adxSmoothing);
+    const result = { diPlus, diMinus, adxVal };
+    indicatorCache.set(cacheKey, result);
+    return result;
+  }
+
+  function evalExpr(e: Expr): any {
+    if (++opsCount > MAX_OPS) throw new Error("Execution budget exceeded");
+
+    switch (e.k) {
+      case "num": return e.v;
+      case "str": return e.v;
+      case "bool": return e.v;
+      case "na": return NA;
+      case "id": return resolveId(e.name);
+      case "bin": {
+        if (e.op === "and") { const l = evalExpr(e.l); return l ? evalExpr(e.r) : false; }
+        if (e.op === "or") { const l = evalExpr(e.l); return l ? l : evalExpr(e.r); }
+        return evalBinOp(e.op, evalExpr(e.l), evalExpr(e.r));
+      }
+      case "un":
+        if (e.op === "not") return !evalExpr(e.e);
+        if (e.op === "-") return -toNum(evalExpr(e.e));
+        return evalExpr(e.e);
+      case "tern": {
+        const c = evalExpr(e.c);
+        return c ? evalExpr(e.t) : evalExpr(e.f);
+      }
+      case "call": return evalCall(e);
+      case "sub": {
+        const obj = e.obj;
+        const idx = evalExpr(e.idx);
+        const offset = Math.round(toNum(idx));
+        if (obj.k === "id") return getVar(obj.name, offset);
+        return NA;
+      }
+      case "mem": return evalMember(e);
+      case "switch_expr": {
+        const switchVal = e.e ? evalExpr(e.e) : null;
+        for (const c of e.cases) {
+          if (c.val === null) return evalExpr(c.result);
+          const cval = evalExpr(c.val);
+          if (switchVal !== null && cval === switchVal) return evalExpr(c.result);
+          if (switchVal === null && cval) return evalExpr(c.result);
+        }
+        return NA;
+      }
+    }
+    return NA;
+  }
+
+  function resolveId(name: string): any {
+    if (params[name] !== undefined) return params[name];
+    const barVal = getVar(name, 0);
+    if (barVal !== NA) return barVal;
+
+    switch (name) {
+      case "bar_index": return currentBar;
+      case "close": return closeArr[currentBar];
+      case "open": return openArr[currentBar];
+      case "high": return highArr[currentBar];
+      case "low": return lowArr[currentBar];
+      case "volume": return volArr[currentBar];
+      case "hl2": return hl2Arr[currentBar];
+      case "hlc3": return hlc3Arr[currentBar];
+      case "ohlc4": return ohlc4Arr[currentBar];
+      case "time": return candles[currentBar].time;
+      case "na": return NA;
+      case "true": return true;
+      case "false": return false;
+    }
+    return NA;
+  }
+
+  function evalMember(e: { k: "mem"; obj: Expr; prop: string }): any {
+    if (e.obj.k === "id") {
+      const obj = e.obj.name;
+      const prop = e.prop;
+
+      if (obj === "strategy") {
+        switch (prop) {
+          case "long": return "long";
+          case "short": return "short";
+          case "position_size": return broker.positionSize;
+          case "position_avg_price": return broker.positionAvgPrice;
+          case "equity": return broker.equity;
+          case "cash": return "cash";
+          case "percent_of_equity": return "percent_of_equity";
+          case "fixed": return "fixed";
+        }
+      }
+
+      if (obj === "barstate") {
+        switch (prop) {
+          case "isconfirmed": return true;
+          case "isfirst": return currentBar === 0;
+          case "islast": return currentBar === n - 1;
+          case "isnew": return true;
+          case "isrealtime": return false;
+          case "ishistory": return true;
+        }
+      }
+
+      if (obj === "math") return { __ns: "math", fn: prop };
+      if (obj === "ta") return { __ns: "ta", fn: prop };
+      if (obj === "str") return { __ns: "str", fn: prop };
+      if (obj === "color") return colorConst(prop);
+      if (obj === "currency") return prop;
+      if (obj === "dayofweek") {
+        if (prop === "monday") return 2;
+        if (prop === "sunday") return 1;
+        return 0;
+      }
+
+      if (obj === "syminfo") {
+        if (prop === "mintick") return 0.01;
+        if (prop === "ticker") return ticker;
+        return NA;
+      }
+
+      if (obj === "location") return prop;
+      if (obj === "shape") return prop;
+      if (obj === "size") return prop;
+      if (obj === "plot") return prop;
+      if (obj === "line") return { __ns: "line", fn: prop };
+      if (obj === "label") return { __ns: "label", fn: prop };
+      if (obj === "display") return prop;
+
+      const v = getVar(obj, 0);
+      if (v !== NA && typeof v === 'object' && v !== null) {
+        return v[prop];
+      }
+    }
+
+    if (e.obj.k === "mem") {
+      const inner = evalMember(e.obj as any);
+      if (inner && typeof inner === 'object' && inner.__ns) {
+        return { __ns: inner.__ns + "." + inner.fn, fn: e.prop };
+      }
+      if (typeof inner === 'object' && inner !== null) return inner[e.prop];
+    }
+
+    const objVal = evalExpr(e.obj);
+    if (typeof objVal === 'object' && objVal !== null) return objVal[e.prop];
+    return NA;
+  }
+
+  function colorConst(name: string): string {
+    return "#000000";
+  }
+
+  function evalCall(e: { k: "call"; fn: Expr; args: Expr[]; kw: [string, Expr][] }): any {
+    const fnVal = evalExpr(e.fn);
+    if (typeof fnVal === 'object' && fnVal && fnVal.__ns) {
+      return evalBuiltinCall(fnVal.__ns, fnVal.fn, e.args, e.kw);
+    }
+
+    if (e.fn.k === "id") {
+      const name = e.fn.name;
+      if (name === "na") {
+        if (e.args.length === 0) return NA;
+        return isNa(evalExpr(e.args[0]));
+      }
+      if (name === "nz") {
+        const v = evalExpr(e.args[0]);
+        if (isNa(v)) return e.args.length > 1 ? evalExpr(e.args[1]) : 0;
+        return v;
+      }
+      if (name === "fixnan") {
+        const v = evalExpr(e.args[0]);
+        if (!isNa(v)) return v;
+        if (e.args[0].k === "id") {
+          for (let b = currentBar - 1; b >= 0; b--) {
+            const prev = getVar(e.args[0].name, currentBar - b);
+            if (!isNa(prev)) return prev;
+          }
+        }
+        return NA;
+      }
+      if (name === "float" || name === "int" || name === "bool" || name === "string") {
+        return e.args.length > 0 ? evalExpr(e.args[0]) : NA;
+      }
+      if (name === "timestamp") return Date.now();
+      if (name === "alert" || name === "alertcondition" || name === "runtime") return NA;
+      if (name === "__array_literal") return e.args.map(a => evalExpr(a));
+    }
+
+    if (e.fn.k === "mem" && e.fn.obj.k === "id") {
+      const obj = e.fn.obj.name;
+      const prop = e.fn.prop;
+
+      if (obj === "input") return evalInputCall(prop, e.args, e.kw);
+      if (obj === "strategy") return evalStrategyCall(prop, e.args, e.kw);
+      if (obj === "color") return "#000000";
+      if (obj === "line" || obj === "label" || obj === "box" || obj === "table") return NA;
+    }
+
+    return NA;
+  }
+
+  function evalBuiltinCall(ns: string, fn: string, args: Expr[], kw: [string, Expr][]): any {
+    if (ns === "math") return evalMathCall(fn, args);
+    if (ns === "ta") return evalTaCall(fn, args, kw);
+    if (ns === "str") return evalStrCall(fn, args);
+    if (ns === "strategy.commission") return fn;
+    return NA;
+  }
+
+  function evalMathCall(fn: string, args: Expr[]): any {
+    const vals = args.map(a => evalExpr(a));
+    switch (fn) {
+      case "abs": return Math.abs(toNum(vals[0]));
+      case "max": {
+        if (vals.length === 1 && Array.isArray(vals[0])) return Math.max(...vals[0].map(toNum));
+        return Math.max(...vals.map(toNum));
+      }
+      case "min": {
+        if (vals.length === 1 && Array.isArray(vals[0])) return Math.min(...vals[0].map(toNum));
+        return Math.min(...vals.map(toNum));
+      }
+      case "sqrt": return Math.sqrt(toNum(vals[0]));
+      case "round": return Math.round(toNum(vals[0]));
+      case "floor": return Math.floor(toNum(vals[0]));
+      case "ceil": return Math.ceil(toNum(vals[0]));
+      case "log": return Math.log(toNum(vals[0]));
+      case "log10": return Math.log10(toNum(vals[0]));
+      case "pow": return Math.pow(toNum(vals[0]), toNum(vals[1]));
+      case "avg": {
+        const nums = vals.map(toNum).filter(v => !isNaN(v));
+        return nums.length > 0 ? nums.reduce((a, b) => a + b, 0) / nums.length : NaN;
+      }
+      case "sign": return Math.sign(toNum(vals[0]));
+      case "sum": return vals.map(toNum).reduce((a, b) => a + b, 0);
+      default: return NaN;
+    }
+  }
+
+  function resolveExprSeries(e: Expr): number[] | null {
+    if (e.k === "id") {
+      if (builtinSeries[e.name]) return Array.from(builtinSeries[e.name]) as number[];
+      if (precomputed[e.name]) return precomputed[e.name];
+      if (inputDefaults[e.name] !== undefined && typeof inputDefaults[e.name] === "string" && builtinSeries[inputDefaults[e.name]]) {
+        return Array.from(builtinSeries[inputDefaults[e.name]]) as number[];
+      }
+    }
+    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
+      return resolveNestedTaSeries(e.fn.prop, e.args, e.kw);
+    }
+    if (e.k === "num") {
+      const arr = new Array(n).fill(e.v);
+      return arr;
+    }
+    return null;
+  }
+
+  function resolveNestedTaSeries(fn: string, innerArgs: Expr[], innerKw: [string, Expr][]): number[] | null {
+    const h = Array.from(highArr) as number[];
+    const l = Array.from(lowArr) as number[];
+    const cl = Array.from(closeArr) as number[];
+    const cacheKey = `nested_${fn}_${innerArgs.map(a => a.k === "id" ? a.name : a.k === "num" ? String(a.v) : "?").join("_")}`;
+    if (indicatorCache.has(cacheKey)) return indicatorCache.get(cacheKey);
+
+    function nSrc(idx: number): number[] | null {
+      if (idx >= innerArgs.length) return cl;
+      return resolveExprSeries(innerArgs[idx]);
+    }
+    function nLen(idx: number, def: number = 14): number {
+      if (idx >= innerArgs.length) return def;
+      const v = resolveConst(innerArgs[idx]);
+      return typeof v === "number" ? v : def;
+    }
+
+    let result: number[] | null = null;
+    switch (fn) {
+      case "sma": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.sma(src, len); break; }
+      case "ema": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.ema(src, len); break; }
+      case "rma": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.rma(src, len); break; }
+      case "wma": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.wma(src, len); break; }
+      case "rsi": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.rsi(src, len); break; }
+      case "atr": { const len = nLen(0); result = ind.atr(h, l, cl, len); break; }
+      case "stdev": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.stdev(src, len); break; }
+      case "highest": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.highest(src, len); break; }
+      case "lowest": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.lowest(src, len); break; }
+      case "tr": { result = ind.trueRange(h, l, cl); break; }
+    }
+    if (result) indicatorCache.set(cacheKey, result);
+    return result;
+  }
+
+  function computeOnFly(fn: string, args: Expr[], kw: [string, Expr][]): number {
+    const h = Array.from(highArr) as number[];
+    const l = Array.from(lowArr) as number[];
+    const cl = Array.from(closeArr) as number[];
+
+    let isDynamic = false;
+
+    function getSrc(idx: number): number[] | null {
+      if (idx >= args.length) return cl;
+      const a = args[idx];
+      if (a.k === "id") {
+        if (builtinSeries[a.name]) return Array.from(builtinSeries[a.name]) as number[];
+        if (precomputed[a.name]) return precomputed[a.name];
+        if (vars[a.name]) {
+          isDynamic = true;
+          const arr = new Array(n).fill(NaN);
+          for (let i = 0; i <= currentBar; i++) {
+            const v = vars[a.name][i];
+            arr[i] = v === undefined ? NaN : toNum(v);
+          }
+          return arr;
+        }
+        if (inputDefaults[a.name] !== undefined && typeof inputDefaults[a.name] === "string" && builtinSeries[inputDefaults[a.name]]) {
+          return Array.from(builtinSeries[inputDefaults[a.name]]) as number[];
+        }
+      }
+      if (a.k === "call" && a.fn.k === "mem" && a.fn.obj.k === "id" && a.fn.obj.name === "ta") {
+        return resolveNestedTaSeries(a.fn.prop, a.args, a.kw);
+      }
+      if (a.k === "bin") {
+        const lSeries = resolveExprSeries(a.l);
+        const rSeries = resolveExprSeries(a.r);
+        if (lSeries && rSeries) {
+          const result = new Array(n).fill(NaN);
+          for (let i = 0; i < n; i++) {
+            if (!isNaN(lSeries[i]) && !isNaN(rSeries[i])) result[i] = evalBinOp(a.op, lSeries[i], rSeries[i]);
+          }
+          return result;
+        }
+      }
+      return null;
+    }
+
+    function getL(idx: number, def: number = 14): number {
+      if (idx >= args.length) {
+        const kwVal = kw.find(k => k[0] === "length");
+        if (kwVal) { const v = resolveConst(kwVal[1]); return typeof v === "number" ? v : def; }
+        return def;
+      }
+      const v = evalExpr(args[idx]);
+      return typeof v === "number" && !isNaN(v) ? Math.round(v) : def;
+    }
+
+    function argKey(a: Expr): string {
+      if (a.k === "id") return a.name;
+      if (a.k === "num") return String(a.v);
+      if (a.k === "str") return a.v;
+      if (a.k === "un" && a.op === "-" && a.e.k === "num") return `-${a.e.v}`;
+      if (a.k === "call" && a.fn.k === "mem") return `${(a.fn.obj as any).name || "?"}.${a.fn.prop}(${a.args.map(argKey).join(",")})`;
+      if (a.k === "bin") return `(${argKey(a.l)}${a.op}${argKey(a.r)})`;
+      const cv = resolveConst(a);
+      if (cv !== undefined && cv !== null) return String(cv);
+      return JSON.stringify(a).slice(0, 60);
+    }
+    const cacheKey = `${fn}_${args.map(argKey).join("_")}_${kw.map(k => `${k[0]}=${argKey(k[1])}`).join("_")}`;
+
+    const hasDynamicSrc = args.length > 0 && args[0].k === "id" && !builtinSeries[args[0].name] && !precomputed[args[0].name] && vars[args[0].name];
+    if (!hasDynamicSrc && indicatorCache.has(cacheKey)) {
+      const cached = indicatorCache.get(cacheKey);
+      return currentBar < cached.length ? (isNaN(cached[currentBar]) ? NA : cached[currentBar]) : NA;
+    }
+
+    let result: number[] | null = null;
+    switch (fn) {
+      case "sma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalSma(src, len, currentBar); result = ind.sma(src, len); } break; }
+      case "ema": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalEma(cacheKey, src, len, currentBar); result = ind.ema(src, len); } break; }
+      case "rma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalRma(cacheKey, src, len, currentBar); result = ind.rma(src, len); } break; }
+      case "wma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalSma(src, len, currentBar); result = ind.wma(src, len); } break; }
+      case "rsi": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalRsi(cacheKey, src, len, currentBar); result = ind.rsi(src, len); } break; }
+      case "atr": { const len = getL(0); result = ind.atr(h, l, cl, len); break; }
+      case "stdev": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalStdev(src, len, currentBar); result = ind.stdev(src, len); } break; }
+      case "highest": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalHighest(src, len, currentBar); result = ind.highest(src, len); } break; }
+      case "lowest": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalLowest(src, len, currentBar); result = ind.lowest(src, len); } break; }
+      case "tr": { result = ind.trueRange(h, l, cl); break; }
+      case "vwap": {
+        const src = getSrc(0) || cl;
+        result = new Array(n).fill(NaN);
+        let cumPV = 0, cumV = 0;
+        for (let i = 0; i < n; i++) {
+          cumPV += src[i] * (volArr[i] || 1);
+          cumV += (volArr[i] || 1);
+          result[i] = cumV !== 0 ? cumPV / cumV : src[i];
+        }
+        break;
+      }
+      case "pivothigh": {
+        let src = h, leftBars: number, rightBars: number;
+        if (args.length >= 3) { const s = getSrc(0); if (s) src = s; leftBars = getL(1, 5); rightBars = getL(2, 5); }
+        else { leftBars = getL(0, 5); rightBars = getL(1, 5); }
+        result = new Array(n).fill(NaN);
+        for (let i = leftBars + rightBars; i < n; i++) {
+          const pi = i - rightBars; let ok = true;
+          for (let j = pi - leftBars; j < pi; j++) if (src[j] >= src[pi]) { ok = false; break; }
+          if (ok) for (let j = pi + 1; j <= pi + rightBars; j++) if (src[j] >= src[pi]) { ok = false; break; }
+          if (ok) result[i] = src[pi];
+        }
+        break;
+      }
+      case "pivotlow": {
+        let src = l, leftBars: number, rightBars: number;
+        if (args.length >= 3) { const s = getSrc(0); if (s) src = s; leftBars = getL(1, 5); rightBars = getL(2, 5); }
+        else { leftBars = getL(0, 5); rightBars = getL(1, 5); }
+        result = new Array(n).fill(NaN);
+        for (let i = leftBars + rightBars; i < n; i++) {
+          const pi = i - rightBars; let ok = true;
+          for (let j = pi - leftBars; j < pi; j++) if (src[j] <= src[pi]) { ok = false; break; }
+          if (ok) for (let j = pi + 1; j <= pi + rightBars; j++) if (src[j] <= src[pi]) { ok = false; break; }
+          if (ok) result[i] = src[pi];
+        }
+        break;
+      }
+    }
+    if (result) {
+      if (!isDynamic) indicatorCache.set(cacheKey, result);
+      return currentBar < result.length ? (isNaN(result[currentBar]) ? NA : result[currentBar]) : NA;
+    }
+    return NA;
+  }
+
+  const emaState: Map<string, number> = new Map();
+  const rmaState: Map<string, number> = new Map();
+  const rsiState: Map<string, { avgGain: number; avgLoss: number }> = new Map();
+
+  function incrementalSma(src: number[], len: number, bar: number): number {
+    let sum = 0, count = 0;
+    const start = Math.max(0, bar - len + 1);
+    for (let i = start; i <= bar; i++) {
+      const v = src[i];
+      if (!isNaN(v)) { sum += v; count++; }
+    }
+    return count > 0 ? sum / count : NA;
+  }
+
+  function incrementalEma(key: string, src: number[], len: number, bar: number): number {
+    const alpha = 2 / (len + 1);
+    const stateKey = `ema_${key}`;
+    if (bar < len - 1) {
+      const sma = incrementalSma(src, bar + 1, bar);
+      emaState.set(stateKey, sma);
+      return isNaN(sma) ? NA : sma;
+    }
+    const prev = emaState.get(stateKey) ?? incrementalSma(src, len, bar - 1);
+    const v = src[bar];
+    if (isNaN(v)) return isNaN(prev) ? NA : prev;
+    const result = isNaN(prev) ? v : alpha * v + (1 - alpha) * prev;
+    emaState.set(stateKey, result);
+    return result;
+  }
+
+  function incrementalRma(key: string, src: number[], len: number, bar: number): number {
+    const alpha = 1 / len;
+    const stateKey = `rma_${key}`;
+    if (bar < len - 1) {
+      const sma = incrementalSma(src, bar + 1, bar);
+      rmaState.set(stateKey, sma);
+      return isNaN(sma) ? NA : sma;
+    }
+    const prev = rmaState.get(stateKey) ?? incrementalSma(src, len, bar - 1);
+    const v = src[bar];
+    if (isNaN(v)) return isNaN(prev) ? NA : prev;
+    const result = isNaN(prev) ? v : alpha * v + (1 - alpha) * prev;
+    rmaState.set(stateKey, result);
+    return result;
+  }
+
+  function incrementalRsi(key: string, src: number[], len: number, bar: number): number {
+    const stateKey = `rsi_${key}`;
+    if (bar < 1) return NA;
+    const change = src[bar] - src[bar - 1];
+    if (isNaN(change)) return NA;
+    const gain = change > 0 ? change : 0;
+    const loss = change < 0 ? -change : 0;
+
+    const prev = rsiState.get(stateKey);
+    if (!prev || bar <= len) {
+      let totalGain = 0, totalLoss = 0, count = 0;
+      const start = Math.max(1, bar - len + 1);
+      for (let i = start; i <= bar; i++) {
+        const c = src[i] - src[i - 1];
+        if (!isNaN(c)) {
+          totalGain += c > 0 ? c : 0;
+          totalLoss += c < 0 ? -c : 0;
+          count++;
+        }
+      }
+      if (count === 0) return NA;
+      const avgGain = totalGain / count;
+      const avgLoss = totalLoss / count;
+      rsiState.set(stateKey, { avgGain, avgLoss });
+      return avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+    }
+    const avgGain = (prev.avgGain * (len - 1) + gain) / len;
+    const avgLoss = (prev.avgLoss * (len - 1) + loss) / len;
+    rsiState.set(stateKey, { avgGain, avgLoss });
+    return avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+
+  function incrementalStdev(src: number[], len: number, bar: number): number {
+    const start = Math.max(0, bar - len + 1);
+    let sum = 0, sumSq = 0, count = 0;
+    for (let i = start; i <= bar; i++) {
+      const v = src[i];
+      if (!isNaN(v)) { sum += v; sumSq += v * v; count++; }
+    }
+    if (count < 2) return NA;
+    const mean = sum / count;
+    return Math.sqrt(Math.max(0, sumSq / count - mean * mean));
+  }
+
+  function incrementalHighest(src: number[], len: number, bar: number): number {
+    const start = Math.max(0, bar - len + 1);
+    let max = -Infinity;
+    for (let i = start; i <= bar; i++) {
+      if (!isNaN(src[i]) && src[i] > max) max = src[i];
+    }
+    return max === -Infinity ? NA : max;
+  }
+
+  function incrementalLowest(src: number[], len: number, bar: number): number {
+    const start = Math.max(0, bar - len + 1);
+    let min = Infinity;
+    for (let i = start; i <= bar; i++) {
+      if (!isNaN(src[i]) && src[i] < min) min = src[i];
+    }
+    return min === Infinity ? NA : min;
+  }
+
+  function evalTaCall(fn: string, args: Expr[], kw: [string, Expr][]): any {
+    switch (fn) {
+      case "sma": case "ema": case "rma": case "wma": case "rsi":
+      case "atr": case "stdev": case "highest": case "lowest":
+      case "pivothigh": case "pivotlow": case "vwap": case "tr": {
+        return computeOnFly(fn, args, kw);
+      }
+      case "dmi": {
+        const diLen = toNum(evalExpr(args[0]));
+        const adxSmooth = args.length > 1 ? toNum(evalExpr(args[1])) : diLen;
+        const { diPlus, diMinus, adxVal } = computeDmi(diLen, adxSmooth);
+        return [
+          isNaN(diPlus[currentBar]) ? NA : diPlus[currentBar],
+          isNaN(diMinus[currentBar]) ? NA : diMinus[currentBar],
+          isNaN(adxVal[currentBar]) ? NA : adxVal[currentBar],
+        ];
+      }
+      case "crossover": {
+        const a = toNum(evalExpr(args[0]));
+        const b = toNum(evalExpr(args[1]));
+        if (currentBar < 1) return false;
+        const aPrev = getPrevVal(args[0]);
+        const bPrev = getPrevVal(args[1]);
+        return a > b && aPrev <= bPrev;
+      }
+      case "crossunder": {
+        const a = toNum(evalExpr(args[0]));
+        const b = toNum(evalExpr(args[1]));
+        if (currentBar < 1) return false;
+        const aPrev = getPrevVal(args[0]);
+        const bPrev = getPrevVal(args[1]);
+        return a < b && aPrev >= bPrev;
+      }
+      case "change": {
+        const v = evalExpr(args[0]);
+        const len = args.length > 1 ? toNum(evalExpr(args[1])) : 1;
+        const prev = getPrevValN(args[0], len);
+        return toNum(v) - toNum(prev);
+      }
+      case "barssince": {
+        const cond = args[0];
+        for (let b = currentBar; b >= 0; b--) {
+          const saved = currentBar;
+          currentBar = b;
+          const val = evalExpr(cond);
+          currentBar = saved;
+          if (val && val !== NA) return saved - b;
+        }
+        return NA;
+      }
+      case "valuewhen": {
+        const cond = args[0];
+        const src = args[1];
+        const occurrence = args.length > 2 ? toNum(evalExpr(args[2])) : 0;
+        let found = 0;
+        for (let b = currentBar; b >= 0; b--) {
+          const saved = currentBar;
+          currentBar = b;
+          const condVal = evalExpr(cond);
+          if (condVal && condVal !== NA) {
+            if (found >= occurrence) {
+              const result = evalExpr(src);
+              currentBar = saved;
+              return result;
+            }
+            found++;
+          }
+          currentBar = saved;
+        }
+        return NA;
+      }
+      case "cum": {
+        const v = toNum(evalExpr(args[0]));
+        const prevCum = currentBar > 0 ? toNum(getVar("__ta_cum_" + (args[0].k === "id" ? args[0].name : "x"), 1)) : 0;
+        const result = (isNaN(prevCum) ? 0 : prevCum) + (isNaN(v) ? 0 : v);
+        setVar("__ta_cum_" + (args[0].k === "id" ? args[0].name : "x"), result);
+        return result;
+      }
+      default: return NA;
+    }
+  }
+
+  function getPrevVal(e: Expr): number {
+    if (e.k === "id") return toNum(getVar(e.name, 1));
+    if (currentBar < 1) return NaN;
+    const saved = currentBar;
+    currentBar = saved - 1;
+    const v = toNum(evalExpr(e));
+    currentBar = saved;
+    return v;
+  }
+
+  function getPrevValN(e: Expr, offset: number): number {
+    if (e.k === "id") return toNum(getVar(e.name, offset));
+    if (currentBar < offset) return NaN;
+    const saved = currentBar;
+    currentBar = saved - offset;
+    const v = toNum(evalExpr(e));
+    currentBar = saved;
+    return v;
+  }
+
+  function evalStrCall(fn: string, args: Expr[]): any {
+    switch (fn) {
+      case "tostring": return String(evalExpr(args[0]));
+      case "format": return String(evalExpr(args[0]));
+      default: return "";
+    }
+  }
+
+  let currentDeclName: string | null = null;
+
+  function evalInputCall(type: string, args: Expr[], kw: [string, Expr][]): any {
+    if (currentDeclName && params[currentDeclName] !== undefined) {
+      return params[currentDeclName];
+    }
+    if (currentDeclName && inputDefaults[currentDeclName] !== undefined) {
+      const def = inputDefaults[currentDeclName];
+      if (type === "source" && typeof def === "string" && builtinSeries[def]) {
+        return (builtinSeries[def] as any)[currentBar];
+      }
+      return def;
+    }
+    if (args.length > 0) {
+      const kwDefval = kw.find(k => k[0] === "defval");
+      if (kwDefval) return evalExpr(kwDefval[1]);
+      return evalExpr(args[0]);
+    }
+    switch (type) {
+      case "int": return 0;
+      case "float": return 0.0;
+      case "bool": return false;
+      case "string": return "";
+      case "time": return 0;
+      case "source": return closeArr[currentBar];
+      default: return 0;
+    }
+  }
+
+  function evalStrategyCall(fn: string, args: Expr[], kw: [string, Expr][]): any {
+    const getKw = (name: string): any => {
+      const found = kw.find(k => k[0] === name);
+      return found ? evalExpr(found[1]) : undefined;
+    };
+
+    const price = config.processOrdersOnClose ? closeArr[currentBar] : (currentBar + 1 < n ? openArr[currentBar + 1] : closeArr[currentBar]);
+    const time = candles[currentBar].time;
+    const bar = currentBar;
+
+    switch (fn) {
+      case "entry": {
+        const id = args.length > 0 ? String(evalExpr(args[0])) : "Entry";
+        const dir = args.length > 1 ? evalExpr(args[1]) : getKw("direction") || "long";
+        const when = getKw("when");
+        if (when !== undefined && !when) return NA;
+        broker.entry(id, dir === "long" ? "long" : "short", bar, price, time);
+        return NA;
+      }
+      case "close": {
+        const id = args.length > 0 ? String(evalExpr(args[0])) : "";
+        const qtyPct = getKw("qty_percent") ?? 100;
+        const comment = getKw("comment") ?? id;
+        const when = getKw("when");
+        if (when !== undefined && !when) return NA;
+        broker.close(id, bar, price, time, toNum(qtyPct), String(comment));
+        return NA;
+      }
+      case "close_all": {
+        const comment = getKw("comment") ?? "Close All";
+        broker.closeAll(bar, price, time, String(comment));
+        return NA;
+      }
+      case "exit": {
+        const id = args.length > 0 ? String(evalExpr(args[0])) : "Exit";
+        const fromEntry = args.length > 1 ? String(evalExpr(args[1])) : (getKw("from_entry") ?? "");
+        const stop = getKw("stop");
+        const limit = getKw("limit");
+        const trailPrice = getKw("trail_price");
+        const trailOffset = getKw("trail_offset");
+        const qtyPercent = getKw("qty_percent") ?? 100;
+        broker.addExit(id, String(fromEntry), stop ?? null, limit ?? null, trailPrice ?? null, trailOffset ?? null, toNum(qtyPercent));
+        return NA;
+      }
+      default: return NA;
+    }
+  }
+
+  function execStmt(stmt: Stmt): "break" | "continue" | null {
+    if (++opsCount > MAX_OPS) throw new Error("Execution budget exceeded");
+
+    switch (stmt.k) {
+      case "decl": {
+        currentDeclName = stmt.name;
+        if (stmt.isVar) {
+          if (currentBar === 0) {
+            const v = evalExpr(stmt.e);
+            setVar(stmt.name, v);
+            varIsVar.add(stmt.name);
+          } else {
+            const prev = getVar(stmt.name, 1);
+            setVar(stmt.name, prev);
+          }
+        } else {
+          if (precomputed[stmt.name]) {
+            const v = precomputed[stmt.name][currentBar];
+            setVar(stmt.name, isNaN(v) ? NA : v);
+          } else {
+            const v = evalExpr(stmt.e);
+            setVar(stmt.name, v);
+          }
+        }
+        currentDeclName = null;
+        break;
+      }
+      case "multi_decl": {
+        const result = evalExpr(stmt.e);
+        if (Array.isArray(result)) {
+          for (let i = 0; i < stmt.names.length; i++) {
+            setVar(stmt.names[i], i < result.length ? result[i] : NA);
+          }
+        }
+        break;
+      }
+      case "reassign": {
+        const v = evalExpr(stmt.e);
+        if (stmt.target.k === "id") {
+          setVar(stmt.target.name, v);
+        }
+        break;
+      }
+      case "aug": {
+        const rhs = evalExpr(stmt.e);
+        if (stmt.target.k === "id") {
+          const cur = getVar(stmt.target.name, 0);
+          let result: any;
+          switch (stmt.op) {
+            case "+=": result = toNum(cur) + toNum(rhs); break;
+            case "-=": result = toNum(cur) - toNum(rhs); break;
+            case "*=": result = toNum(cur) * toNum(rhs); break;
+            case "/=": result = toNum(rhs) === 0 ? NaN : toNum(cur) / toNum(rhs); break;
+            default: result = cur;
+          }
+          setVar(stmt.target.name, result);
+        }
+        break;
+      }
+      case "if": {
+        const cond = evalExpr(stmt.c);
+        if (cond) {
+          for (const s of stmt.body) {
+            const r = execStmt(s);
+            if (r) return r;
+          }
+        } else {
+          let handled = false;
+          for (const elif of stmt.elifs) {
+            if (evalExpr(elif.c)) {
+              for (const s of elif.body) {
+                const r = execStmt(s);
+                if (r) return r;
+              }
+              handled = true;
+              break;
+            }
+          }
+          if (!handled && stmt.el) {
+            for (const s of stmt.el) {
+              const r = execStmt(s);
+              if (r) return r;
+            }
+          }
+        }
+        break;
+      }
+      case "for": {
+        const start = Math.round(toNum(evalExpr(stmt.start)));
+        const end = Math.round(toNum(evalExpr(stmt.end)));
+        const step = stmt.step ? Math.round(toNum(evalExpr(stmt.step))) : 1;
+        if (step === 0) break;
+        let iterations = 0;
+        const maxIter = 10000;
+        for (let i = start; step > 0 ? i <= end : i >= end; i += step) {
+          if (++iterations > maxIter) break;
+          setVar(stmt.v, i);
+          let brk = false;
+          for (const s of stmt.body) {
+            const r = execStmt(s);
+            if (r === "break") { brk = true; break; }
+            if (r === "continue") break;
+          }
+          if (brk) break;
+        }
+        break;
+      }
+      case "while": {
+        let iterations = 0;
+        const maxIter = 10000;
+        while (evalExpr(stmt.c) && ++iterations <= maxIter) {
+          let brk = false;
+          for (const s of stmt.body) {
+            const r = execStmt(s);
+            if (r === "break") { brk = true; break; }
+            if (r === "continue") break;
+          }
+          if (brk) break;
+        }
+        break;
+      }
+      case "switch": {
+        const switchVal = stmt.e ? evalExpr(stmt.e) : null;
+        for (const c of stmt.cases) {
+          let matched = false;
+          for (const v of c.vals) {
+            if (v === null) { matched = true; break; }
+            const cv = evalExpr(v);
+            if (switchVal !== null && cv === switchVal) { matched = true; break; }
+            if (switchVal === null && cv) { matched = true; break; }
+          }
+          if (matched) {
+            for (const s of c.body) {
+              const r = execStmt(s);
+              if (r) return r;
+            }
+            break;
+          }
+        }
+        break;
+      }
+      case "expr": {
+        evalExpr(stmt.e);
+        break;
+      }
+      case "break": return "break";
+      case "continue": return "continue";
+    }
+    return null;
+  }
+
+  function resolveInputDefault(args: Expr[], kw: [string, Expr][], type: string): any {
+    const kwDefval = kw.find(k => k[0] === "defval");
+    if (kwDefval) {
+      const v = resolveConst(kwDefval[1]);
+      if (v !== undefined) return v;
+    }
+    if (args.length > 0) {
+      const v = resolveConst(args[0]);
+      if (v !== undefined) return v;
+    }
+    switch (type) {
+      case "int": return 0;
+      case "float": return 0.0;
+      case "bool": return false;
+      case "string": return "";
+      case "source": return "close";
+      default: return 0;
+    }
+  }
+
+  function precomputePhase() {
+    for (const stmt of ast) {
+      if (stmt.k === "decl" && !stmt.isVar) {
+        if (stmt.e.k === "call" && stmt.e.fn.k === "mem" && stmt.e.fn.obj.k === "id" && stmt.e.fn.obj.name === "input") {
+          if (params[stmt.name] !== undefined) {
+            inputDefaults[stmt.name] = params[stmt.name];
+          } else {
+            inputDefaults[stmt.name] = resolveInputDefault(stmt.e.args, stmt.e.kw, stmt.e.fn.prop);
+          }
+          continue;
+        }
+        if (stmt.e.k === "call" && stmt.e.fn.k === "id" && stmt.e.fn.name === "strategy") {
+          continue;
+        }
+        if (stmt.e.k === "id" && builtinSeries[stmt.e.name]) {
+          builtinSeries[stmt.name] = builtinSeries[stmt.e.name];
+          continue;
+        }
+        if (stmt.e.k !== "na") {
+          tryPrecompute(stmt.name, stmt.e);
+        }
+      }
+    }
+  }
+
+  precomputePhase();
+
+  const equityValues = new Array(n);
+
+  for (currentBar = 0; currentBar < n; currentBar++) {
+    opsCount = 0;
+
+    if (!config.processOrdersOnClose && currentBar > 0) {
+      broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
+    }
+
+    for (const stmt of ast) {
+      try {
+        execStmt(stmt);
+      } catch (e: any) {
+        if (e.message === "Execution budget exceeded") break;
+      }
+    }
+
+    if (config.processOrdersOnClose) {
+      broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
+    }
+
+    equityValues[currentBar] = broker.getEquityWithUnrealized(closeArr[currentBar]);
+  }
+
+  if (broker.position) {
+    const lastClose = closeArr[n - 1];
+    broker.closeAll(n - 1, lastClose, candles[n - 1].time, "Open Position");
+  }
+
+  const trades = broker.trades;
+  let winCount = 0, grossProfit = 0, grossLoss = 0;
+  for (const t of trades) {
+    if (t.pnlPercent > 0) { winCount++; grossProfit += t.pnlDollar; }
+    else grossLoss -= t.pnlDollar;
+  }
+
+  const netProfitPercent = ((broker.equity - config.initialCapital) / config.initialCapital) * 100;
+  let maxEquity = config.initialCapital, maxDrawdown = 0;
+  for (let i = 0; i < n; i++) {
+    const eq = equityValues[i] || config.initialCapital;
+    if (eq > maxEquity) maxEquity = eq;
+    const dd = ((maxEquity - eq) / maxEquity) * 100;
+    if (dd > maxDrawdown) maxDrawdown = dd;
+  }
+
+  const step = Math.max(1, Math.floor(n / 500));
+  const equityCurve: { time: string; equity: number }[] = [];
+  for (let i = 0; i < n; i += step) {
+    equityCurve.push({ time: new Date(candles[i].time).toISOString(), equity: equityValues[i] || config.initialCapital });
+  }
+  if (n > 0 && (n - 1) % step !== 0) {
+    equityCurve.push({ time: new Date(candles[n - 1].time).toISOString(), equity: equityValues[n - 1] || config.initialCapital });
+  }
+
+  return {
+    ticker, timeframe,
+    netProfitPercent: Math.round(netProfitPercent * 100) / 100,
+    winRatePercent: trades.length > 0 ? Math.round((winCount / trades.length) * 10000) / 100 : 0,
+    maxDrawdownPercent: Math.round(maxDrawdown * 100) / 100,
+    profitFactor: grossLoss > 0 ? Math.round((grossProfit / grossLoss) * 100) / 100 : grossProfit > 0 ? 999 : 0,
+    totalTrades: trades.length,
+    params,
+    trades,
+    equityCurve,
+  };
+}

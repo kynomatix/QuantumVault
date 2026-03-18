@@ -1,5 +1,5 @@
 import { workerData, parentPort } from "worker_threads";
-import { runBacktest, type OHLCV } from "./engine";
+import { runBacktest, compilePine, type OHLCV, type PinePlan } from "./engine";
 import type { LabPineInput, LabBacktestResult, LabJobProgress, LabCheckpoint, GuidedInsights } from "@shared/schema";
 
 interface WorkerInput {
@@ -19,6 +19,7 @@ interface WorkerInput {
     guidedInsightsPerCombo?: Record<string, GuidedInsights>;
     deepSearch?: boolean;
     coordinateTune?: boolean;
+    pineScript?: string;
   };
   candlesByCombo: Record<string, OHLCV[]>;
   resumeCheckpoint?: LabCheckpoint;
@@ -755,6 +756,16 @@ async function run() {
   let coordinateTotalTests = 0;
   const inputs = config.parsedInputs;
 
+  let pinePlan: PinePlan | undefined;
+  if (config.pineScript) {
+    try {
+      pinePlan = compilePine(config.pineScript);
+    } catch (e: any) {
+      send({ type: "error", message: `PineScript compilation failed: ${e.message}` });
+      return;
+    }
+  }
+
   const combos: { ticker: string; timeframe: string }[] = [];
   for (const ticker of config.tickers) {
     for (const tf of config.timeframes) {
@@ -819,6 +830,7 @@ async function run() {
       commission: 0.0005,
       positionSize: 1000,
       processOrdersOnClose: config.processOrdersOnClose,
+      pinePlan,
     };
 
     const defaultParams: Record<string, any> = {};
