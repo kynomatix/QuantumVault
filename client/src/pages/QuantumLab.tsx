@@ -2503,6 +2503,10 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
             <p className="text-xs text-white/60">
               {run ? `${(run.tickers as string[]).map(t => t.split("/")[0]).join(", ")} / ${(run.timeframes as string[]).join(", ")} — ${new Date(run.createdAt).toLocaleDateString()}` : ""}
               {run?.totalConfigsTested ? ` — ${run.totalConfigsTested.toLocaleString()} configs tested` : ""}
+              {run?.completedAt && run?.createdAt ? (() => {
+                const mins = Math.round((new Date(run.completedAt).getTime() - new Date(run.createdAt).getTime()) / 60000);
+                return mins > 0 ? ` — ${mins}m` : " — <1m";
+              })() : ""}
             </p>
           </div>
         </div>
