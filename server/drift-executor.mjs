@@ -1041,7 +1041,7 @@ function loadPerpMarketIndices() {
     if (fs.existsSync(jsonPath)) {
       const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
       if (data && Object.keys(data).length >= Object.keys(PERP_MARKET_INDICES_FALLBACK).length) {
-        console.log(`[Executor] Loaded ${Object.keys(data).length} market indices from JSON`);
+        console.error(`[Executor] Loaded ${Object.keys(data).length} market indices from JSON`);
         return data;
       }
     }

@@ -3015,7 +3015,9 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
       
       try {
         if (stdout.trim()) {
-          const result = JSON.parse(stdout.trim());
+          const jsonMatch = stdout.match(/\{[\s\S]*\}$/m);
+          const jsonStr = jsonMatch ? jsonMatch[0] : stdout.trim();
+          const result = JSON.parse(jsonStr);
           // Ensure rate limit errors in parsed result are properly formatted
           if (!result.success && result.error) {
             const rateLimit = checkForRateLimit(result.error);
