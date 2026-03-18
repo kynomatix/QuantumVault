@@ -18,14 +18,16 @@ export function useLeverageLimits() {
       const res = await fetch("/api/drift/leverage-limits");
       if (!res.ok) throw new Error("Failed to fetch leverage limits");
       const data = await safeResponseJson(res);
-      if (data?.leverageLimits && Object.keys(data.leverageLimits).length > 0) {
-        setLeverageLimitsCache(data.leverageLimits);
+      if (!data?.leverageLimits || Object.keys(data.leverageLimits).length === 0) {
+        throw new Error("Leverage cache not ready");
       }
+      setLeverageLimitsCache(data.leverageLimits);
       return data;
     },
     staleTime: 12 * 60 * 60 * 1000,
     refetchInterval: 12 * 60 * 60 * 1000,
-    retry: 2,
+    retry: 5,
+    retryDelay: (attempt) => Math.min(5000 * (attempt + 1), 30000),
   });
 
   const getMaxLeverage = (market: string): number => {
