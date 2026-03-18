@@ -3048,6 +3048,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
   const [selectedCell, setSelectedCell] = useState<any | null>(null);
   const [selectedTopIdx, setSelectedTopIdx] = useState<number>(0);
   const [refiningCombo, setRefiningCombo] = useState<string | null>(null);
+  const [sortByTimeframe, setSortByTimeframe] = useState<string | null>(null);
   const { getMaxLeverage } = useLeverageLimits();
   const { toast } = useToast();
 
@@ -3215,6 +3216,40 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
   const minVal = Math.min(...values);
   const maxVal = Math.max(...values);
 
+  const isInverseMetric = metric === "lowestDrawdown" || metric === "avgDrawdown";
+  const isProfitMetricSort = metric === "bestProfit" || metric === "avgProfit";
+
+  const displayTickers = useMemo(() => {
+    const sorted = [...tickers];
+    if (!sortByTimeframe) return sorted;
+    sorted.sort((a: string, b: string) => {
+      const cellA = cellLookup.get(`${a}|${sortByTimeframe}`);
+      const cellB = cellLookup.get(`${b}|${sortByTimeframe}`);
+      const hasA = !!cellA;
+      const hasB = !!cellB;
+      if (!hasA && !hasB) return a.localeCompare(b);
+      if (!hasA) return 1;
+      if (!hasB) return -1;
+      let valA: number, valB: number;
+      if (isProfitMetricSort) {
+        const levA = cellLevProfit.get(`${a}|${sortByTimeframe}`);
+        const levB = cellLevProfit.get(`${b}|${sortByTimeframe}`);
+        valA = levA ? levA.levProfit : cellA[metric];
+        valB = levB ? levB.levProfit : cellB[metric];
+      } else {
+        valA = cellA[metric] as number;
+        valB = cellB[metric] as number;
+      }
+      if (isInverseMetric) {
+        const cmp = valA - valB;
+        return cmp !== 0 ? cmp : a.localeCompare(b);
+      }
+      const cmp = valB - valA;
+      return cmp !== 0 ? cmp : a.localeCompare(b);
+    });
+    return sorted;
+  }, [tickers, sortByTimeframe, metric, cells, isInverseMetric, isProfitMetricSort]);
+
   return (
     <div className="space-y-6" data-testid="heatmap-panel">
       <div className="flex items-center justify-between">
@@ -3242,10 +3277,24 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
           <div className="grid gap-1" style={{ gridTemplateColumns: `120px repeat(${timeframes.length}, 1fr)` }}>
             <div />
             {timeframes.map((tf: string) => (
-              <div key={tf} className="text-center text-xs font-medium text-white/50 py-2">{tf}</div>
+              <button
+                key={tf}
+                onClick={() => setSortByTimeframe(sortByTimeframe === tf ? null : tf)}
+                className={cn(
+                  "text-center text-xs font-medium py-2 rounded-md transition-colors cursor-pointer select-none flex items-center justify-center gap-1",
+                  sortByTimeframe === tf
+                    ? "text-violet-300 bg-violet-500/10"
+                    : "text-white/50 hover:text-white/70 hover:bg-white/5"
+                )}
+                title="Click to sort by this timeframe"
+                data-testid={`heatmap-sort-${tf}`}
+              >
+                {tf}
+                {sortByTimeframe === tf && <ChevronUp className="w-3 h-3" />}
+              </button>
             ))}
 
-            {tickers.map((ticker: string) => (
+            {displayTickers.map((ticker: string) => (
               <Fragment key={ticker}>
                 <div className="flex items-center text-xs font-medium text-white/70 pr-3 justify-end truncate">
                   {ticker.split("/")[0]}
