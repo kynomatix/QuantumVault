@@ -14,6 +14,23 @@ const CONSERVATIVE_FALLBACK = 5;
 const REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 
+const DRIFT_LEVERAGE_TIERS: Record<string, number> = {
+  'SOL-PERP': 101, 'BTC-PERP': 101, 'ETH-PERP': 101,
+  'XRP-PERP': 20,
+  'HYPE-PERP': 10, 'SUI-PERP': 10, 'ASTER-PERP': 10, 'FARTCOIN-PERP': 10,
+  'LINK-PERP': 10, '1MBONK-PERP': 10, 'AVAX-PERP': 10, 'LIT-PERP': 10,
+  'WIF-PERP': 10, 'RENDER-PERP': 10, 'JUP-PERP': 10, 'INJ-PERP': 10,
+  'PAXG-PERP': 10, 'BNB-PERP': 10, 'DOGE-PERP': 10, 'JTO-PERP': 10,
+  'PYTH-PERP': 10, 'LTC-PERP': 10, 'APT-PERP': 10, 'ARB-PERP': 10,
+  'TAO-PERP': 5, '1KPUMP-PERP': 5, 'ZEC-PERP': 5, 'DRIFT-PERP': 5,
+  'RAY-PERP': 5, '1KMON-PERP': 5, 'TNSR-PERP': 5,
+  'KMNO-PERP': 3,
+  'ADA-PERP': 10, 'HNT-PERP': 5, 'PEPE-PERP': 10, 'TRX-PERP': 10,
+  'SEI-PERP': 10, 'ONDO-PERP': 10, 'NEAR-PERP': 10, 'MNT-PERP': 10,
+  'DOT-PERP': 10, 'AAVE-PERP': 10, 'OP-PERP': 10, 'PENGU-PERP': 10,
+  'POL-PERP': 10, 'CRV-PERP': 10, 'POPCAT-PERP': 10,
+};
+
 let leverageCache: LeverageCache | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let isRefreshing = false;
@@ -58,9 +75,10 @@ async function fetchOnChainMarketData(): Promise<OnChainMarketData | null> {
         const symbol = perpMarkets[i].symbol.toUpperCase();
         const key = symbol.endsWith('-PERP') ? symbol : `${symbol}-PERP`;
 
-        if (decoded.marginRatioInitial > 0) {
-          const maxLeverage = Math.floor(10000 / decoded.marginRatioInitial);
-          leverageMap[key] = maxLeverage;
+        if (DRIFT_LEVERAGE_TIERS[key]) {
+          leverageMap[key] = DRIFT_LEVERAGE_TIERS[key];
+        } else if (decoded.marginRatioInitial > 0) {
+          leverageMap[key] = Math.round(10000 / decoded.marginRatioInitial);
         }
 
         const status = decoded.status;
