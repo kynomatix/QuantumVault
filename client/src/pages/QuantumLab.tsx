@@ -689,9 +689,8 @@ export default function QuantumLab() {
         ) : (
           <RunHistoryPanel
             onSelectRun={(id) => setActiveHistoryRunId(id)}
-            onViewRunning={(jobId) => { setActiveJobId(jobId); setMainTab("main"); }}
+            onViewRunning={(jobId) => { setActiveJobId(jobId); }}
             liveProgress={activeJobId ? jobProgress : null}
-            onGoToLiveJob={() => setMainTab("main")}
           />
         );
       case "heatmap":
@@ -1992,7 +1991,7 @@ function SortHeader({ label, sortKey, current, dir, onClick }: { label: string; 
 
 const PAGE_SIZE = 20;
 
-function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJob }: { onSelectRun: (id: number) => void; onViewRunning: (jobId: string) => void; liveProgress?: LabJobProgress | null; onGoToLiveJob?: () => void }) {
+function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelectRun: (id: number) => void; onViewRunning: (jobId: string) => void; liveProgress?: LabJobProgress | null }) {
   const { toast } = useToast();
   const { getMaxLeverage } = useLeverageLimits();
   const { data: runs, isLoading } = useQuery<LabOptimizationRun[]>({
@@ -2081,11 +2080,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
               <span className="text-sm font-medium text-violet-300">Optimization Running</span>
               <span className="text-xs text-white/40">{liveProgress.stage}</span>
             </div>
-            {onGoToLiveJob && (
-              <Button variant="ghost" size="sm" className="text-violet-300 hover:text-violet-200 hover:bg-violet-500/20 gap-1" onClick={onGoToLiveJob} data-testid="button-go-to-live-job">
-                <Play className="w-3 h-3" /> View Progress
-              </Button>
-            )}
+            <span className="text-[10px] text-violet-400/60 font-mono">LIVE</span>
           </div>
           <div className="w-full bg-white/10 rounded-full h-2 mb-3">
             <div className="bg-violet-500 h-2 rounded-full transition-all duration-500" style={{ width: `${Math.min(100, liveProgress.percent ?? 0)}%` }} />
@@ -2153,26 +2148,14 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
 
             return (
               <div key={run.id} className="flex items-center gap-2">
-                <div className="flex-1 cursor-pointer" onClick={async () => {
+                <div className={`flex-1 ${isRunning ? "" : "cursor-pointer"}`} onClick={async () => {
                   if (isComplete || isPaused || isFailed) { onSelectRun(run.id); }
                   else if (isRunning) {
-                    try {
-                      const res = await fetch(`/api/lab/runs/${run.id}/job`);
-                      if (res.ok) {
-                        const { jobId } = await safeResponseJson(res);
-                        onViewRunning(jobId);
-                      } else {
-                        const failRes = await apiRequest("POST", `/api/lab/runs/${run.id}/fail`);
-                        const failData = await safeResponseJson(failRes);
-                        queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
-                        if (failData.status === "paused") {
-                          onSelectRun(run.id);
-                        }
-                      }
-                    } catch {}
+                    const card = document.querySelector('[data-testid="card-live-progress"]');
+                    if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
                   }
                 }}>
-                  <Card className={`bg-white/5 border border-white/10 p-4 cursor-pointer hover:bg-white/10`} data-testid={`history-run-card-${run.id}`}>
+                  <Card className={`bg-white/5 border border-white/10 p-4 ${isRunning ? "border-violet-500/20 opacity-60" : "cursor-pointer hover:bg-white/10"}`} data-testid={`history-run-card-${run.id}`}>
                     <div className="flex items-center justify-between gap-4 flex-wrap">
                       <div className="flex items-center gap-3 min-w-0 flex-1">
                         <div className={`flex items-center justify-center w-9 h-9 rounded-md ${statusBg} flex-shrink-0`}>{statusIcon}</div>
