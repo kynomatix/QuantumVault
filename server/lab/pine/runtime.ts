@@ -13,7 +13,9 @@ export interface PineEngineConfig {
   processOrdersOnClose?: boolean;
 }
 
-const NA = null as any;
+// NA represents PineScript's "na" value — intentionally typed as any since it
+// substitutes for any Pine type (number, bool, string) in the dynamic runtime.
+const NA: any = null;
 function isNa(v: any): boolean { return v === null || v === undefined || (typeof v === 'number' && isNaN(v)); }
 function toNum(v: any): number { return isNa(v) ? NaN : Number(v); }
 
@@ -29,6 +31,13 @@ interface PendingExit {
   trailExtreme: number;
 }
 
+interface PendingEntry {
+  id: string;
+  direction: "long" | "short";
+  bar: number;
+  time: number;
+}
+
 interface Position {
   direction: "long" | "short";
   size: number;
@@ -41,10 +50,10 @@ interface Position {
 class Broker {
   position: Position | null = null;
   pendingExits: PendingExit[] = [];
+  pendingEntries: PendingEntry[] = [];
   trades: LabTradeRecord[] = [];
   equity: number;
   private config: PineEngineConfig;
-  private partialCloses: { qty: number; price: number; reason: string }[] = [];
 
   constructor(config: PineEngineConfig) {
     this.config = config;
@@ -54,7 +63,19 @@ class Broker {
   get positionSize(): number { return this.position ? (this.position.direction === "long" ? this.position.size : -this.position.size) : 0; }
   get positionAvgPrice(): number { return this.position ? this.position.avgPrice : NaN; }
 
-  entry(id: string, direction: "long" | "short", bar: number, price: number, time: number) {
+  queueEntry(id: string, direction: "long" | "short", bar: number, time: number) {
+    this.pendingEntries = this.pendingEntries.filter(e => e.id !== id);
+    this.pendingEntries.push({ id, direction, bar, time });
+  }
+
+  fillPendingEntries(price: number, bar: number, time: number) {
+    for (const pe of this.pendingEntries) {
+      this.applyEntry(pe.id, pe.direction, bar, price, time);
+    }
+    this.pendingEntries = [];
+  }
+
+  applyEntry(id: string, direction: "long" | "short", bar: number, price: number, time: number) {
     if (this.position && this.position.direction !== direction) {
       this.closeAll(bar, price, time, "Reversal");
     }
@@ -69,6 +90,10 @@ class Broker {
 
   close(id: string, bar: number, price: number, time: number, qtyPercent: number = 100, comment: string = "") {
     if (!this.position) return;
+    if (id && this.position.entries.length > 0) {
+      const hasMatch = this.position.entries.some(e => e.id === id);
+      if (!hasMatch) return;
+    }
     const closeQty = Math.min(this.position.size, this.position.size * (qtyPercent / 100));
     if (closeQty <= 0) return;
     this.recordClose(closeQty, price, bar, time, comment || "Close");
@@ -104,6 +129,11 @@ class Broker {
     for (let i = 0; i < this.pendingExits.length; i++) {
       const ex = this.pendingExits[i];
       if (!this.position) break;
+
+      if (ex.fromEntry && this.position.entries.length > 0) {
+        const hasMatch = this.position.entries.some(e => e.id === ex.fromEntry);
+        if (!hasMatch) continue;
+      }
 
       let fillPrice: number | null = null;
       let reason = ex.id;
@@ -220,9 +250,9 @@ export function executePine(
     ohlc4Arr[i] = (c.open + c.high + c.low + c.close) / 4;
   }
 
-  const builtinSeries: Record<string, Series | Float64Array> = {
-    close: closeArr as any, open: openArr as any, high: highArr as any, low: lowArr as any,
-    volume: volArr as any, hl2: hl2Arr as any, hlc3: hlc3Arr as any, ohlc4: ohlc4Arr as any,
+  const builtinSeries: Record<string, number[] | Float64Array> = {
+    close: closeArr, open: openArr, high: highArr, low: lowArr,
+    volume: volArr, hl2: hl2Arr, hlc3: hlc3Arr, ohlc4: ohlc4Arr,
   };
 
   const broker = new Broker(config);
@@ -1126,6 +1156,14 @@ export function executePine(
         const bPrev = getPrevVal(args[1]);
         return a < b && aPrev >= bPrev;
       }
+      case "cross": {
+        const a = toNum(evalExpr(args[0]));
+        const b = toNum(evalExpr(args[1]));
+        if (currentBar < 1) return false;
+        const aPrev = getPrevVal(args[0]);
+        const bPrev = getPrevVal(args[1]);
+        return (a > b && aPrev <= bPrev) || (a < b && aPrev >= bPrev);
+      }
       case "change": {
         const v = evalExpr(args[0]);
         const len = args.length > 1 ? toNum(evalExpr(args[1])) : 1;
@@ -1212,7 +1250,7 @@ export function executePine(
     if (currentDeclName && inputDefaults[currentDeclName] !== undefined) {
       const def = inputDefaults[currentDeclName];
       if (type === "source" && typeof def === "string" && builtinSeries[def]) {
-        return (builtinSeries[def] as any)[currentBar];
+        return builtinSeries[def][currentBar];
       }
       return def;
     }
@@ -1248,7 +1286,12 @@ export function executePine(
         const dir = args.length > 1 ? evalExpr(args[1]) : getKw("direction") || "long";
         const when = getKw("when");
         if (when !== undefined && !when) return NA;
-        broker.entry(id, dir === "long" ? "long" : "short", bar, price, time);
+        const direction = dir === "long" ? "long" as const : "short" as const;
+        if (config.processOrdersOnClose) {
+          broker.applyEntry(id, direction, bar, price, time);
+        } else {
+          broker.queueEntry(id, direction, bar, time);
+        }
         return NA;
       }
       case "close": {
@@ -1484,6 +1527,7 @@ export function executePine(
     opsCount = 0;
 
     if (!config.processOrdersOnClose && currentBar > 0) {
+      broker.fillPendingEntries(openArr[currentBar], currentBar, candles[currentBar].time);
       broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
     }
 
