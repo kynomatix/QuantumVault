@@ -1990,6 +1990,8 @@ function SortHeader({ label, sortKey, current, dir, onClick }: { label: string; 
   );
 }
 
+const PAGE_SIZE = 20;
+
 function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJob }: { onSelectRun: (id: number) => void; onViewRunning: (jobId: string) => void; liveProgress?: LabJobProgress | null; onGoToLiveJob?: () => void }) {
   const { toast } = useToast();
   const { getMaxLeverage } = useLeverageLimits();
@@ -1998,6 +2000,23 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
     refetchInterval: 5000,
   });
   const { data: strategies } = useQuery<LabStrategy[]>({ queryKey: ["/api/lab/strategies"] });
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setVisibleCount(prev => prev + PAGE_SIZE);
+        }
+      },
+      { rootMargin: "200px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [runs]);
 
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => { await apiRequest("DELETE", `/api/lab/runs/${id}`); },
@@ -2111,7 +2130,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
         </Card>
       ) : (
         <div className="space-y-3">
-          {allRuns.map((run) => {
+          {allRuns.slice(0, visibleCount).map((run) => {
             const strategy = strategyMap.get(run.strategyId);
             const tickers = (run.tickers as string[]).map(t => t.split("/")[0]);
             const timeframes = run.timeframes as string[];
@@ -2212,6 +2231,12 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
               </div>
             );
           })}
+          {visibleCount < allRuns.length && (
+            <div ref={sentinelRef} className="flex items-center justify-center py-4 gap-2">
+              <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+              <span className="text-xs text-white/40">Loading more runs...</span>
+            </div>
+          )}
         </div>
       )}
     </div>
