@@ -558,10 +558,18 @@ export default function QuantumLab() {
 
   const handleCancelJob = useCallback(async () => {
     if (!activeJobId) return;
-    try {
-      await apiRequest("POST", `/api/lab/job/${activeJobId}/cancel`);
-    } catch {
-      toast({ title: "Failed to cancel", variant: "destructive" });
+    let succeeded = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await apiRequest("POST", `/api/lab/job/${activeJobId}/cancel`);
+        succeeded = true;
+        break;
+      } catch {
+        if (attempt < 2) await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+    if (!succeeded) {
+      toast({ title: "Failed to cancel", description: "Lab service may be restarting. Try again in a few seconds.", variant: "destructive" });
       return;
     }
     eventSourceRef.current?.close();

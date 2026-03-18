@@ -20,12 +20,26 @@ app.use(express.urlencoded({ extended: false }));
 
 registerLabRoutes(app);
 
-httpServer.listen({ port: LAB_PORT, host: "127.0.0.1" }, () => {
-  console.log(`[QuantumLab] Child process listening on port ${LAB_PORT}`);
-  if (process.send) {
-    process.send({ type: "ready", port: LAB_PORT });
-  }
-});
+function startListening(retries = 5, delay = 2000) {
+  httpServer.once('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE' && retries > 0) {
+      console.log(`[QuantumLab] Port ${LAB_PORT} in use, retrying in ${delay}ms (${retries} attempts left)`);
+      setTimeout(() => startListening(retries - 1, delay), delay);
+    } else {
+      console.error(`[QuantumLab] Fatal listen error:`, err);
+      process.exit(1);
+    }
+  });
+
+  httpServer.listen({ port: LAB_PORT, host: "127.0.0.1" }, () => {
+    console.log(`[QuantumLab] Child process listening on port ${LAB_PORT}`);
+    if (process.send) {
+      process.send({ type: "ready", port: LAB_PORT });
+    }
+  });
+}
+
+startListening();
 
 let isShuttingDown = false;
 
