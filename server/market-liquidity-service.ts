@@ -27,6 +27,7 @@ export interface MarketInfo {
   openInterestUsd: number | null;
   lastPrice: number | null;
   isActive: boolean;
+  reduceOnly?: boolean;
   warning?: string;
   maxLeverage?: number;
 }
@@ -38,6 +39,7 @@ interface MarketMetadata {
   category: string[];
   baseAssetSymbol: string;
   isActive: boolean;
+  reduceOnly?: boolean;
   minOrderSize: number;
   warning?: string;
 }
@@ -51,6 +53,7 @@ interface MarketMetadataInput {
   fullName: string;
   category: string[];
   minOrderSize: number;
+  reduceOnly?: boolean;
   warning?: string;
 }
 
@@ -69,10 +72,10 @@ const MARKET_METADATA_DEFS: Record<string, MarketMetadataInput> = {
   'OP-PERP': { fullName: 'Optimism', category: ['L2', 'Infra'], minOrderSize: 5 },
   'RENDER-PERP': { fullName: 'Render', category: ['AI', 'GPU'], minOrderSize: 2 },
   'XRP-PERP': { fullName: 'XRP', category: ['L1', 'Payment'], minOrderSize: 5 },
-  'HNT-PERP': { fullName: 'Helium', category: ['IoT', 'Infra'], minOrderSize: 5 },
-  'INJ-PERP': { fullName: 'Injective', category: ['L1', 'DeFi'], minOrderSize: 1 },
+  'HNT-PERP': { fullName: 'Helium', category: ['IoT', 'Infra'], minOrderSize: 5, reduceOnly: true },
+  'INJ-PERP': { fullName: 'Injective', category: ['L1', 'DeFi'], minOrderSize: 1, reduceOnly: true },
   'LINK-PERP': { fullName: 'Chainlink', category: ['Oracle', 'DeFi'], minOrderSize: 1 },
-  'RLB-PERP': { fullName: 'Rollbit', category: ['Gaming'], minOrderSize: 2 },
+  'RLB-PERP': { fullName: 'Rollbit', category: ['Gaming'], minOrderSize: 2, reduceOnly: true },
   'PYTH-PERP': { fullName: 'Pyth Network', category: ['Oracle', 'Solana'], minOrderSize: 2 },
   'TIA-PERP': { fullName: 'Celestia', category: ['L1', 'Modular'], minOrderSize: 0.5 },
   'JTO-PERP': { fullName: 'Jito', category: ['DeFi', 'Solana'], minOrderSize: 2 },
@@ -80,26 +83,26 @@ const MARKET_METADATA_DEFS: Record<string, MarketMetadataInput> = {
   'AVAX-PERP': { fullName: 'Avalanche', category: ['L1', 'Infra'], minOrderSize: 0.1 },
   'WIF-PERP': { fullName: 'dogwifhat', category: ['Meme', 'Dog'], minOrderSize: 5 },
   'JUP-PERP': { fullName: 'Jupiter', category: ['DeFi', 'Solana'], minOrderSize: 5 },
-  'DYM-PERP': { fullName: 'Dymension', category: ['L1', 'Modular'], minOrderSize: 1 },
+  'DYM-PERP': { fullName: 'Dymension', category: ['L1', 'Modular'], minOrderSize: 1, reduceOnly: true },
   'TAO-PERP': { fullName: 'Bittensor', category: ['AI'], minOrderSize: 0.01 },
   'W-PERP': { fullName: 'Wormhole', category: ['Bridge', 'Infra'], minOrderSize: 5 },
   'KMNO-PERP': { fullName: 'Kamino', category: ['DeFi', 'Solana'], minOrderSize: 50 },
   'TNSR-PERP': { fullName: 'Tensor', category: ['NFT', 'Solana'], minOrderSize: 10 },
   'DRIFT-PERP': { fullName: 'Drift Protocol', category: ['DeFi', 'Solana'], minOrderSize: 10 },
-  'CLOUD-PERP': { fullName: 'Cloud', category: ['Infra'], minOrderSize: 5 },
-  'IO-PERP': { fullName: 'IO.net', category: ['AI', 'GPU'], minOrderSize: 1 },
-  'ZEX-PERP': { fullName: 'Zeta', category: ['DeFi', 'Solana'], minOrderSize: 50 },
+  'CLOUD-PERP': { fullName: 'Cloud', category: ['Infra'], minOrderSize: 5, reduceOnly: true },
+  'IO-PERP': { fullName: 'IO.net', category: ['AI', 'GPU'], minOrderSize: 1, reduceOnly: true },
+  'ZEX-PERP': { fullName: 'Zeta', category: ['DeFi', 'Solana'], minOrderSize: 50, reduceOnly: true },
   'POPCAT-PERP': { fullName: 'Popcat', category: ['Meme'], minOrderSize: 10, warning: 'High volatility meme token' },
-  '1KWEN-PERP': { fullName: 'Wen', category: ['Meme', 'Solana'], minOrderSize: 50, warning: 'High volatility' },
+  '1KWEN-PERP': { fullName: 'Wen', category: ['Meme', 'Solana'], minOrderSize: 50, reduceOnly: true, warning: 'High volatility' },
   'TON-PERP': { fullName: 'Toncoin', category: ['L1'], minOrderSize: 1 },
-  'MOTHER-PERP': { fullName: 'Mother Iggy', category: ['Meme'], minOrderSize: 10, warning: 'High volatility meme token' },
+  'MOTHER-PERP': { fullName: 'Mother Iggy', category: ['Meme'], minOrderSize: 10, reduceOnly: true, warning: 'High volatility meme token' },
   'MOODENG-PERP': { fullName: 'Moo Deng', category: ['Meme'], minOrderSize: 5, warning: 'High volatility meme token' },
-  'DBR-PERP': { fullName: 'deBridge', category: ['Bridge', 'Infra'], minOrderSize: 50 },
+  'DBR-PERP': { fullName: 'deBridge', category: ['Bridge', 'Infra'], minOrderSize: 50, reduceOnly: true },
   '1KMEW-PERP': { fullName: 'Cat in a Dog World', category: ['Meme'], minOrderSize: 0.5, warning: 'High volatility meme token' },
-  'MICHI-PERP': { fullName: 'Michi', category: ['Meme'], minOrderSize: 10, warning: 'High volatility meme token' },
-  'GOAT-PERP': { fullName: 'Goatseus Maximus', category: ['Meme', 'AI'], minOrderSize: 10, warning: 'High volatility meme token' },
-  'FWOG-PERP': { fullName: 'Fwog', category: ['Meme'], minOrderSize: 5, warning: 'High volatility meme token' },
-  'PNUT-PERP': { fullName: 'Peanut', category: ['Meme'], minOrderSize: 5, warning: 'High volatility meme token' },
+  'MICHI-PERP': { fullName: 'Michi', category: ['Meme'], minOrderSize: 10, reduceOnly: true, warning: 'High volatility meme token' },
+  'GOAT-PERP': { fullName: 'Goatseus Maximus', category: ['Meme', 'AI'], minOrderSize: 10, reduceOnly: true, warning: 'High volatility meme token' },
+  'FWOG-PERP': { fullName: 'Fwog', category: ['Meme'], minOrderSize: 5, reduceOnly: true, warning: 'High volatility meme token' },
+  'PNUT-PERP': { fullName: 'Peanut', category: ['Meme'], minOrderSize: 5, reduceOnly: true, warning: 'High volatility meme token' },
   'RAY-PERP': { fullName: 'Raydium', category: ['DeFi', 'Solana'], minOrderSize: 1 },
   'HYPE-PERP': { fullName: 'Hyperliquid', category: ['DeFi', 'L1'], minOrderSize: 1 },
   'LTC-PERP': { fullName: 'Litecoin', category: ['L1', 'Payment'], minOrderSize: 0.05 },
@@ -107,10 +110,10 @@ const MARKET_METADATA_DEFS: Record<string, MarketMetadataInput> = {
   'PENGU-PERP': { fullName: 'Pudgy Penguins', category: ['NFT', 'Meme'], minOrderSize: 100 },
   'AI16Z-PERP': { fullName: 'ai16z', category: ['AI', 'Meme'], minOrderSize: 5, warning: 'High volatility' },
   'TRUMP-PERP': { fullName: 'Trump', category: ['Meme', 'Politics'], minOrderSize: 0.5, warning: 'High volatility meme token' },
-  'MELANIA-PERP': { fullName: 'Melania', category: ['Meme', 'Politics'], minOrderSize: 1, warning: 'High volatility meme token' },
+  'MELANIA-PERP': { fullName: 'Melania', category: ['Meme', 'Politics'], minOrderSize: 1, reduceOnly: true, warning: 'High volatility meme token' },
   'BERA-PERP': { fullName: 'Berachain', category: ['L1', 'DeFi'], minOrderSize: 1 },
-  'KAITO-PERP': { fullName: 'Kaito', category: ['AI'], minOrderSize: 5 },
-  'IP-PERP': { fullName: 'Story Protocol', category: ['Infra'], minOrderSize: 1 },
+  'KAITO-PERP': { fullName: 'Kaito', category: ['AI'], minOrderSize: 5, reduceOnly: true },
+  'IP-PERP': { fullName: 'Story Protocol', category: ['Infra'], minOrderSize: 1, reduceOnly: true },
   'FARTCOIN-PERP': { fullName: 'Fartcoin', category: ['Meme'], minOrderSize: 1, warning: 'High volatility meme token' },
   'ADA-PERP': { fullName: 'Cardano', category: ['L1'], minOrderSize: 1 },
   'PAXG-PERP': { fullName: 'PAX Gold', category: ['Commodity', 'Gold'], minOrderSize: 0.001 },
@@ -140,7 +143,8 @@ for (const [symbol, def] of Object.entries(MARKET_METADATA_DEFS)) {
     marketIndex: idx,
     category: def.category,
     baseAssetSymbol: symbol.replace('-PERP', ''),
-    isActive: true,
+    isActive: !def.reduceOnly,
+    reduceOnly: def.reduceOnly || false,
     minOrderSize: def.minOrderSize,
     ...(def.warning ? { warning: def.warning } : {}),
   };
@@ -373,10 +377,8 @@ export async function getAllPerpMarkets(forceRefresh = false): Promise<MarketInf
   const markets: MarketInfo[] = [];
   
   for (const [symbol, metadata] of Object.entries(MARKET_METADATA)) {
-    if (!metadata.isActive) continue;
-    
     const oi = oiData[symbol] || STATIC_OI_DATA[symbol]?.oiUsd || 0;
-    const riskTier = calculateRiskTier(oi);
+    const riskTier = metadata.reduceOnly ? 'high_risk' as RiskTier : calculateRiskTier(oi);
     const slippage = calculateSlippage(oi);
     
     markets.push({
@@ -385,8 +387,9 @@ export async function getAllPerpMarkets(forceRefresh = false): Promise<MarketInf
       marketIndex: metadata.marketIndex,
       category: metadata.category,
       baseAssetSymbol: metadata.baseAssetSymbol,
-      isActive: metadata.isActive,
-      warning: metadata.warning,
+      isActive: !metadata.reduceOnly,
+      reduceOnly: metadata.reduceOnly,
+      warning: metadata.reduceOnly ? 'Reduce-only — closing positions only' : metadata.warning,
       maxLeverage: getCachedMaxLeverage(symbol),
       riskTier,
       estimatedSlippagePct: slippage,

@@ -1086,6 +1086,8 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
   );
 }
 
+const REDUCE_ONLY_TICKERS = new Set(["HNT", "INJ", "DYM", "CLOUD", "IO", "ZEX", "WEN", "MOTHER", "DBR", "FWOG", "GOAT", "PNUT", "MICHI", "MELANIA", "KAITO", "IP", "RLB"]);
+
 const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
   { label: "Major", tickers: ["SOL", "BTC", "ETH", "XRP", "ADA", "LTC", "BNB", "AVAX", "LINK", "DOGE", "BONK", "PEPE"] },
   { label: "Layer 1 / Infra", tickers: ["SUI", "APT", "SEI", "TON", "BERA", "OP", "ARB", "POL", "MNT", "TIA", "INJ", "DYM", "XPL", "MON"] },
@@ -1277,15 +1279,19 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                       const ticker = LAB_AVAILABLE_TICKERS.find(t => t.name === name);
                       if (!ticker) return null;
                       const isSelected = selectedTickers.includes(ticker.symbol);
+                      const isReduceOnly = REDUCE_ONLY_TICKERS.has(name);
                       return (
                         <button
                           key={ticker.symbol}
                           onClick={() => toggleTicker(ticker.symbol)}
+                          title={isReduceOnly ? `${name}: Reduce-only on Drift — no candle data` : undefined}
                           className={cn(
                             "px-2.5 py-1 rounded text-xs font-medium transition-all",
                             isSelected
                               ? "bg-violet-600 text-white shadow-sm shadow-violet-500/20"
-                              : "bg-white/5 text-white/50 hover:bg-white/10 border border-white/10"
+                              : isReduceOnly
+                                ? "bg-white/[0.02] text-white/25 hover:bg-white/5 border border-white/5 line-through"
+                                : "bg-white/5 text-white/50 hover:bg-white/10 border border-white/10"
                           )}
                           data-testid={`button-ticker-${name}`}
                         >

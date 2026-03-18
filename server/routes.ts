@@ -4465,6 +4465,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Name and market are required" });
       }
 
+      const marketMeta = await getMarketBySymbol(market);
+      if (marketMeta && marketMeta.reduceOnly) {
+        return res.status(400).json({ error: `${market} is reduce-only on Drift — new positions cannot be opened` });
+      }
+
       // Ensure wallet exists before creating bot
       const wallet = await storage.getOrCreateWallet(req.walletAddress!);
       
