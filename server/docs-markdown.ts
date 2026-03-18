@@ -813,9 +813,9 @@ The optimizer is the core of QuantumLab. It takes your strategy's parsed paramet
 
 Deep Search is an optional mode that adds 3 additional refinement rounds after the standard random + refine pass. Each round re-ranks all results and refines the top seeds again with a progressively tighter jitter radius:
 
-- **Round 1** — 10% jitter radius, all optimizable parameters perturbed
-- **Round 2** — 6% jitter radius, re-ranked seeds from Round 1
-- **Round 3** — 3% jitter radius, fine-tuning the absolute best configurations
+- **Round 1** — 12% jitter radius, all optimizable parameters perturbed
+- **Round 2** — 8% jitter radius, re-ranked seeds from Round 1
+- **Round 3** — 5% jitter radius, fine-tuning the absolute best configurations
 
 Unlike the standard refinement (which only jitters 4 random parameters at 15% radius), Deep Search jitters **all** numeric parameters simultaneously at each step, making it much more thorough at exploring the neighborhood around a good configuration.
 
@@ -825,13 +825,41 @@ Unlike the standard refinement (which only jitters 4 random parameters at 15% ra
 
 **Combining with Guided Mode:** Deep Search and Guided Mode (Use Insights) work independently and can be used together. Guided Mode improves the random search phase by seeding it with known-good configurations from past runs, while Deep Search improves the refinement phase by adding more rounds of narrowing perturbation. Using both gives you the best of both approaches.
 
+### Smoke Test
+
+Smoke Test is a quick validation mode designed to give you a rough picture in a few minutes rather than committing to a full sweep. When you click the Smoke Test button:
+
+- Only the **first selected ticker** and **first selected timeframe** are tested (one combo instead of all combos).
+- **Random Samples** are capped at 100, **Top K** at 5, and **Refinements** at 20.
+- Deep Search is automatically disabled.
+
+Use Smoke Test to quickly verify that your Pine Script parses correctly, your parameter ranges are reasonable, and the strategy generates valid trades before committing to a full multi-hour sweep.
+
+### Run Queue
+
+QuantumLab processes one optimization at a time in a dedicated worker thread. When you submit a new run (sweep, refine, or smoke test) while another is already running, it is automatically added to a **queue** instead of being rejected.
+
+**How the Queue Works:**
+
+- When you submit a run and the system is busy, the run is saved with status "queued" and assigned a position number in the queue.
+- You will see a notification that the run has been queued, along with its position.
+- The **Queue button** in the top navigation shows a violet badge with the total count of active + queued items.
+- Click the Queue button to open the **Queue Drawer**, which shows the currently running job and all queued runs in order.
+- In the Queue Drawer, you can **reorder** queued runs by dragging them up or down, **cancel** queued runs, or **resume** paused runs.
+- When the active run finishes, the next queued run starts automatically.
+- If you submit a run while the lab process is still starting up (e.g., after a server restart), the run is queued directly into the database and will be picked up as soon as the lab is ready — no waiting required.
+
+**Queue Polling:** The Queue Drawer polls for updates every 2 seconds when open, and the badge updates every 10 seconds in the background.
+
 ### Progress & Checkpointing
 
 During a run, you can monitor progress in real time via the live progress display showing the current stage (Random Search / Refinement), iteration count, elapsed time, and best score so far. The optimizer saves checkpoints every 60 seconds, so if your session disconnects or the server restarts, the run automatically resumes from where it left off.
 
+When a run completes, you receive a toast notification saying "Results are ready in the Results tab." The page does not automatically switch away from what you are doing — you can navigate to Results at your convenience.
+
 ### Worker Thread Isolation
 
-Optimization runs execute in a dedicated Node.js Worker Thread, completely isolated from the main server. This means even intensive multi-hour optimization jobs won't slow down your live trading, webhook processing, or position management. Only one optimization can run at a time.
+Optimization runs execute in a dedicated Node.js Worker Thread, completely isolated from the main server. This means even intensive multi-hour optimization jobs won't slow down your live trading, webhook processing, or position management. Only one optimization can run at a time — additional runs are automatically queued.
 
 ---
 
@@ -922,6 +950,27 @@ Each result includes: Max Safe Leverage, Projected Return (at leverage), Max Dra
 ### Heatmap Tab
 
 A grid visualization showing how your strategy performs across all tested ticker/timeframe combinations. Each cell shows the best composite score, color-coded from red (poor) through yellow (average) to green (strong). Click any cell to see detailed results for that combination.
+
+### Refine (Coordinate Tuning)
+
+After reviewing your results, you can **Refine** any specific ticker/timeframe combination to squeeze out further improvements. The Refine button appears on individual result cards and on Heatmap cells.
+
+**What Refine Does:**
+
+Refine uses **coordinate tuning** — a systematic optimization method that is fundamentally different from the standard random search + jitter approach:
+
+1. **Single-Parameter Sweeps** — Takes your current best parameter set and varies one parameter at a time while holding all others fixed. For each parameter, it tests a grid of values across the parameter's full range, with finer resolution near the current best value.
+2. **Impact Ranking** — After sweeping all parameters individually, it identifies the 2-3 parameters that had the biggest impact on the score (the ones where changing them made the most difference).
+3. **Pairwise Grid Search** — For the top-impact parameter pairs, it runs a 2D grid search testing combinations of those parameters together. This catches interactions that single-parameter sweeps miss.
+4. **Bool & String Handling** — Boolean parameters test both values. String parameters test all available options.
+
+**When to Use Refine:**
+
+- After a standard optimization run has found a good configuration, Refine can often find 5-15% further improvement by precisely tuning individual parameters.
+- Refine is especially useful for high-impact parameters where the optimal value may fall between the random search grid points.
+- You can Refine the same combo multiple times. Each Refine run uses the latest insights to guide its search.
+
+**Queue Integration:** If an optimization is already running when you click Refine, the refine job is automatically added to the queue. You can queue up multiple Refine runs across different ticker/timeframe combos and they will execute sequentially.
 
 ---
 

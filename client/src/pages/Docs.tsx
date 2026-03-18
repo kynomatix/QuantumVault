@@ -7,7 +7,8 @@ import {
   Copy, Check, Menu, X,
   AlertTriangle, Info, CheckCircle2, ArrowDown, ArrowUp,
   Shield, Lock, Key, RefreshCw, Sparkles, TrendingUp, TrendingDown, Cpu, Activity,
-  FlaskConical, BarChart3, Lightbulb, Target, Layers, SlidersHorizontal, FileText
+  FlaskConical, BarChart3, Lightbulb, Target, Layers, SlidersHorizontal, FileText,
+  ListOrdered, Search, TestTube2, Crosshair
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -1831,6 +1832,89 @@ function QuantumLabOptimizerSection() {
         </div>
       </div>
 
+      <SubHeading>Deep Search</SubHeading>
+      <Paragraph>
+        Deep Search is an optional mode that adds 3 additional refinement rounds after the standard random + refine pass. 
+        Each round re-ranks all results and refines the top seeds again with a progressively tighter jitter radius.
+      </Paragraph>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Search className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Three Rounds of Narrowing</h4>
+          </div>
+          <div className="space-y-2 text-white/60 text-sm">
+            <p><strong className="text-white/80">Round 1</strong> — 12% jitter radius, all optimizable parameters perturbed</p>
+            <p><strong className="text-white/80">Round 2</strong> — 8% jitter radius, re-ranked seeds from Round 1</p>
+            <p><strong className="text-white/80">Round 3</strong> — 5% jitter radius, fine-tuning the absolute best configurations</p>
+          </div>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <p className="text-white/60 text-sm">
+            Unlike the standard refinement (which only jitters 4 random parameters at 15% radius), Deep Search jitters 
+            <strong className="text-white/80"> all</strong> numeric parameters simultaneously at each step, making it much more 
+            thorough at exploring the neighborhood around a good configuration.
+          </p>
+        </div>
+      </div>
+      <Paragraph>
+        Deep Search is most valuable when you've already found a promising configuration and want to squeeze out every 
+        last improvement. It can be combined with Guided Mode — Guided Mode improves the random search phase, while 
+        Deep Search improves the refinement phase.
+      </Paragraph>
+
+      <SubHeading>Smoke Test</SubHeading>
+      <div className="p-4 rounded-lg bg-violet-500/10 border border-violet-500/30 mb-6">
+        <div className="flex items-center gap-3 mb-2">
+          <TestTube2 className="w-5 h-5 text-violet-400" />
+          <h4 className="font-medium text-violet-200">Quick Validation</h4>
+        </div>
+        <div className="space-y-2 text-white/60 text-sm">
+          <p>
+            Smoke Test gives you a rough picture in a few minutes rather than committing to a full sweep. When you click the 
+            Smoke Test button:
+          </p>
+          <div className="pl-4 space-y-1">
+            <p>Only the <strong className="text-white/80">first selected ticker</strong> and <strong className="text-white/80">first selected timeframe</strong> are tested</p>
+            <p><strong className="text-white/80">Random Samples</strong> are capped at 100, <strong className="text-white/80">Top K</strong> at 5, and <strong className="text-white/80">Refinements</strong> at 20</p>
+            <p>Deep Search is automatically disabled</p>
+          </div>
+          <p>
+            Use it to quickly verify that your Pine Script parses correctly, your parameter ranges are reasonable, and the 
+            strategy generates valid trades before committing to a full multi-hour sweep.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Run Queue</SubHeading>
+      <Paragraph>
+        QuantumLab processes one optimization at a time in a dedicated worker thread. When you submit a new run while 
+        another is already running, it is automatically added to a queue instead of being rejected.
+      </Paragraph>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <ListOrdered className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">How the Queue Works</h4>
+          </div>
+          <div className="space-y-2 text-white/60 text-sm">
+            <p>When you submit a run and the system is busy, the run is saved with status "queued" and you'll see a notification with its queue position.</p>
+            <p>The <strong className="text-white/80">Queue button</strong> in the top navigation shows a violet badge with the total count of active + queued items.</p>
+            <p>Click the Queue button to open the <strong className="text-white/80">Queue Drawer</strong>, which shows the currently running job and all queued runs in order.</p>
+            <p>In the Queue Drawer you can <strong className="text-white/80">reorder</strong> queued runs by dragging, <strong className="text-white/80">cancel</strong> queued runs, or <strong className="text-white/80">resume</strong> paused runs.</p>
+            <p>When the active run finishes, the next queued run starts automatically.</p>
+          </div>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Pre-Boot Queuing</h4>
+          <p className="text-white/60 text-sm">
+            If you submit a run while the lab process is still starting up (e.g., after a server restart), the run is queued 
+            directly into the database and will be picked up as soon as the lab is ready. You don't need to wait for the 
+            system to finish initializing.
+          </p>
+        </div>
+      </div>
+
       <SubHeading>Progress & Checkpointing</SubHeading>
       <Paragraph>
         During a run, you can monitor progress in real time via the live progress display showing the current 
@@ -1838,17 +1922,21 @@ function QuantumLabOptimizerSection() {
         saves checkpoints every 60 seconds, so if your session disconnects or the server restarts, the run 
         automatically resumes from where it left off.
       </Paragraph>
+      <Paragraph>
+        When a run completes, you receive a toast notification. The page does not automatically switch away from what 
+        you are doing — you can navigate to Results at your convenience.
+      </Paragraph>
 
       <SubHeading>Worker Thread Isolation</SubHeading>
       <Paragraph>
         Optimization runs execute in a dedicated Node.js Worker Thread, completely isolated from the main server. 
         This means even intensive multi-hour optimization jobs won't slow down your live trading, webhook processing, 
-        or position management. Only one optimization can run at a time.
+        or position management. Only one optimization can run at a time — additional runs are automatically queued.
       </Paragraph>
 
       <Alert type="info">
         For a thorough initial exploration, run 2,000+ random samples per combo. For quick tests during development, 
-        200-500 samples give you a rough picture in a few minutes.
+        a Smoke Test gives you a rough picture in a few minutes.
       </Alert>
     </div>
   );
@@ -2118,6 +2206,33 @@ function QuantumLabResultsSection() {
       <Alert type="info">
         You can click any cell in the Heatmap to jump directly to the detailed results for that ticker/timeframe combination.
       </Alert>
+
+      <SubHeading>Refine (Coordinate Tuning)</SubHeading>
+      <Paragraph>
+        After reviewing your results, you can Refine any specific ticker/timeframe combination to squeeze out further 
+        improvements. The Refine button appears on individual result cards and on Heatmap cells.
+      </Paragraph>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-violet-500/10 border border-violet-500/30">
+          <div className="flex items-center gap-3 mb-2">
+            <Crosshair className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-violet-200">How Coordinate Tuning Works</h4>
+          </div>
+          <div className="space-y-2 text-white/60 text-sm">
+            <p><strong className="text-white/80">Single-Parameter Sweeps</strong> — Takes your current best parameter set and varies one parameter at a time while holding all others fixed, testing a grid of values with finer resolution near the current best value.</p>
+            <p><strong className="text-white/80">Impact Ranking</strong> — After sweeping all parameters individually, identifies the 2-3 parameters that had the biggest impact on the score.</p>
+            <p><strong className="text-white/80">Pairwise Grid Search</strong> — For the top-impact parameter pairs, runs a 2D grid search testing combinations together, catching interactions that single-parameter sweeps miss.</p>
+          </div>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">When to Use Refine</h4>
+          <div className="space-y-2 text-white/60 text-sm">
+            <p>After a standard optimization run has found a good configuration, Refine can often find 5-15% further improvement by precisely tuning individual parameters.</p>
+            <p>Refine is especially useful for high-impact parameters where the optimal value may fall between the random search grid points.</p>
+            <p>You can Refine the same combo multiple times. If an optimization is already running when you click Refine, the job is automatically added to the queue.</p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
