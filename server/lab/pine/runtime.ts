@@ -290,11 +290,8 @@ export function executePine(
     if (opsThrottle > MAX_OPS) throw new Error("Execution budget exceeded");
   }
 
-  function allocVar(name: string) {
-    if (!vars[name]) vars[name] = new Array(n);
-  }
-
   function setVar(name: string, value: any) {
+    if (!vars[name]) vars[name] = new Array(n);
     vars[name][currentBar] = value;
   }
 
@@ -859,7 +856,6 @@ export function executePine(
         const fn = userFunctions[name];
         const savedVars: Record<string, any> = {};
         for (let i = 0; i < fn.params.length; i++) {
-          allocVar(fn.params[i]);
           savedVars[fn.params[i]] = vars[fn.params[i]] ? vars[fn.params[i]][currentBar] : undefined;
           setVar(fn.params[i], i < e.args.length ? evalExpr(e.args[i]) : NA);
         }
@@ -1436,7 +1432,6 @@ export function executePine(
         const cumKey = "__ta_cum_" + (args[0].k === "id" ? args[0].name : "x");
         const prevCum = currentBar > 0 ? toNum(getVar(cumKey, 1)) : 0;
         const result = (isNaN(prevCum) ? 0 : prevCum) + (isNaN(v) ? 0 : v);
-        allocVar(cumKey);
         setVar(cumKey, result);
         return result;
       }
@@ -1570,7 +1565,6 @@ export function executePine(
         currentDeclName = stmt.name;
         if (stmt.isVar) {
           if (currentBar === 0) {
-            allocVar(stmt.name);
             const v = evalExpr(stmt.e);
             setVar(stmt.name, v);
             varIsVar.add(stmt.name);
@@ -1582,10 +1576,8 @@ export function executePine(
           const pc = precomputed[stmt.name];
           if (pc) {
             const v = pc[currentBar];
-            allocVar(stmt.name);
             setVar(stmt.name, isNaN(v) ? NA : v);
           } else {
-            if (currentBar === 0) allocVar(stmt.name);
             const v = evalExpr(stmt.e);
             setVar(stmt.name, v);
           }
@@ -1594,7 +1586,6 @@ export function executePine(
         break;
       }
       case "multi_decl": {
-        if (currentBar === 0) for (const nm of stmt.names) allocVar(nm);
         const result = evalExpr(stmt.e);
         if (Array.isArray(result)) {
           for (let i = 0; i < stmt.names.length; i++) {
@@ -1661,7 +1652,6 @@ export function executePine(
         if (step === 0) break;
         let iterations = 0;
         const maxIter = 10000;
-        allocVar(stmt.v);
         for (let i = start; step > 0 ? i <= end : i >= end; i += step) {
           if (++iterations > maxIter) break;
           setVar(stmt.v, i);
