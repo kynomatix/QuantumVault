@@ -958,18 +958,20 @@ export function registerLabRoutes(app: Express): void {
   }
 
   app.post("/api/lab/run-optimization", requireLabAuth, async (req: Request, res: Response) => {
+    let config: LabOptimizationConfig | undefined;
+    let walletAddress: string | undefined;
+    let processOrdersOnClose: boolean | undefined;
     try {
       const parsed = labOptimizationConfigSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ error: parsed.error.message });
       }
 
-      const config = parsed.data;
-      const walletAddress = (req as any).walletAddress;
+      config = parsed.data;
+      walletAddress = (req as any).walletAddress;
 
       const isBusy = await labStorage.hasActiveOrPausedRun();
 
-      let processOrdersOnClose: boolean | undefined;
       if (config.strategyId) {
         const strategy = await labStorage.getStrategy(config.strategyId);
         if (strategy?.strategySettings && typeof strategy.strategySettings === "object") {
@@ -1096,12 +1098,41 @@ export function registerLabRoutes(app: Express): void {
       res.json({ jobId: job.id, runId });
     } catch (err: any) {
       console.log(`[QuantumLab] Run error: ${err.message}`);
-      if ((err as any).blockingJobId) {
-        return res.status(409).json({
-          error: "Another optimization is already running",
-          blockingJobId: (err as any).blockingJobId,
-          blockingRunId: (err as any).blockingRunId,
-        });
+      if ((err as any).blockingJobId && config.strategyId) {
+        console.log(`[QuantumLab] Concurrency conflict — auto-queuing run`);
+        try {
+          const queueOrder = await labStorage.getNextQueueOrder(walletAddress);
+          let snapshotInsights: any = {};
+          if (config.useInsights) {
+            const computed = await computeGuidedInsightsForConfig(config.strategyId, config.tickers, config.timeframes);
+            if (computed.guidedInsights) snapshotInsights.guidedInsights = computed.guidedInsights;
+            if (computed.guidedInsightsPerCombo) snapshotInsights.guidedInsightsPerCombo = computed.guidedInsightsPerCombo;
+          }
+          const run = await labStorage.createRun({
+            strategyId: config.strategyId,
+            userId: walletAddress,
+            tickers: config.tickers,
+            timeframes: config.timeframes,
+            startDate: config.startDate,
+            endDate: config.endDate,
+            randomSamples: config.randomSamples,
+            topK: config.topK,
+            refinementsPerSeed: config.refinementsPerSeed,
+            minTrades: config.minTrades,
+            maxDrawdownCap: config.maxDrawdownCap,
+            mode: config.mode,
+            status: "queued",
+          });
+          await db.update(labOptimizationRuns).set({
+            queueOrder,
+            configSnapshot: { type: "new", config, processOrdersOnClose, ...snapshotInsights } as any,
+          }).where(eq(labOptimizationRuns.id, run.id));
+          console.log(`[QuantumLab] Auto-queued run ${run.id} (order: ${queueOrder})`);
+          setTimeout(() => pumpQueue(), 500);
+          return res.json({ queued: true, runId: run.id, queueOrder });
+        } catch (queueErr: any) {
+          console.log(`[QuantumLab] Auto-queue fallback failed: ${queueErr.message}`);
+        }
       }
       res.status(500).json({ error: err.message });
     }
@@ -1237,23 +1268,35 @@ export function registerLabRoutes(app: Express): void {
   const MAX_AUTO_RESUME_ATTEMPTS = 3;
 
   app.post("/api/lab/runs/:id/refine", requireLabAuth, async (req: Request, res: Response) => {
+    let refineRunId: number | undefined;
+    let refineConfig: LabOptimizationConfig | undefined;
+    let refineWallet: string | undefined;
+    let refineStrategyId: number | undefined;
+    let refineTicker: string | undefined;
+    let refineTimeframe: string | undefined;
+    let refineProcessOrdersOnClose: boolean | undefined;
     try {
       const runId = parseInt(req.params.id);
+      refineRunId = runId;
       const run = await verifyRunOwnership(req, res);
       if (!run) return;
 
       const { ticker, timeframe, reportData } = req.body;
+      refineTicker = ticker;
+      refineTimeframe = timeframe;
       if (!ticker || !timeframe) {
         return res.status(400).json({ error: "ticker and timeframe are required" });
       }
 
       const strategyId = run.strategyId;
+      refineStrategyId = strategyId;
       const strategy = await labStorage.getStrategy(strategyId);
       if (!strategy) {
         return res.status(404).json({ error: "Strategy not found" });
       }
 
       const walletAddress = (req as any).walletAddress;
+      refineWallet = walletAddress;
 
       if (reportData && typeof reportData === "object" && reportData.paramSensitivity) {
         try {
@@ -1300,10 +1343,10 @@ export function registerLabRoutes(app: Express): void {
         coordinateTune: true,
       };
 
-      let processOrdersOnClose: boolean | undefined;
       if (strategy.strategySettings && typeof strategy.strategySettings === "object") {
-        processOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
+        refineProcessOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
       }
+      refineConfig = config;
 
       const isBusy = await labStorage.hasActiveOrPausedRun();
 
@@ -1328,7 +1371,7 @@ export function registerLabRoutes(app: Express): void {
         await db.update(labOptimizationRuns).set({
           queueOrder,
           configSnapshot: {
-            type: "refine", config, processOrdersOnClose, sourceRunId: runId,
+            type: "refine", config, processOrdersOnClose: refineProcessOrdersOnClose, sourceRunId: runId,
             targetTicker: ticker, targetTimeframe: timeframe,
             guidedInsights: computed.guidedInsights,
             guidedInsightsPerCombo: computed.guidedInsightsPerCombo,
@@ -1433,18 +1476,47 @@ export function registerLabRoutes(app: Express): void {
         }
       }
 
-      startOptimizationJob(config, job, newRun.id, undefined, undefined, guidedInsights, guidedInsightsPerCombo, processOrdersOnClose);
+      startOptimizationJob(config, job, newRun.id, undefined, undefined, guidedInsights, guidedInsightsPerCombo, refineProcessOrdersOnClose);
 
       console.log(`[QuantumLab] Refine: started run ${newRun.id} for ${ticker} ${timeframe} (coordinate-tune, ${randomSamples} samples, ${topK} topK, ${refinementsPerSeed} refinements)`);
       res.json({ jobId: job.id, runId: newRun.id });
     } catch (err: any) {
       console.log(`[QuantumLab] Refine error: ${err.message}`);
-      if ((err as any).blockingJobId) {
-        return res.status(409).json({
-          error: "Another optimization is already running. Please wait for it to finish or manually clear stuck jobs first.",
-          blockingJobId: (err as any).blockingJobId,
-          blockingRunId: (err as any).blockingRunId,
-        });
+      if ((err as any).blockingJobId && refineConfig && refineStrategyId && refineTicker && refineTimeframe) {
+        console.log(`[QuantumLab] Refine concurrency conflict — auto-queuing`);
+        try {
+          const queueOrder = await labStorage.getNextQueueOrder(refineWallet ?? "system");
+          const computed = await computeGuidedInsightsForConfig(refineStrategyId, [refineTicker], [refineTimeframe]);
+          const queuedRun = await labStorage.createRun({
+            strategyId: refineStrategyId,
+            userId: refineWallet,
+            tickers: [refineTicker],
+            timeframes: [refineTimeframe],
+            startDate: refineConfig.startDate,
+            endDate: refineConfig.endDate,
+            randomSamples: refineConfig.randomSamples,
+            topK: refineConfig.topK,
+            refinementsPerSeed: refineConfig.refinementsPerSeed,
+            minTrades: refineConfig.minTrades,
+            maxDrawdownCap: refineConfig.maxDrawdownCap,
+            mode: "sweep",
+            status: "queued",
+          });
+          await db.update(labOptimizationRuns).set({
+            queueOrder,
+            configSnapshot: {
+              type: "refine", config: refineConfig, processOrdersOnClose: refineProcessOrdersOnClose, sourceRunId: refineRunId,
+              targetTicker: refineTicker, targetTimeframe: refineTimeframe,
+              guidedInsights: computed.guidedInsights,
+              guidedInsightsPerCombo: computed.guidedInsightsPerCombo,
+            } as any,
+          }).where(eq(labOptimizationRuns.id, queuedRun.id));
+          console.log(`[QuantumLab] Auto-queued refine run ${queuedRun.id} for ${refineTicker} ${refineTimeframe} (order: ${queueOrder})`);
+          setTimeout(() => pumpQueue(), 500);
+          return res.json({ queued: true, runId: queuedRun.id, queueOrder });
+        } catch (queueErr: any) {
+          console.log(`[QuantumLab] Auto-queue refine fallback failed: ${queueErr.message}`);
+        }
       }
       res.status(500).json({ error: err.message });
     }

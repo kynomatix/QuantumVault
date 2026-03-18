@@ -14,7 +14,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
-import { ToastAction } from "@/components/ui/toast";
+
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useWallet } from "@/hooks/useWallet";
 import {
@@ -419,6 +419,18 @@ export default function QuantumLab() {
   const { getMaxLeverage } = useLeverageLimits();
 
   const [queueOpen, setQueueOpen] = useState(false);
+  const { data: queueBadgeData } = useQuery<{ items: any[]; activeRun: any | null }>({
+    queryKey: ["/api/lab/queue"],
+    queryFn: async () => {
+      const res = await fetch("/api/lab/queue", { credentials: "include" });
+      if (!res.ok) return { items: [], activeRun: null };
+      const data = await res.json();
+      if (Array.isArray(data)) return { items: data, activeRun: null };
+      return data;
+    },
+    refetchInterval: queueOpen ? 2000 : 10000,
+  });
+  const queueCount = (queueBadgeData?.items?.length ?? 0) + (queueBadgeData?.activeRun ? 1 : 0);
   const [code, setCode] = useState(EXAMPLE_PINE);
   const [strategyName, setStrategyName] = useState("");
   const [strategyId, setStrategyId] = useState<number | null>(null);
@@ -493,8 +505,9 @@ export default function QuantumLab() {
             es.close();
             setActiveJobId(null);
             if (activeRunId) setActiveHistoryRunId(activeRunId);
-            setMainTab("results");
             queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+            toast({ title: "Optimization complete", description: "Results are ready in the Results tab." });
           }
           if (data.status === "retrying") {
             if (data.newJobId && data.newJobId !== currentJobId) {
@@ -528,8 +541,9 @@ export default function QuantumLab() {
               if (res.ok) {
                 setActiveJobId(null);
                 if (activeRunId) setActiveHistoryRunId(activeRunId);
-                setMainTab("results");
                 queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+                toast({ title: "Optimization complete", description: "Results are ready in the Results tab." });
                 return;
               }
             } catch {}
@@ -722,6 +736,11 @@ export default function QuantumLab() {
               >
                 <ListOrdered className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                 <span className="hidden sm:inline">Queue</span>
+                {queueCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-violet-500 text-white text-[10px] font-bold leading-none px-1" data-testid="queue-badge">
+                    {queueCount}
+                  </span>
+                )}
               </button>
             </nav>
           </div>
@@ -1220,21 +1239,10 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
       const { jobId, runId } = data;
       onJobStarted(jobId, runId);
     } catch (err: any) {
-      const isConcurrencyError = err.message?.includes("concurrent") || err.message?.includes("Maximum") || err.message?.includes("already running");
       toast({
         title: "Failed to start optimization",
-        description: isConcurrencyError
-          ? "A stuck job is blocking new runs. Click 'Force Clear' to fix this."
-          : err.message,
+        description: err.message,
         variant: "destructive",
-        action: isConcurrencyError ? (
-          <ToastAction altText="Force clear stuck jobs" onClick={async () => {
-            try {
-              await apiRequest("POST", "/api/lab/jobs/force-clear");
-              toast({ title: "Jobs cleared", description: "You can now start a new optimization." });
-            } catch { toast({ title: "Failed to clear jobs", variant: "destructive" }); }
-          }}>Force Clear</ToastAction>
-        ) : undefined,
       });
     } finally {
       setIsSubmitting(false);
@@ -2250,12 +2258,9 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
       onRefine?.(data.jobId, data.runId);
     } catch (err: any) {
-      const isConcurrencyError = err.message?.includes("concurrent") || err.message?.includes("already running") || err.message?.includes("Maximum");
       toast({
         title: "Refine failed",
-        description: isConcurrencyError
-          ? "Another optimization is already running. Please wait for it to finish or force clear stuck jobs."
-          : err.message,
+        description: err.message,
         variant: "destructive",
       });
     } finally {
