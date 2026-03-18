@@ -2,7 +2,7 @@ import type { OHLCV } from "./engine";
 import { getCachedCandles, saveCandlesToDb } from "./candle-store";
 
 const OKX_BATCH_SIZE = 300;
-const GATE_BATCH_SIZE = 1000;
+const GATE_BATCH_SIZE = 900;
 const PYTH_BATCH_SIZE = 5000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
@@ -106,6 +106,19 @@ async function fetchGateCandles(
         const text = await res.text();
         if (res.status === 400 && (text.includes("INVALID_CURRENCY_PAIR") || text.includes("currency_pair"))) {
           throw new GatePairNotFoundError(pair, text);
+        }
+        if (res.status === 400 && text.includes("too broad")) {
+          const halfRange = Math.floor((toSec - fromSec) / 2);
+          if (halfRange > 60) {
+            console.log(`[Gate Spot] Range too broad, splitting chunk in half (${halfRange}s)`);
+            const firstHalf = await fetchGateCandles(pair, interval, fromSec, fromSec + halfRange);
+            const secondHalf = await fetchGateCandles(pair, interval, fromSec + halfRange, toSec);
+            return [...firstHalf, ...secondHalf];
+          }
+        }
+        if (res.status === 400 && text.includes("too long ago")) {
+          console.log(`[Gate Spot] Data too old for ${pair}, skipping this chunk`);
+          return [];
         }
         throw new Error(`Gate.io Spot API error ${res.status}: ${text}`);
       }
