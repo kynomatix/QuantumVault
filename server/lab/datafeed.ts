@@ -2,20 +2,62 @@ import type { OHLCV } from "./engine";
 import { getCachedCandles, saveCandlesToDb } from "./candle-store";
 
 const OKX_BATCH_SIZE = 300;
-const GATE_BATCH_SIZE = 2000;
+const GATE_BATCH_SIZE = 1000;
+const PYTH_BATCH_SIZE = 5000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 
-const okxFailedInstruments = new Set<string>();
+const NEGATIVE_CACHE_TTL_MS = 30 * 60 * 1000;
+
+const okxFailedInstruments = new Map<string, number>();
+const gateFailedPairs = new Map<string, number>();
+const pythFailedSymbols = new Map<string, number>();
+
+function isNegCached(cache: Map<string, number>, key: string): boolean {
+  const ts = cache.get(key);
+  if (ts === undefined) return false;
+  if (Date.now() - ts > NEGATIVE_CACHE_TTL_MS) {
+    cache.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function negCache(cache: Map<string, number>, key: string): void {
+  cache.set(key, Date.now());
+}
+
+class GatePairNotFoundError extends Error {
+  constructor(pair: string, detail: string) {
+    super(`Gate.io pair not found: ${pair} — ${detail}`);
+    this.name = "GatePairNotFoundError";
+  }
+}
+
+function isValidNumber(v: unknown): v is number {
+  if (typeof v === "number") return Number.isFinite(v);
+  if (typeof v === "string") return v.length > 0 && Number.isFinite(Number(v));
+  return false;
+}
+
+function stripMultiplierPrefix(base: string): string {
+  const match = base.match(/^1[KM](.+)$/i);
+  return match ? match[1] : base;
+}
 
 function symbolToOkxInstId(symbol: string): string {
   const base = symbol.split("/")[0];
   return `${base}-USDT-SWAP`;
 }
 
-function symbolToGateContract(symbol: string): string {
-  const base = symbol.split("/")[0];
+function symbolToGateSpotPair(symbol: string): string {
+  const base = stripMultiplierPrefix(symbol.split("/")[0]);
   return `${base}_USDT`;
+}
+
+function symbolToPythId(symbol: string): string {
+  const base = stripMultiplierPrefix(symbol.split("/")[0]);
+  return `Crypto.${base}/USD`;
 }
 
 function mapTimeframeToGate(tf: string): string {
@@ -27,44 +69,55 @@ function mapTimeframeToGate(tf: string): string {
   return map[tf] || tf;
 }
 
+function mapTimeframeToPyth(tf: string): string {
+  const map: Record<string, string> = {
+    "1m": "1", "5m": "5", "15m": "15", "30m": "30",
+    "1h": "60", "2h": "120", "4h": "240",
+    "8h": "480", "12h": "720", "1d": "D", "1w": "W",
+  };
+  return map[tf] || "60";
+}
+
 async function fetchGateCandles(
-  contract: string,
+  pair: string,
   interval: string,
   fromSec: number,
   toSec: number,
 ): Promise<any[]> {
   const params = new URLSearchParams({
-    contract,
+    currency_pair: pair,
     interval,
     from: String(fromSec),
     to: String(toSec),
-    limit: String(GATE_BATCH_SIZE),
   });
 
-  const url = `https://api.gateio.ws/api/v4/futures/usdt/candlesticks?${params}`;
+  const url = `https://api.gateio.ws/api/v4/spot/candlesticks?${params}`;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
       if (res.status === 429) {
         const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
-        console.log(`[Gate] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
+        console.log(`[Gate Spot] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
         await new Promise(resolve => setTimeout(resolve, wait));
         continue;
       }
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(`Gate.io API error ${res.status}: ${text}`);
+        if (res.status === 400 && (text.includes("INVALID_CURRENCY_PAIR") || text.includes("currency_pair"))) {
+          throw new GatePairNotFoundError(pair, text);
+        }
+        throw new Error(`Gate.io Spot API error ${res.status}: ${text}`);
       }
       const json = await res.json();
       if (!Array.isArray(json)) {
-        throw new Error(`Gate.io unexpected response: ${JSON.stringify(json).slice(0, 200)}`);
+        throw new Error(`Gate.io Spot unexpected response: ${JSON.stringify(json).slice(0, 200)}`);
       }
       return json;
     } catch (err: any) {
       if (attempt < MAX_RETRIES - 1) {
         const wait = RETRY_DELAY_MS * (attempt + 1);
-        console.log(`[Gate] Fetch error (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message} — retrying in ${wait}ms`);
+        console.log(`[Gate Spot] Fetch error (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message} — retrying in ${wait}ms`);
         await new Promise(resolve => setTimeout(resolve, wait));
         continue;
       }
@@ -81,61 +134,239 @@ async function fetchAllGateCandles(
   endMs: number,
   onProgress?: (msg: string) => void,
 ): Promise<OHLCV[]> {
-  const contract = symbolToGateContract(symbol);
+  const pair = symbolToGateSpotPair(symbol);
+
+  if (isNegCached(gateFailedPairs, pair)) {
+    console.log(`[Gate Spot] Skipping ${pair} (recently failed)`);
+    return [];
+  }
+
   const interval = mapTimeframeToGate(timeframe);
   const startSec = Math.floor(startMs / 1000);
   const endSec = Math.floor(endMs / 1000);
 
-  onProgress?.(`Fetching ${symbol} ${timeframe} from Gate.io (fallback)...`);
-  console.log(`Fetching OHLCV for ${contract} ${interval} from Gate.io (OKX fallback)`);
+  onProgress?.(`Fetching ${symbol} ${timeframe} from Gate.io spot (fallback)...`);
+  console.log(`Fetching OHLCV for ${pair} ${interval} from Gate.io spot (OKX fallback)`);
 
   const allCandles: OHLCV[] = [];
   let currentFrom = startSec;
   let page = 0;
   let consecutiveErrors = 0;
 
+  const tfSeconds = getTimeframeSeconds(timeframe);
+  const windowSeconds = tfSeconds * GATE_BATCH_SIZE;
+
   while (currentFrom < endSec) {
+    const chunkEnd = Math.min(currentFrom + windowSeconds, endSec);
     try {
-      const raw = await fetchGateCandles(contract, interval, currentFrom, endSec);
+      const raw = await fetchGateCandles(pair, interval, currentFrom, chunkEnd);
       consecutiveErrors = 0;
 
-      if (!raw || raw.length === 0) break;
+      if (!raw || raw.length === 0) {
+        if (chunkEnd >= endSec) break;
+        currentFrom = chunkEnd;
+        continue;
+      }
 
       for (const candle of raw) {
-        const ts = candle.t * 1000;
-        if (ts < startMs || ts > endMs) continue;
+        if (!Array.isArray(candle) || candle.length < 6) continue;
+        const ts = parseInt(candle[0]) * 1000;
+        if (!Number.isFinite(ts) || ts < startMs || ts > endMs) continue;
+        const open = parseFloat(candle[5]);
+        const high = parseFloat(candle[3]);
+        const low = parseFloat(candle[4]);
+        const close = parseFloat(candle[2]);
+        if (!isValidNumber(open) || !isValidNumber(high) || !isValidNumber(low) || !isValidNumber(close)) continue;
         allCandles.push({
           time: ts,
-          open: parseFloat(candle.o),
-          high: parseFloat(candle.h),
-          low: parseFloat(candle.l),
-          close: parseFloat(candle.c),
-          volume: parseFloat(candle.sum || candle.v || "0"),
+          open,
+          high,
+          low,
+          close,
+          volume: parseFloat(candle[1] || "0") || 0,
         });
       }
 
-      const lastTs = raw[raw.length - 1].t;
-      if (lastTs <= currentFrom) break;
+      const lastRaw = raw[raw.length - 1];
+      const lastTs = Array.isArray(lastRaw) ? parseInt(lastRaw[0]) : NaN;
+      if (!Number.isFinite(lastTs) || lastTs <= currentFrom) break;
       currentFrom = lastTs + 1;
       page++;
 
       if (page % 3 === 0) {
-        onProgress?.(`Fetched ${allCandles.length} candles for ${symbol} ${timeframe} from Gate.io...`);
+        onProgress?.(`Fetched ${allCandles.length} candles for ${symbol} ${timeframe} from Gate.io spot...`);
       }
 
       await new Promise(resolve => setTimeout(resolve, 200));
     } catch (err: any) {
+      if (err instanceof GatePairNotFoundError) {
+        console.log(`[Gate Spot] ${pair} not found on Gate.io spot`);
+        negCache(gateFailedPairs, pair);
+        break;
+      }
       consecutiveErrors++;
-      console.log(`[Gate] Page fetch error after ${allCandles.length} candles (error ${consecutiveErrors}/5): ${err.message}`);
+      console.log(`[Gate Spot] Page fetch error after ${allCandles.length} candles (error ${consecutiveErrors}/5): ${err.message}`);
       if (consecutiveErrors >= 5) {
-        console.log(`[Gate] Too many consecutive errors, stopping fetch with ${allCandles.length} candles`);
+        console.log(`[Gate Spot] Too many consecutive errors, stopping fetch with ${allCandles.length} candles`);
         break;
       }
       await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * consecutiveErrors));
     }
   }
 
-  console.log(`[Gate] Fetch complete: ${allCandles.length} candles over ${page} pages for ${contract} ${interval}`);
+  console.log(`[Gate Spot] Fetch complete: ${allCandles.length} candles over ${page} pages for ${pair} ${interval}`);
+
+  return allCandles;
+}
+
+async function fetchPythCandles(
+  pythSymbol: string,
+  resolution: string,
+  fromSec: number,
+  toSec: number,
+): Promise<{ t: number[]; o: number[]; h: number[]; l: number[]; c: number[]; v: number[]; s: string } | null> {
+  const params = new URLSearchParams({
+    symbol: pythSymbol,
+    resolution,
+    from: String(fromSec),
+    to: String(toSec),
+  });
+
+  const url = `https://benchmarks.pyth.network/v1/shims/tradingview/history?${params}`;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+      if (res.status === 429) {
+        const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
+        console.log(`[Pyth] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
+        await new Promise(resolve => setTimeout(resolve, wait));
+        continue;
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Pyth API error ${res.status}: ${text}`);
+      }
+      const json = await res.json();
+      if (json.s === "error" || json.s === "no_data") {
+        return json;
+      }
+      return json;
+    } catch (err: any) {
+      if (attempt < MAX_RETRIES - 1) {
+        const wait = RETRY_DELAY_MS * (attempt + 1);
+        console.log(`[Pyth] Fetch error (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message} — retrying in ${wait}ms`);
+        await new Promise(resolve => setTimeout(resolve, wait));
+        continue;
+      }
+      throw err;
+    }
+  }
+  return null;
+}
+
+async function fetchAllPythCandles(
+  symbol: string,
+  timeframe: string,
+  startMs: number,
+  endMs: number,
+  onProgress?: (msg: string) => void,
+): Promise<OHLCV[]> {
+  const pythSymbol = symbolToPythId(symbol);
+
+  if (isNegCached(pythFailedSymbols, pythSymbol)) {
+    console.log(`[Pyth] Skipping ${pythSymbol} (recently failed)`);
+    return [];
+  }
+
+  const resolution = mapTimeframeToPyth(timeframe);
+  const startSec = Math.floor(startMs / 1000);
+  const endSec = Math.floor(endMs / 1000);
+
+  onProgress?.(`Fetching ${symbol} ${timeframe} from Pyth Benchmarks (fallback)...`);
+  console.log(`Fetching OHLCV for ${pythSymbol} ${resolution} from Pyth Benchmarks (Gate.io fallback)`);
+
+  const allCandles: OHLCV[] = [];
+  let currentFrom = startSec;
+  let page = 0;
+  let consecutiveErrors = 0;
+
+  const tfSeconds = getTimeframeSeconds(timeframe);
+  const chunkSeconds = tfSeconds * PYTH_BATCH_SIZE;
+
+  while (currentFrom < endSec) {
+    const chunkEnd = Math.min(currentFrom + chunkSeconds, endSec);
+
+    try {
+      const data = await fetchPythCandles(pythSymbol, resolution, currentFrom, chunkEnd);
+      consecutiveErrors = 0;
+
+      if (!data || data.s === "error") {
+        negCache(pythFailedSymbols, pythSymbol);
+        console.log(`[Pyth] ${pythSymbol} returned error status — symbol likely invalid`);
+        break;
+      }
+
+      if (data.s === "no_data" || !data.t || data.t.length === 0) {
+        if (chunkEnd >= endSec) break;
+        currentFrom = chunkEnd;
+        continue;
+      }
+
+      const arrLen = data.t.length;
+      if (!Array.isArray(data.o) || !Array.isArray(data.h) || !Array.isArray(data.l) || !Array.isArray(data.c) ||
+          data.o.length !== arrLen || data.h.length !== arrLen || data.l.length !== arrLen || data.c.length !== arrLen) {
+        console.log(`[Pyth] Misaligned arrays in response (t=${arrLen}, o=${data.o?.length}, h=${data.h?.length}, l=${data.l?.length}, c=${data.c?.length}), skipping chunk`);
+        if (chunkEnd >= endSec) break;
+        currentFrom = chunkEnd;
+        continue;
+      }
+
+      for (let i = 0; i < arrLen; i++) {
+        const ts = data.t[i] * 1000;
+        if (!Number.isFinite(ts) || ts < startMs || ts > endMs) continue;
+        const open = data.o[i];
+        const high = data.h[i];
+        const low = data.l[i];
+        const close = data.c[i];
+        if (!isValidNumber(open) || !isValidNumber(high) || !isValidNumber(low) || !isValidNumber(close)) continue;
+        allCandles.push({
+          time: ts,
+          open,
+          high,
+          low,
+          close,
+          volume: data.v?.[i] || 0,
+        });
+      }
+
+      const lastTs = data.t[data.t.length - 1];
+      const nextFrom = lastTs + tfSeconds;
+      if (nextFrom <= currentFrom) {
+        currentFrom = chunkEnd;
+      } else {
+        currentFrom = nextFrom;
+      }
+      page++;
+
+      if (page % 3 === 0) {
+        onProgress?.(`Fetched ${allCandles.length} candles for ${symbol} ${timeframe} from Pyth...`);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 200));
+    } catch (err: any) {
+      consecutiveErrors++;
+      console.log(`[Pyth] Page fetch error after ${allCandles.length} candles (error ${consecutiveErrors}/5): ${err.message}`);
+      if (consecutiveErrors >= 5) {
+        console.log(`[Pyth] Too many consecutive errors, stopping fetch with ${allCandles.length} candles`);
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * consecutiveErrors));
+    }
+  }
+
+  console.log(`[Pyth] Fetch complete: ${allCandles.length} candles over ${page} pages for ${pythSymbol} ${resolution}`);
+
   return allCandles;
 }
 
@@ -220,6 +451,7 @@ export async function fetchOHLCV(
   endDate: string,
   onProgress?: (msg: string) => void
 ): Promise<OHLCV[]> {
+  timeframe = timeframe.toLowerCase();
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
 
@@ -251,7 +483,7 @@ export async function fetchOHLCV(
   const instId = symbolToOkxInstId(symbol);
   let allCandles: OHLCV[] = [];
 
-  if (!okxFailedInstruments.has(instId)) {
+  if (!isNegCached(okxFailedInstruments, instId)) {
     const bar = mapTimeframeToOkx(timeframe);
     onProgress?.(`Fetching ${symbol} ${timeframe} from OKX...`);
     console.log(`Fetching OHLCV for ${instId} ${bar} from ${startDate} to ${endDate} via OKX`);
@@ -311,18 +543,26 @@ export async function fetchOHLCV(
     console.log(`[OKX] Fetch complete: ${allCandles.length} candles over ${page} pages for ${instId} ${bar}`);
 
     if (allCandles.length === 0) {
-      okxFailedInstruments.add(instId);
-      console.log(`[OKX] ${instId} not available — will use Gate.io fallback for future requests`);
+      negCache(okxFailedInstruments, instId);
+      console.log(`[OKX] ${instId} not available — will use Gate.io spot fallback for future requests`);
     }
   } else {
-    console.log(`[OKX] Skipping ${instId} (previously failed) — using Gate.io directly`);
+    console.log(`[OKX] Skipping ${instId} (recently failed) — trying Gate.io spot`);
   }
 
   if (allCandles.length === 0) {
     try {
       allCandles = await fetchAllGateCandles(symbol, timeframe, startMs, endMs, onProgress);
     } catch (err: any) {
-      console.log(`[Gate] Fallback also failed for ${symbol} ${timeframe}: ${err.message}`);
+      console.log(`[Gate Spot] Fallback failed for ${symbol} ${timeframe}: ${err.message}`);
+    }
+  }
+
+  if (allCandles.length === 0) {
+    try {
+      allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress);
+    } catch (err: any) {
+      console.log(`[Pyth] Fallback failed for ${symbol} ${timeframe}: ${err.message}`);
     }
   }
 
@@ -337,7 +577,7 @@ export async function fetchOHLCV(
     return deduped;
   }
 
-  onProgress?.(`No candle data available for ${symbol} ${timeframe} from OKX or Gate.io`);
+  onProgress?.(`No candle data available for ${symbol} ${timeframe} from OKX, Gate.io, or Pyth`);
   return allCandles;
 }
 
