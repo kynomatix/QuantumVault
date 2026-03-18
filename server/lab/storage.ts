@@ -76,6 +76,7 @@ export interface ILabStorage {
   hasActiveOrPausedRun(): Promise<boolean>;
   getHeatmapBulkResults(walletAddress: string): Promise<{ runId: number; strategyId: number; resultId: number; ticker: string; timeframe: string; netProfitPercent: number; winRatePercent: number; maxDrawdownPercent: number; profitFactor: number; totalTrades: number; params: any }[]>;
   getCompletedRunCount(walletAddress: string): Promise<number>;
+  deduplicateStrategyResults(strategyId: number): Promise<number>;
 }
 
 export class LabDatabaseStorage implements ILabStorage {
@@ -835,6 +836,33 @@ export class LabDatabaseStorage implements ILabStorage {
         or(eq(labOptimizationRuns.status, "complete"), eq(labOptimizationRuns.status, "paused"))!
       ));
     return rows[0]?.count ?? 0;
+  }
+
+  async deduplicateStrategyResults(strategyId: number): Promise<number> {
+    const rows = await db.execute<{ removed: number }>(sql`
+      WITH ranked AS (
+        SELECT r.id, r.run_id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY r.ticker, r.timeframe, r.params, run.start_date, run.end_date
+                 ORDER BY r.net_profit_percent DESC, r.id DESC
+               ) AS rn
+        FROM lab_optimization_results r
+        JOIN lab_optimization_runs run ON run.id = r.run_id
+        WHERE run.strategy_id = ${strategyId}
+          AND run.status = 'complete'
+      ),
+      deleted AS (
+        DELETE FROM lab_optimization_results del
+        USING ranked, lab_optimization_runs run
+        WHERE del.id = ranked.id
+          AND ranked.rn > 1
+          AND run.id = del.run_id
+          AND run.status = 'complete'
+        RETURNING del.id
+      )
+      SELECT count(*)::int AS removed FROM deleted
+    `);
+    return rows.rows[0]?.removed ?? 0;
   }
 }
 

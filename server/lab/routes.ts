@@ -591,6 +591,11 @@ export function registerLabRoutes(app: Express): void {
                   const finalCheckpoint: LabCheckpoint = { completedCombos: [], configSnapshot: config };
                   await labStorage.finalizeSuccessfulRun(runId, totalConfigsTested, finalCheckpoint);
                   console.log(`[QuantumLab] Run ${runId} completed`);
+                  if (config.strategyId) {
+                    labStorage.deduplicateStrategyResults(config.strategyId).then(removed => {
+                      if (removed > 0) console.log(`[QuantumLab] Dedup: removed ${removed} duplicate results for strategy ${config.strategyId}`);
+                    }).catch(err => console.log(`[QuantumLab] Dedup error for strategy ${config.strategyId}: ${err.message}`));
+                  }
                 } catch (err: any) {
                   console.log(`[QuantumLab] Failed to complete run: ${err.stack || err.message}`);
                   try {
