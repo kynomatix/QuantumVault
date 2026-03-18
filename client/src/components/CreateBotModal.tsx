@@ -98,7 +98,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   const wallet = useWallet();
   const { connection } = useConnection();
   const { executionEnabled, executionLoading, enableExecution, refetchStatus } = useExecutionAuthorization();
-  const { getMaxLeverage } = useLeverageLimits();
+  const { getMaxLeverage: getMaxLeverageFromCache } = useLeverageLimits();
   const [isCreating, setIsCreating] = useState(false);
   const [isDepositingSol, setIsDepositingSol] = useState(false);
   const [step, setStep] = useState<'create' | 'success' | 'enable_execution'>('create');
@@ -149,6 +149,12 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   
   // Get selected market info
   const selectedMarket = markets.find(m => m.symbol === newBot.market);
+  
+  const getMaxLeverage = (market: string): number => {
+    const mkt = markets.find(m => m.symbol === market);
+    if (mkt?.maxLeverage && mkt.maxLeverage > 0) return mkt.maxLeverage;
+    return getMaxLeverageFromCache(market);
+  };
   
   // Check if high-risk market selected
   useEffect(() => {

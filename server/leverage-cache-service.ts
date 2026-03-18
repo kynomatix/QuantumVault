@@ -154,17 +154,17 @@ export function getCachedMaxLeverage(symbol: string): number {
     : `${symbol.toUpperCase()}-PERP`;
 
   if (leverageCache) {
-    return leverageCache.leverageMap[normalizedSymbol] ?? CONSERVATIVE_FALLBACK;
+    return leverageCache.leverageMap[normalizedSymbol] ?? DRIFT_LEVERAGE_TIERS[normalizedSymbol] ?? CONSERVATIVE_FALLBACK;
   }
 
-  return CONSERVATIVE_FALLBACK;
+  return DRIFT_LEVERAGE_TIERS[normalizedSymbol] ?? CONSERVATIVE_FALLBACK;
 }
 
 export function getAllCachedLeverageLimits(): Record<string, number> {
   if (leverageCache) {
     return { ...leverageCache.leverageMap };
   }
-  return {};
+  return { ...DRIFT_LEVERAGE_TIERS };
 }
 
 export function isMarketNonTradable(symbol: string): boolean | null {
