@@ -1600,10 +1600,26 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
       queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
-      toast({ title: data.alreadyRunning ? "Reconnected to running optimization" : "Optimization resumed" });
+      toast({ title: data.queued ? "Queue kicked — next run will start shortly" : data.alreadyRunning ? "Reconnected to running optimization" : "Optimization resumed" });
     },
     onError: (err: any) => {
       toast({ title: "Failed to resume", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const kickQueueMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/lab/queue/kick", { method: "POST", credentials: "include" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Kick failed");
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+      toast({ title: "Queue unstuck — processing will resume" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to kick queue", description: err.message, variant: "destructive" });
     },
   });
 
@@ -1676,12 +1692,25 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
             <div className="p-2 rounded-lg bg-violet-500/10">
               <ListOrdered className="w-5 h-5 text-violet-400" />
             </div>
-            <div>
+            <div className="flex-1">
               <SheetTitle className="text-lg text-white">Run Queue</SheetTitle>
               <p className="text-sm text-white/40" data-testid="badge-queue-count">
                 {totalCount === 0 ? "No runs queued" : `${activeRun ? 1 : 0} active · ${queueItems.length} queued`}
               </p>
             </div>
+            {!activeRun && queueItems.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-3 text-xs border-violet-500/30 text-violet-300 hover:bg-violet-500/10"
+                onClick={() => kickQueueMutation.mutate()}
+                disabled={kickQueueMutation.isPending}
+                data-testid="queue-kick-btn"
+              >
+                {kickQueueMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 mr-1" />}
+                Unstick
+              </Button>
+            )}
           </div>
         </SheetHeader>
 

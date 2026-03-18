@@ -629,6 +629,7 @@ export function registerLabRoutes(app: Express): void {
                 if (isResource) {
                   console.log(`[QuantumLab] Run ${runId} resource error → paused (no auto-retry)`);
                   activeWorker = null;
+                  setTimeout(() => pumpQueue(), 1000);
                   break;
                 }
                 console.log(`[QuantumLab] Run ${runId} error → paused, will auto-retry`);
@@ -638,6 +639,7 @@ export function registerLabRoutes(app: Express): void {
               } catch {}
             }
             activeWorker = null;
+            setTimeout(() => pumpQueue(), 1000);
             break;
           }
         }
@@ -659,6 +661,7 @@ export function registerLabRoutes(app: Express): void {
             if (oom) {
               console.log(`[QuantumLab] Worker OOM run ${runId} → paused (no auto-retry)`);
               activeWorker = null;
+              setTimeout(() => pumpQueue(), 1000);
               return;
             }
             console.log(`[QuantumLab] Worker error run ${runId} → paused, will auto-retry`);
@@ -668,6 +671,7 @@ export function registerLabRoutes(app: Express): void {
           } catch { await labStorage.failRun(runId).catch(() => {}); }
         }
         activeWorker = null;
+        setTimeout(() => pumpQueue(), 1000);
       });
 
       worker.on("exit", async (code: number) => {
@@ -686,6 +690,7 @@ export function registerLabRoutes(app: Express): void {
                 });
                 console.log(`[QuantumLab] Worker OOM exit run ${runId} → paused (no auto-retry)`);
                 activeWorker = null;
+                setTimeout(() => pumpQueue(), 1000);
                 return;
               }
               console.log(`[QuantumLab] Worker exit(${code}) run ${runId} → paused, will auto-retry`);
@@ -695,6 +700,7 @@ export function registerLabRoutes(app: Express): void {
             } catch { await labStorage.failRun(runId).catch(() => {}); }
           }
           activeWorker = null;
+          setTimeout(() => pumpQueue(), 1000);
         }
       });
     };
@@ -914,7 +920,7 @@ export function registerLabRoutes(app: Express): void {
       if (!snapshot) {
         console.log(`[QuantumLab] pumpQueue: run ${claimed.id} has no config snapshot, marking failed`);
         await labStorage.failRun(claimed.id);
-        pumpQueue();
+        setTimeout(() => pumpQueue(), 100);
         return;
       }
 
@@ -1151,6 +1157,12 @@ export function registerLabRoutes(app: Express): void {
           await labStorage.resumeRun(runId);
         }
         return res.json({ jobId: existingJob.id, runId, alreadyRunning: true });
+      }
+
+      if (run.status === "queued") {
+        console.log(`[QuantumLab] Resume request for queued run ${runId} — kicking queue pump`);
+        pumpQueue();
+        return res.json({ queued: true, runId, message: "Queue pump triggered" });
       }
 
       if (run.status === "running") {
@@ -1857,6 +1869,16 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  app.post("/api/lab/queue/kick", requireLabAuth, async (_req: Request, res: Response) => {
+    console.log(`[QuantumLab] Manual queue kick requested (pumpRunning=${pumpQueueRunning})`);
+    if (pumpQueueRunning) {
+      res.json({ success: true, message: "Queue pump already in progress" });
+    } else {
+      pumpQueue();
+      res.json({ success: true, message: "Queue pump triggered" });
+    }
+  });
+
   setTimeout(async () => {
     try {
       if (activeWorker) {
@@ -1869,6 +1891,25 @@ export function registerLabRoutes(app: Express): void {
       console.log(`[QuantumLab] Boot queue pump error: ${err.message}`);
     }
   }, 5000);
+
+  setInterval(async () => {
+    if (activeWorker || pumpQueueRunning) return;
+    try {
+      const blockers = await db.select({ id: labOptimizationRuns.id })
+        .from(labOptimizationRuns)
+        .where(or(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.status, "paused"))!)
+        .limit(1);
+      if (blockers.length > 0) return;
+      const hasQueued = await db.select({ id: labOptimizationRuns.id })
+        .from(labOptimizationRuns)
+        .where(eq(labOptimizationRuns.status, "queued"))
+        .limit(1);
+      if (hasQueued.length > 0) {
+        console.log(`[QuantumLab] Queue watchdog: found stalled queued runs with no blockers, pumping`);
+        pumpQueue();
+      }
+    } catch {}
+  }, 30_000);
 
   labCleanup = async (reason: string) => {
     console.log(`[QuantumLab] ${reason} — pausing active jobs...`);
