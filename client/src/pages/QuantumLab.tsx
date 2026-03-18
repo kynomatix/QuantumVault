@@ -2118,8 +2118,12 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress, onGoToLiveJ
                                 Paused ({checkpointedCombos}/{totalCombos} combos)
                               </Badge>
                             ) : (
-                              <Badge className={`text-[10px] ${isComplete ? "bg-white/5 text-white/70" : isFailed ? "bg-purple-500/20 text-purple-400" : "bg-violet-500/20 text-violet-400"}`}>
-                                {isRunning ? "Running" : isFailed ? "Failed" : run.mode === "smoke" ? "Smoke Test" : "Full Sweep"}
+                              <Badge className={`text-[10px] ${
+                                (run as any).configSnapshot?.type === "refine" && (isComplete || (!isRunning && !isFailed))
+                                  ? "bg-sky-500/20 text-sky-400"
+                                  : isComplete ? "bg-white/5 text-white/70" : isFailed ? "bg-purple-500/20 text-purple-400" : "bg-violet-500/20 text-violet-400"
+                              }`}>
+                                {isRunning ? "Running" : isFailed ? "Failed" : run.mode === "smoke" ? "Smoke Test" : (run as any).configSnapshot?.type === "refine" ? "Refine" : "Full Sweep"}
                               </Badge>
                             )}
                           </div>
