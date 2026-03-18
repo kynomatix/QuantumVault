@@ -28,6 +28,8 @@ export async function ensureSchema() {
         cumulative_trades integer NOT NULL DEFAULT 0,
         updated_at timestamp DEFAULT now()
       )`,
+      `CREATE INDEX IF NOT EXISTS idx_lab_opt_runs_user_status ON lab_optimization_runs (user_id, status, id)`,
+      `CREATE INDEX IF NOT EXISTS idx_lab_opt_results_run_id ON lab_optimization_results (run_id)`,
     ];
     for (const sql of migrations) {
       await client.query(sql);

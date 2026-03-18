@@ -74,6 +74,7 @@ export interface ILabStorage {
   claimNextQueuedRun(walletAddress?: string): Promise<LabOptimizationRun | null>;
   hasActiveRun(walletAddress?: string): Promise<boolean>;
   hasActiveOrPausedRun(): Promise<boolean>;
+  getHeatmapBulkResults(walletAddress: string): Promise<{ runId: number; strategyId: number; resultId: number; ticker: string; timeframe: string; netProfitPercent: number; winRatePercent: number; maxDrawdownPercent: number; profitFactor: number; totalTrades: number; params: any }[]>;
   getHeatmapCells(walletAddress: string): Promise<{ cells: any[]; runsTotal: number }>;
   getCompletedRunCount(walletAddress: string): Promise<number>;
   deduplicateStrategyResults(strategyId: number): Promise<number>;
@@ -805,22 +806,36 @@ export class LabDatabaseStorage implements ILabStorage {
     return activeJobs.length > 0;
   }
 
+  async getHeatmapBulkResults(walletAddress: string): Promise<{ runId: number; strategyId: number; resultId: number; ticker: string; timeframe: string; netProfitPercent: number; winRatePercent: number; maxDrawdownPercent: number; profitFactor: number; totalTrades: number; params: any }[]> {
+    const rows = await db.select({
+      runId: labOptimizationResults.runId,
+      strategyId: labOptimizationRuns.strategyId,
+      resultId: labOptimizationResults.id,
+      ticker: labOptimizationResults.ticker,
+      timeframe: labOptimizationResults.timeframe,
+      netProfitPercent: labOptimizationResults.netProfitPercent,
+      winRatePercent: labOptimizationResults.winRatePercent,
+      maxDrawdownPercent: labOptimizationResults.maxDrawdownPercent,
+      profitFactor: labOptimizationResults.profitFactor,
+      totalTrades: labOptimizationResults.totalTrades,
+      params: labOptimizationResults.params,
+    })
+    .from(labOptimizationResults)
+    .innerJoin(labOptimizationRuns, eq(labOptimizationResults.runId, labOptimizationRuns.id))
+    .where(and(
+      eq(labOptimizationRuns.userId, walletAddress),
+      or(eq(labOptimizationRuns.status, "complete"), eq(labOptimizationRuns.status, "paused"))!
+    ));
+    return rows;
+  }
+
   async getHeatmapCells(walletAddress: string): Promise<{ cells: any[]; runsTotal: number }> {
     const rows = await db.execute(sql`
-      WITH eligible_runs AS (
-        SELECT id, strategy_id
-        FROM lab_optimization_runs
-        WHERE user_id = ${walletAddress}
-          AND status IN ('complete', 'paused')
-      ),
-      runs_total AS (
-        SELECT COUNT(*)::int AS cnt FROM eligible_runs
-      ),
-      filtered AS (
+      WITH filtered AS (
         SELECT
           r.id AS result_id,
           r.run_id,
-          er.strategy_id,
+          run.strategy_id,
           r.ticker,
           r.timeframe,
           COALESCE(r.net_profit_percent, 0) AS net_profit_percent,
@@ -830,7 +845,9 @@ export class LabDatabaseStorage implements ILabStorage {
           COALESCE(r.total_trades, 0) AS total_trades,
           r.params
         FROM lab_optimization_results r
-        INNER JOIN eligible_runs er ON er.id = r.run_id
+        INNER JOIN lab_optimization_runs run ON run.id = r.run_id
+        WHERE run.user_id = ${walletAddress}
+          AND run.status IN ('complete', 'paused')
       ),
       ranked AS (
         SELECT *,
@@ -839,84 +856,72 @@ export class LabDatabaseStorage implements ILabStorage {
             ORDER BY net_profit_percent DESC, result_id DESC
           ) AS rn
         FROM filtered
-      ),
-      cells AS (
-        SELECT
-          ticker,
-          timeframe,
-          COUNT(*)::int AS total_results,
-          MAX(net_profit_percent) AS best_profit,
-          MAX(win_rate_percent) AS best_win_rate,
-          MAX(profit_factor) AS best_pf,
-          MIN(max_drawdown_percent) AS lowest_drawdown,
-          AVG(net_profit_percent) AS avg_profit,
-          AVG(win_rate_percent) AS avg_win_rate,
-          AVG(max_drawdown_percent) AS avg_drawdown,
-          AVG(profit_factor) AS avg_pf,
-          COUNT(DISTINCT run_id)::int AS runs_count,
-          COALESCE(
-            jsonb_agg(
-              jsonb_build_object(
-                'id', result_id,
-                'netProfitPercent', net_profit_percent,
-                'winRatePercent', win_rate_percent,
-                'maxDrawdownPercent', max_drawdown_percent,
-                'profitFactor', profit_factor,
-                'totalTrades', total_trades,
-                'params', params,
-                'runId', run_id,
-                'strategyId', strategy_id
-              ) ORDER BY net_profit_percent DESC, result_id DESC
-            ) FILTER (WHERE rn <= 10),
-            '[]'::jsonb
-          ) AS top_results
-        FROM ranked
-        GROUP BY ticker, timeframe
       )
-      SELECT c.*, rt.cnt AS runs_total
-      FROM cells c
-      CROSS JOIN runs_total rt
-
-      UNION ALL
-
       SELECT
-        NULL AS ticker, NULL AS timeframe, 0 AS total_results,
-        0 AS best_profit, 0 AS best_win_rate, 0 AS best_pf, 0 AS lowest_drawdown,
-        0 AS avg_profit, 0 AS avg_win_rate, 0 AS avg_drawdown, 0 AS avg_pf,
-        0 AS runs_count, '[]'::jsonb AS top_results,
-        rt.cnt AS runs_total
-      FROM runs_total rt
-      WHERE NOT EXISTS (SELECT 1 FROM cells)
+        ticker,
+        timeframe,
+        COUNT(*)::int AS total_results,
+        MAX(net_profit_percent) AS best_profit,
+        MAX(win_rate_percent) AS best_win_rate,
+        MAX(profit_factor) AS best_pf,
+        MIN(max_drawdown_percent) AS lowest_drawdown,
+        AVG(net_profit_percent) AS avg_profit,
+        AVG(win_rate_percent) AS avg_win_rate,
+        AVG(max_drawdown_percent) AS avg_drawdown,
+        AVG(profit_factor) AS avg_pf,
+        COUNT(DISTINCT run_id)::int AS runs_count,
+        COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'id', result_id,
+              'netProfitPercent', net_profit_percent,
+              'winRatePercent', win_rate_percent,
+              'maxDrawdownPercent', max_drawdown_percent,
+              'profitFactor', profit_factor,
+              'totalTrades', total_trades,
+              'params', params,
+              'runId', run_id,
+              'strategyId', strategy_id
+            ) ORDER BY net_profit_percent DESC, result_id DESC
+          ) FILTER (WHERE rn <= 10),
+          '[]'::jsonb
+        ) AS top_results
+      FROM ranked
+      GROUP BY ticker, timeframe
     `);
 
-    const runsTotal = Number(rows.rows[0]?.runs_total) || 0;
+    const runsCountRow = await db.execute(sql`
+      SELECT COUNT(*)::int AS cnt
+      FROM lab_optimization_runs
+      WHERE user_id = ${walletAddress}
+        AND status IN ('complete', 'paused')
+    `);
+    const runsTotal = Number(runsCountRow.rows[0]?.cnt) || 0;
 
-    const cells = rows.rows
-      .filter((row: any) => row.ticker !== null)
-      .map((row: any) => {
-        let topResults = row.top_results;
-        if (typeof topResults === 'string') {
-          try { topResults = JSON.parse(topResults); } catch { topResults = []; }
-        }
-        if (!Array.isArray(topResults)) topResults = [];
+    const cells = rows.rows.map((row: any) => {
+      let topResults = row.top_results;
+      if (typeof topResults === 'string') {
+        try { topResults = JSON.parse(topResults); } catch { topResults = []; }
+      }
+      if (!Array.isArray(topResults)) topResults = [];
 
-        return {
-          ticker: row.ticker,
-          timeframe: row.timeframe,
-          totalConfigs: Number(row.total_results) || 0,
-          totalResults: Number(row.total_results) || 0,
-          bestProfit: Number(row.best_profit) || 0,
-          bestWinRate: Number(row.best_win_rate) || 0,
-          bestPF: Number(row.best_pf) || 0,
-          lowestDrawdown: Number(row.lowest_drawdown) || 0,
-          avgProfit: Number(row.avg_profit) || 0,
-          avgWinRate: Number(row.avg_win_rate) || 0,
-          avgDrawdown: Number(row.avg_drawdown) || 0,
-          avgPF: Number(row.avg_pf) || 0,
-          runsCount: Number(row.runs_count) || 0,
-          allResults: topResults,
-        };
-      });
+      return {
+        ticker: row.ticker,
+        timeframe: row.timeframe,
+        totalConfigs: Number(row.total_results) || 0,
+        totalResults: Number(row.total_results) || 0,
+        bestProfit: Number(row.best_profit) || 0,
+        bestWinRate: Number(row.best_win_rate) || 0,
+        bestPF: Number(row.best_pf) || 0,
+        lowestDrawdown: Number(row.lowest_drawdown) || 0,
+        avgProfit: Number(row.avg_profit) || 0,
+        avgWinRate: Number(row.avg_win_rate) || 0,
+        avgDrawdown: Number(row.avg_drawdown) || 0,
+        avgPF: Number(row.avg_pf) || 0,
+        runsCount: Number(row.runs_count) || 0,
+        allResults: topResults,
+      };
+    });
 
     return { cells, runsTotal };
   }
