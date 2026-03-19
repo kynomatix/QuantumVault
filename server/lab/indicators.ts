@@ -32,6 +32,23 @@ export function ema(data: number[], period: number): number[] {
   return result;
 }
 
+export function pineEma(data: number[], period: number): number[] {
+  const result: number[] = new Array(data.length).fill(NaN);
+  const k = 2 / (period + 1);
+  const k1 = 1 - k;
+  let prev = NaN;
+  for (let i = 0; i < data.length; i++) {
+    if (isNaN(data[i])) continue;
+    if (isNaN(prev)) {
+      prev = data[i];
+    } else {
+      prev = data[i] * k + prev * k1;
+    }
+    result[i] = prev;
+  }
+  return result;
+}
+
 export function rma(data: number[], period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   const k = 1 / period;

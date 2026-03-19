@@ -493,7 +493,7 @@ export function executePine(
       case "ema": {
         const src = getSource(0); const len = getLen(1);
         if (!src) return false;
-        precomputed[name] = ind.ema(src, len); return true;
+        precomputed[name] = ind.pineEma(src, len); return true;
       }
       case "rma": {
         const src = getSource(0); const len = getLen(1);
@@ -811,6 +811,11 @@ export function executePine(
       return evalBuiltinCall(fnVal.__ns, fnVal.fn, e.args, e.kw);
     }
 
+    if (e.fn.k === "na") {
+      if (!e.args || e.args.length === 0) return NA;
+      return isNa(evalExpr(e.args[0]));
+    }
+
     if (e.fn.k === "id") {
       const name = e.fn.name;
       if (name === "na") {
@@ -975,7 +980,7 @@ export function executePine(
     let result: number[] | null = null;
     switch (fn) {
       case "sma": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.sma(src, len); break; }
-      case "ema": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.ema(src, len); break; }
+      case "ema": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.pineEma(src, len); break; }
       case "rma": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.rma(src, len); break; }
       case "wma": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.wma(src, len); break; }
       case "rsi": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.rsi(src, len); break; }
@@ -1064,7 +1069,7 @@ export function executePine(
     let result: number[] | null = null;
     switch (fn) {
       case "sma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalSma(src, len, currentBar); result = ind.sma(src, len); } break; }
-      case "ema": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalEma(cacheKey, src, len, currentBar); result = ind.ema(src, len); } break; }
+      case "ema": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalEma(cacheKey, src, len, currentBar); result = ind.pineEma(src, len); } break; }
       case "rma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalRma(cacheKey, src, len, currentBar); result = ind.rma(src, len); } break; }
       case "wma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalSma(src, len, currentBar); result = ind.wma(src, len); } break; }
       case "rsi": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalRsi(cacheKey, src, len, currentBar); result = ind.rsi(src, len); } break; }
@@ -1198,15 +1203,17 @@ export function executePine(
   function incrementalEma(key: string, src: number[], len: number, bar: number): number {
     const alpha = 2 / (len + 1);
     const stateKey = `ema_${key}`;
-    if (bar < len - 1) {
-      const sma = incrementalSma(src, bar + 1, bar);
-      emaState.set(stateKey, sma);
-      return isNaN(sma) ? NA : sma;
-    }
-    const prev = emaState.get(stateKey) ?? incrementalSma(src, len, bar - 1);
     const v = src[bar];
-    if (isNaN(v)) return isNaN(prev) ? NA : prev;
-    const result = isNaN(prev) ? v : alpha * v + (1 - alpha) * prev;
+    if (isNaN(v)) {
+      const prev = emaState.get(stateKey);
+      return prev !== undefined && !isNaN(prev) ? prev : NA;
+    }
+    const prev = emaState.get(stateKey);
+    if (prev === undefined || isNaN(prev)) {
+      emaState.set(stateKey, v);
+      return v;
+    }
+    const result = alpha * v + (1 - alpha) * prev;
     emaState.set(stateKey, result);
     return result;
   }
@@ -1513,6 +1520,24 @@ export function executePine(
         const when = getKw("when");
         if (when !== undefined && !when) return NA;
         const direction = dir === "long" ? "long" as const : "short" as const;
+        if ((globalThis as any).__PINE_DEBUG_ENTRIES) {
+          const ms = vars["ms"] ? vars["ms"][currentBar] : "?";
+          const ws = vars["ws"] ? vars["ws"][currentBar] : "?";
+          const dt = new Date(candles[currentBar].time).toISOString().replace("T"," ").slice(0,19);
+          const mp1 = vars["m_p1"] ? vars["m_p1"][currentBar] : "?";
+          const mp2 = vars["m_p2"] ? vars["m_p2"][currentBar] : "?";
+          const mneck = vars["m_neck"] ? vars["m_neck"][currentBar] : "?";
+          const wt1 = vars["w_t1"] ? vars["w_t1"][currentBar] : "?";
+          const wt2 = vars["w_t2"] ? vars["w_t2"][currentBar] : "?";
+          const wneck = vars["w_neck"] ? vars["w_neck"][currentBar] : "?";
+          const phVal = precomputed["ph"] ? precomputed["ph"][currentBar] : "?";
+          const plVal = precomputed["pl"] ? precomputed["pl"][currentBar] : "?";
+          const atrVal = precomputed["atr"] ? precomputed["atr"][currentBar] : "?";
+          console.log(`[ENTRY] bar=${currentBar} ${dt} ${direction} close=${closeArr[currentBar].toFixed(3)} ms=${ms} ws=${ws}`);
+          console.log(`  M: p1=${mp1} p2=${mp2} neck=${mneck}`);
+          console.log(`  W: t1=${wt1} t2=${wt2} neck=${wneck}`);
+          console.log(`  ph=${isNaN(phVal as any) ? "na" : phVal} pl=${isNaN(plVal as any) ? "na" : plVal} atr=${typeof atrVal === 'number' ? atrVal.toFixed(3) : atrVal}`);
+        }
         broker.queueEntry(id, direction, bar, time);
         return NA;
       }
