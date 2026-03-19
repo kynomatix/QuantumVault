@@ -142,14 +142,28 @@ class Broker {
     const isLong = this.position.direction === "long";
     const toRemove: number[] = [];
 
+    const entryIds = new Set(this.position.entries.map(e => e.id));
+    const remainingByEntry = new Map<string, number>();
+    const effectiveQty: number[] = [];
+    for (const ex of this.pendingExits) {
+      const key = ex.fromEntry || "__all__";
+      const isEligible = !ex.fromEntry || entryIds.has(ex.fromEntry);
+      if (!isEligible) {
+        effectiveQty.push(0);
+        continue;
+      }
+      const remaining = remainingByEntry.get(key) ?? 100;
+      const qp = (isNaN(ex.qtyPercent) || ex.qtyPercent < 0) ? 100 : ex.qtyPercent;
+      const eff = Math.min(qp, remaining);
+      effectiveQty.push(eff);
+      remainingByEntry.set(key, Math.max(0, remaining - eff));
+    }
+
     for (let i = 0; i < this.pendingExits.length; i++) {
       const ex = this.pendingExits[i];
       if (!this.position) break;
 
-      if (ex.fromEntry && this.position.entries.length > 0) {
-        const hasMatch = this.position.entries.some(e => e.id === ex.fromEntry);
-        if (!hasMatch) continue;
-      }
+      if (effectiveQty[i] <= 0) continue;
 
       let fillPrice: number | null = null;
       let reason = ex.id;
@@ -183,7 +197,7 @@ class Broker {
       }
 
       if (fillPrice !== null && this.position) {
-        const closeQty = this.position.size * (ex.qtyPercent / 100);
+        const closeQty = this.position.size * (effectiveQty[i] / 100);
         this.recordClose(Math.min(closeQty, this.position.size), fillPrice, bar, time, reason);
         toRemove.push(i);
         if (!this.position) break;
