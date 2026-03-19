@@ -447,6 +447,60 @@ export function executePine(
         return true;
       }
     }
+    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "math") {
+      const mathFn = e.fn.prop;
+      if (e.args.length >= 2 && (mathFn === "max" || mathFn === "min")) {
+        const a = tryGetSeries(e.args[0]) ?? (resolveConst(e.args[0]) !== undefined ? new Array(n).fill(resolveConst(e.args[0])) : null);
+        const b = tryGetSeries(e.args[1]) ?? (resolveConst(e.args[1]) !== undefined ? new Array(n).fill(resolveConst(e.args[1])) : null);
+        if (a && b) {
+          const result = new Array(n).fill(NaN);
+          const op = mathFn === "max" ? Math.max : Math.min;
+          for (let i = 0; i < n; i++) result[i] = (isNaN(a[i]) || isNaN(b[i])) ? NaN : op(a[i], b[i]);
+          precomputed[name] = result;
+          return true;
+        }
+      }
+      if (e.args.length >= 1) {
+        const inner = tryGetSeries(e.args[0]);
+        if (inner) {
+          const result = new Array(n).fill(NaN);
+          const fn = (Math as any)[mathFn];
+          if (typeof fn === "function") {
+            for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : fn(inner[i]);
+            precomputed[name] = result;
+            return true;
+          }
+        }
+      }
+    }
+    if (e.k === "tern") {
+      const condConst = resolveConst(e.c);
+      if (condConst !== undefined) {
+        const branch = condConst ? e.t : e.f;
+        const s = tryGetSeries(branch);
+        if (s) { precomputed[name] = s; return true; }
+        const cv = resolveConst(branch);
+        if (cv !== undefined && typeof cv === "number") { precomputed[name] = new Array(n).fill(cv); return true; }
+      }
+    }
+    if (e.k === "un" && e.op === "-") {
+      const inner = tryGetSeries(e.e);
+      if (inner) {
+        const result = new Array(n).fill(NaN);
+        for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : -inner[i];
+        precomputed[name] = result;
+        return true;
+      }
+    }
+    if (e.k === "un" && e.op === "not") {
+      const inner = tryGetSeries(e.e);
+      if (inner) {
+        const result = new Array(n).fill(NaN);
+        for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : (inner[i] ? 0 : 1);
+        precomputed[name] = result;
+        return true;
+      }
+    }
     return false;
   }
 
@@ -457,11 +511,27 @@ export function executePine(
       if (inputDefaults[e.name] !== undefined && typeof inputDefaults[e.name] === "string" && builtinSeries[inputDefaults[e.name]]) {
         return Array.from(builtinSeries[inputDefaults[e.name]]) as Series;
       }
+      if (inputDefaults[e.name] !== undefined && typeof inputDefaults[e.name] === "number") {
+        return new Array(n).fill(inputDefaults[e.name]);
+      }
     }
     if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
       return resolveNestedTaSeries(e.fn.prop, e.args, e.kw);
     }
     if (e.k === "num") return new Array(n).fill(e.v);
+    if (e.k === "un" && e.op === "-") {
+      const inner = tryGetSeries(e.e);
+      if (inner) { const r = new Array(n); for (let i = 0; i < n; i++) r[i] = isNaN(inner[i]) ? NaN : -inner[i]; return r; }
+    }
+    if (e.k === "sub") {
+      const src = tryGetSeries(e.obj);
+      const offset = resolveConst(e.idx);
+      if (src && typeof offset === "number" && !isNaN(offset)) {
+        const shifted = new Array(n).fill(NaN);
+        for (let i = offset; i < n; i++) shifted[i] = src[i - offset];
+        return shifted;
+      }
+    }
     return null;
   }
 
@@ -701,7 +771,7 @@ export function executePine(
   }
 
   function evalExpr(e: Expr): any {
-    if ((++totalOps & 63) === 0) { opsThrottle += 64; checkBudget(); }
+    if ((++totalOps & 255) === 0) { opsThrottle += 256; checkBudget(); }
 
     switch (e.k) {
       case "num": return e.v;
@@ -1747,7 +1817,7 @@ export function executePine(
   }
 
   function execStmt(stmt: Stmt): "break" | "continue" | null {
-    if ((++totalOps & 63) === 0) { opsThrottle += 64; checkBudget(); }
+    if ((++totalOps & 255) === 0) { opsThrottle += 256; checkBudget(); }
 
     switch (stmt.k) {
       case "decl": {
@@ -1945,6 +2015,18 @@ export function executePine(
           builtinSeries[stmt.name] = builtinSeries[stmt.e.name];
           continue;
         }
+        if (stmt.e.k === "str") {
+          inputDefaults[stmt.name] = stmt.e.v;
+          continue;
+        }
+        if (stmt.e.k === "num") {
+          inputDefaults[stmt.name] = stmt.e.v;
+          continue;
+        }
+        if (stmt.e.k === "bool") {
+          inputDefaults[stmt.name] = stmt.e.v;
+          continue;
+        }
         if (stmt.e.k !== "na") {
           tryPrecompute(stmt.name, stmt.e);
         }
@@ -1953,6 +2035,52 @@ export function executePine(
   }
 
   precomputePhase();
+
+  for (let pass = 0; pass < 4; pass++) {
+    let newlyPrecomputed = 0;
+    for (const stmt of ast) {
+      if (stmt.k !== "decl" || stmt.isVar) continue;
+      if (precomputed[stmt.name]) continue;
+      if (inputDefaults[stmt.name] !== undefined) continue;
+      if (stmt.e.k === "call" && stmt.e.fn.k === "id" && stmt.e.fn.name === "strategy") continue;
+      if (stmt.e.k === "id" && builtinSeries[stmt.e.name]) { builtinSeries[stmt.name] = builtinSeries[stmt.e.name]; continue; }
+      if (stmt.e.k !== "na" && tryPrecompute(stmt.name, stmt.e)) newlyPrecomputed++;
+    }
+    if (newlyPrecomputed === 0) break;
+  }
+
+  function isVisualOnlyStmt(stmt: Stmt): boolean {
+    if (stmt.k === "expr" && stmt.e.k === "call") {
+      const fn = stmt.e.fn;
+      if (fn.k === "id") {
+        const name = fn.name;
+        if (name === "plot" || name === "plotshape" || name === "plotchar" ||
+            name === "plotcandle" || name === "plotarrow" || name === "plotbar" ||
+            name === "bgcolor" || name === "barcolor" || name === "fill" ||
+            name === "hline" || name === "label" || name === "line" || name === "box" ||
+            name === "table") return true;
+      }
+      if (fn.k === "mem" && fn.obj.k === "id") {
+        const obj = fn.obj.name;
+        if (obj === "label" || obj === "line" || obj === "box" || obj === "table" ||
+            obj === "color") return true;
+      }
+    }
+    if (stmt.k === "decl" && !stmt.isVar) {
+      const e = stmt.e;
+      if (e.k === "call" && e.fn.k === "id") {
+        const name = e.fn.name;
+        if (name === "plot" || name === "plotshape" || name === "plotchar" ||
+            name === "color" || name === "plotcandle" || name === "bgcolor" ||
+            name === "barcolor") return true;
+      }
+      if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id") {
+        const obj = e.fn.obj.name;
+        if (obj === "color") return true;
+      }
+    }
+    return false;
+  }
 
   const hotStmts: Stmt[] = [];
   for (const stmt of ast) {
@@ -1963,6 +2091,7 @@ export function executePine(
       if (stmt.e.k === "call" && stmt.e.fn.k === "id" && stmt.e.fn.name === "strategy") continue;
       if (stmt.e.k === "id" && builtinSeries[stmt.name]) continue;
     }
+    if (isVisualOnlyStmt(stmt)) continue;
     hotStmts.push(stmt);
   }
 
