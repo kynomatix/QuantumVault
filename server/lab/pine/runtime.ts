@@ -253,11 +253,23 @@ interface PrecomputedSeries { [name: string]: Series }
 export function executePine(
   ast: Stmt[],
   candles: OHLCV[],
-  params: Record<string, any>,
+  rawParams: Record<string, any>,
   ticker: string,
   timeframe: string,
   config: PineEngineConfig,
 ): LabBacktestResult {
+  const params: Record<string, any> = {};
+  for (const [k, v] of Object.entries(rawParams)) {
+    if (typeof v === "string") {
+      const tsMatch = v.match(/^timestamp\("(.+)"\)$/);
+      if (tsMatch) {
+        const d = Date.parse(tsMatch[1]);
+        params[k] = isNaN(d) ? v : d;
+        continue;
+      }
+    }
+    params[k] = v;
+  }
   const n = candles.length;
   if (n < 10) {
     return { ticker, timeframe, netProfitPercent: 0, winRatePercent: 0, maxDrawdownPercent: 0, profitFactor: 0, totalTrades: 0, params, trades: [], equityCurve: [] };
