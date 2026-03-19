@@ -723,6 +723,56 @@ export function executePine(
     return NA;
   }
 
+  function execStmtForValue(stmt: any): any {
+    if (stmt.k === "expr") {
+      return evalExpr(stmt.e);
+    }
+    if (stmt.k === "switch") {
+      const switchVal = stmt.e ? evalExpr(stmt.e) : null;
+      for (const c of stmt.cases) {
+        let matched = false;
+        for (const v of c.vals) {
+          if (v === null) { matched = true; break; }
+          const cv = evalExpr(v);
+          if (switchVal !== null && cv === switchVal) { matched = true; break; }
+          if (switchVal === null && cv) { matched = true; break; }
+        }
+        if (matched) {
+          for (let i = 0; i < c.body.length - 1; i++) execStmt(c.body[i]);
+          const last = c.body[c.body.length - 1];
+          return last ? execStmtForValue(last) : NA;
+        }
+      }
+      return NA;
+    }
+    if (stmt.k === "if") {
+      const cond = evalExpr(stmt.c);
+      if (cond && cond !== NA) {
+        for (let i = 0; i < stmt.body.length - 1; i++) execStmt(stmt.body[i]);
+        const last = stmt.body[stmt.body.length - 1];
+        return last ? execStmtForValue(last) : NA;
+      }
+      if (stmt.elifs) {
+        for (const elif of stmt.elifs) {
+          const ec = evalExpr(elif.c);
+          if (ec && ec !== NA) {
+            for (let i = 0; i < elif.body.length - 1; i++) execStmt(elif.body[i]);
+            const last = elif.body[elif.body.length - 1];
+            return last ? execStmtForValue(last) : NA;
+          }
+        }
+      }
+      if (stmt.el) {
+        for (let i = 0; i < stmt.el.length - 1; i++) execStmt(stmt.el[i]);
+        const last = stmt.el[stmt.el.length - 1];
+        return last ? execStmtForValue(last) : NA;
+      }
+      return NA;
+    }
+    execStmt(stmt);
+    return NA;
+  }
+
   function resolveId(name: string): any {
     const bs = builtinSeries[name];
     if (bs) return (bs as any)[currentBar];
@@ -885,17 +935,14 @@ export function executePine(
           }
         }
         let result: any = NA;
-        for (const stmt of fn.body) {
-          const r = execStmt(stmt);
+        const bodyLen = fn.body.length;
+        for (let si = 0; si < bodyLen - 1; si++) {
+          const r = execStmt(fn.body[si]);
           if (r === "break" || r === "continue") break;
         }
-        const lastStmt = fn.body[fn.body.length - 1];
-        if (lastStmt && lastStmt.k === "expr") {
-          result = evalExpr(lastStmt.e);
-        } else {
-          result = fn.params.length > 0 && vars[fn.params[fn.params.length - 1]]
-            ? vars[fn.params[fn.params.length - 1]][currentBar]
-            : NA;
+        const lastStmt = bodyLen > 0 ? fn.body[bodyLen - 1] : null;
+        if (lastStmt) {
+          result = execStmtForValue(lastStmt);
         }
         for (const p of fn.params) {
           if (savedVars[p] !== undefined) {
