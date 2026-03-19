@@ -556,7 +556,7 @@ export function executePine(
           const pivotIdx = i - rightBars;
           let isPivot = true;
           for (let j = pivotIdx - leftBars; j < pivotIdx; j++) {
-            if (src[j] >= src[pivotIdx]) { isPivot = false; break; }
+            if (src[j] > src[pivotIdx]) { isPivot = false; break; }
           }
           if (isPivot) {
             for (let j = pivotIdx + 1; j <= pivotIdx + rightBars; j++) {
@@ -580,7 +580,7 @@ export function executePine(
           const pivotIdx = i - rightBars;
           let isPivot = true;
           for (let j = pivotIdx - leftBars; j < pivotIdx; j++) {
-            if (src[j] <= src[pivotIdx]) { isPivot = false; break; }
+            if (src[j] < src[pivotIdx]) { isPivot = false; break; }
           }
           if (isPivot) {
             for (let j = pivotIdx + 1; j <= pivotIdx + rightBars; j++) {
@@ -1096,7 +1096,7 @@ export function executePine(
         result = new Array(n).fill(NaN);
         for (let i = leftBars + rightBars; i < n; i++) {
           const pi = i - rightBars; let ok = true;
-          for (let j = pi - leftBars; j < pi; j++) if (src[j] >= src[pi]) { ok = false; break; }
+          for (let j = pi - leftBars; j < pi; j++) if (src[j] > src[pi]) { ok = false; break; }
           if (ok) for (let j = pi + 1; j <= pi + rightBars; j++) if (src[j] >= src[pi]) { ok = false; break; }
           if (ok) result[i] = src[pi];
         }
@@ -1109,7 +1109,7 @@ export function executePine(
         result = new Array(n).fill(NaN);
         for (let i = leftBars + rightBars; i < n; i++) {
           const pi = i - rightBars; let ok = true;
-          for (let j = pi - leftBars; j < pi; j++) if (src[j] <= src[pi]) { ok = false; break; }
+          for (let j = pi - leftBars; j < pi; j++) if (src[j] < src[pi]) { ok = false; break; }
           if (ok) for (let j = pi + 1; j <= pi + rightBars; j++) if (src[j] <= src[pi]) { ok = false; break; }
           if (ok) result[i] = src[pi];
         }
