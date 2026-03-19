@@ -715,6 +715,7 @@ export function executePine(
     const pc = precomputed[name];
     if (pc) { const v = pc[currentBar]; return isNaN(v) ? NA : v; }
     if (params[name] !== undefined) return params[name];
+    if (inputDefaults[name] !== undefined) return inputDefaults[name];
     const va = vars[name];
     if (va) { const v = va[currentBar]; return v === undefined ? NA : v; }
     switch (name) {
