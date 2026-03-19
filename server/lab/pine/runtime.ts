@@ -999,6 +999,10 @@ export function executePine(
       }
       case "sign": return Math.sign(toNum(vals[0]));
       case "sum": return vals.map(toNum).reduce((a, b) => a + b, 0);
+      case "round_to_mintick": {
+        const v = toNum(vals[0]);
+        return isNaN(v) ? NA : Math.round(v * 100) / 100;
+      }
       default: return NaN;
     }
   }
@@ -1389,6 +1393,28 @@ export function executePine(
           isNaN(diMinus[currentBar]) ? NA : diMinus[currentBar],
           isNaN(adxVal[currentBar]) ? NA : adxVal[currentBar],
         ];
+      }
+      case "stoch": {
+        const srcArr = resolveExprSeries(args[0]) || Array.from(closeArr);
+        const hArr = args.length > 1 ? (resolveExprSeries(args[1]) || Array.from(highArr)) : Array.from(highArr);
+        const lArr = args.length > 2 ? (resolveExprSeries(args[2]) || Array.from(lowArr)) : Array.from(lowArr);
+        const len = args.length > 3 ? Math.round(toNum(evalExpr(args[3]))) : 14;
+        const ck = `stoch_${argKeyForTa(args[0])}_${len}`;
+        if (!indicatorCache.has(ck)) {
+          const res = new Array(n).fill(NaN);
+          for (let i = len - 1; i < n; i++) {
+            let hh = -Infinity, ll = Infinity;
+            for (let j = i - len + 1; j <= i; j++) {
+              if (hArr[j] > hh) hh = hArr[j];
+              if (lArr[j] < ll) ll = lArr[j];
+            }
+            const range = hh - ll;
+            res[i] = range > 0 ? ((srcArr[i] - ll) / range) * 100 : 50;
+          }
+          indicatorCache.set(ck, res);
+        }
+        const stochVals = indicatorCache.get(ck);
+        return currentBar < stochVals.length && !isNaN(stochVals[currentBar]) ? stochVals[currentBar] : NA;
       }
       case "adx": {
         const len = toNum(evalExpr(args[0]));
