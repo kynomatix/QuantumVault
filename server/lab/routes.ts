@@ -1731,8 +1731,20 @@ export function registerLabRoutes(app: Express): void {
         return res.status(403).json({ error: "Not authorized to cancel this run" });
       }
     }
+    if (!job) {
+      return res.status(404).json({ error: "Job not found" });
+    }
     if (activeWorker) {
       activeWorker.postMessage({ type: "abort" });
+      const workerRef = activeWorker;
+      setTimeout(() => {
+        if (activeWorker === workerRef) {
+          console.log(`[QuantumLab] Cancel: worker did not exit after grace period, force-terminating`);
+          try { workerRef.terminate(); } catch {}
+          activeWorker = null;
+          pumpQueue();
+        }
+      }, 2000);
     }
     labStorage.cancelJob(req.params.id);
     if (job?.runId) {
@@ -1756,7 +1768,7 @@ export function registerLabRoutes(app: Express): void {
               pumpQueue();
             }
           } catch {}
-        }, 5000);
+        }, 3000);
       } else {
         pumpQueue();
       }

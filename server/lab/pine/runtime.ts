@@ -633,6 +633,16 @@ export function executePine(
         }
         precomputed[name] = result; return true;
       }
+      case "roc": {
+        const src = getSource(0); const len = getLen(1, 1);
+        if (!src) return false;
+        const result = new Array(n).fill(NaN);
+        for (let i = len; i < n; i++) {
+          const prev = src[i - len];
+          result[i] = prev !== 0 && !isNaN(prev) ? 100 * (src[i] - prev) / prev : NaN;
+        }
+        precomputed[name] = result; return true;
+      }
       case "dmi": return false;
       case "crossover": case "crossunder": case "cross": return false;
       case "barssince": case "change": return false;
@@ -1018,9 +1028,51 @@ export function executePine(
     if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
       return resolveNestedTaSeries(e.fn.prop, e.args, e.kw);
     }
+    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "math") {
+      const mathFn = e.fn.prop;
+      if (e.args.length >= 2 && (mathFn === "max" || mathFn === "min")) {
+        const a = resolveExprSeries(e.args[0]);
+        const b = resolveExprSeries(e.args[1]);
+        if (a && b) {
+          const result = new Array(n).fill(NaN);
+          const op = mathFn === "max" ? Math.max : Math.min;
+          for (let i = 0; i < n; i++) result[i] = (isNaN(a[i]) || isNaN(b[i])) ? NaN : op(a[i], b[i]);
+          return result;
+        }
+      }
+      if (e.args.length >= 1) {
+        const inner = resolveExprSeries(e.args[0]);
+        if (inner) {
+          const result = new Array(n).fill(NaN);
+          switch (mathFn) {
+            case "abs": for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : Math.abs(inner[i]); break;
+            case "sqrt": for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : Math.sqrt(inner[i]); break;
+            case "log": for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : Math.log(inner[i]); break;
+            case "log10": for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : Math.log10(inner[i]); break;
+            case "ceil": for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : Math.ceil(inner[i]); break;
+            case "floor": for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : Math.floor(inner[i]); break;
+            case "round": for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : Math.round(inner[i]); break;
+            case "sign": for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : Math.sign(inner[i]); break;
+            default: break;
+          }
+          if (!result.every(v => isNaN(v))) return result;
+        }
+      }
+    }
     if (e.k === "num") {
       const arr = new Array(n).fill(e.v);
       return arr;
+    }
+    if (e.k === "bin") {
+      const lSeries = resolveExprSeries(e.l);
+      const rSeries = resolveExprSeries(e.r);
+      if (lSeries && rSeries) {
+        const result = new Array(n).fill(NaN);
+        for (let i = 0; i < n; i++) {
+          if (!isNaN(lSeries[i]) && !isNaN(rSeries[i])) result[i] = evalBinOp(e.op, lSeries[i], rSeries[i]) as number;
+        }
+        return result;
+      }
     }
     return null;
   }
@@ -1054,6 +1106,17 @@ export function executePine(
       case "highest": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.highest(src, len); break; }
       case "lowest": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.lowest(src, len); break; }
       case "tr": { result = ind.trueRange(h, l, cl); break; }
+      case "roc": {
+        const src = nSrc(0); const len = nLen(1, 1);
+        if (src) {
+          result = new Array(n).fill(NaN);
+          for (let i = len; i < n; i++) {
+            const prev = src[i - len];
+            result[i] = prev !== 0 && !isNaN(prev) ? 100 * (src[i] - prev) / prev : NaN;
+          }
+        }
+        break;
+      }
     }
     if (result) indicatorCache.set(cacheKey, result);
     return result;
@@ -1087,6 +1150,9 @@ export function executePine(
       }
       if (a.k === "call" && a.fn.k === "mem" && a.fn.obj.k === "id" && a.fn.obj.name === "ta") {
         return resolveNestedTaSeries(a.fn.prop, a.args, a.kw);
+      }
+      if (a.k === "call" && a.fn.k === "mem" && a.fn.obj.k === "id" && a.fn.obj.name === "math") {
+        return resolveExprSeries(a);
       }
       if (a.k === "bin") {
         const lSeries = resolveExprSeries(a.l);
@@ -1143,6 +1209,17 @@ export function executePine(
       case "highest": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalHighest(src, len, currentBar); result = ind.highest(src, len); } break; }
       case "lowest": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalLowest(src, len, currentBar); result = ind.lowest(src, len); } break; }
       case "tr": { result = ind.trueRange(h, l, cl); break; }
+      case "roc": {
+        const src = getSrc(0); const len = getL(1, 1);
+        if (src) {
+          result = new Array(n).fill(NaN);
+          for (let i = len; i < n; i++) {
+            const prev = src[i - len];
+            result[i] = prev !== 0 && !isNaN(prev) ? 100 * (src[i] - prev) / prev : NaN;
+          }
+        }
+        break;
+      }
       case "vwap": {
         const src = getSrc(0) || cl;
         result = new Array(n).fill(NaN);
@@ -1380,7 +1457,7 @@ export function executePine(
       case "sma": case "ema": case "rma": case "wma": case "rsi":
       case "atr": case "stdev": case "highest": case "lowest":
       case "pivothigh": case "pivotlow": case "vwap": case "tr":
-      case "linreg": case "percentrank": case "cum":
+      case "linreg": case "percentrank": case "cum": case "roc":
       case "falling": case "rising": case "dev": case "median": case "mfi": {
         return computeOnFly(fn, args, kw);
       }

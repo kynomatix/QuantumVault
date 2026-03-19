@@ -1,11 +1,32 @@
 export function sma(data: number[], period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   if (period <= 0 || data.length < period) return result;
+  let firstValid = -1;
+  for (let i = 0; i <= data.length - period; i++) {
+    let allValid = true;
+    for (let j = i; j < i + period; j++) {
+      if (isNaN(data[j])) { allValid = false; break; }
+    }
+    if (allValid) { firstValid = i; break; }
+  }
+  if (firstValid < 0) return result;
   let sum = 0;
-  for (let i = 0; i < period; i++) sum += data[i];
-  result[period - 1] = sum / period;
-  for (let i = period; i < data.length; i++) {
-    sum += data[i] - data[i - period];
+  for (let i = firstValid; i < firstValid + period; i++) sum += data[i];
+  result[firstValid + period - 1] = sum / period;
+  for (let i = firstValid + period; i < data.length; i++) {
+    const leaving = data[i - period];
+    const entering = data[i];
+    if (isNaN(entering)) { sum = NaN; result[i] = NaN; continue; }
+    if (isNaN(sum)) {
+      sum = 0;
+      for (let j = i - period + 1; j <= i; j++) {
+        if (isNaN(data[j])) { sum = NaN; break; }
+        sum += data[j];
+      }
+      result[i] = isNaN(sum) ? NaN : sum / period;
+      continue;
+    }
+    sum += entering - leaving;
     result[i] = sum / period;
   }
   return result;
@@ -55,10 +76,16 @@ export function rma(data: number[], period: number): number[] {
   const k1 = 1 - k;
   let prev = NaN;
   for (let i = 0; i < data.length; i++) {
+    if (isNaN(data[i])) continue;
     if (isNaN(prev)) {
       if (i >= period - 1) {
         let sum = 0;
-        for (let j = i - period + 1; j <= i; j++) sum += data[j];
+        let valid = true;
+        for (let j = i - period + 1; j <= i; j++) {
+          if (isNaN(data[j])) { valid = false; break; }
+          sum += data[j];
+        }
+        if (!valid) continue;
         prev = sum / period;
         result[i] = prev;
       }
@@ -75,10 +102,13 @@ export function wma(data: number[], period: number): number[] {
   const denom = (period * (period + 1)) / 2;
   for (let i = period - 1; i < data.length; i++) {
     let sum = 0;
+    let hasNaN = false;
     for (let j = 0; j < period; j++) {
-      sum += data[i - period + 1 + j] * (j + 1);
+      const v = data[i - period + 1 + j];
+      if (isNaN(v)) { hasNaN = true; break; }
+      sum += v * (j + 1);
     }
-    result[i] = sum / denom;
+    if (!hasNaN) result[i] = sum / denom;
   }
   return result;
 }
@@ -98,17 +128,36 @@ export function hullMa(data: number[], period: number): number[] {
 export function stdev(data: number[], period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   if (period <= 0 || data.length < period) return result;
+  let firstValid = -1;
+  for (let i = 0; i <= data.length - period; i++) {
+    let allValid = true;
+    for (let j = i; j < i + period; j++) {
+      if (isNaN(data[j])) { allValid = false; break; }
+    }
+    if (allValid) { firstValid = i; break; }
+  }
+  if (firstValid < 0) return result;
   let sum = 0;
   let sumSq = 0;
-  for (let i = 0; i < period; i++) {
+  for (let i = firstValid; i < firstValid + period; i++) {
     sum += data[i];
     sumSq += data[i] * data[i];
   }
-  result[period - 1] = Math.sqrt((sumSq - (sum * sum) / period) / period);
-  for (let i = period; i < data.length; i++) {
+  result[firstValid + period - 1] = Math.sqrt(Math.max(0, (sumSq - (sum * sum) / period) / period));
+  for (let i = firstValid + period; i < data.length; i++) {
     const old = data[i - period];
-    sum += data[i] - old;
-    sumSq += data[i] * data[i] - old * old;
+    if (isNaN(data[i]) || isNaN(old)) {
+      sum = 0; sumSq = 0;
+      let valid = true;
+      for (let j = i - period + 1; j <= i; j++) {
+        if (isNaN(data[j])) { valid = false; break; }
+        sum += data[j]; sumSq += data[j] * data[j];
+      }
+      if (!valid) { result[i] = NaN; sum = NaN; continue; }
+    } else {
+      sum += data[i] - old;
+      sumSq += data[i] * data[i] - old * old;
+    }
     const variance = (sumSq - (sum * sum) / period) / period;
     result[i] = Math.sqrt(Math.max(0, variance));
   }
