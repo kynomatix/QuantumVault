@@ -174,6 +174,24 @@ export class LabDatabaseStorage implements ILabStorage {
         console.log(`[QuantumLab] Recovered ${recovered} failed run(s) with salvageable data`);
       }
 
+      const pausedRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "paused"));
+      let pausedRecovered = 0;
+      for (const run of pausedRuns) {
+        if (this.interruptedRunIds.includes(run.id)) continue;
+        const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+        if (cp?.userCancelled || cp?.resourceError) continue;
+        const hasCheckpoint = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
+        const hasConfigSnapshot = !!cp?.configSnapshot;
+        if (hasCheckpoint || hasConfigSnapshot) {
+          this.interruptedRunIds.push(run.id);
+          pausedRecovered++;
+          console.log(`[QuantumLab] Paused run ${run.id} queued for lazy recovery`);
+        }
+      }
+      if (pausedRecovered > 0) {
+        console.log(`[QuantumLab] Found ${pausedRecovered} paused run(s) eligible for auto-resume`);
+      }
+
       const completedRuns = await db.select({
         id: labOptimizationRuns.id,
         checkpoint: labOptimizationRuns.checkpoint,

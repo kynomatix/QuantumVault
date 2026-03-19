@@ -556,6 +556,35 @@ export default function QuantumLab() {
     return () => { isMounted = false; clearTimeout(reconnectTimer); eventSourceRef.current?.close(); };
   }, [activeJobId, toast]);
 
+  const autoReconnectAttemptedRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (activeJobId) return;
+    const ar = queueBadgeData?.activeRun;
+    if (!ar || (ar.status !== "running" && ar.status !== "paused")) {
+      autoReconnectAttemptedRef.current = null;
+      return;
+    }
+    if (autoReconnectAttemptedRef.current === ar.id) return;
+    autoReconnectAttemptedRef.current = ar.id;
+    (async () => {
+      try {
+        const res = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
+        if (!res.ok) {
+          autoReconnectAttemptedRef.current = null;
+          return;
+        }
+        const data = await res.json();
+        if (data.jobId) {
+          setActiveRunId(ar.id);
+          setActiveJobId(data.jobId);
+          toast({ title: "Reconnected to active run", description: `Run #${ar.id} resumed after restart.` });
+        }
+      } catch {
+        autoReconnectAttemptedRef.current = null;
+      }
+    })();
+  }, [activeJobId, queueBadgeData?.activeRun, toast]);
+
   const handleCancelJob = useCallback(async () => {
     if (!activeJobId) return;
     let succeeded = false;
