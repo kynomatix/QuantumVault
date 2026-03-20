@@ -261,7 +261,7 @@ export function executePine(
   const params: Record<string, any> = {};
   for (const [k, v] of Object.entries(rawParams)) {
     if (typeof v === "string") {
-      const tsMatch = v.match(/^timestamp\("(.+)"\)$/);
+      const tsMatch = v.match(/^timestamp\(\s*"(.+?)"\s*\)?$/);
       if (tsMatch) {
         const d = Date.parse(tsMatch[1]);
         params[k] = isNaN(d) ? v : d;
