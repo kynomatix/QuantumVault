@@ -381,6 +381,179 @@ export function executePine(
     return null;
   }
 
+  const UNSET = Symbol("unset");
+  function scopedPrecompute(
+    fn: { params: string[]; body: Stmt[] },
+    callArgs: Expr[],
+    callKw: [string, Expr][],
+  ): { locals: string[]; success: boolean } {
+    const saved: Map<string, { b?: number[] | Float64Array | typeof UNSET; p?: number[] | typeof UNSET; d?: any }> = new Map();
+    const locals: string[] = [];
+    const cacheKeysBefore = new Set(indicatorCache.keys());
+
+    function save(sym: string) {
+      if (!saved.has(sym)) {
+        saved.set(sym, {
+          b: builtinSeries[sym] !== undefined ? builtinSeries[sym] : UNSET,
+          p: precomputed[sym] !== undefined ? precomputed[sym] : UNSET,
+          d: inputDefaults[sym] !== undefined ? inputDefaults[sym] : UNSET,
+        });
+      }
+    }
+
+    function restore() {
+      for (const [sym, s] of saved) {
+        if (locals.includes(sym)) continue;
+        if (s.b === UNSET) delete builtinSeries[sym]; else if (s.b !== undefined) builtinSeries[sym] = s.b as any;
+        if (s.p === UNSET) delete precomputed[sym]; else if (s.p !== undefined) precomputed[sym] = s.p as any;
+        if (s.d === UNSET) delete inputDefaults[sym]; else if (s.d !== undefined) inputDefaults[sym] = s.d;
+      }
+      for (const key of indicatorCache.keys()) {
+        if (!cacheKeysBefore.has(key)) indicatorCache.delete(key);
+      }
+    }
+
+    for (let i = 0; i < fn.params.length; i++) {
+      const paramName = fn.params[i];
+      if (i < callArgs.length) {
+        const arg = callArgs[i];
+        const series = tryGetSeries(arg);
+        if (series) {
+          save(paramName);
+          builtinSeries[paramName] = series;
+          locals.push(paramName);
+        } else {
+          const cv = resolveConst(arg);
+          if (cv !== undefined) {
+            save(paramName);
+            inputDefaults[paramName] = cv;
+            locals.push(paramName);
+          } else {
+            restore();
+            return { locals: [], success: false };
+          }
+        }
+      }
+    }
+    for (const [kwName, kwExpr] of callKw) {
+      if (fn.params.includes(kwName)) {
+        const cv = resolveConst(kwExpr);
+        if (cv !== undefined) {
+          save(kwName);
+          inputDefaults[kwName] = cv;
+          locals.push(kwName);
+        }
+      }
+    }
+
+    let allOk = true;
+    for (const stmt of fn.body) {
+      if (stmt.k === "decl" && !stmt.isVar) {
+        save(stmt.name);
+        if (!tryPrecompute(stmt.name, stmt.e)) {
+          const cv = resolveConst(stmt.e);
+          if (cv !== undefined) {
+            if (typeof cv === "number") {
+              precomputed[stmt.name] = new Array(n).fill(cv);
+            } else {
+              inputDefaults[stmt.name] = cv;
+            }
+          } else {
+            allOk = false;
+            break;
+          }
+        }
+        locals.push(stmt.name);
+      } else if (stmt.k === "expr") {
+      } else {
+        allOk = false;
+        break;
+      }
+    }
+
+    return { locals, success: allOk };
+  }
+
+  function tryPrecomputeUserFunc(name: string, funcName: string, callArgs: Expr[], callKw: [string, Expr][]): boolean {
+    const fn = userFunctions[funcName];
+    if (!fn) return false;
+    const cacheKeysBefore = new Set(indicatorCache.keys());
+    const originals = new Map<string, { b: number[] | Float64Array | undefined; p: number[] | undefined; d: any }>();
+    for (const p of fn.params) {
+      originals.set(p, { b: builtinSeries[p], p: precomputed[p], d: inputDefaults[p] });
+    }
+    for (const stmt of fn.body) {
+      if (stmt.k === "decl") originals.set(stmt.name, { b: builtinSeries[stmt.name], p: precomputed[stmt.name], d: inputDefaults[stmt.name] });
+    }
+
+    const { locals, success } = scopedPrecompute(fn, callArgs, callKw);
+
+    let resultSeries: number[] | null = null;
+    if (success) {
+      const lastStmt = fn.body.length > 0 ? fn.body[fn.body.length - 1] : null;
+      if (lastStmt) {
+        if (lastStmt.k === "expr") {
+          resultSeries = tryGetSeries(lastStmt.e);
+        } else if (lastStmt.k === "decl" && !lastStmt.isVar && precomputed[lastStmt.name]) {
+          resultSeries = precomputed[lastStmt.name];
+        }
+      }
+    }
+
+    for (const [sym, orig] of originals) {
+      if (orig.b !== undefined) builtinSeries[sym] = orig.b; else delete builtinSeries[sym];
+      if (orig.p !== undefined) precomputed[sym] = orig.p; else delete precomputed[sym];
+      if (orig.d !== undefined) inputDefaults[sym] = orig.d; else delete inputDefaults[sym];
+    }
+    for (const key of indicatorCache.keys()) {
+      if (!cacheKeysBefore.has(key)) indicatorCache.delete(key);
+    }
+
+    if (resultSeries) {
+      precomputed[name] = resultSeries;
+      return true;
+    }
+    return false;
+  }
+
+  function tryPrecomputeUserFuncMulti(funcName: string, callArgs: Expr[], callKw: [string, Expr][], outputNames: string[]): (number[] | null)[] | null {
+    const fn = userFunctions[funcName];
+    if (!fn) return null;
+    const cacheKeysBefore = new Set(indicatorCache.keys());
+    const originals = new Map<string, { b: number[] | Float64Array | undefined; p: number[] | undefined; d: any }>();
+    for (const p of fn.params) {
+      originals.set(p, { b: builtinSeries[p], p: precomputed[p], d: inputDefaults[p] });
+    }
+    for (const stmt of fn.body) {
+      if (stmt.k === "decl") originals.set(stmt.name, { b: builtinSeries[stmt.name], p: precomputed[stmt.name], d: inputDefaults[stmt.name] });
+    }
+
+    const { locals, success } = scopedPrecompute(fn, callArgs, callKw);
+
+    let results: (number[] | null)[] | null = null;
+    if (success) {
+      const lastStmt = fn.body.length > 0 ? fn.body[fn.body.length - 1] : null;
+      if (lastStmt && lastStmt.k === "expr" && lastStmt.e.k === "call" && lastStmt.e.fn.k === "id" && lastStmt.e.fn.name === "__array_literal") {
+        results = [];
+        for (const arg of lastStmt.e.args) {
+          const s = tryGetSeries(arg);
+          results.push(s);
+        }
+        if (results.some(r => r === null)) results = null;
+      }
+    }
+
+    for (const [sym, orig] of originals) {
+      if (orig.b !== undefined) builtinSeries[sym] = orig.b; else delete builtinSeries[sym];
+      if (orig.p !== undefined) precomputed[sym] = orig.p; else delete precomputed[sym];
+      if (orig.d !== undefined) inputDefaults[sym] = orig.d; else delete inputDefaults[sym];
+    }
+    for (const key of indicatorCache.keys()) {
+      if (!cacheKeysBefore.has(key)) indicatorCache.delete(key);
+    }
+    return results;
+  }
+
   function tryPrecompute(name: string, e: Expr): boolean {
     if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
       return precomputeIndicator(name, e.fn.prop, e.args, e.kw);
@@ -390,6 +563,9 @@ export function executePine(
     }
     if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "mem") {
       return false;
+    }
+    if (e.k === "call" && e.fn.k === "id" && userFunctions[e.fn.name]) {
+      return tryPrecomputeUserFunc(name, e.fn.name, e.args, e.kw);
     }
     if (e.k === "sub") {
       const src = resolveSeries(e.obj);
@@ -482,6 +658,20 @@ export function executePine(
         const cv = resolveConst(branch);
         if (cv !== undefined && typeof cv === "number") { precomputed[name] = new Array(n).fill(cv); return true; }
       }
+      const condSeries = tryGetSeries(e.c);
+      if (condSeries) {
+        const tSeries = tryGetSeries(e.t) ?? (resolveConst(e.t) !== undefined ? new Array(n).fill(resolveConst(e.t)) : null);
+        const fSeries = tryGetSeries(e.f) ?? (resolveConst(e.f) !== undefined ? new Array(n).fill(resolveConst(e.f)) : null);
+        if (tSeries && fSeries) {
+          const result = new Array(n);
+          for (let i = 0; i < n; i++) {
+            const c = condSeries[i];
+            result[i] = (isNaN(c as number) || !c) ? fSeries[i] : tSeries[i];
+          }
+          precomputed[name] = result;
+          return true;
+        }
+      }
     }
     if (e.k === "un" && e.op === "-") {
       const inner = tryGetSeries(e.e);
@@ -515,8 +705,8 @@ export function executePine(
         return new Array(n).fill(inputDefaults[e.name]);
       }
     }
-    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
-      return resolveNestedTaSeries(e.fn.prop, e.args, e.kw);
+    if (e.k === "mem" && e.obj.k === "id" && e.obj.name === "ta" && e.prop === "tr") {
+      return ind.trueRange(Array.from(highArr) as number[], Array.from(lowArr) as number[], Array.from(closeArr) as number[]);
     }
     if (e.k === "num") return new Array(n).fill(e.v);
     if (e.k === "un" && e.op === "-") {
@@ -531,6 +721,83 @@ export function executePine(
         for (let i = offset; i < n; i++) shifted[i] = src[i - offset];
         return shifted;
       }
+    }
+    if (e.k === "bin") {
+      const lSeries = tryGetSeries(e.l);
+      const rSeries = tryGetSeries(e.r);
+      if (lSeries && rSeries) {
+        const result = new Array(n).fill(NaN);
+        for (let i = 0; i < n; i++) {
+          const lv = lSeries[i], rv = rSeries[i];
+          if (isNaN(lv) || isNaN(rv)) continue;
+          result[i] = evalBinOp(e.op, lv, rv);
+        }
+        return result;
+      }
+      const lConst = resolveConst(e.l);
+      if (lConst !== undefined && rSeries) {
+        const result = new Array(n).fill(NaN);
+        for (let i = 0; i < n; i++) {
+          if (isNaN(rSeries[i])) continue;
+          result[i] = evalBinOp(e.op, toNum(lConst), rSeries[i]);
+        }
+        return result;
+      }
+      const rConst = resolveConst(e.r);
+      if (lSeries && rConst !== undefined) {
+        const result = new Array(n).fill(NaN);
+        for (let i = 0; i < n; i++) {
+          if (isNaN(lSeries[i])) continue;
+          result[i] = evalBinOp(e.op, lSeries[i], toNum(rConst));
+        }
+        return result;
+      }
+    }
+    if (e.k === "tern") {
+      const condSeries = tryGetSeries(e.c);
+      if (condSeries) {
+        const tSeries = tryGetSeries(e.t) ?? (resolveConst(e.t) !== undefined ? new Array(n).fill(resolveConst(e.t)) : null);
+        const fSeries = tryGetSeries(e.f) ?? (resolveConst(e.f) !== undefined ? new Array(n).fill(resolveConst(e.f)) : null);
+        if (tSeries && fSeries) {
+          const result = new Array(n);
+          for (let i = 0; i < n; i++) {
+            const c = condSeries[i];
+            result[i] = (isNaN(c as number) || !c) ? fSeries[i] : tSeries[i];
+          }
+          return result;
+        }
+      }
+      const condConst = resolveConst(e.c);
+      if (condConst !== undefined) {
+        return tryGetSeries(condConst ? e.t : e.f);
+      }
+    }
+    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "math") {
+      const mathFn = e.fn.prop;
+      if (e.args.length >= 1) {
+        const inner = tryGetSeries(e.args[0]);
+        if (inner) {
+          const fn = (Math as any)[mathFn];
+          if (typeof fn === "function") {
+            const result = new Array(n).fill(NaN);
+            for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : fn(inner[i]);
+            return result;
+          }
+        }
+      }
+      if (e.args.length >= 2 && (mathFn === "max" || mathFn === "min")) {
+        const a = tryGetSeries(e.args[0]) ?? (resolveConst(e.args[0]) !== undefined ? new Array(n).fill(resolveConst(e.args[0])) : null);
+        const b = tryGetSeries(e.args[1]) ?? (resolveConst(e.args[1]) !== undefined ? new Array(n).fill(resolveConst(e.args[1])) : null);
+        if (a && b) {
+          const result = new Array(n).fill(NaN);
+          const op = mathFn === "max" ? Math.max : Math.min;
+          for (let i = 0; i < n; i++) result[i] = (isNaN(a[i]) || isNaN(b[i])) ? NaN : op(a[i], b[i]);
+          return result;
+        }
+      }
+    }
+    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
+      return resolveNestedTaSeries(e.fn.prop, e.args, e.kw);
     }
     return null;
   }
@@ -565,6 +832,8 @@ export function executePine(
       if (!arg) return cl;
       const s = resolveSeries(arg);
       if (s) return s;
+      const ts = tryGetSeries(arg);
+      if (ts) return ts;
       const c = resolveConst(arg);
       if (typeof c === 'string' && builtinSeries[c]) return Array.from(builtinSeries[c]) as Series;
       return null;
@@ -1017,9 +1286,23 @@ export function executePine(
       if (userFunctions[name]) {
         const fn = userFunctions[name];
         const savedVars: Record<string, any> = {};
+        const savedAliases: { name: string; origB?: number[] | Float64Array; origP?: number[] }[] = [];
         for (let i = 0; i < fn.params.length; i++) {
-          savedVars[fn.params[i]] = vars[fn.params[i]] ? vars[fn.params[i]][currentBar] : undefined;
-          setVar(fn.params[i], i < e.args.length ? evalExpr(e.args[i]) : NA);
+          const paramName = fn.params[i];
+          savedVars[paramName] = vars[paramName] ? vars[paramName][currentBar] : undefined;
+          if (i < e.args.length) {
+            const arg = e.args[i];
+            if (arg.k === "id" && builtinSeries[arg.name]) {
+              savedAliases.push({ name: paramName, origB: builtinSeries[paramName], origP: precomputed[paramName] });
+              builtinSeries[paramName] = builtinSeries[arg.name];
+            } else if (arg.k === "id" && precomputed[arg.name]) {
+              savedAliases.push({ name: paramName, origB: builtinSeries[paramName], origP: precomputed[paramName] });
+              precomputed[paramName] = precomputed[arg.name];
+            }
+            setVar(paramName, evalExpr(arg));
+          } else {
+            setVar(paramName, NA);
+          }
         }
         for (const [kwName, kwExpr] of e.kw) {
           if (fn.params.includes(kwName)) {
@@ -1035,6 +1318,10 @@ export function executePine(
         const lastStmt = bodyLen > 0 ? fn.body[bodyLen - 1] : null;
         if (lastStmt) {
           result = execStmtForValue(lastStmt);
+        }
+        for (const alias of savedAliases) {
+          if (alias.origB !== undefined) builtinSeries[alias.name] = alias.origB; else delete builtinSeries[alias.name];
+          if (alias.origP !== undefined) precomputed[alias.name] = alias.origP; else delete precomputed[alias.name];
         }
         for (const p of fn.params) {
           if (savedVars[p] !== undefined) {
@@ -1863,6 +2150,17 @@ export function executePine(
         break;
       }
       case "multi_decl": {
+        let allPrecomputed = true;
+        for (const nm of stmt.names) {
+          if (!precomputed[nm]) { allPrecomputed = false; break; }
+        }
+        if (allPrecomputed) {
+          for (const nm of stmt.names) {
+            const v = precomputed[nm][currentBar];
+            setVar(nm, isNaN(v) ? NA : v);
+          }
+          break;
+        }
         const result = evalExpr(stmt.e);
         if (Array.isArray(result)) {
           for (let i = 0; i < stmt.names.length; i++) {
@@ -2057,6 +2355,21 @@ export function executePine(
   for (let pass = 0; pass < 4; pass++) {
     let newlyPrecomputed = 0;
     for (const stmt of ast) {
+      if (stmt.k === "multi_decl") {
+        if (stmt.names.every((nm: string) => precomputed[nm])) continue;
+        if (stmt.e.k === "call" && stmt.e.fn.k === "id" && userFunctions[stmt.e.fn.name]) {
+          const fn = userFunctions[stmt.e.fn.name];
+          if (fn) {
+            const tempResults = tryPrecomputeUserFuncMulti(stmt.e.fn.name, stmt.e.args, stmt.e.kw, stmt.names);
+            if (tempResults) {
+              for (let i = 0; i < stmt.names.length; i++) {
+                if (tempResults[i]) { precomputed[stmt.names[i]] = tempResults[i]; newlyPrecomputed++; }
+              }
+            }
+          }
+        }
+        continue;
+      }
       if (stmt.k !== "decl" || stmt.isVar) continue;
       if (precomputed[stmt.name]) continue;
       if (inputDefaults[stmt.name] !== undefined) continue;
