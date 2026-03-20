@@ -2100,27 +2100,6 @@ export function executePine(
   }
 
   let compiledFn: Function | null = null;
-  if (planRef?._compiledCache) {
-    compiledFn = planRef._compiledCache.fn;
-    planRef._compiledCache.warmupCount++;
-  } else {
-    const compilerCtx: CompilerContext = {
-      precomputedNames: new Set(Object.keys(precomputed)),
-      builtinSeriesNames: new Set(Object.keys(builtinSeries)),
-      inputDefaultNames: new Set(Object.keys(inputDefaults)),
-      varIsVarNames: varIsVar,
-      userFunctionNames: new Set(Object.keys(userFunctions)),
-      paramNames: new Set(Object.keys(params)),
-    };
-    try {
-      compiledFn = compilePineHotLoop(hotStmts, userFunctions, compilerCtx);
-      if (compiledFn && planRef) {
-        planRef._compiledCache = { fn: compiledFn, warmupCount: 1 };
-      }
-    } catch (e: any) {
-      compiledFn = null;
-    }
-  }
 
   const equityValues = new Array(n);
 
