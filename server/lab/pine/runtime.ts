@@ -1067,6 +1067,15 @@ export function executePine(
         const idx = evalExpr(e.idx);
         const offset = Math.round(toNum(idx));
         if (obj.k === "id") return getVar(obj.name, offset);
+        if (offset > 0 && currentBar >= offset) {
+          const saved = currentBar;
+          try {
+            currentBar = saved - offset;
+            return evalExpr(obj);
+          } finally {
+            currentBar = saved;
+          }
+        }
         return NA;
       }
       case "mem": return evalMember(e);
@@ -1520,6 +1529,9 @@ export function executePine(
           return Array.from(builtinSeries[inputDefaults[a.name]]) as number[];
         }
       }
+      if (a.k === "mem" && a.obj.k === "id" && a.obj.name === "ta" && a.prop === "tr") {
+        return ind.trueRange(getH(), getL_arr(), getCl());
+      }
       if (a.k === "call" && a.fn.k === "mem" && a.fn.obj.k === "id" && a.fn.obj.name === "ta") {
         return resolveNestedTaSeries(a.fn.prop, a.args, a.kw);
       }
@@ -1569,17 +1581,31 @@ export function executePine(
       return currentBar < cached.length ? (isNaN(cached[currentBar]) ? NA : cached[currentBar]) : NA;
     }
 
+    function evalSrcFallback(idx: number): number[] | null {
+      const src = getSrc(idx);
+      if (src) return src;
+      if (idx < args.length) {
+        isDynamic = true;
+        const varName = `__dynSrc_${cacheKey}`;
+        const v = toNum(evalExpr(args[idx]));
+        if (!vars[varName]) vars[varName] = new Array(n).fill(undefined);
+        vars[varName][currentBar] = v;
+        return vars[varName].map((x: any) => x === undefined ? NaN : toNum(x));
+      }
+      return null;
+    }
+
     let result: number[] | null = null;
     switch (fn) {
-      case "sma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalSma(src, len, currentBar); result = ind.sma(src, len); } break; }
-      case "ema": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalEma(cacheKey, src, len, currentBar); result = ind.pineEma(src, len); } break; }
-      case "rma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalRma(cacheKey, src, len, currentBar); result = ind.rma(src, len); } break; }
-      case "wma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalWma(src, len, currentBar); result = ind.wma(src, len); } break; }
-      case "rsi": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalRsi(cacheKey, src, len, currentBar); result = ind.rsi(src, len); } break; }
+      case "sma": { const src = evalSrcFallback(0); const len = getL(1); if (src) { if (isDynamic) return incrementalSma(src, len, currentBar); result = ind.sma(src, len); } break; }
+      case "ema": { const src = evalSrcFallback(0); const len = getL(1); if (src) { if (isDynamic) return incrementalEma(cacheKey, src, len, currentBar); result = ind.pineEma(src, len); } break; }
+      case "rma": { const src = evalSrcFallback(0); const len = getL(1); if (src) { if (isDynamic) return incrementalRma(cacheKey, src, len, currentBar); result = ind.rma(src, len); } break; }
+      case "wma": { const src = evalSrcFallback(0); const len = getL(1); if (src) { if (isDynamic) return incrementalWma(src, len, currentBar); result = ind.wma(src, len); } break; }
+      case "rsi": { const src = evalSrcFallback(0); const len = getL(1); if (src) { if (isDynamic) return incrementalRsi(cacheKey, src, len, currentBar); result = ind.rsi(src, len); } break; }
       case "atr": { const len = getL(0); result = ind.atr(getH(), getL_arr(), getCl(), len); break; }
-      case "stdev": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalStdev(src, len, currentBar); result = ind.stdev(src, len); } break; }
-      case "highest": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalHighest(src, len, currentBar); result = ind.highest(src, len); } break; }
-      case "lowest": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalLowest(src, len, currentBar); result = ind.lowest(src, len); } break; }
+      case "stdev": { const src = evalSrcFallback(0); const len = getL(1); if (src) { if (isDynamic) return incrementalStdev(src, len, currentBar); result = ind.stdev(src, len); } break; }
+      case "highest": { const src = evalSrcFallback(0); const len = getL(1); if (src) { if (isDynamic) return incrementalHighest(src, len, currentBar); result = ind.highest(src, len); } break; }
+      case "lowest": { const src = evalSrcFallback(0); const len = getL(1); if (src) { if (isDynamic) return incrementalLowest(src, len, currentBar); result = ind.lowest(src, len); } break; }
       case "tr": { result = ind.trueRange(getH(), getL_arr(), getCl()); break; }
       case "roc": {
         const src = getSrc(0); const len = getL(1, 1);
