@@ -343,14 +343,28 @@ export function executePine(
       if (inputDefaults[e.name] !== undefined) return inputDefaults[e.name];
       return undefined;
     }
-    if (e.k === "un" && e.op === "-") {
+    if (e.k === "un") {
       const inner = resolveConst(e.e);
-      if (typeof inner === "number") return -inner;
+      if (inner === undefined) return undefined;
+      if (e.op === "-" && typeof inner === "number") return -inner;
+      if (e.op === "not") return !inner;
     }
     if (e.k === "bin") {
       const l = resolveConst(e.l);
       const r = resolveConst(e.r);
-      if (typeof l === "number" && typeof r === "number") return evalBinOp(e.op, l, r);
+      if (l !== undefined && r !== undefined) return evalBinOp(e.op, l, r);
+    }
+    if (e.k === "tern") {
+      const c = resolveConst(e.c);
+      if (c !== undefined) return resolveConst(c ? e.t : e.f);
+    }
+    if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "math") {
+      const mathFn = e.fn.prop;
+      const constArgs = e.args.map(a => resolveConst(a));
+      if (constArgs.every((a: any) => typeof a === "number")) {
+        const fn = (Math as any)[mathFn];
+        if (typeof fn === "function") return fn(...constArgs);
+      }
     }
     if (e.k === "call" && e.fn.k === "id" && e.fn.name === "timestamp") {
       const tsArgs = e.args.map(a => resolveConst(a));
@@ -363,6 +377,15 @@ export function executePine(
       if (tsArgs.length === 1 && typeof tsArgs[0] === "string") {
         const d = Date.parse(tsArgs[0]);
         return isNaN(d) ? undefined : d;
+      }
+    }
+    if (e.k === "call" && e.fn.k === "id" && e.fn.name === "nz") {
+      const val = resolveConst(e.args[0]);
+      if (val !== undefined) {
+        if (isNa(val)) {
+          return e.args.length > 1 ? resolveConst(e.args[1]) ?? 0 : 0;
+        }
+        return val;
       }
     }
     return undefined;
@@ -567,8 +590,18 @@ export function executePine(
     if (e.k === "call" && e.fn.k === "id" && userFunctions[e.fn.name]) {
       return tryPrecomputeUserFunc(name, e.fn.name, e.args, e.kw);
     }
+    if (e.k === "call" && e.fn.k === "id" && e.fn.name === "nz") {
+      const inner = tryGetSeries(e.args[0]);
+      if (inner) {
+        const fallback = e.args.length > 1 ? resolveConst(e.args[1]) ?? 0 : 0;
+        const result = new Array(n);
+        for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? fallback : inner[i];
+        precomputed[name] = result;
+        return true;
+      }
+    }
     if (e.k === "sub") {
-      const src = resolveSeries(e.obj);
+      const src = tryGetSeries(e.obj) ?? resolveSeries(e.obj);
       const offset = resolveConst(e.idx);
       if (src && typeof offset === 'number' && !isNaN(offset)) {
         const shifted = new Array(n).fill(NaN);
@@ -691,6 +724,20 @@ export function executePine(
         return true;
       }
     }
+    const series = tryGetSeries(e);
+    if (series) {
+      precomputed[name] = series;
+      return true;
+    }
+    const cv = resolveConst(e);
+    if (cv !== undefined && typeof cv === "number") {
+      precomputed[name] = new Array(n).fill(cv);
+      return true;
+    }
+    if (cv !== undefined && typeof cv === "boolean") {
+      precomputed[name] = new Array(n).fill(cv ? 1 : 0);
+      return true;
+    }
     return false;
   }
 
@@ -701,10 +748,11 @@ export function executePine(
       if (inputDefaults[e.name] !== undefined && typeof inputDefaults[e.name] === "string" && builtinSeries[inputDefaults[e.name]]) {
         return Array.from(builtinSeries[inputDefaults[e.name]]) as Series;
       }
-      if (inputDefaults[e.name] !== undefined && typeof inputDefaults[e.name] === "number") {
-        return new Array(n).fill(inputDefaults[e.name]);
+      if (inputDefaults[e.name] !== undefined && (typeof inputDefaults[e.name] === "number" || typeof inputDefaults[e.name] === "boolean")) {
+        return new Array(n).fill(typeof inputDefaults[e.name] === "boolean" ? (inputDefaults[e.name] ? 1 : 0) : inputDefaults[e.name]);
       }
     }
+    if (e.k === "bool") return new Array(n).fill(e.v ? 1 : 0);
     if (e.k === "mem" && e.obj.k === "id" && e.obj.name === "ta" && e.prop === "tr") {
       return ind.trueRange(Array.from(highArr) as number[], Array.from(lowArr) as number[], Array.from(closeArr) as number[]);
     }
@@ -798,6 +846,19 @@ export function executePine(
     }
     if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
       return resolveNestedTaSeries(e.fn.prop, e.args, e.kw);
+    }
+    if (e.k === "call" && e.fn.k === "id" && e.fn.name === "nz") {
+      const inner = tryGetSeries(e.args[0]);
+      if (inner) {
+        const fallback = e.args.length > 1 ? resolveConst(e.args[1]) ?? 0 : 0;
+        const result = new Array(n);
+        for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? fallback : inner[i];
+        return result;
+      }
+    }
+    const cv = resolveConst(e);
+    if (cv !== undefined && (typeof cv === "number" || typeof cv === "boolean")) {
+      return new Array(n).fill(typeof cv === "boolean" ? (cv ? 1 : 0) : cv);
     }
     return null;
   }
@@ -995,8 +1056,56 @@ export function executePine(
         precomputed[name] = result; return true;
       }
       case "dmi": return false;
-      case "crossover": case "crossunder": case "cross": return false;
-      case "barssince": case "change": return false;
+      case "change": {
+        const src = getSource(0);
+        if (!src) return false;
+        const len = args.length > 1 ? getLen(1, 1) : 1;
+        const result = new Array(n).fill(NaN);
+        for (let i = len; i < n; i++) {
+          result[i] = (isNaN(src[i]) || isNaN(src[i - len])) ? NaN : src[i] - src[i - len];
+        }
+        precomputed[name] = result; return true;
+      }
+      case "crossover": {
+        const a = getSource(0);
+        const bExpr = args[1];
+        const b = bExpr ? (tryGetSeries(bExpr) ?? (resolveConst(bExpr) !== undefined ? new Array(n).fill(resolveConst(bExpr)) : null)) : null;
+        if (!a || !b) return false;
+        const result = new Array(n).fill(0);
+        for (let i = 1; i < n; i++) {
+          if (!isNaN(a[i]) && !isNaN(b[i]) && !isNaN(a[i-1]) && !isNaN(b[i-1])) {
+            result[i] = (a[i] > b[i] && a[i-1] <= b[i-1]) ? 1 : 0;
+          }
+        }
+        precomputed[name] = result; return true;
+      }
+      case "crossunder": {
+        const a = getSource(0);
+        const bExpr = args[1];
+        const b = bExpr ? (tryGetSeries(bExpr) ?? (resolveConst(bExpr) !== undefined ? new Array(n).fill(resolveConst(bExpr)) : null)) : null;
+        if (!a || !b) return false;
+        const result = new Array(n).fill(0);
+        for (let i = 1; i < n; i++) {
+          if (!isNaN(a[i]) && !isNaN(b[i]) && !isNaN(a[i-1]) && !isNaN(b[i-1])) {
+            result[i] = (a[i] < b[i] && a[i-1] >= b[i-1]) ? 1 : 0;
+          }
+        }
+        precomputed[name] = result; return true;
+      }
+      case "cross": {
+        const a = getSource(0);
+        const bExpr = args[1];
+        const b = bExpr ? (tryGetSeries(bExpr) ?? (resolveConst(bExpr) !== undefined ? new Array(n).fill(resolveConst(bExpr)) : null)) : null;
+        if (!a || !b) return false;
+        const result = new Array(n).fill(0);
+        for (let i = 1; i < n; i++) {
+          if (!isNaN(a[i]) && !isNaN(b[i]) && !isNaN(a[i-1]) && !isNaN(b[i-1])) {
+            result[i] = ((a[i] > b[i] && a[i-1] <= b[i-1]) || (a[i] < b[i] && a[i-1] >= b[i-1])) ? 1 : 0;
+          }
+        }
+        precomputed[name] = result; return true;
+      }
+      case "barssince": case "valuewhen": return false;
       case "falling": case "rising": case "mfi": case "dev": return false;
       default: return false;
     }
@@ -1442,8 +1551,10 @@ export function executePine(
       return arr;
     }
     if (e.k === "bin") {
-      const lSeries = resolveExprSeries(e.l);
-      const rSeries = resolveExprSeries(e.r);
+      const lc = resolveConst(e.l);
+      const rc = resolveConst(e.r);
+      const lSeries = resolveExprSeries(e.l) ?? (lc !== undefined && typeof lc === "number" ? new Array(n).fill(lc) : null);
+      const rSeries = resolveExprSeries(e.r) ?? (rc !== undefined && typeof rc === "number" ? new Array(n).fill(rc) : null);
       if (lSeries && rSeries) {
         const result = new Array(n).fill(NaN);
         for (let i = 0; i < n; i++) {
@@ -1451,6 +1562,10 @@ export function executePine(
         }
         return result;
       }
+    }
+    if (e.k === "id") {
+      const cv = resolveConst(e);
+      if (cv !== undefined && typeof cv === "number") return new Array(n).fill(cv);
     }
     return null;
   }
@@ -1491,6 +1606,43 @@ export function executePine(
           for (let i = len; i < n; i++) {
             const prev = src[i - len];
             result[i] = prev !== 0 && !isNaN(prev) ? 100 * (src[i] - prev) / prev : NaN;
+          }
+        }
+        break;
+      }
+      case "change": {
+        const src = nSrc(0);
+        if (src) {
+          const len = innerArgs.length > 1 ? nLen(1, 1) : 1;
+          result = new Array(n).fill(NaN);
+          for (let i = len; i < n; i++) {
+            result[i] = (isNaN(src[i]) || isNaN(src[i - len])) ? NaN : src[i] - src[i - len];
+          }
+        }
+        break;
+      }
+      case "crossover": {
+        const a = nSrc(0);
+        const b = innerArgs.length > 1 ? resolveExprSeries(innerArgs[1]) : null;
+        if (a && b) {
+          result = new Array(n).fill(0);
+          for (let i = 1; i < n; i++) {
+            if (!isNaN(a[i]) && !isNaN(b[i]) && !isNaN(a[i-1]) && !isNaN(b[i-1])) {
+              result[i] = (a[i] > b[i] && a[i-1] <= b[i-1]) ? 1 : 0;
+            }
+          }
+        }
+        break;
+      }
+      case "crossunder": {
+        const a = nSrc(0);
+        const b = innerArgs.length > 1 ? resolveExprSeries(innerArgs[1]) : null;
+        if (a && b) {
+          result = new Array(n).fill(0);
+          for (let i = 1; i < n; i++) {
+            if (!isNaN(a[i]) && !isNaN(b[i]) && !isNaN(a[i-1]) && !isNaN(b[i-1])) {
+              result[i] = (a[i] < b[i] && a[i-1] >= b[i-1]) ? 1 : 0;
+            }
           }
         }
         break;
@@ -2378,7 +2530,8 @@ export function executePine(
 
   precomputePhase();
 
-  for (let pass = 0; pass < 4; pass++) {
+  const maxPasses = Math.min(ast.length, 32);
+  for (let pass = 0; pass < maxPasses; pass++) {
     let newlyPrecomputed = 0;
     for (const stmt of ast) {
       if (stmt.k === "multi_decl") {
