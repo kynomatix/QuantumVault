@@ -8,6 +8,10 @@ export type { OHLCV, PineEngineConfig } from "./runtime";
 export interface PinePlan {
   ast: Stmt[];
   source: string;
+  _compiledCache?: {
+    fn: Function;
+    warmupCount: number;
+  };
 }
 
 export function compilePine(source: string): PinePlan {
@@ -24,5 +28,5 @@ export function runPineBacktest(
   timeframe: string,
   config: PineEngineConfig,
 ): LabBacktestResult {
-  return executePine(plan.ast, candles, params, ticker, timeframe, config);
+  return executePine(plan.ast, candles, params, ticker, timeframe, config, plan);
 }
