@@ -4548,7 +4548,7 @@ function InsightsPanel() {
               </SelectContent>
             </Select>
           </div>
-          {strategySummary && strategySummary.tickers.length > 0 && (
+          {strategySummary && strategySummary.tickers?.length > 0 && (
             <div className="w-full sm:w-auto sm:min-w-[200px]">
               <Label className="text-white/60 text-xs mb-1.5 block">Focus</Label>
               <Select value={insightsFilter} onValueChange={(v) => { setInsightsFilter(v); setReport(null); }}>
