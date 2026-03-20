@@ -1205,14 +1205,17 @@ export function executePine(
   }
 
   function computeOnFly(fn: string, args: Expr[], kw: [string, Expr][]): number {
-    const h = Array.from(highArr) as number[];
-    const l = Array.from(lowArr) as number[];
-    const cl = Array.from(closeArr) as number[];
-
     let isDynamic = false;
 
+    let _h: number[] | null = null;
+    let _l: number[] | null = null;
+    let _cl: number[] | null = null;
+    function getH(): number[] { if (!_h) _h = Array.from(highArr) as number[]; return _h; }
+    function getL_arr(): number[] { if (!_l) _l = Array.from(lowArr) as number[]; return _l; }
+    function getCl(): number[] { if (!_cl) _cl = Array.from(closeArr) as number[]; return _cl; }
+
     function getSrc(idx: number): number[] | null {
-      if (idx >= args.length) return cl;
+      if (idx >= args.length) return getCl();
       const a = args[idx];
       if (a.k === "id") {
         if (builtinSeries[a.name]) return Array.from(builtinSeries[a.name]) as number[];
@@ -1284,13 +1287,13 @@ export function executePine(
       case "sma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalSma(src, len, currentBar); result = ind.sma(src, len); } break; }
       case "ema": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalEma(cacheKey, src, len, currentBar); result = ind.pineEma(src, len); } break; }
       case "rma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalRma(cacheKey, src, len, currentBar); result = ind.rma(src, len); } break; }
-      case "wma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalSma(src, len, currentBar); result = ind.wma(src, len); } break; }
+      case "wma": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalWma(src, len, currentBar); result = ind.wma(src, len); } break; }
       case "rsi": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalRsi(cacheKey, src, len, currentBar); result = ind.rsi(src, len); } break; }
-      case "atr": { const len = getL(0); result = ind.atr(h, l, cl, len); break; }
+      case "atr": { const len = getL(0); result = ind.atr(getH(), getL_arr(), getCl(), len); break; }
       case "stdev": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalStdev(src, len, currentBar); result = ind.stdev(src, len); } break; }
       case "highest": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalHighest(src, len, currentBar); result = ind.highest(src, len); } break; }
       case "lowest": { const src = getSrc(0); const len = getL(1); if (src) { if (isDynamic) return incrementalLowest(src, len, currentBar); result = ind.lowest(src, len); } break; }
-      case "tr": { result = ind.trueRange(h, l, cl); break; }
+      case "tr": { result = ind.trueRange(getH(), getL_arr(), getCl()); break; }
       case "roc": {
         const src = getSrc(0); const len = getL(1, 1);
         if (src) {
@@ -1303,7 +1306,7 @@ export function executePine(
         break;
       }
       case "vwap": {
-        const src = getSrc(0) || cl;
+        const src = getSrc(0) || getCl();
         result = new Array(n).fill(NaN);
         let cumPV = 0, cumV = 0;
         for (let i = 0; i < n; i++) {
@@ -1314,7 +1317,7 @@ export function executePine(
         break;
       }
       case "pivothigh": {
-        let src = h, leftBars: number, rightBars: number;
+        let src = getH(), leftBars: number, rightBars: number;
         if (args.length >= 3) { const s = getSrc(0); if (s) src = s; leftBars = getL(1, 5); rightBars = getL(2, 5); }
         else { leftBars = getL(0, 5); rightBars = getL(1, 5); }
         result = new Array(n).fill(NaN);
@@ -1327,7 +1330,7 @@ export function executePine(
         break;
       }
       case "pivotlow": {
-        let src = l, leftBars: number, rightBars: number;
+        let src = getL_arr(), leftBars: number, rightBars: number;
         if (args.length >= 3) { const s = getSrc(0); if (s) src = s; leftBars = getL(1, 5); rightBars = getL(2, 5); }
         else { leftBars = getL(0, 5); rightBars = getL(1, 5); }
         result = new Array(n).fill(NaN);
@@ -1388,8 +1391,9 @@ export function executePine(
       }
       case "mfi": {
         const len = getL(0);
+        const hArr = getH(), lArr = getL_arr(), clArr = getCl();
         const typPrice = new Array(n);
-        for (let i = 0; i < n; i++) typPrice[i] = (h[i] + l[i] + cl[i]) / 3;
+        for (let i = 0; i < n; i++) typPrice[i] = (hArr[i] + lArr[i] + clArr[i]) / 3;
         result = new Array(n).fill(NaN);
         for (let i = len; i < n; i++) {
           let posMF = 0, negMF = 0;
@@ -1422,6 +1426,20 @@ export function executePine(
       if (!isNaN(v)) { sum += v; count++; }
     }
     return count > 0 ? sum / count : NA;
+  }
+
+  function incrementalWma(src: number[], len: number, bar: number): number {
+    if (bar < len - 1) return NA;
+    const start = bar - len + 1;
+    let weightedSum = 0;
+    const denom = len * (len + 1) / 2;
+    for (let i = start; i <= bar; i++) {
+      const v = src[i];
+      if (isNaN(v)) return NA;
+      const w = i - start + 1;
+      weightedSum += v * w;
+    }
+    return weightedSum / denom;
   }
 
   function incrementalEma(key: string, src: number[], len: number, bar: number): number {
