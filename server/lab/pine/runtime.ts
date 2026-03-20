@@ -1,7 +1,6 @@
 import type { Expr, Stmt } from "./parser";
 import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "../indicators";
-import { compilePineHotLoop, type CompilerContext } from "./compiler";
 
 export interface OHLCV {
   time: number; open: number; high: number; low: number; close: number; volume: number;
@@ -258,7 +257,6 @@ export function executePine(
   ticker: string,
   timeframe: string,
   config: PineEngineConfig,
-  planRef?: { _compiledCache?: { fn: Function; warmupCount: number } },
 ): LabBacktestResult {
   const params: Record<string, any> = {};
   for (const [k, v] of Object.entries(rawParams)) {
@@ -2036,7 +2034,6 @@ export function executePine(
     }
   }
 
-  const _t_precomp_start = Date.now();
   precomputePhase();
 
   for (let pass = 0; pass < 4; pass++) {
@@ -2051,7 +2048,6 @@ export function executePine(
     }
     if (newlyPrecomputed === 0) break;
   }
-  const _t_precomp_end = Date.now();
 
   function isVisualOnlyStmt(stmt: Stmt): boolean {
     if (stmt.k === "expr" && stmt.e.k === "call") {
@@ -2099,179 +2095,37 @@ export function executePine(
     hotStmts.push(stmt);
   }
 
-  let compiledFn: Function | null = null;
-
   const equityValues = new Array(n);
 
-  const runtimeCtx = compiledFn ? {
-    bar: 0,
-    n,
-    broker,
-    params,
-    inputDefaults,
-    builtinSeries,
-    pc: precomputed,
-    vars,
-    ticker,
-    _processOrdersOnClose: !!config.processOrdersOnClose,
-    _openArr: openArr,
-    _highArr: highArr,
-    _lowArr: lowArr,
-    _closeArr: closeArr,
-    _candles: candles,
-    _equityValues: equityValues,
-    time: () => candles[runtimeCtx.bar].time,
-    close: () => closeArr[runtimeCtx.bar],
-    getPrecomputed: (name: string) => {
-      const pc = precomputed[name];
-      if (!pc) return NA;
-      const v = pc[runtimeCtx.bar];
-      return isNaN(v) ? NA : v;
-    },
-    setVar: (name: string, value: any) => {
-      if (!vars[name]) vars[name] = new Array(n);
-      vars[name][runtimeCtx.bar] = value;
-    },
-    getVar: (name: string, offset: number) => {
-      const idx = runtimeCtx.bar - offset;
-      if (idx < 0) return NA;
-      const pc = precomputed[name];
-      if (pc) return idx < pc.length ? (isNaN(pc[idx]) ? NA : pc[idx]) : NA;
-      const bs = builtinSeries[name];
-      if (bs) return idx < bs.length ? bs[idx] : NA;
-      const va = vars[name];
-      if (va) { const v = va[idx]; return v === undefined ? NA : v; }
-      return NA;
-    },
-    markVar: (name: string) => { varIsVar.add(name); },
-    getMemberVar: (obj: string, prop: string) => {
-      const v = runtimeCtx.getVar(obj, 0);
-      if (v !== NA && typeof v === 'object' && v !== null) return v[prop];
-      return NA;
-    },
-    setMemberVar: (obj: string, prop: string, value: any) => {
-      const v = runtimeCtx.getVar(obj, 0);
-      if (typeof v === 'object' && v !== null) { v[prop] = value; runtimeCtx.setVar(obj, v); }
-    },
-    evalMember: (inner: any, prop: string) => {
-      if (inner && typeof inner === 'object' && inner.__ns) {
-        return { __ns: inner.__ns + "." + inner.fn, fn: prop };
-      }
-      if (typeof inner === 'object' && inner !== null) return inner[prop];
-      return NA;
-    },
-    getMemberDynamic: (obj: any, prop: string) => {
-      if (typeof obj === 'object' && obj !== null) return obj[prop];
-      return NA;
-    },
-    isNa: (v: any) => v === null || v === undefined || (typeof v === 'number' && isNaN(v)),
-    toNum: (v: any) => isNa(v) ? NaN : Number(v),
-    toNumOrNull: (v: any) => {
-      if (v === null || v === undefined) return null;
-      const n = Number(v);
-      return isNaN(n) ? null : n;
-    },
-    binOp: (op: string, l: any, r: any) => evalBinOp(op, l, r),
-    mathAvg: (vals: any[]) => {
-      const nums = vals.map(toNum).filter((v: number) => !isNaN(v));
-      return nums.length > 0 ? nums.reduce((a: number, b: number) => a + b, 0) / nums.length : NaN;
-    },
-    mathSum: (vals: any[]) => vals.map(toNum).reduce((a: number, b: number) => a + b, 0),
-    fixnan: (v: any, name: string | null) => {
-      if (!isNa(v)) return v;
-      if (name) {
-        for (let b = runtimeCtx.bar - 1; b >= 0; b--) {
-          const prev = runtimeCtx.getVar(name, runtimeCtx.bar - b);
-          if (!isNa(prev)) return prev;
+  for (currentBar = 0; currentBar < n; currentBar++) {
+    opsThrottle = 0;
+
+    if (!config.processOrdersOnClose && currentBar > 0) {
+      broker.fillPendingCloses(openArr[currentBar], currentBar, candles[currentBar].time);
+      broker.fillPendingEntries(openArr[currentBar], currentBar, candles[currentBar].time);
+      broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
+    }
+
+    for (const stmt of hotStmts) {
+      try {
+        execStmt(stmt);
+      } catch (e: any) {
+        if (e.message === "Global execution budget exceeded") {
+          console.log(`[PineScript] Global budget exceeded at bar ${currentBar}/${n}`);
+          currentBar = n;
+          break;
         }
+        if (e.message === "Execution budget exceeded") break;
       }
-      return NA;
-    },
-    timestamp: (tsArgs: any[]) => {
-      if (tsArgs.length >= 3) {
-        const yr = toNum(tsArgs[0]), mo = toNum(tsArgs[1]) - 1, dy = toNum(tsArgs[2]);
-        const hr = tsArgs.length > 3 ? toNum(tsArgs[3]) : 0;
-        const mn = tsArgs.length > 4 ? toNum(tsArgs[4]) : 0;
-        const sc = tsArgs.length > 5 ? toNum(tsArgs[5]) : 0;
-        return Date.UTC(yr, mo, dy, hr, mn, sc);
-      }
-      if (tsArgs.length === 1 && typeof tsArgs[0] === "string") {
-        const d = Date.parse(tsArgs[0]);
-        return isNaN(d) ? Date.now() : d;
-      }
-      return Date.now();
-    },
-    strFormat: (...args: any[]) => String(args[0] ?? ""),
-    evalTaCall: (fn: string, args: Expr[], kw: [string, Expr][]) => {
-      currentBar = runtimeCtx.bar;
-      return evalTaCall(fn, args, kw);
-    },
-    evalTaCallCompiled: (fn: string, evaluatedArgs: any[], astArgs: Expr[], astKw: [string, Expr][]) => {
-      currentBar = runtimeCtx.bar;
-      return evalTaCall(fn, astArgs, astKw);
-    },
-    getHistValue: (astExpr: Expr, offset: number) => {
-      const bar = runtimeCtx.bar;
-      if (bar < offset) return NaN;
-      currentBar = bar - offset;
-      const v = toNum(evalExpr(astExpr));
-      currentBar = bar;
-      return v;
-    },
-    evalInputCall: (type: string, args: any[], kw: any[]) => {
-      currentBar = runtimeCtx.bar;
-      return evalInputCall(type, args as any, kw as any);
-    },
-    evalCallFallback: (fn: any, args: any[], kw: any[]) => {
-      return NA;
-    },
-  } : null;
-
-  if (compiledFn && runtimeCtx) {
-    try {
-      compiledFn(runtimeCtx);
-    } catch (e: any) {
-      compiledFn = null;
-    }
-  }
-
-  if (!compiledFn) {
-    const fallbackBroker = runtimeCtx ? new Broker(config) : broker;
-    if (runtimeCtx) {
-      Object.assign(broker, { position: null, pendingExits: [], pendingEntries: [], pendingCloses: [], trades: [], equity: config.initialCapital });
-      for (const k of Object.keys(vars)) delete vars[k];
     }
 
-    for (currentBar = 0; currentBar < n; currentBar++) {
-      opsThrottle = 0;
-
-      if (!config.processOrdersOnClose && currentBar > 0) {
-        broker.fillPendingCloses(openArr[currentBar], currentBar, candles[currentBar].time);
-        broker.fillPendingEntries(openArr[currentBar], currentBar, candles[currentBar].time);
-        broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
-      }
-
-      for (const stmt of hotStmts) {
-        try {
-          execStmt(stmt);
-        } catch (e: any) {
-          if (e.message === "Global execution budget exceeded") {
-            console.log(`[PineScript] Global budget exceeded at bar ${currentBar}/${n}`);
-            currentBar = n;
-            break;
-          }
-          if (e.message === "Execution budget exceeded") break;
-        }
-      }
-
-      if (config.processOrdersOnClose) {
-        broker.fillPendingCloses(closeArr[currentBar], currentBar, candles[currentBar].time);
-        broker.fillPendingEntries(closeArr[currentBar], currentBar, candles[currentBar].time);
-        broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
-      }
-
-      equityValues[currentBar] = broker.getEquityWithUnrealized(closeArr[currentBar]);
+    if (config.processOrdersOnClose) {
+      broker.fillPendingCloses(closeArr[currentBar], currentBar, candles[currentBar].time);
+      broker.fillPendingEntries(closeArr[currentBar], currentBar, candles[currentBar].time);
+      broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
     }
+
+    equityValues[currentBar] = broker.getEquityWithUnrealized(closeArr[currentBar]);
   }
 
   if (broker.position) {
