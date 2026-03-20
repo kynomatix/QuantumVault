@@ -22,7 +22,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair, ListOrdered, GripVertical,
+  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair, ListOrdered, GripVertical, RefreshCw,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -437,6 +437,9 @@ export default function QuantumLab() {
   const [parsedResult, setParsedResult] = useState<LabPineParseResult | null>(null);
 
   const [jobProgress, setJobProgress] = useState<LabJobProgress | null>(null);
+  const [autoRefine, setAutoRefine] = useState(false);
+  const autoRefineRef = useRef(false);
+  useEffect(() => { autoRefineRef.current = autoRefine; }, [autoRefine]);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -503,11 +506,37 @@ export default function QuantumLab() {
           }
           if (data.status === "complete") {
             es.close();
+            const completedRunId = activeRunId;
             setActiveJobId(null);
             if (activeRunId) setActiveHistoryRunId(activeRunId);
             queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
             queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
-            toast({ title: "Optimization complete", description: "Results are ready in the Results tab." });
+            if (autoRefineRef.current && completedRunId) {
+              toast({ title: "Optimization complete", description: "Auto-refining top results..." });
+              (async () => {
+                try {
+                  const combos = data.tickerProgress ? Object.keys(data.tickerProgress) : [];
+                  const firstCombo = combos[0] || data.stage?.match(/(\w+(?:-\w+)*)\s+(\d+[HhDdWwMm])/)?.[0];
+                  let ticker = "SOL-USDT", timeframe = "12H";
+                  if (firstCombo && firstCombo.includes("|")) {
+                    [ticker, timeframe] = firstCombo.split("|");
+                  }
+                  const res = await apiRequest("POST", `/api/lab/runs/${completedRunId}/refine`, { ticker, timeframe });
+                  const refineData = await safeResponseJson(res);
+                  if (refineData.queued) {
+                    toast({ title: "Auto-refine queued", description: `Queued at position #${refineData.queueOrder}` });
+                    queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+                  } else if (refineData.jobId) {
+                    handleJobStarted(refineData.jobId, refineData.runId);
+                    toast({ title: "Auto-refine started", description: "Refining best results from previous run." });
+                  }
+                } catch (err: any) {
+                  toast({ title: "Auto-refine failed", description: err.message, variant: "destructive" });
+                }
+              })();
+            } else {
+              toast({ title: "Optimization complete", description: "Results are ready in the Results tab." });
+            }
           }
           if (data.status === "retrying") {
             if (data.newJobId && data.newJobId !== currentJobId) {
@@ -661,6 +690,8 @@ export default function QuantumLab() {
               <JobMonitor
                 progress={jobProgress}
                 onCancel={handleCancelJob}
+                autoRefine={autoRefine}
+                onAutoRefineChange={setAutoRefine}
               />
             )}
 
@@ -1878,7 +1909,7 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
   );
 }
 
-function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel: () => void }) {
+function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange }: { progress: LabJobProgress; onCancel: () => void; autoRefine: boolean; onAutoRefineChange: (v: boolean) => void }) {
   const [cancelling, setCancelling] = useState(false);
 
   const handleCancel = async () => {
@@ -1888,6 +1919,7 @@ function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel
   };
 
   const isRetrying = progress.status === "retrying";
+  const isRunning = progress.status !== "complete" && progress.status !== "error" && !isRetrying;
   const statusColor = progress.status === "error" && !isRetrying ? "text-purple-400" : progress.status === "complete" ? "text-sky-400" : isRetrying ? "text-amber-400" : "text-violet-400";
   const statusIcon = progress.status === "error" && !isRetrying ? <AlertCircle className="w-5 h-5" /> : progress.status === "complete" ? <CheckCircle2 className="w-5 h-5" /> : <Loader2 className="w-5 h-5 animate-spin" />;
 
@@ -1909,6 +1941,17 @@ function JobMonitor({ progress, onCancel }: { progress: LabJobProgress; onCancel
             </div>
           </div>
           <div className="flex items-center gap-3 flex-shrink-0">
+            {isRunning && (
+              <button
+                onClick={() => onAutoRefineChange(!autoRefine)}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${autoRefine ? "bg-sky-500/20 text-sky-400 border border-sky-500/30" : "bg-white/5 text-white/40 border border-white/10 hover:text-white/60 hover:border-white/20"}`}
+                data-testid="toggle-auto-refine"
+                title="Automatically refine top results when this run completes"
+              >
+                <RefreshCw className={`w-3 h-3 ${autoRefine ? "text-sky-400" : ""}`} />
+                Auto-Refine
+              </button>
+            )}
             <span className="text-2xl font-bold font-mono tabular-nums text-white" data-testid="text-percent">{Math.min(100, Math.round(progress.percent ?? 0))}%</span>
             <Button variant="destructive" size="sm" onClick={handleCancel} disabled={cancelling || progress.status === "complete" || progress.status === "error" || isRetrying} data-testid="button-cancel">
               {cancelling ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <X className="w-3 h-3 mr-1" />} Cancel
