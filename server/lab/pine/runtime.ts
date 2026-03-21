@@ -309,7 +309,7 @@ export function executePine(
   let totalOps = 0;
   const OPS_CHECK_INTERVAL = 64;
   const MAX_OPS = 500000;
-  const MAX_TOTAL_OPS = 50_000_000;
+  const MAX_TOTAL_OPS = 150_000_000;
 
   function checkBudget() {
     if (totalOps > MAX_TOTAL_OPS) throw new Error("Global execution budget exceeded");
