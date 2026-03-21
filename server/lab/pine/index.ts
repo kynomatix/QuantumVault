@@ -58,7 +58,7 @@ export function runPineParityTest(
   const compiled = executePine(plan.ast, candles, params, ticker, timeframe, config);
   const compiledMs = performance.now() - t1;
 
-  const compiledUsedCompiler = (compiled as any).compiledPath === "compiled";
+  const compiledUsedCompiler = compiled.compiledPath === "compiled";
 
   const diffs: string[] = [];
   const tol = 0.01;

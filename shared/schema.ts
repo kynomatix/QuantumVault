@@ -852,6 +852,7 @@ export interface LabBacktestResult {
   params: Record<string, any>;
   trades: LabTradeRecord[];
   equityCurve: { time: string; equity: number }[];
+  compiledPath?: "compiled" | "interpreter";
 }
 
 export interface LabCheckpoint {
