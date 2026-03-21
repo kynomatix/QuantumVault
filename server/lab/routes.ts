@@ -1316,11 +1316,15 @@ export function registerLabRoutes(app: Express): void {
       const run = await verifyRunOwnership(req, res);
       if (!run) return;
 
-      const { ticker, timeframe, reportData } = req.body;
+      const { ticker: reqTicker, timeframe: reqTimeframe, reportData } = req.body;
+      const runTickers = Array.isArray(run.tickers) ? run.tickers as string[] : [];
+      const runTimeframes = Array.isArray(run.timeframes) ? run.timeframes as string[] : [];
+      const ticker = reqTicker || runTickers[0];
+      const timeframe = reqTimeframe || runTimeframes[0];
       refineTicker = ticker;
       refineTimeframe = timeframe;
       if (!ticker || !timeframe) {
-        return res.status(400).json({ error: "ticker and timeframe are required" });
+        return res.status(400).json({ error: "ticker and timeframe are required (and could not be inferred from run)" });
       }
 
       const strategyId = run.strategyId;

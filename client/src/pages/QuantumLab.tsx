@@ -515,13 +515,7 @@ export default function QuantumLab() {
               toast({ title: "Optimization complete", description: "Auto-refining top results..." });
               (async () => {
                 try {
-                  const combos = data.tickerProgress ? Object.keys(data.tickerProgress) : [];
-                  const firstCombo = combos[0] || data.stage?.match(/(\w+(?:-\w+)*)\s+(\d+[HhDdWwMm])/)?.[0];
-                  let ticker = "SOL-USDT", timeframe = "12H";
-                  if (firstCombo && firstCombo.includes("|")) {
-                    [ticker, timeframe] = firstCombo.split("|");
-                  }
-                  const res = await apiRequest("POST", `/api/lab/runs/${completedRunId}/refine`, { ticker, timeframe });
+                  const res = await apiRequest("POST", `/api/lab/runs/${completedRunId}/refine`, {});
                   const refineData = await safeResponseJson(res);
                   if (refineData.queued) {
                     toast({ title: "Auto-refine queued", description: `Queued at position #${refineData.queueOrder}` });
