@@ -2011,34 +2011,43 @@ export function executePine(
     const alpha = 2 / (len + 1);
     const stateKey = `ema_${key}`;
     const v = src[bar];
-    if (isNaN(v)) {
-      const prev = emaState.get(stateKey);
-      return prev !== undefined && !isNaN(prev) ? prev : NA;
-    }
     const prev = emaState.get(stateKey);
     if (prev === undefined || isNaN(prev)) {
-      emaState.set(stateKey, v);
-      return v;
+      if (!isNaN(v)) {
+        emaState.set(stateKey, v);
+        return v;
+      }
+      return NA;
     }
     const result = alpha * v + (1 - alpha) * prev;
     emaState.set(stateKey, result);
-    return result;
+    return isNaN(result) ? NA : result;
   }
 
   function incrementalRma(key: string, src: number[], len: number, bar: number): number {
     const alpha = 1 / len;
     const stateKey = `rma_${key}`;
-    if (bar < len - 1) {
-      const sma = incrementalSma(src, bar + 1, bar);
-      rmaState.set(stateKey, sma);
-      return isNaN(sma) ? NA : sma;
+    const prev = rmaState.get(stateKey);
+    if (prev === undefined || isNaN(prev)) {
+      if (bar >= len - 1) {
+        let sum = 0;
+        let valid = true;
+        for (let j = bar - len + 1; j <= bar; j++) {
+          if (isNaN(src[j])) { valid = false; break; }
+          sum += src[j];
+        }
+        if (valid) {
+          const sma = sum / len;
+          rmaState.set(stateKey, sma);
+          return sma;
+        }
+      }
+      return NA;
     }
-    const prev = rmaState.get(stateKey) ?? incrementalSma(src, len, bar - 1);
     const v = src[bar];
-    if (isNaN(v)) return isNaN(prev) ? NA : prev;
-    const result = isNaN(prev) ? v : alpha * v + (1 - alpha) * prev;
+    const result = alpha * v + (1 - alpha) * prev;
     rmaState.set(stateKey, result);
-    return result;
+    return isNaN(result) ? NA : result;
   }
 
   function incrementalRsi(key: string, src: number[], len: number, bar: number): number {
@@ -2856,49 +2865,54 @@ export function executePine(
         if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
         src[bar] = srcVal;
         const alpha = 1 / len;
-        if (bar < len - 1) {
-          let sum = 0, count = 0;
-          for (let i = 0; i <= bar; i++) { const v = src[i]; if (!isNaN(v)) { sum += v; count++; } }
-          const sma = count > 0 ? sum / count : NaN;
-          rctx._taDynState[slot] = sma;
-          return isNaN(sma) ? NA : sma;
+        const prev = rctx._taDynState[slot];
+        if (prev === undefined || isNaN(prev as number)) {
+          if (bar >= len - 1) {
+            let sum = 0;
+            let valid = true;
+            for (let i = bar - len + 1; i <= bar; i++) {
+              if (isNaN(src[i])) { valid = false; break; }
+              sum += src[i];
+            }
+            if (valid) {
+              const sma = sum / len;
+              rctx._taDynState[slot] = sma;
+              return sma;
+            }
+          }
+          return NA;
         }
-        let prev = rctx._taDynState[slot];
-        if (prev === undefined || isNaN(prev)) {
-          let sum = 0, count = 0;
-          for (let i = Math.max(0, bar - len); i < bar; i++) { const v = src[i]; if (!isNaN(v)) { sum += v; count++; } }
-          prev = count > 0 ? sum / count : NaN;
-        }
-        const v = srcVal;
-        if (isNaN(v)) return isNaN(prev!) ? NA : prev;
-        const result = isNaN(prev!) ? v : alpha * v + (1 - alpha) * prev!;
+        const result = alpha * srcVal + (1 - alpha) * (prev as number);
         rctx._taDynState[slot] = result;
-        return result;
+        return isNaN(result) ? NA : result;
       },
       taDynEma(slot: number, srcVal: number, len: number): any {
         const alpha = 2 / (len + 1);
-        if (isNaN(srcVal)) {
-          const prev = rctx._taDynState[slot];
-          return prev !== undefined && !isNaN(prev) ? prev : NA;
-        }
         const prev = rctx._taDynState[slot];
-        if (prev === undefined || isNaN(prev!)) {
-          rctx._taDynState[slot] = srcVal;
-          return srcVal;
+        if (prev === undefined || isNaN(prev as number)) {
+          if (!isNaN(srcVal)) {
+            rctx._taDynState[slot] = srcVal;
+            return srcVal;
+          }
+          return NA;
         }
-        const result = alpha * srcVal + (1 - alpha) * prev!;
+        const result = alpha * srcVal + (1 - alpha) * (prev as number);
         rctx._taDynState[slot] = result;
-        return result;
+        return isNaN(result) ? NA : result;
       },
       taDynSma(slot: number, srcVal: number, len: number): any {
         const bar = rctx.bar;
         let src = rctx._taDynSrc[slot];
         if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
         src[bar] = srcVal;
-        let sum = 0, count = 0;
-        const start = Math.max(0, bar - len + 1);
-        for (let i = start; i <= bar; i++) { const v = src[i]; if (!isNaN(v)) { sum += v; count++; } }
-        return count > 0 ? sum / count : NA;
+        if (bar < len - 1) return NA;
+        let sum = 0;
+        const start = bar - len + 1;
+        for (let i = start; i <= bar; i++) {
+          if (isNaN(src[i])) return NA;
+          sum += src[i];
+        }
+        return sum / len;
       },
       taDynWma(slot: number, srcVal: number, len: number): any {
         const bar = rctx.bar;

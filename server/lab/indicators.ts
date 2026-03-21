@@ -59,13 +59,15 @@ export function pineEma(data: number[], period: number): number[] {
   const k1 = 1 - k;
   let prev = NaN;
   for (let i = 0; i < data.length; i++) {
-    if (isNaN(data[i])) continue;
     if (isNaN(prev)) {
-      prev = data[i];
+      if (!isNaN(data[i])) {
+        prev = data[i];
+        result[i] = prev;
+      }
     } else {
       prev = data[i] * k + prev * k1;
+      result[i] = prev;
     }
-    result[i] = prev;
   }
   return result;
 }
@@ -76,7 +78,6 @@ export function rma(data: number[], period: number): number[] {
   const k1 = 1 - k;
   let prev = NaN;
   for (let i = 0; i < data.length; i++) {
-    if (isNaN(data[i])) continue;
     if (isNaN(prev)) {
       if (i >= period - 1) {
         let sum = 0;
@@ -85,9 +86,10 @@ export function rma(data: number[], period: number): number[] {
           if (isNaN(data[j])) { valid = false; break; }
           sum += data[j];
         }
-        if (!valid) continue;
-        prev = sum / period;
-        result[i] = prev;
+        if (valid) {
+          prev = sum / period;
+          result[i] = prev;
+        }
       }
     } else {
       prev = data[i] * k + prev * k1;
