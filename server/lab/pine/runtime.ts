@@ -2890,7 +2890,9 @@ export function executePine(
 
     compiledLoop(rctx);
     usedCompiledPath = true;
+    console.log(`[Pine] Backtest executed via compiled path (${n} bars)`);
   } else {
+    console.log(`[Pine] Backtest executed via interpreter path (${n} bars)`);
     for (currentBar = 0; currentBar < n; currentBar++) {
       opsThrottle = 0;
 
