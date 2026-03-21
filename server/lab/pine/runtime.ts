@@ -250,31 +250,23 @@ class Broker {
 type Series = number[];
 interface PrecomputedSeries { [name: string]: Series }
 
-export function executePine(
-  ast: Stmt[],
-  candles: OHLCV[],
-  rawParams: Record<string, any>,
-  ticker: string,
-  timeframe: string,
-  config: PineEngineConfig,
-): LabBacktestResult {
-  const params: Record<string, any> = {};
-  for (const [k, v] of Object.entries(rawParams)) {
-    if (typeof v === "string") {
-      const tsMatch = v.match(/^timestamp\(\s*"(.+?)"\s*\)?$/);
-      if (tsMatch) {
-        const d = Date.parse(tsMatch[1]);
-        params[k] = isNaN(d) ? v : d;
-        continue;
-      }
-    }
-    params[k] = v;
-  }
-  const n = candles.length;
-  if (n < 10) {
-    return { ticker, timeframe, netProfitPercent: 0, winRatePercent: 0, maxDrawdownPercent: 0, profitFactor: 0, totalTrades: 0, params, trades: [], equityCurve: [] };
-  }
+export interface PineSharedArrays {
+  n: number;
+  openArr: Float64Array;
+  highArr: Float64Array;
+  lowArr: Float64Array;
+  closeArr: Float64Array;
+  volArr: Float64Array;
+  hl2Arr: Float64Array;
+  hlc3Arr: Float64Array;
+  ohlc4Arr: Float64Array;
+  numHighArr: number[];
+  numLowArr: number[];
+  numCloseArr: number[];
+}
 
+export function createSharedArrays(candles: OHLCV[]): PineSharedArrays {
+  const n = candles.length;
   const openArr = new Float64Array(n);
   const highArr = new Float64Array(n);
   const lowArr = new Float64Array(n);
@@ -291,45 +283,119 @@ export function executePine(
     hlc3Arr[i] = (c.high + c.low + c.close) / 3;
     ohlc4Arr[i] = (c.open + c.high + c.low + c.close) / 4;
   }
+  return {
+    n, openArr, highArr, lowArr, closeArr, volArr, hl2Arr, hlc3Arr, ohlc4Arr,
+    numHighArr: Array.from(highArr) as number[],
+    numLowArr: Array.from(lowArr) as number[],
+    numCloseArr: Array.from(closeArr) as number[],
+  };
+}
+
+export function executePine(
+  ast: Stmt[],
+  candles: OHLCV[],
+  rawParams: Record<string, any>,
+  ticker: string,
+  timeframe: string,
+  config: PineEngineConfig,
+  shared?: PineSharedArrays,
+  sharedIndicatorCache?: Map<string, any>,
+): LabBacktestResult {
+  const params: Record<string, any> = {};
+  for (const [k, v] of Object.entries(rawParams)) {
+    if (typeof v === "string") {
+      const tsMatch = v.match(/^timestamp\(\s*"(.+?)"\s*\)?$/);
+      if (tsMatch) {
+        const d = Date.parse(tsMatch[1]);
+        params[k] = isNaN(d) ? v : d;
+        continue;
+      }
+    }
+    params[k] = v;
+  }
+  const n = shared?.n ?? candles.length;
+  if (n < 10) {
+    return { ticker, timeframe, netProfitPercent: 0, winRatePercent: 0, maxDrawdownPercent: 0, profitFactor: 0, totalTrades: 0, params, trades: [], equityCurve: [] };
+  }
+
+  let openArr: Float64Array, highArr: Float64Array, lowArr: Float64Array,
+      closeArr: Float64Array, volArr: Float64Array, hl2Arr: Float64Array,
+      hlc3Arr: Float64Array, ohlc4Arr: Float64Array;
+  if (shared) {
+    openArr = shared.openArr; highArr = shared.highArr; lowArr = shared.lowArr;
+    closeArr = shared.closeArr; volArr = shared.volArr; hl2Arr = shared.hl2Arr;
+    hlc3Arr = shared.hlc3Arr; ohlc4Arr = shared.ohlc4Arr;
+  } else {
+    openArr = new Float64Array(n); highArr = new Float64Array(n);
+    lowArr = new Float64Array(n); closeArr = new Float64Array(n);
+    volArr = new Float64Array(n); hl2Arr = new Float64Array(n);
+    hlc3Arr = new Float64Array(n); ohlc4Arr = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const c = candles[i];
+      openArr[i] = c.open; highArr[i] = c.high; lowArr[i] = c.low;
+      closeArr[i] = c.close; volArr[i] = c.volume;
+      hl2Arr[i] = (c.high + c.low) / 2;
+      hlc3Arr[i] = (c.high + c.low + c.close) / 3;
+      ohlc4Arr[i] = (c.open + c.high + c.low + c.close) / 4;
+    }
+  }
 
   const builtinSeries: Record<string, number[] | Float64Array> = {
     close: closeArr, open: openArr, high: highArr, low: lowArr,
     volume: volArr, hl2: hl2Arr, hlc3: hlc3Arr, ohlc4: ohlc4Arr,
   };
 
+  const numHighArr = shared?.numHighArr ?? Array.from(highArr) as number[];
+  const numLowArr = shared?.numLowArr ?? Array.from(lowArr) as number[];
+  const numCloseArr = shared?.numCloseArr ?? Array.from(closeArr) as number[];
+
   const broker = new Broker(config);
   const vars: Record<string, any[]> = {};
   const varIsVar: Set<string> = new Set();
   const precomputed: PrecomputedSeries = {};
-  const indicatorCache: Map<string, any> = new Map();
+  const indicatorCache: Map<string, any> = sharedIndicatorCache ?? new Map();
   const inputDefaults: Record<string, any> = {};
   const userFunctions: Record<string, { params: string[]; body: Stmt[] }> = {};
   let currentBar = 0;
   let opsThrottle = 0;
   let totalOps = 0;
-  const OPS_CHECK_INTERVAL = 64;
   const MAX_OPS = 500000;
   const MAX_TOTAL_OPS = 150_000_000;
 
-  function checkBudget() {
-    if (totalOps > MAX_TOTAL_OPS) throw new Error("Global execution budget exceeded");
-    if (opsThrottle > MAX_OPS) throw new Error("Execution budget exceeded");
+  const allSeries: Map<string, ArrayLike<any>> = new Map();
+  for (const [k, v] of Object.entries(builtinSeries)) allSeries.set(k, v);
+
+  const numSeriesCache: Map<string, number[]> = new Map([
+    ["high", numHighArr], ["low", numLowArr], ["close", numCloseArr],
+  ]);
+  function toNumArr(name: string): number[] {
+    let cached = numSeriesCache.get(name);
+    if (cached) return cached;
+    const src = builtinSeries[name];
+    if (src) { cached = Array.from(src) as number[]; numSeriesCache.set(name, cached); return cached; }
+    const pc = precomputed[name];
+    if (pc) return pc;
+    return [];
   }
 
   function setVar(name: string, value: any) {
-    if (!vars[name]) vars[name] = new Array(n);
-    vars[name][currentBar] = value;
+    let arr = vars[name];
+    if (!arr) {
+      arr = new Array(n);
+      vars[name] = arr;
+      allSeries.set(name, arr);
+    }
+    arr[currentBar] = value;
   }
 
   function getVar(name: string, offset: number): any {
     const idx = currentBar - offset;
     if (idx < 0) return NA;
-    const pc = precomputed[name];
-    if (pc) return idx < pc.length ? (isNaN(pc[idx]) ? NA : pc[idx]) : NA;
-    const bs = builtinSeries[name];
-    if (bs) return idx < bs.length ? bs[idx] : NA;
-    const va = vars[name];
-    if (va) { const v = va[idx]; return v === undefined ? NA : v; }
+    const s = allSeries.get(name);
+    if (s) {
+      const v = s[idx];
+      return v === undefined || (typeof v === 'number' && v !== v) ? NA : v;
+    }
     return NA;
   }
 
@@ -393,11 +459,11 @@ export function executePine(
 
   function resolveSeries(e: Expr): Series | null {
     if (e.k === "id") {
-      if (builtinSeries[e.name]) return Array.from(builtinSeries[e.name]) as Series;
+      if (builtinSeries[e.name]) return toNumArr(e.name);
       if (precomputed[e.name]) return precomputed[e.name];
       if (inputDefaults[e.name] !== undefined) {
         const src = inputDefaults[e.name];
-        if (typeof src === "string" && builtinSeries[src]) return Array.from(builtinSeries[src]) as Series;
+        if (typeof src === "string" && builtinSeries[src]) return toNumArr(src);
       }
       return null;
     }
@@ -743,10 +809,10 @@ export function executePine(
 
   function tryGetSeries(e: Expr): Series | null {
     if (e.k === "id") {
-      if (builtinSeries[e.name]) return Array.from(builtinSeries[e.name]);
+      if (builtinSeries[e.name]) return toNumArr(e.name);
       if (precomputed[e.name]) return precomputed[e.name];
       if (inputDefaults[e.name] !== undefined && typeof inputDefaults[e.name] === "string" && builtinSeries[inputDefaults[e.name]]) {
-        return Array.from(builtinSeries[inputDefaults[e.name]]) as Series;
+        return toNumArr(inputDefaults[e.name]);
       }
       if (inputDefaults[e.name] !== undefined && (typeof inputDefaults[e.name] === "number" || typeof inputDefaults[e.name] === "boolean")) {
         return new Array(n).fill(typeof inputDefaults[e.name] === "boolean" ? (inputDefaults[e.name] ? 1 : 0) : inputDefaults[e.name]);
@@ -754,7 +820,7 @@ export function executePine(
     }
     if (e.k === "bool") return new Array(n).fill(e.v ? 1 : 0);
     if (e.k === "mem" && e.obj.k === "id" && e.obj.name === "ta" && e.prop === "tr") {
-      return ind.trueRange(Array.from(highArr) as number[], Array.from(lowArr) as number[], Array.from(closeArr) as number[]);
+      return ind.trueRange(numHighArr, numLowArr, numCloseArr);
     }
     if (e.k === "num") return new Array(n).fill(e.v);
     if (e.k === "un" && e.op === "-") {
@@ -884,9 +950,9 @@ export function executePine(
   }
 
   function precomputeIndicator(name: string, fn: string, args: Expr[], kw: [string, Expr][]): boolean {
-    const h = Array.from(highArr) as number[];
-    const l = Array.from(lowArr) as number[];
-    const cl = Array.from(closeArr) as number[];
+    const h = numHighArr;
+    const l = numLowArr;
+    const cl = numCloseArr;
 
     function getSource(idx: number): Series | null {
       const arg = args[idx];
@@ -896,7 +962,7 @@ export function executePine(
       const ts = tryGetSeries(arg);
       if (ts) return ts;
       const c = resolveConst(arg);
-      if (typeof c === 'string' && builtinSeries[c]) return Array.from(builtinSeries[c]) as Series;
+      if (typeof c === 'string' && builtinSeries[c]) return toNumArr(c);
       return null;
     }
 
@@ -1115,9 +1181,9 @@ export function executePine(
     const cacheKey = `dmi_${diLen}_${adxSmoothing}`;
     if (indicatorCache.has(cacheKey)) return indicatorCache.get(cacheKey);
 
-    const h = Array.from(highArr) as number[];
-    const l = Array.from(lowArr) as number[];
-    const cl = Array.from(closeArr) as number[];
+    const h = numHighArr;
+    const l = numLowArr;
+    const cl = numCloseArr;
 
     const plusDM: number[] = [0];
     const minusDM: number[] = [0];
@@ -1149,7 +1215,7 @@ export function executePine(
   }
 
   function evalExpr(e: Expr): any {
-    if ((++totalOps & 255) === 0) { opsThrottle += 256; checkBudget(); }
+    if ((++totalOps & 4095) === 0) { opsThrottle += 4096; if (totalOps > MAX_TOTAL_OPS) throw new Error("Global execution budget exceeded"); if (opsThrottle > MAX_OPS) throw new Error("Execution budget exceeded"); }
 
     switch (e.k) {
       case "num": return e.v;
@@ -1253,14 +1319,15 @@ export function executePine(
   }
 
   function resolveId(name: string): any {
-    const bs = builtinSeries[name];
-    if (bs) return (bs as any)[currentBar];
-    const pc = precomputed[name];
-    if (pc) { const v = pc[currentBar]; return isNaN(v) ? NA : v; }
-    if (params[name] !== undefined) return params[name];
-    if (inputDefaults[name] !== undefined) return inputDefaults[name];
-    const va = vars[name];
-    if (va) { const v = va[currentBar]; return v === undefined ? NA : v; }
+    const s = allSeries.get(name);
+    if (s) {
+      const v = (s as any)[currentBar];
+      return v === undefined || (typeof v === 'number' && v !== v) ? NA : v;
+    }
+    const p = params[name];
+    if (p !== undefined) return p;
+    const d = inputDefaults[name];
+    if (d !== undefined) return d;
     switch (name) {
       case "bar_index": return currentBar;
       case "time": return candles[currentBar].time;
@@ -1506,10 +1573,10 @@ export function executePine(
 
   function resolveExprSeries(e: Expr): number[] | null {
     if (e.k === "id") {
-      if (builtinSeries[e.name]) return Array.from(builtinSeries[e.name]) as number[];
+      if (builtinSeries[e.name]) return toNumArr(e.name) as number[];
       if (precomputed[e.name]) return precomputed[e.name];
       if (inputDefaults[e.name] !== undefined && typeof inputDefaults[e.name] === "string" && builtinSeries[inputDefaults[e.name]]) {
-        return Array.from(builtinSeries[inputDefaults[e.name]]) as number[];
+        return toNumArr(inputDefaults[e.name]);
       }
     }
     if (e.k === "call" && e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
@@ -1571,10 +1638,17 @@ export function executePine(
   }
 
   function resolveNestedTaSeries(fn: string, innerArgs: Expr[], innerKw: [string, Expr][]): number[] | null {
-    const h = Array.from(highArr) as number[];
-    const l = Array.from(lowArr) as number[];
-    const cl = Array.from(closeArr) as number[];
-    const cacheKey = `nested_${fn}_${innerArgs.map(a => a.k === "id" ? a.name : a.k === "num" ? String(a.v) : "?").join("_")}`;
+    const h = numHighArr;
+    const l = numLowArr;
+    const cl = numCloseArr;
+    const cacheKey = `nested_${fn}_${innerArgs.map(a => {
+      if (a.k === "id") {
+        if (inputDefaults[a.name] !== undefined) return `@${a.name}=${inputDefaults[a.name]}`;
+        if (precomputed[a.name]) { const pc = precomputed[a.name]; return `#${a.name}[${pc[0]},${pc[Math.min(10, pc.length-1)]},${pc.length}]`; }
+        return a.name;
+      }
+      return a.k === "num" ? String(a.v) : "?";
+    }).join("_")}`;
     if (indicatorCache.has(cacheKey)) return indicatorCache.get(cacheKey);
 
     function nSrc(idx: number): number[] | null {
@@ -1655,18 +1729,15 @@ export function executePine(
   function computeOnFly(fn: string, args: Expr[], kw: [string, Expr][]): number {
     let isDynamic = false;
 
-    let _h: number[] | null = null;
-    let _l: number[] | null = null;
-    let _cl: number[] | null = null;
-    function getH(): number[] { if (!_h) _h = Array.from(highArr) as number[]; return _h; }
-    function getL_arr(): number[] { if (!_l) _l = Array.from(lowArr) as number[]; return _l; }
-    function getCl(): number[] { if (!_cl) _cl = Array.from(closeArr) as number[]; return _cl; }
+    function getH(): number[] { return numHighArr; }
+    function getL_arr(): number[] { return numLowArr; }
+    function getCl(): number[] { return numCloseArr; }
 
     function getSrc(idx: number): number[] | null {
       if (idx >= args.length) return getCl();
       const a = args[idx];
       if (a.k === "id") {
-        if (builtinSeries[a.name]) return Array.from(builtinSeries[a.name]) as number[];
+        if (builtinSeries[a.name]) return toNumArr(a.name);
         if (precomputed[a.name]) return precomputed[a.name];
         if (vars[a.name]) {
           isDynamic = true;
@@ -1678,7 +1749,7 @@ export function executePine(
           return arr;
         }
         if (inputDefaults[a.name] !== undefined && typeof inputDefaults[a.name] === "string" && builtinSeries[inputDefaults[a.name]]) {
-          return Array.from(builtinSeries[inputDefaults[a.name]]) as number[];
+          return toNumArr(inputDefaults[a.name]);
         }
       }
       if (a.k === "mem" && a.obj.k === "id" && a.obj.name === "ta" && a.prop === "tr") {
@@ -1715,7 +1786,14 @@ export function executePine(
     }
 
     function argKey(a: Expr): string {
-      if (a.k === "id") return a.name;
+      if (a.k === "id") {
+        if (inputDefaults[a.name] !== undefined) return `@${a.name}=${inputDefaults[a.name]}`;
+        if (precomputed[a.name]) {
+          const pc = precomputed[a.name];
+          return `#${a.name}[${pc[0]},${pc[Math.min(10, pc.length - 1)]},${pc.length}]`;
+        }
+        return a.name;
+      }
       if (a.k === "num") return String(a.v);
       if (a.k === "str") return a.v;
       if (a.k === "un" && a.op === "-" && a.e.k === "num") return `-${a.e.v}`;
@@ -2005,15 +2083,24 @@ export function executePine(
 
   function getSrcForBb(e: Expr): number[] | null {
     if (e.k === "id") {
-      if (builtinSeries[e.name]) return Array.from(builtinSeries[e.name]);
+      if (builtinSeries[e.name]) return toNumArr(e.name);
       if (precomputed[e.name]) return precomputed[e.name];
     }
     return null;
   }
 
   function argKeyForTa(a: Expr): string {
-    if (a.k === "id") return a.name;
+    if (a.k === "id") {
+      if (inputDefaults[a.name] !== undefined) return `@${a.name}=${inputDefaults[a.name]}`;
+      if (precomputed[a.name]) {
+        const pc = precomputed[a.name];
+        return `#${a.name}[${pc[0]},${pc[Math.min(10, pc.length - 1)]},${pc.length}]`;
+      }
+      return a.name;
+    }
     if (a.k === "num") return String(a.v);
+    const cv = resolveConst(a);
+    if (cv !== undefined && cv !== null) return String(cv);
     return "expr";
   }
 
@@ -2037,9 +2124,9 @@ export function executePine(
         ];
       }
       case "stoch": {
-        const srcArr = resolveExprSeries(args[0]) || Array.from(closeArr);
-        const hArr = args.length > 1 ? (resolveExprSeries(args[1]) || Array.from(highArr)) : Array.from(highArr);
-        const lArr = args.length > 2 ? (resolveExprSeries(args[2]) || Array.from(lowArr)) : Array.from(lowArr);
+        const srcArr = resolveExprSeries(args[0]) || numCloseArr;
+        const hArr = args.length > 1 ? (resolveExprSeries(args[1]) || numHighArr) : numHighArr;
+        const lArr = args.length > 2 ? (resolveExprSeries(args[2]) || numLowArr) : numLowArr;
         const len = args.length > 3 ? Math.round(toNum(evalExpr(args[3]))) : 14;
         const ck = `stoch_${argKeyForTa(args[0])}_${len}`;
         if (!indicatorCache.has(ck)) {
@@ -2062,7 +2149,7 @@ export function executePine(
         const len = toNum(evalExpr(args[0]));
         const ck = `adx_${len}`;
         if (!indicatorCache.has(ck)) indicatorCache.set(ck, ind.adx(
-          Array.from(highArr), Array.from(lowArr), Array.from(closeArr), Math.round(len)));
+          numHighArr, numLowArr, numCloseArr, Math.round(len)));
         const vals = indicatorCache.get(ck);
         return currentBar < vals.length && !isNaN(vals[currentBar]) ? vals[currentBar] : NA;
       }
@@ -2090,8 +2177,8 @@ export function executePine(
         const ck = `kc_${argKeyForTa(args[0])}_${len}_${mult}`;
         if (!indicatorCache.has(ck)) {
           indicatorCache.set(ck, ind.keltnerChannel(
-            srcArr || Array.from(closeArr),
-            Array.from(highArr), Array.from(lowArr),
+            srcArr || numCloseArr,
+            numHighArr, numLowArr,
             Math.round(len), Math.round(len), mult));
         }
         const bands = indicatorCache.get(ck);
@@ -2300,7 +2387,7 @@ export function executePine(
   }
 
   function execStmt(stmt: Stmt): "break" | "continue" | null {
-    if ((++totalOps & 255) === 0) { opsThrottle += 256; checkBudget(); }
+    if ((++totalOps & 4095) === 0) { opsThrottle += 4096; if (totalOps > MAX_TOTAL_OPS) throw new Error("Global execution budget exceeded"); if (opsThrottle > MAX_OPS) throw new Error("Execution budget exceeded"); }
 
     switch (stmt.k) {
       case "decl": {
@@ -2558,6 +2645,8 @@ export function executePine(
     }
     if (newlyPrecomputed === 0) break;
   }
+
+  for (const [k, v] of Object.entries(precomputed)) allSeries.set(k, v);
 
   function isVisualOnlyStmt(stmt: Stmt): boolean {
     if (stmt.k === "expr" && stmt.e.k === "call") {

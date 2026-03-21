@@ -1,5 +1,5 @@
 import { workerData, parentPort } from "worker_threads";
-import { runBacktest, compilePine, type OHLCV, type PinePlan } from "./engine";
+import { runBacktest, compilePine, createSharedArrays, type OHLCV, type PinePlan, type PineSharedArrays } from "./engine";
 import type { LabPineInput, LabBacktestResult, LabJobProgress, LabCheckpoint, GuidedInsights } from "@shared/schema";
 
 interface WorkerInput {
@@ -481,6 +481,8 @@ interface CoordinateTuneContext {
   tickerProgress: Record<string, { status: "pending" | "running" | "complete"; best?: number }>;
   completedParams: string[];
   resumePartialResults?: LabBacktestResult[];
+  sharedArrays?: PineSharedArrays;
+  sharedIndicatorCache?: Map<string, any>;
 }
 
 function generateParamGrid(input: LabPineInput, currentVal: any): any[] {
@@ -564,6 +566,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResul
   const {
     jobId, candles, ticker, timeframe, inputs, config, engineConfig,
     seedResult, testedSignatures, startTime, comboKey, tickerProgress, completedParams,
+    sharedArrays, sharedIndicatorCache,
   } = ctx;
   let bestScore = ctx.seedScore;
   let bestResult = seedResult;
@@ -619,7 +622,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResul
       if (testedSignatures.has(sig)) continue;
       testedSignatures.add(sig);
 
-      const result = runBacktest(candles, testParams, ticker, timeframe, engineConfig);
+      const result = runBacktest(candles, testParams, ticker, timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
       if (!meetsFilters(result, config)) continue;
 
       const score = scoreResult(result);
@@ -691,7 +694,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResul
               if (testedSignatures.has(sig)) continue;
               testedSignatures.add(sig);
 
-              const result = runBacktest(candles, testParams, ticker, timeframe, engineConfig);
+              const result = runBacktest(candles, testParams, ticker, timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
               if (!meetsFilters(result, config)) continue;
 
               const score = scoreResult(result);
@@ -836,11 +839,14 @@ async function run() {
       pinePlan,
     };
 
+    const sharedArrays = pinePlan ? createSharedArrays(candles) : undefined;
+    const sharedIndicatorCache = pinePlan ? new Map<string, any>() : undefined;
+
     const defaultParams: Record<string, any> = {};
     for (const input of inputs) {
       defaultParams[input.name] = input.default;
     }
-    const baseline = runBacktest(candles, defaultParams, combo.ticker, combo.timeframe, engineConfig);
+    const baseline = runBacktest(candles, defaultParams, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
 
     if (config.coordinateTune) {
       const isResumingCoordinate = resumeCombo === key && resumeStage === "coordinate";
@@ -853,7 +859,7 @@ async function run() {
         const comboInsights = config.guidedInsightsPerCombo?.[key] ?? config.guidedInsights;
         if (comboInsights?.topConfigs && comboInsights.topConfigs.length > 0) {
           const bestConfig = comboInsights.topConfigs.sort((a, b) => b.score - a.score)[0];
-          seedResult = runBacktest(candles, bestConfig.params, combo.ticker, combo.timeframe, engineConfig);
+          seedResult = runBacktest(candles, bestConfig.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
         } else {
           seedResult = baseline;
         }
@@ -875,6 +881,7 @@ async function run() {
         testedSignatures, startTime, comboKey: key,
         tickerProgress, completedParams: resumeCoordinateCompleted,
         resumePartialResults: isResumingCoordinate ? resumePartialResults : undefined,
+        sharedArrays, sharedIndicatorCache,
       });
 
       coordinateTotalTests += tuneResult.totalTests;
@@ -946,7 +953,7 @@ async function run() {
         continue;
       }
 
-      const result = runBacktest(candles, params!, combo.ticker, combo.timeframe, engineConfig);
+      const result = runBacktest(candles, params!, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
       if (meetsFilters(result, config)) {
         comboResults.push(result);
       }
@@ -1020,7 +1027,7 @@ async function run() {
             continue;
           }
 
-          const result = runBacktest(candles, jitteredParams!, combo.ticker, combo.timeframe, engineConfig);
+          const result = runBacktest(candles, jitteredParams!, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
           if (meetsFilters(result, config)) {
             comboResults.push(result);
           }
@@ -1111,7 +1118,7 @@ async function run() {
               }
             }
             if (isDup) continue;
-            const er = runBacktest(candles, rp!, combo.ticker, combo.timeframe, engineConfig);
+            const er = runBacktest(candles, rp!, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
             if (meetsFilters(er, config)) {
               exploratory.push(er);
               comboResults.push(er);
@@ -1128,7 +1135,7 @@ async function run() {
           if (bd.combo === key) {
             const bdSig = canonicalizeParams(bd.params, inputs);
             if (!testedSignatures.has(bdSig)) {
-              const bdResult = runBacktest(candles, bd.params, combo.ticker, combo.timeframe, engineConfig);
+              const bdResult = runBacktest(candles, bd.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
               const existingSigs = new Set(deepSeeds.map(s => canonicalizeParams(s.params, inputs)));
               if (!existingSigs.has(bdSig)) {
                 deepSeeds = [bdResult, ...deepSeeds.filter(s => canonicalizeParams(s.params, inputs) !== bdSig)].slice(0, deepSeedsPerRound);
@@ -1170,7 +1177,7 @@ async function run() {
               continue;
             }
 
-            const result = runBacktest(candles, jittered!, combo.ticker, combo.timeframe, engineConfig);
+            const result = runBacktest(candles, jittered!, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
             if (meetsFilters(result, config)) {
               comboResults.push(result);
               roundDiscoveries.push(result);

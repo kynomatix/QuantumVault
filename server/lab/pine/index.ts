@@ -1,9 +1,11 @@
 import { tokenize } from "./tokenizer";
 import { parse, type Stmt } from "./parser";
-import { executePine, type PineEngineConfig, type OHLCV } from "./runtime";
+import { executePine, createSharedArrays, type PineEngineConfig, type OHLCV, type PineSharedArrays } from "./runtime";
 import type { LabBacktestResult } from "@shared/schema";
 
 export type { OHLCV, PineEngineConfig } from "./runtime";
+export type { PineSharedArrays } from "./runtime";
+export { createSharedArrays } from "./runtime";
 
 export interface PinePlan {
   ast: Stmt[];
@@ -23,6 +25,8 @@ export function runPineBacktest(
   ticker: string,
   timeframe: string,
   config: PineEngineConfig,
+  shared?: PineSharedArrays,
+  sharedIndicatorCache?: Map<string, any>,
 ): LabBacktestResult {
-  return executePine(plan.ast, candles, params, ticker, timeframe, config);
+  return executePine(plan.ast, candles, params, ticker, timeframe, config, shared, sharedIndicatorCache);
 }

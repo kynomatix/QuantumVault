@@ -1,9 +1,10 @@
 import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "./indicators";
-import { runPineBacktest, type PinePlan } from "./pine/index";
+import { runPineBacktest, type PinePlan, type PineSharedArrays } from "./pine/index";
 
 export type { PinePlan } from "./pine/index";
-export { compilePine } from "./pine/index";
+export type { PineSharedArrays } from "./pine/index";
+export { compilePine, createSharedArrays } from "./pine/index";
 
 export interface OHLCV {
   time: number;
@@ -33,7 +34,9 @@ export function runBacktest(
   params: Record<string, any>,
   ticker: string,
   timeframe: string,
-  config: EngineConfig = { initialCapital: 1000, commission: 0.0005, positionSize: 1000 }
+  config: EngineConfig = { initialCapital: 1000, commission: 0.0005, positionSize: 1000 },
+  shared?: PineSharedArrays,
+  sharedIndicatorCache?: Map<string, any>,
 ): LabBacktestResult {
   if (config.pinePlan) {
     return runPineBacktest(config.pinePlan, candles, params, ticker, timeframe, {
@@ -41,7 +44,7 @@ export function runBacktest(
       commission: config.commission,
       positionSize: config.positionSize,
       processOrdersOnClose: config.processOrdersOnClose,
-    });
+    }, shared, sharedIndicatorCache);
   }
 
   const n = candles.length;
