@@ -19,6 +19,7 @@ export interface CompilerContext {
   userFunctionNames: Set<string>;
   paramNames: Set<string>;
   localVarNames?: Set<string>;
+  inlinedLoop?: boolean;
 }
 
 const INLINE_HISTORY_TA = new Set(["crossover", "crossunder", "cross", "change", "rising", "falling"]);
@@ -188,6 +189,7 @@ export function compilePineHotLoop(
   ctx: CompilerContext,
 ): Function | null {
   try {
+    _taSlotCounter = 0;
     const liveStmts = eliminateDeadCode(hotStmts, userFunctions);
     const allStmts = [...liveStmts, ...Object.values(userFunctions).flatMap(f => f.body)];
     const historyAccessed = findHistoryAccessed(allStmts);
@@ -212,28 +214,26 @@ export function compilePineHotLoop(
           !ctx.precomputedNames.has(s.name) &&
           !ctx.inputDefaultNames.has(s.name) &&
           !ctx.builtinSeriesNames.has(s.name) &&
-          !historyAccessed.has(s.name) &&
-          !reassignedNames.has(s.name)) {
+          !historyAccessed.has(s.name)) {
         localVarNames.add(s.name);
       }
     }
     ctx.localVarNames = localVarNames;
 
-    const lines: string[] = [
-      `"use strict";`,
-      `var _or, _nz, _dr, _bl, _br, _t, _rt, _ca, _cb, _cap, _cbp, _md;`,
-      `var _N = ctx._N;`,
-      `var _add = ctx._add;`,
-    ];
+    ctx.inlinedLoop = true;
+
+    const bodyLines: string[] = [];
 
     const ufLines: string[] = [];
     for (const [fname, fdef] of Object.entries(userFunctions)) {
       const indent = "  ";
       ufLines.push(`${safeId(fname)}: function(${fdef.params.map(p => safeId(p)).join(", ")}) {`);
-      const savedParams = fdef.params.map(p => `var _saved_${safeId(p)} = ctx.getVar(${safeStr(p)}, 0);`);
-      ufLines.push(...savedParams.map(l => indent + l));
       for (const p of fdef.params) {
-        ufLines.push(`${indent}ctx.setVar(${safeStr(p)}, ${safeId(p)});`);
+        const si = safeId(p);
+        const sn = safeStr(p);
+        ufLines.push(`${indent}var _pArr_${si} = _vars[${sn}]; var _saved_${si};`);
+        ufLines.push(`${indent}if (!_pArr_${si}) { ctx.setVar(${sn}, ${si}); _pArr_${si} = _vars[${sn}]; }`);
+        ufLines.push(`${indent}else { _saved_${si} = _pArr_${si}[_bar]; _pArr_${si}[_bar] = ${si}; }`);
       }
       const bodyLen = fdef.body.length;
       for (let i = 0; i < bodyLen - 1; i++) {
@@ -245,33 +245,40 @@ export function compilePineHotLoop(
         ufLines.push(`${indent}var _fn_result = null;`);
       }
       for (const p of fdef.params) {
-        ufLines.push(`${indent}ctx.setVar(${safeStr(p)}, _saved_${safeId(p)});`);
+        ufLines.push(`${indent}_pArr_${safeId(p)}[_bar] = _saved_${safeId(p)};`);
       }
       ufLines.push(`${indent}return _fn_result;`);
       ufLines.push(`},`);
     }
     if (ufLines.length > 0) {
-      lines.push(`var _uf = {`);
-      lines.push(...ufLines);
-      lines.push(`};`);
+      bodyLines.push(`var _uf = {`);
+      bodyLines.push(...ufLines);
+      bodyLines.push(`};`);
     }
 
     for (const stmt of liveStmts) {
-      lines.push(...compileStmt(stmt, "", ctx));
+      bodyLines.push(...compileStmt(stmt, "  ", ctx));
     }
 
-    const bodyCode = lines.join("\n");
+    const bodyCode = bodyLines.join("\n");
 
-    const barFn = new Function("ctx", bodyCode);
+    const builtinNames = ["close", "open", "high", "low", "volume", "hl2", "hlc3", "ohlc4"];
+    const builtinArrDecls = builtinNames.map(n => `var _${n}Arr = ctx.builtinSeries["${n}"];`).join("\n");
 
     const loopCode = [
       `"use strict";`,
+      `var _or, _nz, _dr, _bl, _br, _t, _rt, _ca, _cb, _cap, _cbp, _md;`,
+      `var _N = ctx._N;`,
+      `var _add = ctx._add;`,
+      `var _toNum = ctx.toNum;`,
       `var _poc = ctx._processOrdersOnClose;`,
       `var _broker = ctx.broker;`,
       `var _openArr = ctx._openArr, _highArr = ctx._highArr, _lowArr = ctx._lowArr, _closeArr = ctx._closeArr, _candles = ctx._candles;`,
+      builtinArrDecls,
       `var _equityValues = ctx._equityValues;`,
+      `var _vars = ctx.vars;`,
+      `var _pc = ctx.pc;`,
       `var _n = ctx.n;`,
-      `var _barFn = ctx._barFn;`,
       `for (var _bar = 0; _bar < _n; _bar++) {`,
       `  ctx.bar = _bar;`,
       `  if (!_poc && _bar > 0) {`,
@@ -280,7 +287,7 @@ export function compilePineHotLoop(
       `    _broker.evaluateExits(_bar, _openArr[_bar], _highArr[_bar], _lowArr[_bar], _closeArr[_bar], _candles[_bar].time);`,
       `  }`,
       `  _broker.snapshotPositionSize(_bar);`,
-      `  _barFn(ctx);`,
+      bodyCode,
       `  if (_poc) {`,
       `    _broker.fillPendingCloses(_closeArr[_bar], _bar, _candles[_bar].time);`,
       `    _broker.fillPendingEntries(_closeArr[_bar], _bar, _candles[_bar].time);`,
@@ -293,10 +300,8 @@ export function compilePineHotLoop(
 
     const _N = (v: any) => v == null ? NaN : typeof v === 'number' ? v : typeof v === 'boolean' ? (v ? 1 : 0) : +v;
     const _add = (a: any, b: any) => (typeof a === 'string' || typeof b === 'string') ? String(a) + String(b) : _N(a) + _N(b);
-    const capturedBarFn = barFn;
 
     const result = function compiledPineLoop(rctx: any) {
-      rctx._barFn = capturedBarFn;
       rctx._N = _N;
       rctx._add = _add;
       loopFn(rctx);
@@ -359,7 +364,7 @@ function compileExpr(e: Expr, ctx: CompilerContext): string {
     }
     case "un":
       if (e.op === "not") return `(!${compileExpr(e.e, ctx)})`;
-      if (e.op === "-") return `(-ctx.toNum(${compileExpr(e.e, ctx)}))`;
+      if (e.op === "-") return `(-_toNum(${compileExpr(e.e, ctx)}))`;
       return compileExpr(e.e, ctx);
     case "tern":
       return `(${compileExpr(e.c, ctx)} ? ${compileExpr(e.t, ctx)} : ${compileExpr(e.f, ctx)})`;
@@ -370,21 +375,23 @@ function compileExpr(e: Expr, ctx: CompilerContext): string {
         const name = e.obj.name;
         const offset = compileExpr(e.idx, ctx);
         if (ctx.precomputedNames.has(name)) {
-          return `((_t = ctx.bar - Math.round(ctx.toNum(${offset}))), _t >= 0 ? ((_t = ctx.pc[${safeStr(name)}][_t]), (typeof _t === 'number' && _t !== _t) ? null : _t) : null)`;
+          return `((_t = _bar - Math.round(_toNum(${offset}))), _t >= 0 ? ((_t = _pc[${safeStr(name)}][_t]), (typeof _t === 'number' && _t !== _t) ? null : _t) : null)`;
         }
         if (ctx.builtinSeriesNames.has(name)) {
-          return `((_t = ctx.bar - Math.round(ctx.toNum(${offset}))), _t >= 0 ? ctx.builtinSeries[${safeStr(name)}][_t] : null)`;
+          const arrName = ctx.inlinedLoop ? _builtinArrMap[name] : null;
+          if (arrName) return `((_t = _bar - Math.round(_toNum(${offset}))), _t >= 0 ? ${arrName}[_t] : null)`;
+          return `((_t = _bar - Math.round(_toNum(${offset}))), _t >= 0 ? ctx.builtinSeries[${safeStr(name)}][_t] : null)`;
         }
         if (ctx.varIsVarNames.has(name)) {
-          return `((_t = ctx.vars[${safeStr(name)}]), _t ? ((_t = _t[ctx.bar - Math.round(ctx.toNum(${offset}))]), _t === undefined ? null : _t) : null)`;
+          return `((_t = _vars[${safeStr(name)}]), _t ? ((_t = _t[_bar - Math.round(_toNum(${offset}))]), _t === undefined ? null : _t) : null)`;
         }
-        return `ctx.getVar(${safeStr(name)}, Math.round(ctx.toNum(${offset})))`;
+        return `ctx.getVar(${safeStr(name)}, Math.round(_toNum(${offset})))`;
       }
       if (e.obj.k === "mem" && e.obj.obj.k === "id" && e.obj.obj.name === "strategy") {
         const prop = e.obj.prop;
         const offset = compileExpr(e.idx, ctx);
         if (prop === "position_size") {
-          return `ctx.broker.getPositionSizeHistory(Math.round(ctx.toNum(${offset})), ctx.bar)`;
+          return `ctx.broker.getPositionSizeHistory(Math.round(_toNum(${offset})), _bar)`;
         }
       }
       return "null";
@@ -419,21 +426,29 @@ function compileExpr(e: Expr, ctx: CompilerContext): string {
   return "null";
 }
 
+const _builtinArrMap: Record<string, string> = {
+  close: "_closeArr", open: "_openArr", high: "_highArr", low: "_lowArr",
+  volume: "_volumeArr", hl2: "_hl2Arr", hlc3: "_hlc3Arr", ohlc4: "_ohlc4Arr",
+};
+
 function compileIdExpr(name: string, ctx: CompilerContext): string {
   if (ctx.localVarNames?.has(name))
     return safeId(name);
-  if (ctx.builtinSeriesNames.has(name))
+  if (ctx.builtinSeriesNames.has(name)) {
+    if (ctx.inlinedLoop && _builtinArrMap[name])
+      return `${_builtinArrMap[name]}[_bar]`;
     return `ctx.builtinSeries[${safeStr(name)}][ctx.bar]`;
+  }
   if (ctx.precomputedNames.has(name)) {
-    return `((_t = ctx.pc[${safeStr(name)}][ctx.bar]), (typeof _t === 'number' && _t !== _t) ? null : _t)`;
+    return `((_t = _pc[${safeStr(name)}][_bar]), (typeof _t === 'number' && _t !== _t) ? null : _t)`;
   }
   if (ctx.paramNames.has(name))
     return `ctx.params[${safeStr(name)}]`;
   if (ctx.inputDefaultNames.has(name))
-    return `((_t = ctx.inputDefaults[${safeStr(name)}]), typeof _t === 'string' && ctx.builtinSeries[_t] ? ctx.builtinSeries[_t][ctx.bar] : _t)`;
+    return `((_t = ctx.inputDefaults[${safeStr(name)}]), typeof _t === 'string' && ctx.builtinSeries[_t] ? ctx.builtinSeries[_t][_bar] : _t)`;
 
   switch (name) {
-    case "bar_index": return "ctx.bar";
+    case "bar_index": return "_bar";
     case "time": return "ctx.time()";
     case "timenow": return "Date.now()";
     case "na": return "null";
@@ -441,7 +456,7 @@ function compileIdExpr(name: string, ctx: CompilerContext): string {
     case "false": return "false";
     default:
       if (ctx.varIsVarNames.has(name)) {
-        return `((_t = ctx.vars[${safeStr(name)}]), _t ? ((_t = _t[ctx.bar]), _t === undefined ? null : _t) : null)`;
+        return `((_t = _vars[${safeStr(name)}]), _t ? ((_t = _t[_bar]), _t === undefined ? null : _t) : null)`;
       }
       return `ctx.getVar(${safeStr(name)}, 0)`;
   }
@@ -466,8 +481,8 @@ function compileMember(e: { k: "mem"; obj: Expr; prop: string }, ctx: CompilerCo
     if (obj === "barstate") {
       switch (prop) {
         case "isconfirmed": return "true";
-        case "isfirst": return "(ctx.bar === 0)";
-        case "islast": return "(ctx.bar === ctx.n - 1)";
+        case "isfirst": return "(_bar === 0)";
+        case "islast": return "(_bar === ctx.n - 1)";
         case "isnew": return "true";
         case "isrealtime": return "false";
         case "ishistory": return "true";
@@ -552,27 +567,29 @@ function compileCall(e: { k: "call"; fn: Expr; args: Expr[]; kw: [string, Expr][
 function compileMathCall(fn: string, args: Expr[], ctx: CompilerContext): string {
   const a = args.map(a => compileExpr(a, ctx));
   switch (fn) {
-    case "abs": return `Math.abs(ctx.toNum(${a[0]}))`;
+    case "abs": return `Math.abs(_toNum(${a[0]}))`;
     case "max":
-      if (args.length === 1) return `Math.max(...(Array.isArray(_t=${a[0]}) ? _t.map(ctx.toNum) : [ctx.toNum(_t)]))`;
-      return `Math.max(${a.map(v => `ctx.toNum(${v})`).join(",")})`;
+      if (args.length === 1) return `Math.max(...(Array.isArray(_t=${a[0]}) ? _t.map(_toNum) : [_toNum(_t)]))`;
+      return `Math.max(${a.map(v => `_toNum(${v})`).join(",")})`;
     case "min":
-      if (args.length === 1) return `Math.min(...(Array.isArray(_t=${a[0]}) ? _t.map(ctx.toNum) : [ctx.toNum(_t)]))`;
-      return `Math.min(${a.map(v => `ctx.toNum(${v})`).join(",")})`;
-    case "sqrt": return `Math.sqrt(ctx.toNum(${a[0]}))`;
-    case "round": return `Math.round(ctx.toNum(${a[0]}))`;
-    case "floor": return `Math.floor(ctx.toNum(${a[0]}))`;
-    case "ceil": return `Math.ceil(ctx.toNum(${a[0]}))`;
-    case "log": return `Math.log(ctx.toNum(${a[0]}))`;
-    case "log10": return `Math.log10(ctx.toNum(${a[0]}))`;
-    case "pow": return `Math.pow(ctx.toNum(${a[0]}),ctx.toNum(${a[1]}))`;
-    case "sign": return `Math.sign(ctx.toNum(${a[0]}))`;
+      if (args.length === 1) return `Math.min(...(Array.isArray(_t=${a[0]}) ? _t.map(_toNum) : [_toNum(_t)]))`;
+      return `Math.min(${a.map(v => `_toNum(${v})`).join(",")})`;
+    case "sqrt": return `Math.sqrt(_toNum(${a[0]}))`;
+    case "round": return `Math.round(_toNum(${a[0]}))`;
+    case "floor": return `Math.floor(_toNum(${a[0]}))`;
+    case "ceil": return `Math.ceil(_toNum(${a[0]}))`;
+    case "log": return `Math.log(_toNum(${a[0]}))`;
+    case "log10": return `Math.log10(_toNum(${a[0]}))`;
+    case "pow": return `Math.pow(_toNum(${a[0]}),_toNum(${a[1]}))`;
+    case "sign": return `Math.sign(_toNum(${a[0]}))`;
     case "avg": return `ctx.mathAvg([${a.join(",")}])`;
     case "sum": return `ctx.mathSum([${a.join(",")}])`;
-    case "round_to_mintick": return `((_rt=ctx.toNum(${a[0]})),isNaN(_rt)?null:Math.round(_rt*100)/100)`;
+    case "round_to_mintick": return `((_rt=_toNum(${a[0]})),isNaN(_rt)?null:Math.round(_rt*100)/100)`;
     default: return "NaN";
   }
 }
+
+let _taSlotCounter = 0;
 
 function compileTaCall(fn: string, args: Expr[], kw: [string, Expr][], ctx: CompilerContext): string {
   const a = (i: number) => i < args.length ? compileExpr(args[i], ctx) : "null";
@@ -582,19 +599,19 @@ function compileTaCall(fn: string, args: Expr[], kw: [string, Expr][], ctx: Comp
       const av = a(0), bv = a(1);
       const ap = compileHistExpr(args[0], 1, ctx);
       const bp = compileHistExpr(args[1], 1, ctx);
-      return `(ctx.bar < 1 ? false : ((_ca=${av}),(_cb=${bv}),(_cap=${ap}),(_cbp=${bp}), ctx.toNum(_ca) > ctx.toNum(_cb) && ctx.toNum(_cap) <= ctx.toNum(_cbp)))`;
+      return `(_bar < 1 ? false : ((_ca=${av}),(_cb=${bv}),(_cap=${ap}),(_cbp=${bp}), _toNum(_ca) > _toNum(_cb) && _toNum(_cap) <= _toNum(_cbp)))`;
     }
     case "crossunder": {
       const av = a(0), bv = a(1);
       const ap = compileHistExpr(args[0], 1, ctx);
       const bp = compileHistExpr(args[1], 1, ctx);
-      return `(ctx.bar < 1 ? false : ((_ca=${av}),(_cb=${bv}),(_cap=${ap}),(_cbp=${bp}), ctx.toNum(_ca) < ctx.toNum(_cb) && ctx.toNum(_cap) >= ctx.toNum(_cbp)))`;
+      return `(_bar < 1 ? false : ((_ca=${av}),(_cb=${bv}),(_cap=${ap}),(_cbp=${bp}), _toNum(_ca) < _toNum(_cb) && _toNum(_cap) >= _toNum(_cbp)))`;
     }
     case "cross": {
       const av = a(0), bv = a(1);
       const ap = compileHistExpr(args[0], 1, ctx);
       const bp = compileHistExpr(args[1], 1, ctx);
-      return `(ctx.bar < 1 ? false : ((_ca=${av}),(_cb=${bv}),(_cap=${ap}),(_cbp=${bp}), (ctx.toNum(_ca) > ctx.toNum(_cb) && ctx.toNum(_cap) <= ctx.toNum(_cbp)) || (ctx.toNum(_ca) < ctx.toNum(_cb) && ctx.toNum(_cap) >= ctx.toNum(_cbp))))`;
+      return `(_bar < 1 ? false : ((_ca=${av}),(_cb=${bv}),(_cap=${ap}),(_cbp=${bp}), (_toNum(_ca) > _toNum(_cb) && _toNum(_cap) <= _toNum(_cbp)) || (_toNum(_ca) < _toNum(_cb) && _toNum(_cap) >= _toNum(_cbp))))`;
     }
     case "change": {
       const v = a(0);
@@ -602,10 +619,26 @@ function compileTaCall(fn: string, args: Expr[], kw: [string, Expr][], ctx: Comp
       const prev = args.length > 1
         ? `ctx.getHistValue(${JSON.stringify(args[0])}, ${a(1)})`
         : compileHistExpr(args[0], 1, ctx);
-      return `(ctx.toNum(${v}) - ctx.toNum(${prev}))`;
+      return `(_toNum(${v}) - _toNum(${prev}))`;
     }
-    default:
-      return `ctx.evalTaCallCompiled(${safeStr(fn)}, [${args.map(a => compileExpr(a, ctx)).join(",")}], ${JSON.stringify(args)}, ${JSON.stringify(kw)})`;
+    default: {
+      const slot = _taSlotCounter++;
+      const builtins = new Set(["close", "open", "high", "low", "volume", "hl2", "hlc3", "ohlc4"]);
+      const srcArg = args[0];
+      const srcIsStatic = !srcArg || (srcArg.k === "id" && builtins.has(srcArg.name)) || srcArg.k === "num";
+      const srcIsDyn = srcArg && !srcIsStatic && srcArg.k !== "mem" && srcArg.k !== "str";
+      const dynFns2: Record<string, string> = { rma: "taDynRma", ema: "taDynEma", sma: "taDynSma", wma: "taDynWma", highest: "taDynHighest", lowest: "taDynLowest", stdev: "taDynStdev", percentrank: "taDynPercentrank", linreg: "taDynLinreg" };
+      if (srcIsDyn && args.length >= 2 && dynFns2[fn]) {
+        const srcExpr = compileExpr(srcArg, ctx);
+        const lenExpr = compileExpr(args[1], ctx);
+        return `ctx.${dynFns2[fn]}(${slot}, _toNum(${srcExpr}), ${lenExpr})`;
+      }
+      if (fn === "barssince" && srcIsDyn && args.length >= 1) {
+        const srcExpr = compileExpr(srcArg, ctx);
+        return `ctx.taDynBarssince(${slot}, ${srcExpr})`;
+      }
+      return `ctx.taSlotRead(${slot}, ${safeStr(fn)}, ${JSON.stringify(args)}, ${JSON.stringify(kw)})`;
+    }
   }
 }
 
@@ -635,7 +668,7 @@ function compileStrategyCall(fn: string, args: Expr[], kw: [string, Expr][], ctx
       const id = getArg(0);
       const direction = getArg(1);
       const when = getKw("when", "true");
-      return `(${when} ? ctx.broker.queueEntry(${id}, ${direction}, ctx.bar, ctx.time()) : null)`;
+      return `(${when} ? ctx.broker.queueEntry(${id}, ${direction}, _bar, ctx.time()) : null)`;
     }
     case "close": {
       const id = getArg(0);
@@ -674,9 +707,9 @@ function compileStmt(stmt: Stmt, indent: string, ctx: CompilerContext): string[]
       const name = stmt.name;
       const expr = compileExpr(stmt.e, ctx);
       if (stmt.isVar) {
-        lines.push(`${i}{ const _va = ctx.vars[${safeStr(name)}] || (ctx.vars[${safeStr(name)}] = new Array(ctx.n)); ctx.markVar(${safeStr(name)});`);
-        lines.push(`${i}  if (ctx.bar === 0) { _va[0] = ${expr}; }`);
-        lines.push(`${i}  else { _va[ctx.bar] = ctx.bar > 0 ? (_va[ctx.bar - 1] !== undefined ? _va[ctx.bar - 1] : null) : null; } }`);
+        lines.push(`${i}{ const _va = _vars[${safeStr(name)}] || (_vars[${safeStr(name)}] = new Array(ctx.n)); ctx.markVar(${safeStr(name)});`);
+        lines.push(`${i}  if (_bar === 0) { _va[0] = ${expr}; }`);
+        lines.push(`${i}  else { _va[_bar] = _bar > 0 ? (_va[_bar - 1] !== undefined ? _va[_bar - 1] : null) : null; } }`);
       } else {
         if (ctx.precomputedNames.has(name) || ctx.inputDefaultNames.has(name) || ctx.builtinSeriesNames.has(name)) {
           break;
@@ -702,8 +735,10 @@ function compileStmt(stmt: Stmt, indent: string, ctx: CompilerContext): string[]
       if (stmt.target.k === "id") {
         const name = stmt.target.name;
         const expr = compileExpr(stmt.e, ctx);
-        if (ctx.varIsVarNames.has(name)) {
-          lines.push(`${i}{ const _va = ctx.vars[${safeStr(name)}]; if (_va) _va[ctx.bar] = ${expr}; }`);
+        if (ctx.localVarNames?.has(name)) {
+          lines.push(`${i}${safeId(name)} = ${expr};`);
+        } else if (ctx.varIsVarNames.has(name)) {
+          lines.push(`${i}{ const _va = _vars[${safeStr(name)}]; if (_va) _va[_bar] = ${expr}; }`);
         } else {
           lines.push(`${i}ctx.setVar(${safeStr(name)}, ${expr});`);
         }
@@ -716,9 +751,11 @@ function compileStmt(stmt: Stmt, indent: string, ctx: CompilerContext): string[]
       if (stmt.target.k === "id") {
         const name = stmt.target.name;
         const val = compileExpr(stmt.e, ctx);
-        if (ctx.varIsVarNames.has(name)) {
-          const readExpr = `((_t = ctx.vars[${safeStr(name)}]), _t ? ((_t = _t[ctx.bar]), _t === undefined ? null : _t) : null)`;
-          lines.push(`${i}{ const _va = ctx.vars[${safeStr(name)}]; if (_va) _va[ctx.bar] = ctx.binOp(${safeStr(stmt.op.replace("=", ""))}, ${readExpr}, ${val}); }`);
+        if (ctx.localVarNames?.has(name)) {
+          lines.push(`${i}${safeId(name)} = ctx.binOp(${safeStr(stmt.op.replace("=", ""))}, ${safeId(name)}, ${val});`);
+        } else if (ctx.varIsVarNames.has(name)) {
+          const readExpr = `((_t = _vars[${safeStr(name)}]), _t ? ((_t = _t[_bar]), _t === undefined ? null : _t) : null)`;
+          lines.push(`${i}{ const _va = _vars[${safeStr(name)}]; if (_va) _va[_bar] = ctx.binOp(${safeStr(stmt.op.replace("=", ""))}, ${readExpr}, ${val}); }`);
         } else {
           lines.push(`${i}ctx.setVar(${safeStr(name)}, ctx.binOp(${safeStr(stmt.op.replace("=", ""))}, ctx.getVar(${safeStr(name)}, 0), ${val}));`);
         }

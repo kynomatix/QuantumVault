@@ -364,6 +364,8 @@ export function executePine(
   const varIsVar: Set<string> = new Set();
   const precomputed: PrecomputedSeries = {};
   const indicatorCache: Map<string, any> = sharedIndicatorCache ?? new Map();
+  const dynNumArrays: Map<string, number[]> = new Map();
+  let _lastFullSeries: number[] | null = null;
   const inputDefaults: Record<string, any> = {};
   const userFunctions: Record<string, { params: string[]; body: Stmt[] }> = {};
   let currentBar = 0;
@@ -1831,9 +1833,13 @@ export function executePine(
         isDynamic = true;
         const varName = `__dynSrc_${cacheKey}`;
         const v = toNum(evalExpr(args[idx]));
-        if (!vars[varName]) vars[varName] = new Array(n).fill(undefined);
-        vars[varName][currentBar] = v;
-        return vars[varName].map((x: any) => x === undefined ? NaN : toNum(x));
+        let numArr = dynNumArrays.get(varName);
+        if (!numArr) {
+          numArr = new Array(n).fill(NaN);
+          dynNumArrays.set(varName, numArr);
+        }
+        numArr[currentBar] = v;
+        return numArr;
       }
       return null;
     }
@@ -1964,7 +1970,10 @@ export function executePine(
       }
     }
     if (result) {
-      if (!isDynamic) indicatorCache.set(cacheKey, result);
+      if (!isDynamic) {
+        indicatorCache.set(cacheKey, result);
+        _lastFullSeries = result;
+      }
       return currentBar < result.length ? (isNaN(result[currentBar]) ? NA : result[currentBar]) : NA;
     }
     return NA;
@@ -2156,6 +2165,7 @@ export function executePine(
           indicatorCache.set(ck, res);
         }
         const stochVals = indicatorCache.get(ck);
+        _lastFullSeries = stochVals;
         return currentBar < stochVals.length && !isNaN(stochVals[currentBar]) ? stochVals[currentBar] : NA;
       }
       case "adx": {
@@ -2736,15 +2746,18 @@ export function executePine(
       _N: null as any,
       _add: null as any,
 
+      _varArrayCache: new Map<string, any[]>(),
       getVar(name: string, offset: number): any {
         const idx = rctx.bar - offset;
         if (idx < 0) return null;
-        const s = allSeries.get(name);
-        if (s) {
-          const v = (s as any)[idx];
-          return v === undefined || (typeof v === 'number' && v !== v) ? null : v;
+        let s = rctx._varArrayCache.get(name);
+        if (s === undefined) {
+          const series = allSeries.get(name);
+          if (series) { s = series as any; rctx._varArrayCache.set(name, s); }
+          else return null;
         }
-        return null;
+        const v = s[idx];
+        return v === undefined || (typeof v === 'number' && v !== v) ? null : v;
       },
 
       setVar(name: string, value: any) {
@@ -2753,6 +2766,7 @@ export function executePine(
           arr = new Array(n);
           vars[name] = arr;
           allSeries.set(name, arr);
+          rctx._varArrayCache.set(name, arr);
         }
         arr[rctx.bar] = value;
       },
@@ -2807,6 +2821,185 @@ export function executePine(
       evalTaCallCompiled(fn: string, _evaledArgs: any[], astArgs: any[], astKw: any[]): any {
         currentBar = rctx.bar;
         return evalTaCall(fn, astArgs, astKw);
+      },
+
+      _TS_DYNAMIC: {} as any,
+      _taSlots: [] as any[],
+      _taDynSrc: [] as (number[] | undefined)[],
+      _taDynState: [] as (number | undefined)[],
+      taSlotRead(slot: number, fn: string, astArgs: any[], astKw: any[]): any {
+        const cached = rctx._taSlots[slot];
+        if (cached !== undefined) {
+          if (cached === rctx._TS_DYNAMIC) {
+            currentBar = rctx.bar;
+            return evalTaCall(fn, astArgs, astKw);
+          }
+          if (Array.isArray(cached)) {
+            const v = rctx.bar < cached.length ? cached[rctx.bar] : NaN;
+            return (typeof v === 'number' && isNaN(v)) ? null : v;
+          }
+          return cached;
+        }
+        currentBar = rctx.bar;
+        _lastFullSeries = null;
+        const result = evalTaCall(fn, astArgs, astKw);
+        if (_lastFullSeries) {
+          rctx._taSlots[slot] = _lastFullSeries;
+        } else {
+          rctx._taSlots[slot] = rctx._TS_DYNAMIC;
+        }
+        return result;
+      },
+      taDynRma(slot: number, srcVal: number, len: number): any {
+        const bar = rctx.bar;
+        let src = rctx._taDynSrc[slot];
+        if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
+        src[bar] = srcVal;
+        const alpha = 1 / len;
+        if (bar < len - 1) {
+          let sum = 0, count = 0;
+          for (let i = 0; i <= bar; i++) { const v = src[i]; if (!isNaN(v)) { sum += v; count++; } }
+          const sma = count > 0 ? sum / count : NaN;
+          rctx._taDynState[slot] = sma;
+          return isNaN(sma) ? NA : sma;
+        }
+        let prev = rctx._taDynState[slot];
+        if (prev === undefined || isNaN(prev)) {
+          let sum = 0, count = 0;
+          for (let i = Math.max(0, bar - len); i < bar; i++) { const v = src[i]; if (!isNaN(v)) { sum += v; count++; } }
+          prev = count > 0 ? sum / count : NaN;
+        }
+        const v = srcVal;
+        if (isNaN(v)) return isNaN(prev!) ? NA : prev;
+        const result = isNaN(prev!) ? v : alpha * v + (1 - alpha) * prev!;
+        rctx._taDynState[slot] = result;
+        return result;
+      },
+      taDynEma(slot: number, srcVal: number, len: number): any {
+        const alpha = 2 / (len + 1);
+        if (isNaN(srcVal)) {
+          const prev = rctx._taDynState[slot];
+          return prev !== undefined && !isNaN(prev) ? prev : NA;
+        }
+        const prev = rctx._taDynState[slot];
+        if (prev === undefined || isNaN(prev!)) {
+          rctx._taDynState[slot] = srcVal;
+          return srcVal;
+        }
+        const result = alpha * srcVal + (1 - alpha) * prev!;
+        rctx._taDynState[slot] = result;
+        return result;
+      },
+      taDynSma(slot: number, srcVal: number, len: number): any {
+        const bar = rctx.bar;
+        let src = rctx._taDynSrc[slot];
+        if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
+        src[bar] = srcVal;
+        let sum = 0, count = 0;
+        const start = Math.max(0, bar - len + 1);
+        for (let i = start; i <= bar; i++) { const v = src[i]; if (!isNaN(v)) { sum += v; count++; } }
+        return count > 0 ? sum / count : NA;
+      },
+      taDynWma(slot: number, srcVal: number, len: number): any {
+        const bar = rctx.bar;
+        let src = rctx._taDynSrc[slot];
+        if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
+        src[bar] = srcVal;
+        if (bar < len - 1) return NA;
+        const start = bar - len + 1;
+        let weightedSum = 0;
+        const denom = len * (len + 1) / 2;
+        for (let i = start; i <= bar; i++) {
+          const v = src[i];
+          if (isNaN(v)) return NA;
+          weightedSum += v * (i - start + 1);
+        }
+        return weightedSum / denom;
+      },
+
+      taDynHighest(slot: number, srcVal: number, len: number): any {
+        const bar = rctx.bar;
+        let src = rctx._taDynSrc[slot];
+        if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
+        src[bar] = srcVal;
+        if (bar < len - 1) return NA;
+        let mx = -Infinity;
+        for (let i = bar - len + 1; i <= bar; i++) {
+          const v = src[i];
+          if (v > mx) mx = v;
+        }
+        return mx === -Infinity ? NA : mx;
+      },
+      taDynLowest(slot: number, srcVal: number, len: number): any {
+        const bar = rctx.bar;
+        let src = rctx._taDynSrc[slot];
+        if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
+        src[bar] = srcVal;
+        if (bar < len - 1) return NA;
+        let mn = Infinity;
+        for (let i = bar - len + 1; i <= bar; i++) {
+          const v = src[i];
+          if (v < mn) mn = v;
+        }
+        return mn === Infinity ? NA : mn;
+      },
+      taDynBarssince(slot: number, condVal: any): any {
+        const bar = rctx.bar;
+        let src = rctx._taDynSrc[slot];
+        if (!src) { src = new Array(n).fill(0); rctx._taDynSrc[slot] = src; }
+        src[bar] = condVal ? 1 : 0;
+        for (let i = bar; i >= 0; i--) {
+          if (src[i]) return bar - i;
+        }
+        return NA;
+      },
+      taDynStdev(slot: number, srcVal: number, len: number): any {
+        const bar = rctx.bar;
+        let src = rctx._taDynSrc[slot];
+        if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
+        src[bar] = srcVal;
+        if (bar < len - 1) return NA;
+        let sum = 0, count = 0;
+        for (let i = bar - len + 1; i <= bar; i++) {
+          const v = src[i];
+          if (!isNaN(v)) { sum += v; count++; }
+        }
+        if (count === 0) return NA;
+        const mean = sum / count;
+        let sq = 0;
+        for (let i = bar - len + 1; i <= bar; i++) {
+          const v = src[i];
+          if (!isNaN(v)) { const d = v - mean; sq += d * d; }
+        }
+        return Math.sqrt(sq / count);
+      },
+      taDynLinreg(slot: number, srcVal: number, len: number): any {
+        const bar = rctx.bar;
+        let src = rctx._taDynSrc[slot];
+        if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
+        src[bar] = srcVal;
+        if (bar < len - 1) return NA;
+        let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, cnt = 0;
+        for (let i = 0; i < len; i++) {
+          const y = src[bar - len + 1 + i];
+          if (isNaN(y)) return NA;
+          sumX += i; sumY += y; sumXY += i * y; sumX2 += i * i; cnt++;
+        }
+        const slope = (cnt * sumXY - sumX * sumY) / (cnt * sumX2 - sumX * sumX);
+        const intercept = (sumY - slope * sumX) / cnt;
+        return intercept + slope * (cnt - 1);
+      },
+      taDynPercentrank(slot: number, srcVal: number, len: number): any {
+        const bar = rctx.bar;
+        let src = rctx._taDynSrc[slot];
+        if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
+        src[bar] = srcVal;
+        if (bar < len) return NA;
+        let count = 0;
+        for (let i = bar - len; i < bar; i++) {
+          if (src[i] <= srcVal) count++;
+        }
+        return (count / len) * 100;
       },
 
       evalCallFallback(fnAST: any, evaledArgs: any[], evaledKw: any[]): any {
