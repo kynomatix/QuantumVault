@@ -2684,7 +2684,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                             onClick={(e) => { e.stopPropagation(); handleRefine(r.ticker, r.timeframe); }}
                             disabled={refiningCombo === comboKey}
                             className="text-sky-400 hover:text-sky-300 transition-colors p-0.5 rounded hover:bg-sky-500/10 disabled:opacity-50"
-                            title="Refine: deep search + insights for this combo"
+                            title="Refine: coordinate-tune around top results, scoring for leverage-friendly low drawdown + high win rate"
                             data-testid={`button-refine-${comboKey}`}
                           >
                             {refiningCombo === comboKey ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
@@ -3651,7 +3651,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                             onClick={(e) => { e.stopPropagation(); handleRefine(cfg, selectedCell.ticker, selectedCell.timeframe); }}
                             disabled={refiningCombo === `${selectedCell.ticker}|${selectedCell.timeframe}`}
                             className="p-1 rounded hover:bg-sky-500/10 text-sky-400 hover:text-sky-300 transition-colors disabled:opacity-50"
-                            title="Refine: deep search + insights for this combo"
+                            title="Refine: coordinate-tune around top results, scoring for leverage-friendly low drawdown + high win rate"
                             data-testid={`heatmap-refine-${idx}`}
                           >
                             {refiningCombo === `${selectedCell.ticker}|${selectedCell.timeframe}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
