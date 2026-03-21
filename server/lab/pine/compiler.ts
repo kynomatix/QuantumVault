@@ -69,7 +69,6 @@ function findHistoryAccessed(stmts: Stmt[]): Set<string> {
     });
   }
   stmts.forEach(walkStmt);
-  for (const [, fdef] of Object.entries({})) { /* user funcs handled separately */ }
   return accessed;
 }
 
@@ -89,21 +88,6 @@ function collectReferencedIds(node: any): Set<string> {
     }
   }
   return ids;
-}
-
-function hasStrategyCall(stmts: Stmt[]): boolean {
-  for (const s of stmts) {
-    if (s.k === "expr" && s.e.k === "call" && s.e.fn?.k === "mem" &&
-        s.e.fn.obj?.k === "id" && s.e.fn.obj.name === "strategy") return true;
-    if (s.k === "if") {
-      if (hasStrategyCall(s.body)) return true;
-      if (s.el && hasStrategyCall(s.el)) return true;
-      if (s.elifs) for (const ei of s.elifs) { if (hasStrategyCall(ei.body)) return true; }
-    }
-    if (s.k === "for" && hasStrategyCall(s.body)) return true;
-    if (s.k === "while" && hasStrategyCall(s.body)) return true;
-  }
-  return false;
 }
 
 function hasSideEffect(stmts: Stmt[]): boolean {
@@ -195,20 +179,6 @@ export function compilePineHotLoop(
     const historyAccessed = findHistoryAccessed(allStmts);
 
     const localVarNames = new Set<string>();
-    const reassignedNames = new Set<string>();
-    function collectReassigned(stmts: Stmt[]) {
-      for (const s of stmts) {
-        if (s.k === "reassign" && s.target.k === "id") reassignedNames.add(s.target.name);
-        if (s.k === "aug" && s.target.k === "id") reassignedNames.add(s.target.name);
-        if (s.k === "if") {
-          collectReassigned(s.body);
-          if (s.el) collectReassigned(s.el);
-          if (s.elifs) for (const ei of s.elifs) collectReassigned(ei.body);
-        }
-        if (s.k === "for" || s.k === "while") collectReassigned(s.body);
-      }
-    }
-    collectReassigned(liveStmts);
     for (const s of liveStmts) {
       if (s.k === "decl" && !s.isVar &&
           !ctx.precomputedNames.has(s.name) &&
@@ -313,18 +283,6 @@ export function compilePineHotLoop(
   }
 }
 
-function isNumericExpr(e: string): boolean {
-  if (/^-?\d+(\.\d+)?$/.test(e)) return true;
-  if (/^ctx\.(builtinSeries|pc)\[/.test(e)) return true;
-  if (/^ctx\.bar$/.test(e)) return true;
-  if (/^NaN$/.test(e)) return true;
-  return false;
-}
-
-function toN(e: string): string {
-  if (isNumericExpr(e) || e === "NaN") return `(+(${e}))`;
-  return `(+${e} || 0)`;
-}
 
 function compileBinOp(op: string, l: string, r: string): string {
   switch (op) {

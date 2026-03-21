@@ -587,7 +587,7 @@ export function executePine(
       if (stmt.k === "decl") originals.set(stmt.name, { b: builtinSeries[stmt.name], p: precomputed[stmt.name], d: inputDefaults[stmt.name] });
     }
 
-    const { locals, success } = scopedPrecompute(fn, callArgs, callKw);
+    const { success } = scopedPrecompute(fn, callArgs, callKw);
 
     let resultSeries: number[] | null = null;
     if (success) {
@@ -629,7 +629,7 @@ export function executePine(
       if (stmt.k === "decl") originals.set(stmt.name, { b: builtinSeries[stmt.name], p: precomputed[stmt.name], d: inputDefaults[stmt.name] });
     }
 
-    const { locals, success } = scopedPrecompute(fn, callArgs, callKw);
+    const { success } = scopedPrecompute(fn, callArgs, callKw);
 
     let results: (number[] | null)[] | null = null;
     if (success) {
@@ -3083,9 +3083,7 @@ export function executePine(
 
     compiledLoop(rctx);
     usedCompiledPath = true;
-    console.log(`[Pine] Backtest executed via compiled path (${n} bars)`);
   } else {
-    console.log(`[Pine] Backtest executed via interpreter path (${n} bars)`);
     for (currentBar = 0; currentBar < n; currentBar++) {
       opsThrottle = 0;
 
