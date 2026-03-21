@@ -442,7 +442,10 @@ function jitterParams(baseParams: Record<string, any>, inputs: LabPineInput[], j
 }
 
 function scoreResult(r: LabBacktestResult): number {
-  return r.netProfitPercent * 1000 + r.winRatePercent * 10 - r.maxDrawdownPercent * 5;
+  const dd = r.maxDrawdownPercent;
+  const safeMaxLev = dd > 0 ? Math.min(20, 80 / dd) : 20;
+  const leveragedProfit = r.netProfitPercent * safeMaxLev;
+  return leveragedProfit * 100 + r.winRatePercent * 10 + r.profitFactor * 50 - dd * 50;
 }
 
 function meetsFilters(result: LabBacktestResult, config: WorkerInput["config"]): boolean {

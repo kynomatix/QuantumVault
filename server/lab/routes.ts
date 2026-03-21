@@ -1468,6 +1468,12 @@ export function registerLabRoutes(app: Express): void {
         status: "running",
       });
       job.runId = newRun.id;
+      await db.update(labOptimizationRuns).set({
+        configSnapshot: {
+          type: "refine", config, processOrdersOnClose: refineProcessOrdersOnClose, sourceRunId: runId,
+          targetTicker: ticker, targetTimeframe: timeframe,
+        } as any,
+      }).where(eq(labOptimizationRuns.id, newRun.id));
       await labStorage.saveCheckpoint(newRun.id, { completedCombos: [], configSnapshot: config });
 
       let guidedInsights: import("@shared/schema").GuidedInsights | undefined;
