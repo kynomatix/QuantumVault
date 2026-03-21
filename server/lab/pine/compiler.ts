@@ -21,12 +21,27 @@ export interface CompilerContext {
   localVarNames?: Set<string>;
 }
 
+const INLINE_HISTORY_TA = new Set(["crossover", "crossunder", "cross", "change", "rising", "falling"]);
+
 function findHistoryAccessed(stmts: Stmt[]): Set<string> {
   const accessed = new Set<string>();
+  function markArgs(args: Expr[]) {
+    for (const a of args) {
+      if (a.k === "id") accessed.add(a.name);
+    }
+  }
   function walkExpr(e: Expr) {
     if (!e || typeof e !== "object") return;
     if (e.k === "sub" && e.obj.k === "id") {
       accessed.add(e.obj.name);
+    }
+    if (e.k === "call") {
+      if (e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
+        markArgs(e.args);
+      }
+      if (e.fn.k === "id" && (INLINE_HISTORY_TA.has(e.fn.name) || ["sma","ema","wma","linreg","rma","vwma","swma","hma","dema","tema","alma","rsi","cci","mfi","roc","dev","median","percentrank","cum","stoch","macd","bb","kc","atr","tr","adx","supertrend","dmi","highest","lowest","barssince","valuewhen","pivothigh","pivotlow","percentile_nearest_rank","percentile_linear_interpolation"].includes(e.fn.name))) {
+        markArgs(e.args);
+      }
     }
     for (const k of Object.keys(e) as (keyof typeof e)[]) {
       const v = (e as any)[k];
@@ -179,10 +194,19 @@ export function compilePineHotLoop(
 
     const localVarNames = new Set<string>();
     const reassignedNames = new Set<string>();
-    for (const s of liveStmts) {
-      if (s.k === "reassign" && s.target.k === "id") reassignedNames.add(s.target.name);
-      if (s.k === "aug" && s.target.k === "id") reassignedNames.add(s.target.name);
+    function collectReassigned(stmts: Stmt[]) {
+      for (const s of stmts) {
+        if (s.k === "reassign" && s.target.k === "id") reassignedNames.add(s.target.name);
+        if (s.k === "aug" && s.target.k === "id") reassignedNames.add(s.target.name);
+        if (s.k === "if") {
+          collectReassigned(s.body);
+          if (s.el) collectReassigned(s.el);
+          if (s.elifs) for (const ei of s.elifs) collectReassigned(ei.body);
+        }
+        if (s.k === "for" || s.k === "while") collectReassigned(s.body);
+      }
     }
+    collectReassigned(liveStmts);
     for (const s of liveStmts) {
       if (s.k === "decl" && !s.isVar &&
           !ctx.precomputedNames.has(s.name) &&
@@ -255,6 +279,7 @@ export function compilePineHotLoop(
       `    _broker.fillPendingEntries(_openArr[_bar], _bar, _candles[_bar].time);`,
       `    _broker.evaluateExits(_bar, _openArr[_bar], _highArr[_bar], _lowArr[_bar], _closeArr[_bar], _candles[_bar].time);`,
       `  }`,
+      `  _broker.snapshotPositionSize(_bar);`,
       `  _barFn(ctx);`,
       `  if (_poc) {`,
       `    _broker.fillPendingCloses(_closeArr[_bar], _bar, _candles[_bar].time);`,
@@ -266,7 +291,7 @@ export function compilePineHotLoop(
     ].join("\n");
     const loopFn = new Function("ctx", loopCode);
 
-    const _N = (v: any) => v == null ? 0 : +v || 0;
+    const _N = (v: any) => v == null ? NaN : typeof v === 'number' ? v : typeof v === 'boolean' ? (v ? 1 : 0) : +v;
     const _add = (a: any, b: any) => (typeof a === 'string' || typeof b === 'string') ? String(a) + String(b) : _N(a) + _N(b);
     const capturedBarFn = barFn;
 
@@ -278,6 +303,7 @@ export function compilePineHotLoop(
     };
     return result;
   } catch (e: any) {
+    if (process.env.NODE_ENV !== "production") console.log("[Pine compiler] compilation error:", e.message?.substring(0, 300));
     return null;
   }
 }
@@ -354,6 +380,13 @@ function compileExpr(e: Expr, ctx: CompilerContext): string {
         }
         return `ctx.getVar(${safeStr(name)}, Math.round(ctx.toNum(${offset})))`;
       }
+      if (e.obj.k === "mem" && e.obj.obj.k === "id" && e.obj.obj.name === "strategy") {
+        const prop = e.obj.prop;
+        const offset = compileExpr(e.idx, ctx);
+        if (prop === "position_size") {
+          return `ctx.broker.getPositionSizeHistory(Math.round(ctx.toNum(${offset})), ctx.bar)`;
+        }
+      }
       return "null";
     }
     case "mem":
@@ -397,7 +430,7 @@ function compileIdExpr(name: string, ctx: CompilerContext): string {
   if (ctx.paramNames.has(name))
     return `ctx.params[${safeStr(name)}]`;
   if (ctx.inputDefaultNames.has(name))
-    return `ctx.inputDefaults[${safeStr(name)}]`;
+    return `((_t = ctx.inputDefaults[${safeStr(name)}]), typeof _t === 'string' && ctx.builtinSeries[_t] ? ctx.builtinSeries[_t][ctx.bar] : _t)`;
 
   switch (name) {
     case "bar_index": return "ctx.bar";

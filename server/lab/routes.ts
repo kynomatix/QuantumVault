@@ -1878,6 +1878,35 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  app.post("/api/lab/compiler/parity-test", requireLabAuth, async (req: Request, res: Response) => {
+    try {
+      const { strategyId, ticker, timeframe } = req.body;
+      if (!strategyId) return res.status(400).json({ error: "strategyId required" });
+      const strategy = await labStorage.getStrategy(strategyId);
+      if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+      const { compilePine: compilePineFn, runPineParityTest } = await import("./pine/index");
+      const plan = compilePineFn(strategy.pineScript);
+      const useTicker = ticker || "SOL/USDT:USDT";
+      const useTf = timeframe || "4h";
+      const candles = await fetchOHLCV(useTicker, useTf, 500);
+      if (!candles || candles.length < 50) {
+        return res.status(400).json({ error: `Not enough candle data for ${useTicker} ${useTf}` });
+      }
+      const config = {
+        initialCapital: strategy.config?.initialCapital ?? 10000,
+        commission: strategy.config?.commission ?? 0.0005,
+        positionSize: strategy.config?.positionSize ?? 100,
+        processOrdersOnClose: strategy.config?.processOrdersOnClose ?? false,
+      };
+      const result = runPineParityTest(plan, candles, {}, useTicker, useTf, config);
+      console.log(`[Compiler Parity] Strategy ${strategyId} (${strategy.name}): match=${result.match}, path=${result.compiledPath}, speedup=${result.speedup}, diffs=${result.diffs.length > 0 ? result.diffs.join('; ') : 'none'}`);
+      res.json({ strategy: strategy.name, ticker: useTicker, timeframe: useTf, bars: candles.length, ...result });
+    } catch (err: any) {
+      console.log(`[Compiler Parity] Error: ${err.message}`);
+      res.status(500).json({ error: err.message, stack: err.stack?.split('\n').slice(0, 5) });
+    }
+  });
+
   app.post("/api/lab/queue/kick", requireLabAuth, async (_req: Request, res: Response) => {
     console.log(`[QuantumLab] Manual queue kick requested (pumpRunning=${pumpQueueRunning})`);
     if (pumpQueueRunning) {

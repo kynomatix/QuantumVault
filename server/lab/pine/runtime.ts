@@ -1,6 +1,7 @@
 import type { Expr, Stmt } from "./parser";
 import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "../indicators";
+import { compilePineHotLoop, type CompilerContext } from "./compiler";
 
 export interface OHLCV {
   time: number; open: number; high: number; low: number; close: number; volume: number;
@@ -55,6 +56,7 @@ class Broker {
   trades: LabTradeRecord[] = [];
   equity: number;
   private config: PineEngineConfig;
+  private _posSizeHistory: number[] = [];
 
   constructor(config: PineEngineConfig) {
     this.config = config;
@@ -63,6 +65,13 @@ class Broker {
 
   get positionSize(): number { return this.position ? (this.position.direction === "long" ? this.position.size : -this.position.size) : 0; }
   get positionAvgPrice(): number { return this.position ? this.position.avgPrice : NaN; }
+
+  snapshotPositionSize(bar: number) { this._posSizeHistory[bar] = this.positionSize; }
+  getPositionSizeHistory(offset: number, currentBar?: number): number {
+    const bar = currentBar !== undefined ? currentBar : this._posSizeHistory.length - 1;
+    const idx = bar - offset;
+    return idx >= 0 ? (this._posSizeHistory[idx] ?? 0) : 0;
+  }
 
   queueEntry(id: string, direction: "long" | "short", bar: number, time: number) {
     this.pendingEntries = this.pendingEntries.filter(e => e.id !== id);
@@ -300,6 +309,7 @@ export function executePine(
   config: PineEngineConfig,
   shared?: PineSharedArrays,
   sharedIndicatorCache?: Map<string, any>,
+  forceInterpreter?: boolean,
 ): LabBacktestResult {
   const params: Record<string, any> = {};
   for (const [k, v] of Object.entries(rawParams)) {
@@ -1242,6 +1252,9 @@ export function executePine(
         const idx = evalExpr(e.idx);
         const offset = Math.round(toNum(idx));
         if (obj.k === "id") return getVar(obj.name, offset);
+        if (obj.k === "mem" && obj.obj.k === "id" && obj.obj.name === "strategy" && obj.prop === "position_size") {
+          return broker.getPositionSizeHistory(offset, currentBar);
+        }
         if (offset > 0 && currentBar >= offset) {
           const saved = currentBar;
           try {
@@ -2336,24 +2349,6 @@ export function executePine(
         const when = getKw("when");
         if (when !== undefined && !when) return NA;
         const direction = dir === "long" ? "long" as const : "short" as const;
-        if ((globalThis as any).__PINE_DEBUG_ENTRIES) {
-          const ms = vars["ms"] ? vars["ms"][currentBar] : "?";
-          const ws = vars["ws"] ? vars["ws"][currentBar] : "?";
-          const dt = new Date(candles[currentBar].time).toISOString().replace("T"," ").slice(0,19);
-          const mp1 = vars["m_p1"] ? vars["m_p1"][currentBar] : "?";
-          const mp2 = vars["m_p2"] ? vars["m_p2"][currentBar] : "?";
-          const mneck = vars["m_neck"] ? vars["m_neck"][currentBar] : "?";
-          const wt1 = vars["w_t1"] ? vars["w_t1"][currentBar] : "?";
-          const wt2 = vars["w_t2"] ? vars["w_t2"][currentBar] : "?";
-          const wneck = vars["w_neck"] ? vars["w_neck"][currentBar] : "?";
-          const phVal = precomputed["ph"] ? precomputed["ph"][currentBar] : "?";
-          const plVal = precomputed["pl"] ? precomputed["pl"][currentBar] : "?";
-          const atrVal = precomputed["atr"] ? precomputed["atr"][currentBar] : "?";
-          console.log(`[ENTRY] bar=${currentBar} ${dt} ${direction} close=${closeArr[currentBar].toFixed(3)} ms=${ms} ws=${ws}`);
-          console.log(`  M: p1=${mp1} p2=${mp2} neck=${mneck}`);
-          console.log(`  W: t1=${wt1} t2=${wt2} neck=${wneck}`);
-          console.log(`  ph=${isNaN(phVal as any) ? "na" : phVal} pl=${isNaN(plVal as any) ? "na" : plVal} atr=${typeof atrVal === 'number' ? atrVal.toFixed(3) : atrVal}`);
-        }
         broker.queueEntry(id, direction, bar, time);
         return NA;
       }
@@ -2696,35 +2691,237 @@ export function executePine(
 
   const equityValues = new Array(n);
 
-  for (currentBar = 0; currentBar < n; currentBar++) {
-    opsThrottle = 0;
+  const varIsVarSet = new Set<string>();
+  for (const s of hotStmts) {
+    if (s.k === "decl" && s.isVar) varIsVarSet.add(s.name);
+  }
 
-    if (!config.processOrdersOnClose && currentBar > 0) {
-      broker.fillPendingCloses(openArr[currentBar], currentBar, candles[currentBar].time);
-      broker.fillPendingEntries(openArr[currentBar], currentBar, candles[currentBar].time);
-      broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
+  let compiledLoop: ((rctx: any) => void) | null = null;
+  let usedCompiledPath = false;
+  if (!forceInterpreter) {
+    try {
+      const compilerCtx: CompilerContext = {
+        precomputedNames: new Set(Object.keys(precomputed)),
+        builtinSeriesNames: new Set(Object.keys(builtinSeries)),
+        inputDefaultNames: new Set(Object.keys(inputDefaults)),
+        varIsVarNames: varIsVarSet,
+        userFunctionNames: new Set(Object.keys(userFunctions)),
+        paramNames: new Set(Object.keys(params)),
+      };
+      compiledLoop = compilePineHotLoop(hotStmts, userFunctions, compilerCtx) as any;
+    } catch (e: any) {
+      if (process.env.NODE_ENV !== "production") console.log("[Pine compiler] fallback:", e.message?.substring(0, 200));
     }
+  }
 
-    for (const stmt of hotStmts) {
-      try {
-        execStmt(stmt);
-      } catch (e: any) {
-        if (e.message === "Global execution budget exceeded") {
-          console.log(`[PineScript] Global budget exceeded at bar ${currentBar}/${n}`);
-          currentBar = n;
-          break;
+  if (compiledLoop) {
+    const rctx: any = {
+      bar: 0,
+      n,
+      ticker,
+      broker,
+      builtinSeries,
+      pc: precomputed,
+      vars,
+      params,
+      inputDefaults,
+      _openArr: openArr,
+      _highArr: highArr,
+      _lowArr: lowArr,
+      _closeArr: closeArr,
+      _candles: candles,
+      _equityValues: equityValues,
+      _processOrdersOnClose: !!config.processOrdersOnClose,
+      _barFn: null as any,
+      _N: null as any,
+      _add: null as any,
+
+      getVar(name: string, offset: number): any {
+        const idx = rctx.bar - offset;
+        if (idx < 0) return null;
+        const s = allSeries.get(name);
+        if (s) {
+          const v = (s as any)[idx];
+          return v === undefined || (typeof v === 'number' && v !== v) ? null : v;
         }
-        if (e.message === "Execution budget exceeded") break;
+        return null;
+      },
+
+      setVar(name: string, value: any) {
+        let arr = vars[name];
+        if (!arr) {
+          arr = new Array(n);
+          vars[name] = arr;
+          allSeries.set(name, arr);
+        }
+        arr[rctx.bar] = value;
+      },
+
+      markVar(name: string) {
+        varIsVar.add(name);
+        if (vars[name] && !allSeries.has(name)) {
+          allSeries.set(name, vars[name]);
+        }
+      },
+
+      toNum(v: any): number { return v == null ? NaN : Number(v); },
+      toNumOrNull(v: any): number | null {
+        if (v == null) return null;
+        const num = Number(v);
+        return isNaN(num) ? null : num;
+      },
+      isNa(v: any): boolean { return v === null || v === undefined || (typeof v === 'number' && isNaN(v)); },
+
+      fixnan(v: any, name: string | null): any {
+        if (v !== null && v !== undefined && !(typeof v === 'number' && isNaN(v))) return v;
+        if (name) {
+          for (let b = rctx.bar - 1; b >= 0; b--) {
+            const prev = rctx.getVar(name, rctx.bar - b);
+            if (prev !== null && prev !== undefined && !(typeof prev === 'number' && isNaN(prev))) return prev;
+          }
+        }
+        return null;
+      },
+
+      binOp(op: string, l: any, r: any): any {
+        return evalBinOp(op, l, r);
+      },
+
+      time(): number { return candles[rctx.bar].time; },
+      close(): number { return closeArr[rctx.bar]; },
+
+      getHistValue(ast: any, offset: any): any {
+        const off = Math.round(toNum(offset));
+        if (ast && ast.k === "id") {
+          currentBar = rctx.bar;
+          return getVar(ast.name, off);
+        }
+        if (rctx.bar < off) return null;
+        const saved = currentBar;
+        currentBar = rctx.bar - off;
+        const v = evalExpr(ast);
+        currentBar = saved;
+        return v;
+      },
+
+      evalTaCallCompiled(fn: string, _evaledArgs: any[], astArgs: any[], astKw: any[]): any {
+        currentBar = rctx.bar;
+        return evalTaCall(fn, astArgs, astKw);
+      },
+
+      evalCallFallback(fnAST: any, evaledArgs: any[], evaledKw: any[]): any {
+        currentBar = rctx.bar;
+        const callExpr: Expr = {
+          k: "call",
+          fn: fnAST,
+          args: evaledArgs.map((v: any) => ({ k: "num", v: v } as Expr)),
+          kw: evaledKw.map(([k, v]: [string, any]) => [k, { k: "num", v: v } as Expr] as [string, Expr]),
+        };
+        return evalCall(callExpr as any);
+      },
+
+      evalInputCall(type: string, evaledArgs: any[], evaledKw: [string, any][]): any {
+        const kwDefval = evaledKw.find((k: any) => k[0] === "defval");
+        if (kwDefval) return kwDefval[1];
+        if (evaledArgs.length > 0) return evaledArgs[0];
+        switch (type) {
+          case "int": return 0;
+          case "float": return 0.0;
+          case "bool": return false;
+          case "string": return "";
+          case "source": return closeArr[rctx.bar];
+          default: return 0;
+        }
+      },
+
+      mathAvg(vals: any[]): number {
+        const nums = vals.map(toNum).filter((v: number) => !isNaN(v));
+        return nums.length > 0 ? nums.reduce((a: number, b: number) => a + b, 0) / nums.length : NaN;
+      },
+
+      mathSum(vals: any[]): number {
+        return vals.map(toNum).reduce((a: number, b: number) => a + b, 0);
+      },
+
+      strFormat(...fmtArgs: any[]): string {
+        return String(fmtArgs[0] ?? "");
+      },
+
+      getMemberVar(obj: string, prop: string): any {
+        currentBar = rctx.bar;
+        const v = getVar(obj, 0);
+        if (v !== null && v !== undefined && typeof v === 'object') return v[prop];
+        return null;
+      },
+
+      setMemberVar(obj: string, prop: string, value: any) {
+        currentBar = rctx.bar;
+        const v = getVar(obj, 0);
+        if (v !== null && v !== undefined && typeof v === 'object') v[prop] = value;
+      },
+
+      evalMember(inner: any, prop: string): any {
+        if (inner && typeof inner === 'object' && inner.__ns) {
+          return { __ns: inner.__ns + "." + inner.fn, fn: prop };
+        }
+        if (typeof inner === 'object' && inner !== null) return inner[prop];
+        return null;
+      },
+
+      getMemberDynamic(obj: any, prop: string): any {
+        if (typeof obj === 'object' && obj !== null) return obj[prop];
+        return null;
+      },
+
+      timestamp(tsArgs: any[]): number {
+        if (tsArgs.length >= 3) {
+          return Date.UTC(toNum(tsArgs[0]), toNum(tsArgs[1]) - 1, toNum(tsArgs[2]),
+            tsArgs.length > 3 ? toNum(tsArgs[3]) : 0,
+            tsArgs.length > 4 ? toNum(tsArgs[4]) : 0,
+            tsArgs.length > 5 ? toNum(tsArgs[5]) : 0);
+        }
+        if (tsArgs.length === 1 && typeof tsArgs[0] === "string") {
+          const d = Date.parse(tsArgs[0]);
+          return isNaN(d) ? Date.now() : d;
+        }
+        return Date.now();
+      },
+    };
+
+    compiledLoop(rctx);
+    usedCompiledPath = true;
+  } else {
+    for (currentBar = 0; currentBar < n; currentBar++) {
+      opsThrottle = 0;
+
+      if (!config.processOrdersOnClose && currentBar > 0) {
+        broker.fillPendingCloses(openArr[currentBar], currentBar, candles[currentBar].time);
+        broker.fillPendingEntries(openArr[currentBar], currentBar, candles[currentBar].time);
+        broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
       }
-    }
+      broker.snapshotPositionSize(currentBar);
 
-    if (config.processOrdersOnClose) {
-      broker.fillPendingCloses(closeArr[currentBar], currentBar, candles[currentBar].time);
-      broker.fillPendingEntries(closeArr[currentBar], currentBar, candles[currentBar].time);
-      broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
-    }
+      for (const stmt of hotStmts) {
+        try {
+          execStmt(stmt);
+        } catch (e: any) {
+          if (e.message === "Global execution budget exceeded") {
+            console.log(`[PineScript] Global budget exceeded at bar ${currentBar}/${n}`);
+            currentBar = n;
+            break;
+          }
+          if (e.message === "Execution budget exceeded") break;
+        }
+      }
 
-    equityValues[currentBar] = broker.getEquityWithUnrealized(closeArr[currentBar]);
+      if (config.processOrdersOnClose) {
+        broker.fillPendingCloses(closeArr[currentBar], currentBar, candles[currentBar].time);
+        broker.fillPendingEntries(closeArr[currentBar], currentBar, candles[currentBar].time);
+        broker.evaluateExits(currentBar, openArr[currentBar], highArr[currentBar], lowArr[currentBar], closeArr[currentBar], candles[currentBar].time);
+      }
+
+      equityValues[currentBar] = broker.getEquityWithUnrealized(closeArr[currentBar]);
+    }
   }
 
   if (broker.position) {
@@ -2759,6 +2956,7 @@ export function executePine(
 
   return {
     ticker, timeframe,
+    compiledPath: usedCompiledPath ? "compiled" : "interpreter",
     netProfitPercent: Math.round(netProfitPercent * 100) / 100,
     winRatePercent: trades.length > 0 ? Math.round((winCount / trades.length) * 10000) / 100 : 0,
     maxDrawdownPercent: Math.round(maxDrawdown * 100) / 100,
