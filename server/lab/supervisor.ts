@@ -108,7 +108,14 @@ export function createLabSupervisor(): LabSupervisor {
             console.log(`[LabSupervisor] Health check failed ${MAX_HEALTH_FAILURES} times, killing child for restart`);
             try { child.kill("SIGKILL"); } catch {}
           } else if (!ownsChild) {
+            const stalePid = readPidFile();
+            if (stalePid) {
+              console.log(`[LabSupervisor] Killing unreachable existing process (pid: ${stalePid}) before spawning new one`);
+              try { process.kill(stalePid, "SIGKILL"); } catch {}
+              removePidFile();
+            }
             console.log(`[LabSupervisor] Existing lab process unreachable, spawning new one`);
+            ownsChild = true;
             spawnAndWaitForReady().catch((err) => {
               console.error(`[LabSupervisor] Failed to spawn new lab: ${err.message}`);
             });

@@ -790,22 +790,29 @@ export function registerLabRoutes(app: Express): void {
 
       if (myGeneration !== retryGeneration) {
         console.log(`[QuantumLab] Auto-retry aborted after delay for run ${runId} — generation changed (${myGeneration} → ${retryGeneration})`);
+        labStorage.updateProgress(oldJobId, { jobId: oldJobId, status: "error", stage: "Retry aborted (superseded)", current: 0, total: 0, percent: 0, elapsed: 0 });
+        setTimeout(() => pumpQueue(), 1000);
         return;
       }
 
       const freshRun = await labStorage.getRun(runId);
       if (!freshRun || freshRun.status !== "paused") {
         console.log(`[QuantumLab] Auto-retry aborted — run ${runId} status changed to ${freshRun?.status}`);
+        labStorage.updateProgress(oldJobId, { jobId: oldJobId, status: "error", stage: "Retry aborted (status changed)", current: 0, total: 0, percent: 0, elapsed: 0 });
+        setTimeout(() => pumpQueue(), 1000);
         return;
       }
       const freshCp = freshRun.checkpoint && typeof freshRun.checkpoint === "object" ? freshRun.checkpoint as any : null;
       if (freshCp?.userCancelled) {
         console.log(`[QuantumLab] Auto-retry aborted — run ${runId} was cancelled during delay`);
+        labStorage.updateProgress(oldJobId, { jobId: oldJobId, status: "error", stage: "Retry aborted (cancelled)", current: 0, total: 0, percent: 0, elapsed: 0 });
+        setTimeout(() => pumpQueue(), 1000);
         return;
       }
 
       if (activeWorker) {
         console.log(`[QuantumLab] Auto-retry skipped — another worker already active`);
+        labStorage.updateProgress(oldJobId, { jobId: oldJobId, status: "error", stage: "Retry skipped (worker busy)", current: 0, total: 0, percent: 0, elapsed: 0 });
         return;
       }
 
@@ -841,10 +848,17 @@ export function registerLabRoutes(app: Express): void {
         }
       }
 
+      const claimed = await labStorage.claimPausedRunForResume(runId);
+      if (!claimed) {
+        console.log(`[QuantumLab] Auto-retry: failed to claim run ${runId} (already running or status changed)`);
+        labStorage.updateProgress(oldJobId, { jobId: oldJobId, status: "error", stage: "Retry skipped (claim failed)", current: 0, total: 0, percent: 0, elapsed: 0 });
+        setTimeout(() => pumpQueue(), 1000);
+        return;
+      }
+
       const newJob = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: false });
       newJob.runId = runId;
       newJob.walletAddress = freshRun.userId ?? undefined;
-      await labStorage.resumeRun(runId);
 
       labStorage.updateProgress(oldJobId, {
         jobId: oldJobId, status: "retrying", stage: `Retrying...`,
@@ -861,6 +875,8 @@ export function registerLabRoutes(app: Express): void {
       startOptimizationJob(config, newJob, runId, resumeCheckpoint, undefined, undefined, undefined, retryPooc);
     } catch (err: any) {
       console.log(`[QuantumLab] Auto-retry error: ${err.message}`);
+      labStorage.updateProgress(oldJobId, { jobId: oldJobId, status: "error", stage: `Retry error: ${err.message}`, current: 0, total: 0, percent: 0, elapsed: 0, error: err.message });
+      setTimeout(() => pumpQueue(), 1000);
     } finally {
       pendingRetryRunId = null;
     }
@@ -1254,11 +1270,15 @@ export function registerLabRoutes(app: Express): void {
         }
       }
 
+      const claimed = await labStorage.claimPausedRunForResume(runId);
+      if (!claimed) {
+        return res.status(409).json({ error: "Could not claim run — another optimization may be running" });
+      }
+
       const job = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: !!activeWorker });
       job.runId = runId;
       job.walletAddress = (req as any).walletAddress;
 
-      await labStorage.resumeRun(runId);
       console.log(`[QuantumLab] Resuming run ${runId} — ${checkpoint.completedCombos.length} combos already done${checkpoint.currentCombo ? `, mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}` : ""}`);
 
       startOptimizationJob(config, job, runId, checkpoint, undefined, undefined, undefined, resumeProcessOrdersOnClose);
@@ -2093,10 +2113,16 @@ export function registerLabRoutes(app: Express): void {
           }
         }
 
+        const claimed = await labStorage.claimPausedRunForResume(runId);
+        if (!claimed) {
+          console.log(`[QuantumLab] Lazy recovery: failed to claim run ${runId} (already running or status changed)`);
+          labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
+          break;
+        }
+
         const newJob = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: false });
         newJob.runId = runId;
         newJob.walletAddress = run.userId ?? undefined;
-        await labStorage.resumeRun(runId);
 
         const resumeCheckpoint = hasProgress ? checkpoint : undefined;
         const attempt = crashCount + 1;

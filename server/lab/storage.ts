@@ -39,6 +39,7 @@ export interface ILabStorage {
   failRun(id: number, force?: boolean): Promise<void>;
   pauseRun(id: number): Promise<void>;
   resumeRun(id: number): Promise<void>;
+  claimPausedRunForResume(id: number): Promise<boolean>;
   deleteRun(id: number): Promise<void>;
   deleteResult(resultId: number): Promise<void>;
   clearStrategyResults(strategyId: number): Promise<number>;
@@ -153,6 +154,8 @@ export class LabDatabaseStorage implements ILabStorage {
       let recovered = 0;
       for (const run of failedRuns) {
         const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+        const exhausted = ((cp?.autoResumeAttempts as number) ?? 0) >= 3;
+        if (exhausted) continue;
         const hasCheckpoint = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
         const hasConfigSnapshot = !!cp?.configSnapshot;
         const savedResults = await db.select({ id: labOptimizationResults.id })
@@ -330,6 +333,22 @@ export class LabDatabaseStorage implements ILabStorage {
     await db.update(labOptimizationRuns).set({
       status: "running",
     }).where(eq(labOptimizationRuns.id, id));
+  }
+
+  async claimPausedRunForResume(id: number): Promise<boolean> {
+    const result = await db.execute(sql`
+      UPDATE ${labOptimizationRuns}
+      SET status = 'running'
+      WHERE id = ${id}
+        AND status = 'paused'
+        AND NOT EXISTS (
+          SELECT 1 FROM ${labOptimizationRuns} blocker
+          WHERE blocker.status = 'running'
+        )
+      RETURNING id
+    `);
+    const rows = result.rows as any[];
+    return rows && rows.length > 0;
   }
 
   async saveCheckpoint(runId: number, checkpoint: LabCheckpoint): Promise<void> {
