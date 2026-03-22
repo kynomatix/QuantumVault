@@ -787,7 +787,7 @@ export class LabDatabaseStorage implements ILabStorage {
         WHERE q.status = 'queued' ${walletFilter}
           AND NOT EXISTS (
             SELECT 1 FROM ${labOptimizationRuns} blocker
-            WHERE blocker.status IN ('running', 'paused')
+            WHERE blocker.status = 'running'
           )
         ORDER BY q.queue_order ASC NULLS LAST, q.id ASC
         LIMIT 1

@@ -1989,7 +1989,7 @@ export function registerLabRoutes(app: Express): void {
     try {
       const blockers = await db.select({ id: labOptimizationRuns.id })
         .from(labOptimizationRuns)
-        .where(or(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.status, "paused"))!)
+        .where(eq(labOptimizationRuns.status, "running"))
         .limit(1);
       if (blockers.length > 0) return;
       const hasQueued = await db.select({ id: labOptimizationRuns.id })
