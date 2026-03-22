@@ -151,8 +151,14 @@ class Broker {
       trailActivated: false,
       trailExtreme: 0,
     };
-    if (existing >= 0) this.pendingExits[existing] = exit;
-    else this.pendingExits.push(exit);
+    if (existing >= 0) {
+      const old = this.pendingExits[existing];
+      exit.trailActivated = old.trailActivated;
+      exit.trailExtreme = old.trailExtreme;
+      this.pendingExits[existing] = exit;
+    } else {
+      this.pendingExits.push(exit);
+    }
   }
 
   evaluateExits(bar: number, o: number, h: number, l: number, c: number, time: number) {
@@ -198,6 +204,7 @@ class Broker {
       }
 
       if (fillPrice === null && ex.trailPrice !== null && ex.trailOffset !== null) {
+        const wasActivated = ex.trailActivated;
         if (!ex.trailActivated) {
           if (isLong && h >= ex.trailPrice) { ex.trailActivated = true; ex.trailExtreme = h; }
           if (!isLong && l <= ex.trailPrice) { ex.trailActivated = true; ex.trailExtreme = l; }
@@ -206,11 +213,17 @@ class Broker {
           if (isLong) {
             ex.trailExtreme = Math.max(ex.trailExtreme, h);
             const trailStop = ex.trailExtreme - ex.trailOffset;
-            if (l <= trailStop) { fillPrice = Math.min(o, trailStop); reason = "Trail"; }
+            if (l <= trailStop) {
+              fillPrice = wasActivated ? Math.min(o, trailStop) : trailStop;
+              reason = "Trail";
+            }
           } else {
             ex.trailExtreme = Math.min(ex.trailExtreme, l);
             const trailStop = ex.trailExtreme + ex.trailOffset;
-            if (h >= trailStop) { fillPrice = Math.max(o, trailStop); reason = "Trail"; }
+            if (h >= trailStop) {
+              fillPrice = wasActivated ? Math.max(o, trailStop) : trailStop;
+              reason = "Trail";
+            }
           }
         }
       }
@@ -2492,7 +2505,8 @@ export function executePine(
         const stop = getKw("stop");
         const limit = getKw("limit");
         const trailPrice = getKw("trail_price");
-        const trailOffset = getKw("trail_offset");
+        const rawTrailOffset = getKw("trail_offset");
+        const trailOffset = (rawTrailOffset != null && !isNa(rawTrailOffset)) ? rawTrailOffset * 0.01 : rawTrailOffset;
         const qtyPercent = getKw("qty_percent") ?? 100;
         broker.addExit(id, String(fromEntry), stop ?? null, limit ?? null, trailPrice ?? null, trailOffset ?? null, toNum(qtyPercent));
         return NA;
@@ -2893,6 +2907,12 @@ export function executePine(
         if (v == null) return null;
         const num = Number(v);
         return isNaN(num) ? null : num;
+      },
+      trailOffsetToPrice(v: any): number | null {
+        if (v == null) return null;
+        const num = Number(v);
+        if (isNaN(num)) return null;
+        return num * 0.01;
       },
       isNa(v: any): boolean { return v === null || v === undefined || (typeof v === 'number' && isNaN(v)); },
 

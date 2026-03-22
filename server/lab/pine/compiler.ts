@@ -656,7 +656,7 @@ function compileStrategyCall(fn: string, args: Expr[], kw: [string, Expr][], ctx
       const trailPrice = getKw("trail_price", "null");
       const trailOffset = getKw("trail_offset", "null");
       const qtyPct = getKw("qty_percent", "100");
-      return `ctx.broker.addExit(${id}, ${fromEntry}, ctx.toNumOrNull(${stop}), ctx.toNumOrNull(${limit}), ctx.toNumOrNull(${trailPrice}), ctx.toNumOrNull(${trailOffset}), ctx.toNum(${qtyPct}))`;
+      return `ctx.broker.addExit(${id}, ${fromEntry}, ctx.toNumOrNull(${stop}), ctx.toNumOrNull(${limit}), ctx.toNumOrNull(${trailPrice}), ctx.trailOffsetToPrice(${trailOffset}), ctx.toNum(${qtyPct}))`;
     }
     default:
       return "null";
