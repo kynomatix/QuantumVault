@@ -2032,19 +2032,19 @@ export function executePine(
         break;
       }
       case "mfi": {
-        const len = getL(0);
-        const hArr = getH(), lArr = getL_arr(), clArr = getCl();
-        const typPrice = new Array(n);
-        for (let i = 0; i < n; i++) typPrice[i] = (hArr[i] + lArr[i] + clArr[i]) / 3;
-        result = new Array(n).fill(NaN);
-        for (let i = len; i < n; i++) {
-          let posMF = 0, negMF = 0;
-          for (let j = i - len + 1; j <= i; j++) {
-            const mf = typPrice[j] * (volArr[j] || 1);
-            if (typPrice[j] > typPrice[j - 1]) posMF += mf;
-            else if (typPrice[j] < typPrice[j - 1]) negMF += mf;
+        const srcArr = getSrc(0) || getCl();
+        const len = getL(1, 14);
+        if (srcArr) {
+          result = new Array(n).fill(NaN);
+          for (let i = len; i < n; i++) {
+            let posMF = 0, negMF = 0;
+            for (let j = i - len + 1; j <= i; j++) {
+              const mf = srcArr[j] * (volArr[j] || 1);
+              if (srcArr[j] > srcArr[j - 1]) posMF += mf;
+              else if (srcArr[j] < srcArr[j - 1]) negMF += mf;
+            }
+            result[i] = negMF === 0 ? 100 : 100 - (100 / (1 + posMF / negMF));
           }
-          result[i] = negMF === 0 ? 100 : 100 - (100 / (1 + posMF / negMF));
         }
         break;
       }
