@@ -14,7 +14,7 @@ const LAB_PORT = 5050;
 const PID_FILE = "/tmp/quantumlab.pid";
 const MIN_RESTART_DELAY = 1000;
 const MAX_RESTART_DELAY = 30000;
-const HEALTH_CHECK_INTERVAL = 15000;
+const HEALTH_CHECK_INTERVAL = 30000;
 const READY_TIMEOUT = 120000;
 
 function deriveLabAuthSecret(): string {
@@ -31,7 +31,7 @@ export function getLabAuthSecret(): string {
 async function probeHealth(port: number): Promise<boolean> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    const timeout = setTimeout(() => controller.abort(), 8000);
     const resp = await fetch(`http://127.0.0.1:${port}/health`, {
       signal: controller.signal,
     });
@@ -83,7 +83,7 @@ export function createLabSupervisor(): LabSupervisor {
   }
 
   let consecutiveHealthFailures = 0;
-  const MAX_HEALTH_FAILURES = 3;
+  const MAX_HEALTH_FAILURES = 5;
 
   function startHealthCheck() {
     if (healthTimer) clearInterval(healthTimer);
