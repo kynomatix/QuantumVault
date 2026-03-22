@@ -1133,7 +1133,88 @@ export function executePine(
         }
         precomputed[name] = result; return true;
       }
-      case "dmi": return false;
+      case "dmi": {
+        const diLen = getLen(0, 14);
+        const adxSmooth = args.length > 1 ? getLen(1, diLen) : diLen;
+        const { diPlus, diMinus, adxVal } = computeDmi(diLen, adxSmooth);
+        precomputed[name] = adxVal as number[];
+        precomputed[name + "__diplus"] = diPlus as number[];
+        precomputed[name + "__diminus"] = diMinus as number[];
+        return true;
+      }
+      case "stoch": {
+        const srcArr = getSource(0) || cl;
+        const hSource = args.length > 1 ? getSource(1) : h;
+        const lSource = args.length > 2 ? getSource(2) : l;
+        const len = args.length > 3 ? getLen(3, 14) : 14;
+        if (!srcArr || !hSource || !lSource) return false;
+        const res = new Array(n).fill(NaN);
+        for (let i = len - 1; i < n; i++) {
+          let hh = -Infinity, ll = Infinity;
+          for (let j = i - len + 1; j <= i; j++) {
+            if (hSource[j] > hh) hh = hSource[j];
+            if (lSource[j] < ll) ll = lSource[j];
+          }
+          const range = hh - ll;
+          res[i] = range > 0 ? ((srcArr[i] - ll) / range) * 100 : 50;
+        }
+        precomputed[name] = res;
+        return true;
+      }
+      case "falling": {
+        const src = getSource(0);
+        const len = getLen(1, 1);
+        if (!src) return false;
+        const result = new Array(n).fill(0);
+        for (let i = len; i < n; i++) {
+          let isFalling = true;
+          for (let j = 0; j < len; j++) {
+            if (isNaN(src[i - j]) || isNaN(src[i - j - 1]) || src[i - j] >= src[i - j - 1]) { isFalling = false; break; }
+          }
+          result[i] = isFalling ? 1 : 0;
+        }
+        precomputed[name] = result;
+        return true;
+      }
+      case "rising": {
+        const src = getSource(0);
+        const len = getLen(1, 1);
+        if (!src) return false;
+        const result = new Array(n).fill(0);
+        for (let i = len; i < n; i++) {
+          let isRising = true;
+          for (let j = 0; j < len; j++) {
+            if (isNaN(src[i - j]) || isNaN(src[i - j - 1]) || src[i - j] <= src[i - j - 1]) { isRising = false; break; }
+          }
+          result[i] = isRising ? 1 : 0;
+        }
+        precomputed[name] = result;
+        return true;
+      }
+      case "dev": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.stdev(src, len);
+        return true;
+      }
+      case "mfi": {
+        const srcArr = getSource(0) || cl;
+        const len = getLen(1, 14);
+        if (!srcArr) return false;
+        const vol = shared?.numVolArr ?? Array.from(volArr) as number[];
+        const result = new Array(n).fill(NaN);
+        for (let i = len; i < n; i++) {
+          let posFlow = 0, negFlow = 0;
+          for (let j = i - len + 1; j <= i; j++) {
+            const flow = srcArr[j] * (vol[j] || 1);
+            if (srcArr[j] > srcArr[j - 1]) posFlow += flow;
+            else if (srcArr[j] < srcArr[j - 1]) negFlow += flow;
+          }
+          result[i] = negFlow === 0 ? 100 : 100 - (100 / (1 + posFlow / negFlow));
+        }
+        precomputed[name] = result;
+        return true;
+      }
       case "change": {
         const src = getSource(0);
         if (!src) return false;
@@ -1184,7 +1265,6 @@ export function executePine(
         precomputed[name] = result; return true;
       }
       case "barssince": case "valuewhen": return false;
-      case "falling": case "rising": case "mfi": case "dev": return false;
       default: return false;
     }
   }

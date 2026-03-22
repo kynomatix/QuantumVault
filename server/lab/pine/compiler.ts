@@ -235,6 +235,11 @@ export function compilePineHotLoop(
     const builtinNames = ["close", "open", "high", "low", "volume", "hl2", "hlc3", "ohlc4"];
     const builtinArrDecls = builtinNames.map(n => `var _${n}Arr = ctx.builtinSeries["${n}"];`).join("\n");
 
+    const varBindingDecls = [...ctx.varIsVarNames].map(name => {
+      const safe = `_vb_${name.replace(/[^a-zA-Z0-9_$]/g, "_")}`;
+      return `var ${safe} = _vars[${safeStr(name)}];`;
+    }).join("\n");
+
     const loopCode = [
       `"use strict";`,
       `var _or, _nz, _dr, _bl, _br, _t, _rt, _ca, _cb, _cap, _cbp, _md;`,
@@ -249,6 +254,7 @@ export function compilePineHotLoop(
       `var _vars = ctx.vars;`,
       `var _pc = ctx.pc;`,
       `var _n = ctx.n;`,
+      varBindingDecls,
       `for (var _bar = 0; _bar < _n; _bar++) {`,
       `  ctx.bar = _bar;`,
       `  if (!_poc && _bar > 0) {`,
@@ -341,7 +347,8 @@ function compileExpr(e: Expr, ctx: CompilerContext): string {
           return `((_t = _bar - Math.round(_toNum(${offset}))), _t >= 0 ? ctx.builtinSeries[${safeStr(name)}][_t] : null)`;
         }
         if (ctx.varIsVarNames.has(name)) {
-          return `((_t = _vars[${safeStr(name)}]), _t ? ((_t = _t[_bar - Math.round(_toNum(${offset}))]), _t === undefined ? null : _t) : null)`;
+          const vb = `_vb_${name.replace(/[^a-zA-Z0-9_$]/g, "_")}`;
+          return `(${vb} ? ((_t = ${vb}[_bar - Math.round(_toNum(${offset}))]), _t === undefined ? null : _t) : null)`;
         }
         return `ctx.getVar(${safeStr(name)}, Math.round(_toNum(${offset})))`;
       }
@@ -414,7 +421,8 @@ function compileIdExpr(name: string, ctx: CompilerContext): string {
     case "false": return "false";
     default:
       if (ctx.varIsVarNames.has(name)) {
-        return `((_t = _vars[${safeStr(name)}]), _t ? ((_t = _t[_bar]), _t === undefined ? null : _t) : null)`;
+        const vb = `_vb_${name.replace(/[^a-zA-Z0-9_$]/g, "_")}`;
+        return `(${vb} ? ((_t = ${vb}[_bar]), _t === undefined ? null : _t) : null)`;
       }
       return `ctx.getVar(${safeStr(name)}, 0)`;
   }
@@ -665,9 +673,10 @@ function compileStmt(stmt: Stmt, indent: string, ctx: CompilerContext): string[]
       const name = stmt.name;
       const expr = compileExpr(stmt.e, ctx);
       if (stmt.isVar) {
-        lines.push(`${i}{ const _va = _vars[${safeStr(name)}] || (_vars[${safeStr(name)}] = new Array(ctx.n)); ctx.markVar(${safeStr(name)});`);
-        lines.push(`${i}  if (_bar === 0) { _va[0] = ${expr}; }`);
-        lines.push(`${i}  else { _va[_bar] = _bar > 0 ? (_va[_bar - 1] !== undefined ? _va[_bar - 1] : null) : null; } }`);
+        const vb = `_vb_${name.replace(/[^a-zA-Z0-9_$]/g, "_")}`;
+        lines.push(`${i}if (!${vb}) { ${vb} = new Array(ctx.n); _vars[${safeStr(name)}] = ${vb}; ctx.markVar(${safeStr(name)}); }`);
+        lines.push(`${i}if (_bar === 0) { ${vb}[0] = ${expr}; }`);
+        lines.push(`${i}else { ${vb}[_bar] = _bar > 0 ? (${vb}[_bar - 1] !== undefined ? ${vb}[_bar - 1] : null) : null; }`);
       } else {
         if (ctx.precomputedNames.has(name) || ctx.inputDefaultNames.has(name) || ctx.builtinSeriesNames.has(name)) {
           break;
@@ -696,7 +705,8 @@ function compileStmt(stmt: Stmt, indent: string, ctx: CompilerContext): string[]
         if (ctx.localVarNames?.has(name)) {
           lines.push(`${i}${safeId(name)} = ${expr};`);
         } else if (ctx.varIsVarNames.has(name)) {
-          lines.push(`${i}{ const _va = _vars[${safeStr(name)}]; if (_va) _va[_bar] = ${expr}; }`);
+          const vb = `_vb_${name.replace(/[^a-zA-Z0-9_$]/g, "_")}`;
+          lines.push(`${i}if (${vb}) ${vb}[_bar] = ${expr};`);
         } else {
           lines.push(`${i}ctx.setVar(${safeStr(name)}, ${expr});`);
         }
@@ -712,8 +722,9 @@ function compileStmt(stmt: Stmt, indent: string, ctx: CompilerContext): string[]
         if (ctx.localVarNames?.has(name)) {
           lines.push(`${i}${safeId(name)} = ctx.binOp(${safeStr(stmt.op.replace("=", ""))}, ${safeId(name)}, ${val});`);
         } else if (ctx.varIsVarNames.has(name)) {
-          const readExpr = `((_t = _vars[${safeStr(name)}]), _t ? ((_t = _t[_bar]), _t === undefined ? null : _t) : null)`;
-          lines.push(`${i}{ const _va = _vars[${safeStr(name)}]; if (_va) _va[_bar] = ctx.binOp(${safeStr(stmt.op.replace("=", ""))}, ${readExpr}, ${val}); }`);
+          const vb = `_vb_${name.replace(/[^a-zA-Z0-9_$]/g, "_")}`;
+          const readExpr = `(${vb} ? ((_t = ${vb}[_bar]), _t === undefined ? null : _t) : null)`;
+          lines.push(`${i}if (${vb}) ${vb}[_bar] = ctx.binOp(${safeStr(stmt.op.replace("=", ""))}, ${readExpr}, ${val});`);
         } else {
           lines.push(`${i}ctx.setVar(${safeStr(name)}, ctx.binOp(${safeStr(stmt.op.replace("=", ""))}, ctx.getVar(${safeStr(name)}, 0), ${val}));`);
         }

@@ -320,8 +320,10 @@ function injectParamsIntoPineScript(code: string, params: Record<string, any>): 
     const newVal = params[varName];
     const isNumeric = inputType === "int" || inputType === "float";
     let formattedVal: string;
-    if (inputType === "string" || inputType === "source") {
+    if (inputType === "string") {
       formattedVal = `"${newVal}"`;
+    } else if (inputType === "source") {
+      formattedVal = String(newVal);
     } else if (inputType === "bool") {
       formattedVal = newVal ? "true" : "false";
     } else if (inputType === "float") {
