@@ -591,23 +591,35 @@ export default function QuantumLab() {
     }
     if (autoReconnectAttemptedRef.current === ar.id) return;
     autoReconnectAttemptedRef.current = ar.id;
-    (async () => {
+    let cancelled = false;
+    const attempt = async (retries: number) => {
+      if (cancelled) return;
       try {
         const res = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
         if (!res.ok) {
-          autoReconnectAttemptedRef.current = null;
+          if (retries > 0 && !cancelled) {
+            setTimeout(() => attempt(retries - 1), 3000);
+          } else {
+            autoReconnectAttemptedRef.current = null;
+          }
           return;
         }
         const data = await res.json();
-        if (data.jobId) {
+        if (data.jobId && !cancelled) {
           setActiveRunId(ar.id);
           setActiveJobId(data.jobId);
           toast({ title: "Reconnected to active run", description: `Run #${ar.id} resumed after restart.` });
         }
       } catch {
-        autoReconnectAttemptedRef.current = null;
+        if (retries > 0 && !cancelled) {
+          setTimeout(() => attempt(retries - 1), 3000);
+        } else {
+          autoReconnectAttemptedRef.current = null;
+        }
       }
-    })();
+    };
+    attempt(5);
+    return () => { cancelled = true; };
   }, [activeJobId, queueBadgeData?.activeRun, toast]);
 
   const handleCancelJob = useCallback(async () => {
