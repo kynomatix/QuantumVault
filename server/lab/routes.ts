@@ -18,6 +18,13 @@ export function getLabCleanup(): ((reason: string) => Promise<void>) | null {
 
 export function registerLabRoutes(app: Express): void {
 
+  (async () => {
+    try {
+      const { sql } = await import("drizzle-orm");
+      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true}'::jsonb WHERE id = 1 AND NOT (strategy_settings ? 'nativeEngine')`);
+    } catch (e) {}
+  })();
+
   const requireLabAuth = (req: any, res: any, next: any) => {
     const labSecret = process.env.LAB_AUTH_SECRET;
     if (labSecret) {
@@ -825,8 +832,11 @@ export function registerLabRoutes(app: Express): void {
         const strat = await labStorage.getStrategy(freshRun.strategyId);
         if (strat?.strategySettings && typeof strat.strategySettings === "object") {
           retryPooc = (strat.strategySettings as any).processOrdersOnClose;
+          if ((strat.strategySettings as any).nativeEngine) {
+            delete config.pineScript;
+          }
         }
-        if (!config.pineScript && strat?.pineScript) {
+        if (!config.pineScript && strat?.pineScript && !(strat.strategySettings as any)?.nativeEngine) {
           config.pineScript = strat.pineScript;
         }
       }
@@ -945,9 +955,13 @@ export function registerLabRoutes(app: Express): void {
       const guidedInsights: import("@shared/schema").GuidedInsights | undefined = snapshot.guidedInsights;
       const guidedInsightsPerCombo: Record<string, import("@shared/schema").GuidedInsights> | undefined = snapshot.guidedInsightsPerCombo;
 
-      if (!config.pineScript && claimed.strategyId) {
+      if (claimed.strategyId) {
         const strat = await labStorage.getStrategy(claimed.strategyId);
-        if (strat?.pineScript) config.pineScript = strat.pineScript;
+        if ((strat?.strategySettings as any)?.nativeEngine) {
+          delete config.pineScript;
+        } else if (!config.pineScript && strat?.pineScript) {
+          config.pineScript = strat.pineScript;
+        }
       }
 
       if (snapshotType === "refine") {
@@ -1002,6 +1016,10 @@ export function registerLabRoutes(app: Express): void {
         const strategy = await labStorage.getStrategy(config.strategyId);
         if (strategy?.strategySettings && typeof strategy.strategySettings === "object") {
           processOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
+          if ((strategy.strategySettings as any).nativeEngine) {
+            delete config.pineScript;
+            console.log(`[QuantumLab] Strategy ${config.strategyId} has nativeEngine=true, using native engine`);
+          }
         }
       }
 
@@ -1227,8 +1245,11 @@ export function registerLabRoutes(app: Express): void {
         const strategy = await labStorage.getStrategy(run.strategyId);
         if (strategy?.strategySettings && typeof strategy.strategySettings === "object") {
           resumeProcessOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
+          if ((strategy.strategySettings as any).nativeEngine) {
+            delete config.pineScript;
+          }
         }
-        if (!config.pineScript && strategy?.pineScript) {
+        if (!config.pineScript && strategy?.pineScript && !(strategy?.strategySettings as any)?.nativeEngine) {
           config.pineScript = strategy.pineScript;
         }
       }
@@ -1363,8 +1384,9 @@ export function registerLabRoutes(app: Express): void {
         return res.status(400).json({ error: "Strategy has no parsed inputs" });
       }
 
+      const isNative = (strategy.strategySettings as any)?.nativeEngine === true;
       const config: LabOptimizationConfig = {
-        pineScript: strategy.pineScript,
+        pineScript: isNative ? undefined : strategy.pineScript,
         parsedInputs,
         tickers: [ticker],
         timeframes: [timeframe],
@@ -2033,6 +2055,9 @@ export function registerLabRoutes(app: Express): void {
           const strat = await labStorage.getStrategy(run.strategyId);
           if (strat?.strategySettings && typeof strat.strategySettings === "object") {
             retryPooc = (strat.strategySettings as any).processOrdersOnClose;
+            if ((strat.strategySettings as any).nativeEngine) {
+              delete config.pineScript;
+            }
           }
         }
 
