@@ -766,7 +766,7 @@ export function registerLabRoutes(app: Express): void {
       const crashCount = (cp.autoResumeAttempts as number) ?? 0;
       if (crashCount >= MAX_AUTO_RESUME_ATTEMPTS) {
         console.log(`[QuantumLab] Auto-retry exhausted for run ${runId} (${crashCount}/${MAX_AUTO_RESUME_ATTEMPTS}). Manual resume required.`);
-        await labStorage.failRun(runId);
+        await labStorage.failRun(runId, true);
         labStorage.updateProgress(oldJobId, {
           jobId: oldJobId, status: "error", stage: `Failed after ${crashCount} retries: ${errorMsg}`,
           current: 0, total: 0, percent: 0, elapsed: 0, error: `Failed after ${crashCount} retries: ${errorMsg}`,
@@ -1941,6 +1941,38 @@ export function registerLabRoutes(app: Express): void {
 
   setTimeout(async () => {
     try {
+      const staleRunning = await db.select().from(labOptimizationRuns).where(
+        eq(labOptimizationRuns.status, "running")
+      );
+      for (const run of staleRunning) {
+        const cp = run.checkpoint as any;
+        const hasResults = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
+        if (hasResults) {
+          await labStorage.pauseRun(run.id);
+          const detail = cp?.currentCombo ? `mid-combo ${cp.currentCombo} at ${cp.currentStage || 'random'} iter ${cp.currentIteration}` : `${cp?.completedCombos?.length} combos done`;
+          console.log(`[QuantumLab] Stale run ${run.id} → paused (${detail})`);
+          labStorage.interruptedRunIds.push(run.id);
+        } else {
+          await labStorage.failRun(run.id);
+          console.log(`[QuantumLab] Stale run ${run.id} → failed (no progress)`);
+        }
+      }
+      if (staleRunning.length > 0) {
+        console.log(`[QuantumLab] Processed ${staleRunning.length} stale run(s) from previous session`);
+      }
+
+      const exhaustedPaused = await db.select().from(labOptimizationRuns).where(
+        eq(labOptimizationRuns.status, "paused")
+      );
+      for (const run of exhaustedPaused) {
+        const cp = run.checkpoint as any;
+        const attempts = (cp?.autoResumeAttempts as number) ?? 0;
+        if (attempts >= MAX_AUTO_RESUME_ATTEMPTS) {
+          await labStorage.failRun(run.id, true);
+          console.log(`[QuantumLab] Boot cleanup: paused run ${run.id} had exhausted auto-resume (${attempts}/${MAX_AUTO_RESUME_ATTEMPTS}), force-failed to unblock queue`);
+        }
+      }
+
       if (activeWorker) {
         console.log(`[QuantumLab] Boot: worker already active, skipping queue pump`);
         return;
