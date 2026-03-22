@@ -521,6 +521,7 @@ export function registerLabRoutes(app: Express): void {
           case "partial-checkpoint":
             if (!runId) break;
             checkpointWriteChain = checkpointWriteChain.then(async () => {
+              if (job.abortSignal.aborted) return;
               try {
                 if (msg.results.length > 0) {
                   await labStorage.saveComboResults(runId!, msg.results, true);
@@ -550,6 +551,7 @@ export function registerLabRoutes(app: Express): void {
             completedCombos.push(msg.combo);
             if (!runId) break;
             checkpointWriteChain = checkpointWriteChain.then(async () => {
+              if (job.abortSignal.aborted) return;
               try {
                 if (msg.results.length > 0) {
                   await labStorage.saveComboResults(runId!, msg.results);
@@ -614,6 +616,7 @@ export function registerLabRoutes(app: Express): void {
                     current: 0, total: 0, percent: 0, elapsed: 0, error: err.message,
                   });
                   activeWorker = null;
+                  setTimeout(() => pumpQueue(), 1000);
                   break;
                 }
               }
@@ -753,13 +756,20 @@ export function registerLabRoutes(app: Express): void {
 
     try {
       const run = await labStorage.getRun(runId);
-      if (!run || run.status !== "paused") return;
+      if (!run || run.status !== "paused") {
+        setTimeout(() => pumpQueue(), 1000);
+        return;
+      }
 
       const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
-      if (cp?.userCancelled) return;
+      if (cp?.userCancelled) {
+        setTimeout(() => pumpQueue(), 1000);
+        return;
+      }
       if (!cp?.configSnapshot) {
         console.log(`[QuantumLab] Auto-retry skipped for run ${runId} — no config snapshot`);
         await labStorage.failRun(runId);
+        setTimeout(() => pumpQueue(), 1000);
         return;
       }
 
@@ -856,23 +866,33 @@ export function registerLabRoutes(app: Express): void {
         return;
       }
 
-      const newJob = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: false });
-      newJob.runId = runId;
-      newJob.walletAddress = freshRun.userId ?? undefined;
+      let startedOk = false;
+      try {
+        const newJob = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: false });
+        newJob.runId = runId;
+        newJob.walletAddress = freshRun.userId ?? undefined;
 
-      labStorage.updateProgress(oldJobId, {
-        jobId: oldJobId, status: "retrying", stage: `Retrying...`,
-        current: 0, total: 0, percent: 0, elapsed: 0, newJobId: newJob.id,
-      });
+        labStorage.updateProgress(oldJobId, {
+          jobId: oldJobId, status: "retrying", stage: `Retrying...`,
+          current: 0, total: 0, percent: 0, elapsed: 0, newJobId: newJob.id,
+        });
 
-      const resumeCheckpoint = hasProgress ? checkpoint : undefined;
-      const detail = hasProgress
-        ? (checkpoint.completedCombos?.length
-          ? `${checkpoint.completedCombos.length} combos done`
-          : `mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}`)
-        : "from scratch";
-      console.log(`[QuantumLab] Auto-retrying run ${runId} (${detail}, attempt ${attempt}/${MAX_AUTO_RESUME_ATTEMPTS})`);
-      startOptimizationJob(config, newJob, runId, resumeCheckpoint, undefined, undefined, undefined, retryPooc);
+        const resumeCheckpoint = hasProgress ? checkpoint : undefined;
+        const detail = hasProgress
+          ? (checkpoint.completedCombos?.length
+            ? `${checkpoint.completedCombos.length} combos done`
+            : `mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}`)
+          : "from scratch";
+        console.log(`[QuantumLab] Auto-retrying run ${runId} (${detail}, attempt ${attempt}/${MAX_AUTO_RESUME_ATTEMPTS})`);
+        startOptimizationJob(config, newJob, runId, resumeCheckpoint, undefined, undefined, undefined, retryPooc);
+        startedOk = true;
+      } finally {
+        if (!startedOk) {
+          console.log(`[QuantumLab] Auto-retry: startup failed for run ${runId}, rolling back claim`);
+          await labStorage.pauseRun(runId).catch(() => {});
+          setTimeout(() => pumpQueue(), 1000);
+        }
+      }
     } catch (err: any) {
       console.log(`[QuantumLab] Auto-retry error: ${err.message}`);
       labStorage.updateProgress(oldJobId, { jobId: oldJobId, status: "error", stage: `Retry error: ${err.message}`, current: 0, total: 0, percent: 0, elapsed: 0, error: err.message });
@@ -1275,15 +1295,24 @@ export function registerLabRoutes(app: Express): void {
         return res.status(409).json({ error: "Could not claim run — another optimization may be running" });
       }
 
-      const job = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: !!activeWorker });
-      job.runId = runId;
-      job.walletAddress = (req as any).walletAddress;
+      let startedOk = false;
+      try {
+        const job = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: !!activeWorker });
+        job.runId = runId;
+        job.walletAddress = (req as any).walletAddress;
 
-      console.log(`[QuantumLab] Resuming run ${runId} — ${checkpoint.completedCombos.length} combos already done${checkpoint.currentCombo ? `, mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}` : ""}`);
+        console.log(`[QuantumLab] Resuming run ${runId} — ${checkpoint.completedCombos.length} combos already done${checkpoint.currentCombo ? `, mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}` : ""}`);
 
-      startOptimizationJob(config, job, runId, checkpoint, undefined, undefined, undefined, resumeProcessOrdersOnClose);
+        startOptimizationJob(config, job, runId, checkpoint, undefined, undefined, undefined, resumeProcessOrdersOnClose);
+        startedOk = true;
 
-      res.json({ jobId: job.id, runId, resumedFrom: checkpoint.completedCombos.length });
+        res.json({ jobId: job.id, runId, resumedFrom: checkpoint.completedCombos.length });
+      } finally {
+        if (!startedOk) {
+          console.log(`[QuantumLab] Resume: startup failed for run ${runId}, rolling back claim`);
+          await labStorage.pauseRun(runId).catch(() => {});
+        }
+      }
     } catch (err: any) {
       console.log(`[QuantumLab] Resume error: ${err.message}`);
       if ((err as any).blockingJobId) {
@@ -2120,24 +2149,34 @@ export function registerLabRoutes(app: Express): void {
           break;
         }
 
-        const newJob = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: false });
-        newJob.runId = runId;
-        newJob.walletAddress = run.userId ?? undefined;
+        let startedOk = false;
+        try {
+          const newJob = labStorage.createJob(config, { forRunId: runId, hasActiveWorker: false });
+          newJob.runId = runId;
+          newJob.walletAddress = run.userId ?? undefined;
 
-        const resumeCheckpoint = hasProgress ? checkpoint : undefined;
-        const attempt = crashCount + 1;
-        const detail = hasProgress
-          ? (checkpoint.completedCombos?.length
-            ? `${checkpoint.completedCombos.length} combos done`
-            : `mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}`)
-          : "from scratch";
-        console.log(`[QuantumLab] Lazy recovery: auto-resuming run ${runId} (${detail}, attempt ${attempt}/${MAX_AUTO_RESUME_ATTEMPTS})`);
-        startOptimizationJob(config, newJob, runId, resumeCheckpoint, undefined, undefined, undefined, retryPooc);
+          const resumeCheckpoint = hasProgress ? checkpoint : undefined;
+          const attempt = crashCount + 1;
+          const detail = hasProgress
+            ? (checkpoint.completedCombos?.length
+              ? `${checkpoint.completedCombos.length} combos done`
+              : `mid-combo ${checkpoint.currentCombo} at iter ${checkpoint.currentIteration}`)
+            : "from scratch";
+          console.log(`[QuantumLab] Lazy recovery: auto-resuming run ${runId} (${detail}, attempt ${attempt}/${MAX_AUTO_RESUME_ATTEMPTS})`);
+          startOptimizationJob(config, newJob, runId, resumeCheckpoint, undefined, undefined, undefined, retryPooc);
+          startedOk = true;
+        } finally {
+          if (!startedOk) {
+            console.log(`[QuantumLab] Lazy recovery: startup failed for run ${runId}, rolling back claim`);
+            await labStorage.pauseRun(runId).catch(() => {});
+          }
+        }
 
         labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
         break;
       } catch (err: any) {
         console.log(`[QuantumLab] Lazy recovery error for run ${runId}: ${err.message}`);
+        setTimeout(() => pumpQueue(), 1000);
         break;
       }
     }
