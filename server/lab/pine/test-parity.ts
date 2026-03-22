@@ -17,7 +17,7 @@ const paramSets: Record<number, Record<string, any>[]> = {
   ],
   6: [
     {},
-    { bbLen: 25, bbMult: 2.5, useStopLoss: true, stopPct: 3.0 },
+    { bb_length: 25, bb_mult: 2.5, useStopLoss: true, slPercent: 3.0 },
   ],
 };
 
