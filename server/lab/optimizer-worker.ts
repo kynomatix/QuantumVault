@@ -25,9 +25,11 @@ interface WorkerInput {
   resumeCheckpoint?: LabCheckpoint;
 }
 
+type PartialResult = LiteBacktestResult | LabBacktestResult;
+
 type WorkerMessage =
   | { type: "progress"; data: LabJobProgress }
-  | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep" | "coordinate"; iteration: number; deepRound?: number; results: LabBacktestResult[]; refineSeeds?: Record<string, any>[]; coordinateCompleted?: string[] }
+  | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep" | "coordinate"; iteration: number; deepRound?: number; results: PartialResult[]; refineSeeds?: Record<string, any>[]; coordinateCompleted?: string[] }
   | { type: "combo-complete"; combo: string; results: LabBacktestResult[] }
   | { type: "best-discovery"; combo: string; stage: "deep"; deepRound: number; score: number; params: Record<string, any> }
   | { type: "done"; results: LabBacktestResult[]; totalConfigsTested?: number }
@@ -35,6 +37,55 @@ type WorkerMessage =
 
 function send(msg: WorkerMessage) {
   parentPort?.postMessage(msg);
+}
+
+interface LiteBacktestResult {
+  ticker: string;
+  timeframe: string;
+  netProfitPercent: number;
+  winRatePercent: number;
+  maxDrawdownPercent: number;
+  profitFactor: number;
+  totalTrades: number;
+  params: Record<string, any>;
+  avgBarsHeld: number;
+  compiledPath?: "compiled" | "interpreter";
+}
+
+function toLiteResult(r: LabBacktestResult | LiteBacktestResult | any): LiteBacktestResult {
+  if ('avgBarsHeld' in r && !('trades' in r)) return r as LiteBacktestResult;
+  const trades = Array.isArray(r.trades) ? r.trades : [];
+  const avgBarsHeld = trades.length > 0
+    ? trades.reduce((sum: number, t: any) => sum + (t.barsHeld ?? 0), 0) / trades.length
+    : 0;
+  return {
+    ticker: r.ticker,
+    timeframe: r.timeframe,
+    netProfitPercent: r.netProfitPercent,
+    winRatePercent: r.winRatePercent,
+    maxDrawdownPercent: r.maxDrawdownPercent,
+    profitFactor: r.profitFactor,
+    totalTrades: r.totalTrades,
+    params: r.params,
+    avgBarsHeld,
+    compiledPath: r.compiledPath,
+  };
+}
+
+function scoreLite(r: LiteBacktestResult): number {
+  const dd = r.maxDrawdownPercent;
+  const safeMaxLev = dd > 0 ? Math.min(20, 80 / dd) : 20;
+  const leveragedProfit = r.netProfitPercent * safeMaxLev;
+  return leveragedProfit * 100 + r.winRatePercent * 10 + r.profitFactor * 50 - dd * 50;
+}
+
+function meetsFiltersLite(r: LiteBacktestResult, config: WorkerInput["config"]): boolean {
+  if (r.totalTrades < config.minTrades) return false;
+  if (r.maxDrawdownPercent > config.maxDrawdownCap) return false;
+  if (config.minAvgBarsHeld > 0 && r.totalTrades > 0) {
+    if (r.avgBarsHeld < config.minAvgBarsHeld) return false;
+  }
+  return true;
 }
 
 function canonicalizeParams(params: Record<string, any>, inputs: LabPineInput[]): string {
@@ -87,9 +138,9 @@ function normalizedParamDistance(a: Record<string, any>, b: Record<string, any>,
   return count > 0 ? Math.sqrt(sumSq / count) : 0;
 }
 
-function selectDiverseSeeds(results: LabBacktestResult[], count: number, inputs: LabPineInput[]): LabBacktestResult[] {
+function selectDiverseSeeds<T extends { params: Record<string, any> }>(results: T[], count: number, inputs: LabPineInput[]): T[] {
   if (results.length <= count) return [...results];
-  const selected: LabBacktestResult[] = [results[0]];
+  const selected: T[] = [results[0]];
   const remaining = new Set(results.slice(1).map((_, i) => i + 1));
 
   while (selected.length < count && remaining.size > 0) {
@@ -473,14 +524,14 @@ interface CoordinateTuneContext {
   inputs: LabPineInput[];
   config: WorkerInput["config"];
   engineConfig: { initialCapital: number; commission: number; positionSize: number; processOrdersOnClose?: boolean };
-  seedResult: LabBacktestResult;
+  seedResult: LiteBacktestResult;
   seedScore: number;
   testedSignatures: Set<string>;
   startTime: number;
   comboKey: string;
   tickerProgress: Record<string, { status: "pending" | "running" | "complete"; best?: number }>;
   completedParams: string[];
-  resumePartialResults?: LabBacktestResult[];
+  resumePartialResults?: LiteBacktestResult[];
   sharedArrays?: PineSharedArrays;
   sharedIndicatorCache?: Map<string, any>;
 }
@@ -562,7 +613,7 @@ function generateParamGrid(input: LabPineInput, currentVal: any): any[] {
   }
 }
 
-function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResult[]; totalTests: number } {
+function coordinateTune(ctx: CoordinateTuneContext): { results: LiteBacktestResult[]; totalTests: number } {
   const {
     jobId, candles, ticker, timeframe, inputs, config, engineConfig,
     seedResult, testedSignatures, startTime, comboKey, tickerProgress, completedParams,
@@ -570,7 +621,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResul
   } = ctx;
   let bestScore = ctx.seedScore;
   let bestResult = seedResult;
-  const allResults: LabBacktestResult[] = [seedResult];
+  const allResults: LiteBacktestResult[] = [seedResult];
   if (ctx.resumePartialResults && ctx.resumePartialResults.length > 0) {
     for (const pr of ctx.resumePartialResults) {
       const sig = canonicalizeParams(pr.params, inputs);
@@ -578,7 +629,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResul
         testedSignatures.add(sig);
       }
       allResults.push(pr);
-      const prScore = scoreResult(pr);
+      const prScore = scoreLite(pr);
       if (prScore > bestScore) {
         bestScore = prScore;
         bestResult = pr;
@@ -623,13 +674,14 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResul
       testedSignatures.add(sig);
 
       const result = runBacktest(candles, testParams, ticker, timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
-      if (!meetsFilters(result, config)) continue;
+      const lite = toLiteResult(result);
+      if (!meetsFiltersLite(lite, config)) continue;
 
-      const score = scoreResult(result);
-      allResults.push(result);
+      const score = scoreLite(lite);
+      allResults.push(lite);
       if (score > paramBestScore) {
         paramBestScore = score;
-        paramBestResult = result;
+        paramBestResult = lite;
       }
     }
 
@@ -643,7 +695,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResul
 
     completedParamSet.add(input.name);
 
-    const best = allResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0];
+    const best = allResults.sort((a, b) => scoreLite(b) - scoreLite(a))[0];
     send({ type: "progress", data: {
       jobId, status: "refinement",
       stage: `Coordinate Tune — ${input.name} — ${ticker.split("/")[0]} ${timeframe} — best Δ${improvement > 0 ? "+" : ""}${improvement.toFixed(1)}`,
@@ -658,7 +710,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResul
       eta: estimateEta(startTime, currentTest, grandTotal),
     }});
 
-    const topPartial = [...allResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+    const topPartial = [...allResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, 10);
     send({ type: "partial-checkpoint", combo: comboKey, stage: "coordinate", iteration: currentTest, results: topPartial, coordinateCompleted: Array.from(completedParamSet) });
   }
 
@@ -695,18 +747,19 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResul
               testedSignatures.add(sig);
 
               const result = runBacktest(candles, testParams, ticker, timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
-              if (!meetsFilters(result, config)) continue;
+              const lite = toLiteResult(result);
+              if (!meetsFiltersLite(lite, config)) continue;
 
-              const score = scoreResult(result);
-              allResults.push(result);
+              const score = scoreLite(lite);
+              allResults.push(lite);
               if (score > bestScore) {
                 bestScore = score;
-                bestResult = result;
+                bestResult = lite;
               }
             }
           }
 
-          const best = allResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0];
+          const best = allResults.sort((a, b) => scoreLite(b) - scoreLite(a))[0];
           send({ type: "progress", data: {
             jobId, status: "refinement",
             stage: `Pair Tune — ${inputA.name} × ${inputB.name} — ${ticker.split("/")[0]} ${timeframe}`,
@@ -721,7 +774,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LabBacktestResul
             eta: estimateEta(startTime, currentTest, grandTotal),
           }});
 
-          const topPartial = [...allResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+          const topPartial = [...allResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, 10);
           send({ type: "partial-checkpoint", combo: comboKey, stage: "coordinate", iteration: currentTest, results: topPartial, coordinateCompleted: Array.from(completedParamSet) });
         }
       }
@@ -852,44 +905,55 @@ async function run() {
       const isResumingCoordinate = resumeCombo === key && resumeStage === "coordinate";
       const resumeCoordinateCompleted = isResumingCoordinate ? (resumeCheckpoint?.coordinateCompleted ?? []) : [];
 
-      let seedResult: LabBacktestResult;
+      let seedLite: LiteBacktestResult;
       if (isResumingCoordinate && resumePartialResults.length > 0) {
-        seedResult = [...resumePartialResults].sort((a, b) => scoreResult(b) - scoreResult(a))[0];
+        const resumeLites = resumePartialResults.map(r => toLiteResult(r));
+        seedLite = [...resumeLites].sort((a, b) => scoreLite(b) - scoreLite(a))[0];
       } else {
         const comboInsights = config.guidedInsightsPerCombo?.[key] ?? config.guidedInsights;
         if (comboInsights?.topConfigs && comboInsights.topConfigs.length > 0) {
           const bestConfig = comboInsights.topConfigs.sort((a, b) => b.score - a.score)[0];
-          seedResult = runBacktest(candles, bestConfig.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
+          seedLite = toLiteResult(runBacktest(candles, bestConfig.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache));
         } else {
-          seedResult = baseline;
+          seedLite = toLiteResult(baseline);
         }
       }
 
       const testedSignatures = new Set<string>();
       testedSignatures.add(canonicalizeParams(defaultParams, inputs));
-      testedSignatures.add(canonicalizeParams(seedResult.params, inputs));
+      testedSignatures.add(canonicalizeParams(seedLite.params, inputs));
       if (isResumingCoordinate && resumePartialResults.length > 0) {
         for (const pr of resumePartialResults) {
           testedSignatures.add(canonicalizeParams(pr.params, inputs));
         }
       }
 
+      const resumeLites = isResumingCoordinate
+        ? resumePartialResults.map(r => toLiteResult(r))
+        : undefined;
+
       const tuneResult = coordinateTune({
         jobId, candles, ticker: combo.ticker, timeframe: combo.timeframe,
         inputs, config, engineConfig,
-        seedResult, seedScore: scoreResult(seedResult),
+        seedResult: seedLite, seedScore: scoreLite(seedLite),
         testedSignatures, startTime, comboKey: key,
         tickerProgress, completedParams: resumeCoordinateCompleted,
-        resumePartialResults: isResumingCoordinate ? resumePartialResults : undefined,
+        resumePartialResults: resumeLites,
         sharedArrays, sharedIndicatorCache,
       });
 
       coordinateTotalTests += tuneResult.totalTests;
-      const topForCombo = tuneResult.results.sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+      const topLites = tuneResult.results.sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, 10);
+      const topForCombo = topLites.map(lite =>
+        runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache)
+      );
       allResults.push(...topForCombo);
       tickerProgress[key] = { status: "complete", best: topForCombo[0]?.netProfitPercent ?? 0 };
       completedCombos.add(key);
       send({ type: "combo-complete", combo: key, results: topForCombo });
+
+      delete candlesByCombo[key];
+      sharedIndicatorCache?.clear();
       continue;
     }
 
@@ -897,9 +961,10 @@ async function run() {
     const skipRandomUntil = isResumingThisCombo && resumeStage === "random" ? resumeIteration : 0;
     const skipRefineEntirely = isResumingThisCombo && (resumeStage === "refine" || resumeStage === "deep");
     const skipDeepUntilRound = isResumingThisCombo && resumeStage === "deep" ? resumeDeepRound : 0;
-    let comboResults: LabBacktestResult[] = isResumingThisCombo && resumePartialResults.length > 0
-      ? [...resumePartialResults]
-      : [baseline];
+    const baselineLite = toLiteResult(baseline);
+    let comboResults: LiteBacktestResult[] = isResumingThisCombo && resumePartialResults.length > 0
+      ? resumePartialResults.map(r => toLiteResult(r))
+      : [baselineLite];
 
     const testedSignatures = new Set<string>();
     testedSignatures.add(canonicalizeParams(defaultParams, inputs));
@@ -954,13 +1019,14 @@ async function run() {
       }
 
       const result = runBacktest(candles, params!, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
-      if (meetsFilters(result, config)) {
-        comboResults.push(result);
+      const lite = toLiteResult(result);
+      if (meetsFiltersLite(lite, config)) {
+        comboResults.push(lite);
       }
       globalCurrent++;
 
       if (s % 10 === 0) {
-        const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
+        const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreLite(b) - scoreLite(a))[0] : null;
         send({ type: "progress", data: {
           jobId, status: "random_search",
           stage: `${searchLabel} Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${s}/${config.randomSamples}`,
@@ -981,16 +1047,16 @@ async function run() {
       if (now - lastCheckpointTime >= interval) {
         lastCheckpointTime = now;
         checkpointCount++;
-        const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, 10);
+        const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, 10);
         send({ type: "partial-checkpoint", combo: key, stage: "random", iteration: s + 1, results: topPartial });
       }
     }
 
     if (aborted) continue;
 
-    comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
+    comboResults.sort((a, b) => scoreLite(b) - scoreLite(a));
     const topSeeds = isResumingThisCombo && resumeRefineSeeds && (resumeStage === "refine" || resumeStage === "deep")
-      ? resumeRefineSeeds.map(params => ({ params } as LabBacktestResult))
+      ? resumeRefineSeeds.map(params => ({ params } as LiteBacktestResult))
       : selectDiverseSeeds(comboResults, config.topK, inputs);
     const refineSeedParams = topSeeds.map(s => s.params);
 
@@ -1028,13 +1094,14 @@ async function run() {
           }
 
           const result = runBacktest(candles, jitteredParams!, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
-          if (meetsFilters(result, config)) {
-            comboResults.push(result);
+          const lite = toLiteResult(result);
+          if (meetsFiltersLite(lite, config)) {
+            comboResults.push(lite);
           }
           globalCurrent++;
         }
 
-        const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
+        const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreLite(b) - scoreLite(a))[0] : null;
         send({ type: "progress", data: {
           jobId, status: "refinement",
           stage: `Refining seed ${seedIdx + 1}/${topSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
@@ -1051,7 +1118,7 @@ async function run() {
 
         const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
         const refineKeepCount = Math.max(10, config.topK);
-        const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, refineKeepCount);
+        const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, refineKeepCount);
         send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: actualIter, results: topPartial, refineSeeds: refineSeedParams });
         lastCheckpointTime = Date.now();
         checkpointCount++;
@@ -1061,7 +1128,7 @@ async function run() {
     if (config.deepSearch && !aborted) {
       const deepRadii = [0.12, 0.08, 0.05];
       const numOptimizable = inputs.filter(i => i.optimizable && (i.type === "int" || i.type === "float")).length;
-      let previousRoundBest: LabBacktestResult[] = [];
+      let previousRoundBest: LiteBacktestResult[] = [];
       let injectedResumeBest = false;
 
       for (let round = 0; round < deepRounds; round++) {
@@ -1074,9 +1141,9 @@ async function run() {
           continue;
         }
         const radius = deepRadii[round] ?? 0.05;
-        comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
+        comboResults.sort((a, b) => scoreLite(b) - scoreLite(a));
 
-        let deepSeeds: LabBacktestResult[];
+        let deepSeeds: LiteBacktestResult[];
         const eliteCount = Math.max(1, Math.ceil(deepSeedsPerRound * 0.30));
         const novelCount = deepSeedsPerRound - eliteCount;
 
@@ -1104,7 +1171,7 @@ async function run() {
           const novelOnly = novelCandidates.filter(
             c => !elites.some(e => canonicalizeParams(e.params, inputs) === canonicalizeParams(c.params, inputs))
           ).slice(0, remainingNovel);
-          const exploratory: LabBacktestResult[] = [];
+          const exploratory: LiteBacktestResult[] = [];
           for (let e = 0; e < exploratoryCount; e++) {
             let rp: Record<string, any>;
             let isDup = true;
@@ -1119,9 +1186,10 @@ async function run() {
             }
             if (isDup) continue;
             const er = runBacktest(candles, rp!, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
-            if (meetsFilters(er, config)) {
-              exploratory.push(er);
-              comboResults.push(er);
+            const erLite = toLiteResult(er);
+            if (meetsFiltersLite(erLite, config)) {
+              exploratory.push(erLite);
+              comboResults.push(erLite);
             }
           }
           deepSeeds = [...elites, ...novelOnly, ...exploratory];
@@ -1136,20 +1204,21 @@ async function run() {
             const bdSig = canonicalizeParams(bd.params, inputs);
             if (!testedSignatures.has(bdSig)) {
               const bdResult = runBacktest(candles, bd.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
+              const bdLite = toLiteResult(bdResult);
               const existingSigs = new Set(deepSeeds.map(s => canonicalizeParams(s.params, inputs)));
               if (!existingSigs.has(bdSig)) {
-                deepSeeds = [bdResult, ...deepSeeds.filter(s => canonicalizeParams(s.params, inputs) !== bdSig)].slice(0, deepSeedsPerRound);
+                deepSeeds = [bdLite, ...deepSeeds.filter(s => canonicalizeParams(s.params, inputs) !== bdSig)].slice(0, deepSeedsPerRound);
               }
-              comboResults.push(bdResult);
+              comboResults.push(bdLite);
               testedSignatures.add(bdSig);
             }
           }
           injectedResumeBest = true;
         }
 
-        const roundDiscoveries: LabBacktestResult[] = [];
+        const roundDiscoveries: LiteBacktestResult[] = [];
         let comboBestScore = comboResults.length > 0
-          ? Math.max(...comboResults.map(r => scoreResult(r)))
+          ? Math.max(...comboResults.map(r => scoreLite(r)))
           : -Infinity;
 
         for (let seedIdx = 0; seedIdx < deepSeeds.length; seedIdx++) {
@@ -1178,19 +1247,20 @@ async function run() {
             }
 
             const result = runBacktest(candles, jittered!, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
-            if (meetsFilters(result, config)) {
-              comboResults.push(result);
-              roundDiscoveries.push(result);
-              const resultScore = scoreResult(result);
+            const lite = toLiteResult(result);
+            if (meetsFiltersLite(lite, config)) {
+              comboResults.push(lite);
+              roundDiscoveries.push(lite);
+              const resultScore = scoreLite(lite);
               if (resultScore > comboBestScore + 1e-9) {
                 comboBestScore = resultScore;
-                send({ type: "best-discovery", combo: key, stage: "deep", deepRound: round, score: resultScore, params: { ...result.params } });
+                send({ type: "best-discovery", combo: key, stage: "deep", deepRound: round, score: resultScore, params: { ...lite.params } });
               }
             }
             globalCurrent++;
           }
 
-          const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreResult(b) - scoreResult(a))[0] : null;
+          const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreLite(b) - scoreLite(a))[0] : null;
           send({ type: "progress", data: {
             jobId, status: "refinement",
             stage: `Deep R${round + 1} (${Math.round(radius * 100)}%) — seed ${seedIdx + 1}/${deepSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`,
@@ -1206,28 +1276,34 @@ async function run() {
           }});
 
           const deepCheckpointCount = Math.max(10, config.topK);
-          const topPartial = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, deepCheckpointCount);
+          const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, deepCheckpointCount);
           send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round, results: topPartial, refineSeeds: refineSeedParams });
           lastCheckpointTime = Date.now();
           checkpointCount++;
         }
 
-        previousRoundBest = [...roundDiscoveries].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, Math.max(10, deepSeedsPerRound));
+        previousRoundBest = [...roundDiscoveries].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, Math.max(10, deepSeedsPerRound));
 
         const deepCheckpointCount2 = Math.max(10, config.topK);
-        const topAfterRound = [...comboResults].sort((a, b) => scoreResult(b) - scoreResult(a)).slice(0, deepCheckpointCount2);
+        const topAfterRound = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, deepCheckpointCount2);
         send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round + 1, results: topAfterRound, refineSeeds: refineSeedParams });
         lastCheckpointTime = Date.now();
       }
     }
 
-    comboResults.sort((a, b) => scoreResult(b) - scoreResult(a));
-    const topForCombo = comboResults.slice(0, 10);
+    comboResults.sort((a, b) => scoreLite(b) - scoreLite(a));
+    const topLitesForCombo = comboResults.slice(0, 10);
+    const topForCombo = topLitesForCombo.map(lite =>
+      runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache)
+    );
     allResults.push(...topForCombo);
 
     tickerProgress[key] = { status: "complete", best: topForCombo[0]?.netProfitPercent ?? 0 };
     completedCombos.add(key);
     send({ type: "combo-complete", combo: key, results: topForCombo });
+
+    delete candlesByCombo[key];
+    sharedIndicatorCache?.clear();
   }
 
   allResults.sort((a, b) => scoreResult(b) - scoreResult(a));

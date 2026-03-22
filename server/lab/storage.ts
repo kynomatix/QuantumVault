@@ -440,8 +440,8 @@ export class LabDatabaseStorage implements ILabStorage {
         profitFactor: r.profitFactor,
         totalTrades: r.totalTrades,
         params: r.params,
-        trades: r.trades,
-        equityCurve: r.equityCurve,
+        trades: r.trades ?? [],
+        equityCurve: r.equityCurve ?? [],
       }));
 
       const batchSize = 50;
