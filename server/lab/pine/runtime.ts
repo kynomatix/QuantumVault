@@ -86,7 +86,16 @@ class Broker {
   }
 
   queueClose(id: string, qtyPercent: number, comment: string, isCloseAll: boolean) {
-    this.pendingCloses.push({ id, qtyPercent, comment, isCloseAll });
+    if (isCloseAll) {
+      this.pendingCloses = [{ id, qtyPercent, comment, isCloseAll }];
+      return;
+    }
+    const existing = this.pendingCloses.findIndex(pc => pc.id === id && !pc.isCloseAll);
+    if (existing >= 0) {
+      this.pendingCloses[existing] = { id, qtyPercent, comment, isCloseAll };
+    } else {
+      this.pendingCloses.push({ id, qtyPercent, comment, isCloseAll });
+    }
   }
 
   fillPendingCloses(price: number, bar: number, time: number) {
@@ -150,6 +159,7 @@ class Broker {
     if (!this.position || this.pendingExits.length === 0) return;
     const isLong = this.position.direction === "long";
     const toRemove: number[] = [];
+    const originalSize = this.position.size;
 
     const entryIds = new Set(this.position.entries.map(e => e.id));
     const remainingByEntry = new Map<string, number>();
@@ -206,10 +216,21 @@ class Broker {
       }
 
       if (fillPrice !== null && this.position) {
-        const closeQty = this.position.size * (effectiveQty[i] / 100);
+        const closeQty = originalSize * (effectiveQty[i] / 100);
         this.recordClose(Math.min(closeQty, this.position.size), fillPrice, bar, time, reason);
-        toRemove.push(i);
-        if (!this.position) break;
+        if (!this.position) {
+          toRemove.push(i);
+          break;
+        }
+        if (ex.stop !== null && ex.limit !== null && reason === "TP") {
+          ex.limit = null;
+          ex.qtyPercent = 100;
+        } else if (ex.stop !== null && ex.limit !== null && reason === "Stop") {
+          ex.stop = null;
+          ex.qtyPercent = 100;
+        } else {
+          toRemove.push(i);
+        }
       }
     }
 
