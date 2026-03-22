@@ -57,7 +57,10 @@ export function tokenize(source: string): Token[] {
     const indent = firstNonSpace;
 
     const lastTok = tokens.length > 0 ? tokens[tokens.length - 1].t : TT.Eof;
-    const isContinuation = parenDepth > 0 || lastTok === TT.Question || lastTok === TT.Colon
+    const firstChar = line[firstNonSpace];
+    const startsWithContinuation = firstChar === ':' || firstChar === '?';
+    const isContinuation = parenDepth > 0 || startsWithContinuation
+      || lastTok === TT.Question || lastTok === TT.Colon
       || lastTok === TT.Plus || lastTok === TT.Minus || lastTok === TT.Star || lastTok === TT.Slash
       || lastTok === TT.And || lastTok === TT.Or || lastTok === TT.Comma
       || lastTok === TT.Assign || lastTok === TT.Reassign
