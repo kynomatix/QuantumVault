@@ -230,6 +230,8 @@ export function createLabSupervisor(): LabSupervisor {
           }
           if (!resolved) {
             spawnInFlight = false;
+            try { spawnedChild.kill("SIGKILL"); } catch {}
+            recordFailure();
             rejectReady(new Error("Lab child process health poll timeout"));
           }
         };

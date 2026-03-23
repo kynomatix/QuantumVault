@@ -587,16 +587,20 @@ export default function QuantumLab() {
 
   useEffect(() => {
     const ar = queueBadgeData?.activeRun;
-    if (!ar || ar.status !== "running" || activeJobId || autoReconnectingRef.current) return;
+    if (!ar || activeJobId) return;
+    if (ar.status !== "running" && ar.status !== "paused") return;
+    if (autoReconnectingRef.current) return;
     autoReconnectingRef.current = true;
     let cancelled = false;
-    console.log(`[AutoReconnect] Detected running run ${ar.id}, attempting job lookup...`);
+    const isPaused = ar.status === "paused";
+    console.log(`[AutoReconnect] Detected ${ar.status} run ${ar.id}, attempting job lookup...`);
     (async () => {
-      for (let i = 0; i < 5; i++) {
+      const maxAttempts = isPaused ? 20 : 8;
+      const delayMs = isPaused ? 5000 : 5000;
+      for (let i = 0; i < maxAttempts; i++) {
         if (cancelled) return;
         try {
           const jobRes = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
-          console.log(`[AutoReconnect] /runs/${ar.id}/job attempt ${i + 1}: status=${jobRes.status}`);
           if (jobRes.ok) {
             const jobData = await jobRes.json();
             if (jobData.jobId && !cancelled) {
@@ -611,11 +615,11 @@ export default function QuantumLab() {
         } catch (err) {
           console.log(`[AutoReconnect] /runs/${ar.id}/job attempt ${i + 1} error:`, err);
         }
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, delayMs));
       }
       autoReconnectingRef.current = false;
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; autoReconnectingRef.current = false; };
   }, [queueBadgeData, activeJobId, toast]);
   const queueCount = (queueBadgeData?.items?.length ?? 0) + (queueBadgeData?.activeRun ? 1 : 0);
 
