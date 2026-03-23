@@ -585,7 +585,7 @@ export default function QuantumLab() {
   useEffect(() => {
     if (activeJobId) return;
     const ar = queueBadgeData?.activeRun;
-    if (!ar || (ar.status !== "running" && ar.status !== "paused")) {
+    if (!ar || ar.status !== "running") {
       autoReconnectAttemptedRef.current = null;
       return;
     }
@@ -2104,6 +2104,23 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
     onError: () => { toast({ title: "Failed to delete run", variant: "destructive" }); },
   });
 
+  const retryMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/lab/runs/${id}/retry`, { method: "POST", credentials: "include" });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || "Retry failed");
+      return data;
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+      toast({ title: "Run queued for retry", description: `New run #${data.runId} created` });
+    },
+    onError: (err: any) => {
+      toast({ title: "Retry failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const resumeMutation = useMutation({
     mutationFn: async (id: number) => {
       const res = await fetch(`/api/lab/runs/${id}/resume`, { method: "POST", credentials: "include" });
@@ -2282,6 +2299,19 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
                           >
                             {resumeMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
                             Resume
+                          </Button>
+                        )}
+                        {isFailed && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 gap-1"
+                            onClick={(e) => { e.stopPropagation(); retryMutation.mutate(run.id); }}
+                            disabled={retryMutation.isPending}
+                            data-testid={`button-retry-run-${run.id}`}
+                          >
+                            {retryMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+                            Retry
                           </Button>
                         )}
                         {(isComplete || isRunning) && <ChevronRight className="w-4 h-4 text-white/40" />}

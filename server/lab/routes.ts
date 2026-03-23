@@ -1370,6 +1370,50 @@ export function registerLabRoutes(app: Express): void {
     res.json(results);
   });
 
+  app.post("/api/lab/runs/:id/retry", requireLabAuth, async (req: Request, res: Response) => {
+    try {
+      const runId = parseInt(req.params.id);
+      const run = await verifyRunOwnership(req, res);
+      if (!run) return;
+      if (run.status !== "failed") {
+        return res.status(400).json({ error: "Only failed runs can be retried" });
+      }
+      const runSnapshot = run.configSnapshot && typeof run.configSnapshot === "object" ? run.configSnapshot as any : null;
+      const checkpoint = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
+      const snapshot = runSnapshot ?? checkpoint?.configSnapshot;
+      if (!snapshot) {
+        return res.status(400).json({ error: "No config snapshot found — cannot retry" });
+      }
+      const walletAddress = (req as any).walletAddress;
+      const queueOrder = await labStorage.getNextQueueOrder(walletAddress);
+      const newRun = await labStorage.createRun({
+        strategyId: run.strategyId,
+        userId: walletAddress,
+        tickers: run.tickers as string[],
+        timeframes: run.timeframes as string[],
+        startDate: run.startDate,
+        endDate: run.endDate,
+        randomSamples: run.randomSamples,
+        topK: run.topK,
+        refinementsPerSeed: run.refinementsPerSeed,
+        minTrades: run.minTrades,
+        maxDrawdownCap: run.maxDrawdownCap ? String(run.maxDrawdownCap) : undefined,
+        mode: run.mode ?? undefined,
+        status: "queued",
+      });
+      await db.update(labOptimizationRuns).set({
+        queueOrder,
+        configSnapshot: snapshot,
+      }).where(eq(labOptimizationRuns.id, newRun.id));
+      console.log(`[QuantumLab] Retry: created run ${newRun.id} from failed run ${runId} (order: ${queueOrder})`);
+      setTimeout(() => pumpQueue(), 500);
+      res.json({ queued: true, runId: newRun.id, queueOrder, sourceRunId: runId });
+    } catch (err: any) {
+      console.error(`[QuantumLab] Retry failed:`, err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   const MAX_AUTO_RESUME_ATTEMPTS = 3;
 
   app.post("/api/lab/runs/:id/refine", requireLabAuth, async (req: Request, res: Response) => {
