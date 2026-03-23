@@ -423,6 +423,7 @@ export default function QuantumLab() {
   const [queueOpen, setQueueOpen] = useState(false);
   const activeJobIdRef = useRef<string | null>(null);
   useEffect(() => { activeJobIdRef.current = activeJobId; }, [activeJobId]);
+  const autoReconnectingRef = useRef(false);
   const [code, setCode] = useState(EXAMPLE_PINE);
   const [strategyName, setStrategyName] = useState("");
   const [strategyId, setStrategyId] = useState<number | null>(null);
@@ -571,7 +572,6 @@ export default function QuantumLab() {
     return () => { isMounted = false; clearTimeout(reconnectTimer); eventSourceRef.current?.close(); };
   }, [activeJobId, toast]);
 
-  const autoReconnectingRef = useRef(false);
   const { data: queueBadgeData } = useQuery<{ items: any[]; activeRun: any | null }>({
     queryKey: ["/api/lab/queue"],
     queryFn: async () => {
@@ -579,41 +579,44 @@ export default function QuantumLab() {
       if (!res.ok) return { items: [], activeRun: null };
       const data = await res.json();
       if (Array.isArray(data)) return { items: data, activeRun: null };
-      const result = data as { items: any[]; activeRun: any | null };
-      const ar = result.activeRun;
-      if (ar?.status === "running" && !activeJobIdRef.current && !autoReconnectingRef.current) {
-        autoReconnectingRef.current = true;
-        console.log(`[AutoReconnect] Detected running run ${ar.id}, attempting job lookup...`);
-        (async () => {
-          for (let i = 0; i < 5; i++) {
-            try {
-              const jobRes = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
-              console.log(`[AutoReconnect] /runs/${ar.id}/job attempt ${i + 1}: status=${jobRes.status}`);
-              if (jobRes.ok) {
-                const jobData = await jobRes.json();
-                if (jobData.jobId && !activeJobIdRef.current) {
-                  setActiveRunId(ar.id);
-                  setActiveJobId(jobData.jobId);
-                  toast({ title: "Reconnected to active run", description: `Run #${ar.id} resumed after restart.` });
-                  console.log(`[AutoReconnect] Connected to job ${jobData.jobId} for run ${ar.id}`);
-                }
-                break;
-              }
-            } catch (err) {
-              console.log(`[AutoReconnect] /runs/${ar.id}/job attempt ${i + 1} error:`, err);
-            }
-            await new Promise(r => setTimeout(r, 3000));
-          }
-          autoReconnectingRef.current = false;
-        })();
-      } else if (ar && !activeJobIdRef.current) {
-        console.log(`[AutoReconnect] Skip: ar.status=${ar.status}, activeJobId=${activeJobIdRef.current}, reconnecting=${autoReconnectingRef.current}`);
-      }
-      return result;
+      return data as { items: any[]; activeRun: any | null };
     },
     refetchInterval: queueOpen ? 2000 : 10000,
     structuralSharing: false,
   });
+
+  useEffect(() => {
+    const ar = queueBadgeData?.activeRun;
+    if (!ar || ar.status !== "running" || activeJobId || autoReconnectingRef.current) return;
+    autoReconnectingRef.current = true;
+    let cancelled = false;
+    console.log(`[AutoReconnect] Detected running run ${ar.id}, attempting job lookup...`);
+    (async () => {
+      for (let i = 0; i < 5; i++) {
+        if (cancelled) return;
+        try {
+          const jobRes = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
+          console.log(`[AutoReconnect] /runs/${ar.id}/job attempt ${i + 1}: status=${jobRes.status}`);
+          if (jobRes.ok) {
+            const jobData = await jobRes.json();
+            if (jobData.jobId && !cancelled) {
+              setActiveRunId(ar.id);
+              setActiveJobId(jobData.jobId);
+              toast({ title: "Reconnected to active run", description: `Run #${ar.id} resumed after restart.` });
+              console.log(`[AutoReconnect] Connected to job ${jobData.jobId} for run ${ar.id}`);
+            }
+            autoReconnectingRef.current = false;
+            return;
+          }
+        } catch (err) {
+          console.log(`[AutoReconnect] /runs/${ar.id}/job attempt ${i + 1} error:`, err);
+        }
+        await new Promise(r => setTimeout(r, 3000));
+      }
+      autoReconnectingRef.current = false;
+    })();
+    return () => { cancelled = true; };
+  }, [queueBadgeData, activeJobId, toast]);
   const queueCount = (queueBadgeData?.items?.length ?? 0) + (queueBadgeData?.activeRun ? 1 : 0);
 
   const handleCancelJob = useCallback(async () => {
