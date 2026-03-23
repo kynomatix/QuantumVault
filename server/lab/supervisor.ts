@@ -80,6 +80,7 @@ export function createLabSupervisor(): LabSupervisor {
   let consecutiveFailures = 0;
   let firstFailureTime = 0;
   let backoffSuspended = false;
+  let suspensionTimer: ReturnType<typeof setTimeout> | null = null;
 
   function getRestartDelay(): number {
     const base = Math.min(MIN_RESTART_DELAY * Math.pow(2, restartCount), MAX_RESTART_DELAY);
@@ -97,7 +98,9 @@ export function createLabSupervisor(): LabSupervisor {
     if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
       backoffSuspended = true;
       console.error(`[LabSupervisor] ${consecutiveFailures} consecutive failures in ${Math.round((now - firstFailureTime) / 1000)}s — suspending restarts for 5 minutes`);
-      setTimeout(() => {
+      if (suspensionTimer) clearTimeout(suspensionTimer);
+      suspensionTimer = setTimeout(() => {
+        suspensionTimer = null;
         backoffSuspended = false;
         consecutiveFailures = 0;
         restartCount = 0;
@@ -218,6 +221,7 @@ export function createLabSupervisor(): LabSupervisor {
               restartCount = 0;
               resolved = true;
               spawnInFlight = false;
+              recordSuccess();
               console.log(`[LabSupervisor] Lab process became healthy via poll on port ${labPort}`);
               resolveReady();
               return;
@@ -317,6 +321,10 @@ export function createLabSupervisor(): LabSupervisor {
       if (healthTimer) {
         clearInterval(healthTimer);
         healthTimer = null;
+      }
+      if (suspensionTimer) {
+        clearTimeout(suspensionTimer);
+        suspensionTimer = null;
       }
       isReady = false;
       child = null;

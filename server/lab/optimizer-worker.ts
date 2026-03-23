@@ -710,7 +710,8 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LiteBacktestResu
       eta: estimateEta(startTime, currentTest, grandTotal),
     }});
 
-    const topPartial = [...allResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, 10);
+    const coordKeep = isLowTimeframe(timeframe) ? 5 : 10;
+    const topPartial = [...allResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, coordKeep);
     send({ type: "partial-checkpoint", combo: comboKey, stage: "coordinate", iteration: currentTest, results: topPartial, coordinateCompleted: Array.from(completedParamSet) });
   }
 
@@ -774,7 +775,8 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LiteBacktestResu
             eta: estimateEta(startTime, currentTest, grandTotal),
           }});
 
-          const topPartial = [...allResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, 10);
+          const coordKeep2 = isLowTimeframe(timeframe) ? 5 : 10;
+          const topPartial = [...allResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, coordKeep2);
           send({ type: "partial-checkpoint", combo: comboKey, stage: "coordinate", iteration: currentTest, results: topPartial, coordinateCompleted: Array.from(completedParamSet) });
         }
       }
@@ -1159,7 +1161,7 @@ async function run() {
         }});
 
         const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
-        const refineKeepCount = Math.max(10, config.topK);
+        const refineKeepCount = lowTf ? Math.max(5, config.topK) : Math.max(10, config.topK);
         const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, refineKeepCount);
         send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: actualIter, results: topPartial, refineSeeds: refineSeedParams });
         lastCheckpointTime = Date.now();
