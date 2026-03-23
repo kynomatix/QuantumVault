@@ -421,18 +421,8 @@ export default function QuantumLab() {
   const { getMaxLeverage } = useLeverageLimits();
 
   const [queueOpen, setQueueOpen] = useState(false);
-  const { data: queueBadgeData } = useQuery<{ items: any[]; activeRun: any | null }>({
-    queryKey: ["/api/lab/queue"],
-    queryFn: async () => {
-      const res = await fetch("/api/lab/queue", { credentials: "include" });
-      if (!res.ok) return { items: [], activeRun: null };
-      const data = await res.json();
-      if (Array.isArray(data)) return { items: data, activeRun: null };
-      return data;
-    },
-    refetchInterval: queueOpen ? 2000 : 10000,
-  });
-  const queueCount = (queueBadgeData?.items?.length ?? 0) + (queueBadgeData?.activeRun ? 1 : 0);
+  const activeJobIdRef = useRef<string | null>(null);
+  useEffect(() => { activeJobIdRef.current = activeJobId; }, [activeJobId]);
   const [code, setCode] = useState(EXAMPLE_PINE);
   const [strategyName, setStrategyName] = useState("");
   const [strategyId, setStrategyId] = useState<number | null>(null);
@@ -581,46 +571,43 @@ export default function QuantumLab() {
     return () => { isMounted = false; clearTimeout(reconnectTimer); eventSourceRef.current?.close(); };
   }, [activeJobId, toast]);
 
-  const autoReconnectAttemptedRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (activeJobId) return;
-    const ar = queueBadgeData?.activeRun;
-    if (!ar || ar.status !== "running") {
-      autoReconnectAttemptedRef.current = null;
-      return;
-    }
-    if (autoReconnectAttemptedRef.current === ar.id) return;
-    autoReconnectAttemptedRef.current = ar.id;
-    let cancelled = false;
-    const attempt = async (retries: number) => {
-      if (cancelled) return;
-      try {
-        const res = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
-        if (!res.ok) {
-          if (retries > 0 && !cancelled) {
-            setTimeout(() => attempt(retries - 1), 3000);
-          } else {
-            autoReconnectAttemptedRef.current = null;
+  const autoReconnectingRef = useRef(false);
+  const { data: queueBadgeData } = useQuery<{ items: any[]; activeRun: any | null }>({
+    queryKey: ["/api/lab/queue"],
+    queryFn: async () => {
+      const res = await fetch("/api/lab/queue", { credentials: "include" });
+      if (!res.ok) return { items: [], activeRun: null };
+      const data = await res.json();
+      if (Array.isArray(data)) return { items: data, activeRun: null };
+      const result = data as { items: any[]; activeRun: any | null };
+      const ar = result.activeRun;
+      if (ar?.status === "running" && !activeJobIdRef.current && !autoReconnectingRef.current) {
+        autoReconnectingRef.current = true;
+        (async () => {
+          for (let i = 0; i < 5; i++) {
+            try {
+              const jobRes = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
+              if (jobRes.ok) {
+                const jobData = await jobRes.json();
+                if (jobData.jobId && !activeJobIdRef.current) {
+                  setActiveRunId(ar.id);
+                  setActiveJobId(jobData.jobId);
+                  toast({ title: "Reconnected to active run", description: `Run #${ar.id} resumed after restart.` });
+                }
+                break;
+              }
+            } catch {}
+            await new Promise(r => setTimeout(r, 3000));
           }
-          return;
-        }
-        const data = await res.json();
-        if (data.jobId && !cancelled) {
-          setActiveRunId(ar.id);
-          setActiveJobId(data.jobId);
-          toast({ title: "Reconnected to active run", description: `Run #${ar.id} resumed after restart.` });
-        }
-      } catch {
-        if (retries > 0 && !cancelled) {
-          setTimeout(() => attempt(retries - 1), 3000);
-        } else {
-          autoReconnectAttemptedRef.current = null;
-        }
+          autoReconnectingRef.current = false;
+        })();
       }
-    };
-    attempt(5);
-    return () => { cancelled = true; };
-  }, [activeJobId, queueBadgeData?.activeRun, toast]);
+      return result;
+    },
+    refetchInterval: queueOpen ? 2000 : 10000,
+    structuralSharing: false,
+  });
+  const queueCount = (queueBadgeData?.items?.length ?? 0) + (queueBadgeData?.activeRun ? 1 : 0);
 
   const handleCancelJob = useCallback(async () => {
     if (!activeJobId) return;
