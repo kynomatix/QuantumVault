@@ -568,6 +568,7 @@ export function registerLabRoutes(app: Express): void {
                   configSnapshot: config,
                   ...checkpointState,
                 } as LabCheckpoint;
+                (checkpoint as any).autoResumeAttempts = 0;
                 await labStorage.saveCheckpoint(runId!, checkpoint);
                 console.log(`[QuantumLab] Checkpoint saved: ${completedCombos.length} combos done (run ${runId})`);
               } catch (err: any) {
@@ -1414,7 +1415,7 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  const MAX_AUTO_RESUME_ATTEMPTS = 3;
+  const MAX_AUTO_RESUME_ATTEMPTS = 6;
 
   app.post("/api/lab/runs/:id/refine", requireLabAuth, async (req: Request, res: Response) => {
     let refineRunId: number | undefined;
@@ -2054,16 +2055,25 @@ export function registerLabRoutes(app: Express): void {
         console.log(`[QuantumLab] Processed ${staleRunning.length} stale run(s) from previous session`);
       }
 
-      const exhaustedPaused = await db.select().from(labOptimizationRuns).where(
+      const allPaused = await db.select().from(labOptimizationRuns).where(
         eq(labOptimizationRuns.status, "paused")
       );
-      for (const run of exhaustedPaused) {
+      for (const run of allPaused) {
         const cp = run.checkpoint as any;
         const attempts = (cp?.autoResumeAttempts as number) ?? 0;
         if (attempts >= MAX_AUTO_RESUME_ATTEMPTS) {
           await labStorage.failRun(run.id, true);
           console.log(`[QuantumLab] Boot cleanup: paused run ${run.id} had exhausted auto-resume (${attempts}/${MAX_AUTO_RESUME_ATTEMPTS}), force-failed to unblock queue`);
+        } else if (cp?.userCancelled || cp?.resourceError) {
+          continue;
+        } else if (!labStorage.interruptedRunIds.includes(run.id)) {
+          labStorage.interruptedRunIds.push(run.id);
+          console.log(`[QuantumLab] Paused run ${run.id} queued for lazy recovery`);
         }
+      }
+      if (allPaused.length > 0) {
+        const eligible = labStorage.interruptedRunIds.length;
+        console.log(`[QuantumLab] Found ${allPaused.length} paused run(s), ${eligible} eligible for auto-resume`);
       }
 
       if (activeWorker) {
