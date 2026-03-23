@@ -800,6 +800,46 @@ function evenSample<T>(arr: T[], count: number, preferVal?: T): T[] {
   return result;
 }
 
+const LOW_TF_MINUTES = new Set([1, 3, 5, 15, 30]);
+function isLowTimeframe(tf: string): boolean {
+  const match = tf.match(/^(\d+)(m|h|d)?$/i);
+  if (!match) return false;
+  const val = parseInt(match[1], 10);
+  const unit = (match[2] || "m").toLowerCase();
+  if (unit === "h" || unit === "d") return false;
+  return LOW_TF_MINUTES.has(val);
+}
+
+const MAX_TRADES_LOW_TF = 200;
+const MAX_EQUITY_POINTS_LOW_TF = 500;
+const MAX_TRADES_HIGH_TF = 500;
+const MAX_EQUITY_POINTS_HIGH_TF = 1000;
+
+function trimResult(r: LabBacktestResult): LabBacktestResult {
+  const lowTf = isLowTimeframe(r.timeframe);
+  const maxTrades = lowTf ? MAX_TRADES_LOW_TF : MAX_TRADES_HIGH_TF;
+  const maxEquity = lowTf ? MAX_EQUITY_POINTS_LOW_TF : MAX_EQUITY_POINTS_HIGH_TF;
+
+  let trades = r.trades;
+  if (trades.length > maxTrades) {
+    trades = trades.slice(-maxTrades);
+  }
+
+  let equityCurve = r.equityCurve;
+  if (equityCurve.length > maxEquity) {
+    const keepLast = maxEquity - 1;
+    const step = (equityCurve.length - 1) / keepLast;
+    const sampled: typeof equityCurve = [];
+    for (let i = 0; i < keepLast; i++) {
+      sampled.push(equityCurve[Math.round(i * step)]);
+    }
+    sampled.push(equityCurve[equityCurve.length - 1]);
+    equityCurve = sampled;
+  }
+
+  return { ...r, trades, equityCurve };
+}
+
 let aborted = false;
 
 parentPort?.on("message", (msg: any) => {
@@ -945,7 +985,7 @@ async function run() {
       coordinateTotalTests += tuneResult.totalTests;
       const topLites = tuneResult.results.sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, 10);
       const topForCombo = topLites.map(lite =>
-        runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache)
+        trimResult(runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache))
       );
       allResults.push(...topForCombo);
       tickerProgress[key] = { status: "complete", best: topForCombo[0]?.netProfitPercent ?? 0 };
@@ -984,8 +1024,10 @@ async function run() {
 
     let lastCheckpointTime = Date.now();
     let checkpointCount = 0;
-    const FIRST_CHECKPOINT_MS = 10_000;
-    const CHECKPOINT_INTERVAL_MS = 60_000;
+    const lowTf = isLowTimeframe(combo.timeframe);
+    const FIRST_CHECKPOINT_MS = lowTf ? 30_000 : 10_000;
+    const CHECKPOINT_INTERVAL_MS = lowTf ? 180_000 : 60_000;
+    const PARTIAL_KEEP_COUNT = lowTf ? 5 : 10;
 
     const comboKey = `${combo.ticker}|${combo.timeframe}`;
     const comboInsights = config.guidedInsightsPerCombo?.[comboKey] ?? config.guidedInsights;
@@ -1025,7 +1067,7 @@ async function run() {
       }
       globalCurrent++;
 
-      if (s % 10 === 0) {
+      if (s % (lowTf ? 25 : 10) === 0) {
         const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreLite(b) - scoreLite(a))[0] : null;
         send({ type: "progress", data: {
           jobId, status: "random_search",
@@ -1047,7 +1089,7 @@ async function run() {
       if (now - lastCheckpointTime >= interval) {
         lastCheckpointTime = now;
         checkpointCount++;
-        const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, 10);
+        const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, PARTIAL_KEEP_COUNT);
         send({ type: "partial-checkpoint", combo: key, stage: "random", iteration: s + 1, results: topPartial });
       }
     }
@@ -1275,7 +1317,7 @@ async function run() {
             eta: estimateEta(startTime, globalCurrent, grandTotal),
           }});
 
-          const deepCheckpointCount = Math.max(10, config.topK);
+          const deepCheckpointCount = lowTf ? Math.max(5, config.topK) : Math.max(10, config.topK);
           const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, deepCheckpointCount);
           send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round, results: topPartial, refineSeeds: refineSeedParams });
           lastCheckpointTime = Date.now();
@@ -1284,7 +1326,7 @@ async function run() {
 
         previousRoundBest = [...roundDiscoveries].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, Math.max(10, deepSeedsPerRound));
 
-        const deepCheckpointCount2 = Math.max(10, config.topK);
+        const deepCheckpointCount2 = lowTf ? Math.max(5, config.topK) : Math.max(10, config.topK);
         const topAfterRound = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, deepCheckpointCount2);
         send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round + 1, results: topAfterRound, refineSeeds: refineSeedParams });
         lastCheckpointTime = Date.now();
@@ -1294,7 +1336,7 @@ async function run() {
     comboResults.sort((a, b) => scoreLite(b) - scoreLite(a));
     const topLitesForCombo = comboResults.slice(0, 10);
     const topForCombo = topLitesForCombo.map(lite =>
-      runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache)
+      trimResult(runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache))
     );
     allResults.push(...topForCombo);
 
