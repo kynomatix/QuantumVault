@@ -12,10 +12,12 @@ export interface LabSupervisor {
 
 const LAB_PORT = 5050;
 const PID_FILE = "/tmp/quantumlab.pid";
-const MIN_RESTART_DELAY = 1000;
-const MAX_RESTART_DELAY = 30000;
+const MIN_RESTART_DELAY = 2000;
+const MAX_RESTART_DELAY = 60000;
 const HEALTH_CHECK_INTERVAL = 30000;
 const READY_TIMEOUT = 120000;
+const MAX_CONSECUTIVE_FAILURES = 8;
+const FAILURE_WINDOW_MS = 300_000;
 
 function deriveLabAuthSecret(): string {
   const base = process.env.SESSION_SECRET || "quantum-vault-secret-change-in-production";
@@ -75,11 +77,46 @@ export function createLabSupervisor(): LabSupervisor {
   let shuttingDown = false;
   let ownsChild = false;
   let spawnInFlight = false;
+  let consecutiveFailures = 0;
+  let firstFailureTime = 0;
+  let backoffSuspended = false;
 
   function getRestartDelay(): number {
     const base = Math.min(MIN_RESTART_DELAY * Math.pow(2, restartCount), MAX_RESTART_DELAY);
     const jitter = Math.random() * base * 0.3;
     return base + jitter;
+  }
+
+  function recordFailure(): boolean {
+    const now = Date.now();
+    if (now - firstFailureTime > FAILURE_WINDOW_MS) {
+      consecutiveFailures = 0;
+      firstFailureTime = now;
+    }
+    consecutiveFailures++;
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      backoffSuspended = true;
+      console.error(`[LabSupervisor] ${consecutiveFailures} consecutive failures in ${Math.round((now - firstFailureTime) / 1000)}s — suspending restarts for 5 minutes`);
+      setTimeout(() => {
+        backoffSuspended = false;
+        consecutiveFailures = 0;
+        restartCount = 0;
+        console.log(`[LabSupervisor] Restart suspension lifted, will attempt fresh spawn`);
+        if (!shuttingDown && !spawnInFlight && !isReady) {
+          spawnAndWaitForReady().catch((err) => {
+            console.error(`[LabSupervisor] Failed to restart after suspension: ${err.message}`);
+          });
+        }
+      }, FAILURE_WINDOW_MS);
+      return false;
+    }
+    return true;
+  }
+
+  function recordSuccess() {
+    consecutiveFailures = 0;
+    firstFailureTime = 0;
+    backoffSuspended = false;
   }
 
   let consecutiveHealthFailures = 0;
@@ -104,7 +141,10 @@ export function createLabSupervisor(): LabSupervisor {
         }
         if (consecutiveHealthFailures >= MAX_HEALTH_FAILURES) {
           isReady = false;
-          if (ownsChild && child) {
+          if (backoffSuspended) {
+            console.log(`[LabSupervisor] Health check failed but restart suspended — waiting for cooldown`);
+            consecutiveHealthFailures = 0;
+          } else if (ownsChild && child) {
             console.log(`[LabSupervisor] Health check failed ${MAX_HEALTH_FAILURES} times, killing child for restart`);
             try { child.kill("SIGKILL"); } catch {}
           } else if (!ownsChild) {
@@ -199,6 +239,7 @@ export function createLabSupervisor(): LabSupervisor {
           isReady = true;
           restartCount = 0;
           spawnInFlight = false;
+          recordSuccess();
           console.log(`[LabSupervisor] Lab process ready on port ${labPort} (pid: ${spawnedChild.pid})`);
           spawnedChild.unref();
           try { spawnedChild.disconnect?.(); } catch {}
@@ -218,11 +259,15 @@ export function createLabSupervisor(): LabSupervisor {
         spawnInFlight = false;
 
         if (!shuttingDown && isCurrentChild) {
+          const canRetry = recordFailure();
+          if (!canRetry || backoffSuspended) {
+            return;
+          }
           const delay = getRestartDelay();
           restartCount++;
-          console.log(`[LabSupervisor] Restarting in ${Math.round(delay)}ms (attempt ${restartCount})`);
+          console.log(`[LabSupervisor] Restarting in ${Math.round(delay)}ms (attempt ${restartCount}, failures: ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES})`);
           setTimeout(() => {
-            if (!shuttingDown && !spawnInFlight) {
+            if (!shuttingDown && !spawnInFlight && !backoffSuspended) {
               spawnAndWaitForReady().catch((err) => {
                 console.error(`[LabSupervisor] Failed to restart lab: ${err.message}`);
               });

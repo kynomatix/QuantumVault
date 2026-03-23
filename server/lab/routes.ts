@@ -2099,7 +2099,6 @@ export function registerLabRoutes(app: Express): void {
   async function lazyRecoveryCycle() {
     if (labStorage.interruptedRunIds.length === 0) return;
     if (activeWorker || pumpQueueRunning) {
-      console.log(`[QuantumLab] Lazy recovery: skipping cycle — worker active or pump running`);
       return;
     }
 
