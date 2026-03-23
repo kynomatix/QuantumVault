@@ -583,24 +583,31 @@ export default function QuantumLab() {
       const ar = result.activeRun;
       if (ar?.status === "running" && !activeJobIdRef.current && !autoReconnectingRef.current) {
         autoReconnectingRef.current = true;
+        console.log(`[AutoReconnect] Detected running run ${ar.id}, attempting job lookup...`);
         (async () => {
           for (let i = 0; i < 5; i++) {
             try {
               const jobRes = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
+              console.log(`[AutoReconnect] /runs/${ar.id}/job attempt ${i + 1}: status=${jobRes.status}`);
               if (jobRes.ok) {
                 const jobData = await jobRes.json();
                 if (jobData.jobId && !activeJobIdRef.current) {
                   setActiveRunId(ar.id);
                   setActiveJobId(jobData.jobId);
                   toast({ title: "Reconnected to active run", description: `Run #${ar.id} resumed after restart.` });
+                  console.log(`[AutoReconnect] Connected to job ${jobData.jobId} for run ${ar.id}`);
                 }
                 break;
               }
-            } catch {}
+            } catch (err) {
+              console.log(`[AutoReconnect] /runs/${ar.id}/job attempt ${i + 1} error:`, err);
+            }
             await new Promise(r => setTimeout(r, 3000));
           }
           autoReconnectingRef.current = false;
         })();
+      } else if (ar && !activeJobIdRef.current) {
+        console.log(`[AutoReconnect] Skip: ar.status=${ar.status}, activeJobId=${activeJobIdRef.current}, reconnecting=${autoReconnectingRef.current}`);
       }
       return result;
     },
