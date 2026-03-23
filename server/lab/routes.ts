@@ -407,6 +407,30 @@ export function registerLabRoutes(app: Express): void {
   let activeWorker: Worker | null = null;
   let lastWorkerOOM = false;
 
+  function clearActiveWorker() {
+    activeWorker = null;
+    stopKeepAlive();
+  }
+
+  let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  function startKeepAlive() {
+    if (keepAliveTimer) return;
+    const port = process.env.PORT || "5000";
+    keepAliveTimer = setInterval(() => {
+      if (!activeWorker) {
+        stopKeepAlive();
+        return;
+      }
+      fetch(`http://127.0.0.1:${port}/health`).catch(() => {});
+    }, 25_000);
+  }
+  function stopKeepAlive() {
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+  }
+
   async function fetchAllCandles(
     config: LabOptimizationConfig,
     onProgress: (msg: string) => void
@@ -485,6 +509,7 @@ export function registerLabRoutes(app: Express): void {
 
       activeWorker = worker;
       lastWorkerOOM = false;
+      startKeepAlive();
 
       worker.on("message", async (msg: any) => {
         switch (msg.type) {
@@ -616,7 +641,7 @@ export function registerLabRoutes(app: Express): void {
                     jobId: job.id, status: "error", stage: `DB finalization failed: ${err.message}`,
                     current: 0, total: 0, percent: 0, elapsed: 0, error: err.message,
                   });
-                  activeWorker = null;
+                  clearActiveWorker();
                   setTimeout(() => pumpQueue(), 1000);
                   break;
                 }
@@ -626,7 +651,7 @@ export function registerLabRoutes(app: Express): void {
                 current: 0, total: 0, percent: 100, elapsed: 0,
               });
             }
-            activeWorker = null;
+            clearActiveWorker();
             setTimeout(() => pumpQueue(), 1000);
             break;
           }
@@ -647,17 +672,17 @@ export function registerLabRoutes(app: Express): void {
                   const cpData = await labStorage.getCheckpoint(runId);
                   if (cpData) { cpData.resourceError = true; await labStorage.saveCheckpoint(runId, cpData); }
                   console.log(`[QuantumLab] Run ${runId} resource error → paused (no auto-retry)`);
-                  activeWorker = null;
+                  clearActiveWorker();
                   setTimeout(() => pumpQueue(), 1000);
                   break;
                 }
                 console.log(`[QuantumLab] Run ${runId} error → paused, will auto-retry`);
-                activeWorker = null;
+                clearActiveWorker();
                 autoRetryAfterCrash(runId, job.id, msg.message);
                 break;
               } catch {}
             }
-            activeWorker = null;
+            clearActiveWorker();
             setTimeout(() => pumpQueue(), 1000);
             break;
           }
@@ -681,17 +706,17 @@ export function registerLabRoutes(app: Express): void {
               const cpData = await labStorage.getCheckpoint(runId);
               if (cpData) { cpData.resourceError = true; await labStorage.saveCheckpoint(runId, cpData); }
               console.log(`[QuantumLab] Worker OOM run ${runId} → paused (no auto-retry)`);
-              activeWorker = null;
+              clearActiveWorker();
               setTimeout(() => pumpQueue(), 1000);
               return;
             }
             console.log(`[QuantumLab] Worker error run ${runId} → paused, will auto-retry`);
-            activeWorker = null;
+            clearActiveWorker();
             autoRetryAfterCrash(runId, job.id, err.message);
             return;
           } catch { await labStorage.failRun(runId).catch(() => {}); }
         }
-        activeWorker = null;
+        clearActiveWorker();
         setTimeout(() => pumpQueue(), 1000);
       });
 
@@ -712,17 +737,17 @@ export function registerLabRoutes(app: Express): void {
                   current: 0, total: 0, percent: 0, elapsed: 0, error: exitMsg,
                 });
                 console.log(`[QuantumLab] Worker OOM exit run ${runId} → paused (no auto-retry)`);
-                activeWorker = null;
+                clearActiveWorker();
                 setTimeout(() => pumpQueue(), 1000);
                 return;
               }
               console.log(`[QuantumLab] Worker exit(${code}) run ${runId} → paused, will auto-retry`);
-              activeWorker = null;
+              clearActiveWorker();
               autoRetryAfterCrash(runId, job.id, exitMsg);
               return;
             } catch { await labStorage.failRun(runId).catch(() => {}); }
           }
-          activeWorker = null;
+          clearActiveWorker();
           setTimeout(() => pumpQueue(), 1000);
         }
       });
@@ -737,7 +762,7 @@ export function registerLabRoutes(app: Express): void {
       if (runId) {
         try {
           await labStorage.pauseRun(runId);
-          activeWorker = null;
+          clearActiveWorker();
           autoRetryAfterCrash(runId, job.id, err.message);
         } catch { await labStorage.failRun(runId).catch(() => {}); }
       }
@@ -1542,7 +1567,7 @@ export function registerLabRoutes(app: Express): void {
       if (activeWorker) {
         activeWorker.postMessage({ type: "abort" });
         try { activeWorker.terminate(); } catch {}
-        activeWorker = null;
+        clearActiveWorker();
       }
       const evicted = labStorage.forceEvictAllJobs();
       const staleRuns = await db.select().from(labOptimizationRuns).where(
@@ -1807,7 +1832,7 @@ export function registerLabRoutes(app: Express): void {
     if (shouldTerminateWorker && activeWorker) {
       activeWorker.postMessage({ type: "abort" });
       try { activeWorker.terminate(); } catch {}
-      activeWorker = null;
+      clearActiveWorker();
     }
 
     let staleRuns;
@@ -1867,7 +1892,7 @@ export function registerLabRoutes(app: Express): void {
         if (activeWorker === workerRef) {
           console.log(`[QuantumLab] Cancel: worker did not exit after grace period, force-terminating`);
           try { workerRef.terminate(); } catch {}
-          activeWorker = null;
+          clearActiveWorker();
           pumpQueue();
         }
       }, 2000);
@@ -2254,7 +2279,7 @@ export function registerLabRoutes(app: Express): void {
         ]);
         activeWorker?.terminate();
       } catch {}
-      activeWorker = null;
+      clearActiveWorker();
     }
     const allJobs = (labStorage as any).jobs as Map<string, any> | undefined;
     if (!allJobs || allJobs.size === 0) return;
