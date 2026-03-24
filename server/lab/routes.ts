@@ -414,11 +414,19 @@ export function registerLabRoutes(app: Express): void {
 
   let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   const keepAlivePingUrl = (() => {
-    if (process.env.REPLIT_DOMAINS) {
-      return `https://${process.env.REPLIT_DOMAINS.split(",")[0]}/health`;
+    const replitDomains = process.env.REPLIT_DOMAINS;
+    const replitDevDomain = process.env.REPLIT_DEV_DOMAIN;
+    const replSlug = process.env.REPL_SLUG;
+    const replOwner = process.env.REPL_OWNER;
+
+    if (replitDomains) {
+      return `https://${replitDomains.split(",")[0]}/health`;
     }
-    if (process.env.REPL_SLUG && process.env.REPL_OWNER) {
-      return `https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co/health`;
+    if (replitDevDomain) {
+      return `https://${replitDevDomain}/health`;
+    }
+    if (replSlug && replOwner) {
+      return `https://${replSlug}.${replOwner}.repl.co/health`;
     }
     return `http://127.0.0.1:${process.env.PORT || "5000"}/health`;
   })();
@@ -427,14 +435,22 @@ export function registerLabRoutes(app: Express): void {
     return !!activeWorker || labStorage.interruptedRunIds.length > 0;
   }
 
+  let keepAlivePingCount = 0;
   function startKeepAlive() {
     if (keepAliveTimer) return;
+    const isExternal = keepAlivePingUrl.startsWith("https://");
+    console.log(`[QuantumLab] Keep-alive started → ${isExternal ? "EXTERNAL" : "LOCAL"} ping: ${keepAlivePingUrl}`);
+    keepAlivePingCount = 0;
     keepAliveTimer = setInterval(() => {
       if (!hasWorkPending()) {
+        console.log(`[QuantumLab] Keep-alive stopped (no work pending, ${keepAlivePingCount} pings sent)`);
         stopKeepAlive();
         return;
       }
-      fetch(keepAlivePingUrl).catch(() => {});
+      keepAlivePingCount++;
+      fetch(keepAlivePingUrl).catch((err) => {
+        console.log(`[QuantumLab] Keep-alive ping #${keepAlivePingCount} failed: ${err.message}`);
+      });
     }, 25_000);
   }
   function stopKeepAlive() {
