@@ -1,5 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import bs58 from 'bs58';
@@ -75,6 +76,9 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
+import { JobMonitor } from '@/pages/QuantumLab';
+import { apiRequest, queryClient } from '@/lib/queryClient';
+import type { LabJobProgress } from '@shared/schema';
 import { BotManagementDrawer } from '@/components/BotManagementDrawer';
 import { CreateBotModal } from '@/components/CreateBotModal';
 import { TradeHistoryModal } from '@/components/TradeHistoryModal';
@@ -203,6 +207,141 @@ export default function AppPage() {
   const [botSortDir, setBotSortDir] = useState<'asc' | 'desc'>('desc');
   const [botSortMenuOpen, setBotSortMenuOpen] = useState(false);
   const botSortRef = useRef<HTMLDivElement>(null);
+
+  const [globalLabJobId, setGlobalLabJobId] = useState<string | null>(null);
+  const [globalLabRunId, setGlobalLabRunId] = useState<number | null>(null);
+  const [globalLabProgress, setGlobalLabProgress] = useState<LabJobProgress | null>(null);
+  const [globalAutoRefine, setGlobalAutoRefine] = useState(false);
+  const globalAutoRefineRef = useRef(false);
+  useEffect(() => { globalAutoRefineRef.current = globalAutoRefine; }, [globalAutoRefine]);
+  const globalEsRef = useRef<EventSource | null>(null);
+  const globalAutoReconnectingRef = useRef(false);
+
+  const { data: globalQueueData } = useQuery<{ items: any[]; activeRun: any | null }>({
+    queryKey: ["/api/lab/queue"],
+    queryFn: async () => {
+      const res = await fetch("/api/lab/queue", { credentials: "include" });
+      if (!res.ok) return { items: [], activeRun: null };
+      const data = await res.json();
+      if (Array.isArray(data)) return { items: data, activeRun: null };
+      return data as { items: any[]; activeRun: any | null };
+    },
+    refetchInterval: 10000,
+    structuralSharing: false,
+  });
+
+  useEffect(() => {
+    const ar = globalQueueData?.activeRun;
+    if (!ar || globalLabJobId) return;
+    if (ar.status !== "running" && ar.status !== "paused") return;
+    if (globalAutoReconnectingRef.current) return;
+    globalAutoReconnectingRef.current = true;
+    let cancelled = false;
+    const isPaused = ar.status === "paused";
+    (async () => {
+      const maxAttempts = isPaused ? 20 : 8;
+      const delayMs = 5000;
+      for (let i = 0; i < maxAttempts; i++) {
+        if (cancelled) return;
+        try {
+          const jobRes = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
+          if (jobRes.ok) {
+            const jobData = await jobRes.json();
+            if (jobData.jobId && !cancelled) {
+              setGlobalLabRunId(ar.id);
+              setGlobalLabJobId(jobData.jobId);
+            }
+            globalAutoReconnectingRef.current = false;
+            return;
+          }
+        } catch {}
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+      globalAutoReconnectingRef.current = false;
+    })();
+    return () => { cancelled = true; globalAutoReconnectingRef.current = false; };
+  }, [globalQueueData, globalLabJobId]);
+
+  useEffect(() => {
+    if (!globalLabJobId) { setGlobalLabProgress(null); return; }
+    const currentJobId = globalLabJobId;
+    let isMounted = true;
+    let reconnectTimer: ReturnType<typeof setTimeout>;
+    let failCount = 0;
+
+    function connect() {
+      if (!isMounted) return;
+      globalEsRef.current?.close();
+      const es = new EventSource(`/api/lab/job/${currentJobId}/progress`);
+      globalEsRef.current = es;
+      let lastUpdate = 0;
+      let pending: LabJobProgress | null = null;
+      let throttle: ReturnType<typeof setTimeout> | null = null;
+
+      es.onmessage = (event) => {
+        try {
+          failCount = 0;
+          const data: LabJobProgress = JSON.parse(event.data);
+          const isTerminal = data.status === "complete" || data.status === "error";
+          const now = Date.now();
+          if (isTerminal || now - lastUpdate >= 500) {
+            lastUpdate = now;
+            if (throttle) { clearTimeout(throttle); throttle = null; }
+            pending = null;
+            setGlobalLabProgress(data);
+          } else {
+            pending = data;
+            if (!throttle) {
+              throttle = setTimeout(() => {
+                throttle = null;
+                if (pending) { lastUpdate = Date.now(); setGlobalLabProgress(pending); pending = null; }
+              }, 500 - (now - lastUpdate));
+            }
+          }
+          if (data.status === "complete") {
+            es.close();
+            setGlobalLabJobId(null);
+            queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+          }
+          if (data.status === "retrying" && data.newJobId && data.newJobId !== currentJobId) {
+            es.close();
+            setGlobalLabJobId(data.newJobId);
+            return;
+          }
+          if (data.status === "error") {
+            es.close();
+            setGlobalLabJobId(null);
+            queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+          }
+        } catch {}
+      };
+      es.onerror = () => {
+        es.close();
+        if (!isMounted) return;
+        failCount++;
+        if (failCount >= 5) { setGlobalLabJobId(null); setGlobalLabProgress(null); return; }
+        reconnectTimer = setTimeout(() => {
+          if (isMounted) connect();
+        }, 3000);
+      };
+    }
+    connect();
+    return () => { isMounted = false; clearTimeout(reconnectTimer); globalEsRef.current?.close(); };
+  }, [globalLabJobId]);
+
+  const handleGlobalCancelJob = useCallback(async () => {
+    if (!globalLabJobId) return;
+    try {
+      await apiRequest("POST", `/api/lab/job/${globalLabJobId}/cancel`);
+    } catch {}
+    globalEsRef.current?.close();
+    setGlobalLabJobId(null);
+    setGlobalLabProgress(null);
+    queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+    toast({ title: "Optimization cancelled", description: "Best results found so far have been saved to History." });
+  }, [globalLabJobId, toast]);
 
   useEffect(() => {
     if (!botSortMenuOpen) return;
@@ -1420,11 +1559,14 @@ export default function AppPage() {
           <div className="flex items-center gap-1">
             <a 
               href="/quantumlab" 
-              className="p-2 hover:bg-muted rounded-lg"
+              className="p-2 hover:bg-muted rounded-lg relative"
               data-testid="link-quantumlab-header"
               title="QuantumLab"
             >
-              <FlaskConical className="w-5 h-5 text-muted-foreground" />
+              <FlaskConical className={`w-5 h-5 ${globalLabJobId ? 'text-violet-400' : 'text-muted-foreground'}`} />
+              {globalLabJobId && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-violet-500 rounded-full animate-pulse" />
+              )}
             </a>
             <a 
               href="/analytics" 
@@ -1575,6 +1717,18 @@ export default function AppPage() {
             </button>
           </div>
         </header>
+
+        {globalLabJobId && globalLabProgress && (
+          <div className="px-4 lg:px-6 pt-4" data-testid="global-job-monitor">
+            <JobMonitor
+              progress={globalLabProgress}
+              onCancel={handleGlobalCancelJob}
+              autoRefine={globalAutoRefine}
+              onAutoRefineChange={setGlobalAutoRefine}
+              hideAutoRefine
+            />
+          </div>
+        )}
 
         <main className="p-4 lg:p-6">
           <AnimatePresence mode="wait">

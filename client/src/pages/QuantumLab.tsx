@@ -279,7 +279,7 @@ function groupByCategory(inputs: LabPineInput[]): Record<string, LabPineInput[]>
   return groups;
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60);
   if (h > 0) return `${h}h ${m % 60}m ${s % 60}s`;
   if (m > 0) return `${m}m ${s % 60}s`;
@@ -1918,7 +1918,7 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
   );
 }
 
-function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange }: { progress: LabJobProgress; onCancel: () => void; autoRefine: boolean; onAutoRefineChange: (v: boolean) => void }) {
+export function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange, hideAutoRefine }: { progress: LabJobProgress; onCancel: () => void; autoRefine: boolean; onAutoRefineChange: (v: boolean) => void; hideAutoRefine?: boolean }) {
   const [cancelling, setCancelling] = useState(false);
 
   const handleCancel = async () => {
@@ -1950,7 +1950,7 @@ function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange }: { pr
             </div>
           </div>
           <div className="flex items-center gap-3 flex-shrink-0">
-            {isRunning && (
+            {isRunning && !hideAutoRefine && (
               <button
                 onClick={() => onAutoRefineChange(!autoRefine)}
                 className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${autoRefine ? "bg-sky-500/20 text-sky-400 border border-sky-500/30" : "bg-white/5 text-white/40 border border-white/10 hover:text-white/60 hover:border-white/20"}`}
