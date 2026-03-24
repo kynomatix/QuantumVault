@@ -2188,9 +2188,36 @@ export function registerLabRoutes(app: Express): void {
     } catch {}
   }, 30_000);
 
+  async function cleanupOrphanedRunningRuns(): Promise<void> {
+    if (activeWorker) return;
+    try {
+      const runningInDb = await db.select({ id: labOptimizationRuns.id, checkpoint: labOptimizationRuns.checkpoint })
+        .from(labOptimizationRuns)
+        .where(eq(labOptimizationRuns.status, "running"));
+      for (const run of runningInDb) {
+        const cp = run.checkpoint as any;
+        const hasResults = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
+        if (hasResults) {
+          await labStorage.pauseRun(run.id);
+          console.log(`[QuantumLab] Orphan cleanup: run ${run.id} was 'running' with no worker → paused`);
+          if (!labStorage.interruptedRunIds.includes(run.id)) {
+            labStorage.interruptedRunIds.push(run.id);
+          }
+        } else {
+          await labStorage.failRun(run.id);
+          console.log(`[QuantumLab] Orphan cleanup: run ${run.id} was 'running' with no worker/progress → failed`);
+        }
+      }
+    } catch (err: any) {
+      console.log(`[QuantumLab] Orphan cleanup error: ${err.message}`);
+    }
+  }
+
   async function resumeNextInterruptedRun(): Promise<boolean> {
     if (labStorage.interruptedRunIds.length === 0) return false;
     if (activeWorker) return false;
+
+    await cleanupOrphanedRunningRuns();
 
     const candidateIds = [...labStorage.interruptedRunIds];
     for (const runId of candidateIds) {
