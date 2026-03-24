@@ -320,7 +320,36 @@ export default function AppPage() {
         es.close();
         if (!isMounted) return;
         failCount++;
-        if (failCount >= 5) { setGlobalLabJobId(null); setGlobalLabProgress(null); return; }
+        if (failCount >= 5) {
+          fetch("/api/lab/queue", { credentials: "include" })
+            .then(r => r.json())
+            .then(async (data: any) => {
+              if (!isMounted) return;
+              const ar = data?.activeRun;
+              if (ar && (ar.status === "running" || ar.status === "paused")) {
+                try {
+                  const jobRes = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
+                  if (jobRes.ok) {
+                    const jobData = await jobRes.json();
+                    if (jobData.jobId && isMounted) {
+                      failCount = 0;
+                      if (jobData.jobId !== currentJobId) {
+                        setGlobalLabJobId(jobData.jobId);
+                      } else {
+                        reconnectTimer = setTimeout(() => { if (isMounted) connect(); }, 3000);
+                      }
+                      return;
+                    }
+                  }
+                } catch {}
+              }
+              if (isMounted) { setGlobalLabJobId(null); setGlobalLabProgress(null); }
+            })
+            .catch(() => {
+              if (isMounted) { setGlobalLabJobId(null); setGlobalLabProgress(null); }
+            });
+          return;
+        }
         reconnectTimer = setTimeout(() => {
           if (isMounted) connect();
         }, 3000);

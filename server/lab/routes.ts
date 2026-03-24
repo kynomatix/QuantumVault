@@ -413,15 +413,28 @@ export function registerLabRoutes(app: Express): void {
   }
 
   let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  const keepAlivePingUrl = (() => {
+    if (process.env.REPLIT_DOMAINS) {
+      return `https://${process.env.REPLIT_DOMAINS.split(",")[0]}/health`;
+    }
+    if (process.env.REPL_SLUG && process.env.REPL_OWNER) {
+      return `https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co/health`;
+    }
+    return `http://127.0.0.1:${process.env.PORT || "5000"}/health`;
+  })();
+
+  function hasWorkPending(): boolean {
+    return !!activeWorker || labStorage.interruptedRunIds.length > 0;
+  }
+
   function startKeepAlive() {
     if (keepAliveTimer) return;
-    const port = process.env.PORT || "5000";
     keepAliveTimer = setInterval(() => {
-      if (!activeWorker) {
+      if (!hasWorkPending()) {
         stopKeepAlive();
         return;
       }
-      fetch(`http://127.0.0.1:${port}/health`).catch(() => {});
+      fetch(keepAlivePingUrl).catch(() => {});
     }, 25_000);
   }
   function stopKeepAlive() {
@@ -2110,6 +2123,11 @@ export function registerLabRoutes(app: Express): void {
       if (allPaused.length > 0) {
         const eligible = labStorage.interruptedRunIds.length;
         console.log(`[QuantumLab] Found ${allPaused.length} paused run(s), ${eligible} eligible for auto-resume`);
+      }
+
+      if (hasWorkPending()) {
+        console.log(`[QuantumLab] Boot: starting keep-alive (external ping to prevent autoscale suspension)`);
+        startKeepAlive();
       }
 
       if (activeWorker) {
