@@ -60,8 +60,13 @@ export async function cleanupOrphanedSubaccounts(): Promise<void> {
     }
     
     console.log(`[OrphanedCleanup] Cleanup cycle complete`);
-  } catch (error) {
-    console.error("[OrphanedCleanup] Error during cleanup:", error);
+  } catch (error: any) {
+    const msg = error?.message || "";
+    if (msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("too many clients")) {
+      console.warn("[OrphanedCleanup] DB timeout — will retry next cycle");
+    } else {
+      console.error("[OrphanedCleanup] Error during cleanup:", error);
+    }
   } finally {
     isCleanupRunning = false;
   }

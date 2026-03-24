@@ -465,6 +465,8 @@ export function registerLabRoutes(app: Express): void {
     const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
     let checkpointState: Partial<LabCheckpoint> = resumeCheckpoint ? { ...resumeCheckpoint } : {};
     let checkpointWriteChain: Promise<void> = Promise.resolve();
+    let pendingCheckpoint: any = null;
+    let checkpointWriteInFlight = false;
 
     const doStart = async () => {
       let candlesByCombo: Record<string, OHLCV[]>;
@@ -545,31 +547,40 @@ export function registerLabRoutes(app: Express): void {
 
           case "partial-checkpoint":
             if (!runId) break;
-            checkpointWriteChain = checkpointWriteChain.then(async () => {
-              if (job.abortSignal.aborted) return;
-              try {
-                if (msg.results.length > 0) {
-                  await labStorage.saveComboResults(runId!, msg.results, true);
+            pendingCheckpoint = msg;
+            if (!checkpointWriteInFlight) {
+              checkpointWriteInFlight = true;
+              checkpointWriteChain = checkpointWriteChain.then(async () => {
+                while (pendingCheckpoint) {
+                  const cp = pendingCheckpoint;
+                  pendingCheckpoint = null;
+                  if (job.abortSignal.aborted) break;
+                  try {
+                    if (cp.results.length > 0) {
+                      await labStorage.saveComboResults(runId!, cp.results, true);
+                    }
+                    checkpointState = {
+                      ...checkpointState,
+                      currentCombo: cp.combo,
+                      currentStage: cp.stage,
+                      currentIteration: cp.iteration,
+                      currentDeepRound: cp.deepRound,
+                      refineSeeds: cp.refineSeeds,
+                      coordinateCompleted: cp.coordinateCompleted,
+                    };
+                    const checkpoint: LabCheckpoint = {
+                      completedCombos: [...completedCombos],
+                      configSnapshot: config,
+                      ...checkpointState,
+                    } as LabCheckpoint;
+                    await labStorage.saveCheckpoint(runId!, checkpoint);
+                  } catch (err: any) {
+                    console.log(`[QuantumLab] Partial checkpoint error: ${err.message}`);
+                  }
                 }
-                checkpointState = {
-                  ...checkpointState,
-                  currentCombo: msg.combo,
-                  currentStage: msg.stage,
-                  currentIteration: msg.iteration,
-                  currentDeepRound: msg.deepRound,
-                  refineSeeds: msg.refineSeeds,
-                  coordinateCompleted: msg.coordinateCompleted,
-                };
-                const checkpoint: LabCheckpoint = {
-                  completedCombos: [...completedCombos],
-                  configSnapshot: config,
-                  ...checkpointState,
-                } as LabCheckpoint;
-                await labStorage.saveCheckpoint(runId!, checkpoint);
-              } catch (err: any) {
-                console.log(`[QuantumLab] Partial checkpoint error: ${err.message}`);
-              }
-            });
+                checkpointWriteInFlight = false;
+              });
+            }
             break;
 
           case "combo-complete":

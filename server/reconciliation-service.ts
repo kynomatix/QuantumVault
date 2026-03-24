@@ -421,12 +421,24 @@ export async function reconcileIfStale(
   }
 }
 
+let consecutiveDbTimeouts = 0;
+
+function isDbTimeout(error: any): boolean {
+  const msg = error?.message || "";
+  return msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("too many clients");
+}
+
 export function startPeriodicReconciliation(): void {
   if (reconcileInterval) return;
   
   console.log("[Reconcile] Starting periodic reconciliation (every 60s)");
   
   reconcileInterval = setInterval(async () => {
+    if (consecutiveDbTimeouts > 0) {
+      consecutiveDbTimeouts--;
+      console.log(`[Reconcile] DB pressure backoff — skipping cycle (${consecutiveDbTimeouts} remaining)`);
+      return;
+    }
     try {
       const allWallets = await storage.getWalletsWithActiveBots();
       
@@ -436,7 +448,6 @@ export function startPeriodicReconciliation(): void {
         
         const bots = await storage.getTradingBots(walletAddress);
         
-        // Reconcile active bots AND any bots that have non-zero positions (even if paused)
         const botsWithPositions = await Promise.all(
           bots.map(async (bot) => {
             if (bot.isActive) return bot;
@@ -460,8 +471,14 @@ export function startPeriodicReconciliation(): void {
           );
         }
       }
+      consecutiveDbTimeouts = 0;
     } catch (error) {
-      console.error("[Reconcile] Periodic reconciliation error:", error);
+      if (isDbTimeout(error)) {
+        consecutiveDbTimeouts = Math.min(consecutiveDbTimeouts + 3, 10);
+        console.warn(`[Reconcile] DB timeout — backing off ${consecutiveDbTimeouts} cycles`);
+      } else {
+        console.error("[Reconcile] Periodic reconciliation error:", error);
+      }
     }
   }, RECONCILE_INTERVAL_MS);
 }

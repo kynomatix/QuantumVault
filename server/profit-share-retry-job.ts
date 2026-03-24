@@ -120,17 +120,26 @@ export function startProfitShareRetryJob(): void {
       await resetStaleProcessingEntries();
       await retryPendingProfitShares();
     } catch (err: any) {
-      console.error("[ProfitShare Retry] Initial run failed:", err.message);
+      const msg = err?.message || "";
+      if (msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("too many clients")) {
+        console.warn("[ProfitShare Retry] DB timeout on initial run — will retry next cycle");
+      } else {
+        console.error("[ProfitShare Retry] Initial run failed:", err.message);
+      }
     }
-  }, 30000); // 30 second initial delay
+  }, 30000);
   
-  // Then run every 5 minutes
   setInterval(async () => {
     try {
       await resetStaleProcessingEntries();
       await retryPendingProfitShares();
     } catch (err: any) {
-      console.error("[ProfitShare Retry] Periodic run failed:", err.message);
+      const msg = err?.message || "";
+      if (msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("too many clients")) {
+        console.warn("[ProfitShare Retry] DB timeout — will retry next cycle");
+      } else {
+        console.error("[ProfitShare Retry] Periodic run failed:", err.message);
+      }
     }
   }, RETRY_INTERVAL_MS);
 }

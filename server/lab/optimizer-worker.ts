@@ -1160,12 +1160,17 @@ async function run() {
           eta: estimateEta(startTime, globalCurrent, grandTotal),
         }});
 
-        const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
-        const refineKeepCount = lowTf ? Math.max(5, config.topK) : Math.max(10, config.topK);
-        const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, refineKeepCount);
-        send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: actualIter, results: topPartial, refineSeeds: refineSeedParams });
-        lastCheckpointTime = Date.now();
-        checkpointCount++;
+        const isLastSeed = seedIdx === topSeeds.length - 1;
+        const refineElapsed = Date.now() - lastCheckpointTime;
+        const REFINE_CHECKPOINT_INTERVAL = lowTf ? 180_000 : 60_000;
+        if (isLastSeed || refineElapsed >= REFINE_CHECKPOINT_INTERVAL) {
+          const actualIter = refineStartIteration + seedIdx * config.refinementsPerSeed + config.refinementsPerSeed;
+          const refineKeepCount = lowTf ? Math.max(5, config.topK) : Math.max(10, config.topK);
+          const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, refineKeepCount);
+          send({ type: "partial-checkpoint", combo: key, stage: "refine", iteration: actualIter, results: topPartial, refineSeeds: refineSeedParams });
+          lastCheckpointTime = Date.now();
+          checkpointCount++;
+        }
       }
     }
 
@@ -1319,11 +1324,16 @@ async function run() {
             eta: estimateEta(startTime, globalCurrent, grandTotal),
           }});
 
-          const deepCheckpointCount = lowTf ? Math.max(5, config.topK) : Math.max(10, config.topK);
-          const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, deepCheckpointCount);
-          send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round, results: topPartial, refineSeeds: refineSeedParams });
-          lastCheckpointTime = Date.now();
-          checkpointCount++;
+          const isLastDeepSeed = seedIdx === deepSeeds.length - 1;
+          const deepSeedElapsed = Date.now() - lastCheckpointTime;
+          const DEEP_CHECKPOINT_INTERVAL = lowTf ? 180_000 : 60_000;
+          if (isLastDeepSeed || deepSeedElapsed >= DEEP_CHECKPOINT_INTERVAL) {
+            const deepCheckpointCount = lowTf ? Math.max(5, config.topK) : Math.max(10, config.topK);
+            const topPartial = [...comboResults].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, deepCheckpointCount);
+            send({ type: "partial-checkpoint", combo: key, stage: "deep", iteration: totalSamples, deepRound: round, results: topPartial, refineSeeds: refineSeedParams });
+            lastCheckpointTime = Date.now();
+            checkpointCount++;
+          }
         }
 
         previousRoundBest = [...roundDiscoveries].sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, Math.max(10, deepSeedsPerRound));
