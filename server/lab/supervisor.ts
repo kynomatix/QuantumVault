@@ -149,8 +149,10 @@ export function createLabSupervisor(): LabSupervisor {
             consecutiveHealthFailures = 0;
           } else if (ownsChild && child) {
             console.log(`[LabSupervisor] Health check failed ${MAX_HEALTH_FAILURES} times, killing child for restart`);
+            consecutiveHealthFailures = 0;
             try { child.kill("SIGKILL"); } catch {}
           } else if (!ownsChild) {
+            consecutiveHealthFailures = 0;
             const stalePid = readPidFile();
             if (stalePid) {
               console.log(`[LabSupervisor] Killing unreachable existing process (pid: ${stalePid}) before spawning new one`);

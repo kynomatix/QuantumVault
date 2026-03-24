@@ -16,6 +16,10 @@ const pool = new Pool({
   idleTimeoutMillis: 30_000,
 });
 
+pool.on("error", (err) => {
+  console.error("[DB Pool] Idle client error (suppressed crash):", err.message);
+});
+
 export const db = drizzle(pool, { schema });
 
 export async function ensureSchema() {
