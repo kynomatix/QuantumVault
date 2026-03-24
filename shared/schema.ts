@@ -873,6 +873,7 @@ export interface LabCheckpoint {
     params: Record<string, any>;
   };
   resourceError?: boolean;
+  lastHeartbeat?: number;
 }
 
 export interface LabJobProgress {

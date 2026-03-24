@@ -406,9 +406,11 @@ export function registerLabRoutes(app: Express): void {
 
   let activeWorker: Worker | null = null;
   let lastWorkerOOM = false;
+  let workerStarting = false;
 
   function clearActiveWorker() {
     activeWorker = null;
+    workerStarting = false;
     stopKeepAlive();
   }
 
@@ -491,6 +493,7 @@ export function registerLabRoutes(app: Express): void {
     guidedInsightsPerCombo?: Record<string, import("@shared/schema").GuidedInsights>,
     processOrdersOnClose?: boolean,
   ) {
+    workerStarting = true;
     const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
     let checkpointState: Partial<LabCheckpoint> = resumeCheckpoint ? { ...resumeCheckpoint } : {};
     let checkpointWriteChain: Promise<void> = Promise.resolve();
@@ -539,8 +542,19 @@ export function registerLabRoutes(app: Express): void {
       });
 
       activeWorker = worker;
+      workerStarting = false;
       lastWorkerOOM = false;
       startKeepAlive();
+
+      if (runId) {
+        checkpointWriteChain = checkpointWriteChain.then(async () => {
+          try {
+            checkpointState.lastHeartbeat = Date.now();
+            const hbCheckpoint: LabCheckpoint = { completedCombos: [...completedCombos], configSnapshot: config, ...checkpointState } as LabCheckpoint;
+            await labStorage.saveCheckpoint(runId!, hbCheckpoint);
+          } catch {}
+        });
+      }
 
       worker.on("message", async (msg: any) => {
         switch (msg.type) {
@@ -627,6 +641,7 @@ export function registerLabRoutes(app: Express): void {
                   currentIteration: undefined,
                   partialResults: undefined,
                   bestDiscovery: undefined,
+                  lastHeartbeat: Date.now(),
                 };
                 const checkpoint: LabCheckpoint = {
                   completedCombos: [...completedCombos],
@@ -886,8 +901,8 @@ export function registerLabRoutes(app: Express): void {
         return;
       }
 
-      if (activeWorker) {
-        console.log(`[QuantumLab] Auto-retry skipped — another worker already active`);
+      if (activeWorker || workerStarting) {
+        console.log(`[QuantumLab] Auto-retry skipped — another worker already active/starting`);
         labStorage.updateProgress(oldJobId, { jobId: oldJobId, status: "error", stage: "Retry skipped (worker busy)", current: 0, total: 0, percent: 0, elapsed: 0 });
         return;
       }
@@ -1022,8 +1037,8 @@ export function registerLabRoutes(app: Express): void {
     }
     pumpQueueRunning = true;
     try {
-      if (activeWorker) {
-        console.log(`[QuantumLab] pumpQueue: worker still active, skipping until it finishes`);
+      if (activeWorker || workerStarting) {
+        console.log(`[QuantumLab] pumpQueue: worker still active/starting, skipping until it finishes`);
         return;
       }
 
@@ -2110,23 +2125,29 @@ export function registerLabRoutes(app: Express): void {
     if (schedulerRunning) return;
     schedulerRunning = true;
     try {
-      if (activeWorker || pumpQueueRunning) return;
+      if (activeWorker || pumpQueueRunning || workerStarting) return;
 
+      const HEARTBEAT_STALE_MS = 90_000;
+      const now = Date.now();
       const runningInDb = await db.select().from(labOptimizationRuns).where(
         eq(labOptimizationRuns.status, "running")
       );
       for (const run of runningInDb) {
         const cp = run.checkpoint as any;
+        const lastHb = cp?.lastHeartbeat as number | undefined;
+        if (lastHb && (now - lastHb) < HEARTBEAT_STALE_MS) {
+          continue;
+        }
         const hasResults = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
         if (hasResults) {
           await labStorage.pauseRun(run.id);
-          console.log(`[QuantumLab] Scheduler: orphaned run ${run.id} → paused`);
+          console.log(`[QuantumLab] Scheduler: orphaned run ${run.id} → paused (heartbeat stale: ${lastHb ? Math.round((now - lastHb) / 1000) + 's ago' : 'none'})`);
           if (!labStorage.interruptedRunIds.includes(run.id)) {
             labStorage.interruptedRunIds.push(run.id);
           }
         } else {
           await labStorage.failRun(run.id);
-          console.log(`[QuantumLab] Scheduler: orphaned run ${run.id} → failed (no progress)`);
+          console.log(`[QuantumLab] Scheduler: orphaned run ${run.id} → failed (no progress, no heartbeat)`);
         }
       }
 
@@ -2169,7 +2190,7 @@ export function registerLabRoutes(app: Express): void {
 
   async function resumeNextInterruptedRun(): Promise<boolean> {
     if (labStorage.interruptedRunIds.length === 0) return false;
-    if (activeWorker) return false;
+    if (activeWorker || workerStarting) return false;
 
     const candidateIds = [...labStorage.interruptedRunIds];
     for (const runId of candidateIds) {
