@@ -121,7 +121,7 @@ export function startProfitShareRetryJob(): void {
       await retryPendingProfitShares();
     } catch (err: any) {
       const msg = err?.message || "";
-      if (msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("too many clients")) {
+      if (msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("timeout exceeded") || msg.includes("too many clients") || msg.includes("Connection terminated")) {
         console.warn("[ProfitShare Retry] DB timeout on initial run — will retry next cycle");
       } else {
         console.error("[ProfitShare Retry] Initial run failed:", err.message);
@@ -135,7 +135,7 @@ export function startProfitShareRetryJob(): void {
       await retryPendingProfitShares();
     } catch (err: any) {
       const msg = err?.message || "";
-      if (msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("too many clients")) {
+      if (msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("timeout exceeded") || msg.includes("too many clients") || msg.includes("Connection terminated")) {
         console.warn("[ProfitShare Retry] DB timeout — will retry next cycle");
       } else {
         console.error("[ProfitShare Retry] Periodic run failed:", err.message);

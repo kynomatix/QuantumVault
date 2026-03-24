@@ -425,7 +425,7 @@ let consecutiveDbTimeouts = 0;
 
 function isDbTimeout(error: any): boolean {
   const msg = error?.message || "";
-  return msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("too many clients");
+  return msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("timeout exceeded") || msg.includes("too many clients") || msg.includes("Connection terminated");
 }
 
 export function startPeriodicReconciliation(): void {

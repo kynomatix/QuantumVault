@@ -7,7 +7,7 @@ if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL must be set");
 }
 
-const poolSize = parseInt(process.env.DB_POOL_SIZE || "10", 10);
+const poolSize = parseInt(process.env.DB_POOL_SIZE || "15", 10);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,

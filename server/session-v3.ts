@@ -670,8 +670,13 @@ export async function cleanupExpiredNonces(): Promise<void> {
     if (count > 0) {
       console.log(`[Security] Cleaned up ${count} expired nonces`);
     }
-  } catch (err) {
-    console.error('[Security] Failed to cleanup expired nonces:', err);
+  } catch (err: any) {
+    const msg = err?.message || "";
+    if (msg.includes("timeout exceeded") || msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("Connection terminated") || msg.includes("too many clients")) {
+      console.warn('[Security] Nonce cleanup skipped — DB timeout');
+    } else {
+      console.error('[Security] Failed to cleanup expired nonces:', err);
+    }
   }
 }
 
