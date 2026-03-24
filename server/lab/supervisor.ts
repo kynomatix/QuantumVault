@@ -238,6 +238,10 @@ export function createLabSupervisor(): LabSupervisor {
         poll();
       }, READY_TIMEOUT);
 
+      spawnedChild.on("error", (err) => {
+        console.log(`[LabSupervisor] Child process error: ${err.message}`);
+      });
+
       spawnedChild.on("message", (msg: any) => {
         if (msg?.type === "ready") {
           clearTimeout(readyTimeout);
