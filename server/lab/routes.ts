@@ -2241,7 +2241,6 @@ export function registerLabRoutes(app: Express): void {
           return false;
         }
 
-        cp.autoResumeAttempts = crashCount + 1;
         await labStorage.saveCheckpoint(runId, cp);
 
         const hasProgress = cp.completedCombos?.length > 0 || (cp.currentCombo && cp.currentIteration != null);

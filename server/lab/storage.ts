@@ -127,9 +127,11 @@ export class LabDatabaseStorage implements ILabStorage {
         const hasConfigSnapshot = !!cp?.configSnapshot;
         const canResume = hasAnyCheckpoint || hasPersistedResults || hasConfigSnapshot;
         const newStatus = canResume ? "paused" : "failed";
+        if (canResume && cp) cp.autoResumeAttempts = 0;
         await db.update(labOptimizationRuns).set({
           status: newStatus,
           ...(!canResume ? { completedAt: new Date() } : {}),
+          ...(canResume && cp ? { checkpoint: cp } : {}),
         }).where(eq(labOptimizationRuns.id, run.id));
 
         const detail = hasComboCheckpoint
@@ -154,8 +156,7 @@ export class LabDatabaseStorage implements ILabStorage {
       let recovered = 0;
       for (const run of failedRuns) {
         const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
-        const exhausted = ((cp?.autoResumeAttempts as number) ?? 0) >= 3;
-        if (exhausted) continue;
+        if (cp?.userCancelled) continue;
         const hasCheckpoint = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
         const hasConfigSnapshot = !!cp?.configSnapshot;
         const savedResults = await db.select({ id: labOptimizationResults.id })
@@ -163,12 +164,15 @@ export class LabDatabaseStorage implements ILabStorage {
           .where(eq(labOptimizationResults.runId, run.id))
           .limit(1);
         if (hasCheckpoint || savedResults.length > 0 || hasConfigSnapshot) {
+          if (cp) cp.autoResumeAttempts = 0;
           await db.update(labOptimizationRuns).set({
             status: "paused",
             completedAt: null,
+            ...(cp ? { checkpoint: cp } : {}),
           }).where(eq(labOptimizationRuns.id, run.id));
           const reason = hasCheckpoint ? "checkpoint" : savedResults.length > 0 ? "results" : "config snapshot";
-          console.log(`[QuantumLab] Recovered failed run ${run.id} → paused (has ${reason})`);
+          const oldAttempts = (run.checkpoint as any)?.autoResumeAttempts ?? 0;
+          console.log(`[QuantumLab] Recovered failed run ${run.id} → paused (has ${reason}, reset attempts ${oldAttempts}→0)`);
           this.interruptedRunIds.push(run.id);
           recovered++;
         }
