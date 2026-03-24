@@ -41,6 +41,14 @@ function startListening(retries = 5, delay = 2000) {
 
 startListening();
 
+process.on("error", (err: any) => {
+  if (err?.code === "EPIPE" || err?.code === "ERR_IPC_CHANNEL_CLOSED") return;
+  console.error(`[QuantumLab] Process error: ${err.message}`);
+});
+
+process.stdout?.on?.("error", () => {});
+process.stderr?.on?.("error", () => {});
+
 let isShuttingDown = false;
 
 const gracefulShutdown = async (signal: string) => {
