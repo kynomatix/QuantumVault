@@ -341,10 +341,6 @@ export class LabDatabaseStorage implements ILabStorage {
       SET status = 'running'
       WHERE id = ${id}
         AND status = 'paused'
-        AND NOT EXISTS (
-          SELECT 1 FROM ${labOptimizationRuns} blocker
-          WHERE blocker.status = 'running'
-        )
       RETURNING id
     `);
     const rows = result.rows as any[];

@@ -2105,26 +2105,29 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  setTimeout(async () => {
+  let schedulerRunning = false;
+  async function unifiedScheduler() {
+    if (schedulerRunning) return;
+    schedulerRunning = true;
     try {
-      const staleRunning = await db.select().from(labOptimizationRuns).where(
+      if (activeWorker || pumpQueueRunning) return;
+
+      const runningInDb = await db.select().from(labOptimizationRuns).where(
         eq(labOptimizationRuns.status, "running")
       );
-      for (const run of staleRunning) {
+      for (const run of runningInDb) {
         const cp = run.checkpoint as any;
         const hasResults = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
         if (hasResults) {
           await labStorage.pauseRun(run.id);
-          const detail = cp?.currentCombo ? `mid-combo ${cp.currentCombo} at ${cp.currentStage || 'random'} iter ${cp.currentIteration}` : `${cp?.completedCombos?.length} combos done`;
-          console.log(`[QuantumLab] Stale run ${run.id} → paused (${detail})`);
-          labStorage.interruptedRunIds.push(run.id);
+          console.log(`[QuantumLab] Scheduler: orphaned run ${run.id} → paused`);
+          if (!labStorage.interruptedRunIds.includes(run.id)) {
+            labStorage.interruptedRunIds.push(run.id);
+          }
         } else {
           await labStorage.failRun(run.id);
-          console.log(`[QuantumLab] Stale run ${run.id} → failed (no progress)`);
+          console.log(`[QuantumLab] Scheduler: orphaned run ${run.id} → failed (no progress)`);
         }
-      }
-      if (staleRunning.length > 0) {
-        console.log(`[QuantumLab] Processed ${staleRunning.length} stale run(s) from previous session`);
       }
 
       const allPaused = await db.select().from(labOptimizationRuns).where(
@@ -2135,89 +2138,38 @@ export function registerLabRoutes(app: Express): void {
         const attempts = (cp?.autoResumeAttempts as number) ?? 0;
         if (attempts >= MAX_AUTO_RESUME_ATTEMPTS) {
           await labStorage.failRun(run.id, true);
-          console.log(`[QuantumLab] Boot cleanup: paused run ${run.id} had exhausted auto-resume (${attempts}/${MAX_AUTO_RESUME_ATTEMPTS}), force-failed to unblock queue`);
+          console.log(`[QuantumLab] Scheduler: run ${run.id} exhausted ${attempts} resume attempts → failed`);
         } else if (cp?.userCancelled || cp?.resourceError) {
           continue;
         } else if (!labStorage.interruptedRunIds.includes(run.id)) {
           labStorage.interruptedRunIds.push(run.id);
-          console.log(`[QuantumLab] Paused run ${run.id} queued for lazy recovery`);
         }
       }
-      if (allPaused.length > 0) {
-        const eligible = labStorage.interruptedRunIds.length;
-        console.log(`[QuantumLab] Found ${allPaused.length} paused run(s), ${eligible} eligible for auto-resume`);
-      }
 
-      if (hasWorkPending()) {
-        console.log(`[QuantumLab] Boot: starting keep-alive (external ping to prevent autoscale suspension)`);
-        startKeepAlive();
-      }
+      if (hasWorkPending()) startKeepAlive();
 
-      if (activeWorker) {
-        console.log(`[QuantumLab] Boot: worker already active, skipping queue pump`);
-        return;
-      }
       if (labStorage.interruptedRunIds.length > 0) {
-        console.log(`[QuantumLab] Boot: ${labStorage.interruptedRunIds.length} interrupted run(s) — resuming paused runs first`);
         const resumed = await resumeNextInterruptedRun();
         if (resumed) return;
       }
-      console.log(`[QuantumLab] Boot: pumping queue for new queued runs`);
+
       pumpQueue();
     } catch (err: any) {
-      console.log(`[QuantumLab] Boot queue pump error: ${err.message}`);
-    }
-  }, 5000);
-
-  setInterval(async () => {
-    if (activeWorker || pumpQueueRunning) return;
-    try {
-      const blockers = await db.select({ id: labOptimizationRuns.id })
-        .from(labOptimizationRuns)
-        .where(eq(labOptimizationRuns.status, "running"))
-        .limit(1);
-      if (blockers.length > 0) return;
-      const hasQueued = await db.select({ id: labOptimizationRuns.id })
-        .from(labOptimizationRuns)
-        .where(eq(labOptimizationRuns.status, "queued"))
-        .limit(1);
-      if (hasQueued.length > 0) {
-        console.log(`[QuantumLab] Queue watchdog: found stalled queued runs with no blockers, pumping`);
-        pumpQueue();
-      }
-    } catch {}
-  }, 30_000);
-
-  async function cleanupOrphanedRunningRuns(): Promise<void> {
-    if (activeWorker) return;
-    try {
-      const runningInDb = await db.select({ id: labOptimizationRuns.id, checkpoint: labOptimizationRuns.checkpoint })
-        .from(labOptimizationRuns)
-        .where(eq(labOptimizationRuns.status, "running"));
-      for (const run of runningInDb) {
-        const cp = run.checkpoint as any;
-        const hasResults = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
-        if (hasResults) {
-          await labStorage.pauseRun(run.id);
-          console.log(`[QuantumLab] Orphan cleanup: run ${run.id} was 'running' with no worker → paused`);
-          if (!labStorage.interruptedRunIds.includes(run.id)) {
-            labStorage.interruptedRunIds.push(run.id);
-          }
-        } else {
-          await labStorage.failRun(run.id);
-          console.log(`[QuantumLab] Orphan cleanup: run ${run.id} was 'running' with no worker/progress → failed`);
-        }
-      }
-    } catch (err: any) {
-      console.log(`[QuantumLab] Orphan cleanup error: ${err.message}`);
+      console.log(`[QuantumLab] Scheduler error: ${err.message}`);
+    } finally {
+      schedulerRunning = false;
     }
   }
+
+  setTimeout(async () => {
+    console.log(`[QuantumLab] Unified scheduler starting (runs every 30s)`);
+    await unifiedScheduler();
+  }, 5000);
+  setInterval(unifiedScheduler, 30_000);
 
   async function resumeNextInterruptedRun(): Promise<boolean> {
     if (labStorage.interruptedRunIds.length === 0) return false;
     if (activeWorker) return false;
-
-    await cleanupOrphanedRunningRuns();
 
     const candidateIds = [...labStorage.interruptedRunIds];
     for (const runId of candidateIds) {
@@ -2339,14 +2291,6 @@ export function registerLabRoutes(app: Express): void {
     }
     return false;
   }
-
-  setInterval(() => {
-    if (labStorage.interruptedRunIds.length > 0 && !activeWorker && !pumpQueueRunning) {
-      resumeNextInterruptedRun().catch((err: any) => {
-        console.log(`[QuantumLab] Recovery interval error: ${err.message}`);
-      });
-    }
-  }, 30_000);
 
   labCleanup = async (reason: string) => {
     console.log(`[QuantumLab] ${reason} — pausing active jobs...`);
