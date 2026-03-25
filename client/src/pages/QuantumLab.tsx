@@ -631,19 +631,23 @@ export default function QuantumLab() {
     structuralSharing: false,
   });
 
+  const lastReconnectRunIdRef = useRef<number | null>(null);
+
   useEffect(() => {
     const ar = queueBadgeData?.activeRun;
     if (!ar || activeJobId) return;
     if (ar.status !== "running" && ar.status !== "paused") return;
-    if (autoReconnectingRef.current) return;
+    if (autoReconnectingRef.current && lastReconnectRunIdRef.current === ar.id) return;
+
     autoReconnectingRef.current = true;
+    lastReconnectRunIdRef.current = ar.id;
     let cancelled = false;
-    const safetyTimeout = setTimeout(() => { autoReconnectingRef.current = false; }, 120_000);
     const isPaused = ar.status === "paused";
     console.log(`[AutoReconnect] Detected ${ar.status} run ${ar.id}, attempting job lookup...`);
+
     (async () => {
-      const maxAttempts = isPaused ? 20 : 8;
-      const delayMs = isPaused ? 5000 : 5000;
+      const maxAttempts = isPaused ? 20 : 4;
+      const delayMs = isPaused ? 5000 : 3000;
       for (let i = 0; i < maxAttempts; i++) {
         if (cancelled) return;
         try {
@@ -653,7 +657,7 @@ export default function QuantumLab() {
             if (jobData.jobId && !cancelled) {
               setActiveRunId(ar.id);
               setActiveJobId(jobData.jobId);
-              toast({ title: "Reconnected to active run", description: `Run #${ar.id} resumed after restart.` });
+              toast({ title: "Reconnected to active run", description: `Run #${ar.id} is now active.` });
               console.log(`[AutoReconnect] Connected to job ${jobData.jobId} for run ${ar.id}`);
             }
             autoReconnectingRef.current = false;
@@ -666,7 +670,7 @@ export default function QuantumLab() {
       }
       autoReconnectingRef.current = false;
     })();
-    return () => { cancelled = true; autoReconnectingRef.current = false; clearTimeout(safetyTimeout); };
+    return () => { cancelled = true; autoReconnectingRef.current = false; };
   }, [queueBadgeData, activeJobId, toast]);
   const queueCount = (queueBadgeData?.items?.length ?? 0) + (queueBadgeData?.activeRun ? 1 : 0);
 
