@@ -446,10 +446,36 @@ export default function QuantumLab() {
     async function handleDeadJob() {
       if (!isMounted) return;
       try {
+        if (activeRunId) {
+          const jobRes = await fetch(`/api/lab/runs/${activeRunId}/job`, { credentials: "include" });
+          if (jobRes.ok) {
+            const jobData = await safeResponseJson(jobRes);
+            if (jobData.jobId && jobData.jobId !== currentJobId && isMounted) {
+              console.log(`[SSE] Run ${activeRunId} has new jobId ${jobData.jobId}, reconnecting`);
+              setActiveJobId(jobData.jobId);
+              toast({ title: "Reconnected", description: "Run resumed after server restart." });
+              return;
+            }
+          }
+        }
         const runsRes = await fetch("/api/lab/runs");
         if (runsRes.ok) {
           const runs = await safeResponseJson(runsRes);
           const sortedRuns = [...runs].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          const activeRun = sortedRuns.find((r: any) => r.status === "running");
+          if (activeRun) {
+            const jobRes2 = await fetch(`/api/lab/runs/${activeRun.id}/job`, { credentials: "include" });
+            if (jobRes2.ok) {
+              const jobData2 = await safeResponseJson(jobRes2);
+              if (jobData2.jobId && isMounted) {
+                console.log(`[SSE] Found active run ${activeRun.id} with jobId ${jobData2.jobId}, reconnecting`);
+                setActiveRunId(activeRun.id);
+                setActiveJobId(jobData2.jobId);
+                toast({ title: "Reconnected", description: `Resumed run #${activeRun.id}.` });
+                return;
+              }
+            }
+          }
           const matchedRun = sortedRuns.find((r: any) => r.status === "paused" || r.status === "failed");
           if (matchedRun?.status === "paused") {
             toast({ title: "Server restarted", description: "Your run is paused and can be resumed from History.", variant: "default" });
@@ -592,6 +618,7 @@ export default function QuantumLab() {
     if (autoReconnectingRef.current) return;
     autoReconnectingRef.current = true;
     let cancelled = false;
+    const safetyTimeout = setTimeout(() => { autoReconnectingRef.current = false; }, 120_000);
     const isPaused = ar.status === "paused";
     console.log(`[AutoReconnect] Detected ${ar.status} run ${ar.id}, attempting job lookup...`);
     (async () => {
@@ -619,7 +646,7 @@ export default function QuantumLab() {
       }
       autoReconnectingRef.current = false;
     })();
-    return () => { cancelled = true; autoReconnectingRef.current = false; };
+    return () => { cancelled = true; autoReconnectingRef.current = false; clearTimeout(safetyTimeout); };
   }, [queueBadgeData, activeJobId, toast]);
   const queueCount = (queueBadgeData?.items?.length ?? 0) + (queueBadgeData?.activeRun ? 1 : 0);
 

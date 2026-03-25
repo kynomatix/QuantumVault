@@ -407,10 +407,12 @@ export function registerLabRoutes(app: Express): void {
   let activeWorker: Worker | null = null;
   let lastWorkerOOM = false;
   let workerStarting = false;
+  let lastWorkerMessageTime = 0;
 
   function clearActiveWorker() {
     activeWorker = null;
     workerStarting = false;
+    lastWorkerMessageTime = 0;
     stopKeepAlive();
   }
 
@@ -434,7 +436,7 @@ export function registerLabRoutes(app: Express): void {
   })();
 
   function hasWorkPending(): boolean {
-    return !!activeWorker || labStorage.interruptedRunIds.length > 0;
+    return !!activeWorker || workerStarting || labStorage.interruptedRunIds.length > 0;
   }
 
   let keepAlivePingCount = 0;
@@ -544,6 +546,7 @@ export function registerLabRoutes(app: Express): void {
       activeWorker = worker;
       workerStarting = false;
       lastWorkerOOM = false;
+      lastWorkerMessageTime = Date.now();
       startKeepAlive();
 
       if (runId) {
@@ -557,6 +560,7 @@ export function registerLabRoutes(app: Express): void {
       }
 
       worker.on("message", async (msg: any) => {
+        lastWorkerMessageTime = Date.now();
         switch (msg.type) {
           case "progress":
             labStorage.updateProgress(job.id, msg.data);
@@ -2129,6 +2133,11 @@ export function registerLabRoutes(app: Express): void {
 
       const HEARTBEAT_STALE_MS = 90_000;
       const now = Date.now();
+
+      if (lastWorkerMessageTime && (now - lastWorkerMessageTime) < HEARTBEAT_STALE_MS) {
+        return;
+      }
+
       const runningInDb = await db.select().from(labOptimizationRuns).where(
         eq(labOptimizationRuns.status, "running")
       );
