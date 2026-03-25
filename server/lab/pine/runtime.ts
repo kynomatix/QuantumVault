@@ -2844,7 +2844,7 @@ export function executePine(
       };
       compiledLoop = compilePineHotLoop(hotStmts, userFunctions, compilerCtx) as any;
     } catch (e: any) {
-      if (process.env.NODE_ENV !== "production") console.log("[Pine compiler] fallback:", e.message?.substring(0, 200));
+      console.log("[Pine compiler] fallback:", e.message?.substring(0, 200));
     }
   }
 

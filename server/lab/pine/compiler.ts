@@ -284,7 +284,7 @@ export function compilePineHotLoop(
     };
     return result;
   } catch (e: any) {
-    if (process.env.NODE_ENV !== "production") console.log("[Pine compiler] compilation error:", e.message?.substring(0, 300));
+    console.log("[Pine compiler] compilation error:", e.message?.substring(0, 300), "— falling back to interpreter");
     return null;
   }
 }

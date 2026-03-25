@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { labStorage } from "./storage";
 import { parsePineScript } from "./pine-parser";
+import { compilePine, runPineParityTest, type PineEngineConfig } from "./pine/index";
 import { labOptimizationConfigSchema, insertLabStrategyBodySchema, updateLabStrategyBodySchema, LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES, type LabCheckpoint, type LabOptimizationConfig, type LabBacktestResult, labOptimizationRuns, labOptimizationResults } from "@shared/schema";
 import { getCacheStats, clearCandleCache } from "./candle-store";
 import { fetchOHLCV } from "./datafeed";
@@ -66,6 +67,26 @@ export function registerLabRoutes(app: Express): void {
     } catch (err: any) {
       console.log(`[QuantumLab] Parse error: ${err.message}`);
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/lab/debug-compiler/:id", requireLabAuth, async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { labStrategies } = await import("@shared/schema");
+      const [strat] = await db.select().from(labStrategies).where(eq(labStrategies.id, id));
+      if (!strat?.pineScript) return res.status(404).json({ error: "Strategy not found" });
+      const plan = compilePine(strat.pineScript);
+      const candles: any[] = [];
+      for (let i = 0; i < 500; i++) {
+        const p = 100 + Math.sin(i * 0.1) * 20 + Math.random() * 5;
+        candles.push({time: Date.now() - (500-i) * 86400000, open: p, high: p*1.03, low: p*0.97, close: p*(0.98+Math.random()*0.04), volume: 1000+Math.random()*5000});
+      }
+      const config: PineEngineConfig = { initialCapital: 100, commissionPercent: 0.05, slippageTicks: 1, defaultQtyType: "cash", defaultQtyValue: 100 };
+      const parity = runPineParityTest(plan, candles, {}, "TEST/USDT", "1d", config);
+      res.json({ strategyId: id, name: strat.name, scriptLength: strat.pineScript.length, astStmts: plan.ast.length, ...parity });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message, stack: err.stack?.substring(0, 500) });
     }
   });
 
