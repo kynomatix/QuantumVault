@@ -527,6 +527,7 @@ export default function QuantumLab() {
             es.close();
             const completedRunId = activeRunId;
             setActiveJobId(null);
+            autoReconnectingRef.current = false;
             if (activeRunId) setActiveHistoryRunId(activeRunId);
             queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
             queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
@@ -549,6 +550,25 @@ export default function QuantumLab() {
               })();
             } else {
               toast({ title: "Optimization complete", description: "Results are ready in the Results tab." });
+              setTimeout(async () => {
+                try {
+                  const qRes = await fetch("/api/lab/queue", { credentials: "include" });
+                  if (!qRes.ok) return;
+                  const qData = await qRes.json();
+                  const nextRun = Array.isArray(qData) ? null : qData?.activeRun;
+                  if (nextRun && (nextRun.status === "running" || nextRun.status === "paused")) {
+                    const jobRes = await fetch(`/api/lab/runs/${nextRun.id}/job`, { credentials: "include" });
+                    if (jobRes.ok) {
+                      const jobData = await jobRes.json();
+                      if (jobData.jobId) {
+                        setActiveRunId(nextRun.id);
+                        setActiveJobId(jobData.jobId);
+                        toast({ title: "Next run started", description: `Run #${nextRun.id} is now active.` });
+                      }
+                    }
+                  }
+                } catch {}
+              }, 2000);
             }
           }
           if (data.status === "retrying") {
