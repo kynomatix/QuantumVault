@@ -683,6 +683,7 @@ export function registerLabRoutes(app: Express): void {
             break;
 
           case "done": {
+            clearActiveWorker();
             await checkpointWriteChain.catch(() => {});
             const results = msg.results as LabBacktestResult[];
             if (job.abortSignal.aborted) {
@@ -721,7 +722,6 @@ export function registerLabRoutes(app: Express): void {
                     jobId: job.id, status: "error", stage: `DB finalization failed: ${err.message}`,
                     current: 0, total: 0, percent: 0, elapsed: 0, error: err.message,
                   });
-                  clearActiveWorker();
                   setTimeout(() => pumpQueue(), 1000);
                   break;
                 }
@@ -731,12 +731,12 @@ export function registerLabRoutes(app: Express): void {
                 current: 0, total: 0, percent: 100, elapsed: 0,
               });
             }
-            clearActiveWorker();
             setTimeout(() => pumpQueue(), 1000);
             break;
           }
 
           case "error": {
+            clearActiveWorker();
             await checkpointWriteChain.catch(() => {});
             const isResource = msg.isResourceError || isOOMError(msg.message || "");
             const errorLabel = isResource ? "Resource limit exceeded" : "Error";
@@ -752,17 +752,14 @@ export function registerLabRoutes(app: Express): void {
                   const cpData = await labStorage.getCheckpoint(runId);
                   if (cpData) { cpData.resourceError = true; await labStorage.saveCheckpoint(runId, cpData); }
                   console.log(`[QuantumLab] Run ${runId} resource error → paused (no auto-retry)`);
-                  clearActiveWorker();
                   setTimeout(() => pumpQueue(), 1000);
                   break;
                 }
                 console.log(`[QuantumLab] Run ${runId} error → paused, will auto-retry`);
-                clearActiveWorker();
                 autoRetryAfterCrash(runId, job.id, msg.message);
                 break;
               } catch {}
             }
-            clearActiveWorker();
             setTimeout(() => pumpQueue(), 1000);
             break;
           }
@@ -770,6 +767,7 @@ export function registerLabRoutes(app: Express): void {
       });
 
       worker.on("error", async (err: Error) => {
+        clearActiveWorker();
         await checkpointWriteChain.catch(() => {});
         const oom = isOOMError(err);
         if (oom) lastWorkerOOM = true;
@@ -786,22 +784,20 @@ export function registerLabRoutes(app: Express): void {
               const cpData = await labStorage.getCheckpoint(runId);
               if (cpData) { cpData.resourceError = true; await labStorage.saveCheckpoint(runId, cpData); }
               console.log(`[QuantumLab] Worker OOM run ${runId} → paused (no auto-retry)`);
-              clearActiveWorker();
               setTimeout(() => pumpQueue(), 1000);
               return;
             }
             console.log(`[QuantumLab] Worker error run ${runId} → paused, will auto-retry`);
-            clearActiveWorker();
             autoRetryAfterCrash(runId, job.id, err.message);
             return;
           } catch { await labStorage.failRun(runId).catch(() => {}); }
         }
-        clearActiveWorker();
         setTimeout(() => pumpQueue(), 1000);
       });
 
       worker.on("exit", async (code: number) => {
         if (code !== 0 && activeWorker === worker) {
+          clearActiveWorker();
           await checkpointWriteChain.catch(() => {});
           const exitMsg = `Worker exited with code ${code}`;
           const oom = lastWorkerOOM;
@@ -817,17 +813,14 @@ export function registerLabRoutes(app: Express): void {
                   current: 0, total: 0, percent: 0, elapsed: 0, error: exitMsg,
                 });
                 console.log(`[QuantumLab] Worker OOM exit run ${runId} → paused (no auto-retry)`);
-                clearActiveWorker();
                 setTimeout(() => pumpQueue(), 1000);
                 return;
               }
               console.log(`[QuantumLab] Worker exit(${code}) run ${runId} → paused, will auto-retry`);
-              clearActiveWorker();
               autoRetryAfterCrash(runId, job.id, exitMsg);
               return;
             } catch { await labStorage.failRun(runId).catch(() => {}); }
           }
-          clearActiveWorker();
           setTimeout(() => pumpQueue(), 1000);
         }
       });
