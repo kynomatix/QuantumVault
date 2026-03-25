@@ -550,25 +550,32 @@ export default function QuantumLab() {
               })();
             } else {
               toast({ title: "Optimization complete", description: "Results are ready in the Results tab." });
-              setTimeout(async () => {
-                try {
-                  const qRes = await fetch("/api/lab/queue", { credentials: "include" });
-                  if (!qRes.ok) return;
-                  const qData = await qRes.json();
-                  const nextRun = Array.isArray(qData) ? null : qData?.activeRun;
-                  if (nextRun && (nextRun.status === "running" || nextRun.status === "paused")) {
-                    const jobRes = await fetch(`/api/lab/runs/${nextRun.id}/job`, { credentials: "include" });
-                    if (jobRes.ok) {
-                      const jobData = await jobRes.json();
-                      if (jobData.jobId) {
-                        setActiveRunId(nextRun.id);
-                        setActiveJobId(jobData.jobId);
-                        toast({ title: "Next run started", description: `Run #${nextRun.id} is now active.` });
+              (async () => {
+                for (let attempt = 0; attempt < 6; attempt++) {
+                  await new Promise(r => setTimeout(r, attempt === 0 ? 3000 : 5000));
+                  try {
+                    const qRes = await fetch("/api/lab/queue", { credentials: "include" });
+                    if (!qRes.ok) continue;
+                    const qData = await qRes.json();
+                    const nextRun = Array.isArray(qData) ? null : qData?.activeRun;
+                    if (nextRun && nextRun.id !== completedRunId && (nextRun.status === "running" || nextRun.status === "paused")) {
+                      const jobRes = await fetch(`/api/lab/runs/${nextRun.id}/job`, { credentials: "include" });
+                      if (jobRes.ok) {
+                        const jobData = await jobRes.json();
+                        if (jobData.jobId) {
+                          setActiveRunId(nextRun.id);
+                          setActiveJobId(jobData.jobId);
+                          toast({ title: "Next run started", description: `Run #${nextRun.id} is now active.` });
+                          return;
+                        }
                       }
                     }
-                  }
-                } catch {}
-              }, 2000);
+                    if (!nextRun || (nextRun.id !== completedRunId && nextRun.status !== "running" && nextRun.status !== "paused")) {
+                      return;
+                    }
+                  } catch {}
+                }
+              })();
             }
           }
           if (data.status === "retrying") {
