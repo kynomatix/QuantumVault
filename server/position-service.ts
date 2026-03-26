@@ -252,6 +252,7 @@ export class PositionService {
       const lastTradeAt = dbPosition.lastTradeAt ? new Date(dbPosition.lastTradeAt) : new Date(0);
       const isStale = (Date.now() - lastTradeAt.getTime()) > this.STALE_THRESHOLD_MS;
 
+      const fallbackEntryPrice = parseFloat(dbPosition.avgEntryPrice);
       return {
         source: 'database',
         timestamp,
@@ -262,8 +263,8 @@ export class PositionService {
           market: dbPosition.market,
           side: baseSize > 0 ? 'LONG' : 'SHORT',
           size: Math.abs(baseSize),
-          avgEntryPrice: parseFloat(dbPosition.avgEntryPrice),
-          currentPrice: 0,
+          avgEntryPrice: fallbackEntryPrice,
+          currentPrice: fallbackEntryPrice,
           unrealizedPnl: 0,
           unrealizedPnlPercent: 0,
           realizedPnl: parseFloat(dbPosition.realizedPnl),

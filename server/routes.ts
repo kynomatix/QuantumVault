@@ -3045,17 +3045,20 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         if (!bot) continue;
 
         const side = baseSize > 0 ? 'LONG' : 'SHORT';
-        const markPrice = prices[pos.market] || 0;
         const entryPrice = parseFloat(pos.avgEntryPrice);
+        const rawMarkPrice = prices[pos.market] || 0;
+        const markPrice = rawMarkPrice > 0 ? rawMarkPrice : entryPrice;
         const sizeUsd = Math.abs(baseSize) * markPrice;
         const realizedPnl = parseFloat(pos.realizedPnl);
         const totalFees = parseFloat(pos.totalFees || "0");
         
-        const unrealizedPnl = side === 'LONG'
-          ? (markPrice - entryPrice) * Math.abs(baseSize)
-          : (entryPrice - markPrice) * Math.abs(baseSize);
+        const unrealizedPnl = rawMarkPrice > 0
+          ? (side === 'LONG'
+              ? (markPrice - entryPrice) * Math.abs(baseSize)
+              : (entryPrice - markPrice) * Math.abs(baseSize))
+          : 0;
         
-        const unrealizedPnlPercent = Math.abs(entryPrice * Math.abs(baseSize)) > 0
+        const unrealizedPnlPercent = rawMarkPrice > 0 && Math.abs(entryPrice * Math.abs(baseSize)) > 0
           ? (unrealizedPnl / (entryPrice * Math.abs(baseSize))) * 100
           : 0;
 
