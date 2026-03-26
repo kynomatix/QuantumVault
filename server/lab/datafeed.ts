@@ -435,8 +435,40 @@ async function fetchOkxCandles(
   return [];
 }
 
-function aggregateCandles(candles: OHLCV[], factor: number): OHLCV[] {
+const TIMEFRAME_MS: Record<string, number> = {
+  "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+  "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+  "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
+};
+
+function aggregateCandles(candles: OHLCV[], factor: number, targetTfMs?: number): OHLCV[] {
   const sorted = [...candles].sort((a, b) => a.time - b.time);
+  if (sorted.length === 0) return [];
+
+  if (targetTfMs && targetTfMs > 0) {
+    const buckets = new Map<number, OHLCV[]>();
+    for (const c of sorted) {
+      const bucket = Math.floor(c.time / targetTfMs) * targetTfMs;
+      if (!buckets.has(bucket)) buckets.set(bucket, []);
+      buckets.get(bucket)!.push(c);
+    }
+    const result: OHLCV[] = [];
+    const sortedKeys = [...buckets.keys()].sort((a, b) => a - b);
+    for (const key of sortedKeys) {
+      const group = buckets.get(key)!;
+      if (group.length < factor) continue;
+      result.push({
+        time: group[0].time,
+        open: group[0].open,
+        high: Math.max(...group.map(c => c.high)),
+        low: Math.min(...group.map(c => c.low)),
+        close: group[group.length - 1].close,
+        volume: group.reduce((s, c) => s + c.volume, 0),
+      });
+    }
+    return result;
+  }
+
   const result: OHLCV[] = [];
   for (let i = 0; i + factor - 1 < sorted.length; i += factor) {
     const group = sorted.slice(i, i + factor);
@@ -480,8 +512,9 @@ export async function fetchOHLCV(
   if (synthetic) {
     onProgress?.(`Synthesizing ${timeframe} from ${synthetic.source} candles...`);
     const sourceCandles = await fetchOHLCV(symbol, synthetic.source, startDate, endDate, onProgress);
-    const aggregated = aggregateCandles(sourceCandles, synthetic.factor);
-    console.log(`[Synthetic] Built ${aggregated.length} ${timeframe} candles from ${sourceCandles.length} ${synthetic.source} candles`);
+    const targetTfMs = TIMEFRAME_MS[timeframe.toLowerCase()] || 0;
+    const aggregated = aggregateCandles(sourceCandles, synthetic.factor, targetTfMs);
+    console.log(`[Synthetic] Built ${aggregated.length} ${timeframe} candles from ${sourceCandles.length} ${synthetic.source} candles (aligned to ${targetTfMs}ms boundaries)`);
     onProgress?.(`Synthesized ${aggregated.length} ${timeframe} candles from ${synthetic.source}`);
 
     if (aggregated.length > 0) {
