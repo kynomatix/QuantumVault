@@ -429,12 +429,36 @@ export function registerLabRoutes(app: Express): void {
   let lastWorkerOOM = false;
   let workerStarting = false;
   let lastWorkerMessageTime = 0;
+  let workerWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+  const WORKER_WATCHDOG_INTERVAL = 30_000;
+  const WORKER_STALL_THRESHOLD = 180_000;
+
+  function startWorkerWatchdog() {
+    stopWorkerWatchdog();
+    workerWatchdogTimer = setInterval(() => {
+      if (!activeWorker || workerStarting) return;
+      const now = Date.now();
+      const silenceMs = lastWorkerMessageTime ? now - lastWorkerMessageTime : 0;
+      if (silenceMs > WORKER_STALL_THRESHOLD) {
+        console.log(`[QuantumLab] Watchdog: worker stalled (no message for ${Math.round(silenceMs / 1000)}s > ${WORKER_STALL_THRESHOLD / 1000}s threshold). Terminating.`);
+        try { activeWorker.terminate(); } catch {}
+      }
+    }, WORKER_WATCHDOG_INTERVAL);
+  }
+
+  function stopWorkerWatchdog() {
+    if (workerWatchdogTimer) {
+      clearInterval(workerWatchdogTimer);
+      workerWatchdogTimer = null;
+    }
+  }
 
   function clearActiveWorker() {
     activeWorker = null;
     workerStarting = false;
     lastWorkerMessageTime = 0;
     stopKeepAlive();
+    stopWorkerWatchdog();
   }
 
   let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -569,6 +593,7 @@ export function registerLabRoutes(app: Express): void {
       lastWorkerOOM = false;
       lastWorkerMessageTime = Date.now();
       startKeepAlive();
+      startWorkerWatchdog();
 
       if (runId) {
         checkpointWriteChain = checkpointWriteChain.then(async () => {
@@ -1458,7 +1483,7 @@ export function registerLabRoutes(app: Express): void {
 
     const heartbeat = setInterval(() => {
       try { res.write(":heartbeat\n\n"); } catch { clearInterval(heartbeat); }
-    }, 15000);
+    }, 25000);
 
     job.listeners.add(sendProgress);
 
@@ -2143,10 +2168,17 @@ export function registerLabRoutes(app: Express): void {
     if (schedulerRunning) return;
     schedulerRunning = true;
     try {
-      if (activeWorker || pumpQueueRunning || workerStarting) return;
+      if (pumpQueueRunning || workerStarting) return;
 
-      const HEARTBEAT_STALE_MS = 90_000;
+      const HEARTBEAT_STALE_MS = 240_000;
       const now = Date.now();
+
+      if (activeWorker) {
+        const silenceMs = lastWorkerMessageTime ? now - lastWorkerMessageTime : 0;
+        if (silenceMs <= HEARTBEAT_STALE_MS) return;
+        console.log(`[QuantumLab] Scheduler: active worker silent for ${Math.round(silenceMs / 1000)}s, watchdog should handle — skipping`);
+        return;
+      }
 
       if (lastWorkerMessageTime && (now - lastWorkerMessageTime) < HEARTBEAT_STALE_MS) {
         return;
