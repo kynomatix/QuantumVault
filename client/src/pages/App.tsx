@@ -206,19 +206,6 @@ export default function AppPage() {
   const [botSortMenuOpen, setBotSortMenuOpen] = useState(false);
   const botSortRef = useRef<HTMLDivElement>(null);
 
-  const { data: globalQueueData } = useQuery<{ items: any[]; activeRun: any | null }>({
-    queryKey: ["/api/lab/queue"],
-    queryFn: async () => {
-      const res = await fetch("/api/lab/queue", { credentials: "include" });
-      if (!res.ok) return { items: [], activeRun: null };
-      const data = await res.json();
-      if (Array.isArray(data)) return { items: data, activeRun: null };
-      return data as { items: any[]; activeRun: any | null };
-    },
-    refetchInterval: 15000,
-    structuralSharing: false,
-  });
-  const hasActiveLabRun = !!(globalQueueData?.activeRun && (globalQueueData.activeRun.status === "running" || globalQueueData.activeRun.status === "paused"));
 
   useEffect(() => {
     if (!botSortMenuOpen) return;
@@ -1440,10 +1427,7 @@ export default function AppPage() {
               data-testid="link-quantumlab-header"
               title="QuantumLab"
             >
-              <FlaskConical className={`w-5 h-5 ${hasActiveLabRun ? 'text-violet-400' : 'text-muted-foreground'}`} />
-              {hasActiveLabRun && (
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-violet-500 rounded-full animate-pulse" />
-              )}
+              <FlaskConical className="w-5 h-5 text-muted-foreground" />
             </a>
             <a 
               href="/analytics" 
