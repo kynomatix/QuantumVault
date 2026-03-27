@@ -26,12 +26,37 @@ export async function getCachedCandles(
     if (rows.length < 50) return null;
 
     const tfSeconds = getTimeframeSecondsForCache(timeframe);
-    const expectedCandles = Math.floor((endMs - startMs) / (tfSeconds * 1000));
+    const tfMs = tfSeconds * 1000;
+    const expectedCandles = Math.floor((endMs - startMs) / tfMs);
     const coverageRatio = rows.length / Math.max(expectedCandles, 1);
 
     if (coverageRatio < 0.7) {
       console.log(`[CandleCache] Partial hit for ${symbol} ${timeframe}: ${rows.length}/${expectedCandles} candles (${(coverageRatio * 100).toFixed(0)}% coverage) — refetching`);
       return null;
+    }
+
+    if (tfMs >= 28800000 && rows.length >= 3) {
+      const sampleSize = Math.min(rows.length, 20);
+      let misaligned = 0;
+      let wrongInterval = 0;
+      for (let i = 0; i < sampleSize; i++) {
+        const ts = Number(rows[i].time);
+        if (ts % tfMs !== 0) misaligned++;
+        if (i > 0) {
+          const gap = ts - Number(rows[i - 1].time);
+          if (gap > 0 && gap < tfMs) wrongInterval++;
+        }
+      }
+      if (misaligned > 0 || wrongInterval > 0) {
+        console.log(`[CandleCache] MISALIGNED: ${symbol} ${timeframe} — ${misaligned}/${sampleSize} off-boundary, ${wrongInterval}/${sampleSize - 1} wrong-interval — purging & refetching`);
+        try {
+          await db.delete(labCandleCache)
+            .where(and(eq(labCandleCache.symbol, symbol), eq(labCandleCache.timeframe, timeframe)));
+        } catch (err: any) {
+          console.log(`[CandleCache] Purge error: ${err.message}`);
+        }
+        return null;
+      }
     }
 
     return rows.map((r) => ({
