@@ -429,6 +429,7 @@ export function registerLabRoutes(app: Express): void {
   let lastWorkerOOM = false;
   let workerStarting = false;
   let lastWorkerMessageTime = 0;
+  let lastRunStartedAt = 0;
   let workerWatchdogTimer: ReturnType<typeof setInterval> | null = null;
   const WORKER_WATCHDOG_INTERVAL = 30_000;
   const WORKER_STALL_THRESHOLD = 180_000;
@@ -541,6 +542,7 @@ export function registerLabRoutes(app: Express): void {
     processOrdersOnClose?: boolean,
   ) {
     workerStarting = true;
+    lastRunStartedAt = Date.now();
     const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
     let checkpointState: Partial<LabCheckpoint> = resumeCheckpoint ? { ...resumeCheckpoint } : {};
     let checkpointWriteChain: Promise<void> = Promise.resolve();
@@ -756,6 +758,7 @@ export function registerLabRoutes(app: Express): void {
                 current: 0, total: 0, percent: 100, elapsed: 0,
               });
             }
+            clearActiveWorker();
             setTimeout(() => pumpQueue(), 1000);
             break;
           }
@@ -829,6 +832,12 @@ export function registerLabRoutes(app: Express): void {
           console.log(`[QuantumLab] ${exitMsg} (oom=${oom})`);
           if (runId) {
             try {
+              const currentRun = await labStorage.getRun(runId);
+              if (currentRun?.status === "completed" || currentRun?.status === "failed") {
+                console.log(`[QuantumLab] Worker exit(${code}) run ${runId} — already ${currentRun.status}, ignoring`);
+                setTimeout(() => pumpQueue(), 1000);
+                return;
+              }
               await labStorage.pauseRun(runId);
               if (oom) {
                 const cpData = await labStorage.getCheckpoint(runId);
@@ -2173,6 +2182,7 @@ export function registerLabRoutes(app: Express): void {
       const HEARTBEAT_STALE_MS = 240_000;
       const now = Date.now();
 
+      const RUN_STARTUP_GRACE_MS = 120_000;
       if (activeWorker) {
         const silenceMs = lastWorkerMessageTime ? now - lastWorkerMessageTime : 0;
         if (silenceMs <= HEARTBEAT_STALE_MS) return;
@@ -2181,6 +2191,10 @@ export function registerLabRoutes(app: Express): void {
       }
 
       if (lastWorkerMessageTime && (now - lastWorkerMessageTime) < HEARTBEAT_STALE_MS) {
+        return;
+      }
+
+      if (lastRunStartedAt && (now - lastRunStartedAt) < RUN_STARTUP_GRACE_MS) {
         return;
       }
 
