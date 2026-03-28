@@ -187,7 +187,7 @@ export function createLabSupervisor(): LabSupervisor {
         ...process.env,
         LAB_PORT: String(labPort),
         LAB_AUTH_SECRET,
-        DB_POOL_SIZE: "2",
+        DB_POOL_SIZE: "5",
       };
 
       const args = isProd ? [entryPath] : ["--import", "tsx", entryPath];
