@@ -759,6 +759,7 @@ export default function QuantumLab() {
                 onCancel={handleCancelJob}
                 autoRefine={autoRefine}
                 onAutoRefineChange={setAutoRefine}
+                strategyName={strategies?.find(s => s.id === strategyId)?.name}
               />
             )}
 
@@ -1976,7 +1977,7 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
   );
 }
 
-export function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange, hideAutoRefine }: { progress: LabJobProgress; onCancel: () => void; autoRefine: boolean; onAutoRefineChange: (v: boolean) => void; hideAutoRefine?: boolean }) {
+export function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange, hideAutoRefine, strategyName }: { progress: LabJobProgress; onCancel: () => void; autoRefine: boolean; onAutoRefineChange: (v: boolean) => void; hideAutoRefine?: boolean; strategyName?: string }) {
   const [cancelling, setCancelling] = useState(false);
 
   const handleCancel = async () => {
@@ -2003,6 +2004,7 @@ export function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange,
             <div className="min-w-0">
               <h2 className="text-base font-semibold text-white truncate" data-testid="text-running-title">
                 {progress.error === "Cancelled" ? "Cancelled" : progress.status === "complete" ? "Complete" : isRetrying ? "Retrying..." : progress.status === "error" ? "Error" : "Optimization Running"}
+                {strategyName && <span className="ml-2 text-sm font-normal text-white/50">— {strategyName}</span>}
               </h2>
               <p className="text-xs text-white/50 truncate" data-testid="text-running-stage">{progress.stage || "Initializing..."}</p>
             </div>
@@ -2235,6 +2237,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
             <div className="flex items-center gap-2">
               <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
               <span className="text-sm font-medium text-violet-300">Optimization Running</span>
+              {(() => { const activeRun = allRuns.find(r => r.status === "running"); const strat = activeRun ? strategyMap.get(activeRun.strategyId) : null; return strat ? <span className="text-xs text-white/50">— {strat.name}</span> : null; })()}
               <span className="text-xs text-white/40">{liveProgress.stage}</span>
             </div>
             <span className="text-[10px] text-violet-400/60 font-mono">LIVE</span>
@@ -2666,6 +2669,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
           <div>
             <h2 className="text-lg font-semibold text-white" data-testid="text-history-title">
               Run #{runId} Results
+              {strategy && <span className="ml-2 text-sm font-normal text-white/50">— {strategy.name}</span>}
               {run && (run.status === "paused" || run.status === "failed") && (
                 <Badge className="ml-2 text-[10px] bg-indigo-500/20 text-indigo-400 align-middle">Partial</Badge>
               )}
