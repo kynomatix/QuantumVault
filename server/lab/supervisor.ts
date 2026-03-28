@@ -188,6 +188,7 @@ export function createLabSupervisor(): LabSupervisor {
         LAB_PORT: String(labPort),
         LAB_AUTH_SECRET,
         DB_POOL_SIZE: "5",
+        DB_CONN_TIMEOUT_MS: "25000",
       };
 
       const args = isProd ? [entryPath] : ["--import", "tsx", entryPath];

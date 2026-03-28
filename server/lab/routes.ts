@@ -662,6 +662,7 @@ export function registerLabRoutes(app: Express): void {
                       currentDeepRound: cp.deepRound,
                       refineSeeds: cp.refineSeeds,
                       coordinateCompleted: cp.coordinateCompleted,
+                      lastHeartbeat: Date.now(),
                     };
                     const checkpoint: LabCheckpoint = {
                       completedCombos: [...completedCombos],
