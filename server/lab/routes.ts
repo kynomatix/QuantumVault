@@ -1010,7 +1010,9 @@ export function registerLabRoutes(app: Express): void {
           current: 0, total: 0, percent: 0, elapsed: 0, newJobId: newJob.id,
         });
 
-        const resumeCheckpoint = hasProgress ? checkpoint : undefined;
+        const resumeCheckpoint = hasProgress
+          ? checkpoint
+          : { completedCombos: [], configSnapshot: config, autoResumeAttempts: checkpoint.autoResumeAttempts } as LabCheckpoint;
         const detail = hasProgress
           ? (checkpoint.completedCombos?.length
             ? `${checkpoint.completedCombos.length} combos done`
@@ -1203,9 +1205,18 @@ export function registerLabRoutes(app: Express): void {
         const queueOrder = await labStorage.getNextQueueOrder(walletAddress);
         let snapshotInsights: any = {};
         if (config.useInsights) {
-          const computed = await computeGuidedInsightsForConfig(config.strategyId, config.tickers, config.timeframes);
-          if (computed.guidedInsights) snapshotInsights.guidedInsights = computed.guidedInsights;
-          if (computed.guidedInsightsPerCombo) snapshotInsights.guidedInsightsPerCombo = computed.guidedInsightsPerCombo;
+          try {
+            const computed = await Promise.race([
+              computeGuidedInsightsForConfig(config.strategyId, config.tickers, config.timeframes),
+              new Promise<{ guidedInsights: undefined; guidedInsightsPerCombo: undefined }>((_, reject) =>
+                setTimeout(() => reject(new Error("insights timeout")), 5000)
+              ),
+            ]);
+            if (computed.guidedInsights) snapshotInsights.guidedInsights = computed.guidedInsights;
+            if (computed.guidedInsightsPerCombo) snapshotInsights.guidedInsightsPerCombo = computed.guidedInsightsPerCombo;
+          } catch {
+            console.log(`[QuantumLab] Queue: insights computation skipped (timeout/error)`);
+          }
         }
         const run = await labStorage.createRun({
           strategyId: config.strategyId,
@@ -2354,7 +2365,9 @@ export function registerLabRoutes(app: Express): void {
           newJob.runId = runId;
           newJob.walletAddress = run.userId ?? undefined;
 
-          const resumeCheckpoint = hasProgress ? checkpoint : undefined;
+          const resumeCheckpoint = hasProgress
+            ? checkpoint
+            : { completedCombos: [], configSnapshot: config, autoResumeAttempts: checkpoint.autoResumeAttempts } as LabCheckpoint;
           const attempt = crashCount + 1;
           const detail = hasProgress
             ? (checkpoint.completedCombos?.length
