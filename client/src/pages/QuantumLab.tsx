@@ -453,7 +453,6 @@ export default function QuantumLab() {
             if (jobData.jobId && jobData.jobId !== currentJobId && isMounted) {
               console.log(`[SSE] Run ${activeRunId} has new jobId ${jobData.jobId}, reconnecting`);
               setActiveJobId(jobData.jobId);
-              toast({ title: "Reconnected", description: "Run resumed after server restart." });
               return;
             }
           }
@@ -471,7 +470,6 @@ export default function QuantumLab() {
                 console.log(`[SSE] Found active run ${activeRun.id} with jobId ${jobData2.jobId}, reconnecting`);
                 setActiveRunId(activeRun.id);
                 setActiveJobId(jobData2.jobId);
-                toast({ title: "Reconnected", description: `Resumed run #${activeRun.id}.` });
                 return;
               }
             }
@@ -664,7 +662,6 @@ export default function QuantumLab() {
             if (jobData.jobId && !cancelled) {
               setActiveRunId(ar.id);
               setActiveJobId(jobData.jobId);
-              toast({ title: "Reconnected to active run", description: `Run #${ar.id} is now active.` });
               console.log(`[AutoReconnect] Connected to job ${jobData.jobId} for run ${ar.id}`);
             }
             autoReconnectingRef.current = false;
