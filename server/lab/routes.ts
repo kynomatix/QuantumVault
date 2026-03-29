@@ -985,8 +985,9 @@ export function registerLabRoutes(app: Express): void {
         return;
       }
 
-      const hasProgress = cp.completedCombos?.length > 0 || (cp.currentCombo && cp.currentIteration != null);
-      const checkpoint: LabCheckpoint = freshCp ?? cp;
+      const safeCp = cp ?? { completedCombos: [], configSnapshot: null } as any;
+      const hasProgress = safeCp.completedCombos?.length > 0 || (safeCp.currentCombo && safeCp.currentIteration != null);
+      const checkpoint: LabCheckpoint = freshCp ?? safeCp;
       const config = await extractConfigForResume(checkpoint, runId);
       if (!config) {
         console.log(`[QuantumLab] Auto-retry: unrecoverable config for run ${runId}, failing`);
@@ -2339,6 +2340,10 @@ export function registerLabRoutes(app: Express): void {
           continue;
         }
 
+        if (!cp) {
+          console.log(`[QuantumLab] Recovery: run ${runId} has null checkpoint, attempting config recovery from run record`);
+        }
+
         const crashCount = (cp?.autoResumeAttempts as number) ?? 0;
         if (crashCount >= MAX_AUTO_RESUME_ATTEMPTS) {
           console.log(`[QuantumLab] Recovery: run ${runId} exhausted auto-resume attempts (${crashCount}/${MAX_AUTO_RESUME_ATTEMPTS}), force-failing`);
@@ -2355,17 +2360,18 @@ export function registerLabRoutes(app: Express): void {
           return false;
         }
 
-        const hasProgress = cp.completedCombos?.length > 0 || (cp.currentCombo && cp.currentIteration != null);
-        const config = await extractConfigForResume(cp, runId);
+        const safeCheckpoint = cp ?? { completedCombos: [], configSnapshot: null } as any;
+        const hasProgress = safeCheckpoint.completedCombos?.length > 0 || (safeCheckpoint.currentCombo && safeCheckpoint.currentIteration != null);
+        const config = await extractConfigForResume(safeCheckpoint, runId);
         if (!config) {
           console.log(`[QuantumLab] Recovery: unrecoverable config for run ${runId}, failing`);
           await db.update(labOptimizationRuns).set({ status: "failed", completedAt: new Date() }).where(eq(labOptimizationRuns.id, runId));
           labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
           continue;
         }
-        cp.configSnapshot = config;
-        await labStorage.saveCheckpoint(runId, cp);
-        const checkpoint: LabCheckpoint = cp;
+        safeCheckpoint.configSnapshot = config;
+        await labStorage.saveCheckpoint(runId, safeCheckpoint);
+        const checkpoint: LabCheckpoint = safeCheckpoint;
 
         if (hasProgress && checkpoint.currentCombo && !checkpoint.partialResults?.length) {
           const dbResults = await labStorage.getRunResults(runId);
