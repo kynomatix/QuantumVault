@@ -17,6 +17,38 @@ export function getLabCleanup(): ((reason: string) => Promise<void>) | null {
   return labCleanup;
 }
 
+function unwrapCheckpointConfig(cpConfigSnapshot: any): LabOptimizationConfig | null {
+  if (!cpConfigSnapshot || typeof cpConfigSnapshot !== "object") return null;
+  if (Array.isArray(cpConfigSnapshot.tickers)) return cpConfigSnapshot as LabOptimizationConfig;
+  if (cpConfigSnapshot.config && Array.isArray(cpConfigSnapshot.config.tickers)) {
+    return cpConfigSnapshot.config as LabOptimizationConfig;
+  }
+  return null;
+}
+
+async function extractConfigForResume(checkpoint: any, runId: number): Promise<LabOptimizationConfig | null> {
+  let config = unwrapCheckpointConfig(checkpoint?.configSnapshot);
+  if (config) return config;
+  console.log(`[QuantumLab] Checkpoint configSnapshot missing/corrupt for run ${runId}, falling back to run record`);
+  try {
+    const run = await labStorage.getRun(runId);
+    if (run?.configSnapshot) {
+      const snap = run.configSnapshot as any;
+      config = unwrapCheckpointConfig(snap);
+      if (!config && snap.config) config = snap.config as LabOptimizationConfig;
+      if (!config && Array.isArray(snap.tickers)) config = snap as LabOptimizationConfig;
+      if (config) {
+        checkpoint.configSnapshot = config;
+        await labStorage.saveCheckpoint(runId, checkpoint);
+        console.log(`[QuantumLab] Recovered config from run record for run ${runId} (tickers: ${config.tickers?.length})`);
+      }
+    }
+  } catch (err: any) {
+    console.log(`[QuantumLab] Failed to recover config for run ${runId}: ${err.message}`);
+  }
+  return config;
+}
+
 export function registerLabRoutes(app: Express): void {
 
   (async () => {
@@ -900,14 +932,7 @@ export function registerLabRoutes(app: Express): void {
         setTimeout(() => pumpQueue(), 1000);
         return;
       }
-      if (!cp?.configSnapshot) {
-        console.log(`[QuantumLab] Auto-retry skipped for run ${runId} — no config snapshot`);
-        await labStorage.failRun(runId);
-        setTimeout(() => pumpQueue(), 1000);
-        return;
-      }
-
-      const crashCount = (cp.autoResumeAttempts as number) ?? 0;
+      const crashCount = (cp?.autoResumeAttempts as number) ?? 0;
       if (crashCount >= MAX_AUTO_RESUME_ATTEMPTS) {
         console.log(`[QuantumLab] Auto-retry exhausted for run ${runId} (${crashCount}/${MAX_AUTO_RESUME_ATTEMPTS}). Manual resume required.`);
         await labStorage.failRun(runId, true);
@@ -962,7 +987,14 @@ export function registerLabRoutes(app: Express): void {
 
       const hasProgress = cp.completedCombos?.length > 0 || (cp.currentCombo && cp.currentIteration != null);
       const checkpoint: LabCheckpoint = freshCp ?? cp;
-      const config = checkpoint.configSnapshot!;
+      const config = await extractConfigForResume(checkpoint, runId);
+      if (!config) {
+        console.log(`[QuantumLab] Auto-retry: unrecoverable config for run ${runId}, failing`);
+        await labStorage.failRun(runId, true);
+        setTimeout(() => pumpQueue(), 1000);
+        return;
+      }
+      checkpoint.configSnapshot = config;
 
       if (hasProgress && checkpoint.currentCombo && !checkpoint.partialResults?.length) {
         const dbResults = await labStorage.getRunResults(runId);
@@ -1129,7 +1161,14 @@ export function registerLabRoutes(app: Express): void {
       }
 
       const snapshotType: "new" | "refine" = snapshot.type === "refine" ? "refine" : "new";
-      const config: LabOptimizationConfig = snapshot.config || snapshot;
+      const unwrapped = unwrapCheckpointConfig(snapshot) ?? (snapshot.config || snapshot);
+      const config: LabOptimizationConfig = unwrapped as LabOptimizationConfig;
+      if (!Array.isArray(config.tickers)) {
+        console.log(`[QuantumLab] pumpQueue: run ${claimed.id} has invalid config (no tickers), marking failed`);
+        await labStorage.failRun(claimed.id);
+        setTimeout(() => pumpQueue(), 100);
+        return;
+      }
       const processOrdersOnClose: boolean | undefined = snapshot.processOrdersOnClose;
       const guidedInsights: import("@shared/schema").GuidedInsights | undefined = snapshot.guidedInsights;
       const guidedInsightsPerCombo: Record<string, import("@shared/schema").GuidedInsights> | undefined = snapshot.guidedInsightsPerCombo;
@@ -1421,7 +1460,11 @@ export function registerLabRoutes(app: Express): void {
         }
       }
 
-      const config = checkpoint.configSnapshot;
+      const config = await extractConfigForResume(checkpoint, runId);
+      if (!config) {
+        return res.status(400).json({ error: "Cannot resume: config is corrupt and unrecoverable" });
+      }
+      checkpoint.configSnapshot = config;
       if ((checkpoint as any).autoResumeAttempts || (checkpoint as any).userCancelled) {
         (checkpoint as any).autoResumeAttempts = 0;
         (checkpoint as any).userCancelled = false;
@@ -2296,17 +2339,7 @@ export function registerLabRoutes(app: Express): void {
           continue;
         }
 
-        if (!cp?.configSnapshot) {
-          console.log(`[QuantumLab] Recovery: run ${runId} has no config snapshot, force-failing`);
-          await db.update(labOptimizationRuns).set({
-            status: "failed",
-            completedAt: new Date(),
-          }).where(eq(labOptimizationRuns.id, runId));
-          labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
-          continue;
-        }
-
-        const crashCount = (cp.autoResumeAttempts as number) ?? 0;
+        const crashCount = (cp?.autoResumeAttempts as number) ?? 0;
         if (crashCount >= MAX_AUTO_RESUME_ATTEMPTS) {
           console.log(`[QuantumLab] Recovery: run ${runId} exhausted auto-resume attempts (${crashCount}/${MAX_AUTO_RESUME_ATTEMPTS}), force-failing`);
           await db.update(labOptimizationRuns).set({
@@ -2322,10 +2355,16 @@ export function registerLabRoutes(app: Express): void {
           return false;
         }
 
-        await labStorage.saveCheckpoint(runId, cp);
-
         const hasProgress = cp.completedCombos?.length > 0 || (cp.currentCombo && cp.currentIteration != null);
-        const config = cp.configSnapshot;
+        const config = await extractConfigForResume(cp, runId);
+        if (!config) {
+          console.log(`[QuantumLab] Recovery: unrecoverable config for run ${runId}, failing`);
+          await db.update(labOptimizationRuns).set({ status: "failed", completedAt: new Date() }).where(eq(labOptimizationRuns.id, runId));
+          labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
+          continue;
+        }
+        cp.configSnapshot = config;
+        await labStorage.saveCheckpoint(runId, cp);
         const checkpoint: LabCheckpoint = cp;
 
         if (hasProgress && checkpoint.currentCombo && !checkpoint.partialResults?.length) {
