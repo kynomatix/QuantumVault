@@ -35,8 +35,24 @@ type WorkerMessage =
   | { type: "done"; results: LabBacktestResult[]; totalConfigsTested?: number }
   | { type: "error"; message: string; isResourceError?: boolean };
 
+let lastSendTime = Date.now();
+const HEARTBEAT_INTERVAL_MS = 30_000;
+
 function send(msg: WorkerMessage) {
+  lastSendTime = Date.now();
   parentPort?.postMessage(msg);
+}
+
+function sendHeartbeat(jobId: string, stage: string, globalCurrent: number, grandTotal: number, startTime: number, tickerProgress: Record<string, any>) {
+  if (Date.now() - lastSendTime < HEARTBEAT_INTERVAL_MS) return;
+  send({ type: "progress", data: {
+    jobId, status: "random_search",
+    stage,
+    current: Math.min(globalCurrent, grandTotal), total: grandTotal,
+    percent: Math.min(99, Math.round((globalCurrent / grandTotal) * 100)),
+    elapsed: Date.now() - startTime,
+    tickerProgress,
+  }});
 }
 
 interface LiteBacktestResult {
@@ -683,6 +699,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LiteBacktestResu
         paramBestScore = score;
         paramBestResult = lite;
       }
+      sendHeartbeat(jobId, `Coordinate Tune — ${input.name} — ${ticker.split("/")[0]} ${timeframe}`, currentTest, grandTotal, startTime, tickerProgress);
     }
 
     const improvement = paramBestScore - paramStartScore;
@@ -757,6 +774,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LiteBacktestResu
                 bestScore = score;
                 bestResult = lite;
               }
+              sendHeartbeat(jobId, `Pair Tune — ${inputA.name} × ${inputB.name} — ${ticker.split("/")[0]} ${timeframe}`, currentTest, grandTotal, startTime, tickerProgress);
             }
           }
 
@@ -1068,6 +1086,7 @@ async function run() {
         comboResults.push(lite);
       }
       globalCurrent++;
+      sendHeartbeat(jobId, `${searchLabel} Search — ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${s}/${config.randomSamples}`, globalCurrent, grandTotal, startTime, tickerProgress);
 
       if (s % (lowTf ? 25 : 10) === 0) {
         const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreLite(b) - scoreLite(a))[0] : null;
@@ -1143,6 +1162,7 @@ async function run() {
             comboResults.push(lite);
           }
           globalCurrent++;
+          sendHeartbeat(jobId, `Refining seed ${seedIdx + 1}/${topSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`, globalCurrent, grandTotal, startTime, tickerProgress);
         }
 
         const best = comboResults.length > 0 ? comboResults.sort((a, b) => scoreLite(b) - scoreLite(a))[0] : null;
@@ -1240,6 +1260,7 @@ async function run() {
               exploratory.push(erLite);
               comboResults.push(erLite);
             }
+            sendHeartbeat(jobId, `Deep R${round + 1} explore — ${combo.ticker.split("/")[0]} ${combo.timeframe}`, globalCurrent, grandTotal, startTime, tickerProgress);
           }
           deepSeeds = [...elites, ...novelOnly, ...exploratory];
           while (deepSeeds.length < deepSeedsPerRound && comboResults.length > deepSeeds.length) {
@@ -1306,6 +1327,7 @@ async function run() {
                 send({ type: "best-discovery", combo: key, stage: "deep", deepRound: round, score: resultScore, params: { ...lite.params } });
               }
             }
+            sendHeartbeat(jobId, `Deep R${round + 1} — seed ${seedIdx + 1}/${deepSeeds.length} — ${combo.ticker.split("/")[0]} ${combo.timeframe}`, globalCurrent, grandTotal, startTime, tickerProgress);
             globalCurrent++;
           }
 
@@ -1347,9 +1369,12 @@ async function run() {
 
     comboResults.sort((a, b) => scoreLite(b) - scoreLite(a));
     const topLitesForCombo = comboResults.slice(0, 10);
-    const topForCombo = topLitesForCombo.map(lite =>
-      trimResult(runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache))
-    );
+    const topForCombo: LabBacktestResult[] = [];
+    for (let fi = 0; fi < topLitesForCombo.length; fi++) {
+      const lite = topLitesForCombo[fi];
+      sendHeartbeat(jobId, `Finalizing ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${fi + 1}/${topLitesForCombo.length}`, globalCurrent, grandTotal, startTime, tickerProgress);
+      topForCombo.push(trimResult(runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache)));
+    }
     allResults.push(...topForCombo);
 
     tickerProgress[key] = { status: "complete", best: topForCombo[0]?.netProfitPercent ?? 0 };
