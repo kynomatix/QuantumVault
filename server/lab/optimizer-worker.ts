@@ -20,6 +20,7 @@ interface WorkerInput {
     deepSearch?: boolean;
     coordinateTune?: boolean;
     pineScript?: string;
+    strategyId?: number;
   };
   candlesByCombo: Record<string, OHLCV[]>;
   resumeCheckpoint?: LabCheckpoint;
@@ -539,7 +540,7 @@ interface CoordinateTuneContext {
   timeframe: string;
   inputs: LabPineInput[];
   config: WorkerInput["config"];
-  engineConfig: { initialCapital: number; commission: number; positionSize: number; processOrdersOnClose?: boolean };
+  engineConfig: { initialCapital: number; commission: number; positionSize: number; processOrdersOnClose?: boolean; strategyId?: number };
   seedResult: LiteBacktestResult;
   seedScore: number;
   testedSignatures: Set<string>;
@@ -950,6 +951,7 @@ async function run() {
       positionSize: 1000,
       processOrdersOnClose: config.processOrdersOnClose,
       pinePlan,
+      strategyId: config.strategyId,
     };
 
     const sharedArrays = pinePlan ? createSharedArrays(candles) : undefined;

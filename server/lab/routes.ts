@@ -55,6 +55,7 @@ export function registerLabRoutes(app: Express): void {
     try {
       const { sql } = await import("drizzle-orm");
       await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true}'::jsonb WHERE id = 1 AND NOT (strategy_settings ? 'nativeEngine')`);
+      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true}'::jsonb WHERE id IN (3, 5, 10) AND NOT (strategy_settings ? 'nativeEngine')`);
     } catch (e) {}
   })();
 
@@ -617,6 +618,7 @@ export function registerLabRoutes(app: Express): void {
           deepSearch: config.deepSearch ?? false,
           coordinateTune: config.coordinateTune ?? false,
           pineScript: config.pineScript,
+          strategyId: config.strategyId,
         },
         candlesByCombo,
         resumeCheckpoint,
