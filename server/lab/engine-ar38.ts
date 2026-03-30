@@ -128,11 +128,13 @@ export function runAdaptiveRegimeBacktest(
   const tpRrRatio = p(params, "tp_rr_ratio", 2.0);
 
   const exitOnRibbonFlip = p(params, "exit_on_ribbon_flip", false);
-  const exitOnStFlip = p(params, "exit_on_st_flip", false);
+  const exitModeRaw: string = p(params, "exit_mode", "");
+  const exitOnStFlip = exitModeRaw === "ST Flip" || p(params, "exit_on_st_flip", false);
   const flipOnSignal = p(params, "flip_on_signal", true);
 
   const pyramidAtrDistance = p(params, "pyramid_atr_distance", 3.0);
-  const PYRAMID_MAX = 3;
+  const usePyramiding = p(params, "use_pyramiding", true);
+  const PYRAMID_MAX = usePyramiding ? p(params, "pyramid_max", 3) : 1;
 
   const showCandlePatterns = p(params, "show_candle_patterns", true);
   const useCandleForRange = p(params, "use_candle_for_range", false);
