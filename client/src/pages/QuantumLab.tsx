@@ -424,61 +424,114 @@ export default function QuantumLab() {
   const activeJobIdRef = useRef<string | null>(null);
   useEffect(() => { activeJobIdRef.current = activeJobId; }, [activeJobId]);
   const autoReconnectingRef = useRef(false);
+  const reconnectTokenRef = useRef(0);
   const [code, setCode] = useState(EXAMPLE_PINE);
   const [strategyName, setStrategyName] = useState("");
   const [strategyId, setStrategyId] = useState<number | null>(null);
   const [parsedResult, setParsedResult] = useState<LabPineParseResult | null>(null);
 
   const [jobProgress, setJobProgress] = useState<LabJobProgress | null>(null);
+  const [sseReconnecting, setSseReconnecting] = useState(false);
   const [autoRefine, setAutoRefine] = useState(false);
   const autoRefineRef = useRef(false);
   useEffect(() => { autoRefineRef.current = autoRefine; }, [autoRefine]);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const activeRunIdRef = useRef(activeRunId);
+  useEffect(() => { activeRunIdRef.current = activeRunId; }, [activeRunId]);
 
   useEffect(() => {
-    if (!activeJobId) { setJobProgress(null); return; }
+    if (!activeJobId) { setJobProgress(null); setSseReconnecting(false); return; }
     const currentJobId = activeJobId;
     let reconnectTimer: ReturnType<typeof setTimeout>;
     let isMounted = true;
     let failCount = 0;
-    const MAX_FAIL_RETRIES = 5;
+    const INITIAL_RETRIES = 5;
+    const POLL_INTERVAL_MS = 5000;
+    const MAX_POLL_DURATION_MS = 180_000;
 
-    async function handleDeadJob() {
+    async function pollForNewJob() {
       if (!isMounted) return;
-      try {
-        if (activeRunId) {
-          const jobRes = await fetch(`/api/lab/runs/${activeRunId}/job`, { credentials: "include" });
-          if (jobRes.ok) {
-            const jobData = await safeResponseJson(jobRes);
-            if (jobData.jobId && jobData.jobId !== currentJobId && isMounted) {
-              console.log(`[SSE] Run ${activeRunId} has new jobId ${jobData.jobId}, reconnecting`);
-              setActiveJobId(jobData.jobId);
-              return;
+      setSseReconnecting(true);
+      console.log(`[SSE] Entering reconnect poll mode for run ${activeRunIdRef.current}`);
+      const pollStart = Date.now();
+
+      while (isMounted && Date.now() - pollStart < MAX_POLL_DURATION_MS) {
+        await new Promise(r => { reconnectTimer = setTimeout(r, POLL_INTERVAL_MS); });
+        if (!isMounted) return;
+
+        try {
+          const runId = activeRunIdRef.current;
+          if (runId) {
+            const jobRes = await fetch(`/api/lab/runs/${runId}/job`, { credentials: "include" });
+            if (jobRes.ok) {
+              const jobData = await safeResponseJson(jobRes);
+              if (jobData.jobId && isMounted) {
+                console.log(`[SSE] Reconnected to job ${jobData.jobId} for run ${runId}`);
+                setSseReconnecting(false);
+                if (jobData.jobId !== currentJobId) {
+                  setActiveJobId(jobData.jobId);
+                } else {
+                  failCount = 0;
+                  connect();
+                }
+                return;
+              }
+            } else if (jobRes.status === 202) {
+              console.log(`[SSE] Run ${runId} still active, waiting for job recreation...`);
+              continue;
+            } else if (jobRes.status === 404) {
+              console.log(`[SSE] Run ${runId} no longer active (404), checking status...`);
+              break;
             }
           }
+
+          const runsRes = await fetch("/api/lab/runs", { credentials: "include" });
+          if (runsRes.ok) {
+            const runs = await safeResponseJson(runsRes);
+            const sortedRuns = [...runs].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            const activeRun = sortedRuns.find((r: any) => r.status === "running" || r.status === "paused");
+            if (activeRun) {
+              if (activeRun.id !== runId) setActiveRunId(activeRun.id);
+              const jobRes2 = await fetch(`/api/lab/runs/${activeRun.id}/job`, { credentials: "include" });
+              if (jobRes2.ok) {
+                const jobData2 = await safeResponseJson(jobRes2);
+                if (jobData2.jobId && isMounted) {
+                  console.log(`[SSE] Found job ${jobData2.jobId} for active run ${activeRun.id}`);
+                  setSseReconnecting(false);
+                  setActiveRunId(activeRun.id);
+                  setActiveJobId(jobData2.jobId);
+                  return;
+                }
+              } else if (jobRes2.status === 202) {
+                continue;
+              }
+            } else {
+              break;
+            }
+          }
+        } catch (err) {
+          console.log(`[SSE] Poll error:`, err);
         }
-        const runsRes = await fetch("/api/lab/runs");
+      }
+
+      if (!isMounted) return;
+      setSseReconnecting(false);
+
+      try {
+        const runsRes = await fetch("/api/lab/runs", { credentials: "include" });
         if (runsRes.ok) {
           const runs = await safeResponseJson(runsRes);
           const sortedRuns = [...runs].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          const activeRun = sortedRuns.find((r: any) => r.status === "running");
+          const activeRun = sortedRuns.find((r: any) => r.status === "running" || r.status === "paused");
           if (activeRun) {
-            const jobRes2 = await fetch(`/api/lab/runs/${activeRun.id}/job`, { credentials: "include" });
-            if (jobRes2.ok) {
-              const jobData2 = await safeResponseJson(jobRes2);
-              if (jobData2.jobId && isMounted) {
-                console.log(`[SSE] Found active run ${activeRun.id} with jobId ${jobData2.jobId}, reconnecting`);
-                setActiveRunId(activeRun.id);
-                setActiveJobId(jobData2.jobId);
-                return;
-              }
-            }
-          }
-          const matchedRun = sortedRuns.find((r: any) => r.status === "paused" || r.status === "failed");
-          if (matchedRun?.status === "paused") {
-            toast({ title: "Server restarted", description: "Your run is paused and can be resumed from History.", variant: "default" });
+            toast({ title: "Connection lost", description: "Run is still active. Refresh the page to reconnect.", variant: "default" });
           } else {
-            toast({ title: "Optimization interrupted", description: "The server restarted. Check History for details.", variant: "destructive" });
+            const matchedRun = sortedRuns.find((r: any) => r.status === "paused" || r.status === "failed");
+            if (matchedRun?.status === "paused") {
+              toast({ title: "Server restarted", description: "Your run is paused and can be resumed from History.", variant: "default" });
+            } else {
+              toast({ title: "Optimization interrupted", description: "The server restarted. Check History for details.", variant: "destructive" });
+            }
           }
         }
       } catch {}
@@ -500,6 +553,7 @@ export default function QuantumLab() {
       es.onmessage = (event) => {
         try {
           failCount = 0;
+          setSseReconnecting(false);
           const data: LabJobProgress = JSON.parse(event.data);
           const isTerminal = data.status === "complete" || data.status === "error";
           const now = Date.now();
@@ -523,10 +577,10 @@ export default function QuantumLab() {
           }
           if (data.status === "complete") {
             es.close();
-            const completedRunId = activeRunId;
+            const completedRunId = activeRunIdRef.current;
             setActiveJobId(null);
             autoReconnectingRef.current = false;
-            if (activeRunId) setActiveHistoryRunId(activeRunId);
+            if (completedRunId) setActiveHistoryRunId(completedRunId);
             queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
             queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
             if (autoRefineRef.current && completedRunId) {
@@ -598,8 +652,8 @@ export default function QuantumLab() {
         es.close();
         if (isMounted) {
           failCount++;
-          if (failCount >= MAX_FAIL_RETRIES) {
-            handleDeadJob();
+          if (failCount >= INITIAL_RETRIES) {
+            pollForNewJob();
             return;
           }
           reconnectTimer = setTimeout(async () => {
@@ -607,7 +661,7 @@ export default function QuantumLab() {
               const res = await fetch(`/api/lab/job/${currentJobId}/results`);
               if (res.ok) {
                 setActiveJobId(null);
-                if (activeRunId) setActiveHistoryRunId(activeRunId);
+                if (activeRunIdRef.current) setActiveHistoryRunId(activeRunIdRef.current);
                 queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
                 queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
                 toast({ title: "Optimization complete", description: "Results are ready in the Results tab." });
@@ -620,7 +674,7 @@ export default function QuantumLab() {
       };
     }
     connect();
-    return () => { isMounted = false; clearTimeout(reconnectTimer); eventSourceRef.current?.close(); };
+    return () => { isMounted = false; clearTimeout(reconnectTimer); eventSourceRef.current?.close(); setSseReconnecting(false); };
   }, [activeJobId, toast]);
 
   const { data: queueBadgeData } = useQuery<{ items: any[]; activeRun: any | null }>({
@@ -646,35 +700,44 @@ export default function QuantumLab() {
 
     autoReconnectingRef.current = true;
     lastReconnectRunIdRef.current = ar.id;
-    let cancelled = false;
-    const isPaused = ar.status === "paused";
-    console.log(`[AutoReconnect] Detected ${ar.status} run ${ar.id}, attempting job lookup...`);
+    const token = ++reconnectTokenRef.current;
+    console.log(`[AutoReconnect] Detected ${ar.status} run ${ar.id}, attempting job lookup... (token=${token})`);
+    setSseReconnecting(true);
 
     (async () => {
-      const maxAttempts = isPaused ? 20 : 4;
-      const delayMs = isPaused ? 5000 : 3000;
+      const maxAttempts = ar.status === "running" ? 36 : 3;
+      const delayMs = 5000;
       for (let i = 0; i < maxAttempts; i++) {
-        if (cancelled) return;
+        if (reconnectTokenRef.current !== token) return;
         try {
           const jobRes = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
           if (jobRes.ok) {
             const jobData = await jobRes.json();
-            if (jobData.jobId && !cancelled) {
+            if (jobData.jobId && reconnectTokenRef.current === token) {
               setActiveRunId(ar.id);
               setActiveJobId(jobData.jobId);
+              setSseReconnecting(false);
               console.log(`[AutoReconnect] Connected to job ${jobData.jobId} for run ${ar.id}`);
             }
             autoReconnectingRef.current = false;
             return;
+          } else if (jobRes.status === 202) {
+            console.log(`[AutoReconnect] Run ${ar.id} active, job pending (attempt ${i + 1}/${maxAttempts})`);
+          } else if (jobRes.status === 404) {
+            console.log(`[AutoReconnect] Run ${ar.id} no longer active`);
+            break;
           }
         } catch (err) {
           console.log(`[AutoReconnect] /runs/${ar.id}/job attempt ${i + 1} error:`, err);
         }
         await new Promise(r => setTimeout(r, delayMs));
       }
-      autoReconnectingRef.current = false;
+      if (reconnectTokenRef.current === token) {
+        autoReconnectingRef.current = false;
+        setSseReconnecting(false);
+      }
     })();
-    return () => { cancelled = true; autoReconnectingRef.current = false; };
+    return () => { autoReconnectingRef.current = false; };
   }, [queueBadgeData, activeJobId, toast]);
   const queueCount = (queueBadgeData?.items?.length ?? 0) + (queueBadgeData?.activeRun ? 1 : 0);
 
@@ -750,15 +813,37 @@ export default function QuantumLab() {
       case "main":
         return (
           <div className="space-y-6">
-            {activeJobId && jobProgress && (
-              <JobMonitor
-                progress={jobProgress}
-                onCancel={handleCancelJob}
-                autoRefine={autoRefine}
-                onAutoRefineChange={setAutoRefine}
-                strategyName={strategies?.find(s => s.id === strategyId)?.name}
-              />
-            )}
+            {(activeJobId && jobProgress) || sseReconnecting ? (
+              jobProgress ? (
+                <div className="relative">
+                  {sseReconnecting && (
+                    <div className="absolute inset-0 z-10 bg-black/40 backdrop-blur-[2px] rounded-lg flex items-center justify-center">
+                      <div className="flex items-center gap-2 text-white/80 text-sm">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Reconnecting to server...
+                      </div>
+                    </div>
+                  )}
+                  <JobMonitor
+                    progress={jobProgress}
+                    onCancel={handleCancelJob}
+                    autoRefine={autoRefine}
+                    onAutoRefineChange={setAutoRefine}
+                    strategyName={strategies?.find(s => s.id === strategyId)?.name}
+                  />
+                </div>
+              ) : (
+                <Card className="bg-violet-500/5 border border-violet-500/20 p-5" data-testid="reconnecting-monitor">
+                  <div className="flex items-center gap-3">
+                    <Loader2 className="w-5 h-5 animate-spin text-violet-400" />
+                    <div>
+                      <p className="text-sm font-medium text-white">Reconnecting to server...</p>
+                      <p className="text-xs text-white/50">The server is restarting. Your run will resume automatically.</p>
+                    </div>
+                  </div>
+                </Card>
+              )
+            ) : null}
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 space-y-6">

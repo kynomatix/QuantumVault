@@ -333,8 +333,11 @@ export function registerLabRoutes(app: Express): void {
     if (!run) return;
     const runId = parseInt(req.params.id);
     const job = labStorage.getJobByRunId(runId);
-    if (!job) return res.status(404).json({ error: "No active job for this run" });
-    res.json({ jobId: job.id });
+    if (job) return res.json({ jobId: job.id });
+    if (run.status === "running" || run.status === "paused") {
+      return res.status(202).json({ pending: true, status: run.status });
+    }
+    return res.status(404).json({ error: "No active job for this run" });
   });
 
   app.post("/api/lab/runs/:id/fail", requireLabAuth, async (req: Request, res: Response) => {
