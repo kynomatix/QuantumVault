@@ -9,7 +9,7 @@ import { Worker } from "worker_threads";
 import { resolve, dirname } from "path";
 import type { OHLCV } from "./engine";
 import { db } from "../db";
-import { eq, or, and, inArray, desc } from "drizzle-orm";
+import { eq, or, and, inArray, desc, sql } from "drizzle-orm";
 
 let labCleanup: ((reason: string) => Promise<void>) | null = null;
 
@@ -644,6 +644,8 @@ export function registerLabRoutes(app: Express): void {
         });
       }
 
+      let doneReceived = false;
+
       worker.on("message", async (msg: any) => {
         lastWorkerMessageTime = Date.now();
         switch (msg.type) {
@@ -678,7 +680,7 @@ export function registerLabRoutes(app: Express): void {
             break;
 
           case "partial-checkpoint":
-            if (!runId) break;
+            if (!runId || doneReceived) break;
             pendingCheckpoint = msg;
             if (!checkpointWriteInFlight) {
               checkpointWriteInFlight = true;
@@ -686,7 +688,7 @@ export function registerLabRoutes(app: Express): void {
                 while (pendingCheckpoint) {
                   const cp = pendingCheckpoint;
                   pendingCheckpoint = null;
-                  if (job.abortSignal.aborted) break;
+                  if (job.abortSignal.aborted || doneReceived) break;
                   try {
                     if (cp.results.length > 0) {
                       await labStorage.saveComboResults(runId!, cp.results, true);
@@ -748,6 +750,8 @@ export function registerLabRoutes(app: Express): void {
             break;
 
           case "done": {
+            doneReceived = true;
+            pendingCheckpoint = null;
             clearActiveWorker();
             await checkpointWriteChain.catch(() => {});
             const results = msg.results as LabBacktestResult[];
@@ -871,7 +875,7 @@ export function registerLabRoutes(app: Express): void {
           if (runId) {
             try {
               const currentRun = await labStorage.getRun(runId);
-              if (currentRun?.status === "completed" || currentRun?.status === "failed") {
+              if (currentRun?.status === "complete" || currentRun?.status === "completed" || currentRun?.status === "failed") {
                 console.log(`[QuantumLab] Worker exit(${code}) run ${runId} — already ${currentRun.status}, ignoring`);
                 setTimeout(() => pumpQueue(), 1000);
                 return;
@@ -1702,6 +1706,22 @@ export function registerLabRoutes(app: Express): void {
         refineProcessOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
       }
       refineConfig = config;
+
+      const dupCheck = await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(${runId + 1000000})`);
+        const existing = await tx.select({ id: labOptimizationRuns.id })
+          .from(labOptimizationRuns)
+          .where(and(
+            or(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.status, "queued"), eq(labOptimizationRuns.status, "paused"))!,
+            sql`${labOptimizationRuns.configSnapshot}->>'sourceRunId' = ${String(runId)}`
+          )!)
+          .limit(1);
+        return existing;
+      });
+      if (dupCheck.length > 0) {
+        console.log(`[QuantumLab] Refine: duplicate blocked — refine of run ${runId} already exists as run ${dupCheck[0].id}`);
+        return res.json({ queued: true, runId: dupCheck[0].id, queueOrder: 0, duplicate: true });
+      }
 
       const isBusy = await labStorage.hasActiveOrPausedRun();
 
