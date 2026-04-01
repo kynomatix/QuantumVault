@@ -103,7 +103,7 @@ export function runBacktest(
   const useEmaBias = p(params, "useEmaBias", null, false);
   const emaLen = p(params, "emaLen", null, 200);
   const cooldownBars = p(params, "cooldownBars", null, 0);
-  const requireSqz = p(params, "requireSqz", null, true);
+  const requireSqz = p(params, "requireSqz", null, false);
   const bbwPctile = p(params, "bbwPctile", null, 25);
   const bbwPctileLen = p(params, "bbwPctileLen", null, 100);
 
@@ -116,25 +116,25 @@ export function runBacktest(
   const useTP1 = p(params, "useTP1", null, true);
   const tp1Mult = p(params, "tp1Mult", null, 1.5);
   const tp1Pct = p(params, "tp1Pct", null, 2.0);
-  const tp1QtyPct = p(params, "tp1QtyPct", null, 30);
+  const tp1QtyPct = p(params, "tp1QtyPct", null, 5);
   const useTP2 = p(params, "useTP2", null, true);
   const tp2Mult = p(params, "tp2Mult", null, 3.0);
   const tp2Pct = p(params, "tp2Pct", null, 4.0);
-  const tp2QtyPct = p(params, "tp2QtyPct", null, 30);
+  const tp2QtyPct = p(params, "tp2QtyPct", null, 10);
   const useTP3 = p(params, "useTP3", null, true);
   const tp3Mult = p(params, "tp3Mult", null, 5.0);
   const tp3Pct = p(params, "tp3Pct", null, 8.0);
-  const tp3QtyPct = p(params, "tp3QtyPct", null, 50);
+  const tp3QtyPct = p(params, "tp3QtyPct", null, 15);
 
   const useTrail = p(params, "useTrail", "useTrailing", false);
   const trailMode: string = p(params, "trailMode", null, "ATR");
   const trailAtrMult = p(params, "trailAtrMult", "trailMult", 2.0);
   const trailPct = p(params, "trailPct", null, 1.0);
-  const trailActivation: string = p(params, "trailActivation", null, "Immediately");
+  const trailActivation: string = p(params, "trailActivation", null, "After TP1");
   const trailActAtr = p(params, "trailActAtr", null, 2.0);
 
   const useBE = p(params, "useBE", null, false);
-  const beActivation: string = p(params, "beActivation", null, "After TP1");
+  const beActivation: string = p(params, "beActivation", null, "After TP2");
   const beOffset = p(params, "beOffset", null, 0.1);
   const beActAtr = p(params, "beActAtr", null, 2.0);
 
@@ -236,6 +236,23 @@ export function runBacktest(
     }
   }
 
+  const useDateFilter = p(params, "useDateFilter", null, false);
+  const backtestStart = p(params, "backtestStart", null, null);
+  const backtestEnd = p(params, "backtestEnd", null, null);
+
+  let dateStartMs = 0;
+  let dateEndMs = Infinity;
+  if (useDateFilter) {
+    if (backtestStart) {
+      const parsed = typeof backtestStart === "string" ? Date.parse(backtestStart) : backtestStart;
+      if (!isNaN(parsed)) dateStartMs = parsed;
+    }
+    if (backtestEnd) {
+      const parsed = typeof backtestEnd === "string" ? Date.parse(backtestEnd) : backtestEnd;
+      if (!isNaN(parsed)) dateEndMs = parsed;
+    }
+  }
+
   const trades: LabTradeRecord[] = [];
   const equityValues: number[] = new Array(n);
   let equity = config.initialCapital;
@@ -273,12 +290,37 @@ export function runBacktest(
     trailLevel: number;
     signalBar: number;
   } | null = null;
-  let pendingExit: {
-    exitReason: string;
-    signalBar: number;
-  } | null = null;
-  let pendingPartials: { qty: number; fillPriceRef: number; signalBar: number }[] = [];
   let barsSinceExit = 999;
+
+  function closePosition(pos: Position, exitBar: number, fillPrice: number, exitReason: string) {
+    const dir = pos.direction;
+    const pnlPct = dir === "long"
+      ? ((fillPrice - pos.entryPrice) / pos.entryPrice) * 100
+      : ((pos.entryPrice - fillPrice) / pos.entryPrice) * 100;
+    const pnlDollar = pos.remainingQty * config.positionSize * (pnlPct / 100)
+      - 2 * pos.remainingQty * config.positionSize * config.commission;
+    equity += pnlDollar;
+    trades.push({
+      entryTime: new Date(candles[pos.entryTimeIdx].time).toISOString(),
+      exitTime: new Date(candles[exitBar].time).toISOString(),
+      direction: dir,
+      entryPrice: pos.entryPrice,
+      exitPrice: fillPrice,
+      pnlPercent: Math.round(pnlPct * 100) / 100,
+      pnlDollar: Math.round(pnlDollar * 100) / 100,
+      exitReason,
+      barsHeld: exitBar - pos.entryBar,
+    });
+  }
+
+  function doPartialClose(pos: Position, qty: number, fillPrice: number) {
+    const dir = pos.direction;
+    const pnl = dir === "long"
+      ? (fillPrice - pos.entryPrice) / pos.entryPrice
+      : (pos.entryPrice - fillPrice) / pos.entryPrice;
+    equity += qty * config.positionSize * pnl - 2 * qty * config.positionSize * config.commission;
+    pos.remainingQty -= qty;
+  }
 
   for (let i = 0; i < n; i++) {
     if (pendingEntry !== null && i > 0) {
@@ -305,60 +347,21 @@ export function runBacktest(
       pendingEntry = null;
     }
 
-    if (pendingPartials.length > 0 && position && i > 0) {
-      for (const partial of pendingPartials) {
-        const fillPrice = open[i];
-        const dir = position.direction;
-        const pnl = dir === "long"
-          ? (fillPrice - position.entryPrice) / position.entryPrice
-          : (position.entryPrice - fillPrice) / position.entryPrice;
-        equity += partial.qty * config.positionSize * pnl - 2 * partial.qty * config.positionSize * config.commission;
-        position.remainingQty -= partial.qty;
-      }
-      pendingPartials = [];
-    }
-
-    if (pendingExit !== null && position && i > 0) {
-      const fillPrice = open[i];
-      const dir = position.direction;
-      const pnlPct = dir === "long"
-        ? ((fillPrice - position.entryPrice) / position.entryPrice) * 100
-        : ((position.entryPrice - fillPrice) / position.entryPrice) * 100;
-      const pnlDollar = position.remainingQty * config.positionSize * (pnlPct / 100)
-        - 2 * position.remainingQty * config.positionSize * config.commission;
-      equity += pnlDollar;
-      trades.push({
-        entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
-        exitTime: new Date(candles[i].time).toISOString(),
-        direction: dir,
-        entryPrice: position.entryPrice,
-        exitPrice: fillPrice,
-        pnlPercent: Math.round(pnlPct * 100) / 100,
-        pnlDollar: Math.round(pnlDollar * 100) / 100,
-        exitReason: pendingExit.exitReason,
-        barsHeld: i - position.entryBar,
-      });
-      position = null;
-      pendingExit = null;
-      barsSinceExit = -1;
-    }
-
     if (i < warmup) {
       equityValues[i] = equity;
       continue;
     }
 
-    const justEntered = position !== null && position.entryBar === i;
-
-    if (position && !pendingExit && !justEntered) {
+    if (position) {
       const dir = position.direction;
       const isLong = dir === "long";
       const atrNow = isNaN(slAtr[i]) ? close[i] * 0.02 : slAtr[i];
+      let exited = false;
 
       if (useTP1 && !position.tp1Hit && position.tp1Level !== 0) {
         const hit = isLong ? close[i] >= position.tp1Level : close[i] <= position.tp1Level;
         if (hit) {
-          pendingPartials.push({ qty: position.remainingQty * (tp1QtyPct / 100), fillPriceRef: close[i], signalBar: i });
+          doPartialClose(position, position.remainingQty * (tp1QtyPct / 100), close[i]);
           position.tp1Hit = true;
         }
       }
@@ -366,8 +369,7 @@ export function runBacktest(
       if (useTP2 && !position.tp2Hit && position.tp1Hit && position.tp2Level !== 0) {
         const hit = isLong ? close[i] >= position.tp2Level : close[i] <= position.tp2Level;
         if (hit) {
-          const currentQty = position.remainingQty - pendingPartials.reduce((s, pp) => s + pp.qty, 0);
-          pendingPartials.push({ qty: currentQty * (tp2QtyPct / 100), fillPriceRef: close[i], signalBar: i });
+          doPartialClose(position, position.remainingQty * (tp2QtyPct / 100), close[i]);
           position.tp2Hit = true;
         }
       }
@@ -375,12 +377,18 @@ export function runBacktest(
       if (useTP3 && !position.tp3Hit && position.tp2Hit && position.tp3Level !== 0) {
         const hit = isLong ? close[i] >= position.tp3Level : close[i] <= position.tp3Level;
         if (hit) {
+          doPartialClose(position, position.remainingQty * (tp3QtyPct / 100), close[i]);
           position.tp3Hit = true;
-          pendingExit = { exitReason: "TP3", signalBar: i };
         }
       }
 
-      if (position && !pendingExit && useBE && !position.beActive) {
+      if (position.remainingQty <= 0.001) {
+        position = null;
+        exited = true;
+        barsSinceExit = -1;
+      }
+
+      if (position && !exited && useBE && !position.beActive) {
         let shouldActivateBE = false;
         if (beActivation === "After TP1") shouldActivateBE = position.tp1Hit;
         else if (beActivation === "After TP2") shouldActivateBE = position.tp2Hit;
@@ -396,7 +404,7 @@ export function runBacktest(
         }
       }
 
-      if (position && !pendingExit && useTrail) {
+      if (position && !exited && useTrail) {
         let shouldActivateTrail = false;
         if (trailActivation === "Immediately") shouldActivateTrail = true;
         else if (trailActivation === "After TP1") shouldActivateTrail = position.tp1Hit;
@@ -429,57 +437,65 @@ export function runBacktest(
         }
       }
 
-      if (position && !pendingExit) {
+      if (position && !exited) {
         const slHit = isLong ? close[i] <= position.stopLoss : close[i] >= position.stopLoss;
         if (slHit) {
           const reason = position.beActive ? "BE Stop" : position.trailActive ? "Trail Stop" : "Stop Loss";
-          pendingExit = { exitReason: reason, signalBar: i };
+          closePosition(position, i, close[i], reason);
+          position = null;
+          exited = true;
+          barsSinceExit = -1;
         }
+      }
+
+      if (position && !exited) {
+        if (exitOnMomFlip) {
+          const momBearish = !isNaN(mom[i]) && mom[i] < 0;
+          const momFall = !isNaN(mom[i]) && !isNaN(mom[i - 1]) && mom[i] < mom[i - 1];
+          const momBullish = !isNaN(mom[i]) && mom[i] > 0;
+          const momRise = !isNaN(mom[i]) && !isNaN(mom[i - 1]) && mom[i] > mom[i - 1];
+          if (isLong && momBearish && momFall) { closePosition(position, i, close[i], "Mom Flip"); position = null; exited = true; barsSinceExit = -1; }
+          if (!exited && !isLong && momBullish && momRise) { closePosition(position!, i, close[i], "Mom Flip"); position = null; exited = true; barsSinceExit = -1; }
+        }
+
+        if (!exited && exitOnHullFlip && hull) {
+          const hullBull = !isNaN(hull[i]) && !isNaN(hull[i - 2]) && hull[i] - hull[i - 2] > 0;
+          const hullBear = !isNaN(hull[i]) && !isNaN(hull[i - 2]) && hull[i] - hull[i - 2] < 0;
+          if (isLong && hullBear) { closePosition(position!, i, close[i], "Hull Flip"); position = null; exited = true; barsSinceExit = -1; }
+          if (!exited && !isLong && hullBull) { closePosition(position!, i, close[i], "Hull Flip"); position = null; exited = true; barsSinceExit = -1; }
+        }
+
+        if (!exited && exitOnResqueeze) {
+          if (sqz[i] && i > 0 && !sqz[i - 1]) {
+            closePosition(position!, i, close[i], "Re-Squeeze"); position = null; exited = true; barsSinceExit = -1;
+          }
+        }
+
+        if (!exited && exitOnRsiExtreme && useRsi && rsiVals) {
+          if (isLong && !isNaN(rsiVals[i]) && rsiVals[i] >= rsiOB) { closePosition(position!, i, close[i], "RSI OB"); position = null; exited = true; barsSinceExit = -1; }
+          if (!exited && !isLong && !isNaN(rsiVals[i]) && rsiVals[i] <= rsiOS) { closePosition(position!, i, close[i], "RSI OS"); position = null; exited = true; barsSinceExit = -1; }
+        }
+
+        if (!exited && exitOnAdxDrop && useAdx && adxVals) {
+          if (!isNaN(adxVals[i]) && !isNaN(adxVals[i - 1]) &&
+              adxVals[i] < adxDropLevel && adxVals[i - 1] >= adxDropLevel) {
+            closePosition(position!, i, close[i], "ADX Drop"); position = null; exited = true; barsSinceExit = -1;
+          }
+        }
+      }
+
+      if (position && !exited && useDateFilter && candles[i].time > dateEndMs) {
+        closePosition(position, i, close[i], "Date End");
+        position = null;
+        barsSinceExit = -1;
       }
     }
 
-    if (position && !pendingExit) {
-      const dir = position.direction;
-      const isLong = dir === "long";
+    const inDateRange = !useDateFilter || (candles[i].time >= dateStartMs && candles[i].time <= dateEndMs);
 
-      if (exitOnMomFlip) {
-        const momBearish = !isNaN(mom[i]) && mom[i] < 0;
-        const momFall = !isNaN(mom[i]) && !isNaN(mom[i - 1]) && mom[i] < mom[i - 1];
-        const momBullish = !isNaN(mom[i]) && mom[i] > 0;
-        const momRise = !isNaN(mom[i]) && !isNaN(mom[i - 1]) && mom[i] > mom[i - 1];
-        if (isLong && momBearish && momFall) pendingExit = { exitReason: "Mom Flip", signalBar: i };
-        if (!isLong && momBullish && momRise) pendingExit = { exitReason: "Mom Flip", signalBar: i };
-      }
-
-      if (!pendingExit && exitOnHullFlip && hull) {
-        const hullBull = !isNaN(hull[i]) && !isNaN(hull[i - 2]) && hull[i] - hull[i - 2] > 0;
-        const hullBear = !isNaN(hull[i]) && !isNaN(hull[i - 2]) && hull[i] - hull[i - 2] < 0;
-        if (isLong && hullBear) pendingExit = { exitReason: "Hull Flip", signalBar: i };
-        if (!isLong && hullBull) pendingExit = { exitReason: "Hull Flip", signalBar: i };
-      }
-
-      if (!pendingExit && exitOnResqueeze) {
-        if (sqz[i] && i > 0 && !sqz[i - 1]) {
-          pendingExit = { exitReason: "Re-Squeeze", signalBar: i };
-        }
-      }
-
-      if (!pendingExit && exitOnRsiExtreme && useRsi && rsiVals) {
-        if (isLong && !isNaN(rsiVals[i]) && rsiVals[i] >= rsiOB) pendingExit = { exitReason: "RSI OB", signalBar: i };
-        if (!isLong && !isNaN(rsiVals[i]) && rsiVals[i] <= rsiOS) pendingExit = { exitReason: "RSI OS", signalBar: i };
-      }
-
-      if (!pendingExit && exitOnAdxDrop && useAdx && adxVals) {
-        if (!isNaN(adxVals[i]) && !isNaN(adxVals[i - 1]) &&
-            adxVals[i] < adxDropLevel && adxVals[i - 1] >= adxDropLevel) {
-          pendingExit = { exitReason: "ADX Drop", signalBar: i };
-        }
-      }
-    }
-
-    if (!position && !pendingEntry && !pendingExit && i > 0) {
+    if (!position && !pendingEntry && i > 0) {
       barsSinceExit++;
-      if (barsSinceExit < cooldownBars) {
+      if (barsSinceExit < cooldownBars || !inDateRange) {
         equityValues[i] = equity;
         continue;
       }
@@ -580,23 +596,7 @@ export function runBacktest(
 
   if (position) {
     const lastClose = close[n - 1];
-    const pnlPct = position.direction === "long"
-      ? ((lastClose - position.entryPrice) / position.entryPrice) * 100
-      : ((position.entryPrice - lastClose) / position.entryPrice) * 100;
-    const pnlDollar = position.remainingQty * config.positionSize * (pnlPct / 100)
-      - 2 * position.remainingQty * config.positionSize * config.commission;
-    equity += pnlDollar;
-    trades.push({
-      entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
-      exitTime: new Date(candles[n - 1].time).toISOString(),
-      direction: position.direction,
-      entryPrice: position.entryPrice,
-      exitPrice: lastClose,
-      pnlPercent: Math.round(pnlPct * 100) / 100,
-      pnlDollar: Math.round(pnlDollar * 100) / 100,
-      exitReason: "Open Position",
-      barsHeld: n - 1 - position.entryBar,
-    });
+    closePosition(position, n - 1, lastClose, "Open Position");
   }
 
   let winCount = 0;
