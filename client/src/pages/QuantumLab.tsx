@@ -592,6 +592,9 @@ export default function QuantumLab() {
                   if (refineData.queued) {
                     toast({ title: "Auto-refine queued", description: `Queued at position #${refineData.queueOrder}` });
                     queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+                    if (refineData.runId) {
+                      pollForQueuedRun(refineData.runId);
+                    }
                   } else if (refineData.jobId) {
                     handleJobStarted(refineData.jobId, refineData.runId);
                     toast({ title: "Auto-refine started", description: "Refining best results from previous run." });
@@ -809,12 +812,55 @@ export default function QuantumLab() {
     queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
   }, []);
 
+  const pollForQueuedRun = useCallback((runId: number) => {
+    setActiveRunId(runId);
+    setJobProgress({ jobId: "", status: "running" as any, stage: "Queued — waiting to start...", current: 0, total: 0, percent: 0, elapsed: 0 });
+    (async () => {
+      const POLL_MS = 5000;
+      const MAX_POLLS = 120;
+      for (let i = 0; i < MAX_POLLS; i++) {
+        await new Promise(r => setTimeout(r, POLL_MS));
+        try {
+          const jobRes = await fetch(`/api/lab/runs/${runId}/job`, { credentials: "include" });
+          if (jobRes.ok) {
+            const jobData = await safeResponseJson(jobRes);
+            if (jobData.jobId) {
+              handleJobStarted(jobData.jobId, runId);
+              return;
+            }
+          }
+          const runRes = await fetch(`/api/lab/runs/${runId}`, { credentials: "include" });
+          if (runRes.ok) {
+            const runData = await safeResponseJson(runRes);
+            if (runData.status === "complete") {
+              toast({ title: "Refine complete", description: "Results are ready in the Results tab." });
+              setActiveRunId(null);
+              setActiveJobId(null);
+              setJobProgress(null);
+              queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+              return;
+            }
+            if (runData.status === "failed") {
+              toast({ title: "Refine failed", description: "Check History for details.", variant: "destructive" });
+              setActiveRunId(null);
+              setActiveJobId(null);
+              setJobProgress(null);
+              queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+              return;
+            }
+          }
+        } catch {}
+      }
+      setJobProgress(null);
+    })();
+  }, [handleJobStarted, toast]);
+
   const renderContent = () => {
     switch (mainTab) {
       case "main":
         return (
           <div className="space-y-6">
-            {(activeJobId && jobProgress) || sseReconnecting ? (
+            {(activeJobId && jobProgress) || jobProgress || sseReconnecting ? (
               jobProgress ? (
                 <div className="relative">
                   {sseReconnecting && (
@@ -892,8 +938,12 @@ export default function QuantumLab() {
             onBack={() => { setActiveHistoryRunId(null); setTargetCombo(null); }}
             targetCombo={targetCombo}
             onTargetConsumed={() => setTargetCombo(null)}
-            onRefine={(jobId, newRunId) => {
-              handleJobStarted(jobId, newRunId);
+            onRefine={(jobId, newRunId, queued) => {
+              if (queued && newRunId) {
+                pollForQueuedRun(newRunId);
+              } else {
+                handleJobStarted(jobId, newRunId);
+              }
               setMainTab("main");
             }}
           />
@@ -905,7 +955,7 @@ export default function QuantumLab() {
           />
         );
       case "heatmap":
-        return <HeatmapPanel onViewRun={(runId, ticker, timeframe) => { setActiveHistoryRunId(runId); setTargetCombo({ ticker, timeframe }); setMainTab("results"); }} onRefine={(jobId, newRunId) => { handleJobStarted(jobId, newRunId); setMainTab("main"); }} />;
+        return <HeatmapPanel onViewRun={(runId, ticker, timeframe) => { setActiveHistoryRunId(runId); setTargetCombo({ ticker, timeframe }); setMainTab("results"); }} onRefine={(jobId, newRunId, queued) => { if (queued && newRunId) { pollForQueuedRun(newRunId); } else { handleJobStarted(jobId, newRunId); } setMainTab("main"); }} />;
       case "insights":
         return <InsightsPanel />;
       default:
@@ -2482,7 +2532,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
   );
 }
 
-const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, targetCombo, onTargetConsumed, onRefine }: { runId: number; onBack: () => void; targetCombo?: { ticker: string; timeframe: string } | null; onTargetConsumed?: () => void; onRefine?: (jobId: string, runId: number) => void }) {
+const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, targetCombo, onTargetConsumed, onRefine }: { runId: number; onBack: () => void; targetCombo?: { ticker: string; timeframe: string } | null; onTargetConsumed?: () => void; onRefine?: (jobId: string, runId: number, queued?: boolean) => void }) {
   const [sortKey, setSortKey] = useState<SortKey>("netProfitPercent");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedResultSummary, setSelectedResultSummary] = useState<LabOptResult | null>(null);
@@ -2579,6 +2629,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       if (data.queued) {
         toast({ title: "Refine queued", description: `${ticker} ${timeframe} queued at position #${data.queueOrder}` });
         queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+        if (data.runId) onRefine?.("", data.runId, true);
         return;
       }
       queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
@@ -3341,7 +3392,7 @@ function EquityCurvePopup({ resultId, ticker, timeframe }: { resultId: number; t
   );
 }
 
-function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, ticker: string, timeframe: string) => void; onRefine?: (jobId: string, runId: number) => void }) {
+function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, ticker: string, timeframe: string) => void; onRefine?: (jobId: string, runId: number, queued?: boolean) => void }) {
   const [metric, setMetric] = useState<HeatmapMetric>("bestProfit");
   const [selectedCell, setSelectedCell] = useState<any | null>(null);
   const [selectedTopIdx, setSelectedTopIdx] = useState<number>(0);
@@ -3458,6 +3509,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
       if (data.queued) {
         toast({ title: "Refine queued", description: `${ticker} ${timeframe} queued at position #${data.queueOrder}` });
         queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
+        if (data.runId) onRefine?.("", data.runId, true);
         return;
       }
       queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
