@@ -383,6 +383,21 @@ export function runBacktest(
       }
 
       if (position.remainingQty <= 0.001) {
+        const tpLabel = position.tp3Hit ? "TP3" : position.tp2Hit ? "TP2" : "TP1";
+        const avgExitPnlPct = position.direction === "long"
+          ? ((close[i] - position.entryPrice) / position.entryPrice) * 100
+          : ((position.entryPrice - close[i]) / position.entryPrice) * 100;
+        trades.push({
+          entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
+          exitTime: new Date(candles[i].time).toISOString(),
+          direction: position.direction,
+          entryPrice: position.entryPrice,
+          exitPrice: close[i],
+          pnlPercent: Math.round(avgExitPnlPct * 100) / 100,
+          pnlDollar: 0,
+          exitReason: tpLabel,
+          barsHeld: i - position.entryBar,
+        });
         position = null;
         exited = true;
         barsSinceExit = -1;
