@@ -2332,11 +2332,17 @@ export function registerLabRoutes(app: Express): void {
     }
   }
 
+  let initComplete = false;
   setTimeout(async () => {
+    await labStorage.initPromise;
+    initComplete = true;
     console.log(`[QuantumLab] Unified scheduler starting (runs every 30s)`);
     await unifiedScheduler();
   }, 5000);
-  setInterval(unifiedScheduler, 30_000);
+  setInterval(async () => {
+    if (!initComplete) return;
+    await unifiedScheduler();
+  }, 30_000);
 
   async function resumeNextInterruptedRun(): Promise<boolean> {
     if (labStorage.interruptedRunIds.length === 0) return false;
@@ -2346,9 +2352,26 @@ export function registerLabRoutes(app: Express): void {
     for (const runId of candidateIds) {
       try {
         const run = await labStorage.getRun(runId);
-        if (!run || run.status !== "paused") {
+        if (!run) {
           labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
-          console.log(`[QuantumLab] Recovery: run ${runId} no longer paused (status=${run?.status}), removed`);
+          console.log(`[QuantumLab] Recovery: run ${runId} not found, removed`);
+          continue;
+        }
+        if (run.status === "running") {
+          const cp = run.checkpoint as any;
+          const lastHb = cp?.lastHeartbeat as number | undefined;
+          const hbStale = !lastHb || (Date.now() - lastHb) > 240_000;
+          if (hbStale) {
+            await labStorage.pauseRun(runId);
+            console.log(`[QuantumLab] Recovery: run ${runId} still running with stale heartbeat → paused first`);
+          } else {
+            labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
+            console.log(`[QuantumLab] Recovery: run ${runId} actively running (recent heartbeat), removed from recovery`);
+            continue;
+          }
+        } else if (run.status !== "paused") {
+          labStorage.interruptedRunIds = labStorage.interruptedRunIds.filter(id => id !== runId);
+          console.log(`[QuantumLab] Recovery: run ${runId} no longer paused (status=${run.status}), removed`);
           continue;
         }
 

@@ -83,10 +83,11 @@ export interface ILabStorage {
 export class LabDatabaseStorage implements ILabStorage {
   private jobs: Map<string, LabJob>;
   public interruptedRunIds: number[] = [];
+  public initPromise: Promise<void>;
 
   constructor() {
     this.jobs = new Map();
-    this.backfillOwnership().then(() => this.cleanupStaleRuns());
+    this.initPromise = this.backfillOwnership().then(() => this.cleanupStaleRuns());
   }
 
   private async backfillOwnership(): Promise<void> {
