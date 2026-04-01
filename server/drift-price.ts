@@ -33,7 +33,6 @@ const COINGECKO_IDS: Record<string, string> = {
   'RAY-PERP': 'raydium',
   'PENGU-PERP': 'pudgy-penguins',
   'MNT-PERP': 'mantle',
-  'BERA-PERP': 'berachain-bera',
   'HNT-PERP': 'helium',
   'BNB-PERP': 'binancecoin',
   'TAO-PERP': 'bittensor',

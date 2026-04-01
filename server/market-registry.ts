@@ -66,7 +66,6 @@ export const CANONICAL_PERP_MARKETS: Record<number, string> = {
   63: 'AI16Z-PERP',
   64: 'TRUMP-PERP',
   65: 'MELANIA-PERP',
-  66: 'BERA-PERP',
   69: 'KAITO-PERP',
   70: 'IP-PERP',
   71: 'FARTCOIN-PERP',

@@ -974,7 +974,6 @@ export const LAB_AVAILABLE_TICKERS = [
   { symbol: "PENGU/USDT:USDT", name: "PENGU" },
   { symbol: "AI16Z/USDT:USDT", name: "AI16Z" },
   { symbol: "TRUMP/USDT:USDT", name: "TRUMP" },
-  { symbol: "BERA/USDT:USDT", name: "BERA" },
   { symbol: "KAITO/USDT:USDT", name: "KAITO" },
   { symbol: "IP/USDT:USDT", name: "IP" },
   { symbol: "FARTCOIN/USDT:USDT", name: "FARTCOIN" },
