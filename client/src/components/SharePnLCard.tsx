@@ -388,10 +388,10 @@ export function SharePnLCard({
 
       let tweetText: string;
       if (isPublishedBot && shareUrl) {
-        tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!\n\nCopy my trades: ${shareUrl}\n\nPowered by @myQuantumVault`;
+        tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!\n\nCopy my trades: ${shareUrl}\n\nPowered by @QuantumVaultLab`;
       } else {
         const urlText = shareUrl ? `\n\nJoin here: ${shareUrl}` : '';
-        tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!${urlText}\n\nPowered by @myQuantumVault`;
+        tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!${urlText}\n\nPowered by @QuantumVaultLab`;
       }
       const xUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(tweetText)}`;
       window.open(xUrl, '_blank', 'noopener,noreferrer');
