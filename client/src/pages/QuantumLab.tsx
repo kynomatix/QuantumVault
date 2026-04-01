@@ -686,7 +686,7 @@ export default function QuantumLab() {
       if (Array.isArray(data)) return { items: data, activeRun: null };
       return data as { items: any[]; activeRun: any | null };
     },
-    refetchInterval: queueOpen ? 2000 : 10000,
+    refetchInterval: queueOpen ? 5000 : 15000,
     structuralSharing: false,
   });
 
@@ -1825,7 +1825,7 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
       if (Array.isArray(data)) return { items: data, activeRun: null };
       return data;
     },
-    refetchInterval: open ? 2000 : 10000,
+    refetchInterval: open ? 5000 : 15000,
   });
   const queueItems = queueData?.items ?? [];
   const activeRun = queueData?.activeRun ?? null;
@@ -2221,7 +2221,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
   const { getMaxLeverage } = useLeverageLimits();
   const { data: runs, isLoading } = useQuery<LabOptimizationRun[]>({
     queryKey: ["/api/lab/runs"],
-    refetchInterval: 5000,
+    refetchInterval: 15000,
   });
   const { data: strategies } = useQuery<LabStrategy[]>({ queryKey: ["/api/lab/strategies"] });
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
