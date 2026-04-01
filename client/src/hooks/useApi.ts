@@ -148,8 +148,8 @@ export function usePositions() {
     queryKey: ["positions", publicKeyString],
     queryFn: () => fetchPositions(publicKeyString!),
     enabled: !!publicKeyString && sessionConnected,
-    refetchInterval: 10000,
-    staleTime: 8000,
+    refetchInterval: 5000,
+    staleTime: 3000,
   });
 }
 
@@ -209,8 +209,8 @@ export function usePrices() {
   return useQuery({
     queryKey: ["prices"],
     queryFn: fetchPrices,
-    refetchInterval: 15000,
-    staleTime: 10000,
+    refetchInterval: 5000,
+    staleTime: 3000,
   });
 }
 
@@ -232,8 +232,8 @@ export function useHealthMetrics() {
     queryKey: ["healthMetrics", publicKeyString],
     queryFn: fetchHealthMetrics,
     enabled: !!publicKeyString && sessionConnected,
-    refetchInterval: 30000,
-    staleTime: 25000,
+    refetchInterval: 15000,
+    staleTime: 10000,
   });
 }
 
