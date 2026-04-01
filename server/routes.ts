@@ -2876,14 +2876,39 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: result.error || "Deposit failed" });
       }
 
-      await storage.createEquityEvent({
-        walletAddress: req.walletAddress!,
-        tradingBotId,
-        eventType: 'drift_deposit',
-        amount: String(amount),
-        txSignature: result.signature || null,
-        notes: tradingBotId ? `Deposit to bot` : 'Deposit to Drift Protocol',
-      });
+      try {
+        await storage.createEquityEvent({
+          walletAddress: req.walletAddress!,
+          tradingBotId,
+          eventType: 'drift_deposit',
+          amount: String(amount),
+          txSignature: result.signature || null,
+          notes: tradingBotId ? `Deposit to bot` : 'Deposit to Drift Protocol',
+        });
+      } catch (eventErr: any) {
+        console.error(`[Drift Deposit] CRITICAL: On-chain deposit succeeded (tx: ${result.signature}) but equity event recording failed:`, eventErr.message);
+        console.error(`[Drift Deposit] Untracked deposit: wallet=${req.walletAddress}, botId=${tradingBotId}, amount=${amount}, subAccount=${subAccountId}`);
+        if (result.signature) {
+          const existing = await storage.getEquityEventByTxSignature(result.signature);
+          if (!existing) {
+            try {
+              await storage.createEquityEvent({
+                walletAddress: req.walletAddress!,
+                tradingBotId,
+                eventType: 'drift_deposit',
+                amount: String(amount),
+                txSignature: result.signature,
+                notes: tradingBotId ? `Deposit to bot (recovered)` : 'Deposit to Drift Protocol (recovered)',
+              });
+              console.log(`[Drift Deposit] Equity event retry succeeded`);
+            } catch (retryErr: any) {
+              console.error(`[Drift Deposit] Equity event retry also failed:`, retryErr.message);
+            }
+          } else {
+            console.log(`[Drift Deposit] Event already recorded for tx ${result.signature}, skipping retry`);
+          }
+        }
+      }
 
       res.json(result);
     } catch (error) {
@@ -2977,14 +3002,39 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: result.error || "Withdraw failed" });
       }
 
-      await storage.createEquityEvent({
-        walletAddress: req.walletAddress!,
-        tradingBotId,
-        eventType: 'drift_withdraw',
-        amount: String(-amount),
-        txSignature: result.signature || null,
-        notes: tradingBotId ? `Withdraw from bot` : 'Withdraw from Drift Protocol',
-      });
+      try {
+        await storage.createEquityEvent({
+          walletAddress: req.walletAddress!,
+          tradingBotId,
+          eventType: 'drift_withdraw',
+          amount: String(-amount),
+          txSignature: result.signature || null,
+          notes: tradingBotId ? `Withdraw from bot` : 'Withdraw from Drift Protocol',
+        });
+      } catch (eventErr: any) {
+        console.error(`[Drift Withdraw] CRITICAL: On-chain withdraw succeeded (tx: ${result.signature}) but equity event recording failed:`, eventErr.message);
+        console.error(`[Drift Withdraw] Untracked withdraw: wallet=${req.walletAddress}, botId=${tradingBotId}, amount=${amount}, subAccount=${subAccountId}`);
+        if (result.signature) {
+          const existing = await storage.getEquityEventByTxSignature(result.signature);
+          if (!existing) {
+            try {
+              await storage.createEquityEvent({
+                walletAddress: req.walletAddress!,
+                tradingBotId,
+                eventType: 'drift_withdraw',
+                amount: String(-amount),
+                txSignature: result.signature,
+                notes: tradingBotId ? `Withdraw from bot (recovered)` : 'Withdraw from Drift Protocol (recovered)',
+              });
+              console.log(`[Drift Withdraw] Equity event retry succeeded`);
+            } catch (retryErr: any) {
+              console.error(`[Drift Withdraw] Equity event retry also failed:`, retryErr.message);
+            }
+          } else {
+            console.log(`[Drift Withdraw] Event already recorded for tx ${result.signature}, skipping retry`);
+          }
+        }
+      }
 
       res.json(result);
     } catch (error) {
@@ -4173,26 +4223,31 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         netDeposited = await storage.getWalletNetDeposited(req.walletAddress!);
       }
       
-      // Reconciliation: If bot has on-chain funds but no recorded deposits,
-      // auto-create a reconciliation equity event (handles server restart during deposit)
-      if (netDeposited === 0 && bot.driftSubaccountId && bot.driftSubaccountId > 0) {
+      if (bot.driftSubaccountId && bot.driftSubaccountId > 0) {
         try {
           const wallet = await storage.getWallet(req.walletAddress!);
           if (wallet?.agentPublicKey) {
-            const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, bot.driftSubaccountId);
-            const onChainBalance = accountInfo.totalCollateral;
-            
-            if (onChainBalance > 0.01) {
-              console.log(`[Reconciliation] Bot ${bot.name} has $${onChainBalance.toFixed(2)} on-chain but no recorded deposits - creating reconciliation event`);
-              await storage.createEquityEvent({
-                walletAddress: req.walletAddress!,
-                tradingBotId: botId,
-                eventType: 'drift_deposit',
-                amount: String(onChainBalance),
-                txSignature: null,
-                notes: 'Deposit reconciled from on-chain state',
-              });
-              netDeposited = onChainBalance;
+            const stats = bot.stats as any || {};
+            const totalTrades = stats.totalTrades || 0;
+            const tradeCount = await storage.getBotTradeCount(botId);
+            const hasNoTrades = totalTrades === 0 && tradeCount === 0;
+
+            if (hasNoTrades) {
+              const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, bot.driftSubaccountId);
+              const onChainBalance = accountInfo.totalCollateral;
+              const gap = onChainBalance - netDeposited;
+
+              if (gap > 1.0 && onChainBalance > 0.01) {
+                const reconciled = await storage.reconcileDeposit(
+                  req.walletAddress!,
+                  botId,
+                  gap,
+                  onChainBalance
+                );
+                if (reconciled) {
+                  netDeposited = onChainBalance;
+                }
+              }
             }
           }
         } catch (reconcileErr) {
@@ -4294,9 +4349,32 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         driftDetails: null,
         healthMetrics: null,
       };
-      const netDeposited = results[3].status === 'fulfilled' ? results[3].value : 0;
+      let netDeposited = results[3].status === 'fulfilled' ? results[3].value : 0;
       const tradeCount = results[4].status === 'fulfilled' ? results[4].value : 0;
       const dbPosition = results[5].status === 'fulfilled' ? results[5].value : null;
+
+      if (subAccountId > 0) {
+        const stats = bot.stats as any || {};
+        const hasNoTrades = (stats.totalTrades || 0) === 0 && tradeCount === 0;
+        const onChainBalance = accountInfo.totalCollateral;
+        const gap = onChainBalance - netDeposited;
+
+        if (hasNoTrades && gap > 1.0 && onChainBalance > 0.01) {
+          try {
+            const reconciled = await storage.reconcileDeposit(
+              req.walletAddress!,
+              botId,
+              gap,
+              onChainBalance
+            );
+            if (reconciled) {
+              netDeposited = onChainBalance;
+            }
+          } catch (reconcileErr: any) {
+            console.warn(`[Reconciliation] Overview reconcile failed:`, reconcileErr.message);
+          }
+        }
+      }
       const apyResult = results[6].status === 'fulfilled' ? results[6].value : { apy: 5.3, stale: true };
       
       // Log any failures for debugging

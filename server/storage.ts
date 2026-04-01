@@ -153,6 +153,8 @@ export interface IStorage {
   }>>;
 
   createEquityEvent(event: InsertEquityEvent): Promise<EquityEvent>;
+  getEquityEventByTxSignature(txSignature: string): Promise<EquityEvent | undefined>;
+  reconcileDeposit(walletAddress: string, botId: string, gap: number, onChainBalance: number): Promise<boolean>;
   getEquityEvents(walletAddress: string, limit?: number): Promise<EquityEvent[]>;
   getBotEquityEvents(tradingBotId: string, limit?: number): Promise<EquityEvent[]>;
   getBotNetDeposited(tradingBotId: string): Promise<number>;
@@ -784,6 +786,40 @@ export class DatabaseStorage implements IStorage {
   async createEquityEvent(event: InsertEquityEvent): Promise<EquityEvent> {
     const result = await db.insert(equityEvents).values(event).returning();
     return result[0];
+  }
+
+  async getEquityEventByTxSignature(txSignature: string): Promise<EquityEvent | undefined> {
+    const result = await db.select().from(equityEvents).where(eq(equityEvents.txSignature, txSignature)).limit(1);
+    return result[0];
+  }
+
+  async reconcileDeposit(walletAddress: string, botId: string, gap: number, onChainBalance: number): Promise<boolean> {
+    return await db.transaction(async (tx) => {
+      const lockKey = Buffer.from(botId.slice(0, 8), 'hex').readInt32BE(0);
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${893742}, ${lockKey})`);
+
+      const events = await tx.select().from(equityEvents).where(eq(equityEvents.tradingBotId, botId));
+      let freshDeposited = 0;
+      for (const event of events) {
+        freshDeposited += parseFloat(event.amount);
+      }
+      const freshGap = onChainBalance - freshDeposited;
+
+      if (freshGap <= 1.0) {
+        return false;
+      }
+
+      console.log(`[Reconciliation] Bot ${botId}: on-chain=$${onChainBalance.toFixed(2)}, tracked=$${freshDeposited.toFixed(2)}, gap=$${freshGap.toFixed(2)} — inserting reconciliation event`);
+      await tx.insert(equityEvents).values({
+        walletAddress,
+        tradingBotId: botId,
+        eventType: 'drift_deposit',
+        amount: String(freshGap),
+        txSignature: null,
+        notes: `Deposit reconciled from on-chain (untracked $${freshGap.toFixed(2)})`,
+      });
+      return true;
+    });
   }
 
   async getEquityEvents(walletAddress: string, limit: number = 50): Promise<EquityEvent[]> {
