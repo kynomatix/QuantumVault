@@ -705,7 +705,7 @@ export default function QuantumLab() {
     setSseReconnecting(true);
 
     (async () => {
-      const maxAttempts = ar.status === "running" ? 36 : 3;
+      const maxAttempts = (ar.status === "running" || ar.status === "paused") ? 36 : 3;
       const delayMs = 5000;
       for (let i = 0; i < maxAttempts; i++) {
         if (reconnectTokenRef.current !== token) return;
@@ -734,6 +734,7 @@ export default function QuantumLab() {
       }
       if (reconnectTokenRef.current === token) {
         autoReconnectingRef.current = false;
+        lastReconnectRunIdRef.current = null;
         setSseReconnecting(false);
       }
     })();
