@@ -62,7 +62,7 @@
 
 | Category | Endpoint | Method | Notes |
 |----------|----------|--------|-------|
-| **Markets** | `/markets` | GET | All available trading pairs |
+| **Markets** | `/info` | GET | All available trading pairs (verified live) |
 | | `/prices` | GET | Current prices |
 | | `/klines` | GET | OHLCV candle data |
 | | `/book` | GET | Orderbook snapshot |
@@ -190,22 +190,72 @@ Our `market-registry.ts` has 70 perp markets. The ones actively used by bots:
 | ETH-PERP | 2 | Active |
 | AVAX-PERP | 22 | Active (AVAX bot) |
 
-### Pacifica Confirmed Markets
+### Pacifica Live Markets (Verified April 2026)
 
-59 perp pairs total. **Confirmed available:**
-- BTC, ETH, SOL — all confirmed with 50x max leverage
-- Full list is dynamic — fetched via `GET /api/v1/markets`
+**63 perp pairs** confirmed via live API call to `GET https://api.pacifica.fi/api/v1/info`
 
-### Action Required
-Before committing to migration, we need to **hit the markets endpoint** to verify:
-1. SOL, BTC, ETH, AVAX are all available
-2. What symbols Pacifica uses (e.g., `BTC` vs `BTC-PERP` vs `BTCUSD`)
-3. Maximum leverage per market
-4. Minimum order sizes
-5. Price precision / tick sizes
+#### Critical Markets — All Confirmed Available
 
-### Symbol Mapping
-Pacifica uses **bare symbols** (`BTC`, `SOL`, `ETH`) in API payloads, not `BTC-PERP` format. Our market registry will need an adapter layer.
+| Market | Pacifica Symbol | Max Leverage | Min Order | Tick Size | Lot Size |
+|--------|----------------|-------------|-----------|-----------|----------|
+| SOL | `SOL` | 20x | $10 | 0.01 | 0.01 |
+| BTC | `BTC` | 50x | $10 | 1 | 0.00001 |
+| ETH | `ETH` | 50x | $10 | 0.1 | 0.0001 |
+| AVAX | `AVAX` | 10x | $10 | 0.001 | 0.01 |
+
+**All four actively traded markets are available.**
+
+#### Full Market List (63 markets)
+
+**Crypto (42):** 2Z, AAVE, ADA, ARB, ASTER, AVAX, BCH, BNB, BTC, CRCL, CRV, DOGE, ENA, ETH, FARTCOIN, HYPE, ICP, JUP, kBONK, kPEPE, LDO, LINK, LIT, LTC, MEGA, MON, NEAR, PAXG, PENGU, PIPPIN, PUMP, SOL, STRK, SUI, TAO, TRUMP, UNI, VIRTUAL, WIF, WLFI, WLD, XMR, XPL, XRP, ZEC, ZK, ZRO
+
+**Equities (5):** GOOGL, HOOD, NVDA, PLTR, TSLA
+
+**Commodities (7):** CL (Crude Oil), COPPER, NATGAS, PLATINUM, URNM (Uranium), XAG (Silver), XAU (Gold)
+
+**Forex (2):** EURUSD, USDJPY
+
+**Indices (1):** SP500
+
+**Misc (1):** BP
+
+#### Coverage Gap: Drift Markets NOT on Pacifica (39 markets)
+
+These markets exist on Drift but are NOT available on Pacifica:
+
+`AI16Z, APT, CLOUD, DBR, DRIFT, DYM, FWOG, GOAT, HNT, INJ, IO, IP, JTO, KAITO, KMNO, LAUNCHCOIN, ME, MELANIA, MET, MEW, MICHI, MNT, MOODENG, MOTHER, OP, PNUT, POL, POPCAT, PYTH, RAY, RENDER, RLB, SEI, TIA, TNSR, TON, W, WEN, ZEX`
+
+Most of these are low-cap Solana ecosystem tokens. None are actively traded by our bots. **No impact on current operations.**
+
+#### New Markets Available on Pacifica (34 not on Drift)
+
+`AAVE, BCH, BP, CL, COPPER, CRCL, CRV, ENA, EURUSD, GOOGL, HOOD, ICP, LDO, MEGA, NATGAS, NEAR, NVDA, PIPPIN, PLATINUM, PLTR, SP500, STRK, TSLA, UNI, URNM, USDJPY, VIRTUAL, WLD, WLFI, XAG, XAU, XMR, ZK, ZRO`
+
+Notable additions: **Equities** (TSLA, NVDA, GOOGL, PLTR, HOOD), **Commodities** (Gold, Silver, Oil, Gas, Copper), **Forex** (EUR/USD, USD/JPY), **Index** (S&P 500). These could open new strategy possibilities.
+
+### Symbol Mapping Required
+
+| Our Format (Drift) | Pacifica Format | Notes |
+|--------------------|-----------------|---------| 
+| `SOL-PERP` | `SOL` | Strip `-PERP` suffix |
+| `BTC-PERP` | `BTC` | Strip `-PERP` suffix |
+| `1MBONK-PERP` | `kBONK` | Denomination change: `1M` → `k` |
+| `1MPEPE-PERP` | `kPEPE` | Denomination change: `1M` → `k` |
+
+Simple adapter: strip `-PERP` suffix for most, handle `1M→k` prefix for BONK/PEPE.
+
+### Leverage Differences
+
+| Market | Drift Max | Pacifica Max | Notes |
+|--------|----------|-------------|-------|
+| SOL | 20x | 20x | Same |
+| BTC | 20x | 50x | Pacifica higher |
+| ETH | 20x | 50x | Pacifica higher |
+| AVAX | 10x | 10x | Same |
+
+### API Endpoint Correction
+
+The correct markets endpoint is `GET /api/v1/info` (not `/api/v1/markets` or `/api/v1/info/markets` as stated in some docs). Verified via live API call.
 
 ---
 
