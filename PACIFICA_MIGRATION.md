@@ -354,36 +354,126 @@ Users authorize once via a signed approval payload during bot setup. This replac
 
 ### File-by-File Impact Assessment
 
+#### Server — Core Drift Files (Delete/Replace)
+
+| File | Lines | Migration Action | Replaces With |
+|------|-------|-----------------|---------------|
+| `drift-service.ts` | 4,120 | **Full rewrite** | `pacifica-service.ts` |
+| `drift-executor.mjs` | 2,229 | **Delete** | Not needed — Pacifica is REST, no subprocess |
+| `swift-executor.ts` | 425 | **Delete** | No equivalent |
+| `swift-config.ts` | 164 | **Delete** | No equivalent |
+| `swift-metrics.ts` | ~100 | **Delete** | No equivalent |
+| `drift-price.ts` | 208 | **Rewrite** | `pacifica-price.ts` |
+| `drift-data-api.ts` | 190 | **Rewrite** | Pacifica equity/trade history endpoints |
+
+#### Server — Dependent Services (Adapt)
+
 | File | Lines | Drift Coupling | Migration Effort | Notes |
 |------|-------|----------------|------------------|-------|
-| `drift-service.ts` | 4,120 | **Complete** — core of all Drift interaction | **Full rewrite** | Replace with `pacifica-service.ts` |
-| `drift-executor.mjs` | 2,229 | **Complete** — subprocess trade execution | **Full rewrite** | Replace with `pacifica-executor.ts` |
-| `swift-executor.ts` | 425 | **Complete** — Drift-specific Swift protocol | **Delete** | Pacifica has no Swift equivalent |
-| `swift-config.ts` | 164 | **Complete** | **Delete** | |
-| `drift-price.ts` | 208 | **High** — uses Drift Data API for prices | **Rewrite** | Use Pacifica REST + WS prices |
-| `drift-data-api.ts` | 190 | **Complete** — Drift analytics API | **Rewrite** | Use Pacifica equity/trade history |
-| `agent-wallet.ts` | 511 | **Low** — generic Solana keypair management | **Minor changes** | Add Pacifica signing helper |
-| `market-registry.ts` | 187 | **High** — hardcoded Drift market indices | **Rewrite** | Pacifica uses string symbols, not numeric indices |
-| `position-service.ts` | 450 | **High** — wraps drift-service position calls | **Rewrite** | Simpler — REST calls instead of byte parsing |
-| `reconciliation-service.ts` | 788 | **High** — reconciles Drift on-chain state | **Rewrite** | Simpler — REST-based position/balance checks |
-| `trade-retry-service.ts` | 1,084 | **Medium** — retry logic around Drift errors | **Adapt** | Error codes change, retry logic stays |
-| `leverage-cache-service.ts` | 212 | **High** — caches Drift leverage per market | **Rewrite** | Use `POST /account/leverage` |
-| `market-liquidity-service.ts` | 546 | **High** — uses Drift orderbook data | **Rewrite** | Use Pacifica orderbook endpoint |
-| `portfolio-snapshot-job.ts` | 126 | **Medium** — calls drift-service for snapshots | **Adapt** | Change to Pacifica account calls |
-| `pnl-snapshot-job.ts` | 148 | **Medium** — calls drift-service for PnL | **Adapt** | Change to Pacifica position data |
-| `analytics-indexer.ts` | 250 | **Medium** — indexes Drift trade data | **Adapt** | Change data source |
-| `orphaned-subaccount-cleanup.ts` | 83 | **High** — closes Drift subaccounts on-chain | **Rewrite** | Pacifica subaccount cleanup via API |
-| `routes.ts` | 10,000+ | **Medium** — calls drift-service functions | **Update imports** | Swap drift-service → pacifica-service |
+| `agent-wallet.ts` | 511 | **Low** | **Minor** | Add Pacifica canonical JSON signing |
+| `market-registry.ts` | 187 | **High** | **Rewrite** | Numeric indices → string symbols |
+| `position-service.ts` | 450 | **High** | **Rewrite** | REST calls instead of byte parsing |
+| `reconciliation-service.ts` | 788 | **High** | **Rewrite** | REST-based position/balance checks |
+| `trade-retry-service.ts` | 1,084 | **Medium** | **Adapt** | Error codes change, retry logic stays |
+| `leverage-cache-service.ts` | 212 | **High** | **Rewrite** | Use `POST /account/leverage` |
+| `market-liquidity-service.ts` | 546 | **High** | **Rewrite** | Use Pacifica orderbook endpoint |
+| `portfolio-snapshot-job.ts` | 126 | **Medium** | **Adapt** | Change to Pacifica account calls |
+| `pnl-snapshot-job.ts` | 148 | **Medium** | **Adapt** | Change to Pacifica position data |
+| `analytics-indexer.ts` | 250 | **Medium** | **Adapt** | Change data source |
+| `orphaned-subaccount-cleanup.ts` | 83 | **High** | **Rewrite** | Pacifica subaccount cleanup via API |
+| `profit-share-retry-job.ts` | ~150 | **Low** | **Minor** | Profit share logic is exchange-agnostic |
 
-### Total Lines Requiring Changes: ~11,700+ across dedicated Drift files, plus route updates
+#### Server — Routes (Significant Refactor)
+
+| Area | Endpoint Pattern | Count | Notes |
+|------|-----------------|-------|-------|
+| Deposit/Withdraw | `/api/agent/drift-deposit`, `/api/agent/drift-withdraw` | 2 | Rename + rewire to Pacifica |
+| Bot Balance | `/api/bots/:id/drift-balance` | 1 | Rename + rewire |
+| Agent Balance | `/api/agent/drift-balance` | 1 | Rename + rewire |
+| Markets | `/api/drift/markets`, `/api/drift/markets/:symbol` | 2 | Rename + rewire to Pacifica markets |
+| Leverage | `/api/drift/leverage-limits` | 1 | Rename + use Pacifica leverage data |
+| Non-tradable | `/api/drift/non-tradable-markets` | 1 | Rename + adapt |
+| USDC APY | `/api/drift/usdc-apy` | 1 | Remove (Drift-specific lending feature) |
+| User Deposit/Withdraw | `/api/drift/deposit`, `/api/drift/withdraw`, `/api/drift/balance` | 3 | Rename + rewire |
+| Account Reset | `/api/wallet/reset-drift-account` | 1 | Rethink — Pacifica has no on-chain account to reset |
+| Cache Status | `/api/drift/markets/cache/status` | 1 | Rename |
+| Swift Metrics | Admin swift metrics endpoint | 1 | Remove |
+| Trade Execution | Webhook handler, `computeTradeSizingAndTopUp` | — | Rewire execution calls |
+
+**Total: 15+ Drift-named API endpoints to rename/rewire**
+
+#### Client — Frontend Files (16 files total)
+
+| File | Drift Refs | Migration Effort | Notes |
+|------|-----------|------------------|-------|
+| `lib/drift-constants.ts` | **Complete** | **Rewrite** | Rename to `exchange-constants.ts`; replace `DRIFT_LEVERAGE_TIERS` with Pacifica limits |
+| `hooks/useLeverageLimits.ts` | **High** | **Adapt** | Update import + API endpoint reference |
+| `lib/strategy-insights.ts` | **Medium** | **Adapt** | Uses `getDriftMaxLeverage` |
+| `components/BotManagementDrawer.tsx` | **High** | **Adapt** | 6 Drift API calls, "Drift balance" UI labels |
+| `components/CreateBotModal.tsx` | **Medium** | **Adapt** | Calls `/api/drift/markets`, `/api/agent/drift-deposit` |
+| `pages/WalletManagement.tsx` | **High** | **Adapt** | "Drift deposit/withdraw" labels and API calls |
+| `pages/App.tsx` | **Medium** | **Adapt** | "Reset Drift Account" flow, `driftSubaccountId` in TradingBot type |
+| `pages/Docs.tsx` | **High** | **Rewrite** | 50 references to Drift/Swift in documentation content |
+| `pages/QuantumLab.tsx` | **Low** | **Adapt** | Calls non-tradable markets + deposit endpoints |
+| `hooks/useApi.ts` | **Low** | **Adapt** | `HealthMetrics.marketIndex` type reference |
+| `pages/PitchDeck.tsx` | **Medium** | **Adapt** | 13 Drift references in pitch content |
+| `pages/Landing.tsx` | **Low** | **Adapt** | 3 Drift references in landing copy |
+| `pages/Analytics.tsx` | **Low** | **Adapt** | 1 Drift reference |
+| `pages/Admin.tsx` | **Low** | **Adapt** | 1 Drift reference |
+| `components/SubscribeBotModal.tsx` | **Low** | **Adapt** | 1 Drift reference |
+| `components/WelcomePopup.tsx` | **Low** | **Adapt** | 1 Drift reference |
+| `components/EquityHistory.tsx` | **Low** | **Adapt** | 2 Drift references |
+
+#### Server — Additional Missed Files
+
+| File | Drift Reference | Notes |
+|------|----------------|-------|
+| `server/index.ts` | Imports `syncMarketRegistry` from `drift-service` | Startup initialization — must rewire |
+| `server/docs-markdown.ts` | Full documentation content references Drift Protocol, Swift, subaccounts | Content rewrite needed |
+
+#### Shared Schema (`shared/schema.ts`)
+
+| Table | Column | Current (Drift) | Migration |
+|-------|--------|----------------|-----------|
+| `wallets` | `drift_subaccount` | Integer (on-chain PDA index) | Add `pacifica_subaccount_id: text` |
+| `trading_bots` | `drift_subaccount_id` | Integer (per-bot subaccount) | Add `pacifica_subaccount_id: text` |
+| `bot_trades` | `tx_signature` | Solana tx signature | Keep for deposit/withdraw; add `pacifica_order_id: text` |
+| `bot_trades` | `execution_method` | `'legacy'` / `'swift'` | Add `'pacifica'` value |
+| `bot_trades` | `swift_order_id` | Swift-specific UUID | Deprecate (nullable, keep for history) |
+| `bot_trades` | `auction_duration_ms` | Drift JIT auction param | Deprecate |
+| `equity_events` | `tx_signature` | On-chain deposit/withdraw tx | Keep — Pacifica deposits are still on-chain |
+| `orphaned_subaccounts` | `drift_subaccount_id` | On-chain PDA index | Replace with `pacifica_subaccount_id` |
+| `bot_positions` | `market` | `SOL-PERP` format | Update to bare symbol (`SOL`) or keep and adapt |
+
+#### NPM Dependencies
+
+| Package | Action |
+|---------|--------|
+| `@drift-labs/sdk` | **Remove** — largest Drift dependency, causes ESM/CJS issues, memory leaks |
+| `@solana/web3.js` | **Keep** — still needed for deposit/withdraw on-chain transactions |
+| `@coral-xyz/anchor` | **Evaluate** — may not be needed if all Pacifica interaction is REST |
+| `bs58` | **Keep** — needed for Base58 signature encoding |
+| `tweetnacl` or `@noble/ed25519` | **Add** — for Ed25519 signing (canonical JSON payloads) |
+
+### Total Impact Summary
+
+| Category | Files | Lines |
+|----------|-------|-------|
+| Server — Delete | 7 files | ~7,436 |
+| Server — Rewrite/Adapt | 12 files | ~4,535 |
+| Server — Routes | 1 file | 15+ endpoints |
+| Client — Adapt | 10 files | Various |
+| Schema | 1 file | ~10 column changes |
+| New Files | 4 files | ~3,000-4,000 est. |
 
 ### What Stays the Same
 - `agent-wallet.ts` — keypair generation, encryption, USDC/SOL transfers (mostly unchanged)
 - `server/lab/` — QuantumLab backtesting engine (no Drift dependency)
-- `client/` — Frontend is exchange-agnostic (calls our API, not Drift directly)
-- `shared/schema.ts` — Database schema (minimal changes, add pacifica IDs)
+- `shared/schema.ts` — Structure intact, additive column changes only
 - Bot management logic — create/start/stop/configure bot workflows
 - Strategy engine — signal generation is independent of execution layer
+- Notification service — exchange-agnostic
+- Profit share system — exchange-agnostic (just needs correct PnL inputs)
 
 ---
 
@@ -447,25 +537,36 @@ This is the most critical new piece. Every authenticated request goes through th
 
 ## 11. Database Schema Changes
 
-### Minimal Changes Needed
+Schema changes are **additive only** — no column type changes, no drops of existing columns (preserves historical data).
 
-```
-bots table:
-  + pacifica_subaccount_id: text  (Pacifica subaccount identifier)
-  ~ sub_account_id: keep for backward compat, may deprecate
+### New Columns
 
-market_registry / config:
-  - Remove numeric market index system
-  + Use string symbol mapping (BTC, SOL, ETH, etc.)
+| Table | Column | Type | Purpose |
+|-------|--------|------|---------|
+| `trading_bots` | `pacifica_subaccount_id` | `text` | Pacifica subaccount identifier (replaces `drift_subaccount_id` for new bots) |
+| `wallets` | `pacifica_subaccount_id` | `text` | Master account's Pacifica subaccount |
+| `bot_trades` | `pacifica_order_id` | `text` | Pacifica's UUID-based order ID |
 
-commission constant:
-  ~ Update from 0.0005 to 0.0004 (Pacifica base taker fee)
-```
+### Column Value Changes (No Schema Change)
 
-### Data Migration
-- Existing bot PnL history, trade logs, and snapshots remain valid
-- New trades will use Pacifica order IDs instead of Drift tx signatures
-- Position data format changes (entry_price is string, side is "bid"/"ask" not long/short enum)
+| Table.Column | Old Values | New Values |
+|-------------|------------|------------|
+| `bot_trades.execution_method` | `'legacy'`, `'swift'` | Add `'pacifica'` |
+| `bot_trades.tx_signature` | Always populated (Solana tx) | Nullable for Pacifica trades (only deposits/withdrawals are on-chain) |
+| `bot_trades.swift_order_id` | Swift UUID | Always null for new trades (keep column for history) |
+| `bot_positions.market` | `SOL-PERP` format | Could keep as-is or switch to `SOL` — adapter handles conversion |
+
+### Constants
+
+| Constant | Current | New | Location |
+|----------|---------|-----|----------|
+| Commission rate | `0.0005` (5 bps) | `0.0004` (4 bps) | Configurable per-environment |
+| Market format | `SOL-PERP` (with index) | `SOL` (bare symbol) | Market registry |
+
+### Data Migration Notes
+- Existing PnL history, trade logs, and snapshots remain valid and untouched
+- Old Drift columns (`drift_subaccount_id`, `swift_order_id`, etc.) are kept for historical queries
+- No data migration needed — schema is additive only
 
 ---
 
@@ -482,42 +583,143 @@ commission constant:
 ### Phase 1: Foundation (Est. 2-3 days)
 - [ ] Implement `pacifica-signer.ts` (canonical JSON + Ed25519 signing)
 - [ ] Implement `pacifica-service.ts` core: auth, account info, positions
-- [ ] Hit `/markets` endpoint to verify market coverage
-- [ ] Verify agent wallet registration flow
-- [ ] Add `pacifica_subaccount_id` to bot schema
+- [ ] Hit `/markets` endpoint to confirm SOL, BTC, ETH, AVAX availability
+- [ ] Verify agent wallet registration flow on testnet
+- [ ] Schema migration: add `pacifica_subaccount_id` + `pacifica_order_id` columns
+- [ ] Install `@noble/ed25519` or `tweetnacl` for signing
 
 ### Phase 2: Trading (Est. 2-3 days)
 - [ ] Implement order placement (market, limit) with `builder_code` inclusion
 - [ ] Implement position close
 - [ ] Implement `pacifica-price.ts` with REST + WS price feeds
+- [ ] Implement `pacifica-ws.ts` WebSocket connection manager
 - [ ] Port `trade-retry-service.ts` error handling to Pacifica error codes
 - [ ] Port `computeTradeSizingAndTopUp` for Pacifica margin model
+- [ ] Delete `drift-executor.mjs`, `swift-executor.ts`, `swift-config.ts`, `swift-metrics.ts`
 
 ### Phase 3: Account Management (Est. 1-2 days)
-- [ ] Implement subaccount create/transfer
-- [ ] Port deposit/withdraw flows
+- [ ] Implement subaccount create/transfer via REST
+- [ ] Port deposit/withdraw flows (keep on-chain USDC transfer, change destination)
 - [ ] Implement `reconciliation-service.ts` using REST account/position data
 - [ ] Port leverage management (`POST /account/leverage`)
 - [ ] Implement builder code user authorization flow
+- [ ] Rewrite `orphaned-subaccount-cleanup.ts` for REST-based cleanup
 
-### Phase 4: Monitoring & Analytics (Est. 1-2 days)
+### Phase 4: Route & Frontend Migration (Est. 2-3 days)
+- [ ] Rename all 15+ `/api/drift/*` endpoints to `/api/exchange/*` or similar
+- [ ] Update all `drift-service` imports in `routes.ts` to `pacifica-service`
+- [ ] Remove USDC APY endpoint (Drift-specific)
+- [ ] Rethink "Reset Drift Account" flow for Pacifica
+- [ ] Rename `client/src/lib/drift-constants.ts` → `exchange-constants.ts`
+- [ ] Update `useLeverageLimits.ts` and `strategy-insights.ts` imports
+- [ ] Update `BotManagementDrawer.tsx` API calls and "Drift" UI labels
+- [ ] Update `CreateBotModal.tsx` market fetch + deposit calls
+- [ ] Update `WalletManagement.tsx` deposit/withdraw labels and calls
+- [ ] Update `App.tsx` reset account flow + `TradingBot` type
+- [ ] Update `Docs.tsx` documentation content (50 Drift/Swift references)
+- [ ] Update `QuantumLab.tsx` deposit + non-tradable market calls
+
+### Phase 5: Monitoring, Analytics & Cleanup (Est. 1-2 days)
 - [ ] Port `portfolio-snapshot-job.ts`
 - [ ] Port `pnl-snapshot-job.ts`
 - [ ] Port `analytics-indexer.ts`
 - [ ] Implement equity history via `/account/equity_history`
+- [ ] Delete all Drift files (`drift-service.ts`, `drift-price.ts`, `drift-data-api.ts`, `drift-executor.mjs`)
+- [ ] Remove `@drift-labs/sdk` from `package.json`
+- [ ] Evaluate if `@coral-xyz/anchor` is still needed
 
-### Phase 5: Testing & Cutover (Est. 2-3 days)
+### Phase 6: Testing & Cutover (Est. 2-3 days)
 - [ ] End-to-end testing on Pacifica testnet (code: `Pacifica`)
-- [ ] Parallel run: verify positions/PnL match between systems
-- [ ] Frontend verification (should be transparent)
+- [ ] Test full bot lifecycle: create → deposit → trade → close → withdraw
+- [ ] Verify position/PnL reporting accuracy
+- [ ] Verify builder code revenue attribution
+- [ ] Verify subaccount isolation between bots
+- [ ] Frontend smoke test: all pages, all flows
 - [ ] Production cutover
-- [ ] Remove Drift code and `@drift-labs/sdk` dependency
+- [ ] Monitor first 24h of live trading
 
-**Total estimated effort: 8-13 days** (excluding Phase 0 business prerequisites which depend on Pacifica team response time)
+**Total estimated effort: 10-16 days** (excluding Phase 0 business prerequisites which depend on Pacifica team response time)
+
+**Revised estimate rationale:** Original 8-13 day estimate missed the frontend migration (10 files, 15+ API endpoint renames, UI label changes, Docs page rewrite) and the full route refactoring scope. Adding Phase 4 accounts for this.
 
 ---
 
-## 13. Risk Assessment
+## 13. Critical Execution Risks (Architect Review Findings)
+
+The following issues were identified during architect code review and must be resolved before production cutover.
+
+### 13.1 Order Lifecycle State Machine
+
+**Problem:** Drift's execution model is on-chain and atomic — a `placeAndTakePerpOrder` either succeeds or fails in a single transaction. Pacifica is off-chain-first with asynchronous matching. This means orders have intermediate states that Drift doesn't have.
+
+**Pacifica order states:**
+```
+submitted → acknowledged → partial_fill → filled
+                        → canceled
+                        → rejected
+                        → expired
+```
+
+**Required:** Build an explicit order state machine in `pacifica-service.ts` that:
+- Assigns a `client_order_id` (UUID) to every order for idempotent retries
+- Tracks order state via WebSocket `account_orders` channel
+- Handles partial fills (our current system assumes atomic fills)
+- Prevents duplicate submissions when TradingView webhooks retry
+- Times out orders that aren't acknowledged within N seconds
+
+**Current Drift pattern that breaks:**
+```
+Webhook → executePerpOrder() → Solana tx → verify on-chain position
+```
+The "verify on-chain position" step can't work with Pacifica — there's no on-chain position to check until settlement. Must replace with WS fill confirmation + REST position polling fallback.
+
+### 13.2 Fill Confirmation & Reconciliation
+
+**Problem:** The current system verifies trade execution by reading on-chain position state (byte-parsing the Drift User account). With Pacifica, position state is off-chain and comes via REST API or WebSocket events.
+
+**Risk:** If WebSocket events are delayed or lost, the system could:
+- Report false success (order accepted but never filled)
+- Record phantom PnL (position close reported but position still open)
+- Miss fills entirely (WebSocket reconnection gap)
+
+**Required mitigation:**
+1. **Primary:** WebSocket `account_trades` channel for real-time fill events
+2. **Fallback:** REST `GET /positions` polling on 5-second intervals when WS is disconnected
+3. **Reconciliation:** Periodic (60s) position check via REST to catch any missed WS events
+4. **Invariant:** Never record PnL or update `bot_trades` status to `filled` until position state is confirmed via at least one of the above methods
+
+### 13.3 Deposit Contract / Destination Validation
+
+**Problem:** The migration doc lists the Pacifica deposit contract address as an open question. This is a **loss-of-funds risk** — sending USDC to the wrong on-chain address is irreversible.
+
+**Required before Phase 1:**
+- Identify exact Pacifica bridge contract address on Solana mainnet
+- Validate on testnet with small amounts first
+- Hardcode and verify the destination in `pacifica-service.ts` with a checksum
+- Add a pre-flight validation that confirms the destination account is owned by the expected program
+
+### 13.4 Symbol Canonicalization
+
+**Problem:** The doc says market format "could keep as-is or switch" — this is unsafe. Mixed `SOL-PERP` (Drift) and `SOL` (Pacifica) values in `bot_positions.market` would fragment PnL queries, position history, and strategy insights.
+
+**Required decision:** Pick one canonical format and enforce it:
+- **Option A:** Keep `SOL-PERP` internally, convert at the API boundary (adapter in pacifica-service)
+- **Option B:** Migrate to `SOL` everywhere (requires updating all historical data)
+
+**Recommendation:** Option A — keep internal format as-is (`SOL-PERP`), convert to bare symbols only when calling Pacifica API, and convert back when receiving responses. Zero data migration needed, zero risk of fragmenting history.
+
+### 13.5 Webhook Idempotency
+
+**Problem:** TradingView webhooks can retry. The current system deduplicates via `signalHash` in `webhook_logs`. This must continue to work, but the order submission path changes:
+
+- **Drift:** Dedup → submit on-chain tx → verify position. If tx fails, retry is safe (new tx).
+- **Pacifica:** Dedup → submit via REST → order may be in-flight. If REST times out but order was received, retry creates a **duplicate order**.
+
+**Required:** Use `client_order_id` on all Pacifica orders. This makes retries idempotent at the exchange level — Pacifica will reject a second order with the same `client_order_id`.
+
+---
+
+## 14. General Risk Assessment
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
@@ -535,7 +737,7 @@ commission constant:
 
 ---
 
-## 14. What We Gain
+## 15. What We Gain
 
 1. **No SDK dependency** — pure HTTP/WS, no memory leaks, no CJS/ESM compatibility issues
 2. **No on-chain byte parsing** — positions/balances come as clean JSON
@@ -550,7 +752,7 @@ commission constant:
 
 ---
 
-## 15. Builder Program — Deep Dive
+## 16. Builder Program — Deep Dive
 
 The Builder Program is Pacifica's developer partnership model. It's the most relevant revenue path for QuantumVault because it's designed for exactly our use case: platforms that route order flow through Pacifica.
 
@@ -597,22 +799,33 @@ This means Pacifica's referral attribution is handled by a dedicated third-party
 
 ---
 
-## 16. Open Questions (Require Investigation)
+## 17. Open Questions (Require Investigation)
 
-1. **Market list verification** — Does Pacifica have AVAX? What's the full symbol list?
-2. **Beta equity cap** — Is $100K still the limit? Has it been raised?
-3. **Agent wallet registration** — Can this be done purely via API, or does it require UI interaction?
-4. **Subaccount limits** — How many subaccounts per master account?
-5. **Order fill notifications** — How reliable is the WebSocket `account_trades` channel for confirming fills?
-6. **Builder Program approval timeline** — How long does the application process take?
-7. **Builder fee_rate limits** — Is there a max fee_rate cap?
-8. **Historical data depth** — How far back does `/account/equity_history` go?
-9. **Cross-margin behavior** — How does cross-margin interact with subaccounts? Is it per-subaccount or account-wide?
-10. **Deposit contract address** — What's the on-chain program/contract for USDC deposits?
+### Must-Answer Before Phase 1 (Blockers)
+
+1. **Deposit contract address** — What is the exact on-chain Solana program/account for USDC deposits? This is a **funds-safety blocker** — wrong destination means lost USDC.
+2. **Builder Program approval** — Has the application been submitted? What's the timeline? Revenue model depends on this.
+3. **Beta equity cap** — Is $100K still the limit? Has it been raised? Blocks large portfolio deployments.
+4. **Market list verification** — Does Pacifica have AVAX, SOL, BTC, ETH? What exact symbols? Need to confirm before writing market adapter.
+
+### Should-Answer Before Phase 2
+
+5. **Agent wallet registration** — Can this be done purely via API, or does it require UI interaction for the initial setup?
+6. **Partial fill handling** — Does Pacifica support partial fills on market orders? If so, how are they reported via WS?
+7. **Order rejection codes** — What error codes does Pacifica return for insufficient margin, invalid symbol, rate limit, etc.?
+8. **WebSocket reconnection** — Does Pacifica support resume tokens or sequence IDs for missed events during disconnection?
+
+### Nice-to-Know
+
+9. **Subaccount limits** — How many subaccounts per master account?
+10. **Builder fee_rate limits** — Is there a max fee_rate cap?
+11. **Historical data depth** — How far back does `/account/equity_history` go?
+12. **Cross-margin behavior** — How does cross-margin interact with subaccounts? Is it per-subaccount or account-wide?
+13. **Referral + Builder stacking** — Can you earn both affiliate referral and builder fee on the same user's trades?
 
 ---
 
-## 17. Decision Framework
+## 18. Decision Framework
 
 ### Go with Pacifica if:
 - Drift remains compromised or offline for extended period
@@ -623,10 +836,11 @@ This means Pacifica's referral attribution is handled by a dedicated third-party
 
 ### Hold off if:
 - Drift recovers quickly and funds are returned
-- Builder Program application is rejected (no revenue path)
 - Critical markets (SOL, BTC, ETH) missing from Pacifica
-- $100K cap blocks meaningful trading
+- $100K cap blocks meaningful trading and no timeline to lift
 - Another DEX emerges with better API/coverage
+
+**Note on Builder Program rejection:** If the Builder Program application is rejected, migration can still proceed — it only affects the *revenue model*, not the trading functionality. The platform would operate without the builder fee revenue stream, relying only on the standard referral program (points-based) or affiliate program if accepted. This is a business decision, not a technical blocker.
 
 ### Hybrid option:
 - Build `pacifica-service.ts` behind a feature flag
@@ -636,7 +850,7 @@ This means Pacifica's referral attribution is handled by a dedicated third-party
 
 ---
 
-## 18. Immediate Next Steps
+## 19. Immediate Next Steps
 
 1. **Apply to Builder Program** — ops@pacifica.fi — this gates the revenue model
 2. **Apply to Affiliate Program** — layered revenue opportunity
