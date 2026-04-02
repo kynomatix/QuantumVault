@@ -5,6 +5,31 @@
 
 ---
 
+## Key Links
+
+| Resource | URL |
+|----------|-----|
+| API Documentation | https://docs.pacifica.fi/api-documentation/api |
+| Builder Program | https://docs.pacifica.fi/builder-program |
+| Python SDK | https://github.com/pacifica-fi/python-sdk |
+| Testnet App | https://test-app.pacifica.fi (access code: `Pacifica`) |
+| Mainnet App | https://app.pacifica.fi |
+| Referral Dashboard | https://app.pacifica.fi/referral |
+| API Key Management | https://app.pacifica.fi/apikey |
+| Contract Specifications | https://docs.pacifica.fi/trading-on-pacifica/contract-specifications |
+| Trading Fees | https://docs.pacifica.fi/trading-on-pacifica/trading-fees |
+| Referral & Affiliate | https://docs.pacifica.fi/referral-and-affiliate-program |
+
+### Partner / Infrastructure Tools
+
+| Partner | Purpose | URL |
+|---------|---------|-----|
+| Fuul | Referral & points program provider (on-chain tracking, anti-sybil, payout automation) | https://fuul.xyz |
+| Rhinofi | Cross-chain bridge & interoperability (deposit path for non-Solana assets) | https://rhino.fi |
+| Privy | Privacy & secure auth toolkit (embedded wallets, email/social onboarding) | https://privy.io |
+
+---
+
 ## 1. Why Pacifica
 
 | Criteria | Pacifica | GMTrade | Verdict |
@@ -18,6 +43,7 @@
 | Volume (24h) | ~$1B | ~$554M | Pacifica |
 | Leverage | 3x–50x | Up to 500x | GMTrade |
 | Testnet | Yes (`test-api.pacifica.fi`) | Unknown | Pacifica |
+| Builder Program | Yes — fee revenue + points | Unknown | Pacifica |
 
 **GMTrade is ruled out** — no public API means we'd need to reverse-engineer their Anchor program IDL. Not viable for production trading bots.
 
@@ -104,9 +130,14 @@ Pacifica natively supports **agent wallets** — exactly what we already use:
 - For all POST requests, sign with the **agent wallet's private key** and include `agent_wallet: <AGENT_PUBKEY>` in the payload
 - The `account` field still contains the **main wallet address**
 
+### Builder Code Integration
+
+When using the Builder Program (see Section 15), orders can include a `builder_code` parameter. The user must first sign an approval payload authorizing the builder code and a `max_fee_rate`. This is included in the canonical signing payload under a `data` object.
+
 **Impact on QuantumVault:** Our existing `server/agent-wallet.ts` generates Solana keypairs and manages encryption. The keypair generation and storage is **fully reusable**. We only need to:
 - Add a registration step (register the agent wallet pubkey with Pacifica)
 - Implement the canonical JSON signing function (different from Drift's SDK-based signing)
+- Include `builder_code` in order payloads if enrolled in Builder Program
 
 ### Key Difference from Drift
 
@@ -217,6 +248,9 @@ Pacifica uses **bare symbols** (`BTC`, `SOL`, `ETH`) in API payloads, not `BTC-P
 2. Send USDC to Pacifica's bridge contract (on-chain Solana transaction)
 3. Balance appears in account after on-chain confirmation
 
+### Cross-Chain Deposits
+Pacifica partners with **Rhinofi** (rhino.fi) for cross-chain bridging. Users can bridge assets from other chains into Solana USDC. For QuantumVault this is less relevant since our agent wallets already hold Solana-native USDC.
+
 ### Key Concern: $100K Equity Cap (Beta)
 During beta, accounts are capped at $100K equity. For larger portfolios, this is a constraint. Need to verify if this cap has been lifted or when it will be.
 
@@ -225,7 +259,98 @@ Our current deposit flow (`buildDepositTransaction` / `executeAgentDriftDeposit`
 
 ---
 
-## 8. Current Drift Integration — What Needs to Change
+## 8. Revenue Model — How QuantumVault Makes Money
+
+### Current Model (Drift)
+
+QuantumVault earns revenue through the `kryptolytix` referral code hardcoded into `drift-service.ts`. Every user account initialized through the platform gets this referral baked in at the **on-chain level**:
+
+- **Referrer earns:** 15% of taker fees on every trade
+- **User gets:** 5% fee discount
+- **Mechanism:** On-chain PDA (`ReferrerName`) set during `initialize_user` instruction on subaccount 0
+- **Permanence:** Once set, it's permanent — embedded in the on-chain account state
+- **Revenue is automatic:** No manual tracking, no off-chain attribution
+
+### Pacifica Options (Three Tiers)
+
+#### Tier 1: Standard Referral (Open to all)
+
+| Detail | Value |
+|--------|-------|
+| Eligibility | $10,000 in trading volume |
+| Codes available | Up to 20 referral codes + 1 link |
+| Referrer reward | 10% of referred users' **points** |
+| Referee bonus | 5% bonus in points |
+| Distribution | Weekly, automatic |
+| Application | None — self-serve at `app.pacifica.fi/referral` |
+
+**Assessment:** This is a **points-based** reward, not direct fee revenue. Points are part of Pacifica's token incentive system. Weaker than Drift's direct USDC fee share. Not a primary revenue path.
+
+#### Tier 2: Affiliate Program (Selective)
+
+| Detail | Value |
+|--------|-------|
+| Fee share | Up to **40%** of trading fees from referred users |
+| Scaling | Scales with total referred volume |
+| Spots | Limited — selective approval |
+| Target | KOLs, community owners, large trading communities |
+| Application | Discord ticket or contact ops@pacifica.fi |
+
+**Assessment:** Potentially **better** than Drift's 15% — up to 40% fee share. But it's selective, requires approval, and the fee-share percentage scales (you don't start at 40%). There's also a catch: if a referred user reaches VIP fee tier or joins the market maker program, the affiliate **stops earning** from them.
+
+#### Tier 3: Builder Program (Best Fit for QuantumVault)
+
+| Detail | Value |
+|--------|-------|
+| Revenue mechanism | Custom `fee_rate` charged on all orders routed through your builder code |
+| Points | Eligible for point rewards for significant contributions |
+| Integration | `builder_code` parameter added to order payloads |
+| User authorization | Users sign approval for your builder code + max fee rate |
+| Application | ops@pacifica.fi, Discord ticket, or @PacificaTGPortalBot on Telegram |
+
+**How it works:**
+1. Apply to Builder Program → receive a `builder_code`
+2. Set your `fee_rate` (e.g., `0.001` = 0.1% additional fee)
+3. Users authorize your builder code by signing an approval payload containing your `builder_code` and a `max_fee_rate`
+4. All orders placed through your platform include `builder_code` in the payload
+5. You earn the `fee_rate` on every order routed through your code
+
+**Assessment:** This is the **closest equivalent** to our Drift referral model and arguably better:
+- Direct fee revenue (not points)
+- You control the fee rate
+- Applied per-order, not per-account-creation
+- Works regardless of user's VIP tier
+- No expiration or cutoff
+
+### Revenue Model Comparison
+
+| | Drift (Current) | Pacifica Builder | Pacifica Affiliate |
+|---|---|---|---|
+| Revenue type | 15% of taker fees | Custom fee_rate per order | Up to 40% of fees |
+| Mechanism | On-chain referral PDA | `builder_code` in API payload | Off-chain attribution |
+| Permanence | Permanent (on-chain) | Per-order (code must be included) | Subject to VIP/MM cutoff |
+| Control | Fixed 15% | You set the rate | Scales with volume |
+| Application | None (open) | Required (Builder Program) | Required (selective) |
+| Risk | None once set | Must include code in every order | Loses rev if user hits VIP |
+
+### Recommended Approach
+
+1. **Apply to Builder Program first** — this is a prerequisite before migration makes financial sense
+2. **Also apply to Affiliate Program** — layered revenue (affiliate attribution + builder fee)
+3. Builder code integration is straightforward — just an extra field in order payloads
+4. Since we control the order creation code, `builder_code` inclusion is guaranteed for all bot trades
+
+### Implementation Impact
+
+Minimal code change. In `pacifica-service.ts`, every order creation call includes:
+```
+builder_code: PLATFORM_BUILDER_CODE
+```
+Users authorize once via a signed approval payload during bot setup. This replaces the current Drift `initialize_user` referral PDA logic.
+
+---
+
+## 9. Current Drift Integration — What Needs to Change
 
 ### File-by-File Impact Assessment
 
@@ -262,7 +387,7 @@ Our current deposit flow (`buildDepositTransaction` / `executeAgentDriftDeposit`
 
 ---
 
-## 9. Architecture: Pacifica Service Design
+## 10. Architecture: Pacifica Service Design
 
 ### Proposed New Files
 
@@ -320,7 +445,7 @@ This is the most critical new piece. Every authenticated request goes through th
 
 ---
 
-## 10. Database Schema Changes
+## 11. Database Schema Changes
 
 ### Minimal Changes Needed
 
@@ -344,7 +469,15 @@ commission constant:
 
 ---
 
-## 11. Migration Strategy — Phased Approach
+## 12. Migration Strategy — Phased Approach
+
+### Phase 0: Business Prerequisites (Before any code)
+- [ ] Apply to Builder Program (ops@pacifica.fi / Discord / Telegram)
+- [ ] Apply to Affiliate Program (Discord ticket)
+- [ ] Get Builder Code assigned
+- [ ] Verify $100K equity cap status
+- [ ] Hit testnet `/markets` endpoint to verify SOL, BTC, ETH, AVAX availability
+- [ ] Test agent wallet registration flow on testnet
 
 ### Phase 1: Foundation (Est. 2-3 days)
 - [ ] Implement `pacifica-signer.ts` (canonical JSON + Ed25519 signing)
@@ -354,7 +487,7 @@ commission constant:
 - [ ] Add `pacifica_subaccount_id` to bot schema
 
 ### Phase 2: Trading (Est. 2-3 days)
-- [ ] Implement order placement (market, limit)
+- [ ] Implement order placement (market, limit) with `builder_code` inclusion
 - [ ] Implement position close
 - [ ] Implement `pacifica-price.ts` with REST + WS price feeds
 - [ ] Port `trade-retry-service.ts` error handling to Pacifica error codes
@@ -365,6 +498,7 @@ commission constant:
 - [ ] Port deposit/withdraw flows
 - [ ] Implement `reconciliation-service.ts` using REST account/position data
 - [ ] Port leverage management (`POST /account/leverage`)
+- [ ] Implement builder code user authorization flow
 
 ### Phase 4: Monitoring & Analytics (Est. 1-2 days)
 - [ ] Port `portfolio-snapshot-job.ts`
@@ -373,21 +507,22 @@ commission constant:
 - [ ] Implement equity history via `/account/equity_history`
 
 ### Phase 5: Testing & Cutover (Est. 2-3 days)
-- [ ] End-to-end testing on Pacifica testnet
+- [ ] End-to-end testing on Pacifica testnet (code: `Pacifica`)
 - [ ] Parallel run: verify positions/PnL match between systems
 - [ ] Frontend verification (should be transparent)
 - [ ] Production cutover
 - [ ] Remove Drift code and `@drift-labs/sdk` dependency
 
-**Total estimated effort: 8-13 days**
+**Total estimated effort: 8-13 days** (excluding Phase 0 business prerequisites which depend on Pacifica team response time)
 
 ---
 
-## 12. Risk Assessment
+## 13. Risk Assessment
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
 | $100K equity cap (beta) | **High** | Verify current limits; may block large portfolios |
+| Builder Program rejection | **High** | Apply early; prepare pitch showing volume potential |
 | AVAX not available on Pacifica | **Medium** | Check `/markets` — may need to drop AVAX bot |
 | No TypeScript SDK | **Low** | REST API is simpler anyway; we build our own thin client |
 | Pacifica is newer/less battle-tested | **Medium** | Start with small positions; testnet first |
@@ -395,10 +530,12 @@ commission constant:
 | Rate limiting unknown specifics | **Medium** | API Config Keys available for higher limits |
 | Signature format complexity | **Low** | Well-documented; Python SDK has reference implementation |
 | Funding rate differences (hourly vs Drift) | **Low** | Update funding calculations in PnL reporting |
+| Affiliate revenue cutoff at VIP tier | **Medium** | Builder Program revenue is not subject to this — use both |
+| Pacifica itself getting hacked | **Medium** | Off-chain orderbook + on-chain settlement reduces surface area vs fully on-chain DEX |
 
 ---
 
-## 13. What We Gain
+## 14. What We Gain
 
 1. **No SDK dependency** — pure HTTP/WS, no memory leaks, no CJS/ESM compatibility issues
 2. **No on-chain byte parsing** — positions/balances come as clean JSON
@@ -408,32 +545,85 @@ commission constant:
 6. **Sub-10ms API latency** — off-chain matching engine
 7. **~4,000 fewer lines of code** — estimated reduction from removing SDK workarounds, byte parsing, Swift protocol, subprocess management
 8. **Testnet available** — proper staging environment for integration testing
+9. **Builder Program revenue** — potentially higher and more flexible than Drift's fixed 15% referral
+10. **No Solana RPC dependency for trading** — eliminates rate limit issues, 429 errors, and RPC failover complexity
 
 ---
 
-## 14. Open Questions (Require Investigation)
+## 15. Builder Program — Deep Dive
+
+The Builder Program is Pacifica's developer partnership model. It's the most relevant revenue path for QuantumVault because it's designed for exactly our use case: platforms that route order flow through Pacifica.
+
+### How Builder Codes Work
+
+1. **Apply** → Contact ops@pacifica.fi, Discord, or Telegram bot
+2. **Receive builder_code** → Unique identifier for your platform
+3. **Set fee_rate** → Your custom fee (e.g., `0.001` = 10 bps on top of Pacifica's fees)
+4. **User authorization** → User signs a one-time approval payload:
+   ```json
+   {
+     "timestamp": 1716200000000,
+     "expiry_window": 5000,
+     "type": "approve_builder_code",
+     "data": {
+       "builder_code": "YOUR_CODE",
+       "max_fee_rate": "0.001"
+     }
+   }
+   ```
+5. **Order tagging** → Every order includes `builder_code` in the payload
+6. **Revenue** → You earn `fee_rate` on every order routed through your code
+
+### Builder vs Drift Referral — Technical Comparison
+
+| Aspect | Drift Referral | Pacifica Builder |
+|--------|---------------|------------------|
+| Setup | On-chain PDA at account init | One-time user signature |
+| Per-order work | None (set and forget) | Must include `builder_code` in every order |
+| Revenue control | Fixed 15% | You set the rate |
+| Can lose revenue | Never (on-chain permanent) | Only if you stop including the code |
+| Implementation | Complex (PDA derivation, referrer lookup, on-chain accounts) | Simple (one field in JSON payload) |
+
+### Pacifica Partner Ecosystem Context
+
+Pacifica uses **Fuul** (fuul.xyz) to power their referral and points infrastructure. Fuul provides:
+- On-chain affiliate tracking with anti-sybil/fraud protection
+- Points systems with automated distribution
+- Leaderboard and competition infrastructure
+
+This means Pacifica's referral attribution is handled by a dedicated third-party system designed for accuracy and fraud prevention — more sophisticated than Drift's simple on-chain PDA approach.
+
+**Privy** (privy.io) handles Pacifica's authentication layer, supporting email/social/wallet login with embedded wallets. This is relevant context but doesn't directly impact our integration since we use our own agent wallet system.
+
+---
+
+## 16. Open Questions (Require Investigation)
 
 1. **Market list verification** — Does Pacifica have AVAX? What's the full symbol list?
 2. **Beta equity cap** — Is $100K still the limit? Has it been raised?
 3. **Agent wallet registration** — Can this be done purely via API, or does it require UI interaction?
 4. **Subaccount limits** — How many subaccounts per master account?
 5. **Order fill notifications** — How reliable is the WebSocket `account_trades` channel for confirming fills?
-6. **Referral/affiliate program** — Is there an equivalent to Drift's referral system for fee sharing?
-7. **Historical data depth** — How far back does `/account/equity_history` go?
-8. **Cross-margin behavior** — How does cross-margin interact with subaccounts? Is it per-subaccount or account-wide?
+6. **Builder Program approval timeline** — How long does the application process take?
+7. **Builder fee_rate limits** — Is there a max fee_rate cap?
+8. **Historical data depth** — How far back does `/account/equity_history` go?
+9. **Cross-margin behavior** — How does cross-margin interact with subaccounts? Is it per-subaccount or account-wide?
+10. **Deposit contract address** — What's the on-chain program/contract for USDC deposits?
 
 ---
 
-## 15. Decision Framework
+## 17. Decision Framework
 
 ### Go with Pacifica if:
 - Drift remains compromised or offline for extended period
+- Builder Program application is accepted
 - AVAX and all actively traded markets are available
 - Beta equity cap is lifted or acceptable for current portfolio sizes
 - Testnet integration validates successfully
 
 ### Hold off if:
 - Drift recovers quickly and funds are returned
+- Builder Program application is rejected (no revenue path)
 - Critical markets (SOL, BTC, ETH) missing from Pacifica
 - $100K cap blocks meaningful trading
 - Another DEX emerges with better API/coverage
@@ -443,3 +633,14 @@ commission constant:
 - Keep Drift code in place but disabled
 - Switch execution layer via environment variable
 - Allows rapid cutover without code deletion
+
+---
+
+## 18. Immediate Next Steps
+
+1. **Apply to Builder Program** — ops@pacifica.fi — this gates the revenue model
+2. **Apply to Affiliate Program** — layered revenue opportunity
+3. **Hit testnet API** — verify markets, test signing, confirm subaccount flow
+4. **Create testnet account** — https://test-app.pacifica.fi (code: `Pacifica`)
+5. **Review Python SDK** — https://github.com/pacifica-fi/python-sdk — reference implementation for signing and order flow
+6. **Decision point** — once Builder Program status is known, decide go/no-go on full migration
