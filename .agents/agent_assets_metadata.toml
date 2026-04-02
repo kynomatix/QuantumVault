@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "E0kemYMw7Sa0mOx0TpOeP"
+uri = "file://PACIFICA_MIGRATION.md"
+type = "text"
+title = "Pacifica DEX Migration Scope Document"
