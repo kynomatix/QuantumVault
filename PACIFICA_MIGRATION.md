@@ -236,9 +236,24 @@ interface UserTransactionBuilder {
 
 **Why separate?** For Pacifica, deposit is still an on-chain USDC transfer (user signs in browser) BUT withdrawals may be a REST API call (agent signs server-side). The boundary between "user signs" vs "server signs" is protocol-specific. Some operations may move between interfaces depending on the protocol.
 
+**CRITICAL: Dual-Path Deposit/Withdraw Flows**
+
+The current codebase has TWO distinct deposit/withdraw paths that coexist:
+
+| Path | Route | Signer | When Used |
+|------|-------|--------|-----------|
+| **User-signed** | `POST /api/drift/deposit` → `buildDepositTransaction()` → serialized tx → frontend → user signs in Phantom | User's browser wallet | Manual deposits from Portfolio page |
+| **Agent-signed** | `executeAgentDriftDeposit()` / `executeAgentDriftWithdraw()` | Agent wallet (server holds key) | Automated top-ups by trade-retry-service, profit-share payouts |
+
+Both paths MUST be preserved in the adapter architecture. The migration plan must explicitly handle:
+1. `UserTransactionBuilder.buildDepositTransaction()` — for manual user deposits (user signs)
+2. `ProtocolAdapter.executeDeposit()` — for automated agent deposits (server signs)
+3. `ProtocolAdapter.executeWithdraw()` — for automated agent withdrawals (server signs)
+4. `UserTransactionBuilder.buildWithdrawTransaction()` — for manual user withdrawals (user signs), IF Pacifica supports user-signed withdrawal. Otherwise this path is retired and all withdrawals go through agent-signed `executeWithdraw()`.
+
 **For Pacifica specifically:**
 - `buildDepositTransaction` → Still needed (on-chain USDC transfer to Pacifica bridge contract, user signs)
-- `buildWithdrawTransaction` → May become `adapter.executeWithdraw()` (Pacifica REST API, agent signs)
+- `buildWithdrawTransaction` → May become `adapter.executeWithdraw()` only (Pacifica REST API, agent signs). Need to verify if Pacifica supports user-initiated withdrawals via on-chain tx.
 - `buildTransferTo/FromSubaccount` → Becomes `adapter.transferBetweenSubaccounts()` (Pacifica REST API, agent signs)
 
 ### Functions That Do NOT Belong Behind an Adapter
@@ -265,6 +280,10 @@ interface ProtocolMarket {
   lotSize: number;
   isActive: boolean;
   category: string[];        // ["L1", "Infra"]
+  fullName: string;          // "Solana" — for UI display (replaces DRIFT_MARKET_METADATA in market-liquidity-service.ts)
+  maintenanceMarginWeight: number;  // For liquidation price calc (replaces MAINTENANCE_MARGIN_WEIGHTS in position-service.ts)
+  openInterestUsd?: number;  // Current OI — for slippage estimation (replaces Drift on-chain PerpMarket decode)
+  warning?: string;          // "High volatility meme token" — for UI risk display
 }
 
 interface ProtocolPosition {
@@ -294,8 +313,8 @@ interface MarketOrderParams {
 
 interface OrderResult {
   success: boolean;
-  orderId?: string;           // Protocol's order ID
-  clientOrderId?: string;     // Our UUID
+  orderId?: string;           // Protocol's order ID (may be unknown at submit time for async protocols)
+  clientOrderId?: string;     // Our UUID — echoed back for durable correlation across restarts
   status: 'submitted' | 'acknowledged' | 'filled' | 'partial_fill' | 'rejected' | 'error';
   fillPrice?: number;
   fillSize?: number;
@@ -969,7 +988,7 @@ Only the **data source** changes — from byte-parsing RPC calls to adapter meth
 | `market-registry.ts` | 187 | **High** | **Rewrite** | Pull from adapter's `getMarkets()` instead of hardcoded Drift indices |
 | `position-service.ts` | 450 | **High** | **Rewrite** | Use `adapter.getPositions()` instead of byte parsing. **Also:** hardcoded `MAINTENANCE_MARGIN_WEIGHTS` (lines 4-30) are Drift-specific — replace with `adapter.getMaintenanceMarginWeight()` |
 | `reconciliation-service.ts` | 788 | **High** | **Refactor** | Replace `getPerpPositions()` with `adapter.getPositions()` |
-| `trade-retry-service.ts` | 1,084 | **Medium** | **Adapt** | Error codes change, retry logic stays. **Also:** job shape assumes numeric `subAccountId` (line 19) — update to string |
+| `trade-retry-service.ts` | 1,084 | **High** | **Refactor** | **Understated in original scope.** Directly imports `closePerpPosition`, `executePerpOrder`, `getPerpPositions`, `settleAllPnl`, `executeAgentDriftWithdraw` (line 2). Job shape assumes numeric `subAccountId` (line 19). Startup rebuilds jobs using `bot.driftSubaccountId` (line ~974). Must be fully rerouted through adapter, not patched |
 | `leverage-cache-service.ts` | 212 | **High** | **Rewrite** | Currently imports `@drift-labs/sdk`, decodes on-chain PerpMarket accounts via Borsh to read `marginRatioInitial`. Replace entirely with adapter's `getMarkets()` which returns leverage per-market |
 | `market-liquidity-service.ts` | 546 | **High** | **Rewrite** | Hardcoded Drift OI data (lines 149-219), Drift metadata defs (lines 57-127). Replace with adapter's market data + orderbook |
 | `portfolio-snapshot-job.ts` | 126 | **Medium** | **Adapt** | Use `adapter.getAccountInfo()` |
@@ -1021,6 +1040,20 @@ All route handlers switch from importing `drift-service.ts` directly to calling 
 | `components/WelcomePopup.tsx` | **Low** | **Adapt** | 1 Drift reference |
 | `components/EquityHistory.tsx` | **Low** | **Adapt** | 2 Drift references |
 
+### Server — Startup Sequence (`server/index.ts`)
+
+The server startup initializes multiple Drift-coupled subsystems. ALL must be adapter-aware before Phase 5 can delete Drift files:
+
+| Line(s) | Current Startup Call | Drift Coupling | Migration |
+|---------|---------------------|---------------|-----------|
+| 477 | `syncMarketRegistry()` (from `drift-service.ts`) | Direct import | Replace with `adapter.getMarkets()` → populate `market-registry.ts` |
+| 488 | `initLeverageCache()` (from `leverage-cache-service.ts`) | Imports `@drift-labs/sdk`, decodes on-chain PerpMarket | Replace with adapter market data (leverage is in `ProtocolMarket.maxLeverage`) |
+| 494 | `startOrphanedSubaccountCleanup()` | Uses Drift subaccount discovery | Replace with `adapter.discoverSubaccounts()` |
+| 471 | `startPeriodicReconciliation()` | Uses `getPerpPositions()` | Replace with `adapter.getPositions()` |
+| ~500 | Trade-retry job reconstruction | Loads `bot.driftSubaccountId` (line ~974 of trade-retry-service.ts) | Must use `bot.protocol_subaccount_id` and resolve adapter per-bot |
+
+**Phase gate:** Phase 5 (delete Drift files) CANNOT proceed until ALL startup imports are de-drifted. A single remaining import will crash the server on boot.
+
 ### Server — Additional Files
 
 | File | Drift Reference | Notes |
@@ -1043,6 +1076,7 @@ All route handlers switch from importing `drift-service.ts` directly to calling 
 | `bot_trades` | `auction_duration_ms` | Drift JIT auction param | Deprecate |
 | `equity_events` | `tx_signature` | On-chain deposit/withdraw tx | Keep — deposits are still on-chain |
 | `orphaned_subaccounts` | `drift_subaccount_id` | On-chain PDA index | Replace with `protocol_subaccount_id` |
+| `pending_profit_shares` | `drift_subaccount_id` | Integer (line 596) | Add `protocol_subaccount_id: text` — integer blocker for Pacifica string IDs |
 | `bot_positions` | `market` | `SOL-PERP` format | Keep as-is — adapter converts at boundary |
 
 ### NPM Dependencies
@@ -1065,7 +1099,7 @@ All route handlers switch from importing `drift-service.ts` directly to calling 
 | Server — New (protocol layer) | 7 files | ~2,500-3,500 est. |
 | Server — Routes | 1 file | 15+ endpoints |
 | Client — Adapt | 16 files | Various |
-| Schema | 1 file | ~6 column additions |
+| Schema | 1 file | ~9 column additions |
 
 ### What Stays the Same
 
@@ -1093,6 +1127,9 @@ Schema changes are **additive only** — no column type changes, no drops of exi
 | `trading_bots` | `active_protocol` | `text` | Which protocol this bot uses (default: `"pacifica"`) |
 | `wallets` | `protocol_subaccount_id` | `text` | Master account's protocol subaccount |
 | `bot_trades` | `protocol_order_id` | `text` | Protocol's order ID (UUID for Pacifica) |
+| `bot_trades` | `client_order_id` | `text` | Our UUID — enables durable order correlation across restarts/timeouts |
+| `pending_profit_shares` | `protocol_subaccount_id` | `text` | Protocol's subaccount ID (currently `drift_subaccount_id: integer` — line 596 of schema.ts) |
+| `orphaned_subaccounts` | `protocol_subaccount_id` | `text` | Replaces current `drift_subaccount_id: integer` |
 
 ### Column Value Changes (No Schema Change)
 
@@ -1202,10 +1239,10 @@ Before deleting any Drift files, create a `drift-archive` branch preserving the 
 - [ ] Refactor `market-registry.ts` — pull from `adapter.getMarkets()` instead of hardcoded indices
 - [ ] Refactor `leverage-cache-service.ts` — use adapter market data
 - [ ] Refactor `market-liquidity-service.ts` — use adapter orderbook data
-- [ ] Refactor `trade-retry-service.ts` — update error codes for Pacifica
+- [ ] Refactor `trade-retry-service.ts` — replace all 5 Drift function imports (`closePerpPosition`, `executePerpOrder`, `getPerpPositions`, `settleAllPnl`, `executeAgentDriftWithdraw`), convert job shape to string subaccount IDs, update startup reconstruction (line ~974)
 - [ ] Refactor `portfolio-snapshot-job.ts` and `pnl-snapshot-job.ts`
 - [ ] Refactor `analytics-indexer.ts` — remove `drift-data-api` import (must happen before Phase 5 deletes that file)
-- [ ] Refactor deposit/withdraw flows in `agent-wallet.ts`
+- [ ] Refactor deposit/withdraw flows in `agent-wallet.ts` — preserve dual-path (user-signed + agent-signed)
 - [ ] Refactor `orphaned-subaccount-cleanup.ts`
 - [ ] Consolidate `normalizeMarket()` copies into single shared utility in `server/protocol/symbol-registry.ts`
 - [ ] Refactor `position-service.ts` — replace hardcoded `MAINTENANCE_MARGIN_WEIGHTS` with `adapter.getMaintenanceMarginWeight()`
@@ -1223,6 +1260,13 @@ Before deleting any Drift files, create a `drift-archive` branch preserving the 
 - [ ] Update `PitchDeck.tsx` and `Landing.tsx` content
 
 ### Phase 5: Cleanup & Testing (Est. 2-3 sessions)
+
+**PHASE GATE — All must be true before proceeding:**
+- [ ] ALL `server/index.ts` startup imports de-drifted (syncMarketRegistry, initLeverageCache, startOrphanedSubaccountCleanup, reconciliation, trade-retry reconstruction)
+- [ ] `analytics-indexer.ts` no longer imports `drift-data-api.ts`
+- [ ] `trade-retry-service.ts` fully rerouted through adapter (5 Drift function imports removed)
+- [ ] `pending_profit_shares.protocol_subaccount_id` column populated for all active records
+- [ ] No file in `server/` imports from `drift-service.ts`, `drift-price.ts`, or `drift-data-api.ts`
 
 - [ ] Create `drift-archive` git branch
 - [ ] Delete `drift-service.ts`, `drift-executor.mjs`, `drift-price.ts`, `drift-data-api.ts`
