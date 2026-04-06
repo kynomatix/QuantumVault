@@ -124,7 +124,19 @@ server/protocol/
     pacifica-types.ts     # Pacifica-specific API response types
 ```
 
-### ProtocolAdapter Interface
+### Interface Design — Separation of Concerns
+
+The current `drift-service.ts` exports ~25 functions, but they fall into **three distinct categories** that should NOT be mixed into a single interface:
+
+| Category | Example Functions | Who Calls | Who Signs |
+|----------|------------------|-----------|-----------|
+| **Server-side Execution** | `executePerpOrder`, `closePerpPosition`, `executeAgentDriftDeposit` | Server (webhook, bot logic) | Agent wallet (server holds key) |
+| **User Transaction Builders** | `buildDepositTransaction`, `buildWithdrawTransaction`, `buildTransferToSubaccountTransaction` | Frontend (via API route) | User's browser wallet (Phantom, etc.) |
+| **Read/Query** | `getPerpPositions`, `getDriftAccountInfo`, `getBatchPerpPositions`, `getMarketPrice` | Server (reconciliation, portfolio, UI) | No signing needed |
+
+**Critical insight:** `buildDepositTransaction` and `buildWithdrawTransaction` are NOT server-executed operations. The server builds a Solana transaction, serializes it, sends it to the frontend, and the **user signs it in their browser wallet**. These cannot go behind the same adapter as server-side execution because the signing model is fundamentally different.
+
+### ProtocolAdapter Interface (Server-Side Execution + Reads)
 
 ```typescript
 interface ProtocolAdapter {
@@ -135,37 +147,40 @@ interface ProtocolAdapter {
   initialize(): Promise<void>;
   shutdown(): Promise<void>;
   healthCheck(): Promise<{ healthy: boolean; latencyMs: number; error?: string }>;
+  getCapabilities(): AdapterCapabilities;
 
-  // --- Market Data ---
+  // --- Market Data & Capabilities ---
   getMarkets(): Promise<ProtocolMarket[]>;
   getPrice(internalSymbol: string): Promise<number | null>;
   getAllPrices(): Promise<Record<string, number>>;
   getOrderbook(internalSymbol: string, depth?: number): Promise<OrderbookSnapshot>;
   getFundingRate(internalSymbol: string): Promise<FundingRateInfo>;
+  getMaintenanceMarginWeight(internalSymbol: string): number;
 
-  // --- Account ---
-  getAccountInfo(agentPublicKey: string): Promise<AccountInfo>;
+  // --- Account Reads ---
+  getAccountInfo(agentPublicKey: string, subaccountId?: string): Promise<AccountInfo>;
   getPositions(agentPublicKey: string, subaccountId?: string): Promise<ProtocolPosition[]>;
   getBalances(agentPublicKey: string, subaccountId?: string): Promise<BalanceInfo>;
   getEquityHistory(agentPublicKey: string, params?: HistoryParams): Promise<EquityPoint[]>;
   getTradeHistory(agentPublicKey: string, params?: HistoryParams): Promise<TradeRecord[]>;
 
-  // --- Order Execution ---
+  // --- Batch Reads (Performance — portfolio page, reconciliation) ---
+  getBatchAccountInfo(agentPublicKey: string, subaccountIds: string[]): Promise<AccountInfo[]>;
+  getBatchPositions(agentPublicKey: string, subaccountIds: string[]): Promise<Map<string, ProtocolPosition[]>>;
+
+  // --- Server-Side Order Execution (agent wallet signs) ---
   placeMarketOrder(params: MarketOrderParams): Promise<OrderResult>;
   placeLimitOrder(params: LimitOrderParams): Promise<OrderResult>;
-  placeStopOrder(params: StopOrderParams): Promise<OrderResult>;
   cancelOrder(params: CancelOrderParams): Promise<CancelResult>;
   cancelAllOrders(agentPublicKey: string, symbol?: string): Promise<CancelResult>;
-  setTpSl(params: TpSlParams): Promise<OrderResult>;
 
-  // --- Position Management ---
+  // --- Server-Side Position Management ---
   closePosition(params: ClosePositionParams): Promise<OrderResult>;
   setLeverage(agentPublicKey: string, symbol: string, leverage: number): Promise<void>;
-  setMarginMode(agentPublicKey: string, mode: 'cross' | 'isolated'): Promise<void>;
 
-  // --- Fund Management ---
-  deposit(params: DepositParams): Promise<DepositResult>;
-  withdraw(params: WithdrawParams): Promise<WithdrawResult>;
+  // --- Server-Side Fund Management (agent wallet signs) ---
+  executeDeposit(params: AgentDepositParams): Promise<DepositResult>;
+  executeWithdraw(params: AgentWithdrawParams): Promise<WithdrawResult>;
   transferBetweenSubaccounts(params: TransferParams): Promise<TransferResult>;
 
   // --- Subaccounts ---
@@ -176,19 +191,65 @@ interface ProtocolAdapter {
 
   // --- Settlement ---
   settlePnl(agentPublicKey: string, agentSecretKey: Uint8Array, subaccountId?: string): Promise<SettleResult>;
-  settleAllPnl?(agentPublicKey: string, agentSecretKey: Uint8Array, subaccountId?: string): Promise<SettleResult>;
 
   // --- Agent Wallet ---
   registerAgentWallet(mainWalletAddress: string, agentPublicKey: string): Promise<void>;
-
-  // --- Capabilities ---
-  getCapabilities(): AdapterCapabilities;
 
   // --- WebSocket (Optional — adapters may or may not support real-time feeds) ---
   subscribeToFills?(agentPublicKey: string, callback: (fill: FillEvent) => void): Unsubscribe;
   subscribeToPositionUpdates?(agentPublicKey: string, callback: (pos: ProtocolPosition) => void): Unsubscribe;
   subscribeToOrderUpdates?(agentPublicKey: string, callback: (order: OrderUpdate) => void): Unsubscribe;
 }
+```
+
+### UserTransactionBuilder Interface (Separate — User Signs in Browser)
+
+These functions build unsigned Solana transactions for the user's browser wallet to sign. They are protocol-specific but follow a different pattern than server-side execution.
+
+```typescript
+interface UserTransactionBuilder {
+  readonly protocolName: string;
+
+  buildDepositTransaction(
+    walletAddress: string,
+    amountUsdc: number
+  ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }>;
+
+  buildWithdrawTransaction(
+    walletAddress: string,
+    amountUsdc: number
+  ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }>;
+
+  buildTransferToSubaccountTransaction(
+    walletAddress: string,
+    subaccountId: string,
+    amountUsdc: number
+  ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }>;
+
+  buildTransferFromSubaccountTransaction(
+    walletAddress: string,
+    subaccountId: string,
+    amountUsdc: number
+  ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }>;
+}
+```
+
+**Why separate?** For Pacifica, deposit is still an on-chain USDC transfer (user signs in browser) BUT withdrawals may be a REST API call (agent signs server-side). The boundary between "user signs" vs "server signs" is protocol-specific. Some operations may move between interfaces depending on the protocol.
+
+**For Pacifica specifically:**
+- `buildDepositTransaction` → Still needed (on-chain USDC transfer to Pacifica bridge contract, user signs)
+- `buildWithdrawTransaction` → May become `adapter.executeWithdraw()` (Pacifica REST API, agent signs)
+- `buildTransferTo/FromSubaccount` → Becomes `adapter.transferBetweenSubaccounts()` (Pacifica REST API, agent signs)
+
+### Functions That Do NOT Belong Behind an Adapter
+
+Some current `drift-service.ts` functions are platform-internal and should remain as standalone utilities:
+
+| Function | Reason to exclude |
+|----------|------------------|
+| `getUsdcBalance(walletAddress)` | Reads on-chain USDC balance via Solana RPC — not protocol-specific |
+| `subaccountExists(walletAddress, subId)` | Drift-specific on-chain check — replaced by `adapter.listSubaccounts()` |
+| `getNextOnChainSubaccountId()` | Drift-specific sequential ID — replaced by `adapter.createSubaccount()` |
 ```
 
 ### Protocol-Neutral Types
@@ -434,6 +495,20 @@ The SymbolRegistry is populated at adapter initialization by calling Pacifica's 
 - **Symbol collisions:** Case-insensitive normalization. All lookups are case-insensitive (`sol` → `SOL-PERP`). If two internal symbols map to the same protocol symbol, fail loudly at initialization — this is a configuration error.
 - **Unknown symbol in response:** If the adapter receives a position or fill with a protocol symbol not in the registry, log an error and use the raw protocol symbol prefixed with `UNKNOWN-` to prevent silent data loss.
 - **Registry refresh:** The SymbolRegistry should be refreshable at runtime (e.g., when new markets are listed on Pacifica) without restarting the server. Adapter calls `registry.refresh()` which re-fetches `/api/v1/info`.
+
+### CRITICAL: Fragmented `normalizeMarket()` Functions
+
+The codebase currently has **three separate `normalizeMarket()` implementations** that strip suffixes/prefixes to compare symbols:
+
+| File | Line | Logic |
+|------|------|-------|
+| `reconciliation-service.ts` | 13 | `.replace(/-PERP$/i, '').replace(/PERP$/i, '').replace(/USD[CT]?$/i, '').replace(/[-_/]/g, '')` |
+| `position-service.ts` | 41 | Identical to reconciliation |
+| `routes.ts` (inline) | Various | Ad-hoc comparisons like `p.market === bot.market` |
+
+**Risk:** If an adapter returns a protocol-native symbol anywhere in its output (e.g., `"SOL"` instead of `"SOL-PERP"`), the strict `p.market === bot.market` comparisons in routes.ts will silently fail, breaking reconciliation and position matching.
+
+**Solution:** The adapter interface contract states: **all `ProtocolPosition`, `OrderResult`, and `FillEvent` objects must return `internalSymbol` in canonical `SOL-PERP` format.** The SymbolRegistry conversion happens inside the adapter, not outside. Additionally, consolidate all `normalizeMarket()` copies into a single shared utility in `server/protocol/symbol-registry.ts`.
 
 ### Design Decision: Keep Internal Format
 
@@ -892,14 +967,14 @@ Only the **data source** changes — from byte-parsing RPC calls to adapter meth
 |------|-------|-----------------|------------------|-------|
 | `agent-wallet.ts` | 511 | **Low** | **Minor** | Add Pacifica agent wallet registration |
 | `market-registry.ts` | 187 | **High** | **Rewrite** | Pull from adapter's `getMarkets()` instead of hardcoded Drift indices |
-| `position-service.ts` | 450 | **High** | **Rewrite** | Use `adapter.getPositions()` instead of byte parsing |
+| `position-service.ts` | 450 | **High** | **Rewrite** | Use `adapter.getPositions()` instead of byte parsing. **Also:** hardcoded `MAINTENANCE_MARGIN_WEIGHTS` (lines 4-30) are Drift-specific — replace with `adapter.getMaintenanceMarginWeight()` |
 | `reconciliation-service.ts` | 788 | **High** | **Refactor** | Replace `getPerpPositions()` with `adapter.getPositions()` |
-| `trade-retry-service.ts` | 1,084 | **Medium** | **Adapt** | Error codes change, retry logic stays |
-| `leverage-cache-service.ts` | 212 | **High** | **Rewrite** | Use adapter market data for leverage limits |
-| `market-liquidity-service.ts` | 546 | **High** | **Rewrite** | Use adapter's orderbook/market data |
+| `trade-retry-service.ts` | 1,084 | **Medium** | **Adapt** | Error codes change, retry logic stays. **Also:** job shape assumes numeric `subAccountId` (line 19) — update to string |
+| `leverage-cache-service.ts` | 212 | **High** | **Rewrite** | Currently imports `@drift-labs/sdk`, decodes on-chain PerpMarket accounts via Borsh to read `marginRatioInitial`. Replace entirely with adapter's `getMarkets()` which returns leverage per-market |
+| `market-liquidity-service.ts` | 546 | **High** | **Rewrite** | Hardcoded Drift OI data (lines 149-219), Drift metadata defs (lines 57-127). Replace with adapter's market data + orderbook |
 | `portfolio-snapshot-job.ts` | 126 | **Medium** | **Adapt** | Use `adapter.getAccountInfo()` |
 | `pnl-snapshot-job.ts` | 148 | **Medium** | **Adapt** | Use adapter position data |
-| `analytics-indexer.ts` | 250 | **Medium** | **Adapt** | Change data source |
+| `analytics-indexer.ts` | 250 | **Medium** | **Adapt** | Imports `drift-data-api.ts` (line 3) — must be refactored BEFORE `drift-data-api.ts` is deleted in Phase 5 |
 | `orphaned-subaccount-cleanup.ts` | 83 | **High** | **Rewrite** | Use `adapter.listSubaccounts()` |
 | `profit-share-retry-job.ts` | ~150 | **Low** | **Minor** | Profit share logic is exchange-agnostic |
 
@@ -951,7 +1026,7 @@ All route handlers switch from importing `drift-service.ts` directly to calling 
 | File | Drift Reference | Notes |
 |------|----------------|-------|
 | `server/index.ts` | Imports `syncMarketRegistry` from `drift-service` | Startup init → rewire to adapter |
-| `server/storage.ts` | `getNextSubaccountId`, `getAllocatedSubaccountIds`, `driftSubaccountId` column references | Refactor subaccount allocation to use string-based `protocol_subaccount_id` |
+| `server/storage.ts` | `getNextSubaccountId` (line 398, comment "Drift requires sequential"), `getAllocatedSubaccountIds` (line 419), `driftSubaccountId` column references throughout | Refactor subaccount allocation: remove sequential-integer assumption, add `getNextProtocolSubaccountId()` and `getAllocatedProtocolSubaccountIds()` that work with string IDs |
 | `server/rpc-config.ts` | Drift RPC endpoint configuration | Evaluate — may still be needed for on-chain deposit/withdraw |
 | `server/check-agent-referrer.mjs` | Drift on-chain referrer PDA checking | Delete — replaced by Builder Program |
 | `server/docs-markdown.ts` | Documentation content references Drift/Swift | Content rewrite |
@@ -1129,9 +1204,12 @@ Before deleting any Drift files, create a `drift-archive` branch preserving the 
 - [ ] Refactor `market-liquidity-service.ts` — use adapter orderbook data
 - [ ] Refactor `trade-retry-service.ts` — update error codes for Pacifica
 - [ ] Refactor `portfolio-snapshot-job.ts` and `pnl-snapshot-job.ts`
+- [ ] Refactor `analytics-indexer.ts` — remove `drift-data-api` import (must happen before Phase 5 deletes that file)
 - [ ] Refactor deposit/withdraw flows in `agent-wallet.ts`
 - [ ] Refactor `orphaned-subaccount-cleanup.ts`
-- [ ] Update `server/index.ts` startup to initialize adapter
+- [ ] Consolidate `normalizeMarket()` copies into single shared utility in `server/protocol/symbol-registry.ts`
+- [ ] Refactor `position-service.ts` — replace hardcoded `MAINTENANCE_MARGIN_WEIGHTS` with `adapter.getMaintenanceMarginWeight()`
+- [ ] Update `server/index.ts` startup to initialize adapter and orphaned-trade recovery (currently hardcodes `driftSubaccountId`)
 
 ### Phase 4: Route Renaming & Frontend Migration (Est. 2-3 sessions)
 
