@@ -37,6 +37,24 @@ import type {
 } from '../protocol-types.js';
 import { SymbolRegistry, buildPacificaMappings } from '../symbol-registry.js';
 import { PacificaSigner, OPERATION_TYPES } from './pacifica-signer.js';
+import {
+  PACIFICA_PROGRAM_ID,
+  PACIFICA_CENTRAL_STATE,
+  PACIFICA_USDC_VAULT,
+  USDC_MINT,
+  EVENT_AUTHORITY,
+  buildDepositInstruction,
+  getAssociatedTokenAddress,
+  usdcToLamports,
+} from './pacifica-tx-builder.js';
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  Transaction,
+  sendAndConfirmTransaction,
+} from '@solana/web3.js';
+import { getPrimaryRpcUrl } from '../../rpc-config.js';
 import type {
   PacificaMarketInfo,
   PacificaPositionResponse,
@@ -659,11 +677,128 @@ export class PacificaAdapter implements ProtocolAdapter {
     };
   }
 
-  async executeDeposit(_params: AgentDepositParams): Promise<DepositResult> {
-    throw new Error(
-      'PacificaAdapter.executeDeposit: not yet implemented — ' +
-      'requires deposit contract address (Phase 0 blocker)',
-    );
+  async executeDeposit(params: AgentDepositParams): Promise<DepositResult> {
+    try {
+      if (!Number.isFinite(params.amount) || params.amount <= 0) {
+        return { success: false, error: 'Invalid deposit amount: must be a positive number' };
+      }
+      if (params.amount < 10) {
+        return { success: false, error: 'Pacifica minimum deposit is $10' };
+      }
+
+      const agentKeypair = Keypair.fromSecretKey(params.agentSecretKey);
+      const agentPubkey = agentKeypair.publicKey;
+
+      if (params.agentPublicKey && agentPubkey.toBase58() !== params.agentPublicKey) {
+        return {
+          success: false,
+          error: 'Deposit aborted: secret key does not match expected agent public key. ' +
+            'Derived: ' + agentPubkey.toBase58() + ', expected: ' + params.agentPublicKey,
+        };
+      }
+
+      const connection = new Connection(getPrimaryRpcUrl(), 'confirmed');
+
+      const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+
+      const vaultInfo = await connection.getAccountInfo(PACIFICA_USDC_VAULT);
+      if (!vaultInfo || vaultInfo.owner.toBase58() !== TOKEN_PROGRAM) {
+        return {
+          success: false,
+          error: 'Deposit aborted: vault account owner mismatch. ' +
+            'Expected Token Program, got: ' + (vaultInfo ? vaultInfo.owner.toBase58() : 'null'),
+        };
+      }
+
+      if (vaultInfo.data.length >= 40) {
+        const mintFromVault = new PublicKey(vaultInfo.data.slice(0, 32));
+        if (mintFromVault.toBase58() !== USDC_MINT.toBase58()) {
+          return {
+            success: false,
+            error: 'Deposit aborted: vault mint mismatch. ' +
+              'Expected USDC ' + USDC_MINT.toBase58() + ', got: ' + mintFromVault.toBase58(),
+          };
+        }
+      }
+
+      const centralStateInfo = await connection.getAccountInfo(PACIFICA_CENTRAL_STATE);
+      if (!centralStateInfo || centralStateInfo.owner.toBase58() !== PACIFICA_PROGRAM_ID.toBase58()) {
+        return {
+          success: false,
+          error: 'Deposit aborted: central state owner mismatch. ' +
+            'Expected Pacifica Program, got: ' + (centralStateInfo ? centralStateInfo.owner.toBase58() : 'null'),
+        };
+      }
+
+      const agentUsdcAta = getAssociatedTokenAddress(USDC_MINT, agentPubkey);
+      const ataInfo = await connection.getAccountInfo(agentUsdcAta);
+      if (!ataInfo) {
+        return {
+          success: false,
+          error: 'Agent wallet has no USDC token account. Fund the wallet with USDC first.',
+        };
+      }
+
+      if (ataInfo.owner.toBase58() !== TOKEN_PROGRAM) {
+        return {
+          success: false,
+          error: 'Deposit aborted: agent USDC ATA owner mismatch.',
+        };
+      }
+
+      if (ataInfo.data.length >= 72) {
+        const ataMint = new PublicKey(ataInfo.data.slice(0, 32));
+        const ataOwner = new PublicKey(ataInfo.data.slice(32, 64));
+        if (ataMint.toBase58() !== USDC_MINT.toBase58()) {
+          return {
+            success: false,
+            error: 'Deposit aborted: agent ATA mint mismatch.',
+          };
+        }
+        if (ataOwner.toBase58() !== agentPubkey.toBase58()) {
+          return {
+            success: false,
+            error: 'Deposit aborted: agent ATA owner does not match agent wallet.',
+          };
+        }
+
+        const amountBytes = ataInfo.data.slice(64, 72);
+        const ataBalance = Number(amountBytes.readBigUInt64LE(0));
+        const requiredLamports = Number(usdcToLamports(params.amount));
+        if (ataBalance < requiredLamports) {
+          return {
+            success: false,
+            error: 'Insufficient USDC balance. Have: ' +
+              (ataBalance / 1_000_000).toFixed(6) + ', need: ' + params.amount.toFixed(6),
+          };
+        }
+      }
+
+      const amountLamports = usdcToLamports(params.amount);
+      const depositIx = buildDepositInstruction(agentPubkey, agentUsdcAta, amountLamports);
+
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      const tx = new Transaction();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = agentPubkey;
+      tx.add(depositIx);
+
+      const txSignature = await sendAndConfirmTransaction(connection, tx, [agentKeypair], {
+        commitment: 'confirmed',
+        maxRetries: 3,
+      });
+
+      return {
+        success: true,
+        txSignature,
+      };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        error: 'Deposit failed: ' + message,
+      };
+    }
   }
 
   async executeWithdraw(params: AgentWithdrawParams): Promise<WithdrawResult> {
