@@ -52,6 +52,8 @@ export const wallets = pgTable("wallets", {
   dialectAddress: text("dialect_address"),
   dialectBearerToken: text("dialect_bearer_token"),
   
+  protocolSubaccountId: text("protocol_subaccount_id"),
+  
   // Security v3: Per-user cryptographic salt and UMK envelope
   userSalt: text("user_salt"),                                      // 32 bytes hex, generated once per user
   encryptedUserMasterKey: text("encrypted_user_master_key"),        // EUMK: UMK encrypted with session key
@@ -151,6 +153,9 @@ export const tradingBots = pgTable("trading_bots", {
   autoTopUp: boolean("auto_top_up").default(false).notNull(),
   pauseReason: text("pause_reason"), // Reason why bot was auto-paused (e.g., "Insufficient margin")
   
+  protocolSubaccountId: text("protocol_subaccount_id"),
+  activeProtocol: text("active_protocol"),
+  
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -188,6 +193,20 @@ export const botTrades = pgTable("bot_trades", {
   swiftOrderId: text("swift_order_id"),
   auctionDurationMs: integer("auction_duration_ms"),
   priceImprovement: decimal("price_improvement", { precision: 10, scale: 4 }),
+  protocolOrderId: text("protocol_order_id"),
+  clientOrderId: text("client_order_id"),
+  protocolFillId: text("protocol_fill_id").unique(),
+  protocol: text("protocol"),
+  protocolStatus: text("protocol_status"),
+  submittedAt: timestamp("submitted_at"),
+  acknowledgedAt: timestamp("acknowledged_at"),
+  filledAt: timestamp("filled_at"),
+  requestedSizeBase: decimal("requested_size_base", { precision: 20, scale: 8 }),
+  filledSizeBase: decimal("filled_size_base", { precision: 20, scale: 8 }),
+  remainingSizeBase: decimal("remaining_size_base", { precision: 20, scale: 8 }),
+  averageFillPrice: decimal("average_fill_price", { precision: 20, scale: 6 }),
+  lastProtocolError: text("last_protocol_error"),
+  lastReconcileAt: timestamp("last_reconcile_at"),
   executedAt: timestamp("executed_at").defaultNow().notNull(),
 });
 

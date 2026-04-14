@@ -31,7 +31,7 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 
 **Workflow:** When starting a phase, check the Phase Navigation Index for which sections to read. Work through Section 17's phase checklist top-to-bottom. Phase 3 has explicit Group A→B→C ordering — follow it.
 
-**Status:** Planning phase — document is still being audited. No code changes until audit is complete.
+**Status:** Phase 1 in progress — building protocol adapter foundation. Testnet verification deferred (will test with real capital later).
 
 ### Engineering Standards for Migration Work
 
