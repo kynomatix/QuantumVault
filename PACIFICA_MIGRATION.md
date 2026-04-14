@@ -566,16 +566,19 @@ Rationale: Option A requires zero data migration, zero risk of fragmenting histo
 | | `/account/funding` | GET | Funding payment history |
 | | `/account/equity_history` | GET | Equity over time |
 | | `/account/balance_history` | GET | Balance over time |
-| | `/account/withdraw` | POST | Request withdrawal |
-| **Subaccounts** | `/subaccounts/create` | POST | Create subaccount |
-| | `/subaccounts/transfer` | POST | Transfer funds between main ↔ sub |
-| **Orders** | `/orders/create_market` | POST | Market order (with optional TP/SL) |
-| | `/orders/create` | POST | Limit order (GTC/IOC/ALO/TOB) |
-| | `/orders/create_stop` | POST | Stop order |
-| | `/orders/tp_sl` | POST | Set TP/SL on existing position |
-| | `/orders/cancel` | POST | Cancel single order |
-| | `/orders/cancel_all` | POST | Cancel all orders |
-| | `/orders/cancel_stop` | POST | Cancel stop order |
+| | `/account/withdraw` | POST | Request withdrawal — operation type: `withdraw` |
+| | `/account/leverage` | POST | Update leverage — operation type: `update_leverage` |
+| | `/account/margin` | POST | Update margin mode — operation type: `update_margin_mode` |
+| **Subaccounts** | `/account/subaccount/create` | POST | Create subaccount (2-step: `subaccount_initiate` then `subaccount_confirm`) |
+| | `/account/subaccount/transfer` | POST | Transfer funds between main ↔ sub (`subaccount_transfer`) |
+| **Agent Wallet** | `/agent/bind` | POST | Register agent wallet — operation type: `bind_agent_wallet` |
+| **Orders** | `/orders/create_market` | POST | Market order (with optional TP/SL) — operation type: `create_market_order` |
+| | `/orders/create` | POST | Limit order (GTC/IOC/ALO/TOB) — operation type: `create_order` |
+| | `/orders/stop/create` | POST | Stop order — operation type: `create_stop_order` |
+| | `/positions/tpsl` | POST | Set TP/SL on existing position — operation type: `set_position_tpsl` |
+| | `/orders/cancel` | POST | Cancel single order — operation type: `cancel_order` |
+| | `/orders/cancel_all` | POST | Cancel all orders — operation type: `cancel_all_orders` |
+| | `/orders/stop/cancel` | POST | Cancel stop order — operation type: `cancel_stop_order` |
 | | `/orders/batch` | POST | Batch order operations |
 | | `/orders/open` | GET | Open orders |
 | | `/orders/history` | GET | Order history |
@@ -605,26 +608,145 @@ The correct markets endpoint is `GET /api/v1/info` (NOT `/api/v1/markets` or `/a
 
 ### How Pacifica Auth Works
 
-All POST requests require a **Solana Ed25519 signature** over a canonicalized JSON payload:
+**Only POST requests require signing.** GET requests and WebSocket subscriptions do not.
 
-1. Build the request payload (account, timestamp, symbol, amount, etc.)
-2. Remove the `signature` field
-3. **Recursively sort all JSON keys alphabetically**
-4. Create compact JSON string (no spaces)
-5. Sign the UTF-8 bytes with Ed25519 private key
-6. Base58-encode the 64-byte signature
+The signing process has 8 steps (from [Pacifica docs](https://pacifica.gitbook.io/docs/api-documentation/api/signing/implementation)):
+
+**Step 1 — Setup:** Generate keypair from private key (Solana Ed25519).
+
+**Step 2 — Define operation:** Choose the `operation_type` string and build `operation_data`. Each endpoint has a specific operation type (see Operation Types table below).
+
+**Step 3 — Create signature header:**
+```json
+{
+  "timestamp": 1748970123456,
+  "expiry_window": 5000,
+  "type": "create_order"
+}
+```
+- `timestamp` — current time in **milliseconds** (not seconds!)
+- `expiry_window` — optional, defaults to 30,000ms (30 seconds). How long the signature is valid.
+- `type` — must match the operation type for the endpoint
+
+**Step 4 — Combine header + payload into signing message:**
+```json
+{
+  "timestamp": 1748970123456,
+  "expiry_window": 5000,
+  "type": "create_order",
+  "data": {
+    "symbol": "BTC",
+    "price": "100000",
+    "amount": "0.1",
+    "side": "bid",
+    "tif": "GTC",
+    "reduce_only": false,
+    "client_order_id": "12345678-1234-1234-1234-123456789abc"
+  }
+}
+```
+**CRITICAL:** `data` is a nested key at the same level as `timestamp`/`type`. This is what gets signed.
+
+**Step 5 — Recursively sort ALL JSON keys alphabetically** (at every nesting level):
+```json
+{
+  "data": {
+    "amount": "0.1",
+    "client_order_id": "...",
+    "price": "100000",
+    "reduce_only": false,
+    "side": "bid",
+    "symbol": "BTC",
+    "tif": "GTC"
+  },
+  "expiry_window": 5000,
+  "timestamp": 1748970123456,
+  "type": "create_order"
+}
+```
+
+**Step 6 — Create compact JSON** (no whitespace, standardized separators `,` and `:`):
+```
+{"data":{"amount":"0.1","client_order_id":"...","price":"100000","reduce_only":false,"side":"bid","symbol":"BTC","tif":"GTC"},"expiry_window":5000,"timestamp":1748970123456,"type":"create_order"}
+```
+
+**Step 7 — Sign:** Convert compact JSON to UTF-8 bytes → Ed25519 sign with private key → Base58 encode the 64-byte signature.
+
+**Step 8 — Build final request** (this is what actually gets POSTed):
+```json
+{
+  "account": "6ETnufiec2CxVWTS4u5Wiq33Zh5Y3Qm6Pkdpi375fuxP",
+  "agent_wallet": null,
+  "signature": "5j1Vy9UqYUF2jKD9r2Lv...",
+  "timestamp": 1748970123456,
+  "expiry_window": 5000,
+  "symbol": "BTC",
+  "price": "100000",
+  "amount": "0.1",
+  "side": "bid",
+  "tif": "GTC",
+  "reduce_only": false,
+  "client_order_id": "12345678-1234-1234-1234-123456789abc"
+}
+```
+**CRITICAL:** The final request **flattens** `operation_data` — it does NOT use the `"data"` wrapper. The `type` field from the signing header is also NOT included in the final request. The `account` and `agent_wallet` fields are added here but were NOT part of the signed message.
+
+### Operation Types (Complete List)
+
+| Operation Type | API Endpoint |
+|---------------|-------------|
+| `create_order` | `/api/v1/orders/create` |
+| `create_market_order` | `/api/v1/orders/create_market` |
+| `create_stop_order` | `/api/v1/orders/stop/create` |
+| `cancel_order` | `/api/v1/orders/cancel` |
+| `cancel_all_orders` | `/api/v1/orders/cancel_all` |
+| `cancel_stop_order` | `/api/v1/orders/stop/cancel` |
+| `update_leverage` | `/api/v1/account/leverage` |
+| `update_margin_mode` | `/api/v1/account/margin` |
+| `set_position_tpsl` | `/api/v1/positions/tpsl` |
+| `withdraw` | `/api/v1/account/withdraw` |
+| `subaccount_initiate` | `/api/v1/account/subaccount/create` |
+| `subaccount_confirm` | `/api/v1/account/subaccount/create` |
+| `subaccount_transfer` | `/api/v1/account/subaccount/transfer` |
+| `bind_agent_wallet` | `/api/v1/agent/bind` |
+| `create_api_key` | `/api/v1/account/api_keys/create` |
+| `revoke_api_key` | `/api/v1/account/api_keys/revoke` |
+| `list_api_keys` | `/api/v1/account/api_keys` |
+
+**Batch orders:** No dedicated operation type. Each order within a batch is signed independently with its own operation type.
+
+### Signing Error Responses
+
+| Error Message | Cause |
+|--------------|-------|
+| `"Invalid signature"` | Not valid Base58, or bytes don't form valid Ed25519 signature |
+| `"Invalid message"` | Expired (timestamp + expiry_window < now), can't serialize to JSON, or malformed structure |
+| `"Invalid public key"` | Account address isn't a valid Ed25519 public key |
+| `"Verification failed"` | Signature doesn't match message content — wrong key, modified payload, or incorrect sorting/compacting |
 
 ### Signing Module (`server/protocol/pacifica/pacifica-signer.ts`)
 
 ```
-Input: payload object + agent keypair
-  → Remove "signature" key
-  → Recursively sort all keys
-  → JSON.stringify with compact separators
-  → Ed25519 sign UTF-8 bytes
-  → Base58 encode
-Output: Base58 signature string
+Input: operationType (string) + operationData (object) + agentKeypair
+  Step 1: Build signature header { timestamp: Date.now(), expiry_window: 5000, type: operationType }
+  Step 2: Wrap data { ...header, data: operationData }
+  Step 3: Recursively sort all keys (every nesting level)
+  Step 4: JSON.stringify with no whitespace (compact separators)
+  Step 5: Convert to UTF-8 bytes
+  Step 6: Ed25519 sign with agentKeypair.secretKey
+  Step 7: Base58 encode signature
+Output: { signature: string (Base58), timestamp: number, expiry_window: number }
+
+Then caller builds final POST body:
+  { account: mainWalletAddress, agent_wallet: agentPublicKey, signature, timestamp, expiry_window, ...operationData }
 ```
+
+**Implementation pitfalls to watch for:**
+- JavaScript's `JSON.stringify` does NOT guarantee key order — must implement recursive sort explicitly
+- `JSON.stringify` default separators include a space after `:` — must use custom replacer or explicit compact serialization
+- Timestamp is milliseconds, not seconds — `Date.now()` is correct, `Math.floor(Date.now() / 1000)` is WRONG
+- The `type` field goes in the signing message but NOT in the final request body
+- The `account` and `agent_wallet` fields go in the final request but NOT in the signing message
 
 This is the most critical new piece. Every authenticated request goes through this.
 
@@ -675,8 +797,8 @@ The adapter receives a decrypted `agentSecretKey: Uint8Array` for signing — it
 - We do custom byte-parsing of on-chain User accounts to read positions
 
 ### Pacifica's Model
-- Subaccounts are created via REST API (`POST /subaccounts/create`)
-- Fund transfer between main ↔ sub via REST API (`POST /subaccounts/transfer`)
+- Subaccounts are created via REST API (`POST /account/subaccount/create`) — **2-step process:** first `subaccount_initiate`, then `subaccount_confirm` (both use same endpoint, different operation types)
+- Fund transfer between main ↔ sub via REST API (`POST /account/subaccount/transfer`, operation type `subaccount_transfer`)
 - **No on-chain transaction needed** to create subaccounts — purely off-chain
 - All subaccounts share the same fee tier as the master account
 - Subaccount volumes count toward master account fee tier
