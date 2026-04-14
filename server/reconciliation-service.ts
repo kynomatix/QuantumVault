@@ -2,10 +2,26 @@ import { storage } from "./storage";
 import { db } from "./db";
 import { botTrades } from "@shared/schema";
 import { eq, and, or, sql, gte } from "drizzle-orm";
-import { getPerpPositions } from "./drift-service";
-import { getMarketPrice } from "./drift-price";
 import type { TradingBot } from "@shared/schema";
 import { normalizeMarket } from "./protocol/symbol-registry";
+
+async function fetchPerpPositions(agentPublicKey: string, subaccountId: number): Promise<any[]> {
+  try {
+    const { getPerpPositions } = await import("./drift-service");
+    return await getPerpPositions(agentPublicKey, subaccountId);
+  } catch {
+    return [];
+  }
+}
+
+async function fetchMarketPrice(market: string): Promise<number | null> {
+  try {
+    const { getMarketPrice } = await import("./drift-price");
+    return await getMarketPrice(market);
+  } catch {
+    return null;
+  }
+}
 
 const STALE_THRESHOLD_MS = 60 * 1000; // 60 seconds
 const LIQUIDATION_TRADE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
@@ -40,7 +56,7 @@ export async function syncPositionFromOnChain(
     console.log(`[Sync] Force syncing bot ${botId} from on-chain (market=${market}, subaccount=${subAccountId})`);
     
     // Query actual on-chain position using raw RPC (no WebSocket)
-    const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
+    const onChainPositions = await fetchPerpPositions(agentPublicKey, subAccountId);
     const normalizedMarket = normalizeMarket(market);
     const onChainPos = onChainPositions.find(p => normalizeMarket(p.market) === normalizedMarket);
     
@@ -202,7 +218,7 @@ async function detectAndRecordLiquidation(
       console.log(`[Reconcile] Recent trades (${recentTradeVolume.toFixed(4)}) don't explain position drop (${sizeDelta.toFixed(4)}) for ${market} - checking further`);
     }
 
-    const markPrice = await getMarketPrice(market) || dbEntryPrice;
+    const markPrice = await fetchMarketPrice(market) || dbEntryPrice;
     const liquidatedSize = sizeDelta;
     let estimatedPnl = 0;
 
@@ -298,7 +314,7 @@ export async function reconcileBotPosition(
   market: string
 ): Promise<{ synced: boolean; discrepancy: boolean; liquidation?: boolean }> {
   try {
-    const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
+    const onChainPositions = await fetchPerpPositions(agentPublicKey, subAccountId);
     const normalizedMarket = normalizeMarket(market);
     const onChainPos = onChainPositions.find(p => normalizeMarket(p.market) === normalizedMarket);
     const dbPosition = await storage.getBotPosition(botId, market);

@@ -1,5 +1,14 @@
 import { storage } from "./storage";
-import { getDriftAccountInfo } from "./drift-service";
+
+async function getAccountEquity(agentPublicKey: string, subaccountId: number): Promise<{ usdcBalance: number; unrealizedPnl: number }> {
+  try {
+    const { getDriftAccountInfo } = await import("./drift-service");
+    const info = await getDriftAccountInfo(agentPublicKey, subaccountId);
+    return { usdcBalance: info.usdcBalance || 0, unrealizedPnl: info.unrealizedPnl || 0 };
+  } catch {
+    return { usdcBalance: 0, unrealizedPnl: 0 };
+  }
+}
 
 const SNAPSHOT_INTERVAL_MS = 6 * 60 * 60 * 1000; // Every 6 hours
 
@@ -20,7 +29,7 @@ export async function takePnlSnapshots(): Promise<void> {
         const wallet = await storage.getWallet(sourceTradingBot.walletAddress);
         if (!wallet?.agentPublicKey) continue;
         
-        const accountInfo = await getDriftAccountInfo(
+        const accountInfo = await getAccountEquity(
           wallet.agentPublicKey,
           sourceTradingBot.driftSubaccountId
         );
@@ -29,7 +38,7 @@ export async function takePnlSnapshots(): Promise<void> {
         const realizedPnl = stats.totalPnl || 0;
         const totalTrades = stats.totalTrades || 0;
         const winningTrades = stats.winningTrades || 0;
-        const creatorEquity = accountInfo.usdcBalance || 0;
+        const creatorEquity = accountInfo.usdcBalance;
         
         // Get actual net deposited from equity events (same as bot management drawer)
         const botEvents = await storage.getBotEquityEvents(sourceTradingBot.id, 1000);

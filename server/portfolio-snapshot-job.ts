@@ -1,5 +1,23 @@
 import { storage } from "./storage";
-import { getDriftAccountInfo, getUsdcBalance } from "./drift-service";
+
+async function getAccountBalance(agentPublicKey: string, subaccountId: number): Promise<number> {
+  try {
+    const { getDriftAccountInfo } = await import("./drift-service");
+    const info = await getDriftAccountInfo(agentPublicKey, subaccountId);
+    return info.usdcBalance || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function getWalletUsdcBalance(agentPublicKey: string): Promise<number> {
+  try {
+    const { getUsdcBalance } = await import("./drift-service");
+    return await getUsdcBalance(agentPublicKey);
+  } catch {
+    return 0;
+  }
+}
 
 const SNAPSHOT_INTERVAL_MS = 12 * 60 * 60 * 1000; // Every 12 hours (00:00 and 12:00 UTC)
 
@@ -37,7 +55,7 @@ async function processWalletSnapshot(walletAddress: string): Promise<void> {
   
   if (wallet.agentPublicKey) {
     try {
-      const agentBalance = await getUsdcBalance(wallet.agentPublicKey);
+      const agentBalance = await getWalletUsdcBalance(wallet.agentPublicKey);
       totalBalance += agentBalance;
     } catch (error) {
       console.error(`[Portfolio Snapshots] Error getting agent wallet balance:`, error);
@@ -49,11 +67,11 @@ async function processWalletSnapshot(walletAddress: string): Promise<void> {
       if (bot.isActive) activeBotCount++;
       
       if (wallet.agentPublicKey && bot.driftSubaccountId) {
-        const accountInfo = await getDriftAccountInfo(
+        const balance = await getAccountBalance(
           wallet.agentPublicKey,
           bot.driftSubaccountId
         );
-        totalBalance += accountInfo.usdcBalance || 0;
+        totalBalance += balance;
       }
     } catch (error) {
       console.error(`[Portfolio Snapshots] Error getting balance for bot ${bot.id}:`, error);

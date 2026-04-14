@@ -1,6 +1,23 @@
 import { storage } from './storage';
 import type { PlatformMetricType } from '@shared/schema';
-import { fetchPlatformVolumeFromDrift, fetchPlatformTVLFromDrift } from './drift-data-api';
+
+async function tryFetchDriftVolume(wallets: string[]): Promise<{ totalVolume: number } | null> {
+  try {
+    const { fetchPlatformVolumeFromDrift } = await import('./drift-data-api');
+    return await fetchPlatformVolumeFromDrift(wallets);
+  } catch {
+    return null;
+  }
+}
+
+async function tryFetchDriftTVL(wallets: string[]): Promise<{ totalTVL: number; walletData: any[] } | null> {
+  try {
+    const { fetchPlatformTVLFromDrift } = await import('./drift-data-api');
+    return await fetchPlatformTVLFromDrift(wallets);
+  } catch {
+    return null;
+  }
+}
 
 const RECALC_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
@@ -34,8 +51,8 @@ async function seedCumulativeLedger(): Promise<void> {
     let driftVolume = 0;
     if (agentWallets.length > 0) {
       try {
-        const driftData = await fetchPlatformVolumeFromDrift(agentWallets);
-        driftVolume = driftData.totalVolume;
+        const driftData = await tryFetchDriftVolume(agentWallets);
+        if (driftData) driftVolume = driftData.totalVolume;
       } catch {}
     }
 
@@ -83,25 +100,25 @@ export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapsho
     if (agentWallets.length > 0) {
       try {
         const [volumeDriftData, tvlDriftData] = await Promise.all([
-          fetchPlatformVolumeFromDrift(agentWallets),
-          fetchPlatformTVLFromDrift(agentWallets),
+          tryFetchDriftVolume(agentWallets),
+          tryFetchDriftTVL(agentWallets),
         ]);
         
-        if (volumeDriftData.totalVolume > 0) {
+        if (volumeDriftData && volumeDriftData.totalVolume > 0) {
           const localVolume = totalVolumeFromDrift;
           totalVolumeFromDrift = Math.max(totalVolumeFromDrift, volumeDriftData.totalVolume);
           console.log(`[Analytics] Drift API volume: $${volumeDriftData.totalVolume.toFixed(2)}, Local volume: $${localVolume.toFixed(2)}, Using: $${totalVolumeFromDrift.toFixed(2)}`);
         }
         
-        if (tvlDriftData.walletData.length > 0) {
+        if (tvlDriftData && tvlDriftData.walletData.length > 0) {
           driftTVLSuccess = true;
           driftTVLValue = tvlDriftData.totalTVL;
           console.log(`[Analytics] Fetched real TVL from Drift API: $${tvlDriftData.totalTVL.toFixed(2)} (${tvlDriftData.walletData.length} wallets)`);
         } else {
-          console.warn('[Analytics] Drift TVL API returned no valid wallet data, using local fallback');
+          console.warn('[Analytics] Drift TVL data not available, using local fallback');
         }
       } catch (driftError) {
-        console.warn('[Analytics] Failed to fetch Drift API data, using local data:', driftError);
+        console.warn('[Analytics] Failed to fetch external API data, using local data:', driftError);
       }
     }
 

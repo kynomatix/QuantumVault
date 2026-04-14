@@ -12,7 +12,7 @@
  */
 
 import { getCachedMaxLeverage, isMarketNonTradable, getNonTradableMarkets } from "./leverage-cache-service";
-import { CANONICAL_PERP_MARKETS, getCanonicalIndex } from "./market-registry";
+import { CANONICAL_PERP_MARKETS, getCanonicalIndex, getMarketInfo as getAdapterMarketInfo, getAllMarkets as getAdapterAllMarkets } from "./market-registry";
 
 export type RiskTier = 'recommended' | 'caution' | 'high_risk';
 
@@ -471,6 +471,8 @@ export function getMinOrderSize(symbol: string): number {
   const normalizedSymbol = symbol.toUpperCase().includes('-PERP') 
     ? symbol.toUpperCase() 
     : `${symbol.toUpperCase()}-PERP`;
+  const adapterInfo = getAdapterMarketInfo(normalizedSymbol);
+  if (adapterInfo) return adapterInfo.minOrderSizeBase;
   return MARKET_METADATA[normalizedSymbol]?.minOrderSize ?? 0.01;
 }
 

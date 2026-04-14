@@ -1,35 +1,33 @@
 import { storage } from './storage';
-import { getPerpPositions, getDriftAccountInfo } from './drift-service';
 import { normalizeMarket } from './protocol/symbol-registry';
+import { getMarketInfo } from './market-registry';
 
-const MAINTENANCE_MARGIN_WEIGHTS: Record<string, number> = {
-  'SOL': 0.0625,
-  'BTC': 0.05,
-  'ETH': 0.05,
-  'APT': 0.10,
-  'MATIC': 0.10,
-  'DOGE': 0.10,
-  'BNB': 0.0625,
-  'SUI': 0.10,
-  'PEPE': 0.15,
-  'ARB': 0.10,
-  'PYTH': 0.10,
-  'WIF': 0.15,
-  'JUP': 0.10,
-  'JTO': 0.10,
-  'INJ': 0.10,
-  'SEI': 0.10,
-  'TIA': 0.10,
-  'LINK': 0.0625,
-  'AVAX': 0.0625,
-  'POPCAT': 0.15,
-  'ONDO': 0.10,
-  'TRUMP': 0.15,
-};
+async function fetchPerpPositions(agentPublicKey: string, subaccountId: number): Promise<any[]> {
+  try {
+    const { getPerpPositions } = await import("./drift-service");
+    return await getPerpPositions(agentPublicKey, subaccountId);
+  } catch {
+    return [];
+  }
+}
+
+async function fetchDriftAccountInfo(agentPublicKey: string, subaccountId: number): Promise<any> {
+  try {
+    const { getDriftAccountInfo } = await import("./drift-service");
+    return await getDriftAccountInfo(agentPublicKey, subaccountId);
+  } catch {
+    return { usdcBalance: 0, unrealizedPnl: 0 };
+  }
+}
+
+const DEFAULT_MARGIN_WEIGHT = 0.10;
 
 function getMaintenanceMarginWeight(market: string): number {
   const normalized = normalizeMarket(market);
-  return MAINTENANCE_MARGIN_WEIGHTS[normalized] ?? 0.10;
+  const internalSymbol = normalized.includes('-PERP') ? normalized : `${normalized}-PERP`;
+  const info = getMarketInfo(internalSymbol);
+  if (info) return info.maintenanceMarginWeight;
+  return DEFAULT_MARGIN_WEIGHT;
 }
 
 export interface OnChainPosition {
@@ -92,7 +90,7 @@ export class PositionService {
       // ALWAYS use byte-parsing for position reading to avoid SDK WebSocket memory leaks
       // The SDK creates WebSocket connections that don't properly cleanup
       console.log(`[PositionService] Using byte-parsing position fetching for ${market}`);
-      const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
+      const onChainPositions = await fetchPerpPositions(agentPublicKey, subAccountId);
       const normalizedMarket = normalizeMarket(market);
       onChainPos = onChainPositions.find(p => 
         normalizeMarket(p.market) === normalizedMarket
@@ -143,7 +141,7 @@ export class PositionService {
       let healthMetrics: PositionData['healthMetrics'] = undefined;
       if (hasPosition) {
         try {
-          const accountInfo = await getDriftAccountInfo(agentPublicKey, subAccountId);
+          const accountInfo = await fetchDriftAccountInfo(agentPublicKey, subAccountId);
           
           // Health Factor = (freeCollateral / totalCollateral) * 100
           // This matches Drift's approach: 100% when fully free, lower as margin is used
@@ -275,10 +273,10 @@ export class PositionService {
     // ALWAYS use byte-parsing for position reading - it's lightweight and doesn't create WebSocket connections
     // The SDK approach causes memory leaks due to WebSocket connections that don't cleanup
     console.log(`[PositionService] getPositionForExecution: Using byte-parsing for ${market} (subaccount ${subAccountId})`);
-    const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
+    const onChainPositions = await fetchPerpPositions(agentPublicKey, subAccountId);
     
     const normalizedMarket = normalizeMarket(market);
-    const onChainPos = onChainPositions.find(p => 
+    const onChainPos = onChainPositions.find((p: any) => 
       normalizeMarket(p.market) === normalizedMarket
     );
 
@@ -390,7 +388,7 @@ export class PositionService {
       checked++;
 
       try {
-        const onChainPositions = await getPerpPositions(agentPublicKey, subAccountId);
+        const onChainPositions = await fetchPerpPositions(agentPublicKey, subAccountId);
         const normalizedMarket = normalizeMarket(bot.market);
         const onChainPos = onChainPositions.find(p => 
           normalizeMarket(p.market) === normalizedMarket

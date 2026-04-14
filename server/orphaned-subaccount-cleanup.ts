@@ -1,5 +1,13 @@
 import { storage } from "./storage";
-import { closeDriftSubaccount } from "./drift-service";
+
+async function tryCloseDriftSubaccount(encryptedKey: string, subaccountId: number): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    const { closeDriftSubaccount } = await import("./drift-service");
+    return await closeDriftSubaccount(encryptedKey, subaccountId);
+  } catch (err: any) {
+    return { success: false, error: err.message || 'drift-service unavailable' };
+  }
+}
 
 let isCleanupRunning = false;
 
@@ -39,7 +47,7 @@ export async function cleanupOrphanedSubaccounts(): Promise<void> {
       console.log(`[OrphanedCleanup] Attempting to close subaccount ${entry.driftSubaccountId} (retry ${entry.retryCount + 1}/5)`);
       
       try {
-        const result = await closeDriftSubaccount(
+        const result = await tryCloseDriftSubaccount(
           entry.agentPrivateKeyEncrypted,
           entry.driftSubaccountId
         );
