@@ -14,7 +14,7 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 5. **If something isn't covered in the doc**, stop and flag it — do not improvise. The doc may need updating before the work proceeds.
 
 **Key sections in `PACIFICA_MIGRATION.md`:**
-- **Master Progress Tracker** (top of doc): 159 checkboxes across all phases — scan this FIRST to see what's done and what's next
+- **Master Progress Tracker** (top of doc): 194 checkboxes across all phases (0-7) — scan this FIRST to see what's done and what's next
 - Section 4: ProtocolAdapter + UserTransactionBuilder interfaces (split by signing model)
 - Section 5: SymbolRegistry design + normalizeMarket consolidation
 - Section 6: Pacifica API endpoints with operation types
