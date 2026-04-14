@@ -33,6 +33,34 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 
 **Status:** Planning phase — document is still being audited. No code changes until audit is complete.
 
+### Engineering Standards for Migration Work
+
+**These apply to ALL migration code. This platform holds user capital — code quality is non-negotiable.**
+
+**Architect Review:** After completing each numbered step within a phase (e.g., Phase 1 step 3, Phase 3 Group B step 7), run an architect review before moving to the next step. Do not batch multiple steps and review at the end — review each step individually. The architect should evaluate: correctness against the migration doc spec, error handling completeness, security of key material handling, and adherence to the memory/RPC/rate-limit standards below.
+
+**Memory Efficiency (Critical — Replit-hosted, constrained environment):**
+- No unbounded in-memory collections. Every Map, array, or cache MUST have a max size or TTL-based eviction.
+- WebSocket event buffers must be bounded — process events inline or use a fixed-size ring buffer, never accumulate indefinitely.
+- Market data caches: use TTL (e.g., 60s for prices, 5min for market metadata). Stale entries must be evicted, not just overwritten.
+- No `@drift-labs/sdk` patterns — the entire point of this migration is eliminating that memory footprint. The Pacifica adapter must be a thin REST/WS client, not a fat SDK wrapper.
+- If a service holds per-bot state in memory (like trade-retry-service), ensure cleanup on bot deletion/deactivation.
+- When reviewing: check for `new Map()` or `{}` used as caches without size limits — flag them.
+
+**RPC Cost (Solana on-chain calls — minimize aggressively):**
+- After migration, Solana RPC is ONLY needed for deposit/withdraw (on-chain USDC transfers). All market data, positions, orders, balances come from Pacifica REST/WS — zero RPC cost.
+- Do NOT add new Solana RPC calls for anything the adapter can provide. If you're tempted to read on-chain state, check if the adapter already has a method for it.
+- Batch RPC calls where unavoidable (e.g., `getMultipleAccountsInfo` instead of N × `getAccountInfo`).
+- Existing RPC config (Helius primary, Triton backup) remains for the deposit/withdraw path only.
+
+**Pacifica Rate Limit Budget (300 credits / 60s rolling, shared across ALL subaccounts):**
+- Every Pacifica REST call costs credits. Heavy GETs (positions, account info) cost more than light ones (prices).
+- WebSocket is the primary data path — REST is fallback/reconciliation only. Do not poll REST when WS is healthy.
+- Reconciliation loop (60s interval) must be budgeted: N bots × position read cost must fit within the credit budget with headroom for order placement.
+- When WS disconnects, REST polling kicks in at 5s intervals — this burns credits fast. Track credit usage and reduce polling frequency if approaching limit.
+- 429 responses must trigger exponential backoff, not immediate retry.
+- When reviewing: calculate worst-case credit consumption for any new polling loop or batch read pattern.
+
 ---
 
 ## Overview
