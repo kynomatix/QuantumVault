@@ -20,6 +20,24 @@ async function trySyncMarketRegistry(): Promise<void> {
     console.warn('[Startup] Market registry sync skipped (drift-service unavailable):', err);
   }
 }
+
+async function initializeProtocolAdapter(): Promise<void> {
+  try {
+    const { PacificaAdapter } = await import("./protocol/pacifica/pacifica-adapter");
+    const { registerAdapter, setAdapterHealth } = await import("./protocol/adapter-registry");
+    const adapter = new PacificaAdapter();
+    registerAdapter(adapter);
+    await adapter.initialize();
+    setAdapterHealth('pacifica', 'ready');
+    console.log('[Startup] Pacifica adapter registered and initialized');
+  } catch (err: any) {
+    console.error('[Startup] Pacifica adapter initialization failed:', err.message || err);
+    try {
+      const { setAdapterHealth } = await import("./protocol/adapter-registry");
+      setAdapterHealth('pacifica', 'degraded');
+    } catch { }
+  }
+}
 import { createLabSupervisor, getLabAuthSecret } from "./lab/supervisor";
 import { createProxyMiddleware } from "http-proxy-middleware";
 
@@ -313,6 +331,8 @@ app.use((req, res, next) => {
 
 (async () => {
   await ensureSchema();
+
+  await initializeProtocolAdapter();
 
   labSupervisor.start().catch((err) => {
     console.error(`[LabSupervisor] Initial start failed: ${err.message}`);

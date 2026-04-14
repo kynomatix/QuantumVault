@@ -1,5 +1,7 @@
-import { sign } from 'tweetnacl';
+import nacl from 'tweetnacl';
 import * as bs58 from 'bs58';
+
+const sign = nacl.sign;
 
 export interface SignResult {
   signature: string;

@@ -9,38 +9,375 @@ import type { Request as ExpressRequest, Response as ExpressResponse, NextFuncti
 import { db } from "./db";
 import { desc, eq, sql } from "drizzle-orm";
 import { ZodError } from "zod";
-let _driftPriceMod: any = null;
-let _driftServiceMod: any = null;
-async function _dp(): Promise<any> { if (!_driftPriceMod) _driftPriceMod = await import("./drift-price"); return _driftPriceMod; }
-async function _ds(): Promise<any> { if (!_driftServiceMod) _driftServiceMod = await import("./drift-service"); return _driftServiceMod; }
+import { getDefaultAdapter } from './protocol/adapter-registry';
+import { getAgentKeypair } from './agent-wallet';
 
-async function getMarketPrice(a: any) { return (await _dp()).getMarketPrice(a); }
-async function getAllPrices() { return (await _dp()).getAllPrices(); }
-async function forceRefreshPrices() { return (await _dp()).forceRefreshPrices(); }
+function _subIdStr(subAccountId: number): string | undefined {
+  return subAccountId > 0 ? String(subAccountId) : undefined;
+}
 
-async function buildDepositTransaction(a: any, b: any) { return (await _ds()).buildDepositTransaction(a, b); }
-async function buildWithdrawTransaction(a: any, b: any) { return (await _ds()).buildWithdrawTransaction(a, b); }
-async function getUsdcBalance(a: any) { return (await _ds()).getUsdcBalance(a); }
-async function getDriftBalance(a: any, b?: any) { return (await _ds()).getDriftBalance(a, b); }
-async function buildTransferToSubaccountTransaction(a: any, b: any, c: any, d: any) { return (await _ds()).buildTransferToSubaccountTransaction(a, b, c, d); }
-async function buildTransferFromSubaccountTransaction(a: any, b: any, c: any, d: any) { return (await _ds()).buildTransferFromSubaccountTransaction(a, b, c, d); }
-async function subaccountExists(a: any, b: any) { return (await _ds()).subaccountExists(a, b); }
-async function buildAgentDriftDepositTransaction(a: any, b: any, c: any) { return (await _ds()).buildAgentDriftDepositTransaction(a, b, c); }
-async function buildAgentDriftWithdrawTransaction(a: any, b: any, c: any) { return (await _ds()).buildAgentDriftWithdrawTransaction(a, b, c); }
-async function executeAgentDriftDeposit(a: any, b: any, c: any, d: any, e?: any) { return (await _ds()).executeAgentDriftDeposit(a, b, c, d, e); }
-async function executeAgentDriftWithdraw(a: any, b: any, c: any, d: any) { return (await _ds()).executeAgentDriftWithdraw(a, b, c, d); }
-async function executeAgentTransferBetweenSubaccounts(a: any, b: any, c: any, d: any, e: any) { return (await _ds()).executeAgentTransferBetweenSubaccounts(a, b, c, d, e); }
-async function getAgentDriftBalance(a: any) { return (await _ds()).getAgentDriftBalance(a); }
-async function getDriftAccountInfo(a: any, b: any) { return (await _ds()).getDriftAccountInfo(a, b); }
-async function getBatchDriftAccountInfo(a: any, b: any) { return (await _ds()).getBatchDriftAccountInfo(a, b); }
-async function getBatchPerpPositions(a: any, b: any) { return (await _ds()).getBatchPerpPositions(a, b); }
-async function executePerpOrder(a: any, b: any, c: any, d: any, e: any, f: any, g: any, h?: any, i?: any) { return (await _ds()).executePerpOrder(a, b, c, d, e, f, g, h, i); }
-async function getPerpPositions(a: any, b: any) { return (await _ds()).getPerpPositions(a, b); }
-async function closePerpPosition(a: any, b: any, c: any, d?: any, e?: any, f?: any, g?: any, h?: any) { return (await _ds()).closePerpPosition(a, b, c, d, e, f, g, h); }
-async function getNextOnChainSubaccountId(a: any, b?: any) { return (await _ds()).getNextOnChainSubaccountId(a, b); }
-async function discoverOnChainSubaccounts(a: any) { return (await _ds()).discoverOnChainSubaccounts(a); }
-async function closeDriftSubaccount(a: any, b: any) { return (await _ds()).closeDriftSubaccount(a, b); }
-async function settleAllPnl(a: any, b: any) { return (await _ds()).settleAllPnl(a, b); }
+function _decryptToSecretKey(encryptedPrivateKey: string): { secretKey: Uint8Array; publicKey: string } {
+  const keypair = getAgentKeypair(encryptedPrivateKey);
+  return { secretKey: keypair.secretKey, publicKey: keypair.publicKey.toBase58() };
+}
+
+async function _lookupMainWallet(agentPublicKey: string): Promise<string> {
+  const [w] = await db.select({ address: wallets.address })
+    .from(wallets)
+    .where(eq(wallets.agentPublicKey, agentPublicKey))
+    .limit(1);
+  if (!w) throw new Error('No wallet found for agent public key ' + agentPublicKey.slice(0, 12) + '...');
+  return w.address;
+}
+
+function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entryPrice: number; markPrice: number; unrealizedPnl: number }) {
+  return {
+    marketIndex: 0,
+    market: p.internalSymbol,
+    baseAssetAmount: p.baseSize,
+    quoteAssetAmount: 0,
+    quoteEntryAmount: 0,
+    side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
+    sizeUsd: Math.abs(p.baseSize) * p.markPrice,
+    entryPrice: p.entryPrice,
+    markPrice: p.markPrice,
+    unrealizedPnl: p.unrealizedPnl,
+    unrealizedPnlPercent: p.entryPrice > 0
+      ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
+      : 0,
+  };
+}
+
+function _mapAccountInfoToDrift(info: { balance: number; equity: number; availableMargin: number; maintenanceMargin: number; unrealizedPnl: number }) {
+  const hasOpenPositions = Math.abs(info.unrealizedPnl) > 0.001 || info.maintenanceMargin > 0;
+  return {
+    usdcBalance: info.balance,
+    totalCollateral: info.equity,
+    freeCollateral: info.availableMargin,
+    hasOpenPositions,
+    marginUsed: info.maintenanceMargin,
+    unrealizedPnl: info.unrealizedPnl,
+    totalPositionNotional: info.maintenanceMargin > 0 ? info.maintenanceMargin / 0.03 : 0,
+  };
+}
+
+async function getMarketPrice(symbol: string): Promise<number | null> {
+  return getDefaultAdapter().getPrice(symbol);
+}
+
+async function getAllPrices(): Promise<Record<string, number>> {
+  return getDefaultAdapter().getAllPrices();
+}
+
+async function forceRefreshPrices(): Promise<void> { }
+
+async function buildDepositTransaction(walletAddress: string, amountUsdc: number) {
+  const { PacificaTxBuilder } = await import('./protocol/pacifica/pacifica-tx-builder');
+  return new PacificaTxBuilder().buildDepositTransaction(walletAddress, amountUsdc);
+}
+
+async function buildWithdrawTransaction(_walletAddress: string, _amountUsdc: number) {
+  throw new Error('Pacifica withdrawals are API-based. Use the exchange withdraw endpoint instead.');
+}
+
+async function getUsdcBalance(walletAddress: string): Promise<number> {
+  return getAgentUsdcBalance(walletAddress);
+}
+
+async function getDriftBalance(walletAddress: string, subAccountId: number = 0): Promise<number> {
+  try {
+    const info = await getDefaultAdapter().getAccountInfo(walletAddress, _subIdStr(subAccountId));
+    return info.balance;
+  } catch { return 0; }
+}
+
+async function buildTransferToSubaccountTransaction(_a: string, _b: number, _c: number, _d: number) {
+  throw new Error('Pacifica subaccount transfers are API-based. Use executeAgentTransferBetweenSubaccounts instead.');
+}
+
+async function buildTransferFromSubaccountTransaction(_a: string, _b: number, _c: number, _d: number) {
+  throw new Error('Pacifica subaccount transfers are API-based. Use executeAgentTransferBetweenSubaccounts instead.');
+}
+
+async function subaccountExists(walletAddress: string, subAccountId: number): Promise<boolean> {
+  try {
+    const subs = await getDefaultAdapter().listSubaccounts(walletAddress);
+    return subs.some(s => s.subaccountId === String(subAccountId));
+  } catch { return false; }
+}
+
+async function buildAgentDriftDepositTransaction(_a: string, _b: string, _c: number) {
+  throw new Error('Pacifica agent deposits are executed directly. Use executeAgentDriftDeposit instead.');
+}
+
+async function buildAgentDriftWithdrawTransaction(_a: string, _b: string, _c: number) {
+  throw new Error('Pacifica agent withdrawals are API-based. Use executeAgentDriftWithdraw instead.');
+}
+
+async function executeAgentDriftDeposit(
+  agentPublicKey: string,
+  privateKeyOrEncrypted: string,
+  amountUsdc: number,
+  subAccountId: number = 0,
+  isPreDecrypted: boolean = false,
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    let secretKey: Uint8Array;
+    if (isPreDecrypted) {
+      const bs58Mod = await import('bs58');
+      const bs58Default = bs58Mod.default || bs58Mod;
+      secretKey = bs58Default.decode(privateKeyOrEncrypted);
+    } else {
+      secretKey = getAgentKeypair(privateKeyOrEncrypted).secretKey;
+    }
+    const result = await getDefaultAdapter().executeDeposit({
+      agentPublicKey,
+      agentSecretKey: secretKey,
+      amount: amountUsdc,
+      subaccountId: _subIdStr(subAccountId),
+    });
+    return { success: result.success, signature: result.txSignature, error: result.error };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+}
+
+async function executeAgentDriftWithdraw(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  amountUsdc: number,
+  subAccountId: number = 0,
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    const { secretKey } = _decryptToSecretKey(encryptedPrivateKey);
+    const mainWalletAddress = await _lookupMainWallet(agentPublicKey);
+    const result = await getDefaultAdapter().executeWithdraw({
+      agentPublicKey,
+      agentSecretKey: secretKey,
+      mainWalletAddress,
+      amount: amountUsdc,
+      subaccountId: _subIdStr(subAccountId),
+    });
+    return { success: result.success, signature: result.txSignature, error: result.error };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+}
+
+async function executeAgentTransferBetweenSubaccounts(
+  agentPublicKey: string,
+  encryptedPrivateKey: string,
+  fromSubAccountId: number,
+  toSubAccountId: number,
+  amountUsdc: number,
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    const { secretKey } = _decryptToSecretKey(encryptedPrivateKey);
+    const mainWalletAddress = await _lookupMainWallet(agentPublicKey);
+    const result = await getDefaultAdapter().transferBetweenSubaccounts({
+      agentPublicKey,
+      agentSecretKey: secretKey,
+      mainWalletAddress,
+      fromSubaccountId: String(fromSubAccountId),
+      toSubaccountId: String(toSubAccountId),
+      amount: amountUsdc,
+    });
+    return { success: result.success, error: result.error };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+}
+
+async function getAgentDriftBalance(agentPublicKey: string): Promise<number> {
+  return getDriftBalance(agentPublicKey, 0);
+}
+
+async function getDriftAccountInfo(walletAddress: string, subAccountId: number = 0) {
+  try {
+    const info = await getDefaultAdapter().getAccountInfo(walletAddress, _subIdStr(subAccountId));
+    return _mapAccountInfoToDrift(info);
+  } catch (error) {
+    console.error('[Adapter] Error reading account info:', error);
+    return { usdcBalance: 0, totalCollateral: 0, freeCollateral: 0, hasOpenPositions: false, marginUsed: 0, unrealizedPnl: 0, totalPositionNotional: 0 };
+  }
+}
+
+async function getBatchDriftAccountInfo(walletAddress: string, subAccountIds: number[]) {
+  try {
+    const results = await getDefaultAdapter().getBatchAccountInfo(walletAddress, subAccountIds.map(String));
+    const mapped = new Map<number, any>();
+    for (let i = 0; i < subAccountIds.length; i++) {
+      if (results[i]) mapped.set(subAccountIds[i], _mapAccountInfoToDrift(results[i]));
+    }
+    return mapped;
+  } catch (error) {
+    console.error('[Adapter] Batch account info error:', error);
+    return new Map<number, any>();
+  }
+}
+
+async function getBatchPerpPositions(walletAddress: string, subAccountIds: number[]) {
+  try {
+    const batchResult = await getDefaultAdapter().getBatchPositions(walletAddress, subAccountIds.map(String));
+    const mapped = new Map<number, any[]>();
+    batchResult.forEach((positions, stringId) => {
+      mapped.set(parseInt(stringId, 10), positions.map(_mapPositionToDrift));
+    });
+    return mapped;
+  } catch (error) {
+    console.error('[Adapter] Batch positions error:', error);
+    return new Map<number, any[]>();
+  }
+}
+
+async function executePerpOrder(
+  encryptedPrivateKey: string,
+  market: string,
+  side: 'long' | 'short',
+  sizeInBase: number,
+  subAccountId: number = 0,
+  reduceOnly: boolean = false,
+  _slippageBps: number = 50,
+  _privateKeyBase58?: string,
+  expectedAgentPubkey?: string,
+): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string | null }> {
+  try {
+    const { secretKey, publicKey } = _decryptToSecretKey(encryptedPrivateKey);
+    const agentPubKey = expectedAgentPubkey || publicKey;
+    const mainWalletAddress = await _lookupMainWallet(agentPubKey);
+    const orderResult = await getDefaultAdapter().placeMarketOrder({
+      agentPublicKey: agentPubKey,
+      agentSecretKey: secretKey,
+      mainWalletAddress,
+      internalSymbol: market,
+      side,
+      sizeBase: sizeInBase,
+      reduceOnly,
+      subaccountId: _subIdStr(subAccountId),
+    });
+    return {
+      success: orderResult.success,
+      signature: orderResult.orderId,
+      txSignature: orderResult.orderId,
+      fillPrice: orderResult.fillPrice,
+      actualFee: orderResult.fee,
+      error: orderResult.error,
+      executionMethod: 'adapter',
+      swiftOrderId: null,
+    };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+}
+
+async function getPerpPositions(walletAddress: string, subAccountId: number = 0) {
+  try {
+    const positions = await getDefaultAdapter().getPositions(walletAddress, _subIdStr(subAccountId));
+    return positions.map(_mapPositionToDrift);
+  } catch { return []; }
+}
+
+async function closePerpPosition(
+  encryptedPrivateKey: string,
+  market: string,
+  subAccountId: number = 0,
+  positionSizeBase?: number,
+  _slippageBps: number = 50,
+  _privateKeyBase58?: string,
+  expectedAgentPubkey?: string,
+  positionSide?: 'long' | 'short',
+): Promise<{ success: boolean; signature?: string; error?: string; executionMethod?: string; fillPrice?: number }> {
+  try {
+    const { secretKey, publicKey } = _decryptToSecretKey(encryptedPrivateKey);
+    const agentPubKey = expectedAgentPubkey || publicKey;
+    const mainWalletAddress = await _lookupMainWallet(agentPubKey);
+    const adapter = getDefaultAdapter();
+    let orderResult;
+    if (positionSizeBase && positionSide) {
+      const closeSide: 'long' | 'short' = positionSide === 'long' ? 'short' : 'long';
+      orderResult = await adapter.placeMarketOrder({
+        agentPublicKey: agentPubKey,
+        agentSecretKey: secretKey,
+        mainWalletAddress,
+        internalSymbol: market,
+        side: closeSide,
+        sizeBase: positionSizeBase,
+        reduceOnly: true,
+        subaccountId: _subIdStr(subAccountId),
+      });
+    } else {
+      orderResult = await adapter.closePosition({
+        agentPublicKey: agentPubKey,
+        agentSecretKey: secretKey,
+        mainWalletAddress,
+        internalSymbol: market,
+        subaccountId: _subIdStr(subAccountId),
+      });
+    }
+    return {
+      success: orderResult.success,
+      signature: orderResult.orderId,
+      error: orderResult.error,
+      executionMethod: 'adapter',
+      fillPrice: orderResult.fillPrice,
+    };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+}
+
+async function getNextOnChainSubaccountId(walletAddress: string, dbAllocatedIds: number[] = []): Promise<number> {
+  try {
+    const subs = await getDefaultAdapter().listSubaccounts(walletAddress);
+    const existingIds = subs.map(s => parseInt(s.subaccountId, 10)).filter(n => !isNaN(n));
+    const allIds = new Set([...existingIds, ...dbAllocatedIds]);
+    let nextId = 1;
+    while (allIds.has(nextId)) nextId++;
+    return nextId;
+  } catch {
+    const maxDb = dbAllocatedIds.length > 0 ? Math.max.apply(null, dbAllocatedIds) : 0;
+    return maxDb + 1;
+  }
+}
+
+async function discoverOnChainSubaccounts(walletAddress: string): Promise<number[]> {
+  try {
+    const subs = await getDefaultAdapter().discoverSubaccounts(walletAddress);
+    return subs.map(s => parseInt(s.subaccountId, 10)).filter(n => !isNaN(n));
+  } catch { return []; }
+}
+
+async function closeDriftSubaccount(
+  encryptedPrivateKey: string,
+  subAccountId: number,
+): Promise<{ success: boolean; signature?: string; error?: string }> {
+  try {
+    const { publicKey } = _decryptToSecretKey(encryptedPrivateKey);
+    const adapter = getDefaultAdapter();
+    if (adapter.closeSubaccount) {
+      await adapter.closeSubaccount(publicKey, String(subAccountId));
+    }
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+}
+
+async function settleAllPnl(
+  _encryptedOrPublicKey: string,
+  subAccountId: number,
+): Promise<{ success: boolean; settledMarkets?: any[]; error?: string }> {
+  try {
+    const result = await getDefaultAdapter().settlePnl({
+      agentPublicKey: _encryptedOrPublicKey,
+      agentSecretKey: new Uint8Array(0),
+      subaccountId: _subIdStr(subAccountId),
+    });
+    return { success: result.success, settledMarkets: [], error: result.error };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+}
 import { reconcileBotPosition, syncPositionFromOnChain, backfillLiquidationRecords, correctFalseLiquidations } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
@@ -62,7 +399,7 @@ const EXCHANGE_FEE_RATES: Record<string, number> = {
   drift: 0.00045,
   pacifica: 0.0004,
 };
-const DEFAULT_EXCHANGE_FEE_RATE = 0.00045;
+const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;
 
 function getExchangeFeeRate(protocol?: string | null): number {
   if (!protocol) return DEFAULT_EXCHANGE_FEE_RATE;
@@ -4624,33 +4961,32 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         const dbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
         
         if (wallet.agentPublicKey) {
-          // SYNC: Create placeholder bots for any orphaned on-chain subaccounts
-          // This keeps DB in sync with on-chain state and prevents ID conflicts
-          const { syncOnChainSubaccounts } = await import('./drift-service');
-          await syncOnChainSubaccounts(
-            wallet.agentPublicKey,
-            req.walletAddress!,
-            dbAllocatedIds,
-            async (orphanedSubaccountId: number) => {
-              // Create a placeholder bot for the orphaned subaccount
-              const orphanedWebhookSecret = generateWebhookSecret();
-              const orphanedBot = await storage.createTradingBot({
-                walletAddress: req.walletAddress!,
-                name: `Recovered Bot (SA${orphanedSubaccountId})`,
-                market: 'SOL-PERP',
-                webhookSecret: orphanedWebhookSecret,
-                driftSubaccountId: orphanedSubaccountId,
-                isActive: false, // Paused by default - user can configure
-                side: 'both',
-                leverage: 1,
-                totalInvestment: '0',
-                maxPositionSize: null,
-                signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
-                riskConfig: {},
-              } as any);
-              console.log(`[Bot Creation] Created recovered bot ${orphanedBot.id} for orphaned subaccount ${orphanedSubaccountId}`);
+          const existingOnChain = await discoverOnChainSubaccounts(wallet.agentPublicKey);
+          const dbIdSet = new Set(dbAllocatedIds);
+          for (const subId of existingOnChain) {
+            if (subId > 0 && !dbIdSet.has(subId)) {
+              try {
+                const orphanedWebhookSecret = generateWebhookSecret();
+                const orphanedBot = await storage.createTradingBot({
+                  walletAddress: req.walletAddress!,
+                  name: `Recovered Bot (SA${subId})`,
+                  market: 'SOL-PERP',
+                  webhookSecret: orphanedWebhookSecret,
+                  driftSubaccountId: subId,
+                  isActive: false,
+                  side: 'both',
+                  leverage: 1,
+                  totalInvestment: '0',
+                  maxPositionSize: null,
+                  signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
+                  riskConfig: {},
+                } as any);
+                console.log(`[Bot Creation] Created recovered bot ${orphanedBot.id} for orphaned subaccount ${subId}`);
+              } catch (syncErr: any) {
+                console.error(`[Bot Creation] Failed to create placeholder for subaccount ${subId}:`, syncErr.message);
+              }
             }
-          );
+          }
           
           // Re-fetch allocated IDs after sync (may have added orphaned bots)
           const updatedDbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
@@ -9062,33 +9398,32 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         // Get all subaccount IDs currently allocated in the database for this wallet
         const dbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
         
-        // SYNC: Create placeholder bots for any orphaned on-chain subaccounts
-        // This keeps DB in sync with on-chain state and prevents ID conflicts
-        const { syncOnChainSubaccounts } = await import('./drift-service');
-        await syncOnChainSubaccounts(
-          wallet.agentPublicKey,
-          req.walletAddress!,
-          dbAllocatedIds,
-          async (orphanedSubaccountId: number) => {
-            // Create a placeholder bot for the orphaned subaccount
-            const orphanedWebhookSecret = generateWebhookSecret();
-            await storage.createTradingBot({
-              walletAddress: req.walletAddress!,
-              name: `Recovered Bot (SA${orphanedSubaccountId})`,
-              market: 'SOL-PERP',
-              webhookSecret: orphanedWebhookSecret,
-              driftSubaccountId: orphanedSubaccountId,
-              isActive: false,
-              side: 'both',
-              leverage: 1,
-              totalInvestment: '0',
-              maxPositionSize: null,
-              signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
-              riskConfig: {},
-            } as any);
-            console.log(`[Marketplace] Created recovered bot for orphaned subaccount ${orphanedSubaccountId}`);
+        const existingOnChain = await discoverOnChainSubaccounts(wallet.agentPublicKey);
+        const dbIdSet = new Set(dbAllocatedIds);
+        for (const subId of existingOnChain) {
+          if (subId > 0 && !dbIdSet.has(subId)) {
+            try {
+              const orphanedWebhookSecret = generateWebhookSecret();
+              await storage.createTradingBot({
+                walletAddress: req.walletAddress!,
+                name: `Recovered Bot (SA${subId})`,
+                market: 'SOL-PERP',
+                webhookSecret: orphanedWebhookSecret,
+                driftSubaccountId: subId,
+                isActive: false,
+                side: 'both',
+                leverage: 1,
+                totalInvestment: '0',
+                maxPositionSize: null,
+                signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
+                riskConfig: {},
+              } as any);
+              console.log(`[Marketplace] Created recovered bot for orphaned subaccount ${subId}`);
+            } catch (syncErr: any) {
+              console.error(`[Marketplace] Failed to create placeholder for subaccount ${subId}:`, syncErr.message);
+            }
           }
-        );
+        }
         
         // Re-fetch allocated IDs after sync (may have added orphaned bots)
         const updatedDbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
@@ -9566,8 +9901,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
       }
       
-      // Get private key
-      const { getAgentKeypair } = await import('./agent-wallet');
       const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
       const bs58 = await import('bs58');
       const privateKeyBase58 = bs58.default.encode(agentKeypair.secretKey);
@@ -9693,15 +10026,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       console.log(`[Debug] Closing position on ${market} in subaccount ${subAccountId} for wallet ${wallet.agentPublicKey}`);
       
-      // Use closePerpPosition to close the position
-      const { closePerpPosition } = await import("./drift-service.js");
-      const slippageBps = wallet.slippageBps ?? 100; // Higher slippage for dust
+      const slippageBps = wallet.slippageBps ?? 100;
       
       const result = await closePerpPosition(
         wallet.agentPrivateKeyEncrypted,
         market,
         subAccountId,
-        undefined, // Let SDK determine position size from on-chain
+        undefined,
         slippageBps
       );
       
