@@ -5,6 +5,15 @@ import { getMarketBySymbol } from "./market-liquidity-service";
 import { transferUsdcToWallet } from "./agent-wallet";
 import { PublicKey } from "@solana/web3.js";
 
+const EXCHANGE_FEE_RATES: Record<string, number> = {
+  drift: 0.00045,
+  pacifica: 0.0004,
+};
+function getExchangeFeeRate(protocol?: string | null): number {
+  if (!protocol) return EXCHANGE_FEE_RATES.drift;
+  return EXCHANGE_FEE_RATES[protocol] ?? EXCHANGE_FEE_RATES.drift;
+}
+
 async function driftExecutePerpOrder(
   encryptedKey: string, market: string, side: 'long' | 'short', size: number,
   subAccountId: number, reduceOnly: boolean, slippageBps: number,
@@ -443,7 +452,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             if (job.entryPrice && job.entryPrice > 0) {
               const exitPrice = originalTrade?.price ? parseFloat(originalTrade.price) : 0;
               if (exitPrice > 0) {
-                const fee = originalTrade?.fee ? parseFloat(originalTrade.fee) : job.size * exitPrice * 0.00045;
+                const fee = originalTrade?.fee ? parseFloat(originalTrade.fee) : job.size * exitPrice * getExchangeFeeRate();
                 const normalizedMarket = job.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
                 const recentTrades = await storage.getBotTrades(job.botId, 30);
                 const sortedTrades = recentTrades
@@ -574,7 +583,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       if (bot && wallet) {
         const fillPrice = result.fillPrice || 0;
         const notional = job.size * fillPrice;
-        const fee = result.actualFee || notional * 0.00045;
+        const fee = result.actualFee || notional * getExchangeFeeRate();
         
         // Update original trade if it exists, otherwise create new
         let tradeId: string;
@@ -1072,7 +1081,7 @@ export async function backfillRecoveredClosePnl(): Promise<void> {
         for (const closeTrade of recoveredCloses) {
           const closePrice = parseFloat(closeTrade.price);
           const closeSize = parseFloat(closeTrade.size);
-          const closeFee = closeTrade.fee ? parseFloat(closeTrade.fee) : closeSize * closePrice * 0.00045;
+          const closeFee = closeTrade.fee ? parseFloat(closeTrade.fee) : closeSize * closePrice * getExchangeFeeRate();
           const closeMarket = closeTrade.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
           
           const sortedOpens = trades

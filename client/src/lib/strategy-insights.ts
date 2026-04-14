@@ -1,5 +1,5 @@
 import type { LabPineInput } from "@shared/schema";
-import { getDriftMaxLeverage } from "@/lib/drift-constants";
+import { getMaxLeverage } from "@/lib/exchange-constants";
 
 interface TradeRecord {
   direction: "long" | "short";
@@ -160,7 +160,7 @@ export interface StrategyInsightsReport {
 
 function computeMaxSafeLeverage(dd: number, ticker?: string): number {
   if (dd <= 0) return 1;
-  const maxLev = ticker ? getDriftMaxLeverage(ticker) : 5;
+  const maxLev = ticker ? getMaxLeverage(ticker) : 5;
   return Math.min(maxLev, Math.max(1, Math.floor((100 / dd) * 0.8)));
 }
 

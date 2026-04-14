@@ -233,7 +233,7 @@ export function BotManagementDrawer({
   // Fetch USDC deposit APY from Drift
   const fetchUsdcApy = async () => {
     try {
-      const response = await fetch('/api/drift/usdc-apy');
+      const response = await fetch('/api/exchange/usdc-apy');
       if (response.ok) {
         const data = await safeResponseJson(response);
         setUsdcApy(data.apy);
@@ -434,7 +434,7 @@ export function BotManagementDrawer({
       const [balanceRes, agentRes, botDriftRes, netDepositedRes] = await Promise.all([
         fetchWithTimeout(`/api/bot/${bot.id}/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
         fetchWithTimeout(`/api/agent/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
-        fetchWithTimeout(`/api/bots/${bot.id}/drift-balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
+        fetchWithTimeout(`/api/bots/${bot.id}/balance?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
         fetchWithTimeout(`/api/bots/${bot.id}/net-deposited?wallet=${walletAddress}&_=${cacheBust}`, { credentials: 'include', cache: 'no-store' }),
       ]);
 
@@ -502,7 +502,7 @@ export function BotManagementDrawer({
 
     setAddEquityLoading(true);
     try {
-      const res = await fetch('/api/agent/drift-deposit', {
+      const res = await fetch('/api/agent/deposit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -544,7 +544,7 @@ export function BotManagementDrawer({
 
     setRemoveEquityLoading(true);
     try {
-      const res = await fetch('/api/agent/drift-withdraw', {
+      const res = await fetch('/api/agent/withdraw', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',

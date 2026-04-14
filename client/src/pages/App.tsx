@@ -638,7 +638,7 @@ export default function AppPage() {
     }, 3000);
     
     try {
-      const res = await fetch('/api/wallet/reset-drift-account', {
+      const res = await fetch('/api/wallet/reset-account', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',

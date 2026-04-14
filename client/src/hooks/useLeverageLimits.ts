@@ -1,6 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useQuery } from "@tanstack/react-query";
-import { setLeverageLimitsCache, tickerToDriftMarket, getDriftMaxLeverage } from "@/lib/drift-constants";
+import { setLeverageLimitsCache, tickerToMarket, getMaxLeverage as getFallbackMaxLeverage } from "@/lib/exchange-constants";
 
 interface LeverageLimitsResponse {
   leverageLimits: Record<string, number>;
@@ -11,9 +11,9 @@ interface LeverageLimitsResponse {
 
 export function useLeverageLimits() {
   const query = useQuery<LeverageLimitsResponse>({
-    queryKey: ["/api/drift/leverage-limits"],
+    queryKey: ["/api/exchange/leverage-limits"],
     queryFn: async () => {
-      const res = await fetch("/api/drift/leverage-limits");
+      const res = await fetch("/api/exchange/leverage-limits");
       if (!res.ok) throw new Error("Failed to fetch leverage limits");
       const data = await safeResponseJson(res);
       if (!data?.leverageLimits || Object.keys(data.leverageLimits).length === 0) {
@@ -29,13 +29,13 @@ export function useLeverageLimits() {
   });
 
   const getMaxLeverage = (market: string): number => {
-    const normalized = tickerToDriftMarket(market);
+    const normalized = tickerToMarket(market);
 
     if (query.data?.leverageLimits) {
-      return query.data.leverageLimits[normalized] ?? getDriftMaxLeverage(market);
+      return query.data.leverageLimits[normalized] ?? getFallbackMaxLeverage(market);
     }
 
-    return getDriftMaxLeverage(market);
+    return getFallbackMaxLeverage(market);
   };
 
   return {

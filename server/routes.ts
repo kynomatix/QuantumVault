@@ -58,8 +58,16 @@ import nacl from "tweetnacl";
 import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
 
-// Drift trading fee rate (0.05% base - 10% referral discount = 0.045%)
-const DRIFT_FEE_RATE = 0.00045;
+const EXCHANGE_FEE_RATES: Record<string, number> = {
+  drift: 0.00045,
+  pacifica: 0.0004,
+};
+const DEFAULT_EXCHANGE_FEE_RATE = 0.00045;
+
+function getExchangeFeeRate(protocol?: string | null): number {
+  if (!protocol) return DEFAULT_EXCHANGE_FEE_RATE;
+  return EXCHANGE_FEE_RATES[protocol] ?? DEFAULT_EXCHANGE_FEE_RATE;
+}
 
 declare module "express-session" {
   interface SessionData {
@@ -867,7 +875,7 @@ async function routeSignalToSubscribers(
             
             // Estimate fee from notional (closePerpPosition doesn't return actualFee)
             const closeNotional = Math.abs(position.size) * fillPrice;
-            const closeFee = closeNotional * 0.00045; // Drift taker fee ~0.045%
+            const closeFee = closeNotional * getExchangeFeeRate();
             
             // Calculate PnL for subscriber close
             const closeEntryPrice = position.entryPrice || 0;
@@ -1130,7 +1138,7 @@ async function routeSignalToSubscribers(
             const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
 
             const tradeNotional = contractSize * fillPrice;
-            const tradeFee = orderResult.actualFee ?? (tradeNotional * DRIFT_FEE_RATE);
+            const tradeFee = orderResult.actualFee ?? (tradeNotional * getExchangeFeeRate());
             
             const subTrade = await storage.createBotTrade({
               tradingBotId: subBot.id,
@@ -1168,7 +1176,7 @@ async function routeSignalToSubscribers(
               };
               if (!orderResult.actualFee) {
                 const updatedNotional = contractSize * fillPrice;
-                tradeUpdate.fee = (updatedNotional * DRIFT_FEE_RATE).toFixed(6);
+                tradeUpdate.fee = (updatedNotional * getExchangeFeeRate()).toFixed(6);
               }
               await storage.updateBotTrade(subTrade.id, tradeUpdate);
             }
@@ -1181,7 +1189,7 @@ async function routeSignalToSubscribers(
               const closedEntryPrice = preTradePosition.entryPrice;
               const exitPrice = fillPrice;
               // Fee on the close leg only (proportional to closed size, not full order)
-              const closeFee = closedSize * exitPrice * DRIFT_FEE_RATE;
+              const closeFee = closedSize * exitPrice * getExchangeFeeRate();
               
               let flipPnl = 0;
               if (preTradePosition.side === 'LONG') {
@@ -2080,8 +2088,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  // Reset Drift Account - Fully automated: closes positions, sweeps funds, deletes subaccounts
-  app.post("/api/wallet/reset-drift-account", requireWallet, async (req, res) => {
+  app.post("/api/wallet/reset-account", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) {
@@ -2093,10 +2100,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const agentKey = wallet.agentPrivateKeyEncrypted;
       const agentPubKey = wallet.agentPublicKey;
-      const log = (msg: string) => console.log(`[Reset Drift] ${msg}`);
+      const log = (msg: string) => console.log(`[Reset Account] ${msg}`);
       const progress: string[] = [];
 
-      log(`Starting automated Drift account reset for ${agentPubKey}`);
+      log(`Starting automated account reset for ${agentPubKey}`);
       progress.push("Starting reset process...");
 
       // 1. Discover all existing subaccounts on-chain
@@ -2805,7 +2812,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.post("/api/agent/drift-deposit", requireWallet, async (req, res) => {
+  app.post("/api/agent/deposit", requireWallet, async (req, res) => {
     try {
       const { amount, botId } = req.body;
       if (!amount || amount <= 0) {
@@ -2948,7 +2955,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.post("/api/agent/drift-withdraw", requireWallet, async (req, res) => {
+  app.post("/api/agent/withdraw", requireWallet, async (req, res) => {
     try {
       const { amount, botId } = req.body;
       if (!amount || amount <= 0) {
@@ -3074,7 +3081,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.get("/api/agent/drift-balance", requireWallet, async (req, res) => {
+  app.get("/api/agent/balance", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) {
@@ -3566,7 +3573,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       // Calculate fee (0.05% taker fee on notional value)
       const closeNotional = closeSize * fillPrice;
-      const closeFee = closeNotional * DRIFT_FEE_RATE;
+      const closeFee = closeNotional * getExchangeFeeRate();
 
       // Calculate trade PnL based on entry and exit prices
       // closeSide = 'short' means we're closing a LONG (bought low, selling high)
@@ -3920,7 +3927,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       let fillPrice = orderResult.fillPrice || oraclePrice;
       const tradeNotional = contractSize * fillPrice;
       // Use actual fee from executor if available, otherwise estimate
-      const tradeFee = orderResult.actualFee ?? (tradeNotional * DRIFT_FEE_RATE);
+      const tradeFee = orderResult.actualFee ?? (tradeNotional * getExchangeFeeRate());
 
       await storage.updateBotTrade(trade.id, {
         status: "executed",
@@ -3955,7 +3962,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         };
         if (!orderResult.actualFee) {
           const updatedNotional = contractSize * fillPrice;
-          tradeUpdate.fee = (updatedNotional * DRIFT_FEE_RATE).toFixed(6);
+          tradeUpdate.fee = (updatedNotional * getExchangeFeeRate()).toFixed(6);
         }
         await storage.updateBotTrade(trade.id, tradeUpdate);
       }
@@ -4294,7 +4301,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   });
 
   // Get bot-specific Drift account info from its subaccount
-  app.get("/api/bots/:botId/drift-balance", requireWallet, async (req, res) => {
+  app.get("/api/bots/:botId/balance", requireWallet, async (req, res) => {
     try {
       const { botId } = req.params;
       const bot = await storage.getTradingBotById(botId);
@@ -4815,7 +4822,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               // Calculate fee (0.05% taker fee on notional value)
               const pauseFillPrice = result.fillPrice || 0;
               const closeNotional = closeSize * pauseFillPrice;
-              const closeFee = closeNotional * DRIFT_FEE_RATE;
+              const closeFee = closeNotional * getExchangeFeeRate();
               
               // Calculate trade PnL for pause close
               let pauseClosePnl = 0;
@@ -6073,7 +6080,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             // Since closePerpPosition doesn't return fillPrice, use the signal price as estimate
             const closeFillPrice = parseFloat(signalPrice) || 0;
             const closeNotional = closeSize * closeFillPrice;
-            const closeFee = closeNotional * DRIFT_FEE_RATE;
+            const closeFee = closeNotional * getExchangeFeeRate();
             
             // Calculate trade PnL based on entry and exit prices
             // IMPORTANT: closeEntryPrice was captured BEFORE close attempt
@@ -6537,7 +6544,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           // This ensures PnL is recorded even if position was closed by another process
           const closeFillPrice = parseFloat(signalPrice || "0");
           const closeNotional = closeSize * closeFillPrice;
-          const closeFee = closeNotional * DRIFT_FEE_RATE;
+          const closeFee = closeNotional * getExchangeFeeRate();
           
           // Calculate trade PnL for position flip close
           const flipEntryPrice = onChainPosition.entryPrice || 0;
@@ -6822,7 +6829,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       // Calculate fee - use actual fee from executor if available
       const tradeNotional = finalContractSize * fillPrice;
-      const tradeFee = orderResult.actualFee ?? (tradeNotional * DRIFT_FEE_RATE);
+      const tradeFee = orderResult.actualFee ?? (tradeNotional * getExchangeFeeRate());
       
       await storage.updateBotTrade(trade.id, {
         status: "executed",
@@ -7376,7 +7383,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           if (result.success && result.signature) {
             const closeFillPrice = parseFloat(signalPrice) || 0;
             const closeNotional = closeSize * closeFillPrice;
-            const closeFee = closeNotional * DRIFT_FEE_RATE;
+            const closeFee = closeNotional * getExchangeFeeRate();
             
             // Calculate PnL
             const closeEntryPrice = onChainPosition.entryPrice || 0;
@@ -7793,7 +7800,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       // Calculate fee (0.05% taker fee on notional value)
       const userTradeNotional = contractSize * userFillPrice;
-      const userTradeFee = userTradeNotional * DRIFT_FEE_RATE;
+      const userTradeFee = userTradeNotional * getExchangeFeeRate();
       
       await storage.updateBotTrade(trade.id, {
         status: "executed",
@@ -7825,7 +7832,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         };
         if (!orderResult.actualFee) {
           const updatedNotional = contractSize * userFillPrice;
-          tradeUpdate.fee = (updatedNotional * DRIFT_FEE_RATE).toFixed(6);
+          tradeUpdate.fee = (updatedNotional * getExchangeFeeRate()).toFixed(6);
         }
         await storage.updateBotTrade(trade.id, tradeUpdate);
       }
@@ -8133,7 +8140,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   });
 
   // Get all available Drift perp markets with liquidity info
-  app.get("/api/drift/markets", async (req, res) => {
+  app.get("/api/exchange/markets", async (req, res) => {
     try {
       const forceRefresh = req.query.refresh === 'true';
       const markets = await getAllPerpMarkets(forceRefresh);
@@ -8158,7 +8165,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   });
 
   // Get single market info
-  app.get("/api/drift/markets/:symbol", async (req, res) => {
+  app.get("/api/exchange/markets/:symbol", async (req, res) => {
     try {
       const { symbol } = req.params;
       const market = await getMarketBySymbol(symbol);
@@ -8178,7 +8185,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   });
 
   // Get market liquidity cache status
-  app.get("/api/drift/markets/cache/status", async (req, res) => {
+  app.get("/api/exchange/markets/cache/status", async (req, res) => {
     try {
       const status = getCacheStatus();
       res.json(status);
@@ -8188,7 +8195,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.get("/api/drift/non-tradable-markets", async (req, res) => {
+  app.get("/api/exchange/non-tradable-markets", async (req, res) => {
     try {
       const cacheStatus = getLeverageCacheStatus();
       res.json({
@@ -8201,7 +8208,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.get("/api/drift/leverage-limits", async (req, res) => {
+  app.get("/api/exchange/leverage-limits", async (req, res) => {
     try {
       const leverageMap = getAllCachedLeverageLimits();
       const cacheStatus = getLeverageCacheStatus();
@@ -8259,15 +8266,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   }
 
-  // Get current USDC deposit APY from Drift Data API
-  app.get("/api/drift/usdc-apy", async (req, res) => {
-    try {
-      const result = await getUsdcApy();
-      res.json(result);
-    } catch (error) {
-      console.error("Get USDC APY endpoint error:", error);
-      res.status(500).json({ error: "Failed to fetch USDC APY" });
-    }
+  app.get("/api/exchange/usdc-apy", async (_req, res) => {
+    res.json({ apy: null, cached: false, stale: false, unavailable: true });
   });
 
   // Force refresh market OI data (admin endpoint)
@@ -8318,7 +8318,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.post("/api/drift/deposit", async (req, res) => {
+  app.post("/api/exchange/deposit", async (req, res) => {
     try {
       const { walletAddress, amount } = req.body;
       if (!walletAddress) {
@@ -8335,7 +8335,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.post("/api/drift/withdraw", async (req, res) => {
+  app.post("/api/exchange/withdraw", async (req, res) => {
     try {
       const { walletAddress, amount } = req.body;
       if (!walletAddress) {
@@ -8352,7 +8352,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.get("/api/drift/balance", async (req, res) => {
+  app.get("/api/exchange/balance", async (req, res) => {
     try {
       const walletAddress = req.query.wallet as string;
       if (!walletAddress) {
@@ -9591,7 +9591,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         
         // Estimate fee (0.05% taker fee)
         const notionalValue = size * fillPrice;
-        const estimatedFee = notionalValue * DRIFT_FEE_RATE;
+        const estimatedFee = notionalValue * getExchangeFeeRate();
         
         // Create a new trade record for the retry
         const newTrade = await storage.createBotTrade({
@@ -9884,7 +9884,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     next();
   };
   
-  app.get("/api/admin/swift-diagnostics", requireAdminAuth, async (req, res) => {
+  app.get("/api/admin/execution-diagnostics", requireAdminAuth, async (req, res) => {
     try {
       const diag = getSwiftDiagnostics();
       res.json(diag);
@@ -9893,7 +9893,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.get("/api/admin/swift-metrics", requireAdminAuth, async (req, res) => {
+  app.get("/api/admin/execution-metrics", requireAdminAuth, async (req, res) => {
     try {
       const metrics = getSwiftMetrics();
       res.json(metrics);

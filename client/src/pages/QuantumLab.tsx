@@ -31,7 +31,7 @@ import {
 import { motion } from "framer-motion";
 import { Link } from "wouter";
 import { cn } from "@/lib/utils";
-import { getDriftMaxLeverage, tickerToDriftMarket } from "@/lib/drift-constants";
+import { getMaxLeverage, tickerToMarket } from "@/lib/exchange-constants";
 import { useLeverageLimits } from "@/hooks/useLeverageLimits";
 import { generateInsightsReport, formatReportAsText, type StrategyInsightsReport, type ParamSensitivity, type ComboFit, type Suggestion } from "@/lib/strategy-insights";
 import { generateAndSaveInsightsReport, insightsReportsQueryKey, type GenerateReportError } from "@/lib/insights-report-workflow";
@@ -224,7 +224,7 @@ function calculateRiskAnalysis(
 
   const recoveryFactor = maxDrawdownPercent > 0 ? netProfitPercent / maxDrawdownPercent : 0;
 
-  const MAX_LEVERAGE_CAP = maxLeverageOverride ?? (ticker ? getDriftMaxLeverage(ticker) : CONSERVATIVE_FALLBACK);
+  const MAX_LEVERAGE_CAP = maxLeverageOverride ?? (ticker ? getMaxLeverage(ticker) : CONSERVATIVE_FALLBACK);
   const maxSafeLeverage = maxDrawdownPercent > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor((100 / maxDrawdownPercent) * 0.8))) : 1;
   const streakSafety = streakDrawdownPercent > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor(100 / (streakDrawdownPercent * 1.5)))) : maxSafeLeverage;
   const recommendedLeverage = Math.max(1, Math.min(maxSafeLeverage, streakSafety));
@@ -1389,9 +1389,9 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
   const [deepSearch, setDeepSearch] = useState(false);
 
   const { data: nonTradableData } = useQuery<{ nonTradableMarkets: string[] }>({
-    queryKey: ["/api/drift/non-tradable-markets"],
+    queryKey: ["/api/exchange/non-tradable-markets"],
     queryFn: async () => {
-      const res = await fetch("/api/drift/non-tradable-markets");
+      const res = await fetch("/api/exchange/non-tradable-markets");
       if (!res.ok) return { nonTradableMarkets: [] };
       return res.json();
     },
@@ -4035,7 +4035,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
 
     setIsCreating(true);
     try {
-      const market = tickerToDriftMarket(ticker);
+      const market = tickerToMarket(ticker);
       const botName = generateBotName();
 
       const res = await fetch('/api/trading-bots', {
@@ -4074,7 +4074,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         console.error('Failed to update bot settings, but bot was created');
       }
 
-      const depositRes = await fetch('/api/agent/drift-deposit', {
+      const depositRes = await fetch('/api/agent/deposit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -4090,7 +4090,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       }
 
       if (!fundingFailed && equityBuffer > 0) {
-        const equityDepositRes = await fetch('/api/agent/drift-deposit', {
+        const equityDepositRes = await fetch('/api/agent/deposit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',

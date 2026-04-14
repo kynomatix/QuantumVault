@@ -133,7 +133,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       if (markets.length > 0) return;
       setIsLoadingMarkets(true);
       try {
-        const res = await fetch('/api/drift/markets');
+        const res = await fetch('/api/exchange/markets');
         if (res.ok) {
           const data = await safeResponseJson(res);
           setMarkets(data.markets || []);
@@ -338,7 +338,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
         }
         
         // Then deposit the investment amount to the bot's Drift subaccount
-        const depositRes = await fetch('/api/agent/drift-deposit', {
+        const depositRes = await fetch('/api/agent/deposit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',

@@ -1,6 +1,6 @@
 const CONSERVATIVE_FALLBACK = 5;
 
-const DRIFT_LEVERAGE_TIERS: Record<string, number> = {
+const LEVERAGE_TIERS: Record<string, number> = {
   'SOL-PERP': 101, 'BTC-PERP': 101, 'ETH-PERP': 101,
   'XRP-PERP': 20,
   'HYPE-PERP': 10, 'SUI-PERP': 10, 'ASTER-PERP': 10, 'FARTCOIN-PERP': 10,
@@ -25,16 +25,16 @@ export function setLeverageLimitsCache(limits: Record<string, number>): void {
   }
 }
 
-export function tickerToDriftMarket(ticker: string): string {
+export function tickerToMarket(ticker: string): string {
   if (ticker.endsWith('-PERP')) return ticker.toUpperCase();
   const base = ticker.split('/')[0].toUpperCase();
   return `${base}-PERP`;
 }
 
-export function getDriftMaxLeverage(ticker: string): number {
-  const market = tickerToDriftMarket(ticker);
+export function getMaxLeverage(ticker: string): number {
+  const market = tickerToMarket(ticker);
   if (_cachedLeverageLimits && market in _cachedLeverageLimits) {
     return _cachedLeverageLimits[market];
   }
-  return DRIFT_LEVERAGE_TIERS[market] ?? CONSERVATIVE_FALLBACK;
+  return LEVERAGE_TIERS[market] ?? CONSERVATIVE_FALLBACK;
 }
