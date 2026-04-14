@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import type { ProtocolMarket } from './protocol/protocol-types';
 
 function getModuleDir(): string {
   try {
@@ -184,4 +185,62 @@ export async function syncFromSdk(
     console.warn('[market-registry] SDK sync failed, keeping hardcoded fallback:', err);
     return { names: currentNames, indices: currentIndices };
   }
+}
+
+export interface MarketInfo {
+  internalSymbol: string;
+  maxLeverage: number;
+  maintenanceMarginWeight: number;
+  minOrderSizeUsd: number;
+  minOrderSizeBase: number;
+  tickSize: number;
+  lotSize: number;
+  isActive: boolean;
+  openInterestUsd?: number;
+}
+
+let marketCache: Map<string, MarketInfo> = new Map();
+let marketCacheUpdatedAt: Date | null = null;
+const MARKET_CACHE_TTL_MS = 5 * 60 * 1000;
+
+export function updateMarketCache(markets: ProtocolMarket[]): void {
+  const newCache = new Map<string, MarketInfo>();
+  for (const m of markets) {
+    newCache.set(m.internalSymbol, {
+      internalSymbol: m.internalSymbol,
+      maxLeverage: m.maxLeverage,
+      maintenanceMarginWeight: m.maintenanceMarginWeight,
+      minOrderSizeUsd: m.minOrderSizeUsd,
+      minOrderSizeBase: m.minOrderSizeBase,
+      tickSize: m.tickSize,
+      lotSize: m.lotSize,
+      isActive: m.isActive,
+      openInterestUsd: m.openInterestUsd,
+    });
+  }
+  marketCache = newCache;
+  marketCacheUpdatedAt = new Date();
+  console.log(`[market-registry] Cache updated: ${newCache.size} markets`);
+}
+
+export function getMarketInfo(internalSymbol: string): MarketInfo | undefined {
+  return marketCache.get(internalSymbol);
+}
+
+export function getAllMarkets(): MarketInfo[] {
+  return Array.from(marketCache.values());
+}
+
+export function getActiveMarkets(): MarketInfo[] {
+  return Array.from(marketCache.values()).filter(m => m.isActive);
+}
+
+export function isMarketCacheStale(): boolean {
+  if (!marketCacheUpdatedAt) return true;
+  return Date.now() - marketCacheUpdatedAt.getTime() > MARKET_CACHE_TTL_MS;
+}
+
+export function getMarketCacheAge(): number | null {
+  if (!marketCacheUpdatedAt) return null;
+  return Date.now() - marketCacheUpdatedAt.getTime();
 }

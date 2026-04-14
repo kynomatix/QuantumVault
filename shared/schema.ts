@@ -158,7 +158,9 @@ export const tradingBots = pgTable("trading_bots", {
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => ([
+  index("idx_trading_bots_protocol_subaccount").on(table.activeProtocol, table.protocolSubaccountId),
+]));
 
 export const insertTradingBotSchema = createInsertSchema(tradingBots).omit({
   id: true,
@@ -208,7 +210,11 @@ export const botTrades = pgTable("bot_trades", {
   lastProtocolError: text("last_protocol_error"),
   lastReconcileAt: timestamp("last_reconcile_at"),
   executedAt: timestamp("executed_at").defaultNow().notNull(),
-});
+}, (table) => ([
+  index("idx_bot_trades_protocol_client_order").on(table.protocol, table.clientOrderId),
+  index("idx_bot_trades_protocol_order_id").on(table.protocolOrderId),
+  index("idx_bot_trades_protocol_status").on(table.protocolStatus),
+]));
 
 export const insertBotTradeSchema = createInsertSchema(botTrades).omit({
   id: true,
@@ -370,6 +376,7 @@ export const orphanedSubaccounts = pgTable("orphaned_subaccounts", {
   agentPublicKey: text("agent_public_key").notNull(),
   agentPrivateKeyEncrypted: text("agent_private_key_encrypted").notNull(),
   driftSubaccountId: integer("drift_subaccount_id").notNull(),
+  protocolSubaccountId: text("protocol_subaccount_id"),
   reason: text("reason"),
   retryCount: integer("retry_count").default(0).notNull(),
   lastRetryAt: timestamp("last_retry_at"),
@@ -555,6 +562,9 @@ export const tradeRetryQueue = pgTable("trade_retry_queue", {
   entryPrice: decimal("entry_price", { precision: 20, scale: 8 }),
   swiftAttempts: integer("swift_attempts").default(0),
   originalExecutionMethod: text("original_execution_method").default("legacy"),
+  protocol: text("protocol"),
+  protocolSubaccountId: text("protocol_subaccount_id"),
+  agentPublicKey: text("agent_public_key"),
 });
 
 export const insertTradeRetryQueueSchema = createInsertSchema(tradeRetryQueue).omit({
@@ -613,6 +623,7 @@ export const pendingProfitShares = pgTable("pending_profit_shares", {
   tradeId: text("trade_id").notNull(),
   publishedBotId: varchar("published_bot_id").references(() => publishedBots.id, { onDelete: "set null" }),
   driftSubaccountId: integer("drift_subaccount_id").notNull(),
+  protocolSubaccountId: text("protocol_subaccount_id"),
   status: text("status").notNull().default("pending"), // pending, processing, paid, voided
   retryCount: integer("retry_count").notNull().default(0),
   lastError: text("last_error"),
@@ -632,6 +643,80 @@ export const insertPendingProfitShareSchema = createInsertSchema(pendingProfitSh
 });
 export type InsertPendingProfitShare = z.infer<typeof insertPendingProfitShareSchema>;
 export type PendingProfitShare = typeof pendingProfitShares.$inferSelect;
+
+export const protocolOrderEvents = pgTable("protocol_order_events", {
+  id: serial("id").primaryKey(),
+  botTradeId: varchar("bot_trade_id").references(() => botTrades.id, { onDelete: "cascade" }),
+  protocolOrderId: text("protocol_order_id"),
+  clientOrderId: text("client_order_id"),
+  eventType: text("event_type").notNull(),
+  eventSource: text("event_source").notNull(),
+  status: text("status"),
+  filledSize: decimal("filled_size", { precision: 20, scale: 8 }),
+  fillPrice: decimal("fill_price", { precision: 20, scale: 6 }),
+  protocolFillId: text("protocol_fill_id"),
+  rawPayload: jsonb("raw_payload"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ([
+  index("idx_protocol_order_events_order_id").on(table.protocolOrderId),
+  index("idx_protocol_order_events_client_order_id").on(table.clientOrderId),
+  index("idx_protocol_order_events_trade_created").on(table.botTradeId, table.createdAt),
+]));
+
+export const insertProtocolOrderEventSchema = createInsertSchema(protocolOrderEvents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertProtocolOrderEvent = z.infer<typeof insertProtocolOrderEventSchema>;
+export type ProtocolOrderEvent = typeof protocolOrderEvents.$inferSelect;
+
+export const protocolSubaccounts = pgTable("protocol_subaccounts", {
+  id: serial("id").primaryKey(),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  botId: varchar("bot_id").references(() => tradingBots.id, { onDelete: "set null" }),
+  protocol: text("protocol").notNull(),
+  protocolSubaccountId: text("protocol_subaccount_id"),
+  status: text("status").notNull(),
+  initiationTx: text("initiation_tx"),
+  confirmationTx: text("confirmation_tx"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  confirmedAt: timestamp("confirmed_at"),
+  lastError: text("last_error"),
+}, (table) => ([
+  unique("uq_protocol_subaccount").on(table.protocol, table.protocolSubaccountId),
+  index("idx_protocol_subaccounts_wallet_protocol").on(table.walletAddress, table.protocol),
+  index("idx_protocol_subaccounts_status").on(table.status),
+]));
+
+export const insertProtocolSubaccountSchema = createInsertSchema(protocolSubaccounts).omit({
+  id: true,
+  createdAt: true,
+  confirmedAt: true,
+});
+export type InsertProtocolSubaccount = z.infer<typeof insertProtocolSubaccountSchema>;
+export type ProtocolSubaccount = typeof protocolSubaccounts.$inferSelect;
+
+export const builderAuthorizations = pgTable("builder_authorizations", {
+  id: serial("id").primaryKey(),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  builderCode: text("builder_code").notNull(),
+  maxFeeRate: decimal("max_fee_rate", { precision: 10, scale: 6 }).notNull(),
+  signature: text("signature").notNull(),
+  status: text("status").notNull(),
+  approvedAt: timestamp("approved_at"),
+  revokedAt: timestamp("revoked_at"),
+}, (table) => ([
+  unique("uq_builder_auth_wallet_code").on(table.walletAddress, table.builderCode),
+  index("idx_builder_authorizations_status").on(table.status),
+]));
+
+export const insertBuilderAuthorizationSchema = createInsertSchema(builderAuthorizations).omit({
+  id: true,
+  approvedAt: true,
+  revokedAt: true,
+});
+export type InsertBuilderAuthorization = z.infer<typeof insertBuilderAuthorizationSchema>;
+export type BuilderAuthorization = typeof builderAuthorizations.$inferSelect;
 
 // Portfolio Daily Snapshots: Track daily balance for true P&L charting
 // Net P&L = currentBalance - totalDeposits + totalWithdrawals (deposits/withdrawals are cumulative)

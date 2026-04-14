@@ -1,19 +1,17 @@
 import { storage } from './storage';
 import { getPerpPositions, getDriftAccountInfo } from './drift-service';
+import { normalizeMarket } from './protocol/symbol-registry';
 
-// Drift maintenance margin weights by market (in decimal, e.g., 0.0625 = 6.25%)
-// These affect when liquidation occurs - higher weight = liquidation at less adverse price
-// Values sourced from Drift Protocol's perp market configs
 const MAINTENANCE_MARGIN_WEIGHTS: Record<string, number> = {
-  'SOL': 0.0625,      // 6.25% for SOL-PERP
-  'BTC': 0.05,        // 5% for BTC-PERP
-  'ETH': 0.05,        // 5% for ETH-PERP
-  'APT': 0.10,        // 10% for smaller caps
+  'SOL': 0.0625,
+  'BTC': 0.05,
+  'ETH': 0.05,
+  'APT': 0.10,
   'MATIC': 0.10,
   'DOGE': 0.10,
   'BNB': 0.0625,
   'SUI': 0.10,
-  'PEPE': 0.15,       // 15% for memecoins
+  'PEPE': 0.15,
   'ARB': 0.10,
   'PYTH': 0.10,
   'WIF': 0.15,
@@ -30,20 +28,8 @@ const MAINTENANCE_MARGIN_WEIGHTS: Record<string, number> = {
 };
 
 function getMaintenanceMarginWeight(market: string): number {
-  const normalized = market.toUpperCase()
-    .replace(/-PERP$/i, '')
-    .replace(/PERP$/i, '')
-    .replace(/USD[CT]?$/i, '')
-    .replace(/[-_/]/g, '');
-  return MAINTENANCE_MARGIN_WEIGHTS[normalized] ?? 0.10; // Default 10% if unknown
-}
-
-function normalizeMarket(market: string): string {
-  return market.toUpperCase()
-    .replace(/-PERP$/i, '')
-    .replace(/PERP$/i, '')
-    .replace(/USD[CT]?$/i, '')
-    .replace(/[-_/]/g, '');
+  const normalized = normalizeMarket(market);
+  return MAINTENANCE_MARGIN_WEIGHTS[normalized] ?? 0.10;
 }
 
 export interface OnChainPosition {

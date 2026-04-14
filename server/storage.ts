@@ -106,6 +106,10 @@ export interface IStorage {
   getTradingBotBySecret(webhookSecret: string): Promise<TradingBot | undefined>;
   getNextSubaccountId(walletAddress: string): Promise<number>;
   getAllocatedSubaccountIds(walletAddress: string): Promise<number[]>;
+  getAllocatedProtocolSubaccountIds(walletAddress: string, protocol?: string): Promise<string[]>;
+  assignProtocolSubaccountId(botId: string, protocolSubaccountId: string, protocol: string): Promise<void>;
+  clearProtocolSubaccount(botId: string): Promise<void>;
+  findBotByProtocolSubaccount(walletAddress: string, protocolSubaccountId: string, protocol?: string): Promise<TradingBot | undefined>;
   createTradingBot(bot: InsertTradingBot): Promise<TradingBot>;
   updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined>;
   clearTradingBotSubaccount(id: string): Promise<void>;
@@ -424,6 +428,56 @@ export class DatabaseStorage implements IStorage {
     return bots
       .map(b => b.driftSubaccountId)
       .filter((id): id is number => id !== null);
+  }
+
+  async getAllocatedProtocolSubaccountIds(walletAddress: string, protocol?: string): Promise<string[]> {
+    let query = db.select({
+      protocolSubaccountId: tradingBots.protocolSubaccountId,
+      activeProtocol: tradingBots.activeProtocol,
+    })
+      .from(tradingBots)
+      .where(eq(tradingBots.walletAddress, walletAddress));
+
+    const bots = await query;
+
+    return bots
+      .filter(b => b.protocolSubaccountId !== null && (!protocol || b.activeProtocol === protocol))
+      .map(b => b.protocolSubaccountId as string);
+  }
+
+  async assignProtocolSubaccountId(botId: string, protocolSubaccountId: string, protocol: string): Promise<void> {
+    await db.update(tradingBots)
+      .set({
+        protocolSubaccountId,
+        activeProtocol: protocol,
+        updatedAt: sql`NOW()`,
+      } as any)
+      .where(eq(tradingBots.id, botId));
+  }
+
+  async clearProtocolSubaccount(botId: string): Promise<void> {
+    await db.update(tradingBots)
+      .set({
+        protocolSubaccountId: null,
+        activeProtocol: null,
+        updatedAt: sql`NOW()`,
+      } as any)
+      .where(eq(tradingBots.id, botId));
+  }
+
+  async findBotByProtocolSubaccount(walletAddress: string, protocolSubaccountId: string, protocol?: string): Promise<TradingBot | undefined> {
+    const conditions = [
+      eq(tradingBots.walletAddress, walletAddress),
+      eq(tradingBots.protocolSubaccountId, protocolSubaccountId),
+    ];
+    if (protocol) {
+      conditions.push(eq(tradingBots.activeProtocol, protocol));
+    }
+    const result = await db.select()
+      .from(tradingBots)
+      .where(and(...conditions))
+      .limit(1);
+    return result[0];
   }
 
   async createTradingBot(bot: InsertTradingBot): Promise<TradingBot> {

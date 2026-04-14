@@ -31,7 +31,7 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 
 **Workflow:** When starting a phase, check the Phase Navigation Index for which sections to read. Work through Section 17's phase checklist top-to-bottom. Phase 3 has explicit Group A→B→C ordering — follow it.
 
-**Status:** Phase 1 COMPLETE, Phase 2 COMPLETE (9/10 steps, 1 deferred). Phase 3 next — service refactors. Testnet verification deferred (will test with real capital on mainnet).
+**Status:** Phase 1 COMPLETE, Phase 2 COMPLETE (9/10 steps, 1 deferred). Phase 3 Group A COMPLETE (4/4 steps). Phase 3 Group B next — service-by-service refactors. Testnet verification deferred (will test with real capital on mainnet).
 
 ### Engineering Standards for Migration Work
 

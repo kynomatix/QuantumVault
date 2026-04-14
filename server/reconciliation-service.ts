@@ -5,18 +5,11 @@ import { eq, and, or, sql, gte } from "drizzle-orm";
 import { getPerpPositions } from "./drift-service";
 import { getMarketPrice } from "./drift-price";
 import type { TradingBot } from "@shared/schema";
+import { normalizeMarket } from "./protocol/symbol-registry";
 
 const STALE_THRESHOLD_MS = 60 * 1000; // 60 seconds
 const LIQUIDATION_TRADE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 const RECENT_TRADE_COOLDOWN_MS = 30 * 1000; // 30 seconds cooldown after recent trade activity
-
-function normalizeMarket(market: string): string {
-  return market.toUpperCase()
-    .replace(/-PERP$/i, '')
-    .replace(/PERP$/i, '')
-    .replace(/USD[CT]?$/i, '')
-    .replace(/[-_/]/g, '');
-}
 const RECONCILE_INTERVAL_MS = 60 * 1000; // 60 seconds
 
 let reconcileInterval: NodeJS.Timeout | null = null;
