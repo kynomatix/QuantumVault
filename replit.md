@@ -1,7 +1,36 @@
 # QuantumVault - Solana Bot Trading Platform
 
+## ⚠️ ACTIVE MIGRATION: Pacifica Protocol Adapter Architecture
+
+**`PACIFICA_MIGRATION.md` is the SINGLE SOURCE OF TRUTH for all migration work.**
+
+QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter architecture, with Pacifica.fi as the first adapter. This is the next major change to the application.
+
+**MANDATORY RULES for any migration-related work:**
+1. **READ `PACIFICA_MIGRATION.md` FIRST** before writing ANY code that touches: protocol adapters, signing, order execution, subaccounts, symbol mapping, deposit/withdraw flows, market data, position reads, reconciliation, trade-retry, leverage cache, or any file listed in the migration scope.
+2. **DO NOT deviate from the plan.** The document has been audited across multiple architect reviews and cross-referenced against Pacifica's official API documentation. Going off-script risks breaking production systems.
+3. **Follow the phased approach** (Phases 0→6). Do not skip phases or mix work from different phases.
+4. **Check the document for the specific interface, type, or endpoint** before implementing. The signing protocol, operation types, endpoint paths, and type definitions are all specified precisely.
+5. **If something isn't covered in the doc**, stop and flag it — do not improvise. The doc may need updating before the work proceeds.
+
+**Key sections in `PACIFICA_MIGRATION.md`:**
+- Section 4: ProtocolAdapter + UserTransactionBuilder interfaces (split by signing model)
+- Section 5: SymbolRegistry design + normalizeMarket consolidation
+- Section 6: Pacifica API endpoints with operation types
+- Section 7: Complete 8-step signing protocol with pitfalls
+- Section 8: Subaccount system differences
+- Section 9: Builder Program / commission model
+- Section 12: File-by-file migration scope (21 server files)
+- Section 13: Startup sequence dependencies
+- Section 14: Phased migration plan with Phase 5 gate
+- Section 15: Database schema changes (additive only)
+
+**Status:** Planning phase — document is still being audited. No code changes until audit is complete.
+
+---
+
 ## Overview
-QuantumVault is a Solana-based bot trading platform for deploying and managing perpetual futures trading bots on the Drift Protocol. It automates trade execution via TradingView webhooks, provides real-time position tracking, and integrates with Phantom Wallet. The platform aims for a user-friendly experience in automated DeFi trading, leveraging Solana for high-speed, low-cost transactions. Key capabilities include real-time PnL tracking, automated position management, robust error handling, a referral system for Drift Protocol, and a marketplace for trading signals to foster a community-driven environment.
+QuantumVault is a Solana-based bot trading platform for deploying and managing perpetual futures trading bots. It automates trade execution via TradingView webhooks, provides real-time position tracking, and integrates with Phantom Wallet. The platform aims for a user-friendly experience in automated DeFi trading, leveraging Solana for high-speed, low-cost transactions. Key capabilities include real-time PnL tracking, automated position management, robust error handling, and a marketplace for trading signals to foster a community-driven environment.
 
 ## User Preferences
 Preferred communication style: Simple, everyday language.
