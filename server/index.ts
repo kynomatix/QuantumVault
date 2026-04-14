@@ -25,9 +25,14 @@ async function initializeProtocolAdapter(): Promise<void> {
   try {
     const { PacificaAdapter } = await import("./protocol/pacifica/pacifica-adapter");
     const { registerAdapter, setAdapterHealth } = await import("./protocol/adapter-registry");
+    const { updateMarketCache } = await import("./market-registry");
     const adapter = new PacificaAdapter();
     registerAdapter(adapter);
     await adapter.initialize();
+    const markets = await adapter.getMarkets();
+    if (markets.length > 0) {
+      updateMarketCache(markets);
+    }
     setAdapterHealth('pacifica', 'ready');
     console.log('[Startup] Pacifica adapter registered and initialized');
   } catch (err: any) {
