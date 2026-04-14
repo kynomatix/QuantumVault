@@ -30,6 +30,9 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 
 **Status:** Planning phase — document is still being audited. No code changes until audit is complete.
 
+### Vaults V2 Architecture
+`docs/VAULTS_V2_ARCHITECTURE.md` — Protocol-agnostic capital management layer. Replaces the Drift-centric V1 (`docs/VAULTS_ARCHITECTURE.md`). Separates trading adapters from yield/lending adapters, with a vault orchestrator managing capital flow between them. Covers idle capital yield routing, multi-asset collateral borrowing, auto-repayment from bot profits, and intelligent agents (yield arbitrage, risk management, capital rebalancing). Depends on Pacifica adapter migration completing first.
+
 ---
 
 ## Overview
