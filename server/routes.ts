@@ -9,8 +9,38 @@ import type { Request as ExpressRequest, Response as ExpressResponse, NextFuncti
 import { db } from "./db";
 import { desc, eq, sql } from "drizzle-orm";
 import { ZodError } from "zod";
-import { getMarketPrice, getAllPrices, forceRefreshPrices } from "./drift-price";
-import { buildDepositTransaction, buildWithdrawTransaction, getUsdcBalance, getDriftBalance, buildTransferToSubaccountTransaction, buildTransferFromSubaccountTransaction, subaccountExists, buildAgentDriftDepositTransaction, buildAgentDriftWithdrawTransaction, executeAgentDriftDeposit, executeAgentDriftWithdraw, executeAgentTransferBetweenSubaccounts, getAgentDriftBalance, getDriftAccountInfo, getBatchDriftAccountInfo, getBatchPerpPositions, executePerpOrder, getPerpPositions, closePerpPosition, getNextOnChainSubaccountId, discoverOnChainSubaccounts, closeDriftSubaccount, settleAllPnl } from "./drift-service";
+let _driftPriceMod: any = null;
+let _driftServiceMod: any = null;
+async function _dp(): Promise<any> { if (!_driftPriceMod) _driftPriceMod = await import("./drift-price"); return _driftPriceMod; }
+async function _ds(): Promise<any> { if (!_driftServiceMod) _driftServiceMod = await import("./drift-service"); return _driftServiceMod; }
+
+async function getMarketPrice(a: any) { return (await _dp()).getMarketPrice(a); }
+async function getAllPrices() { return (await _dp()).getAllPrices(); }
+async function forceRefreshPrices() { return (await _dp()).forceRefreshPrices(); }
+
+async function buildDepositTransaction(a: any, b: any) { return (await _ds()).buildDepositTransaction(a, b); }
+async function buildWithdrawTransaction(a: any, b: any) { return (await _ds()).buildWithdrawTransaction(a, b); }
+async function getUsdcBalance(a: any) { return (await _ds()).getUsdcBalance(a); }
+async function getDriftBalance(a: any, b?: any) { return (await _ds()).getDriftBalance(a, b); }
+async function buildTransferToSubaccountTransaction(a: any, b: any, c: any, d: any) { return (await _ds()).buildTransferToSubaccountTransaction(a, b, c, d); }
+async function buildTransferFromSubaccountTransaction(a: any, b: any, c: any, d: any) { return (await _ds()).buildTransferFromSubaccountTransaction(a, b, c, d); }
+async function subaccountExists(a: any, b: any) { return (await _ds()).subaccountExists(a, b); }
+async function buildAgentDriftDepositTransaction(a: any, b: any, c: any) { return (await _ds()).buildAgentDriftDepositTransaction(a, b, c); }
+async function buildAgentDriftWithdrawTransaction(a: any, b: any, c: any) { return (await _ds()).buildAgentDriftWithdrawTransaction(a, b, c); }
+async function executeAgentDriftDeposit(a: any, b: any, c: any, d: any, e?: any) { return (await _ds()).executeAgentDriftDeposit(a, b, c, d, e); }
+async function executeAgentDriftWithdraw(a: any, b: any, c: any, d: any) { return (await _ds()).executeAgentDriftWithdraw(a, b, c, d); }
+async function executeAgentTransferBetweenSubaccounts(a: any, b: any, c: any, d: any, e: any) { return (await _ds()).executeAgentTransferBetweenSubaccounts(a, b, c, d, e); }
+async function getAgentDriftBalance(a: any) { return (await _ds()).getAgentDriftBalance(a); }
+async function getDriftAccountInfo(a: any, b: any) { return (await _ds()).getDriftAccountInfo(a, b); }
+async function getBatchDriftAccountInfo(a: any, b: any) { return (await _ds()).getBatchDriftAccountInfo(a, b); }
+async function getBatchPerpPositions(a: any, b: any) { return (await _ds()).getBatchPerpPositions(a, b); }
+async function executePerpOrder(a: any, b: any, c: any, d: any, e: any, f: any, g: any, h?: any, i?: any) { return (await _ds()).executePerpOrder(a, b, c, d, e, f, g, h, i); }
+async function getPerpPositions(a: any, b: any) { return (await _ds()).getPerpPositions(a, b); }
+async function closePerpPosition(a: any, b: any, c: any, d?: any, e?: any, f?: any, g?: any, h?: any) { return (await _ds()).closePerpPosition(a, b, c, d, e, f, g, h); }
+async function getNextOnChainSubaccountId(a: any, b?: any) { return (await _ds()).getNextOnChainSubaccountId(a, b); }
+async function discoverOnChainSubaccounts(a: any) { return (await _ds()).discoverOnChainSubaccounts(a); }
+async function closeDriftSubaccount(a: any, b: any) { return (await _ds()).closeDriftSubaccount(a, b); }
+async function settleAllPnl(a: any, b: any) { return (await _ds()).settleAllPnl(a, b); }
 import { reconcileBotPosition, syncPositionFromOnChain, backfillLiquidationRecords, correctFalseLiquidations } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
@@ -20,9 +50,10 @@ import { sendTradeNotification, type TradeNotification } from "./notification-se
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
-import { getSwiftMetrics } from "./swift-metrics";
 import { DOCS_MARKDOWN } from "./docs-markdown";
-import { getSwiftDiagnostics } from "./swift-config";
+
+async function getSwiftMetrics() { try { return (await import("./swift-metrics")).getSwiftMetrics(); } catch { return null; } }
+async function getSwiftDiagnostics() { try { return (await import("./swift-config")).getSwiftDiagnostics(); } catch { return null; } }
 import nacl from "tweetnacl";
 import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
@@ -2096,7 +2127,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         try {
           // 2a. Close all open positions in this subaccount
           const positions = await getPerpPositions(agentPubKey, subId);
-          const openPositions = positions.filter(p => Math.abs(p.baseAssetAmount) > 0.0001);
+          const openPositions = positions.filter((p: any) => Math.abs(p.baseAssetAmount) > 0.0001);
           
           if (openPositions.length > 0) {
             log(`Closing ${openPositions.length} position(s) in subaccount ${subId}`);
@@ -2194,7 +2225,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         try {
           // 3a. Close any positions in subaccount 0
           const positions = await getPerpPositions(agentPubKey, 0);
-          const openPositions = positions.filter(p => Math.abs(p.baseAssetAmount) > 0.0001);
+          const openPositions = positions.filter((p: any) => Math.abs(p.baseAssetAmount) > 0.0001);
           
           if (openPositions.length > 0) {
             log(`Closing ${openPositions.length} position(s) in main account`);
@@ -2362,7 +2393,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       for (const subId of existingSubaccounts) {
         const positions = await getPerpPositions(agentPubKey, subId);
-        const openPositions = positions.filter(p => Math.abs(p.baseAssetAmount) > 0.0001);
+        const openPositions = positions.filter((p: any) => Math.abs(p.baseAssetAmount) > 0.0001);
         
         if (openPositions.length > 0) {
           return res.status(400).json({ 
@@ -2518,7 +2549,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         
         try {
           const onChainPositions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
-          const position = onChainPositions.find(p => p.market === bot.market);
+          const position = onChainPositions.find((p: any) => p.market === bot.market);
           
           if (!position || Math.abs(position.baseAssetAmount) < 0.0001) {
             continue;
@@ -3183,7 +3214,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         console.log(`[Reconcile] Bot ${bot.name} (subaccount ${subAccountId}): Found ${onChainPositions.length} on-chain positions`);
 
         // Find position matching this bot's market
-        const pos = onChainPositions.find(p => p.market === bot.market);
+        const pos = onChainPositions.find((p: any) => p.market === bot.market);
         const dbPosition = await storage.getBotPosition(bot.id, bot.market);
         const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
 
@@ -3298,7 +3329,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const freeCollateral = accountInfo.freeCollateral;
       let unrealizedPnl = 0;
       
-      const formattedPositions = positions.map(pos => {
+      const formattedPositions = positions.map((pos: any) => {
         unrealizedPnl += pos.unrealizedPnl;
         return {
           marketIndex: pos.marketIndex,
@@ -4712,7 +4743,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         try {
           const onChainPositions = await getPerpPositions(wallet!.agentPublicKey!, pauseSubAccountId);
           const marketName = bot.market.toUpperCase();
-          pauseOnChainPosition = onChainPositions.find(p => 
+          pauseOnChainPosition = onChainPositions.find((p: any) => 
             p.market.toUpperCase() === marketName || 
             p.market.toUpperCase().replace('-', '-') === marketName
           );
@@ -4760,7 +4791,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 try {
                   await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s for blockchain confirmation
                   const verifyPositions = await getPerpPositions(wallet.agentPublicKey!, pauseSubAccountId);
-                  const verifyPosition = verifyPositions.find(p => 
+                  const verifyPosition = verifyPositions.find((p: any) => 
                     p.market.toUpperCase() === bot.market.toUpperCase()
                   );
                   const remainingSize = Math.abs(verifyPosition?.baseAssetAmount || 0);
