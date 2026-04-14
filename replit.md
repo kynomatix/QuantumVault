@@ -9,24 +9,27 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 **MANDATORY RULES for any migration-related work:**
 1. **READ `PACIFICA_MIGRATION.md` FIRST** before writing ANY code that touches: protocol adapters, signing, order execution, subaccounts, symbol mapping, deposit/withdraw flows, market data, position reads, reconciliation, trade-retry, leverage cache, or any file listed in the migration scope.
 2. **DO NOT deviate from the plan.** The document has been audited across multiple architect reviews and cross-referenced against Pacifica's official API documentation. Going off-script risks breaking production systems.
-3. **Follow the phased approach** (Phases 0→6). Do not skip phases or mix work from different phases.
+3. **Follow the phased approach** (Phases 0→7, including 5b). Do not skip phases or mix work from different phases.
 4. **Check the document for the specific interface, type, or endpoint** before implementing. The signing protocol, operation types, endpoint paths, and type definitions are all specified precisely.
 5. **If something isn't covered in the doc**, stop and flag it — do not improvise. The doc may need updating before the work proceeds.
 
-**Key sections in `PACIFICA_MIGRATION.md`:**
-- **Master Progress Tracker** (top of doc): 242 checkboxes across all phases (0-7 + 5b shadow-read) — scan this FIRST to see what's done and what's next
-- Section 4: ProtocolAdapter + UserTransactionBuilder interfaces (split by signing model)
-- Section 5: SymbolRegistry design + normalizeMarket consolidation
-- Section 6: Pacifica API endpoints with operation types
-- Section 7: Complete 8-step signing protocol with pitfalls
-- Section 8: Subaccount system differences
-- Section 9: Builder Program / commission model
-- Section 12: File-by-file migration scope (21 server files)
-- Section 13: Startup sequence dependencies
-- Section 14: Phased migration plan with Phase 5 gate
-- Section 15: Database schema changes (additive only)
+**How to navigate the doc:**
+- **Phase Navigation Index** (top of Master Progress Tracker): tells you which sections to load for each phase — follow this to avoid reading the full 2,196-line doc
+- **Phase markers**: grep for `PHASE_N_START` / `PHASE_N_END` to find any phase instantly (e.g., `grep PHASE_3_START`)
+- **Section 17**: AUTHORITATIVE phase checklists with ordering, section cross-references, and verification commands
+- **Master Progress Tracker**: summary view for quick scanning — sync with Section 17 periodically
+- **Critical Findings section**: VERIFICATION items, not build tasks — check off when phase work addresses them
 
-**Workflow:** Before starting any migration task, check the Master Progress Tracker checkboxes. After completing any item, mark it as done (`- [x]`). This prevents duplicate work and keeps progress visible across sessions.
+**Key reference sections:**
+- §4: ProtocolAdapter + UserTransactionBuilder interfaces (split by signing model)
+- §5: SymbolRegistry design + normalizeMarket consolidation
+- §6: Pacifica API endpoints with operation types
+- §7: Complete 8-step signing protocol with pitfalls
+- §14: File-by-file migration scope (21 server files + startup sequence)
+- §15: Database schema changes (additive only)
+- §18: Critical execution risks
+
+**Workflow:** When starting a phase, check the Phase Navigation Index for which sections to read. Work through Section 17's phase checklist top-to-bottom. Phase 3 has explicit Group A→B→C ordering — follow it.
 
 **Status:** Planning phase — document is still being audited. No code changes until audit is complete.
 
