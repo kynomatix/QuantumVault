@@ -16,7 +16,16 @@ export interface PacificaRequestBody {
   [key: string]: unknown;
 }
 
-const DEFAULT_EXPIRY_WINDOW = 5000;
+const DEFAULT_EXPIRY_WINDOW = 30000;
+
+const RESERVED_FIELDS = new Set([
+  'account',
+  'agent_wallet',
+  'signature',
+  'timestamp',
+  'expiry_window',
+  'type',
+]);
 
 export class PacificaSigner {
   private readonly secretKey: Uint8Array;
@@ -70,6 +79,15 @@ export class PacificaSigner {
     agentPublicKey: string | null,
     expiryWindow: number = DEFAULT_EXPIRY_WINDOW,
   ): PacificaRequestBody {
+    for (const key of Object.keys(operationData)) {
+      if (RESERVED_FIELDS.has(key)) {
+        throw new Error(
+          `PacificaSigner: operationData contains reserved field "${key}" — ` +
+          `this field is managed by the signer and must not be in operation data`,
+        );
+      }
+    }
+
     const { signature, timestamp, expiryWindow: expiry } = this.sign(
       operationType,
       operationData,
