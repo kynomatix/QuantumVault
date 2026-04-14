@@ -24,7 +24,7 @@ type DocSection =
   | 'marketplace'
   | 'settings'
   | 'security'
-  | 'swift-execution'
+  | 'trade-execution'
   | 'ai-agents'
   | 'quantumlab-overview'
   | 'quantumlab-strategies'
@@ -49,7 +49,7 @@ const navItems: NavItem[] = [
   { id: 'marketplace', label: 'Marketplace', icon: Users },
   { id: 'settings', label: 'Settings & Referrals', icon: Zap },
   { id: 'security', label: 'Security', icon: Shield },
-  { id: 'swift-execution', label: 'Swift Execution', icon: Zap },
+  { id: 'trade-execution', label: 'Trade Execution', icon: Zap },
   { id: 'ai-agents', label: 'AI Agent Integration', icon: Cpu },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', icon: FlaskConical },
   { id: 'quantumlab-strategies', label: 'Strategy Library', icon: Layers },
@@ -155,7 +155,7 @@ function GettingStartedSection() {
       <SectionHeading>Getting Started</SectionHeading>
       <Paragraph>
         QuantumVault is an automated trading platform built on Solana that connects your TradingView alerts 
-        to Drift Protocol for perpetual futures trading. Execute trades automatically based on your technical 
+        to perpetual futures trading. Execute trades automatically based on your technical 
         analysis signals with minimal latency.
       </Paragraph>
       
@@ -200,7 +200,7 @@ function GettingStartedSection() {
       </div>
       
       <Alert type="info">
-        All trades are executed on Drift Protocol, a decentralized perpetual futures exchange on Solana. 
+        All trades are executed on decentralized perpetual futures exchanges on Solana. 
         Your funds remain in your control through your agent wallet.
       </Alert>
     </div>
@@ -265,9 +265,9 @@ function FundingSection() {
       
       <SubHeading>SOL for Account Setup & Fees</SubHeading>
       <Paragraph>
-        SOL covers a one-time account setup (~0.05 SOL for your Drift trading account and Swift execution 
-        authorization) plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover 
-        setup and many trades. Most trades via Swift cost no gas at all.
+        SOL covers a one-time account setup (~0.05 SOL for your trading account initialization) 
+        plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover 
+        setup and many trades.
       </Paragraph>
       <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
         <div className="flex items-center justify-between">
@@ -282,8 +282,8 @@ function FundingSection() {
       
       <SubHeading>USDC for Trading</SubHeading>
       <Paragraph>
-        USDC is the trading currency on Drift Protocol. Your USDC is held in your agent wallet 
-        and can be allocated to individual bots or the Drift trading account.
+        USDC is the trading currency. Your USDC is held in your agent wallet 
+        and can be allocated to individual bots or your trading account.
       </Paragraph>
       
       <SubHeading>Capital Flow</SubHeading>
@@ -294,18 +294,18 @@ function FundingSection() {
           <ArrowRight className="w-4 h-4 text-white/40" />
           <span className="text-white/70">Agent Wallet</span>
           <ArrowRight className="w-4 h-4 text-white/40" />
-          <span className="text-white/70">Drift Account</span>
+          <span className="text-white/70">Trading Account</span>
         </div>
       </div>
       
       <Paragraph>
-        When you deposit to a bot, funds move from your agent wallet to that bot's Drift subaccount. 
+        When you deposit to a bot, funds move from your agent wallet to that bot's trading subaccount. 
         Each bot has an isolated subaccount for safety.
       </Paragraph>
       
       <Alert type="success">
-        Your USDC earns interest while sitting in Drift! The current APY is displayed in your bot 
-        settings and adjusts based on market conditions.
+        Your USDC may earn interest while deposited in the exchange. The current APY (if available) is displayed 
+        in your bot settings.
       </Alert>
     </div>
   );
@@ -691,7 +691,7 @@ function TradingViewSection() {
           amount (~$900) for important reasons:
         </p>
         <ul className="list-disc list-inside text-white/60 text-sm space-y-1 ml-2">
-          <li><strong className="text-white/80">Margin Buffer</strong> - Drift requires a safety cushion to accept orders</li>
+          <li><strong className="text-white/80">Margin Buffer</strong> - The exchange requires a safety cushion to accept orders</li>
           <li><strong className="text-white/80">Trading Fees</strong> - Opening fees reduce available margin</li>
           <li><strong className="text-white/80">Price Slippage</strong> - Market orders may fill at slightly different prices</li>
           <li><strong className="text-white/80">Health Protection</strong> - Prevents immediate liquidation risk on entry</li>
@@ -931,7 +931,7 @@ function SettingsSection() {
           </p>
         </div>
         <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/30">
-          <h4 className="font-medium text-red-200 mb-1">Reset Drift Account</h4>
+          <h4 className="font-medium text-red-200 mb-1">Reset Trading Account</h4>
           <p className="text-red-200/70 text-sm">
             Closes all positions, withdraws funds, and deletes all bot subaccounts. Start fresh.
           </p>
@@ -1120,82 +1120,68 @@ function SecuritySection() {
   );
 }
 
-function SwiftExecutionSection() {
+function TradeExecutionSection() {
   return (
     <div>
-      <SectionHeading>Swift Execution</SectionHeading>
+      <SectionHeading>Trade Execution</SectionHeading>
       <Paragraph>
-        Swift is a faster, cheaper way to execute your trades on Drift Protocol. Instead of sending 
-        transactions directly to the Solana blockchain, Swift sends your trade intent to professional 
-        market makers who compete to fill your order — resulting in gasless trades, better prices, 
-        and lower fees.
+        QuantumVault executes your trades on decentralized perpetual futures exchanges on Solana. 
+        The platform handles order routing, retry logic, and position management so your signals 
+        are executed reliably with minimal latency.
       </Paragraph>
 
-      <SubHeading>Why Swift Is Better for You</SubHeading>
+      <SubHeading>How Trades Are Executed</SubHeading>
+      <Paragraph>
+        When a trading signal is received, QuantumVault handles the full execution pipeline automatically:
+      </Paragraph>
+      <StepList steps={[
+        'Your bot receives a trading signal (from TradingView or AI agent)',
+        'QuantumVault validates the signal and checks your current position',
+        'The trade is submitted to the exchange with optimized parameters',
+        'Trade is settled on-chain — you can verify it on Solana explorer',
+      ]} />
+
+      <SubHeading>Execution Features</SubHeading>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <div className="flex items-center gap-3 mb-2">
             <Zap className="w-5 h-5 text-violet-400" />
-            <h4 className="font-medium text-white">Gasless Trading</h4>
+            <h4 className="font-medium text-white">Low Latency</h4>
           </div>
           <p className="text-white/60 text-sm">
-            No SOL burned per trade. Swift eliminates blockchain gas fees so you keep more of your profits.
-          </p>
-        </div>
-        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
-          <div className="flex items-center gap-3 mb-2">
-            <TrendingUp className="w-5 h-5 text-violet-400" />
-            <h4 className="font-medium text-white">Better Fills</h4>
-          </div>
-          <p className="text-white/60 text-sm">
-            Market makers compete in an auction to fill your order, often giving you price improvement over standard execution.
-          </p>
-        </div>
-        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
-          <div className="flex items-center gap-3 mb-2">
-            <DollarSign className="w-5 h-5 text-violet-400" />
-            <h4 className="font-medium text-white">Lower Fees</h4>
-          </div>
-          <p className="text-white/60 text-sm">
-            Swift taker fees can be lower than standard on-chain execution, saving you money on every trade.
+            Trades are submitted directly to the exchange with minimal delay from signal to execution.
           </p>
         </div>
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <div className="flex items-center gap-3 mb-2">
             <RefreshCw className="w-5 h-5 text-violet-400" />
-            <h4 className="font-medium text-white">Reduced RPC Pressure</h4>
+            <h4 className="font-medium text-white">Automatic Retry</h4>
           </div>
           <p className="text-white/60 text-sm">
-            Fewer blockchain calls means more reliable execution, especially important for high-frequency strategies on 1-minute charts.
+            Failed trades are automatically retried with RPC failover to ensure your signals get executed.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <DollarSign className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Competitive Fees</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Trading fees are kept low through optimized exchange routing and fee tier management.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Shield className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Position Safety</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Before every trade, QuantumVault verifies your current position to prevent double exposure or conflicting orders.
           </p>
         </div>
       </div>
 
-      <SubHeading>How It Works</SubHeading>
-      <Paragraph>
-        Swift handles the complexity behind the scenes. Here's what happens when a trade is triggered:
-      </Paragraph>
-      <StepList steps={[
-        'Your bot receives a trading signal (from TradingView or AI agent)',
-        "QuantumVault creates a signed trade intent and submits it to Swift's auction",
-        'Professional market makers compete to fill your order at the best price',
-        'Trade is settled on-chain — you can verify it on Solana explorer',
-      ]} />
-
-      <SubHeading>Automatic Fallback & Trade Protection</SubHeading>
-      <Alert type="success">
-        If Swift can't fill your trade (this is rare), QuantumVault automatically falls back to direct 
-        on-chain execution. Before switching, it verifies your current position to ensure the same trade 
-        isn't executed twice — protecting you from unintended double exposure. You don't need to configure 
-        anything — it's completely seamless and your trades will always go through safely.
-      </Alert>
-
-      <SubHeading>Minimum Trade Size for Swift</SubHeading>
-      <Paragraph>
-        Swift routes trades through market maker auctions. For very small trades, market makers may not 
-        participate in the auction, so there's a minimum trade size of <strong className="text-violet-300">$25 notional value</strong> for 
-        Swift execution. Trades below this threshold automatically use direct on-chain execution instead.
-      </Paragraph>
+      <SubHeading>Trade Size</SubHeading>
       <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-6">
         <div className="flex items-center gap-3 mb-3">
           <DollarSign className="w-5 h-5 text-violet-400" />
@@ -1203,62 +1189,30 @@ function SwiftExecutionSection() {
         </div>
         <p className="text-white/60 text-sm mb-3">
           Notional value = number of contracts × current price. For example, trading 0.5 SOL-PERP at $120 
-          = $60 notional — this qualifies for Swift execution.
+          = $60 notional value.
         </p>
         <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
-          <span className="text-violet-200 text-sm">Swift Minimum</span>
-          <span className="text-violet-200 font-medium text-sm">$25 notional value</span>
+          <span className="text-violet-200 text-sm">Minimum Trade Size</span>
+          <span className="text-violet-200 font-medium text-sm">Varies by exchange</span>
         </div>
       </div>
-      <Alert type="info">
-        If your trade is below the minimum, it still executes normally — just via direct on-chain 
-        transaction instead of Swift. The only difference is a small gas fee (~0.000005 SOL per trade).
-      </Alert>
-
-      <SubHeading>Market Liquidity & Swift Availability</SubHeading>
-      <Paragraph>
-        Swift relies on professional market makers to compete in an auction and fill your trade. This works 
-        best on popular, high-volume markets where market makers are actively looking for orders to fill. 
-        On smaller or newer altcoin markets, there may be fewer market makers participating, which means 
-        Swift auctions are less likely to get filled.
-      </Paragraph>
-      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
-        <div className="flex items-center gap-3 mb-3">
-          <TrendingUp className="w-5 h-5 text-violet-400" />
-          <h4 className="font-medium text-white">Best Markets for Swift</h4>
-        </div>
-        <p className="text-white/60 text-sm mb-2">
-          High-volume markets like <strong className="text-white/80">SOL, BTC, ETH, SUI</strong> and other 
-          major tokens tend to have the most active market makers, so Swift fills are more consistent.
-        </p>
-        <p className="text-white/60 text-sm">
-          Smaller altcoin markets with lower trading volume may see Swift auctions go unfilled more 
-          frequently. When this happens, your trade automatically switches to direct on-chain execution — 
-          no action needed from you, and your trade still goes through.
-        </p>
-      </div>
-      <Alert type="info">
-        Even if Swift doesn't fill on a particular market, it doesn't cost you anything extra. The system 
-        simply falls back to direct on-chain execution seamlessly. As markets grow in popularity and attract 
-        more market makers, Swift fill rates will improve over time.
-      </Alert>
 
       <SubHeading>What You Need to Know</SubHeading>
       <div className="space-y-3 mb-6">
         <Alert type="info">
-          Swift is enabled by default for all trades above $25 notional value. No setup required on your end.
+          A one-time account setup (~0.05 SOL) is required when you first start trading. This covers 
+          your trading account initialization.
         </Alert>
         <Alert type="info">
-          A one-time account setup (~0.05 SOL) is required when you first start trading. This covers 
-          both your Drift account and Swift authorization.
+          Each bot has its own isolated trading subaccount for safety. Funds are managed per-bot.
         </Alert>
         <Alert type="warning">
-          In rare edge cases, a trade may take a few extra seconds if Swift needs to fall back to direct 
-          execution. This is normal and your trade will still complete.
+          In rare edge cases, a trade may take a few extra seconds due to network conditions. 
+          This is normal and your trade will still complete.
         </Alert>
       </div>
 
-      <SubHeading>Swift Status</SubHeading>
+      <SubHeading>Execution Status</SubHeading>
       <div className="p-4 rounded-lg bg-white/5 border border-white/10">
         <div className="flex items-center gap-3 mb-4">
           <Activity className="w-5 h-5 text-violet-400" />
@@ -1266,23 +1220,19 @@ function SwiftExecutionSection() {
         </div>
         <div className="space-y-3">
           <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
-            <span className="text-violet-200 text-sm">Swift Status</span>
+            <span className="text-violet-200 text-sm">Execution Status</span>
             <span className="text-violet-200 font-medium text-sm flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-green-400" />
               Active
             </span>
           </div>
           <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
-            <span className="text-violet-200 text-sm">Fallback</span>
+            <span className="text-violet-200 text-sm">Retry Logic</span>
             <span className="text-violet-200 font-medium text-sm">Automatic</span>
           </div>
           <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
-            <span className="text-violet-200 text-sm">Minimum Trade Size</span>
-            <span className="text-violet-200 font-medium text-sm">$25 notional</span>
-          </div>
-          <div className="flex items-center justify-between p-3 rounded-lg bg-violet-500/10 border border-violet-500/30">
             <span className="text-violet-200 text-sm">Setup Required</span>
-            <span className="text-violet-200 font-medium text-sm">None (auto-configured)</span>
+            <span className="text-violet-200 font-medium text-sm">One-time account initialization</span>
           </div>
         </div>
       </div>
@@ -1353,13 +1303,13 @@ POST {{QUANTUMVAULT_URL}}/api/webhook/{{BOT_ID}}
       <SectionHeading>AI Agent Integration</SectionHeading>
       <Paragraph>
         Connect AI trading agents like OpenClaw, AutoGPT, or custom LLM-powered bots to QuantumVault 
-        for automated perpetual futures trading on Drift Protocol. Your AI handles the intelligence, 
+        for automated perpetual futures trading. Your AI handles the intelligence, 
         QuantumVault handles safe execution.
       </Paragraph>
       
       <Alert type="info">
-        AI agents send webhook signals just like TradingView. QuantumVault executes trades on Drift 
-        Protocol with automatic retry, RPC failover, and position management.
+        AI agents send webhook signals just like TradingView. QuantumVault executes trades 
+        with automatic retry, RPC failover, and position management.
       </Alert>
       
       <SubHeading>Why Use QuantumVault as Your Execution Layer?</SubHeading>
@@ -1382,7 +1332,7 @@ POST {{QUANTUMVAULT_URL}}/api/webhook/{{BOT_ID}}
             <h4 className="font-medium text-white">QuantumVault</h4>
           </div>
           <ul className="text-white/60 text-sm space-y-1">
-            <li>• Drift Protocol execution</li>
+            <li>• Exchange execution</li>
             <li>• Position management</li>
             <li>• Auto retry & failover</li>
             <li>• Secure key handling</li>
@@ -1538,7 +1488,7 @@ POST {{QUANTUMVAULT_URL}}/api/webhook/{{BOT_ID}}
       
       <SubHeading>Supported Markets</SubHeading>
       <Paragraph>
-        QuantumVault supports all Drift Protocol perpetual markets including:
+        QuantumVault supports a wide range of perpetual markets including:
       </Paragraph>
       <div className="flex flex-wrap gap-2 mb-6">
         {['SOL-PERP', 'BTC-PERP', 'ETH-PERP', 'SUI-PERP', 'APT-PERP', 'ARB-PERP', 
@@ -2383,8 +2333,8 @@ export default function DocsPage() {
         return <SettingsSection />;
       case 'security':
         return <SecuritySection />;
-      case 'swift-execution':
-        return <SwiftExecutionSection />;
+      case 'trade-execution':
+        return <TradeExecutionSection />;
       case 'ai-agents':
         return <AIAgentsSection />;
       case 'quantumlab-overview':
