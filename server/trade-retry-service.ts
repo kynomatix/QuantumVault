@@ -1,11 +1,66 @@
 import { sendTradeNotification } from "./notification-service";
-import { executePerpOrder, closePerpPosition, getPerpPositions, settleAllPnl, executeAgentDriftWithdraw } from "./drift-service";
 import { syncPositionFromOnChain } from "./reconciliation-service";
 import { storage } from "./storage";
 import { getMarketBySymbol } from "./market-liquidity-service";
 import { transferUsdcToWallet } from "./agent-wallet";
 import { PublicKey } from "@solana/web3.js";
-import { isSwiftAvailable, classifySwiftError } from './swift-config';
+
+async function driftExecutePerpOrder(
+  encryptedKey: string, market: string, side: 'long' | 'short', size: number,
+  subAccountId: number, reduceOnly: boolean, slippageBps: number,
+  privateKeyBase58?: string, agentPublicKey?: string
+): Promise<any> {
+  const { executePerpOrder } = await import("./drift-service");
+  return executePerpOrder(encryptedKey, market, side, size, subAccountId, reduceOnly, slippageBps, privateKeyBase58, agentPublicKey);
+}
+
+async function driftClosePerpPosition(
+  encryptedKey: string, market: string, subAccountId: number,
+  size?: number, slippageBps?: number, privateKeyBase58?: string,
+  agentPublicKey?: string, side?: 'long' | 'short'
+): Promise<any> {
+  const { closePerpPosition } = await import("./drift-service");
+  return closePerpPosition(encryptedKey, market, subAccountId, size, slippageBps, privateKeyBase58, agentPublicKey, side);
+}
+
+async function driftGetPerpPositions(agentPublicKey: string, subAccountId: number): Promise<any[]> {
+  try {
+    const { getPerpPositions } = await import("./drift-service");
+    return await getPerpPositions(agentPublicKey, subAccountId);
+  } catch {
+    return [];
+  }
+}
+
+async function driftSettleAllPnl(encryptedKey: string, subAccountId: number): Promise<any> {
+  const { settleAllPnl } = await import("./drift-service");
+  return settleAllPnl(encryptedKey, subAccountId);
+}
+
+async function driftExecuteAgentWithdraw(
+  agentPublicKey: string, encryptedKey: string, amount: number, subAccountId: number
+): Promise<any> {
+  const { executeAgentDriftWithdraw } = await import("./drift-service");
+  return executeAgentDriftWithdraw(agentPublicKey, encryptedKey, amount, subAccountId);
+}
+
+function tryIsSwiftAvailable(): boolean {
+  try {
+    const mod = require('./swift-config');
+    return mod.isSwiftAvailable();
+  } catch {
+    return false;
+  }
+}
+
+function tryClassifySwiftError(error?: string): { category: string; shouldRetrySwift: boolean } {
+  try {
+    const mod = require('./swift-config');
+    return mod.classifySwiftError(error);
+  } catch {
+    return { category: 'unknown', shouldRetrySwift: false };
+  }
+}
 
 export interface RetryJob {
   id: string;
@@ -359,14 +414,14 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   try {
     let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string };
     let actualCloseSide: 'long' | 'short' = 'short';
-    const swiftAvailable = isSwiftAvailable();
+    const swiftAvailable = tryIsSwiftAvailable();
     const jobSwiftAttempts = job.swiftAttempts || 0;
     console.log(`[TradeRetry] Swift status: available=${swiftAvailable}, swiftAttempts=${jobSwiftAttempts}, originalMethod=${job.originalExecMethod || 'legacy'}`);
     
     if (job.side === 'close') {
       // CRITICAL: Check on-chain position before close retry to prevent duplicate closes
       try {
-        const positions = await getPerpPositions(job.agentPublicKey, job.subAccountId);
+        const positions = await driftGetPerpPositions(job.agentPublicKey, job.subAccountId);
         const normalizedMarket = job.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
         const position = positions.find(p => {
           const posMarket = p.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
@@ -427,7 +482,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         console.warn(`[TradeRetry] Could not verify position, proceeding with close attempt:`, posCheckErr);
       }
       
-      result = await closePerpPosition(
+      result = await driftClosePerpPosition(
         job.agentPrivateKeyEncrypted,
         job.market,
         job.subAccountId,
@@ -443,7 +498,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       // IMPORTANT: Must compare position size against intended trade size to avoid false positives
       // from residual positions left by incomplete closes
       try {
-        const positions = await getPerpPositions(job.agentPublicKey, job.subAccountId);
+        const positions = await driftGetPerpPositions(job.agentPublicKey, job.subAccountId);
         const normalizedMarket = job.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
         const position = positions.find(p => {
           const posMarket = p.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
@@ -490,7 +545,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         console.warn(`[TradeRetry] Could not verify existing position, proceeding with trade attempt:`, posCheckErr);
       }
       
-      result = await executePerpOrder(
+      result = await driftExecutePerpOrder(
         job.agentPrivateKeyEncrypted,
         job.market,
         job.side,
@@ -675,13 +730,12 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                     };
                     
                     // Step 1: Settle PnL
-                    const settleResult = await settleAllPnl(job.agentPrivateKeyEncrypted, job.subAccountId);
+                    const settleResult = await driftSettleAllPnl(job.agentPrivateKeyEncrypted, job.subAccountId);
                     if (!settleResult.success) {
                       console.error(`[TradeRetry] Settle PnL failed: ${settleResult.error}`);
                       await createIouOnFailure(`Settle PnL failed: ${settleResult.error}`);
                     } else {
-                      // Step 2: Withdraw from Drift
-                      const withdrawResult = await executeAgentDriftWithdraw(
+                      const withdrawResult = await driftExecuteAgentWithdraw(
                         job.agentPublicKey,
                         job.agentPrivateKeyEncrypted,
                         profitShareAmount,
@@ -738,7 +792,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     }
     if (failedExecMethod === 'swift') {
       job.swiftAttempts = (job.swiftAttempts || 0) + 1;
-      const swiftClassification = classifySwiftError(job.lastError);
+      const swiftClassification = tryClassifySwiftError(job.lastError);
       console.log(`[TradeRetry] Swift attempt failed (swiftAttempts=${job.swiftAttempts}, classification=${swiftClassification}): ${job.lastError.slice(0, 100)}`);
     }
     const errorInfo = categorizeError(job.lastError);

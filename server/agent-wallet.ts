@@ -3,8 +3,8 @@ import { encrypt, decrypt } from './crypto';
 import bs58 from 'bs58';
 import BN from 'bn.js';
 
-const DRIFT_ENV = (process.env.DRIFT_ENV || 'mainnet-beta') as 'devnet' | 'mainnet-beta';
-const IS_MAINNET = DRIFT_ENV === 'mainnet-beta';
+const SOLANA_ENV = (process.env.DRIFT_ENV || process.env.SOLANA_ENV || 'mainnet-beta') as 'devnet' | 'mainnet-beta';
+const IS_MAINNET = SOLANA_ENV === 'mainnet-beta';
 
 const MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const DEVNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';

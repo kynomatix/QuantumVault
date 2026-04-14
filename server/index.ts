@@ -10,8 +10,16 @@ import { startPnlSnapshotJob } from "./pnl-snapshot-job";
 import { startRetryWorker, queueTradeRetry } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
 import { initLeverageCache, setOnCacheRefreshed } from "./leverage-cache-service";
-import { syncMarketRegistry } from "./drift-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
+
+async function trySyncMarketRegistry(): Promise<void> {
+  try {
+    const { syncMarketRegistry } = await import("./drift-service");
+    await syncMarketRegistry();
+  } catch (err) {
+    console.warn('[Startup] Market registry sync skipped (drift-service unavailable):', err);
+  }
+}
 import { createLabSupervisor, getLabAuthSecret } from "./lab/supervisor";
 import { createProxyMiddleware } from "http-proxy-middleware";
 
@@ -471,10 +479,9 @@ app.use((req, res, next) => {
         startPeriodicReconciliation();
       }, 15_000);
 
-      // ~15s: market registry sync (reads SDK PerpMarkets, writes executor JSON)
       setTimeout(() => {
-        log('[Staggered startup] Syncing market registry from SDK');
-        syncMarketRegistry().catch(err => console.error('Failed to sync market registry:', err));
+        log('[Staggered startup] Syncing market registry');
+        trySyncMarketRegistry().catch(err => console.error('Failed to sync market registry:', err));
       }, 15_000);
 
       // ~20s: leverage cache (single batch RPC call to read perp market accounts)
