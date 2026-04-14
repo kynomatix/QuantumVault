@@ -230,7 +230,7 @@ export function BotManagementDrawer({
   const [performanceTradeCount, setPerformanceTradeCount] = useState<number>(0);
   const [manualTradeLoading, setManualTradeLoading] = useState<'long' | 'short' | null>(null);
 
-  // Fetch USDC deposit APY from Drift
+  // Fetch USDC deposit APY
   const fetchUsdcApy = async () => {
     try {
       const response = await fetch('/api/exchange/usdc-apy');
@@ -554,7 +554,7 @@ export function BotManagementDrawer({
       const data = await safeResponseJson(res);
       
       if (!res.ok) {
-        // Map Drift errors to friendly messages
+        // Map exchange errors to friendly messages
         let friendlyMessage = data.error || 'Failed to remove from bot';
         if (data.error?.includes('InsufficientCollateral') || data.error?.includes('0x1773')) {
           friendlyMessage = 'Not enough available balance. Try a smaller amount.';
@@ -1104,7 +1104,7 @@ export function BotManagementDrawer({
                         <Info className="w-3 h-3 text-muted-foreground" />
                       </TooltipTrigger>
                       <TooltipContent>
-                        <p>Current Drift account balance (Total Collateral)</p>
+                        <p>Current trading account balance (Total Collateral)</p>
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
@@ -1596,7 +1596,7 @@ export function BotManagementDrawer({
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm text-muted-foreground">Bot Balance</p>
-                    <p className="text-2xl font-bold mt-1" data-testid="text-drift-balance">
+                    <p className="text-2xl font-bold mt-1" data-testid="text-trading-balance">
                       {balanceLoading ? (
                         <Loader2 className="w-5 h-5 animate-spin" />
                       ) : (
@@ -2084,7 +2084,7 @@ export function BotManagementDrawer({
                   {getMaxLeverage(localBot?.market || '') < 10 && (
                     <p className="text-xs text-amber-400 flex items-center gap-1">
                       <Info className="w-3 h-3" />
-                      {localBot?.market.replace('-PERP', '')} has a {getMaxLeverage(localBot?.market || '')}x max leverage limit on Drift
+                      {localBot?.market.replace('-PERP', '')} has a {getMaxLeverage(localBot?.market || '')}x max leverage limit
                     </p>
                   )}
                 </div>
@@ -2244,15 +2244,15 @@ export function BotManagementDrawer({
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Info className="w-4 h-4 text-muted-foreground" />
-                    <span className="text-sm text-muted-foreground">Drift Subaccount</span>
+                    <span className="text-sm text-muted-foreground">Trading Subaccount</span>
                   </div>
                   <span className="text-sm font-mono font-medium">
                     Subaccount {displayBot.driftSubaccountId}
                   </span>
                 </div>
                 <p className="text-xs text-muted-foreground mt-2">
-                  This bot's funds are isolated in Drift Subaccount {displayBot.driftSubaccountId}. 
-                  Use this to identify the account in Drift's interface.
+                  This bot's funds are isolated in Trading Subaccount {displayBot.driftSubaccountId}. 
+                  Each bot operates in its own isolated subaccount.
                 </p>
               </div>
             )}

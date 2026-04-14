@@ -267,7 +267,7 @@ export default function Analytics() {
               Platform Analytics
             </h1>
             <p className="text-muted-foreground">
-              On-chain metrics from Drift Protocol
+              On-chain trading metrics
             </p>
           </motion.div>
 

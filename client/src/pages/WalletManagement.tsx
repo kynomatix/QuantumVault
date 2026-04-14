@@ -549,7 +549,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
 
       if (!response.ok) {
         const error = await safeResponseJson(response);
-        throw new Error(error.error || 'Drift deposit failed');
+        throw new Error(error.error || 'Trading account deposit failed');
       }
 
       const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
@@ -559,7 +559,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       
       toast({ 
         title: 'Transaction Submitted', 
-        description: 'Confirming Drift deposit...'
+        description: 'Confirming trading account deposit...'
       });
       
       await confirmTransactionWithFallback(connection, {
@@ -569,16 +569,16 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
 
       toast({ 
-        title: 'Drift Deposit Confirmed!', 
-        description: message || `Deposited ${amount} USDC to Drift Protocol`
+        title: 'Deposit Confirmed!', 
+        description: message || `Deposited ${amount} USDC to Trading Account`
       });
       
       setAgentToDriftAmount('');
       await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool()]);
     } catch (error: any) {
-      console.error('Agent to Drift error:', error);
+      console.error('Agent to trading account error:', error);
       toast({ 
-        title: 'Drift Deposit Failed', 
+        title: 'Deposit Failed', 
         description: error.message || 'Please try again',
         variant: 'destructive' 
       });
@@ -595,7 +595,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     }
 
     if (capitalPool && amount > capitalPool.mainAccountBalance) {
-      toast({ title: 'Insufficient Drift balance', variant: 'destructive' });
+      toast({ title: 'Insufficient trading account balance', variant: 'destructive' });
       return;
     }
 
@@ -612,7 +612,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
 
       if (!response.ok) {
         const error = await safeResponseJson(response);
-        throw new Error(error.error || 'Drift withdrawal failed');
+        throw new Error(error.error || 'Trading account withdrawal failed');
       }
 
       const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
@@ -622,7 +622,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       
       toast({ 
         title: 'Transaction Submitted', 
-        description: 'Confirming Drift withdrawal...'
+        description: 'Confirming trading account withdrawal...'
       });
       
       await confirmTransactionWithFallback(connection, {
@@ -632,16 +632,16 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
 
       toast({ 
-        title: 'Drift Withdrawal Confirmed!', 
-        description: message || `Withdrew ${amount} USDC from Drift to Agent Wallet`
+        title: 'Withdrawal Confirmed!', 
+        description: message || `Withdrew ${amount} USDC from Trading Account to Agent Wallet`
       });
       
       setDriftToAgentAmount('');
       await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool()]);
     } catch (error: any) {
-      console.error('Drift to Agent error:', error);
+      console.error('Trading account to Agent error:', error);
       toast({ 
-        title: 'Drift Withdrawal Failed', 
+        title: 'Withdrawal Failed', 
         description: error.message || 'Please try again',
         variant: 'destructive' 
       });
@@ -819,8 +819,8 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                         className="h-6 w-6"
                         onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentWallet?.agentPublicKey}`, '_blank')}
                         disabled={!agentWallet?.agentPublicKey}
-                        title="View on Drift"
-                        data-testid="button-view-on-drift"
+                        title="View on Exchange"
+                        data-testid="button-view-on-exchange"
                       >
                         <ExternalLink className="w-3 h-3" />
                       </Button>

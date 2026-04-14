@@ -337,7 +337,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
           console.error('Failed to update bot settings, but bot was created');
         }
         
-        // Then deposit the investment amount to the bot's Drift subaccount
+        // Then deposit the investment amount to the bot's trading subaccount
         const depositRes = await fetch('/api/exchange/deposit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -602,7 +602,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
             <div className="flex items-start gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs">
               <Info className="w-3.5 h-3.5 text-amber-400 mt-0.5 flex-shrink-0" />
               <p className="text-muted-foreground">
-                {newBot.market.replace('-PERP', '')} has a max leverage of {getMaxLeverage(newBot.market)}x on Drift. 
+                {newBot.market.replace('-PERP', '')} has a max leverage of {getMaxLeverage(newBot.market)}x. 
                 Trades exceeding this will fail with "insufficient margin".
               </p>
             </div>
@@ -715,7 +715,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
             <div className="text-xs">
               <p className="font-medium text-yellow-500">Subaccount Rent</p>
               <p className="text-muted-foreground">
-                Creating a bot allocates a Drift subaccount which requires ~0.035 SOL rent from your agent wallet's gas balance. This rent is reclaimable when you delete the bot.
+                Creating a bot allocates a trading subaccount which requires ~0.035 SOL rent from your agent wallet's gas balance. This rent is reclaimable when you delete the bot.
               </p>
             </div>
           </div>

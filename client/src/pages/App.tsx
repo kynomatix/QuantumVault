@@ -158,8 +158,8 @@ export default function AppPage() {
   const [expandedSection, setExpandedSection] = useState<'account' | 'trading' | 'notifications' | 'security' | 'danger' | null>(null);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
-  const [resetDriftDialogOpen, setResetDriftDialogOpen] = useState(false);
-  const [resettingDriftAccount, setResettingDriftAccount] = useState(false);
+  const [resetTradingDialogOpen, setResetTradingDialogOpen] = useState(false);
+  const [resettingTradingAccount, setResettingTradingAccount] = useState(false);
   const [resetStep, setResetStep] = useState<'idle' | 'closing' | 'settling' | 'sweeping' | 'withdrawing' | 'deleting' | 'complete'>('idle');
   const [resetAgentDialogOpen, setResetAgentDialogOpen] = useState(false);
   const [resettingAgentWallet, setResettingAgentWallet] = useState(false);
@@ -622,8 +622,8 @@ export default function AppPage() {
     }
   };
 
-  const handleResetDriftAccount = async () => {
-    setResettingDriftAccount(true);
+  const handleResetTradingAccount = async () => {
+    setResettingTradingAccount(true);
     setResetStep('closing');
     
     // Simulate step progression while the actual request runs
@@ -650,7 +650,7 @@ export default function AppPage() {
       const data = await safeResponseJson(res);
       
       if (res.status === 400 || res.status === 500) {
-        throw new Error(data.message || data.error || 'Failed to reset Drift account');
+        throw new Error(data.message || data.error || 'Failed to reset trading account');
       }
       
       // Show completion for a moment before closing
@@ -665,22 +665,22 @@ export default function AppPage() {
       } else if (data.success) {
         toast({ 
           title: 'Reset Complete', 
-          description: 'Your Drift account has been reset. Funds have been withdrawn to your agent wallet.'
+          description: 'Your trading account has been reset. Funds have been withdrawn to your agent wallet.'
         });
       }
       
-      setResetDriftDialogOpen(false);
+      setResetTradingDialogOpen(false);
       refetchBots();
     } catch (error: any) {
       clearInterval(stepTimer);
       toast({ 
         title: 'Reset Failed', 
-        description: error.message || 'Failed to reset Drift account',
+        description: error.message || 'Failed to reset trading account',
         variant: 'destructive' 
       });
-      setResetDriftDialogOpen(false);
+      setResetTradingDialogOpen(false);
     } finally {
-      setResettingDriftAccount(false);
+      setResettingTradingAccount(false);
       setResetStep('idle');
     }
   };
@@ -1646,7 +1646,7 @@ export default function AppPage() {
                           size="sm" 
                           onClick={() => {
                             reconcilePositions.mutate(undefined, {
-                              onSuccess: () => toast({ title: "Synced", description: "Positions synced with Drift" }),
+                              onSuccess: () => toast({ title: "Synced", description: "Positions synced" }),
                               onError: () => toast({ title: "Sync failed", description: "Could not sync positions", variant: "destructive" })
                             });
                           }}
@@ -3165,18 +3165,18 @@ export default function AppPage() {
                               
                               {agentPublicKey && (
                                 <div className="pt-4 border-t border-border/30">
-                                  <h4 className="font-medium mb-3">Drift Account</h4>
+                                  <h4 className="font-medium mb-3">Trading Account</h4>
                                   <p className="text-sm text-muted-foreground mb-3">
-                                    View your on-chain Drift trading account and positions directly.
+                                    View your on-chain trading account and positions directly.
                                   </p>
                                   <Button
                                     variant="outline"
                                     onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentPublicKey}`, '_blank')}
                                     className="w-full sm:w-auto"
-                                    data-testid="button-view-drift-settings"
+                                    data-testid="button-view-exchange"
                                   >
                                     <ExternalLink className="w-4 h-4 mr-2" />
-                                    View on Drift
+                                    View on Exchange
                                   </Button>
                                   <p className="text-xs text-muted-foreground mt-2 font-mono break-all">
                                     Agent: {agentPublicKey}
@@ -3705,16 +3705,16 @@ export default function AppPage() {
                               </div>
                               <div>
                                 <p className="text-sm text-muted-foreground mb-2">
-                                  Close all positions, withdraw all funds, and delete your Drift account.
+                                  Close all positions, withdraw all funds, and delete your trading account.
                                 </p>
                                 <Button 
                                   variant="outline" 
                                   className="border-red-500/50 text-red-400 hover:bg-red-500/10" 
-                                  onClick={() => setResetDriftDialogOpen(true)}
-                                  data-testid="button-reset-drift"
+                                  onClick={() => setResetTradingDialogOpen(true)}
+                                  data-testid="button-reset-trading"
                                 >
                                   <Trash2 className="w-4 h-4 mr-2" />
-                                  Reset Drift Account
+                                  Reset Trading Account
                                 </Button>
                               </div>
                               <div>
@@ -3833,15 +3833,15 @@ export default function AppPage() {
         </div>
       )}
 
-      {resetDriftDialogOpen && (
+      {resetTradingDialogOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <motion.div 
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             className="gradient-border p-6 noise max-w-md w-full mx-4"
-            data-testid="modal-reset-drift"
+            data-testid="modal-reset-trading"
           >
-            {resettingDriftAccount ? (
+            {resettingTradingAccount ? (
               <>
                 <div className="flex items-center gap-3 mb-4">
                   <div className="w-12 h-12 rounded-xl bg-primary/20 flex items-center justify-center">
@@ -3849,7 +3849,7 @@ export default function AppPage() {
                   </div>
                   <div>
                     <h3 className="font-display font-semibold text-lg">Resetting Account</h3>
-                    <p className="text-sm text-muted-foreground">Please wait while we reset your Drift account...</p>
+                    <p className="text-sm text-muted-foreground">Please wait while we reset your trading account...</p>
                   </div>
                 </div>
 
@@ -3933,7 +3933,7 @@ export default function AppPage() {
                     <Trash2 className="w-6 h-6 text-red-400" />
                   </div>
                   <div>
-                    <h3 className="font-display font-semibold text-lg">Reset Drift Account</h3>
+                    <h3 className="font-display font-semibold text-lg">Reset Trading Account</h3>
                     <p className="text-sm text-muted-foreground">Close all positions and withdraw funds</p>
                   </div>
                 </div>
@@ -3947,7 +3947,7 @@ export default function AppPage() {
                         <ul className="text-sm text-muted-foreground mt-2 list-disc ml-4 space-y-1">
                           <li>Close all open trading positions</li>
                           <li>Withdraw all funds to your agent wallet</li>
-                          <li>Delete all Drift subaccounts</li>
+                          <li>Delete all trading subaccounts</li>
                           <li>Recover any rent deposits</li>
                         </ul>
                       </div>
@@ -3962,17 +3962,17 @@ export default function AppPage() {
                   <Button 
                     variant="outline" 
                     className="flex-1" 
-                    onClick={() => setResetDriftDialogOpen(false)}
-                    disabled={resettingDriftAccount}
-                    data-testid="button-cancel-reset-drift"
+                    onClick={() => setResetTradingDialogOpen(false)}
+                    disabled={resettingTradingAccount}
+                    data-testid="button-cancel-reset-trading"
                   >
                     Cancel
                   </Button>
                   <Button 
                     className="flex-1 bg-red-500 hover:bg-red-600 text-white"
-                    onClick={handleResetDriftAccount}
-                    disabled={resettingDriftAccount}
-                    data-testid="button-confirm-reset-drift"
+                    onClick={handleResetTradingAccount}
+                    disabled={resettingTradingAccount}
+                    data-testid="button-confirm-reset-trading"
                   >
                     Reset Account
                   </Button>
@@ -4030,7 +4030,7 @@ export default function AppPage() {
                         <p className="text-sm font-medium text-red-400">Warning</p>
                         <p className="text-sm text-muted-foreground mt-1">
                           This action will withdraw all funds from your agent wallet to your connected wallet 
-                          and create a new agent wallet. All existing Drift subaccounts will no longer be accessible.
+                          and create a new agent wallet. All existing trading subaccounts will no longer be accessible.
                         </p>
                       </div>
                     </div>
@@ -4041,9 +4041,9 @@ export default function AppPage() {
                       <div>
                         <p className="text-sm font-medium">Requirements</p>
                         <ul className="text-sm text-muted-foreground mt-2 list-disc ml-4 space-y-1">
-                          <li>No open positions on Drift</li>
-                          <li>No funds remaining in Drift subaccounts</li>
-                          <li>Use "Reset Drift Account" first if needed</li>
+                          <li>No open trading positions</li>
+                          <li>No funds remaining in trading subaccounts</li>
+                          <li>Use "Reset Trading Account" first if needed</li>
                         </ul>
                       </div>
                     </div>
@@ -4123,7 +4123,7 @@ export default function AppPage() {
                       <p className="text-sm font-medium">Automatic Fund Withdrawal</p>
                       <p className="text-sm text-muted-foreground mt-1">
                         This bot has <span className="font-semibold text-primary">${botToDelete.balance.toFixed(2)} USDC</span>. 
-                        Funds will be automatically withdrawn to your main Drift account before deletion.
+                        Funds will be automatically withdrawn to your agent wallet before deletion.
                       </p>
                     </div>
                   </div>

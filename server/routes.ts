@@ -150,10 +150,10 @@ function parseDriftError(error: string | undefined): string {
     return "Market trading is temporarily paused. Try again later.";
   }
   if (error.includes("AccountOwnedByWrongProgram") || error.includes("wrong owner")) {
-    return "Account initialization issue. Try resetting your Drift account in Settings.";
+    return "Account initialization issue. Try resetting your trading account in Settings.";
   }
   if (error.includes("userStats account") || error.includes("Main account") || error.includes("account does not exist")) {
-    return "Drift account not properly initialized. Please deposit funds first.";
+    return "Trading account not properly initialized. Please deposit funds first.";
   }
   if (error.includes("Key mismatch") || error.includes("decrypted key")) {
     return "Wallet key error. Please contact support.";
@@ -2111,8 +2111,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (existingSubaccounts.length === 0) {
         return res.json({ 
           success: true, 
-          message: "No Drift accounts found",
-          progress: ["No Drift accounts to reset"]
+          message: "No trading accounts found",
+          progress: ["No trading accounts to reset"]
         });
       }
 
@@ -2350,7 +2350,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       res.json({
         success: true,
-        message: `Successfully reset Drift account. Deleted ${deletedSubaccounts.length} subaccount(s).`,
+        message: `Successfully reset trading account. Deleted ${deletedSubaccounts.length} subaccount(s).`,
         progress,
         deletedSubaccounts,
         totalSwept
@@ -2358,7 +2358,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
     } catch (error: any) {
       console.error("Reset Drift account error:", error);
-      res.status(500).json({ error: error.message || "Failed to reset Drift account" });
+      res.status(500).json({ error: error.message || "Failed to reset trading account" });
     }
   });
 
@@ -2404,7 +2404,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         
         if (openPositions.length > 0) {
           return res.status(400).json({ 
-            error: "Cannot reset: You have open positions on Drift. Please close all positions first using 'Close All Positions' or 'Reset Drift Account'.",
+            error: "Cannot reset: You have open positions. Please close all positions first using 'Close All Positions' or 'Reset Trading Account'.",
             hasOpenPositions: true 
           });
         }
@@ -2412,7 +2412,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         const accountInfo = await getDriftAccountInfo(agentPubKey, subId);
         if (accountInfo.usdcBalance > 0.01) {
           return res.status(400).json({ 
-            error: `Cannot reset: You have $${accountInfo.usdcBalance.toFixed(2)} in Drift subaccount ${subId}. Please use 'Reset Drift Account' to withdraw funds first.`,
+            error: `Cannot reset: You have $${accountInfo.usdcBalance.toFixed(2)} in trading subaccount ${subId}. Please use 'Reset Trading Account' to withdraw funds first.`,
             hasDriftFunds: true 
           });
         }
@@ -5083,7 +5083,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         // Edge case: subaccount exists but agent keys are missing (data corruption)
         if (exists && !wallet.agentPrivateKeyEncrypted && bot.driftSubaccountId > 0) {
           console.error(`[Delete] CRITICAL: Subaccount ${bot.driftSubaccountId} exists but agent keys missing - cannot auto-recover!`);
-          console.error(`[Delete] User must use "Reset Drift Account" in Settings or manually close on Drift`);
+          console.error(`[Delete] User must use "Reset Trading Account" in Settings or manually close positions`);
           rentReclaimError = "Agent keys missing - manual recovery required";
         }
         
@@ -5140,7 +5140,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         } else if (rentReclaimed) {
           message = 'Subaccount closed and rent reclaimed';
         } else if (needsManualRecovery) {
-          message = 'Bot deleted. Subaccount requires manual recovery - use "Reset Drift Account" in Settings.';
+          message = 'Bot deleted. Subaccount requires manual recovery - use "Reset Trading Account" in Settings.';
         } else if (rentReclaimPending) {
           message = 'Bot deleted. Subaccount rent reclaim pending.';
         }
@@ -5345,10 +5345,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       // Subaccount 0 or no encrypted key - can't auto-sweep, inform user
       return res.status(409).json({
-        error: "Bot has funds in main Drift account",
+        error: "Bot has funds in main trading account",
         balance,
         driftSubaccountId: bot.driftSubaccountId,
-        message: `This bot has $${balance.toFixed(2)} USDC. Please withdraw from Drift to Agent Wallet first via Wallet Management.`
+        message: `This bot has $${balance.toFixed(2)} USDC. Please withdraw from Trading Account to Agent Wallet first via Wallet Management.`
       });
     } catch (error) {
       console.error("Force delete trading bot error:", error);
@@ -8454,7 +8454,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(403).json({ error: "Forbidden" });
       }
       if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
-        return res.status(400).json({ error: "Bot has no Drift subaccount assigned" });
+        return res.status(400).json({ error: "Bot has no trading subaccount assigned" });
       }
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
@@ -8487,7 +8487,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(403).json({ error: "Forbidden" });
       }
       if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
-        return res.status(400).json({ error: "Bot has no Drift subaccount assigned" });
+        return res.status(400).json({ error: "Bot has no trading subaccount assigned" });
       }
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
@@ -8687,7 +8687,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(403).json({ error: "Forbidden" });
       }
       if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
-        return res.status(400).json({ error: "Bot has no Drift subaccount assigned" });
+        return res.status(400).json({ error: "Bot has no trading subaccount assigned" });
       }
 
       // Get the agent wallet address - this is where Drift funds are held

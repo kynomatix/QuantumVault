@@ -790,7 +790,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
                 <div className="text-sm">
                   <p className="font-medium text-orange-500 mb-1">Why SOL is Required</p>
                   <p className="text-muted-foreground">
-                    SOL is used for a one-time account setup (Drift trading account + Swift execution authorization) and ongoing transaction fees. Without it, your trading agent cannot execute trades.
+                    SOL is used for a one-time account setup (trading account initialization) and ongoing transaction fees. Without it, your trading agent cannot execute trades.
                   </p>
                 </div>
               </div>

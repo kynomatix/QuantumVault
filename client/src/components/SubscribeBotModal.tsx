@@ -384,7 +384,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
               <div className="flex items-start gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs">
                 <Info className="w-3.5 h-3.5 text-amber-400 mt-0.5 flex-shrink-0" />
                 <p className="text-muted-foreground">
-                  {bot.market.replace('-PERP', '')} has a max leverage of {maxLeverage}x on Drift. 
+                  {bot.market.replace('-PERP', '')} has a max leverage of {maxLeverage}x. 
                   Trades exceeding this will fail with "insufficient margin".
                 </p>
               </div>
