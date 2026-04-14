@@ -1,10 +1,15 @@
 import { storage } from "./storage";
+import { getDefaultAdapter } from "./protocol/adapter-registry";
+import { getAgentUsdcBalance } from "./agent-wallet";
+
+function _subIdStr(subAccountId: number): string | undefined {
+  return subAccountId > 0 ? String(subAccountId) : undefined;
+}
 
 async function getAccountBalance(agentPublicKey: string, subaccountId: number): Promise<number> {
   try {
-    const { getDriftAccountInfo } = await import("./drift-service");
-    const info = await getDriftAccountInfo(agentPublicKey, subaccountId);
-    return info.usdcBalance || 0;
+    const info = await getDefaultAdapter().getAccountInfo(agentPublicKey, _subIdStr(subaccountId));
+    return info.balance || 0;
   } catch {
     return 0;
   }
@@ -12,8 +17,7 @@ async function getAccountBalance(agentPublicKey: string, subaccountId: number): 
 
 async function getWalletUsdcBalance(agentPublicKey: string): Promise<number> {
   try {
-    const { getUsdcBalance } = await import("./drift-service");
-    return await getUsdcBalance(agentPublicKey);
+    return await getAgentUsdcBalance(agentPublicKey);
   } catch {
     return 0;
   }

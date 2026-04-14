@@ -1,10 +1,14 @@
 import { storage } from "./storage";
+import { getDefaultAdapter } from "./protocol/adapter-registry";
+
+function _subIdStr(subAccountId: number): string | undefined {
+  return subAccountId > 0 ? String(subAccountId) : undefined;
+}
 
 async function getAccountEquity(agentPublicKey: string, subaccountId: number): Promise<{ usdcBalance: number; unrealizedPnl: number }> {
   try {
-    const { getDriftAccountInfo } = await import("./drift-service");
-    const info = await getDriftAccountInfo(agentPublicKey, subaccountId);
-    return { usdcBalance: info.usdcBalance || 0, unrealizedPnl: info.unrealizedPnl || 0 };
+    const info = await getDefaultAdapter().getAccountInfo(agentPublicKey, _subIdStr(subaccountId));
+    return { usdcBalance: info.balance || 0, unrealizedPnl: info.unrealizedPnl || 0 };
   } catch {
     return { usdcBalance: 0, unrealizedPnl: 0 };
   }

@@ -2,73 +2,181 @@ import { sendTradeNotification } from "./notification-service";
 import { syncPositionFromOnChain } from "./reconciliation-service";
 import { storage } from "./storage";
 import { getMarketBySymbol } from "./market-liquidity-service";
-import { transferUsdcToWallet } from "./agent-wallet";
+import { transferUsdcToWallet, getAgentKeypair } from "./agent-wallet";
 import { PublicKey } from "@solana/web3.js";
+import { getDefaultAdapter } from "./protocol/adapter-registry";
+import { db } from "./db";
+import { wallets } from "@shared/schema";
+import { eq } from "drizzle-orm";
 
-const EXCHANGE_FEE_RATES: Record<string, number> = {
-  drift: 0.00045,
-  pacifica: 0.0004,
-};
-function getExchangeFeeRate(protocol?: string | null): number {
-  if (!protocol) return EXCHANGE_FEE_RATES.drift;
-  return EXCHANGE_FEE_RATES[protocol] ?? EXCHANGE_FEE_RATES.drift;
+const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;
+
+function getExchangeFeeRate(_protocol?: string | null): number {
+  return DEFAULT_EXCHANGE_FEE_RATE;
+}
+
+function _subIdStr(subAccountId: number): string | undefined {
+  return subAccountId > 0 ? String(subAccountId) : undefined;
+}
+
+async function _lookupMainWallet(agentPublicKey: string): Promise<string> {
+  const [w] = await db.select({ address: wallets.address })
+    .from(wallets)
+    .where(eq(wallets.agentPublicKey, agentPublicKey))
+    .limit(1);
+  if (!w) throw new Error('No wallet found for agent public key ' + agentPublicKey.slice(0, 12) + '...');
+  return w.address;
+}
+
+function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entryPrice: number; markPrice: number; unrealizedPnl: number }) {
+  return {
+    marketIndex: 0,
+    market: p.internalSymbol,
+    baseAssetAmount: p.baseSize,
+    quoteAssetAmount: 0,
+    quoteEntryAmount: 0,
+    side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
+    sizeUsd: Math.abs(p.baseSize) * p.markPrice,
+    entryPrice: p.entryPrice,
+    markPrice: p.markPrice,
+    unrealizedPnl: p.unrealizedPnl,
+    unrealizedPnlPercent: p.entryPrice > 0
+      ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
+      : 0,
+  };
 }
 
 async function driftExecutePerpOrder(
   encryptedKey: string, market: string, side: 'long' | 'short', size: number,
-  subAccountId: number, reduceOnly: boolean, slippageBps: number,
-  privateKeyBase58?: string, agentPublicKey?: string
+  subAccountId: number, reduceOnly: boolean, _slippageBps: number,
+  _privateKeyBase58?: string, agentPublicKey?: string
 ): Promise<any> {
-  const { executePerpOrder } = await import("./drift-service");
-  return executePerpOrder(encryptedKey, market, side, size, subAccountId, reduceOnly, slippageBps, privateKeyBase58, agentPublicKey);
+  const keypair = getAgentKeypair(encryptedKey);
+  const pubKey = agentPublicKey || keypair.publicKey.toBase58();
+  const mainWalletAddress = await _lookupMainWallet(pubKey);
+  const orderResult = await getDefaultAdapter().placeMarketOrder({
+    agentPublicKey: pubKey,
+    agentSecretKey: keypair.secretKey,
+    mainWalletAddress,
+    internalSymbol: market,
+    side,
+    sizeBase: size,
+    reduceOnly,
+    subaccountId: _subIdStr(subAccountId),
+  });
+  return {
+    success: orderResult.success,
+    signature: orderResult.orderId,
+    txSignature: orderResult.orderId,
+    fillPrice: orderResult.fillPrice,
+    actualFee: orderResult.fee,
+    error: orderResult.error,
+    executionMethod: 'adapter',
+    swiftOrderId: null,
+  };
 }
 
 async function driftClosePerpPosition(
   encryptedKey: string, market: string, subAccountId: number,
-  size?: number, slippageBps?: number, privateKeyBase58?: string,
+  size?: number, _slippageBps?: number, _privateKeyBase58?: string,
   agentPublicKey?: string, side?: 'long' | 'short'
 ): Promise<any> {
-  const { closePerpPosition } = await import("./drift-service");
-  return closePerpPosition(encryptedKey, market, subAccountId, size, slippageBps, privateKeyBase58, agentPublicKey, side);
+  const keypair = getAgentKeypair(encryptedKey);
+  const pubKey = agentPublicKey || keypair.publicKey.toBase58();
+  const mainWalletAddress = await _lookupMainWallet(pubKey);
+  const adapter = getDefaultAdapter();
+  let orderResult;
+  if (size && side) {
+    const closeSide: 'long' | 'short' = side === 'long' ? 'short' : 'long';
+    orderResult = await adapter.placeMarketOrder({
+      agentPublicKey: pubKey,
+      agentSecretKey: keypair.secretKey,
+      mainWalletAddress,
+      internalSymbol: market,
+      side: closeSide,
+      sizeBase: size,
+      reduceOnly: true,
+      subaccountId: _subIdStr(subAccountId),
+    });
+  } else {
+    const positions = await adapter.getPositions(pubKey, _subIdStr(subAccountId));
+    const pos = positions.find(p => p.internalSymbol.toUpperCase().includes(market.toUpperCase().replace('-PERP', '')));
+    if (!pos || Math.abs(pos.baseSize) < 0.0001) {
+      return { success: true, signature: 'no-position', executionMethod: 'adapter' };
+    }
+    const closeSide: 'long' | 'short' = pos.baseSize >= 0 ? 'short' : 'long';
+    orderResult = await adapter.placeMarketOrder({
+      agentPublicKey: pubKey,
+      agentSecretKey: keypair.secretKey,
+      mainWalletAddress,
+      internalSymbol: market,
+      side: closeSide,
+      sizeBase: Math.abs(pos.baseSize),
+      reduceOnly: true,
+      subaccountId: _subIdStr(subAccountId),
+    });
+  }
+  return {
+    success: orderResult.success,
+    signature: orderResult.orderId,
+    error: orderResult.error,
+    executionMethod: 'adapter',
+    fillPrice: orderResult.fillPrice,
+  };
 }
 
 async function driftGetPerpPositions(agentPublicKey: string, subAccountId: number): Promise<any[]> {
   try {
-    const { getPerpPositions } = await import("./drift-service");
-    return await getPerpPositions(agentPublicKey, subAccountId);
+    const positions = await getDefaultAdapter().getPositions(agentPublicKey, _subIdStr(subAccountId));
+    return positions.map(_mapPositionToDrift);
   } catch {
     return [];
   }
 }
 
 async function driftSettleAllPnl(encryptedKey: string, subAccountId: number): Promise<any> {
-  const { settleAllPnl } = await import("./drift-service");
-  return settleAllPnl(encryptedKey, subAccountId);
+  try {
+    const adapter = getDefaultAdapter();
+    if (!adapter.getCapabilities().supportsSettlePnl) {
+      return { success: true, settledMarkets: [] };
+    }
+    const keypair = getAgentKeypair(encryptedKey);
+    const result = await adapter.settlePnl({
+      agentPublicKey: keypair.publicKey.toBase58(),
+      agentSecretKey: keypair.secretKey,
+      subaccountId: _subIdStr(subAccountId),
+    });
+    return { success: result.success, settledMarkets: [], error: result.error };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
 }
 
 async function driftExecuteAgentWithdraw(
   agentPublicKey: string, encryptedKey: string, amount: number, subAccountId: number
 ): Promise<any> {
-  const { executeAgentDriftWithdraw } = await import("./drift-service");
-  return executeAgentDriftWithdraw(agentPublicKey, encryptedKey, amount, subAccountId);
+  try {
+    const keypair = getAgentKeypair(encryptedKey);
+    const mainWalletAddress = await _lookupMainWallet(agentPublicKey);
+    const result = await getDefaultAdapter().executeWithdraw({
+      agentPublicKey,
+      agentSecretKey: keypair.secretKey,
+      mainWalletAddress,
+      amount,
+      subaccountId: _subIdStr(subAccountId),
+    });
+    return { success: result.success, signature: result.txSignature, error: result.error };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
 }
 
 function tryIsSwiftAvailable(): boolean {
-  try {
-    const mod = require('./swift-config');
-    return mod.isSwiftAvailable();
-  } catch {
-    return false;
-  }
+  return false;
 }
 
-function tryClassifySwiftError(error?: string): { category: string; shouldRetrySwift: boolean } {
-  try {
-    const mod = require('./swift-config');
-    return mod.classifySwiftError(error);
-  } catch {
-    return { category: 'unknown', shouldRetrySwift: false };
-  }
+function tryClassifySwiftError(_error?: string): { category: string; shouldRetrySwift: boolean } {
+  return { category: 'unknown', shouldRetrySwift: false };
 }
 
 export interface RetryJob {
@@ -314,6 +422,9 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
       status: 'pending',
       webhookPayload: job.webhookPayload || null,
       entryPrice: job.entryPrice?.toString() || null,
+      protocol: 'pacifica',
+      protocolSubaccountId: String(job.subAccountId),
+      agentPublicKey: job.agentPublicKey || null,
     });
     dbJobId = dbJob.id;
     console.log(`[TradeRetry] Persisted job ${dbJobId} to database`);
@@ -731,6 +842,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                           tradeId: tradeId || `retry-${job.id}`,
                           publishedBotId: subscription.publishedBot.id,
                           driftSubaccountId: job.subAccountId,
+                          protocolSubaccountId: String(job.subAccountId),
                         });
                         console.log(`[TradeRetry] IOU created for $${profitShareAmount.toFixed(4)} to ${creatorWallet}`);
                       } catch (iouErr: any) {

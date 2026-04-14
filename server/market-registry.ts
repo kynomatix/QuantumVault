@@ -138,53 +138,7 @@ export async function syncFromSdk(
   currentNames: Record<number, string>,
   currentIndices: Record<string, number>
 ): Promise<{ names: Record<number, string>; indices: Record<string, number> }> {
-  try {
-    const sdkModule = await import('@drift-labs/sdk');
-    const perpMarkets = sdkModule.PerpMarkets?.['mainnet-beta'];
-    if (!perpMarkets || !Array.isArray(perpMarkets)) {
-      console.warn('[market-registry] SDK PerpMarkets not available, keeping hardcoded fallback');
-      return { names: currentNames, indices: currentIndices };
-    }
-
-    const sdkNames: Record<number, string> = {};
-    for (const m of perpMarkets) {
-      if (typeof m.symbol === 'string' && m.symbol.endsWith('-PERP')) {
-        sdkNames[m.marketIndex] = m.symbol;
-      }
-    }
-
-    if (sdkNames[83] === undefined) sdkNames[83] = '1KMON-PERP';
-    if (sdkNames[84] === undefined) sdkNames[84] = 'LIT-PERP';
-
-    const hardcodedCount = Object.keys(CANONICAL_PERP_MARKETS).length;
-    const sdkCount = Object.keys(sdkNames).length;
-    if (sdkCount < hardcodedCount) {
-      console.warn(`[market-registry] SDK returned fewer perp markets (${sdkCount}) than hardcoded (${hardcodedCount}), keeping fallback`);
-      return { names: currentNames, indices: currentIndices };
-    }
-
-    for (const [idxStr, symbol] of Object.entries(CANONICAL_PERP_MARKETS)) {
-      const idx = Number(idxStr);
-      if (sdkNames[idx] && sdkNames[idx] !== symbol) {
-        console.warn(`[market-registry] Discrepancy at index ${idx}: hardcoded=${symbol}, SDK=${sdkNames[idx]}`);
-      }
-    }
-
-    for (const [idxStr, symbol] of Object.entries(sdkNames)) {
-      const idx = Number(idxStr);
-      if (!CANONICAL_PERP_MARKETS[idx]) {
-        console.log(`[market-registry] New market from SDK: ${idx}: ${symbol}`);
-      }
-    }
-
-    const newIndices = buildPerpMarketIndices(sdkNames, PERP_ALIASES);
-
-    console.log(`[market-registry] SDK sync complete: ${sdkCount} perp markets`);
-    return { names: sdkNames, indices: newIndices };
-  } catch (err) {
-    console.warn('[market-registry] SDK sync failed, keeping hardcoded fallback:', err);
-    return { names: currentNames, indices: currentIndices };
-  }
+  return { names: currentNames, indices: currentIndices };
 }
 
 export interface MarketInfo {

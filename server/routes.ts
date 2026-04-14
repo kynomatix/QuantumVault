@@ -364,13 +364,18 @@ async function closeDriftSubaccount(
 }
 
 async function settleAllPnl(
-  _encryptedOrPublicKey: string,
+  encryptedPrivateKey: string,
   subAccountId: number,
 ): Promise<{ success: boolean; settledMarkets?: any[]; error?: string }> {
   try {
-    const result = await getDefaultAdapter().settlePnl({
-      agentPublicKey: _encryptedOrPublicKey,
-      agentSecretKey: new Uint8Array(0),
+    const adapter = getDefaultAdapter();
+    if (!adapter.getCapabilities().supportsSettlePnl) {
+      return { success: true, settledMarkets: [] };
+    }
+    const { secretKey, publicKey } = _decryptToSecretKey(encryptedPrivateKey);
+    const result = await adapter.settlePnl({
+      agentPublicKey: publicKey,
+      agentSecretKey: secretKey,
       subaccountId: _subIdStr(subAccountId),
     });
     return { success: result.success, settledMarkets: [], error: result.error };
@@ -395,15 +400,10 @@ import nacl from "tweetnacl";
 import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
 
-const EXCHANGE_FEE_RATES: Record<string, number> = {
-  drift: 0.00045,
-  pacifica: 0.0004,
-};
 const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;
 
-function getExchangeFeeRate(protocol?: string | null): number {
-  if (!protocol) return DEFAULT_EXCHANGE_FEE_RATE;
-  return EXCHANGE_FEE_RATES[protocol] ?? DEFAULT_EXCHANGE_FEE_RATE;
+function getExchangeFeeRate(_protocol?: string | null): number {
+  return DEFAULT_EXCHANGE_FEE_RATE;
 }
 
 declare module "express-session" {
@@ -964,6 +964,7 @@ async function distributeCreatorProfitShare(params: {
         tradeId,
         publishedBotId: publishedBot.id,
         driftSubaccountId,
+        protocolSubaccountId: String(driftSubaccountId),
       });
       console.log(`[ProfitShare] IOU created for $${profitShareAmount.toFixed(4)} to ${creatorWalletAddress} (trade: ${tradeId})`);
     } catch (iouErr: any) {

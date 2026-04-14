@@ -1,11 +1,27 @@
 import { storage } from './storage';
 import { normalizeMarket } from './protocol/symbol-registry';
 import { getMarketInfo } from './market-registry';
+import { getDefaultAdapter } from './protocol/adapter-registry';
+
+function _subIdStr(subAccountId: number): string | undefined {
+  return subAccountId > 0 ? String(subAccountId) : undefined;
+}
 
 async function fetchPerpPositions(agentPublicKey: string, subaccountId: number): Promise<any[]> {
   try {
-    const { getPerpPositions } = await import("./drift-service");
-    return await getPerpPositions(agentPublicKey, subaccountId);
+    const positions = await getDefaultAdapter().getPositions(agentPublicKey, _subIdStr(subaccountId));
+    return positions.map(p => ({
+      marketIndex: 0,
+      market: p.internalSymbol,
+      baseAssetAmount: p.baseSize,
+      side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
+      entryPrice: p.entryPrice,
+      markPrice: p.markPrice,
+      unrealizedPnl: p.unrealizedPnl,
+      unrealizedPnlPercent: p.entryPrice > 0
+        ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
+        : 0,
+    }));
   } catch {
     return [];
   }
@@ -13,8 +29,14 @@ async function fetchPerpPositions(agentPublicKey: string, subaccountId: number):
 
 async function fetchDriftAccountInfo(agentPublicKey: string, subaccountId: number): Promise<any> {
   try {
-    const { getDriftAccountInfo } = await import("./drift-service");
-    return await getDriftAccountInfo(agentPublicKey, subaccountId);
+    const info = await getDefaultAdapter().getAccountInfo(agentPublicKey, _subIdStr(subaccountId));
+    return {
+      usdcBalance: info.balance,
+      totalCollateral: info.equity,
+      freeCollateral: info.availableMargin,
+      marginUsed: info.maintenanceMargin,
+      unrealizedPnl: info.unrealizedPnl,
+    };
   } catch {
     return { usdcBalance: 0, unrealizedPnl: 0 };
   }

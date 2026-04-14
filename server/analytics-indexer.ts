@@ -1,22 +1,12 @@
 import { storage } from './storage';
 import type { PlatformMetricType } from '@shared/schema';
 
-async function tryFetchDriftVolume(wallets: string[]): Promise<{ totalVolume: number } | null> {
-  try {
-    const { fetchPlatformVolumeFromDrift } = await import('./drift-data-api');
-    return await fetchPlatformVolumeFromDrift(wallets);
-  } catch {
-    return null;
-  }
+async function tryFetchDriftVolume(_wallets: string[]): Promise<{ totalVolume: number } | null> {
+  return null;
 }
 
-async function tryFetchDriftTVL(wallets: string[]): Promise<{ totalTVL: number; walletData: any[] } | null> {
-  try {
-    const { fetchPlatformTVLFromDrift } = await import('./drift-data-api');
-    return await fetchPlatformTVLFromDrift(wallets);
-  } catch {
-    return null;
-  }
+async function tryFetchDriftTVL(_wallets: string[]): Promise<{ totalTVL: number; walletData: any[] } | null> {
+  return null;
 }
 
 const RECALC_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours

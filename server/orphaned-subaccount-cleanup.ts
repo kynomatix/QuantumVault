@@ -1,11 +1,19 @@
 import { storage } from "./storage";
+import { getDefaultAdapter } from "./protocol/adapter-registry";
+import { getAgentKeypair } from "./agent-wallet";
 
 async function tryCloseDriftSubaccount(encryptedKey: string, subaccountId: number): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
-    const { closeDriftSubaccount } = await import("./drift-service");
-    return await closeDriftSubaccount(encryptedKey, subaccountId);
+    const keypair = getAgentKeypair(encryptedKey);
+    const agentPubKey = keypair.publicKey.toBase58();
+    const adapter = getDefaultAdapter();
+    if (adapter.closeSubaccount) {
+      await adapter.closeSubaccount(agentPubKey, String(subaccountId));
+      return { success: true };
+    }
+    return { success: false, error: 'Adapter does not support closeSubaccount' };
   } catch (err: any) {
-    return { success: false, error: err.message || 'drift-service unavailable' };
+    return { success: false, error: err.message || 'adapter unavailable' };
   }
 }
 

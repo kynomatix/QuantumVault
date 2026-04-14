@@ -14,10 +14,15 @@ import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 
 async function trySyncMarketRegistry(): Promise<void> {
   try {
-    const { syncMarketRegistry } = await import("./drift-service");
-    await syncMarketRegistry();
-  } catch (err) {
-    console.warn('[Startup] Market registry sync skipped (drift-service unavailable):', err);
+    const { getDefaultAdapter } = await import("./protocol/adapter-registry");
+    const { updateMarketCache } = await import("./market-registry");
+    const adapter = getDefaultAdapter();
+    const markets = await adapter.getMarkets();
+    if (markets.length > 0) {
+      updateMarketCache(markets);
+    }
+  } catch (err: any) {
+    console.warn('[Startup] Market registry sync skipped:', err.message || err);
   }
 }
 
@@ -336,6 +341,20 @@ app.use((req, res, next) => {
 
 (async () => {
   await ensureSchema();
+
+  try {
+    const { db: appDb } = await import("./db");
+    const { pendingProfitShares } = await import("@shared/schema");
+    const { isNull, sql: drizzleSql } = await import("drizzle-orm");
+    const updated = await appDb.update(pendingProfitShares)
+      .set({ protocolSubaccountId: drizzleSql`CAST(${pendingProfitShares.driftSubaccountId} AS text)` })
+      .where(isNull(pendingProfitShares.protocolSubaccountId));
+    if (updated.rowCount && updated.rowCount > 0) {
+      console.log(`[Startup] Backfilled ${updated.rowCount} pending_profit_shares.protocol_subaccount_id from drift_subaccount_id`);
+    }
+  } catch (bfErr: any) {
+    console.warn('[Startup] protocol_subaccount_id backfill skipped:', bfErr.message);
+  }
 
   await initializeProtocolAdapter();
 
