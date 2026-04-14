@@ -9,6 +9,7 @@
 
 ## Table of Contents
 
+0. [Master Progress Tracker](#master-progress-tracker) ← **CHECK THIS FIRST**
 1. [Strategic Vision](#1-strategic-vision)
 2. [Key Links](#2-key-links)
 3. [Why Pacifica First](#3-why-pacifica-first)
@@ -32,6 +33,110 @@
 21. [Open Questions](#21-open-questions)
 22. [Decision Framework](#22-decision-framework)
 23. [Future: Multi-Protocol & Smart Routing](#23-future-multi-protocol--smart-routing)
+
+---
+
+## Master Progress Tracker
+
+This checklist tracks ALL actionable items across the entire migration. Check items off as they are completed. **Before starting any migration work, scan this list to see current progress and identify what's next.**
+
+### Planning & Audit (Must complete before ANY code)
+- [ ] PACIFICA_MIGRATION.md fully audited and signed off
+- [ ] Apply to Pacifica Builder Program (ops@pacifica.fi) — **user action**
+- [ ] Apply to Pacifica Affiliate Program — **user action**
+- [ ] Verify Pacifica deposit contract address (critical funds-safety blocker)
+- [ ] Confirm subaccount creation flow (2-step initiate/confirm) against live API
+- [ ] Confirm whether Pacifica supports user-signed withdrawals or agent-signed only
+
+### Phase 1: Protocol Layer Foundation
+- [ ] Create `server/protocol/` directory structure
+- [ ] Implement `protocol-adapter.ts` (ProtocolAdapter interface)
+- [ ] Implement `user-tx-builder.ts` (UserTransactionBuilder interface)
+- [ ] Implement `adapter-registry.ts` (per-bot adapter resolution)
+- [ ] Implement `symbol-registry.ts` (bidirectional symbol mapping + consolidated `normalizeMarket()`)
+- [ ] Implement `protocol-types.ts` (ProtocolMarket, ProtocolPosition, OrderResult, etc.)
+- [ ] Install `tweetnacl` or `@noble/ed25519` for signing
+- [ ] Implement `pacifica-signer.ts` (8-step canonical JSON signing)
+- [ ] Verify signing against Pacifica testnet
+- [ ] Implement `pacifica-adapter.ts` (ProtocolAdapter implementation)
+- [ ] Implement `pacifica-tx-builder.ts` (UserTransactionBuilder implementation)
+- [ ] Implement `pacifica-ws.ts` (WebSocket connection manager)
+- [ ] Implement `pacifica-types.ts` (Pacifica API response types)
+- [ ] Get Builder Code assigned from Pacifica
+
+### Phase 2: Schema Migration
+- [ ] Add `trading_bots.protocol_subaccount_id` (text)
+- [ ] Add `trading_bots.active_protocol` (text, default 'pacifica')
+- [ ] Add `wallets.protocol_subaccount_id` (text)
+- [ ] Add `bot_trades.protocol_order_id` (text)
+- [ ] Add `bot_trades.client_order_id` (text)
+- [ ] Add `pending_profit_shares.protocol_subaccount_id` (text)
+- [ ] Add `orphaned_subaccounts.protocol_subaccount_id` (text)
+- [ ] Verify all schema changes are additive only (no column type changes, no drops)
+- [ ] Run `db:push` and verify migration succeeds
+
+### Phase 3: Service Refactors (File-by-File)
+- [ ] `drift-service.ts` → route through adapter (2,458 lines)
+- [ ] `routes.ts` → rename 15+ `/api/drift/*` routes, update all Drift function calls
+- [ ] `reconciliation-service.ts` → replace `getPerpPositions()` with `adapter.getPositions()`
+- [ ] `trade-retry-service.ts` → replace 5 Drift function imports, convert to string subaccount IDs, update startup reconstruction
+- [ ] `position-service.ts` → replace byte parsing with `adapter.getPositions()`, replace hardcoded `MAINTENANCE_MARGIN_WEIGHTS` with `adapter.getMaintenanceMarginWeight()`
+- [ ] `leverage-cache-service.ts` → replace `@drift-labs/sdk` Borsh decoding with adapter market data
+- [ ] `market-liquidity-service.ts` → replace hardcoded Drift OI/metadata with adapter market data + orderbook
+- [ ] `market-registry.ts` → pull from `adapter.getMarkets()` instead of hardcoded indices
+- [ ] `portfolio-snapshot-job.ts` → use `adapter.getAccountInfo()`
+- [ ] `pnl-snapshot-job.ts` → use adapter position data
+- [ ] `analytics-indexer.ts` → remove `drift-data-api.ts` import (must happen BEFORE Phase 5)
+- [ ] `agent-wallet.ts` → add Pacifica agent wallet registration, preserve dual-path deposit/withdraw
+- [ ] `orphaned-subaccount-cleanup.ts` → use `adapter.listSubaccounts()`
+- [ ] `storage.ts` → refactor subaccount allocation (remove sequential-integer assumption)
+- [ ] Consolidate 3 `normalizeMarket()` copies into `symbol-registry.ts`
+- [ ] `server/index.ts` → de-drift all startup imports (syncMarketRegistry, initLeverageCache, startOrphanedSubaccountCleanup, reconciliation, trade-retry)
+
+### Phase 4: Route Renaming & Frontend
+- [ ] Rename all `/api/drift/*` routes to protocol-neutral names
+- [ ] Update all 16 client files (API calls, UI labels, component props)
+- [ ] Update `Docs.tsx` (50 Drift/Swift references)
+- [ ] Update `PitchDeck.tsx` and `Landing.tsx` content
+- [ ] Update `Portfolio.tsx` deposit/withdraw flows
+
+### Phase 5: Cleanup & Deletion
+- [ ] **PHASE GATE verified:** All startup imports de-drifted
+- [ ] **PHASE GATE verified:** analytics-indexer no longer imports drift-data-api
+- [ ] **PHASE GATE verified:** trade-retry-service fully rerouted through adapter
+- [ ] **PHASE GATE verified:** pending_profit_shares.protocol_subaccount_id populated
+- [ ] **PHASE GATE verified:** No server file imports from drift-service/drift-price/drift-data-api
+- [ ] Create `drift-archive` git branch
+- [ ] Delete `drift-service.ts`, `drift-executor.mjs`, `drift-price.ts`, `drift-data-api.ts`
+- [ ] Delete `swift-executor.ts`, `swift-config.ts`, `swift-metrics.ts`
+- [ ] Remove `@drift-labs/sdk` from `package.json`
+- [ ] Remove deprecated functions (Section 16)
+- [ ] Remove legacy `crypto.ts` (verify all wallets on v3 first)
+- [ ] End-to-end testing on Pacifica testnet
+
+### Phase 6: Production Cutover
+- [ ] Canary rollout — 1-2 test bots with small positions
+- [ ] Monitor 24h — order placement, fills, PnL, reconciliation
+- [ ] Verify builder code revenue accruing
+- [ ] Enable Pacifica for all new bots
+- [ ] Migrate existing bots (only after positions closed)
+- [ ] Monitor first 48h of full production trading
+- [ ] Verify auto-withdraw profits flow
+- [ ] Confirm WebSocket reconnection under network failures
+
+### Critical Findings Addressed
+- [ ] Interface split: ProtocolAdapter (server signs) vs UserTransactionBuilder (user signs)
+- [ ] Batch reads added (getBatchAccountInfo, getBatchPositions)
+- [ ] Fragmented `normalizeMarket()` consolidated into single utility
+- [ ] `position-service.ts` hardcoded margin weights → `adapter.getMaintenanceMarginWeight()`
+- [ ] `leverage-cache-service.ts` `@drift-labs/sdk` import → adapter market data
+- [ ] `analytics-indexer.ts` drift-data-api import → adapter analytics
+- [ ] `pending_profit_shares.drift_subaccount_id` → protocol_subaccount_id
+- [ ] `trade-retry-service.ts` upgraded to High effort (5 Drift imports + numeric subaccount)
+- [ ] Startup sequence fully documented and de-drifted
+- [ ] Dual-path deposit/withdraw flows preserved (user-signed + agent-signed)
+- [ ] `client_order_id` added for durable order correlation
+- [ ] `ProtocolMarket` type expanded (fullName, maintenanceMarginWeight, openInterestUsd, warning)
 
 ---
 
