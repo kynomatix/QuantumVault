@@ -538,7 +538,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
 
     setIsAgentToDrift(true);
     try {
-      const response = await fetch('/api/agent/deposit', {
+      const response = await fetch('/api/exchange/deposit', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -601,7 +601,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
 
     setIsDriftToAgent(true);
     try {
-      const response = await fetch('/api/agent/withdraw', {
+      const response = await fetch('/api/exchange/withdraw', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',

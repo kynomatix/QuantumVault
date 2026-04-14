@@ -502,7 +502,7 @@ export function BotManagementDrawer({
 
     setAddEquityLoading(true);
     try {
-      const res = await fetch('/api/agent/deposit', {
+      const res = await fetch('/api/exchange/deposit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -544,7 +544,7 @@ export function BotManagementDrawer({
 
     setRemoveEquityLoading(true);
     try {
-      const res = await fetch('/api/agent/withdraw', {
+      const res = await fetch('/api/exchange/withdraw', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',

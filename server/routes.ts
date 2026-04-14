@@ -2812,7 +2812,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.post("/api/agent/deposit", requireWallet, async (req, res) => {
+  app.post("/api/exchange/deposit", requireWallet, async (req, res) => {
     try {
       const { amount, botId } = req.body;
       if (!amount || amount <= 0) {
@@ -2955,7 +2955,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.post("/api/agent/withdraw", requireWallet, async (req, res) => {
+  app.post("/api/exchange/withdraw", requireWallet, async (req, res) => {
     try {
       const { amount, botId } = req.body;
       if (!amount || amount <= 0) {
@@ -3081,7 +3081,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.get("/api/agent/balance", requireWallet, async (req, res) => {
+  app.get("/api/exchange/balance", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) {
@@ -3099,7 +3099,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         marginUsed: accountInfo.marginUsed,
       });
     } catch (error) {
-      console.error("Get agent drift balance error:", error);
+      console.error("Get exchange balance error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -8318,7 +8318,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.post("/api/exchange/deposit", async (req, res) => {
+  app.post("/api/exchange/build-deposit", async (req, res) => {
     try {
       const { walletAddress, amount } = req.body;
       if (!walletAddress) {
@@ -8330,12 +8330,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const result = await buildDepositTransaction(walletAddress, amount);
       res.json(result);
     } catch (error) {
-      console.error("Drift deposit error:", error);
+      console.error("Exchange deposit build error:", error);
       res.status(500).json({ error: "Failed to build deposit transaction" });
     }
   });
 
-  app.post("/api/exchange/withdraw", async (req, res) => {
+  app.post("/api/exchange/build-withdraw", async (req, res) => {
     try {
       const { walletAddress, amount } = req.body;
       if (!walletAddress) {
@@ -8347,12 +8347,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const result = await buildWithdrawTransaction(walletAddress, amount);
       res.json(result);
     } catch (error) {
-      console.error("Drift withdraw error:", error);
+      console.error("Exchange withdraw build error:", error);
       res.status(500).json({ error: "Failed to build withdraw transaction" });
     }
   });
 
-  app.get("/api/exchange/balance", async (req, res) => {
+  app.get("/api/exchange/wallet-balance", async (req, res) => {
     try {
       const walletAddress = req.query.wallet as string;
       if (!walletAddress) {
@@ -8364,7 +8364,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       ]);
       res.json({ usdcBalance, driftBalance });
     } catch (error) {
-      console.error("Drift balance error:", error);
+      console.error("Exchange wallet balance error:", error);
       res.status(500).json({ error: "Failed to fetch balances" });
     }
   });

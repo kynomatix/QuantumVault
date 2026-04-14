@@ -338,7 +338,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
         }
         
         // Then deposit the investment amount to the bot's Drift subaccount
-        const depositRes = await fetch('/api/agent/deposit', {
+        const depositRes = await fetch('/api/exchange/deposit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',

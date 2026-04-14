@@ -4074,7 +4074,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         console.error('Failed to update bot settings, but bot was created');
       }
 
-      const depositRes = await fetch('/api/agent/deposit', {
+      const depositRes = await fetch('/api/exchange/deposit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -4090,7 +4090,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       }
 
       if (!fundingFailed && equityBuffer > 0) {
-        const equityDepositRes = await fetch('/api/agent/deposit', {
+        const equityDepositRes = await fetch('/api/exchange/deposit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
