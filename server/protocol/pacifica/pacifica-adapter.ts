@@ -514,6 +514,22 @@ export class PacificaAdapter implements ProtocolAdapter {
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
+    if (params.leverage && params.leverage > 0 && !params.reduceOnly) {
+      try {
+        await this.setLeverage({
+          agentPublicKey: params.agentPublicKey,
+          agentSecretKey: params.agentSecretKey,
+          mainWalletAddress: params.mainWalletAddress,
+          internalSymbol: params.internalSymbol,
+          leverage: params.leverage,
+          subaccountId: params.subaccountId,
+        });
+        console.log(`[PacificaAdapter] Set leverage to ${params.leverage}x for ${params.internalSymbol} before order`);
+      } catch (err: any) {
+        console.warn(`[PacificaAdapter] setLeverage pre-order failed (continuing): ${err.message}`);
+      }
+    }
+
     const slippagePct = params.maxSlippagePct ?? 0.5;
     const isReduceOnly = params.reduceOnly ?? false;
     const orderSize = isReduceOnly
@@ -530,10 +546,6 @@ export class PacificaAdapter implements ProtocolAdapter {
       reduce_only: isReduceOnly,
       slippage_percent: String(slippagePct),
     };
-
-    if (params.leverage && params.leverage > 0) {
-      operationData.leverage = String(params.leverage);
-    }
 
     if (params.clientOrderId) {
       operationData.client_order_id = params.clientOrderId;
@@ -703,7 +715,7 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
-      leverage: params.leverage,
+      leverage: String(params.leverage),
     };
 
     const body = signer.buildRequestBody(
