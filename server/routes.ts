@@ -2,7 +2,9 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import { encrypt as legacyEncrypt } from "./crypto";
+import { encrypt as legacyEncrypt, decrypt } from "./crypto";
+import bs58 from "bs58";
+import { Keypair } from "@solana/web3.js";
 import { storage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
@@ -44,11 +46,8 @@ function _resolveSigningContext(
   botCtx: BotSubaccountContext | null,
 ): { secretKey: Uint8Array; publicKey: string; subaccountId: string | undefined } {
   if (botCtx) {
-    const { decrypt } = require('./crypto');
-    const bs58 = require('bs58');
     const botKeyBase58 = decrypt(botCtx.botEncryptedKey);
     const botSecretKey = bs58.decode(botKeyBase58);
-    const { Keypair } = require('@solana/web3.js');
     const botKeypair = Keypair.fromSecretKey(botSecretKey);
     const derivedPubkey = botKeypair.publicKey.toBase58();
     if (derivedPubkey !== botCtx.botPublicKey) {
@@ -472,7 +471,6 @@ import { DOCS_MARKDOWN } from "./docs-markdown";
 async function getSwiftMetrics() { try { return (await import("./swift-metrics")).getSwiftMetrics(); } catch { return null; } }
 async function getSwiftDiagnostics() { try { return (await import("./swift-config")).getSwiftDiagnostics(); } catch { return null; } }
 import nacl from "tweetnacl";
-import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
 
 const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;
