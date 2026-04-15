@@ -3720,36 +3720,63 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      const subAccountId = req.query.subaccount ? parseInt(req.query.subaccount as string) : 0;
-      
-      // Use byte-parsing to get positions and account info - NO SDK to avoid memory leaks
-      const positions = await getPerpPositions(wallet.agentPublicKey, subAccountId);
-      const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, subAccountId);
-      
-      // Calculate metrics from byte-parsed data
+      const bots = await storage.getTradingBots(req.walletAddress!);
+      const subAccountIds = Array.from(new Set(bots.map(b => b.driftSubaccountId ?? 0)));
+      if (subAccountIds.length === 0) subAccountIds.push(0);
+
+      const primarySubAccountId = subAccountIds[0];
+      const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, primarySubAccountId);
+
       const totalCollateral = accountInfo.totalCollateral;
       const freeCollateral = accountInfo.freeCollateral;
+
       let unrealizedPnl = 0;
-      
-      const formattedPositions = positions.map((pos: any) => {
-        unrealizedPnl += pos.unrealizedPnl;
-        return {
-          marketIndex: pos.marketIndex,
-          market: pos.market,
-          baseSize: pos.baseAssetAmount,
-          notionalValue: pos.sizeUsd,
-          liquidationPrice: null, // Would require more complex calculation
-          entryPrice: pos.entryPrice,
-          unrealizedPnl: pos.unrealizedPnl,
-        };
-      });
-      
-      // Health factor: Use freeCollateral/totalCollateral ratio (closer to Drift's approach)
-      // Drift shows health as remaining margin capacity - when freeCollateral drops, health drops
+      const formattedPositions: any[] = [];
+
+      for (const subId of subAccountIds) {
+        const positions = await getPerpPositions(wallet.agentPublicKey, subId);
+        for (const pos of positions) {
+          if (pos.baseAssetAmount && Math.abs(pos.baseAssetAmount) > 0.0001) {
+            unrealizedPnl += pos.unrealizedPnl || 0;
+            formattedPositions.push({
+              marketIndex: pos.marketIndex,
+              market: pos.market,
+              baseSize: pos.baseAssetAmount,
+              notionalValue: pos.sizeUsd,
+              liquidationPrice: null,
+              entryPrice: pos.entryPrice,
+              unrealizedPnl: pos.unrealizedPnl,
+            });
+          }
+        }
+      }
+
+      if (formattedPositions.length === 0) {
+        const dbPositions = await storage.getBotPositions(req.walletAddress!);
+        const prices = await getAllPrices();
+        for (const pos of dbPositions) {
+          const baseSize = parseFloat(pos.baseSize);
+          if (Math.abs(baseSize) < 0.0001) continue;
+          const entryPrice = parseFloat(pos.avgEntryPrice);
+          const markPrice = prices[pos.market] || entryPrice;
+          const posUnrealizedPnl = baseSize > 0
+            ? (markPrice - entryPrice) * Math.abs(baseSize)
+            : (entryPrice - markPrice) * Math.abs(baseSize);
+          unrealizedPnl += posUnrealizedPnl;
+          formattedPositions.push({
+            marketIndex: 0,
+            market: pos.market,
+            baseSize,
+            notionalValue: Math.abs(baseSize) * markPrice,
+            liquidationPrice: null,
+            entryPrice,
+            unrealizedPnl: posUnrealizedPnl,
+          });
+        }
+      }
+
       let healthFactor = 100;
       if (formattedPositions.length > 0 && totalCollateral > 0) {
-        // Health = (freeCollateral / totalCollateral) * 100
-        // This matches Drift's approach: 100% when fully free, 0% when all margin is used
         healthFactor = Math.max(0, Math.min(100, (freeCollateral / totalCollateral) * 100));
       }
       
@@ -3760,9 +3787,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         freeCollateral,
         unrealizedPnl,
         positions: formattedPositions,
-        subAccountId,
-        isEstimate: true, // Health metrics are estimates - check Drift UI for precise values
-        estimateNote: "Using per-market maintenance margins (SOL: 3.3%, BTC/ETH: 2.5%)",
+        subAccountId: primarySubAccountId,
+        isEstimate: true,
+        estimateNote: "Health metrics from exchange account data",
       });
     } catch (error) {
       console.error("Health metrics error:", error);
