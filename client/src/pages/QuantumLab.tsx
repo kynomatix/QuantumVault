@@ -433,6 +433,7 @@ export default function QuantumLab() {
   const [jobProgress, setJobProgress] = useState<LabJobProgress | null>(null);
   const [sseReconnecting, setSseReconnecting] = useState(false);
   const [autoRefine, setAutoRefine] = useState(false);
+  const [pendingAutoRefine, setPendingAutoRefine] = useState(false);
   const autoRefineRef = useRef(false);
   useEffect(() => { autoRefineRef.current = autoRefine; }, [autoRefine]);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -584,8 +585,15 @@ export default function QuantumLab() {
             queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
             queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
             if (autoRefineRef.current && completedRunId) {
-              toast({ title: "Optimization complete", description: "Auto-refining top results..." });
+              toast({ title: "Optimization complete", description: "Auto-refining top results in 3s..." });
+              setPendingAutoRefine(true);
               (async () => {
+                await new Promise(r => setTimeout(r, 3000));
+                setPendingAutoRefine(false);
+                if (!autoRefineRef.current) {
+                  toast({ title: "Auto-refine cancelled", description: "Results are ready in the Results tab." });
+                  return;
+                }
                 try {
                   const res = await apiRequest("POST", `/api/lab/runs/${completedRunId}/refine`, {});
                   const refineData = await safeResponseJson(res);
@@ -891,6 +899,24 @@ export default function QuantumLab() {
                 </Card>
               )
             ) : null}
+
+            {pendingAutoRefine && (
+              <Card className="bg-amber-500/10 border border-amber-500/30 p-4" data-testid="pending-auto-refine">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                    <span className="text-sm text-amber-200">Auto-refine starting shortly...</span>
+                  </div>
+                  <button
+                    className="text-xs px-3 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 transition-colors"
+                    data-testid="cancel-auto-refine"
+                    onClick={() => { setAutoRefine(false); setPendingAutoRefine(false); }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </Card>
+            )}
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 space-y-6">

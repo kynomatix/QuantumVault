@@ -77,7 +77,7 @@ export interface ILabStorage {
   hasActiveOrPausedRun(): Promise<boolean>;
   getHeatmapCells(walletAddress: string): Promise<{ cells: any[]; runsTotal: number }>;
   getCompletedRunCount(walletAddress: string): Promise<number>;
-  deduplicateStrategyResults(strategyId: number): Promise<number>;
+  deduplicateStrategyResults(strategyId: number, protectRunId?: number): Promise<number>;
 }
 
 export class LabDatabaseStorage implements ILabStorage {
@@ -1016,7 +1016,7 @@ export class LabDatabaseStorage implements ILabStorage {
     return rows[0]?.count ?? 0;
   }
 
-  async deduplicateStrategyResults(strategyId: number): Promise<number> {
+  async deduplicateStrategyResults(strategyId: number, protectRunId?: number): Promise<number> {
     const rows = await db.execute<{ removed: number }>(sql`
       WITH ranked AS (
         SELECT r.id, r.run_id,
@@ -1036,6 +1036,7 @@ export class LabDatabaseStorage implements ILabStorage {
           AND ranked.rn > 1
           AND run.id = del.run_id
           AND run.status = 'complete'
+          AND del.run_id != ${protectRunId ?? -1}
         RETURNING del.id
       )
       SELECT count(*)::int AS removed FROM deleted

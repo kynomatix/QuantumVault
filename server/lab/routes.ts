@@ -650,6 +650,7 @@ export function registerLabRoutes(app: Express): void {
         lastWorkerMessageTime = Date.now();
         switch (msg.type) {
           case "progress":
+            if (msg.data.status === "complete") break;
             labStorage.updateProgress(job.id, msg.data);
             break;
 
@@ -778,7 +779,7 @@ export function registerLabRoutes(app: Express): void {
                   await labStorage.finalizeSuccessfulRun(runId, totalConfigsTested, finalCheckpoint);
                   console.log(`[QuantumLab] Run ${runId} completed`);
                   if (config.strategyId) {
-                    labStorage.deduplicateStrategyResults(config.strategyId).then(removed => {
+                    labStorage.deduplicateStrategyResults(config.strategyId, runId).then(removed => {
                       if (removed > 0) console.log(`[QuantumLab] Dedup: removed ${removed} duplicate results for strategy ${config.strategyId}`);
                     }).catch(err => console.log(`[QuantumLab] Dedup error for strategy ${config.strategyId}: ${err.message}`));
                   }
