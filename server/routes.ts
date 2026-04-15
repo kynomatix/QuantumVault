@@ -460,7 +460,7 @@ async function settleAllPnl(
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
-import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMarketMaxLeverage } from "./market-liquidity-service";
+import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
@@ -803,13 +803,16 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
   }
 
   // GUARD: Minimum equity check - prevent submitting trades that will fail on-chain
-  // Calculate the minimum equity needed: (minOrderSize * oraclePrice) / leverage, with 20% buffer
+  // Check BOTH base-unit minimum AND notional USD minimum (Pacifica enforces $10 notional minimum)
   const minOrderSize = getMinOrderSize(market);
-  const minEquityNeeded = (minOrderSize * oraclePrice / effectiveLeverage) * 1.2;
+  const minOrderUsd = getMinOrderSizeUsd(market);
+  const minEquityFromBase = (minOrderSize * oraclePrice / effectiveLeverage) * 1.2;
+  const minEquityFromUsd = (minOrderUsd / effectiveLeverage) * 1.15;
+  const minEquityNeeded = Math.max(minEquityFromBase, minEquityFromUsd);
   const minEquityThreshold = Math.max(0.50, minEquityNeeded);
   
   if (freeCollateral < minEquityThreshold) {
-    const pauseReason = `Bot underfunded: $${freeCollateral.toFixed(2)} equity available but need $${minEquityThreshold.toFixed(2)} minimum for ${market} (${minOrderSize} min order at ${effectiveLeverage}x leverage). Top up your bot to continue trading.`;
+    const pauseReason = `Bot underfunded: $${freeCollateral.toFixed(2)} equity available but need $${minEquityThreshold.toFixed(2)} minimum for ${market} ($${minOrderUsd} min notional at ${effectiveLeverage}x leverage). Top up your bot to continue trading.`;
     console.log(`${logPrefix} ${pauseReason}`);
     return {
       success: false,
@@ -1019,6 +1022,32 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
           shouldPauseBot: true,
         };
       }
+    }
+  }
+
+  // STEP 7: Final notional floor check — Pacifica enforces a minimum notional (typically $10)
+  const finalNotional = finalContractSize * oraclePrice;
+  if (finalNotional < minOrderUsd) {
+    const minContractsForNotional = minOrderUsd / oraclePrice;
+    const requiredCollateralForMin = (minOrderUsd / effectiveLeverage) * 1.05;
+    if (freeCollateral >= requiredCollateralForMin) {
+      console.log(`${logPrefix} NOTIONAL FLOOR: $${finalNotional.toFixed(2)} < $${minOrderUsd} minimum. Bumping ${finalContractSize.toFixed(6)} → ${minContractsForNotional.toFixed(6)} contracts (need $${requiredCollateralForMin.toFixed(2)} collateral, have $${freeCollateral.toFixed(2)})`);
+      finalContractSize = minContractsForNotional;
+      tradeAmountUsd = minOrderUsd;
+    } else {
+      const pauseReason = `Order notional $${finalNotional.toFixed(2)} below Pacifica minimum of $${minOrderUsd}. Need $${requiredCollateralForMin.toFixed(2)} equity at ${effectiveLeverage}x leverage, but only $${freeCollateral.toFixed(2)} available. Deposit more funds to trade.`;
+      console.log(`${logPrefix} ${pauseReason}`);
+      return {
+        success: false,
+        tradeAmountUsd,
+        finalContractSize,
+        freeCollateral,
+        maxTradeableValue,
+        effectiveLeverage,
+        error: pauseReason,
+        pauseReason,
+        shouldPauseBot: true,
+      };
     }
   }
 

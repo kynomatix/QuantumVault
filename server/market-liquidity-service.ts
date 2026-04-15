@@ -143,6 +143,15 @@ export function getMinOrderSize(symbol: string): number {
   return 0.01;
 }
 
+export function getMinOrderSizeUsd(symbol: string): number {
+  const normalizedSymbol = symbol.toUpperCase().includes('-PERP')
+    ? symbol.toUpperCase()
+    : `${symbol.toUpperCase()}-PERP`;
+  const adapterInfo = getAdapterMarketInfo(normalizedSymbol);
+  if (adapterInfo) return adapterInfo.minOrderSizeUsd;
+  return 10;
+}
+
 export function getMarketMaxLeverage(symbol: string): number {
   return getCachedMaxLeverage(symbol);
 }
