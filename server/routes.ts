@@ -4438,11 +4438,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const dbPosition = await storage.getBotPosition(bot.id, bot.market);
-      if (!dbPosition || Math.abs(Number(dbPosition.currentSize || 0)) < 0.0001) {
+      if (!dbPosition || Math.abs(parseFloat(dbPosition.baseSize || '0')) < 0.0001) {
         return res.status(400).json({ error: "No open position — TP/SL can only be set on an active position" });
       }
 
       const subAccountId = bot.driftSubaccountId ?? 0;
+      const tpslBotCtx = getBotSubaccountContext(bot);
       const { secretKey, publicKey } = _decryptToSecretKey(wallet.agentPrivateKeyEncrypted);
       const agentPubKey = wallet.agentPublicKey || publicKey;
       const mainWalletAddress = await _lookupMainWallet(agentPubKey);
@@ -4452,14 +4453,22 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Current protocol adapter does not support TP/SL" });
       }
 
+      let tpslSecretKey = secretKey;
+      let tpslPublicKey = agentPubKey;
+      if (tpslBotCtx) {
+        const botKeyBase58 = decrypt(tpslBotCtx.botEncryptedKey);
+        tpslSecretKey = bs58.decode(botKeyBase58);
+        tpslPublicKey = tpslBotCtx.botPublicKey;
+      }
+
       const result = await adapter.setTpSl({
-        agentPublicKey: agentPubKey,
-        agentSecretKey: secretKey,
+        agentPublicKey: tpslPublicKey,
+        agentSecretKey: tpslSecretKey,
         mainWalletAddress,
         internalSymbol: bot.market,
         takeProfitPrice: takeProfitPrice || undefined,
         stopLossPrice: stopLossPrice || undefined,
-        subaccountId: _subIdStr(subAccountId),
+        subaccountId: tpslBotCtx ? '0' : _subIdStr(subAccountId),
       });
 
       console.log(`[SetTpSl] Set TP/SL for bot ${bot.id} (${bot.market}): TP=${takeProfitPrice ?? 'none'}, SL=${stopLossPrice ?? 'none'}, orderId=${result.orderId}`);
