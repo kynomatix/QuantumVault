@@ -5388,7 +5388,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           actualTradeCount: tradeCount,
           realizedPnl: position?.realizedPnl || "0",
           totalFees: position?.totalFees || "0",
-          driftBalance: botBalance,
+          exchangeBalance: botBalance,
           netDeposited,
           netPnl,
           netPnlPercent,
@@ -9262,7 +9262,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         getUsdcBalance(walletAddress),
         getDriftBalance(walletAddress),
       ]);
-      res.json({ usdcBalance, driftBalance });
+      res.json({ usdcBalance, exchangeBalance: driftBalance });
     } catch (error) {
       console.error("Exchange wallet balance error:", error);
       res.status(500).json({ error: "Failed to fetch balances" });
@@ -9336,7 +9336,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       res.json({ 
         agentBalance,
-        driftBalance: inTrading,
+        exchangeBalance: inTrading,
         totalEquity,
         solBalance,
         botCount: bots.length,

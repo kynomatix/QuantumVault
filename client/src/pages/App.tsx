@@ -261,7 +261,7 @@ export default function AppPage() {
   const { data: portfolioPerformanceData, isLoading: portfolioPerformanceLoading } = usePortfolioPerformance();
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
-  const [driftBalance, setDriftBalance] = useState<number | null>(null);
+  const [exchangeBalance, setExchangeBalance] = useState<number | null>(null);
   const [agentBalance, setAgentBalance] = useState<number | null>(null);
   const [solBalance, setSolBalance] = useState<number | null>(null);
   const [equityLoading, setEquityLoading] = useState(false);
@@ -272,7 +272,7 @@ export default function AppPage() {
     if (!connected) {
       setTotalEquity(null);
       setAgentBalance(null);
-      setDriftBalance(null);
+      setExchangeBalance(null);
       setSolBalance(null);
       equityInitialLoadDone.current = false;
       return;
@@ -288,7 +288,7 @@ export default function AppPage() {
           const data = await safeResponseJson(res);
           setTotalEquity(data.totalEquity ?? 0);
           setAgentBalance(data.agentBalance ?? 0);
-          setDriftBalance(data.driftBalance ?? 0);
+          setExchangeBalance(data.exchangeBalance ?? 0);
           setSolBalance(data.solBalance ?? 0);
           equityInitialLoadDone.current = true;
         }
@@ -444,7 +444,7 @@ export default function AppPage() {
           if (data) {
             setTotalEquity(data.totalEquity ?? 0);
             setAgentBalance(data.agentBalance ?? 0);
-            setDriftBalance(data.driftBalance ?? 0);
+            setExchangeBalance(data.exchangeBalance ?? 0);
             setSolBalance(data.solBalance ?? 0);
           }
         });
@@ -1327,7 +1327,7 @@ export default function AppPage() {
                     </div>
                     <div className="flex justify-between text-xs">
                       <span className="text-muted-foreground">In Trading</span>
-                      <span className="font-mono text-emerald-400" data-testid="text-in-trading">${driftBalance?.toFixed(2) ?? '0.00'}</span>
+                      <span className="font-mono text-emerald-400" data-testid="text-in-trading">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
                     </div>
                   </div>
                 </div>
@@ -1365,7 +1365,7 @@ export default function AppPage() {
                     </div>
                     <div className="flex justify-between text-xs">
                       <span className="text-muted-foreground">In Trading</span>
-                      <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">${driftBalance?.toFixed(2) ?? '0.00'}</span>
+                      <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
                     </div>
                   </div>
                 </div>

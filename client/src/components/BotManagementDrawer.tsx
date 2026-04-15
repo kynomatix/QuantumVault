@@ -187,8 +187,8 @@ export function BotManagementDrawer({
   const [activeTab, setActiveTab] = useState('overview');
   const [botBalance, setBotBalance] = useState<number>(0);
   const [mainAccountBalance, setMainAccountBalance] = useState<number>(0);
-  const [driftBalance, setDriftBalance] = useState<number>(0);
-  const [driftFreeCollateral, setDriftFreeCollateral] = useState<number>(0);
+  const [exchangeBalance, setExchangeBalance] = useState<number>(0);
+  const [exchangeFreeCollateral, setExchangeFreeCollateral] = useState<number>(0);
   const [hasOpenPositions, setHasOpenPositions] = useState<boolean>(false);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [trades, setTrades] = useState<BotTrade[]>([]);
@@ -350,8 +350,8 @@ export function BotManagementDrawer({
         // Balance data
         setBotBalance(data.usdcBalance ?? 0);
         setMainAccountBalance(data.mainAccountBalance ?? 0);
-        setDriftBalance(data.totalCollateral ?? 0);
-        setDriftFreeCollateral(data.freeCollateral ?? 0);
+        setExchangeBalance(data.totalCollateral ?? 0);
+        setExchangeFreeCollateral(data.freeCollateral ?? 0);
         setHasOpenPositions(data.hasOpenPositions ?? false);
         setNetDeposited(data.netDeposited ?? 0);
         
@@ -445,8 +445,8 @@ export function BotManagementDrawer({
 
       if (botDriftRes?.ok) {
         const data = await safeResponseJson(botDriftRes);
-        setDriftBalance(data.totalCollateral ?? data.balance ?? 0);
-        setDriftFreeCollateral(data.freeCollateral ?? 0);
+        setExchangeBalance(data.totalCollateral ?? data.balance ?? 0);
+        setExchangeFreeCollateral(data.freeCollateral ?? 0);
         setHasOpenPositions(data.hasOpenPositions ?? false);
       }
 
@@ -527,10 +527,10 @@ export function BotManagementDrawer({
     }
 
     // Validate amount doesn't exceed withdrawable
-    if (amount > driftFreeCollateral + 0.000001) {
+    if (amount > exchangeFreeCollateral + 0.000001) {
       toast({ 
         title: 'Amount exceeds withdrawable balance', 
-        description: `Maximum you can withdraw is $${driftFreeCollateral.toFixed(2)}`,
+        description: `Maximum you can withdraw is $${exchangeFreeCollateral.toFixed(2)}`,
         variant: 'destructive' 
       });
       return;
@@ -1268,7 +1268,7 @@ export function BotManagementDrawer({
                   {balanceLoading ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    `$${driftBalance.toFixed(2)}`
+                    `$${exchangeBalance.toFixed(2)}`
                   )}
                 </p>
               </div>
@@ -1289,14 +1289,14 @@ export function BotManagementDrawer({
                 </div>
                 <p
                   className={`text-2xl font-bold mt-1 ${
-                    (driftBalance - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                    (exchangeBalance - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
                   }`}
                   data-testid="text-net-pnl"
                 >
                   {balanceLoading ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    `${(driftBalance - netDeposited) >= 0 ? '+' : ''}$${(driftBalance - netDeposited).toFixed(2)}`
+                    `${(exchangeBalance - netDeposited) >= 0 ? '+' : ''}$${(exchangeBalance - netDeposited).toFixed(2)}`
                   )}
                 </p>
               </div>
@@ -1316,14 +1316,14 @@ export function BotManagementDrawer({
                 </div>
                 <p
                   className={`text-2xl font-bold mt-1 ${
-                    (driftBalance - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                    (exchangeBalance - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
                   }`}
                   data-testid="text-return-pct"
                 >
                   {balanceLoading ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : netDeposited > 0 ? (
-                    `${(((driftBalance - netDeposited) / netDeposited) * 100).toFixed(2)}%`
+                    `${(((exchangeBalance - netDeposited) / netDeposited) * 100).toFixed(2)}%`
                   ) : (
                     '0%'
                   )}
@@ -1912,7 +1912,7 @@ export function BotManagementDrawer({
                     className="absolute right-1 top-1/2 -translate-y-1/2 h-7 px-2 text-xs"
                     onClick={() => {
                       // Floor to 2 decimal places (cents) for clean display values
-                      const maxWithdrawable = Math.floor(driftFreeCollateral * 100) / 100;
+                      const maxWithdrawable = Math.floor(exchangeFreeCollateral * 100) / 100;
                       setRemoveEquityAmount(maxWithdrawable.toString());
                     }}
                     data-testid="button-remove-max"
@@ -1922,24 +1922,24 @@ export function BotManagementDrawer({
                 </div>
                 <Button
                   onClick={handleRemoveEquity}
-                  disabled={removeEquityLoading || !removeEquityAmount || parseFloat(removeEquityAmount) > driftFreeCollateral + 0.000001}
+                  disabled={removeEquityLoading || !removeEquityAmount || parseFloat(removeEquityAmount) > exchangeFreeCollateral + 0.000001}
                   variant="outline"
                   data-testid="button-remove-equity"
                 >
                   {removeEquityLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Remove'}
                 </Button>
               </div>
-              {removeEquityAmount && parseFloat(removeEquityAmount) > driftFreeCollateral + 0.000001 && (
+              {removeEquityAmount && parseFloat(removeEquityAmount) > exchangeFreeCollateral + 0.000001 && (
                 <p className="text-xs text-red-500">
-                  Amount exceeds max withdrawable (${driftFreeCollateral.toFixed(2)})
+                  Amount exceeds max withdrawable (${exchangeFreeCollateral.toFixed(2)})
                 </p>
               )}
               <p className="text-xs text-muted-foreground">
                 Withdraw USDC from the bot back to your wallet
               </p>
-              {hasOpenPositions && driftBalance > driftFreeCollateral && (
+              {hasOpenPositions && exchangeBalance > exchangeFreeCollateral && (
                 <p className="text-xs text-amber-500">
-                  Note: ${(driftBalance - driftFreeCollateral).toFixed(2)} is locked as margin for open positions
+                  Note: ${(exchangeBalance - exchangeFreeCollateral).toFixed(2)} is locked as margin for open positions
                 </p>
               )}
             </div>
@@ -2602,8 +2602,8 @@ export function BotManagementDrawer({
           onClose={() => setShareCardOpen(false)}
           botName={displayBot.name}
           market={displayBot.market}
-          pnl={driftBalance - netDeposited}
-          pnlPercent={netDeposited > 0 ? ((driftBalance - netDeposited) / netDeposited) * 100 : 0}
+          pnl={exchangeBalance - netDeposited}
+          pnlPercent={netDeposited > 0 ? ((exchangeBalance - netDeposited) / netDeposited) * 100 : 0}
           timeframe={performanceTimeframe}
           tradeCount={performanceTradeCount}
           winRate={parseFloat(getWinRate() as string)}
