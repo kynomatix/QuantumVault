@@ -1086,8 +1086,10 @@ export class PacificaAdapter implements ProtocolAdapter {
     const sigBytes = bs58.decode(signatureBase58);
     const pubKeyBytes = bs58.decode(mainWalletAddress);
     const localValid = nacl.sign.detached.verify(messageBytes, sigBytes, pubKeyBytes);
-    console.log(`[AgentBind] Local verification: ${localValid ? 'PASS' : 'FAIL'}`);
-    console.log(`[AgentBind] Signed message: ${expectedMessage}`);
+    console.log(`[AgentBind] Local verification: ${localValid ? 'PASS' : 'FAIL'}, account=${mainWalletAddress.slice(0, 8)}..., agent=${agentPublicKey.slice(0, 8)}...`);
+    if (!localValid) {
+      throw new Error('Agent bind signature failed local verification — aborting before sending to Pacifica');
+    }
 
     const body: Record<string, unknown> = {
       account: mainWalletAddress,
@@ -1097,7 +1099,6 @@ export class PacificaAdapter implements ProtocolAdapter {
       expiry_window: expiryWindow,
       agent_public_key: agentPublicKey,
     };
-    console.log('[AgentBind] Sending to Pacifica:', JSON.stringify(body, null, 2));
     await this.post('/agent/bind', body);
   }
 
