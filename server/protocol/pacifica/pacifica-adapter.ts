@@ -487,7 +487,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       amount: String(params.sizeBase),
       side: mapToProtocolSide(params.side),
       reduce_only: params.reduceOnly ?? false,
-      max_slippage: String(slippagePct),
+      slippage_percent: String(slippagePct),
     };
 
     if (params.clientOrderId) {
