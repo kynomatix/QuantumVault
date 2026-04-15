@@ -786,8 +786,20 @@ export class PacificaAdapter implements ProtocolAdapter {
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
+    let positionSide: string = 'bid';
+    try {
+      const positions = await this.getPositions(params.agentPublicKey);
+      const pos = positions.find(p => p.internalSymbol === params.internalSymbol);
+      if (pos) {
+        positionSide = pos.baseSize >= 0 ? 'bid' : 'ask';
+      }
+    } catch (err) {
+      console.warn(`[SetTpSl] Could not fetch position side, defaulting to 'bid':`, err);
+    }
+
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
+      side: positionSide,
     };
 
     if (params.takeProfitPrice !== undefined) {
@@ -1258,12 +1270,22 @@ export class PacificaAdapter implements ProtocolAdapter {
   private mapPosition(p: PacificaPositionResponse): ProtocolPosition {
     const rawAmount = parseFloat(p.amount || p.size || '0');
     const size = p.side === 'ask' ? -rawAmount : rawAmount;
+    const entryPrice = parseFloat(p.entry_price);
+    const markPrice = p.mark_price ? parseFloat(p.mark_price) : entryPrice;
+
+    let unrealizedPnl = p.unrealized_pnl ? parseFloat(p.unrealized_pnl) : 0;
+    if (unrealizedPnl === 0 && Math.abs(size) > 0.0001 && markPrice > 0 && entryPrice > 0 && markPrice !== entryPrice) {
+      unrealizedPnl = size > 0
+        ? (markPrice - entryPrice) * Math.abs(size)
+        : (entryPrice - markPrice) * Math.abs(size);
+    }
+
     return {
       internalSymbol: this.safeProtocolToInternal(p.symbol),
       baseSize: size,
-      entryPrice: parseFloat(p.entry_price),
-      markPrice: p.mark_price ? parseFloat(p.mark_price) : parseFloat(p.entry_price),
-      unrealizedPnl: p.unrealized_pnl ? parseFloat(p.unrealized_pnl) : 0,
+      entryPrice,
+      markPrice,
+      unrealizedPnl,
       leverage: p.leverage ? parseFloat(p.leverage) : null,
       liquidationPrice: p.liquidation_price ? parseFloat(p.liquidation_price) : null,
       marginMode: p.margin_mode || (p.isolated ? 'isolated' : 'cross'),
