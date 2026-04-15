@@ -93,6 +93,13 @@ const DISPLAY_NAMES: Record<string, string> = {
   URNM: 'Uranium Miners ETF',
 };
 
+function countDecimals(val: number): number {
+  if (Math.floor(val) === val) return 0;
+  const s = val.toString();
+  const dotIndex = s.indexOf('.');
+  return dotIndex < 0 ? 0 : s.length - dotIndex - 1;
+}
+
 interface CacheEntry<T> {
   data: T;
   fetchedAt: number;
@@ -333,7 +340,10 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (!market) {
       throw new Error(`PacificaAdapter: unknown market "${internalSymbol}"`);
     }
-    return Math.floor(size / market.lotSize) * market.lotSize;
+    const lotSize = market.lotSize;
+    const decimals = countDecimals(lotSize);
+    const raw = Math.floor(size / lotSize) * lotSize;
+    return parseFloat(raw.toFixed(decimals));
   }
 
   quantizePrice(internalSymbol: string, price: number): number {
@@ -342,7 +352,10 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (!market) {
       throw new Error(`PacificaAdapter: unknown market "${internalSymbol}"`);
     }
-    return Math.round(price / market.tickSize) * market.tickSize;
+    const tickSize = market.tickSize;
+    const decimals = countDecimals(tickSize);
+    const raw = Math.round(price / tickSize) * tickSize;
+    return parseFloat(raw.toFixed(decimals));
   }
 
   async getAccountInfo(agentPublicKey: string, subaccountId?: string): Promise<AccountInfo> {
@@ -481,10 +494,14 @@ export class PacificaAdapter implements ProtocolAdapter {
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
     const slippagePct = params.maxSlippagePct ?? 0.5;
+    const quantizedSize = this.quantizeOrderSize(params.internalSymbol, params.sizeBase);
+    if (quantizedSize <= 0) {
+      throw new Error(`Order size ${params.sizeBase} rounds to zero for ${params.internalSymbol} (lot size too large)`);
+    }
 
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
-      amount: String(params.sizeBase),
+      amount: String(quantizedSize),
       side: mapToProtocolSide(params.side),
       reduce_only: params.reduceOnly ?? false,
       slippage_percent: String(slippagePct),
@@ -517,11 +534,16 @@ export class PacificaAdapter implements ProtocolAdapter {
   async placeLimitOrder(params: LimitOrderParams): Promise<OrderResult> {
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
+    const quantizedSize = this.quantizeOrderSize(params.internalSymbol, params.sizeBase);
+    if (quantizedSize <= 0) {
+      throw new Error(`Order size ${params.sizeBase} rounds to zero for ${params.internalSymbol} (lot size too large)`);
+    }
+    const quantizedPrice = this.quantizePrice(params.internalSymbol, params.price);
 
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
-      price: String(params.price),
-      amount: String(params.sizeBase),
+      price: String(quantizedPrice),
+      amount: String(quantizedSize),
       side: mapToProtocolSide(params.side),
       tif: params.timeInForce,
       reduce_only: params.reduceOnly ?? false,
