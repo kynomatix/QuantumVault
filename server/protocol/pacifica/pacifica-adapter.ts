@@ -73,6 +73,26 @@ const MARKET_CACHE_TTL_MS = 5 * 60 * 1000;
 const PRICE_CACHE_TTL_MS = 60 * 1000;
 const MAX_PRICE_CACHE_SIZE = 200;
 
+const DISPLAY_NAMES: Record<string, string> = {
+  BTC: 'Bitcoin', ETH: 'Ethereum', SOL: 'Solana', XRP: 'XRP',
+  DOGE: 'Dogecoin', SUI: 'Sui', HYPE: 'Hyperliquid', AVAX: 'Avalanche',
+  ADA: 'Cardano', ARB: 'Arbitrum', BNB: 'Binance Coin', LINK: 'Chainlink',
+  LTC: 'Litecoin', JUP: 'Jupiter', TAO: 'Bittensor', WIF: 'dogwifhat',
+  TRUMP: 'Trump', PENGU: 'Pudgy Penguins', PAXG: 'PAX Gold',
+  FARTCOIN: 'Fartcoin', PUMP: 'Pump.fun', ASTER: 'Aster', XPL: 'XPL',
+  '2Z': '2Z', ZEC: 'Zcash', LIT: 'Litentry', MON: 'Monad',
+  kBONK: 'Bonk', kPEPE: 'Pepe', AAVE: 'Aave', BCH: 'Bitcoin Cash',
+  CRV: 'Curve', ENA: 'Ethena', ICP: 'Internet Computer', LDO: 'Lido',
+  NEAR: 'Near Protocol', UNI: 'Uniswap', VIRTUAL: 'Virtuals Protocol',
+  WLD: 'Worldcoin', XMR: 'Monero', ZK: 'zkSync', ZRO: 'LayerZero',
+  STRK: 'Starknet', MEGA: 'MegaETH', PIPPIN: 'Pippin', WLFI: 'World Liberty Financial',
+  CRCL: 'Circle', SP500: 'S&P 500', EURUSD: 'EUR/USD', USDJPY: 'USD/JPY',
+  NVDA: 'Nvidia', TSLA: 'Tesla', GOOGL: 'Alphabet', PLTR: 'Palantir',
+  HOOD: 'Robinhood', XAU: 'Gold', XAG: 'Silver', CL: 'Crude Oil',
+  BP: 'BP plc', NATGAS: 'Natural Gas', COPPER: 'Copper', PLATINUM: 'Platinum',
+  URNM: 'Uranium Miners ETF',
+};
+
 interface CacheEntry<T> {
   data: T;
   fetchedAt: number;
@@ -1088,16 +1108,16 @@ export class PacificaAdapter implements ProtocolAdapter {
       );
     }
 
+    const allProtocolSymbols = rawMarkets.slice(0, MAX_MARKET_CACHE_SIZE).map(m => m.symbol);
+    const allMappings = buildPacificaMappings(allProtocolSymbols);
+    const protocolToInternal = new Map<string, string>();
+    for (const mapping of allMappings) {
+      protocolToInternal.set(mapping.protocol.toUpperCase(), mapping.internal);
+    }
+
     return rawMarkets.slice(0, MAX_MARKET_CACHE_SIZE).map((m) => {
       const protocolSymbol = m.symbol;
-      let internalSymbol: string;
-
-      try {
-        const tempMappings = buildPacificaMappings([protocolSymbol]);
-        internalSymbol = tempMappings[0]?.internal || `${protocolSymbol.toUpperCase()}-PERP`;
-      } catch {
-        internalSymbol = `${protocolSymbol.toUpperCase()}-PERP`;
-      }
+      const internalSymbol = protocolToInternal.get(protocolSymbol.toUpperCase()) || `${protocolSymbol.toUpperCase()}-PERP`;
 
       const maxLev = typeof m.max_leverage === 'number' ? m.max_leverage : parseFloat(String(m.max_leverage)) || 1;
       const minOrderUsd = parseFloat(String(m.min_order_size)) || 10;
@@ -1115,7 +1135,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         lotSize: lotSz,
         isActive: true,
         category: m.instrument_type ? [m.instrument_type] : [],
-        fullName: m.base_asset || protocolSymbol,
+        fullName: DISPLAY_NAMES[m.base_asset || protocolSymbol] || m.base_asset || protocolSymbol,
         maintenanceMarginWeight: maxLev > 0 ? 1 / maxLev : 0.03,
         fundingRate: isNaN(fundRate as number) ? undefined : fundRate,
       };

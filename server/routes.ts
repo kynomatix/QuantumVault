@@ -8484,7 +8484,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         highRisk: markets.filter(m => m.riskTier === 'high_risk').length,
       });
     } catch (error) {
-      console.error("Get Drift markets error:", error);
+      console.error("Get markets error:", error);
       res.status(500).json({ error: "Failed to fetch markets" });
     }
   });

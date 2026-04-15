@@ -151,6 +151,10 @@ export interface MarketInfo {
   lotSize: number;
   isActive: boolean;
   openInterestUsd?: number;
+  fullName: string;
+  category: string[];
+  warning?: string;
+  fundingRate?: number;
 }
 
 let marketCache: Map<string, MarketInfo> = new Map();
@@ -170,6 +174,10 @@ export function updateMarketCache(markets: ProtocolMarket[]): void {
       lotSize: m.lotSize,
       isActive: m.isActive,
       openInterestUsd: m.openInterestUsd,
+      fullName: m.fullName,
+      category: m.category,
+      warning: m.warning,
+      fundingRate: m.fundingRate,
     });
   }
   marketCache = newCache;
