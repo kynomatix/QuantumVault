@@ -329,7 +329,10 @@ async function fetchAllPythCandles(
   let consecutiveErrors = 0;
 
   const tfSeconds = getTimeframeSeconds(timeframe);
-  const chunkSeconds = tfSeconds * PYTH_BATCH_SIZE;
+  const base = symbol.split("/")[0];
+  const isNonCrypto = base in NON_CRYPTO_PYTH_MAP;
+  const batchSize = isNonCrypto ? Math.min(PYTH_BATCH_SIZE, Math.floor(90 * 86400 / tfSeconds)) : PYTH_BATCH_SIZE;
+  const chunkSeconds = tfSeconds * batchSize;
 
   while (currentFrom < endSec) {
     const chunkEnd = Math.min(currentFrom + chunkSeconds, endSec);
@@ -339,6 +342,12 @@ async function fetchAllPythCandles(
       consecutiveErrors = 0;
 
       if (!data || data.s === "error") {
+        if (isNonCrypto) {
+          console.log(`[Pyth] ${pythSymbol} returned error for chunk ${currentFrom}–${chunkEnd} — skipping (non-crypto, limited history)`);
+          currentFrom = chunkEnd;
+          await new Promise(resolve => setTimeout(resolve, 200));
+          continue;
+        }
         negCache(pythFailedSymbols, pythSymbol);
         console.log(`[Pyth] ${pythSymbol} returned error status — symbol likely invalid`);
         break;
