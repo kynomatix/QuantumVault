@@ -5341,22 +5341,25 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         ]);
         
         let netDeposited = 0;
+        let totalDeposits = 0;
         let botBalance = 0;
         let netPnl = 0;
         let netPnlPercent = 0;
         
         try {
+          const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
+          netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+          totalDeposits = botEvents.reduce((sum, e) => {
+            const amt = parseFloat(e.amount || '0');
+            return amt > 0 ? sum + amt : sum;
+          }, 0);
+
           if (botCtx && wallet?.agentPublicKey) {
             const liveInfo = await getDriftAccountInfoForBot(wallet.agentPublicKey, 0, botCtx);
             botBalance = liveInfo.totalCollateral;
-            const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
-            netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
             netPnl = botBalance - netDeposited;
-            netPnlPercent = netDeposited > 0 ? (netPnl / netDeposited) * 100 : 0;
+            netPnlPercent = totalDeposits > 0 ? (netPnl / totalDeposits) * 100 : 0;
           } else {
-            const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
-            netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
-            
             const realizedPnl = parseFloat(position?.realizedPnl || '0');
             const totalFees = parseFloat(position?.totalFees || '0');
             
@@ -5374,7 +5377,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             
             botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
             netPnl = botBalance - netDeposited;
-            netPnlPercent = netDeposited > 0 ? (netPnl / netDeposited) * 100 : 0;
+            netPnlPercent = totalDeposits > 0 ? (netPnl / totalDeposits) * 100 : 0;
           }
         } catch (err) {
           console.warn(`[trading-bots] Failed to calculate net PnL for bot ${bot.id}:`, err);
