@@ -1138,6 +1138,8 @@ export class PacificaAdapter implements ProtocolAdapter {
         fullName: DISPLAY_NAMES[m.base_asset || protocolSymbol] || m.base_asset || protocolSymbol,
         maintenanceMarginWeight: maxLev > 0 ? 1 / maxLev : 0.03,
         fundingRate: isNaN(fundRate as number) ? undefined : fundRate,
+        riskTier: PacificaAdapter.assessRiskTier(maxLev),
+        estimatedSlippagePct: PacificaAdapter.assessSlippage(maxLev),
       };
     });
   }
@@ -1269,5 +1271,19 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     const json = await response.json();
     return this.unwrapEnvelope(json);
+  }
+
+  private static assessRiskTier(maxLeverage: number): 'recommended' | 'caution' | 'high_risk' {
+    if (maxLeverage >= 20) return 'recommended';
+    if (maxLeverage >= 10) return 'caution';
+    return 'high_risk';
+  }
+
+  private static assessSlippage(maxLeverage: number): number {
+    if (maxLeverage >= 50) return 0.02;
+    if (maxLeverage >= 20) return 0.05;
+    if (maxLeverage >= 10) return 0.10;
+    if (maxLeverage >= 5) return 0.25;
+    return 0.50;
   }
 }

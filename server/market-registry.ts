@@ -155,6 +155,8 @@ export interface MarketInfo {
   category: string[];
   warning?: string;
   fundingRate?: number;
+  riskTier: 'recommended' | 'caution' | 'high_risk';
+  estimatedSlippagePct: number;
 }
 
 let marketCache: Map<string, MarketInfo> = new Map();
@@ -178,6 +180,8 @@ export function updateMarketCache(markets: ProtocolMarket[]): void {
       category: m.category,
       warning: m.warning,
       fundingRate: m.fundingRate,
+      riskTier: m.riskTier,
+      estimatedSlippagePct: m.estimatedSlippagePct,
     });
   }
   marketCache = newCache;

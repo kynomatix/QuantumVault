@@ -1,3 +1,5 @@
+export type RiskTier = 'recommended' | 'caution' | 'high_risk';
+
 export interface ProtocolMarket {
   internalSymbol: string;
   protocolSymbol: string;
@@ -13,6 +15,8 @@ export interface ProtocolMarket {
   openInterestUsd?: number;
   warning?: string;
   fundingRate?: number;
+  riskTier: RiskTier;
+  estimatedSlippagePct: number;
 }
 
 export interface ProtocolPosition {

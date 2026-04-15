@@ -1,8 +1,9 @@
 import { getCachedMaxLeverage, isMarketNonTradable, getNonTradableMarkets } from "./leverage-cache-service";
 import { getMarketInfo as getAdapterMarketInfo, getAllMarkets as getAdapterAllMarkets } from "./market-registry";
 import type { MarketInfo as RegistryMarketInfo } from "./market-registry";
+import type { RiskTier } from "./protocol/protocol-types";
 
-export type RiskTier = 'recommended' | 'caution' | 'high_risk';
+export type { RiskTier };
 
 export interface MarketInfo {
   symbol: string;
@@ -17,20 +18,6 @@ export interface MarketInfo {
   isActive: boolean;
   warning?: string;
   maxLeverage?: number;
-}
-
-function calculateRiskTier(maxLeverage: number): RiskTier {
-  if (maxLeverage >= 20) return 'recommended';
-  if (maxLeverage >= 10) return 'caution';
-  return 'high_risk';
-}
-
-function calculateSlippage(maxLeverage: number): number {
-  if (maxLeverage >= 50) return 0.02;
-  if (maxLeverage >= 20) return 0.05;
-  if (maxLeverage >= 10) return 0.10;
-  if (maxLeverage >= 5) return 0.25;
-  return 0.50;
 }
 
 interface MarketCache {
@@ -55,9 +42,6 @@ async function fetchMarketPrices(): Promise<Record<string, number>> {
 }
 
 function buildMarketFromRegistry(m: RegistryMarketInfo, price: number | null): MarketInfo {
-  const maxLev = m.maxLeverage || 1;
-  const riskTier = calculateRiskTier(maxLev);
-  const slippage = calculateSlippage(maxLev);
   const baseSymbol = m.internalSymbol.replace(/-PERP$/, '');
 
   return {
@@ -69,8 +53,8 @@ function buildMarketFromRegistry(m: RegistryMarketInfo, price: number | null): M
     isActive: m.isActive,
     warning: m.warning,
     maxLeverage: m.maxLeverage,
-    riskTier,
-    estimatedSlippagePct: slippage,
+    riskTier: m.riskTier,
+    estimatedSlippagePct: m.estimatedSlippagePct,
     lastPrice: price,
     openInterestUsd: m.openInterestUsd || null,
   };
