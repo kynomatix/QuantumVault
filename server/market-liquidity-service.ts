@@ -19,28 +19,18 @@ export interface MarketInfo {
   maxLeverage?: number;
 }
 
-const OI_THRESHOLDS = {
-  RECOMMENDED: 10_000_000,
-  CAUTION: 1_000_000,
-};
-
-function calculateRiskTier(oiUsd: number): RiskTier {
-  if (oiUsd >= OI_THRESHOLDS.RECOMMENDED) return 'recommended';
-  if (oiUsd >= OI_THRESHOLDS.CAUTION) return 'caution';
+function calculateRiskTier(maxLeverage: number): RiskTier {
+  if (maxLeverage >= 20) return 'recommended';
+  if (maxLeverage >= 10) return 'caution';
   return 'high_risk';
 }
 
-function calculateSlippage(oiUsd: number): number {
-  if (oiUsd >= 100_000_000) return 0.02;
-  if (oiUsd >= 50_000_000) return 0.03;
-  if (oiUsd >= 10_000_000) return 0.05;
-  if (oiUsd >= 5_000_000) return 0.10;
-  if (oiUsd >= 2_000_000) return 0.15;
-  if (oiUsd >= 1_000_000) return 0.25;
-  if (oiUsd >= 500_000) return 0.40;
-  if (oiUsd >= 200_000) return 0.55;
-  if (oiUsd >= 100_000) return 0.70;
-  return 0.85;
+function calculateSlippage(maxLeverage: number): number {
+  if (maxLeverage >= 50) return 0.02;
+  if (maxLeverage >= 20) return 0.05;
+  if (maxLeverage >= 10) return 0.10;
+  if (maxLeverage >= 5) return 0.25;
+  return 0.50;
 }
 
 interface MarketCache {
@@ -65,9 +55,9 @@ async function fetchMarketPrices(): Promise<Record<string, number>> {
 }
 
 function buildMarketFromRegistry(m: RegistryMarketInfo, price: number | null): MarketInfo {
-  const oi = m.openInterestUsd || 0;
-  const riskTier = calculateRiskTier(oi);
-  const slippage = calculateSlippage(oi);
+  const maxLev = m.maxLeverage || 1;
+  const riskTier = calculateRiskTier(maxLev);
+  const slippage = calculateSlippage(maxLev);
   const baseSymbol = m.internalSymbol.replace(/-PERP$/, '');
 
   return {
@@ -82,7 +72,7 @@ function buildMarketFromRegistry(m: RegistryMarketInfo, price: number | null): M
     riskTier,
     estimatedSlippagePct: slippage,
     lastPrice: price,
-    openInterestUsd: oi > 0 ? oi : null,
+    openInterestUsd: m.openInterestUsd || null,
   };
 }
 
@@ -131,19 +121,19 @@ export function getRiskTierInfo(tier: RiskTier): { label: string; color: string;
       return {
         label: 'Recommended',
         color: 'green',
-        description: 'High liquidity ($10M+ OI) - minimal slippage',
+        description: 'High liquidity market (20x+ leverage) - minimal slippage',
       };
     case 'caution':
       return {
         label: 'Caution',
         color: 'yellow',
-        description: 'Medium liquidity ($1M-$10M OI) - moderate slippage',
+        description: 'Medium liquidity market (10-19x leverage) - moderate slippage',
       };
     case 'high_risk':
       return {
         label: 'High Risk',
         color: 'red',
-        description: 'Low liquidity (<$1M OI) - higher slippage expected',
+        description: 'Lower liquidity market (<10x leverage) - higher slippage possible',
       };
   }
 }
