@@ -1081,6 +1081,19 @@ export const LAB_AVAILABLE_TICKERS = [
   { symbol: "MON/USDT:USDT", name: "MON" },
   { symbol: "XPL/USDT:USDT", name: "XPL" },
   { symbol: "2Z/USDT:USDT", name: "2Z" },
+  { symbol: "EURUSD/USDT:USDT", name: "EURUSD" },
+  { symbol: "USDJPY/USDT:USDT", name: "USDJPY" },
+  { symbol: "XAU/USDT:USDT", name: "XAU" },
+  { symbol: "XAG/USDT:USDT", name: "XAG" },
+  { symbol: "PLATINUM/USDT:USDT", name: "PLATINUM" },
+  { symbol: "CL/USDT:USDT", name: "CL" },
+  { symbol: "SP500/USDT:USDT", name: "SP500" },
+  { symbol: "NVDA/USDT:USDT", name: "NVDA" },
+  { symbol: "TSLA/USDT:USDT", name: "TSLA" },
+  { symbol: "GOOGL/USDT:USDT", name: "GOOGL" },
+  { symbol: "PLTR/USDT:USDT", name: "PLTR" },
+  { symbol: "HOOD/USDT:USDT", name: "HOOD" },
+  { symbol: "CRCL/USDT:USDT", name: "CRCL" },
 ] as const;
 
 export const LAB_AVAILABLE_TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h"] as const;

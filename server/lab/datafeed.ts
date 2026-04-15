@@ -55,8 +55,32 @@ function symbolToGateSpotPair(symbol: string): string {
   return `${base}_USDT`;
 }
 
+const NON_CRYPTO_PYTH_MAP: Record<string, string> = {
+  EURUSD: "EURUSD",
+  USDJPY: "USDJPY",
+  XAU: "XAUUSD",
+  XAG: "XAGUSD",
+  PLATINUM: "XPTUSD",
+  CL: "USOILSPOT",
+  SP500: "SPY",
+  NVDA: "NVDA",
+  TSLA: "TSLA",
+  GOOGL: "GOOGL",
+  PLTR: "PLTR",
+  HOOD: "HOOD",
+  CRCL: "CRCL",
+};
+
+function isNonCryptoSymbol(symbol: string): boolean {
+  const base = symbol.split("/")[0];
+  return base in NON_CRYPTO_PYTH_MAP;
+}
+
 function symbolToPythId(symbol: string): string {
   const base = stripMultiplierPrefix(symbol.split("/")[0]);
+  if (base in NON_CRYPTO_PYTH_MAP) {
+    return NON_CRYPTO_PYTH_MAP[base];
+  }
   return `Crypto.${base}/USD`;
 }
 
@@ -526,8 +550,30 @@ export async function fetchOHLCV(
     return aggregated;
   }
 
+  const nonCrypto = isNonCryptoSymbol(symbol);
   const instId = symbolToOkxInstId(symbol);
   let allCandles: OHLCV[] = [];
+
+  if (nonCrypto) {
+    onProgress?.(`Fetching ${symbol} ${timeframe} from Pyth (non-crypto)...`);
+    try {
+      allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress);
+    } catch (err: any) {
+      console.log(`[Pyth] Non-crypto fetch failed for ${symbol} ${timeframe}: ${err.message}`);
+    }
+
+    if (allCandles.length > 0) {
+      const deduped = deduplicateCandles(allCandles);
+      onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
+      saveCandlesToDb(symbol, timeframe, deduped).catch((err) =>
+        console.log(`[CandleCache] Background save error: ${err.message}`)
+      );
+      return deduped;
+    }
+
+    onProgress?.(`No candle data available for ${symbol} ${timeframe} from Pyth`);
+    return allCandles;
+  }
 
   if (!isNegCached(okxFailedInstruments, instId)) {
     const bar = mapTimeframeToOkx(timeframe);

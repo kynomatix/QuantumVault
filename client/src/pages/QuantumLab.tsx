@@ -1361,6 +1361,9 @@ const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
   { label: "Memes", tickers: ["WIF", "FARTCOIN", "PENGU", "TRUMP", "VIRTUAL", "PIPPIN", "WLFI", "MEGA"] },
   { label: "PerpDEX", tickers: ["HYPE", "LIT", "ASTER"] },
   { label: "Privacy / Store of Value", tickers: ["XMR", "ZEC", "BCH", "WLD", "PAXG"] },
+  { label: "Stocks", tickers: ["NVDA", "TSLA", "GOOGL", "PLTR", "HOOD", "CRCL", "SP500"] },
+  { label: "Forex", tickers: ["EURUSD", "USDJPY"] },
+  { label: "Commodities", tickers: ["XAU", "XAG", "PLATINUM", "CL"] },
   { label: "Other", tickers: ["2Z"] },
 ];
 
