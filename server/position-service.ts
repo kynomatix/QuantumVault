@@ -181,10 +181,10 @@ export class PositionService {
           // priceBuffer = freeCollateral / (|size| * (1 + maintenanceWeight))
           // This gives a more conservative (safer) liquidation price estimate
           let liquidationPrice: number | null = null;
-          const posSize = onChainPos ? onChainSize : dbSize;
+          const posSize = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainSize : dbSize;
           const posMarket = onChainPos?.market || dbPosition?.market || market;
-          const posSide = onChainPos ? onChainPos.side : (dbSize > 0 ? 'LONG' : 'SHORT');
-          const posMarkPrice = onChainPos?.markPrice || (dbPosition ? parseFloat(dbPosition.avgEntryPrice) : 0);
+          const posSide = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainPos.side : (dbSize > 0 ? 'LONG' : 'SHORT');
+          const posMarkPrice = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainPos.markPrice : (dbPosition ? parseFloat(dbPosition.avgEntryPrice) : 0);
 
           if (Math.abs(posSize) > 0.0001 && posMarkPrice > 0) {
             if (accountInfo.freeCollateral <= 0) {
