@@ -93,6 +93,7 @@ interface TradingBot {
   totalInvestment: string;
   maxPositionSize: string | null;
   driftSubaccountId?: number | null;
+  botAgentPublicKey?: string | null;
   profitReinvest?: boolean;
   autoWithdrawThreshold?: string | null;
   autoTopUp?: boolean;
@@ -2482,20 +2483,45 @@ export function BotManagementDrawer({
               </div>
             </div>
 
-            {displayBot?.driftSubaccountId !== null && displayBot?.driftSubaccountId !== undefined && (
+            {(displayBot?.botAgentPublicKey || (displayBot?.driftSubaccountId !== null && displayBot?.driftSubaccountId !== undefined)) && (
               <div className="p-4 rounded-xl border border-border/50 bg-muted/30">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Info className="w-4 h-4 text-muted-foreground" />
                     <span className="text-sm text-muted-foreground">Trading Subaccount</span>
                   </div>
-                  <span className="text-sm font-mono font-medium">
-                    Subaccount {displayBot.driftSubaccountId}
-                  </span>
+                  {displayBot.botAgentPublicKey ? (
+                    <div className="flex items-center gap-1.5">
+                      <a
+                        href={`https://solscan.io/account/${displayBot.botAgentPublicKey}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm font-mono font-medium hover:text-primary transition-colors flex items-center gap-1"
+                        data-testid="link-subaccount-solscan"
+                      >
+                        {displayBot.botAgentPublicKey.slice(0, 4)}...{displayBot.botAgentPublicKey.slice(-4)}
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(displayBot.botAgentPublicKey!);
+                          toast({ title: 'Copied', description: 'Subaccount address copied to clipboard' });
+                        }}
+                        className="p-1 rounded hover:bg-muted transition-colors"
+                        data-testid="button-copy-subaccount"
+                      >
+                        <Copy className="w-3 h-3 text-muted-foreground" />
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="text-sm font-mono font-medium" data-testid="text-subaccount-id">
+                      Subaccount {displayBot.driftSubaccountId}
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-muted-foreground mt-2">
-                  This bot's funds are isolated in Trading Subaccount {displayBot.driftSubaccountId}. 
-                  Each bot operates in its own isolated subaccount.
+                  This bot's funds are isolated in its own trading subaccount.
+                  Each bot operates independently with separate balances and positions.
                 </p>
               </div>
             )}
