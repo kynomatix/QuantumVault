@@ -96,7 +96,7 @@ export class PacificaSigner {
       expiryWindow,
     );
 
-    return {
+    const body: PacificaRequestBody = {
       account: mainWalletAddress,
       agent_wallet: agentPublicKey,
       signature,
@@ -104,6 +104,10 @@ export class PacificaSigner {
       expiry_window: expiry,
       ...operationData,
     };
+    if (agentPublicKey === null) {
+      delete (body as Record<string, unknown>).agent_wallet;
+    }
+    return body;
   }
 }
 

@@ -555,7 +555,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       OPERATION_TYPES.CREATE_MARKET_ORDER,
       operationData,
       params.agentPublicKey,
-      signer.getPublicKey(),
+      null,
     );
 
     if (params.subaccountId) {
@@ -600,8 +600,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CREATE_ORDER,
       operationData,
-      signer.getPublicKey(),
-      signer.getPublicKey(),
+      params.agentPublicKey,
+      null,
     );
 
     if (params.subaccountId) {
@@ -623,8 +623,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CANCEL_ORDER,
       operationData,
-      signer.getPublicKey(),
-      signer.getPublicKey(),
+      params.agentPublicKey,
+      null,
     );
 
     if (params.subaccountId) {
@@ -652,8 +652,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CANCEL_ALL_ORDERS,
       operationData,
-      signer.getPublicKey(),
-      signer.getPublicKey(),
+      params.agentPublicKey,
+      null,
     );
 
     if (params.subaccountId) {
@@ -717,8 +717,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.UPDATE_LEVERAGE,
       operationData,
-      signer.getPublicKey(),
-      signer.getPublicKey(),
+      params.agentPublicKey,
+      null,
     );
 
     if (params.subaccountId) {
@@ -738,8 +738,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.UPDATE_MARGIN_MODE,
       operationData,
-      signer.getPublicKey(),
-      signer.getPublicKey(),
+      params.agentPublicKey,
+      null,
     );
 
     if (params.subaccountId) {
@@ -771,8 +771,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CREATE_STOP_ORDER,
       operationData,
-      signer.getPublicKey(),
-      signer.getPublicKey(),
+      params.agentPublicKey,
+      null,
     );
 
     if (params.subaccountId) {
@@ -802,8 +802,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.SET_POSITION_TPSL,
       operationData,
-      signer.getPublicKey(),
-      signer.getPublicKey(),
+      params.agentPublicKey,
+      null,
     );
 
     if (params.subaccountId) {
@@ -825,8 +825,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CANCEL_STOP_ORDER,
       operationData,
-      signer.getPublicKey(),
-      signer.getPublicKey(),
+      params.agentPublicKey,
+      null,
     );
 
     if (params.subaccountId) {
@@ -976,8 +976,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.WITHDRAW,
       operationData,
-      signer.getPublicKey(),
-      signer.getPublicKey(),
+      params.agentPublicKey,
+      null,
     );
 
     if (params.subaccountId) {
@@ -1005,8 +1005,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.SUBACCOUNT_TRANSFER,
       operationData,
-      signer.getPublicKey(),
-      signer.getPublicKey(),
+      params.agentPublicKey,
+      null,
     );
 
     const response = await this.post('/account/subaccount/transfer', body);
@@ -1042,7 +1042,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       OPERATION_TYPES.SUBACCOUNT_INITIATE,
       initiateData,
       signer.getPublicKey(),
-      signer.getPublicKey(),
+      null,
     );
 
     const initiateResponse: PacificaSubaccountResponse = await this.post(
@@ -1058,7 +1058,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       OPERATION_TYPES.SUBACCOUNT_CONFIRM,
       confirmData,
       signer.getPublicKey(),
-      signer.getPublicKey(),
+      null,
     );
 
     const confirmResponse: PacificaSubaccountResponse = await this.post(
