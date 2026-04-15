@@ -301,17 +301,36 @@ export class PositionService {
     agentPublicKey: string,
     subAccountId: number,
     market: string,
-    agentPrivateKeyEncrypted?: string
+    agentPrivateKeyEncrypted?: string,
+    botSubaccountPublicKey?: string
   ): Promise<{ 
     size: number; 
     side: 'LONG' | 'SHORT' | 'FLAT'; 
     source: 'on-chain';
     entryPrice: number;
   }> {
-    // ALWAYS use byte-parsing for position reading - it's lightweight and doesn't create WebSocket connections
-    // The SDK approach causes memory leaks due to WebSocket connections that don't cleanup
-    console.log(`[PositionService] getPositionForExecution: Using byte-parsing for ${market} (subaccount ${subAccountId})`);
-    const fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+    let fetchResult;
+    if (botSubaccountPublicKey) {
+      console.log(`[PositionService] getPositionForExecution: Using adapter for ${market} (bot subaccount ${botSubaccountPublicKey.slice(0,8)}...)`);
+      try {
+        const positions = await getDefaultAdapter().getPositions(botSubaccountPublicKey);
+        fetchResult = { positions: positions.map(p => ({
+          marketIndex: 0,
+          market: p.internalSymbol,
+          baseAssetAmount: p.baseSize,
+          side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
+          entryPrice: p.entryPrice,
+          markPrice: p.markPrice,
+          unrealizedPnl: p.unrealizedPnl,
+        })), fetchFailed: false };
+      } catch (err) {
+        console.log(`[PositionService] bot subaccount position fetch failed: ${err instanceof Error ? err.message : err}`);
+        fetchResult = { positions: [], fetchFailed: true };
+      }
+    } else {
+      console.log(`[PositionService] getPositionForExecution: Using byte-parsing for ${market} (subaccount ${subAccountId})`);
+      fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+    }
     
     const normalizedMarket = normalizeMarket(market);
     const onChainPos = fetchResult.positions.find((p: any) => 

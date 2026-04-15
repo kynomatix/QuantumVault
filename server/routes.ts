@@ -1338,7 +1338,8 @@ async function routeSignalToSubscribers(
             subCloseQueryAccount,
             subCloseQuerySubId,
             subBot.market,
-            subWallet.agentPrivateKeyEncrypted
+            subWallet.agentPrivateKeyEncrypted,
+            subCloseCtx?.botPublicKey
           );
 
           if (position.side === 'FLAT' || Math.abs(position.size) < 0.0001) {
@@ -1597,7 +1598,8 @@ async function routeSignalToSubscribers(
               subQueryAccount,
               subQuerySubId,
               subBot.market,
-              subWallet.agentPrivateKeyEncrypted
+              subWallet.agentPrivateKeyEncrypted,
+              subBotCtx?.botPublicKey
             );
             if (existingPos.side !== 'FLAT' && Math.abs(existingPos.size) >= 0.0001) {
               const isOpposite = (existingPos.side === 'LONG' && side === 'short') || 
@@ -4069,7 +4071,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           closeQueryAccount,
           closeQuerySubId,
           bot.market,
-          wallet.agentPrivateKeyEncrypted
+          wallet.agentPrivateKeyEncrypted,
+          closeBotCtx?.botPublicKey
         );
         console.log(`[ClosePosition] On-chain position for ${bot.market}: ${onChainPosition.side} ${onChainPosition.size}`);
       } catch (err) {
@@ -4281,7 +4284,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             wallet.agentPublicKey,
             subAccountId,
             bot.market,
-            wallet.agentPrivateKeyEncrypted
+            wallet.agentPrivateKeyEncrypted,
+            closeBotCtx?.botPublicKey
           );
           
           if (postClosePosition.side === 'FLAT' || Math.abs(postClosePosition.size) < 0.0001) {
@@ -4330,7 +4334,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           wallet.agentPublicKey,
           subAccountId,
           bot.market,
-          wallet.agentPrivateKeyEncrypted
+          wallet.agentPrivateKeyEncrypted,
+          closeBotCtx?.botPublicKey
         );
         if (finalCheck.side !== 'FLAT' && Math.abs(finalCheck.size) > 0.0001) {
           verificationWarning = `Position not fully closed after ${maxRetries} attempts. Remaining: ${finalCheck.side} ${finalCheck.size}`;
@@ -4532,6 +4537,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const subAccountId = bot.driftSubaccountId ?? 0;
+      const closeMarketBotCtx = getBotSubaccountContext(bot);
       console.log(`[CloseMarketPosition] Closing ${market} in subaccount ${subAccountId} (bot: ${bot.name})`);
 
       // Query position for Swift support
@@ -4543,7 +4549,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           wallet.agentPublicKey,
           subAccountId,
           market,
-          wallet.agentPrivateKeyEncrypted
+          wallet.agentPrivateKeyEncrypted,
+          closeMarketBotCtx?.botPublicKey
         );
         if (marketPos.side !== 'FLAT' && Math.abs(marketPos.size) > 0) {
           marketPositionSide = marketPos.side === 'LONG' ? 'long' : 'short';
@@ -6809,7 +6816,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             queryAccount,
             querySubId,
             bot.market,
-            wallet.agentPrivateKeyEncrypted
+            wallet.agentPrivateKeyEncrypted,
+            webhookBotCtx?.botPublicKey
           );
           console.log(`[Webhook] On-chain position query result: size=${onChainPosition.size}, side=${onChainPosition.side}, entryPrice=${onChainPosition.entryPrice}`);
         } catch (onChainErr) {
@@ -6963,7 +6971,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                   wallet.agentPublicKey,
                   subAccountId,
                   bot.market,
-                  wallet.agentPrivateKeyEncrypted
+                  wallet.agentPrivateKeyEncrypted,
+                  webhookBotCtx?.botPublicKey
                 );
                 
                 if (postClosePosition.side === 'FLAT' || Math.abs(postClosePosition.size) < 0.0001) {
@@ -7013,7 +7022,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 wallet.agentPublicKey,
                 subAccountId,
                 bot.market,
-                wallet.agentPrivateKeyEncrypted
+                wallet.agentPrivateKeyEncrypted,
+                webhookBotCtx?.botPublicKey
               );
               if (finalCheck.side !== 'FLAT' && Math.abs(finalCheck.size) > 0.0001) {
                 finalPositionRemaining = { side: finalCheck.side, size: finalCheck.size };
@@ -7318,7 +7328,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           openQueryAccount,
           openQuerySubId,
           bot.market,
-          wallet.agentPrivateKeyEncrypted
+          wallet.agentPrivateKeyEncrypted,
+          webhookBotCtx?.botPublicKey
         );
         console.log(`[Webhook] Position flip check: on-chain position is ${onChainPosition.side} ${Math.abs(onChainPosition.size).toFixed(6)} on ${bot.market}`);
       } catch (posErr) {
@@ -8126,7 +8137,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               uwCloseQueryAccount,
               uwCloseQuerySubId,
               bot.market,
-              wallet.agentPrivateKeyEncrypted
+              wallet.agentPrivateKeyEncrypted,
+              userWebhookBotCtx?.botPublicKey
             );
             console.log(`[User Webhook] On-chain position query result: size=${onChainPosition.size}, side=${onChainPosition.side}, entryPrice=${onChainPosition.entryPrice}`);
           } catch (onChainErr) {
@@ -9291,7 +9303,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         });
       }
       
-      const totalEquity = agentBalance + exchangeBalance;
+      const totalBotBalances = subaccountBalances.reduce((sum, b) => sum + b.balance, 0);
+      const totalEquity = agentBalance + exchangeBalance + totalBotBalances;
       
       res.json({ 
         agentBalance,
