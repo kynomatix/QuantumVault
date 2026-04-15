@@ -1356,12 +1356,12 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
 
 const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
   { label: "Major", tickers: ["SOL", "BTC", "ETH", "XRP", "ADA", "LTC", "BNB", "AVAX", "LINK", "DOGE", "BONK", "PEPE"] },
-  { label: "Layer 1 / Infra", tickers: ["SUI", "APT", "SEI", "TON", "OP", "ARB", "POL", "MNT", "TIA", "INJ", "DYM", "XPL", "MON"] },
-  { label: "Solana DeFi", tickers: ["JUP", "DRIFT", "RAY", "JTO", "PYTH", "W", "KMNO", "TNSR", "CLOUD", "IO", "ME", "RENDER", "HNT", "DBR", "ZEX", "LAUNCHCOIN", "PUMP", "MET"] },
-  { label: "Memes", tickers: ["WIF", "POPCAT", "MOODENG", "FWOG", "GOAT", "PNUT", "MEW", "MICHI", "MOTHER", "FARTCOIN", "PENGU", "WEN", "MELANIA", "TRUMP"] },
+  { label: "Layer 1 / Infra", tickers: ["SUI", "ARB", "INJ", "NEAR", "ICP", "STRK", "ZK", "ZRO", "XPL", "MON"] },
+  { label: "DeFi", tickers: ["JUP", "AAVE", "UNI", "CRV", "LDO", "ENA", "PUMP", "TAO"] },
+  { label: "Memes", tickers: ["WIF", "FARTCOIN", "PENGU", "TRUMP", "VIRTUAL", "PIPPIN", "WLFI", "MEGA"] },
   { label: "PerpDEX", tickers: ["HYPE", "LIT", "ASTER"] },
-  { label: "New / Trending", tickers: ["AI16Z", "KAITO", "IP"] },
-  { label: "Commodities / Other", tickers: ["PAXG", "ZEC", "TAO", "RLB", "2Z"] },
+  { label: "Privacy / Store of Value", tickers: ["XMR", "ZEC", "BCH", "WLD", "PAXG"] },
+  { label: "Other", tickers: ["2Z"] },
 ];
 
 function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobStarted, isRunning }: {
