@@ -709,17 +709,6 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
           </CollapsibleContent>
         </Collapsible>
 
-        <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
-          <div className="flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
-            <div className="text-xs">
-              <p className="font-medium text-blue-500">Trading Subaccount</p>
-              <p className="text-muted-foreground">
-                Each bot gets its own isolated trading subaccount. A small amount of SOL (~0.005) is needed in your agent wallet for transaction fees.
-              </p>
-            </div>
-          </div>
-        </div>
 
       </div>
 

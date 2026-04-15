@@ -3510,20 +3510,36 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const adapter = getDefaultAdapter() as PacificaAdapter;
           const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
 
-          console.log(`[Deposit] Transferring ${amount} USDC from agent wallet to bot subaccount ${botForTransfer.protocolSubaccountId}`);
-          const transferResult = await adapter.transferBetweenSubaccounts({
-            agentSecretKey: agentKeypair.secretKey,
-            agentPublicKey: agentKeypair.publicKey.toString(),
-            fromSubaccountId: agentKeypair.publicKey.toString(),
-            toSubaccountId: botForTransfer.protocolSubaccountId!,
-            amount,
-          });
+          console.log(`[Deposit] Waiting for exchange deposit to settle before transferring to bot subaccount...`);
+          await new Promise(resolve => setTimeout(resolve, 3000));
 
-          if (!transferResult.success) {
+          let transferSuccess = false;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            console.log(`[Deposit] Transfer attempt ${attempt}/3: ${amount} USDC agent→${botForTransfer.protocolSubaccountId}`);
+            const transferResult = await adapter.transferBetweenSubaccounts({
+              agentSecretKey: agentKeypair.secretKey,
+              agentPublicKey: agentKeypair.publicKey.toString(),
+              fromSubaccountId: agentKeypair.publicKey.toString(),
+              toSubaccountId: botForTransfer.protocolSubaccountId!,
+              amount,
+            });
+
+            if (transferResult.success) {
+              console.log(`[Deposit] Successfully transferred ${amount} USDC to bot subaccount ${botForTransfer.protocolSubaccountId}`);
+              transferSuccess = true;
+              break;
+            } else {
+              console.warn(`[Deposit] Transfer attempt ${attempt} failed: ${transferResult.error}`);
+              if (attempt < 3) {
+                console.log(`[Deposit] Waiting 3s before retry (deposit may still be settling)...`);
+                await new Promise(resolve => setTimeout(resolve, 3000));
+              }
+            }
+          }
+
+          if (!transferSuccess) {
             subaccountTransferSuccess = false;
-            console.error(`[Deposit] Transfer to bot subaccount failed: ${transferResult.error}. Funds remain in agent main account.`);
-          } else {
-            console.log(`[Deposit] Successfully transferred ${amount} USDC to bot subaccount ${botForTransfer.protocolSubaccountId}`);
+            console.error(`[Deposit] All transfer attempts failed. Funds remain in agent main account.`);
           }
         } catch (transferErr: any) {
           subaccountTransferSuccess = false;
