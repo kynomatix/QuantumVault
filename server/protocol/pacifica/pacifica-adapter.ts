@@ -554,7 +554,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CREATE_MARKET_ORDER,
       operationData,
-      params.mainWalletAddress,
+      params.agentPublicKey,
       signer.getPublicKey(),
     );
 
@@ -600,7 +600,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CREATE_ORDER,
       operationData,
-      params.mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -623,7 +623,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CANCEL_ORDER,
       operationData,
-      params.mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -652,7 +652,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CANCEL_ALL_ORDERS,
       operationData,
-      params.mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -717,7 +717,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.UPDATE_LEVERAGE,
       operationData,
-      params.mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -738,7 +738,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.UPDATE_MARGIN_MODE,
       operationData,
-      params.mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -771,7 +771,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CREATE_STOP_ORDER,
       operationData,
-      params.mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -802,7 +802,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.SET_POSITION_TPSL,
       operationData,
-      params.mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -825,7 +825,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CANCEL_STOP_ORDER,
       operationData,
-      params.mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -976,7 +976,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.WITHDRAW,
       operationData,
-      params.mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -1005,7 +1005,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const body = signer.buildRequestBody(
       OPERATION_TYPES.SUBACCOUNT_TRANSFER,
       operationData,
-      params.mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -1041,7 +1041,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const initiateBody = signer.buildRequestBody(
       OPERATION_TYPES.SUBACCOUNT_INITIATE,
       initiateData,
-      mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
@@ -1057,7 +1057,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const confirmBody = signer.buildRequestBody(
       OPERATION_TYPES.SUBACCOUNT_CONFIRM,
       confirmData,
-      mainWalletAddress,
+      signer.getPublicKey(),
       signer.getPublicKey(),
     );
 
