@@ -993,21 +993,31 @@ export class PacificaAdapter implements ProtocolAdapter {
 
   async transferBetweenSubaccounts(params: TransferParams): Promise<TransferResult> {
     const signer = new PacificaSigner(params.agentSecretKey);
+    const timestamp = Date.now();
+    const expiryWindow = 5000;
 
-    const operationData: Record<string, unknown> = {
-      from_subaccount: params.fromSubaccountId,
-      to_subaccount: params.toSubaccountId,
+    const fromAccount = params.fromSubaccountId || signer.getPublicKey();
+
+    const payload: Record<string, unknown> = {
+      to_account: params.toSubaccountId,
       amount: String(params.amount),
     };
 
-    const body = signer.buildRequestBody(
+    const message = buildSigningMessage(
       OPERATION_TYPES.SUBACCOUNT_TRANSFER,
-      operationData,
-      params.agentPublicKey,
-      null,
+      payload,
+      timestamp,
+      expiryWindow,
     );
+    const signature = signer.signMessage(message);
 
-    const response = await this.post('/account/subaccount/transfer', body);
+    const response = await this.post('/account/subaccount/transfer', {
+      account: fromAccount,
+      ...payload,
+      signature,
+      timestamp,
+      expiry_window: expiryWindow,
+    });
 
     return {
       success: response.success !== false,
@@ -1020,70 +1030,87 @@ export class PacificaAdapter implements ProtocolAdapter {
     _label?: string,
   ): Promise<SubaccountInfo> {
     throw new Error(
-      'PacificaAdapter.createSubaccount: Pacifica requires signing for subaccount creation. ' +
-      'Use createSubaccountWithKey(agentSecretKey, mainWalletAddress, label) instead. ' +
-      'This gap is resolved in Phase 3 when per-bot signer injection is implemented.',
+      'PacificaAdapter.createSubaccount: Pacifica requires dual-signature subaccount creation. ' +
+      'Use createSubaccountWithKey(mainSecretKey, subSecretKey) instead.',
     );
   }
 
   async createSubaccountWithKey(
-    agentSecretKey: Uint8Array,
-    mainWalletAddress: string,
-    label?: string,
+    mainSecretKey: Uint8Array,
+    subSecretKey: Uint8Array,
   ): Promise<SubaccountInfo> {
-    const signer = new PacificaSigner(agentSecretKey);
+    const mainSigner = new PacificaSigner(mainSecretKey);
+    const subSigner = new PacificaSigner(subSecretKey);
+    const timestamp = Date.now();
+    const expiryWindow = 5000;
 
-    const initiateData: Record<string, unknown> = {};
-    if (label) initiateData.label = label;
-
-    const initiateBody = signer.buildRequestBody(
+    const subMessage = buildSigningMessage(
       OPERATION_TYPES.SUBACCOUNT_INITIATE,
-      initiateData,
-      signer.getPublicKey(),
-      null,
+      { account: mainSigner.getPublicKey() },
+      timestamp,
+      expiryWindow,
     );
+    const subSignature = subSigner.signMessage(subMessage);
 
-    const initiateResponse: PacificaSubaccountResponse = await this.post(
-      '/account/subaccount/create',
-      initiateBody,
-    );
-
-    const confirmData: Record<string, unknown> = {
-      subaccount_id: initiateResponse.subaccount_id,
-    };
-
-    const confirmBody = signer.buildRequestBody(
+    const mainMessage = buildSigningMessage(
       OPERATION_TYPES.SUBACCOUNT_CONFIRM,
-      confirmData,
-      signer.getPublicKey(),
-      null,
+      { signature: subSignature },
+      timestamp,
+      expiryWindow,
     );
+    const mainSignature = mainSigner.signMessage(mainMessage);
 
-    const confirmResponse: PacificaSubaccountResponse = await this.post(
-      '/account/subaccount/create',
-      confirmBody,
-    );
+    const response = await this.post('/account/subaccount/create', {
+      main_account: mainSigner.getPublicKey(),
+      subaccount: subSigner.getPublicKey(),
+      main_signature: mainSignature,
+      sub_signature: subSignature,
+      timestamp,
+      expiry_window: expiryWindow,
+    });
+
+    console.log(`[PacificaAdapter] Subaccount created: ${subSigner.getPublicKey()} under ${mainSigner.getPublicKey()}`);
 
     return {
-      subaccountId: confirmResponse.subaccount_id,
-      label: confirmResponse.label,
-      equity: confirmResponse.equity ? parseFloat(confirmResponse.equity) : undefined,
+      subaccountId: subSigner.getPublicKey(),
+      label: undefined,
+      equity: 0,
       status: 'confirmed',
     };
   }
 
-  async listSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]> {
-    const response: PacificaSubaccountResponse[] = await this.get(
-      '/account/subaccounts',
-      { account: agentPublicKey },
-    );
+  async listSubaccountsWithKey(agentSecretKey: Uint8Array): Promise<SubaccountInfo[]> {
+    const signer = new PacificaSigner(agentSecretKey);
+    const timestamp = Date.now();
+    const expiryWindow = 5000;
 
-    return response.map((s) => ({
-      subaccountId: s.subaccount_id,
-      label: s.label,
-      equity: s.equity ? parseFloat(s.equity) : undefined,
+    const message = buildSigningMessage(
+      OPERATION_TYPES.LIST_SUBACCOUNTS,
+      {},
+      timestamp,
+      expiryWindow,
+    );
+    const signature = signer.signMessage(message);
+
+    const response = await this.post('/account/subaccount/list', {
+      account: signer.getPublicKey(),
+      signature,
+      timestamp,
+      expiry_window: expiryWindow,
+    });
+
+    const subaccounts = response?.data?.subaccounts || response?.subaccounts || [];
+    return subaccounts.map((s: any) => ({
+      subaccountId: s.address,
+      label: undefined,
+      equity: s.balance ? parseFloat(s.balance) : 0,
       status: 'confirmed' as const,
     }));
+  }
+
+  async listSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]> {
+    console.warn('[PacificaAdapter] listSubaccounts without key — use listSubaccountsWithKey for authenticated listing');
+    return [];
   }
 
   async discoverSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]> {

@@ -74,6 +74,12 @@ export class PacificaSigner {
     };
   }
 
+  signMessage(message: string): string {
+    const messageBytes = new TextEncoder().encode(message);
+    const signatureBytes = sign.detached(messageBytes, this.secretKey);
+    return bs58.encode(signatureBytes);
+  }
+
   buildRequestBody(
     operationType: string,
     operationData: Record<string, unknown>,
@@ -161,7 +167,8 @@ export const OPERATION_TYPES = {
   WITHDRAW: 'withdraw',
   SUBACCOUNT_INITIATE: 'subaccount_initiate',
   SUBACCOUNT_CONFIRM: 'subaccount_confirm',
-  SUBACCOUNT_TRANSFER: 'subaccount_transfer',
+  SUBACCOUNT_TRANSFER: 'transfer_funds',
+  LIST_SUBACCOUNTS: 'list_subaccounts',
   BIND_AGENT_WALLET: 'bind_agent_wallet',
   CREATE_API_KEY: 'create_api_key',
   REVOKE_API_KEY: 'revoke_api_key',
