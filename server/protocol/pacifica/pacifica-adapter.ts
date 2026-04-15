@@ -36,7 +36,7 @@ import type {
   Unsubscribe,
 } from '../protocol-types.js';
 import { SymbolRegistry, buildPacificaMappings } from '../symbol-registry.js';
-import { PacificaSigner, OPERATION_TYPES } from './pacifica-signer.js';
+import { PacificaSigner, OPERATION_TYPES, buildSigningMessage } from './pacifica-signer.js';
 import {
   PACIFICA_PROGRAM_ID,
   PACIFICA_CENTRAL_STATE,
@@ -1048,6 +1048,40 @@ export class PacificaAdapter implements ProtocolAdapter {
       null,
     );
 
+    await this.post('/agent/bind', body);
+  }
+
+  prepareAgentBind(
+    mainWalletAddress: string,
+    agentPublicKey: string,
+  ): { message: string; timestamp: number; expiryWindow: number } {
+    const timestamp = Date.now();
+    const expiryWindow = 30000;
+    const operationData = { agent_public_key: agentPublicKey };
+    const message = buildSigningMessage(
+      OPERATION_TYPES.BIND_AGENT_WALLET,
+      operationData,
+      timestamp,
+      expiryWindow,
+    );
+    return { message, timestamp, expiryWindow };
+  }
+
+  async confirmAgentBind(
+    mainWalletAddress: string,
+    agentPublicKey: string,
+    signatureBase58: string,
+    timestamp: number,
+    expiryWindow: number,
+  ): Promise<void> {
+    const body = {
+      account: mainWalletAddress,
+      agent_wallet: null,
+      signature: signatureBase58,
+      timestamp,
+      expiry_window: expiryWindow,
+      agent_public_key: agentPublicKey,
+    };
     await this.post('/agent/bind', body);
   }
 

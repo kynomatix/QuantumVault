@@ -128,6 +128,22 @@ function sortKeysRecursive(obj: unknown): unknown {
   return obj;
 }
 
+export function buildSigningMessage(
+  operationType: string,
+  operationData: Record<string, unknown>,
+  timestamp: number,
+  expiryWindow: number = DEFAULT_EXPIRY_WINDOW,
+): string {
+  const signingMessage = {
+    timestamp,
+    expiry_window: expiryWindow,
+    type: operationType,
+    data: operationData,
+  };
+  const sorted = sortKeysRecursive(signingMessage);
+  return JSON.stringify(sorted);
+}
+
 export const OPERATION_TYPES = {
   CREATE_ORDER: 'create_order',
   CREATE_MARKET_ORDER: 'create_market_order',

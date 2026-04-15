@@ -1,5 +1,7 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect } from 'react';
+import { useWallet } from '@solana/wallet-adapter-react';
+import bs58 from 'bs58';
 import { useToast } from '@/hooks/use-toast';
 import { useLeverageLimits } from '@/hooks/useLeverageLimits';
 import {
@@ -179,6 +181,7 @@ export function BotManagementDrawer({
 }: BotManagementDrawerProps) {
   const { toast } = useToast();
   const { getMaxLeverage } = useLeverageLimits();
+  const wallet = useWallet();
 
   const [activeTab, setActiveTab] = useState('overview');
   const [botBalance, setBotBalance] = useState<number>(0);
@@ -726,18 +729,75 @@ export function BotManagementDrawer({
     }
   };
 
+  const bindAgentWallet = async (): Promise<boolean> => {
+    if (!wallet.signMessage || !wallet.publicKey) {
+      toast({ title: 'Wallet not connected', description: 'Connect your wallet to authorize trading.', variant: 'destructive' });
+      return false;
+    }
+    try {
+      toast({ title: 'Authorizing agent wallet...', description: 'Please sign the message in your wallet to allow trading.' });
+      const prepRes = await fetch('/api/agent/prepare-bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+      });
+      if (!prepRes.ok) {
+        const err = await safeResponseJson(prepRes);
+        throw new Error(err.error || 'Failed to prepare authorization');
+      }
+      const { message, timestamp, expiryWindow } = await safeResponseJson(prepRes);
+      const messageBytes = new TextEncoder().encode(message);
+      const signatureBytes = await wallet.signMessage(messageBytes);
+      const signature = bs58.encode(signatureBytes);
+      const confirmRes = await fetch('/api/agent/confirm-bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ signature, timestamp, expiryWindow }),
+      });
+      if (!confirmRes.ok) {
+        const err = await safeResponseJson(confirmRes);
+        throw new Error(err.error || 'Failed to confirm authorization');
+      }
+      toast({ title: 'Agent wallet authorized', description: 'Your bot can now execute trades.' });
+      return true;
+    } catch (error: any) {
+      if (error.message?.includes('User rejected')) {
+        toast({ title: 'Authorization cancelled', variant: 'destructive' });
+      } else {
+        toast({ title: 'Authorization failed', description: error.message, variant: 'destructive' });
+      }
+      return false;
+    }
+  };
+
   const handleManualTrade = async (side: 'long' | 'short') => {
     if (!localBot) return;
     setManualTradeLoading(side);
     try {
-      const res = await fetch(`/api/trading-bots/${localBot.id}/manual-trade?wallet=${walletAddress}`, {
+      let res = await fetch(`/api/trading-bots/${localBot.id}/manual-trade?wallet=${walletAddress}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ side }),
       });
 
-      const data = await safeResponseJson(res);
+      let data = await safeResponseJson(res);
+
+      if (!res.ok && data.error?.includes('unauthorized to sign on behalf of')) {
+        const bound = await bindAgentWallet();
+        if (!bound) {
+          setManualTradeLoading(null);
+          return;
+        }
+        res = await fetch(`/api/trading-bots/${localBot.id}/manual-trade?wallet=${walletAddress}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ side }),
+        });
+        data = await safeResponseJson(res);
+      }
 
       if (!res.ok) {
         throw new Error(data.error || 'Failed to execute trade');
@@ -748,7 +808,6 @@ export function BotManagementDrawer({
         description: `${data.size?.toFixed(4)} ${localBot.market} @ $${data.price?.toFixed(2)}`,
       });
       
-      // Refresh position and balance data
       setTimeout(() => fetchBotOverview(), 1500);
       
       onBotUpdated();
