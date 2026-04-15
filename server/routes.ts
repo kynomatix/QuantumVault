@@ -3677,29 +3677,17 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             });
           }
         } else if (dbPosition && Math.abs(dbBaseSize) > 0.0001) {
-          // Position in DB but not on-chain (closed position)
           discrepancies.push({
             botId: bot.id,
             botName: bot.name,
             market: bot.market,
             subAccountId,
             database: { baseSize: dbBaseSize },
-            onChain: { baseSize: 0, side: 'FLAT' }
+            onChain: { baseSize: 0, side: 'FLAT' },
+            action: 'preserved_db'
           });
 
-          // Zero out the database position
-          await storage.upsertBotPosition({
-            tradingBotId: bot.id,
-            walletAddress: bot.walletAddress,
-            market: bot.market,
-            baseSize: "0",
-            avgEntryPrice: "0",
-            costBasis: "0",
-            realizedPnl: dbPosition.realizedPnl,
-            totalFees: dbPosition.totalFees,
-            lastTradeId: dbPosition.lastTradeId,
-            lastTradeAt: new Date(),
-          });
+          console.log(`[Reconcile] On-chain empty but DB has ${dbBaseSize} ${bot.market} for bot ${bot.name} — preserving DB (source of truth)`);
 
           reconciled.push({
             botId: bot.id,

@@ -151,7 +151,7 @@ export class PositionService {
         console.log(`[PositionService] Position fetch failed — preserving DB position (${dbSize} ${market})`);
       }
 
-      const hasPosition = fetchResult.fetchFailed ? Math.abs(dbSize) > 0.0001 : Math.abs(onChainSize) > 0.0001;
+      const hasPosition = (onChainPos && Math.abs(onChainSize) > 0.0001) || Math.abs(dbSize) > 0.0001;
       const realizedPnl = dbPosition ? parseFloat(dbPosition.realizedPnl) : 0;
       const totalFees = dbPosition ? parseFloat(dbPosition.totalFees || "0") : 0;
 
@@ -215,23 +215,42 @@ export class PositionService {
         }
       }
 
+      let positionResult: PositionData['position'] = null;
+      if (onChainPos && Math.abs(onChainSize) > 0.0001) {
+        positionResult = {
+          hasPosition: true,
+          market: onChainPos.market,
+          side: onChainPos.side,
+          size: Math.abs(onChainSize),
+          avgEntryPrice: onChainPos.entryPrice,
+          currentPrice: onChainPos.markPrice,
+          unrealizedPnl: onChainPos.unrealizedPnl,
+          unrealizedPnlPercent: onChainPos.unrealizedPnlPercent,
+          realizedPnl,
+          totalFees,
+        };
+      } else if (dbPosition && Math.abs(dbSize) > 0.0001) {
+        const entryPrice = parseFloat(dbPosition.avgEntryPrice);
+        positionResult = {
+          hasPosition: true,
+          market: dbPosition.market,
+          side: dbSize > 0 ? 'LONG' : 'SHORT',
+          size: Math.abs(dbSize),
+          avgEntryPrice: entryPrice,
+          currentPrice: entryPrice,
+          unrealizedPnl: 0,
+          unrealizedPnlPercent: 0,
+          realizedPnl,
+          totalFees,
+        };
+      }
+
       return {
-        source: 'on-chain',
+        source: onChainPos ? 'on-chain' : 'database',
         timestamp,
         staleWarning: false,
         driftDetected,
-        position: hasPosition ? {
-          hasPosition: true,
-          market: onChainPos!.market,
-          side: onChainPos!.side,
-          size: Math.abs(onChainSize),
-          avgEntryPrice: onChainPos!.entryPrice,
-          currentPrice: onChainPos!.markPrice,
-          unrealizedPnl: onChainPos!.unrealizedPnl,
-          unrealizedPnlPercent: onChainPos!.unrealizedPnlPercent,
-          realizedPnl,
-          totalFees,
-        } : null,
+        position: positionResult,
         healthMetrics,
         driftDetails,
       };
