@@ -1,19 +1,18 @@
 export interface PacificaMarketInfo {
   symbol: string;
-  full_name: string;
+  tick_size: string;
+  min_tick: string;
+  max_tick: string;
+  lot_size: string;
   max_leverage: number;
-  min_order_size: number;
-  min_order_size_usd: number;
-  tick_size: number;
-  lot_size: number;
-  is_active: boolean;
-  category: string[];
-  maintenance_margin_weight: number;
-  open_interest?: number;
-}
-
-export interface PacificaInfoResponse {
-  markets: PacificaMarketInfo[];
+  isolated_only: boolean;
+  min_order_size: string;
+  max_order_size: string;
+  funding_rate: string;
+  next_funding_rate: string;
+  created_at: number;
+  instrument_type: string;
+  base_asset: string;
 }
 
 export interface PacificaPriceEntry {
@@ -27,14 +26,15 @@ export interface PacificaPricesResponse {
 }
 
 export interface PacificaOrderbookLevel {
-  price: string;
-  size: string;
+  p: string;
+  a: string;
+  n: number;
 }
 
 export interface PacificaOrderbookResponse {
-  bids: PacificaOrderbookLevel[];
-  asks: PacificaOrderbookLevel[];
-  timestamp: number;
+  s: string;
+  l: PacificaOrderbookLevel[][];
+  t: number;
 }
 
 export interface PacificaFundingResponse {

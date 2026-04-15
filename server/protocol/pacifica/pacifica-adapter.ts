@@ -183,31 +183,57 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async getAllPrices(): Promise<Record<string, number>> {
-    const response = await this.get('/prices');
     const result: Record<string, number> = {};
 
-    if (Array.isArray(response)) {
-      for (const entry of response) {
-        const protocolSymbol = entry.symbol || entry.coin;
-        const price = parseFloat(entry.price || entry.mid);
-        if (!protocolSymbol || isNaN(price)) continue;
+    const markets = this.marketCache?.data || [];
+    if (markets.length === 0) return result;
 
-        let internalSymbol: string;
-        try {
-          internalSymbol = this.getRegistry().protocolToInternal(protocolSymbol);
-        } catch {
-          internalSymbol = `UNKNOWN-${protocolSymbol}`;
+    const staleSymbols: { internal: string; protocol: string }[] = [];
+    const now = Date.now();
+
+    for (const m of markets) {
+      const cached = this.priceCache.get(m.internalSymbol.toUpperCase());
+      if (cached && now - cached.fetchedAt < PRICE_CACHE_TTL_MS) {
+        result[m.internalSymbol] = cached.data;
+      } else {
+        staleSymbols.push({ internal: m.internalSymbol, protocol: m.protocolSymbol });
+      }
+    }
+
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < staleSymbols.length; i += BATCH_SIZE) {
+      const batch = staleSymbols.slice(i, i + BATCH_SIZE);
+      const settled = await Promise.allSettled(
+        batch.map(async ({ internal, protocol }) => {
+          const book = await this.get('/book', { symbol: protocol, depth: '1' });
+          const bids = book?.l?.[0];
+          const asks = book?.l?.[1];
+          const bestBid = bids?.[0]?.p ? parseFloat(bids[0].p) : NaN;
+          const bestAsk = asks?.[0]?.p ? parseFloat(asks[0].p) : NaN;
+          let mid: number;
+          if (!isNaN(bestBid) && !isNaN(bestAsk)) {
+            mid = (bestBid + bestAsk) / 2;
+          } else if (!isNaN(bestBid)) {
+            mid = bestBid;
+          } else if (!isNaN(bestAsk)) {
+            mid = bestAsk;
+          } else {
+            return;
+          }
+          return { internal, mid };
+        }),
+      );
+      for (const s of settled) {
+        if (s.status === 'fulfilled' && s.value) {
+          result[s.value.internal] = s.value.mid;
+          if (this.priceCache.size >= MAX_PRICE_CACHE_SIZE) {
+            this.evictStalePrices();
+          }
+          this.priceCache.set(s.value.internal.toUpperCase(), {
+            data: s.value.mid,
+            fetchedAt: now,
+          });
         }
-
-        result[internalSymbol] = price;
-
-        if (this.priceCache.size >= MAX_PRICE_CACHE_SIZE) {
-          this.evictStalePrices();
-        }
-        this.priceCache.set(internalSymbol.toUpperCase(), {
-          data: price,
-          fetchedAt: Date.now(),
-        });
       }
     }
 
@@ -221,31 +247,53 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     const response = await this.get('/book', params);
 
+    const bidsRaw = response.l?.[0] || response.bids || [];
+    const asksRaw = response.l?.[1] || response.asks || [];
+
     return {
-      bids: (response.bids || []).map((l: PacificaOrderbookLevel) => ({
-        price: parseFloat(l.price),
-        size: parseFloat(l.size),
+      bids: bidsRaw.map((l: any) => ({
+        price: parseFloat(l.p || l.price),
+        size: parseFloat(l.a || l.size),
       })),
-      asks: (response.asks || []).map((l: PacificaOrderbookLevel) => ({
-        price: parseFloat(l.price),
-        size: parseFloat(l.size),
+      asks: asksRaw.map((l: any) => ({
+        price: parseFloat(l.p || l.price),
+        size: parseFloat(l.a || l.size),
       })),
-      timestamp: response.timestamp || Date.now(),
+      timestamp: response.t || response.timestamp || Date.now(),
     };
   }
 
   async getFundingRate(internalSymbol: string): Promise<FundingRateInfo> {
-    const protocolSymbol = this.getRegistry().internalToProtocol(internalSymbol);
-    const response: PacificaFundingResponse = await this.get('/funding', {
-      symbol: protocolSymbol,
-    });
+    this.ensureInitialized();
+    const market = this.marketDetailsMap.get(internalSymbol.toUpperCase());
+    if (market && market.fundingRate !== undefined) {
+      return {
+        internalSymbol,
+        rate: market.fundingRate,
+        nextFundingTime: undefined,
+        timestamp: Date.now(),
+      };
+    }
 
-    return {
-      internalSymbol,
-      rate: parseFloat(String(response.rate)),
-      nextFundingTime: response.next_funding_time,
-      timestamp: response.timestamp,
-    };
+    try {
+      const protocolSymbol = this.getRegistry().internalToProtocol(internalSymbol);
+      const response: PacificaFundingResponse = await this.get('/funding', {
+        symbol: protocolSymbol,
+      });
+      return {
+        internalSymbol,
+        rate: parseFloat(String(response.rate)),
+        nextFundingTime: response.next_funding_time,
+        timestamp: response.timestamp,
+      };
+    } catch {
+      return {
+        internalSymbol,
+        rate: 0,
+        nextFundingTime: undefined,
+        timestamp: Date.now(),
+      };
+    }
   }
 
   getMaintenanceMarginWeight(internalSymbol: string): number {
@@ -281,7 +329,24 @@ export class PacificaAdapter implements ProtocolAdapter {
     const params: Record<string, string> = { account: agentPublicKey };
     if (subaccountId) params.subaccount_id = subaccountId;
 
-    const response: PacificaAccountResponse = await this.get('/account', params);
+    let response: PacificaAccountResponse;
+    try {
+      response = await this.get('/account', params);
+    } catch (err: any) {
+      if (err.message && err.message.includes('404')) {
+        return {
+          equity: 0,
+          balance: 0,
+          unrealizedPnl: 0,
+          availableMargin: 0,
+          maintenanceMargin: 0,
+          feeTier: undefined,
+          subaccountId: subaccountId || '0',
+          exists: false,
+        };
+      }
+      throw err;
+    }
 
     return {
       equity: parseFloat(response.equity),
@@ -298,8 +363,17 @@ export class PacificaAdapter implements ProtocolAdapter {
     const params: Record<string, string> = { account: agentPublicKey };
     if (subaccountId) params.subaccount_id = subaccountId;
 
-    const response: PacificaPositionResponse[] = await this.get('/positions', params);
+    let response: PacificaPositionResponse[];
+    try {
+      response = await this.get('/positions', params);
+    } catch (err: any) {
+      if (err.message && err.message.includes('404')) {
+        return [];
+      }
+      throw err;
+    }
 
+    if (!Array.isArray(response)) return [];
     return response.map((p) => this.mapPosition(p));
   }
 
@@ -1001,7 +1075,7 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     const rawMarkets: PacificaMarketInfo[] = Array.isArray(response)
       ? response
-      : response.markets || response.universe || [];
+      : response.data || response.markets || response.universe || [];
 
     if (rawMarkets.length === 0) {
       throw new Error('PacificaAdapter: /info returned no markets');
@@ -1025,19 +1099,25 @@ export class PacificaAdapter implements ProtocolAdapter {
         internalSymbol = `${protocolSymbol.toUpperCase()}-PERP`;
       }
 
+      const maxLev = typeof m.max_leverage === 'number' ? m.max_leverage : parseFloat(String(m.max_leverage)) || 1;
+      const minOrderUsd = parseFloat(String(m.min_order_size)) || 10;
+      const tickSz = parseFloat(String(m.tick_size)) || 0.01;
+      const lotSz = parseFloat(String(m.lot_size)) || 0.01;
+      const fundRate = m.funding_rate !== undefined ? parseFloat(String(m.funding_rate)) : undefined;
+
       return {
         internalSymbol,
         protocolSymbol,
-        maxLeverage: m.max_leverage ?? 1,
-        minOrderSizeUsd: m.min_order_size_usd ?? 10,
-        minOrderSizeBase: m.min_order_size ?? 0,
-        tickSize: m.tick_size ?? 0.01,
-        lotSize: m.lot_size ?? 0.01,
-        isActive: m.is_active !== false,
-        category: m.category || [],
-        fullName: m.full_name || protocolSymbol,
-        maintenanceMarginWeight: m.maintenance_margin_weight ?? 0.03,
-        openInterestUsd: m.open_interest,
+        maxLeverage: maxLev,
+        minOrderSizeUsd: minOrderUsd,
+        minOrderSizeBase: lotSz,
+        tickSize: tickSz,
+        lotSize: lotSz,
+        isActive: true,
+        category: m.instrument_type ? [m.instrument_type] : [],
+        fullName: m.base_asset || protocolSymbol,
+        maintenanceMarginWeight: maxLev > 0 ? 1 / maxLev : 0.03,
+        fundingRate: isNaN(fundRate as number) ? undefined : fundRate,
       };
     });
   }
@@ -1118,6 +1198,16 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
   }
 
+  private unwrapEnvelope(json: any): any {
+    if (json && typeof json === 'object' && 'success' in json && 'data' in json) {
+      if (json.success === false) {
+        throw new Error(`Pacifica API error: ${json.error || 'unknown'} (code: ${json.code || 'none'})`);
+      }
+      return json.data;
+    }
+    return json;
+  }
+
   private async get(path: string, params?: Record<string, string>): Promise<any> {
     let url = `${this.config.baseUrl}${path}`;
     if (params && Object.keys(params).length > 0) {
@@ -1137,7 +1227,8 @@ export class PacificaAdapter implements ProtocolAdapter {
       );
     }
 
-    return response.json();
+    const json = await response.json();
+    return this.unwrapEnvelope(json);
   }
 
   private async post(path: string, body: unknown): Promise<any> {
@@ -1156,6 +1247,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       );
     }
 
-    return response.json();
+    const json = await response.json();
+    return this.unwrapEnvelope(json);
   }
 }

@@ -12,6 +12,7 @@ export interface ProtocolMarket {
   maintenanceMarginWeight: number;
   openInterestUsd?: number;
   warning?: string;
+  fundingRate?: number;
 }
 
 export interface ProtocolPosition {
@@ -209,8 +210,9 @@ export interface AccountInfo {
   unrealizedPnl: number;
   availableMargin: number;
   maintenanceMargin: number;
-  feeTier: string;
+  feeTier?: string;
   subaccountId?: string;
+  exists?: boolean;
 }
 
 export interface BalanceInfo {
