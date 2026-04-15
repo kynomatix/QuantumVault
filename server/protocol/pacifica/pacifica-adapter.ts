@@ -36,6 +36,8 @@ import type {
   Unsubscribe,
 } from '../protocol-types.js';
 import { SymbolRegistry, buildPacificaMappings } from '../symbol-registry.js';
+import nacl from 'tweetnacl';
+import bs58 from 'bs58';
 import { PacificaSigner, OPERATION_TYPES, buildSigningMessage } from './pacifica-signer.js';
 import {
   PACIFICA_PROGRAM_ID,
@@ -1074,13 +1076,25 @@ export class PacificaAdapter implements ProtocolAdapter {
     timestamp: number,
     expiryWindow: number,
   ): Promise<void> {
+    const expectedMessage = buildSigningMessage(
+      OPERATION_TYPES.BIND_AGENT_WALLET,
+      { agent_public_key: agentPublicKey },
+      timestamp,
+      expiryWindow,
+    );
+    const messageBytes = new TextEncoder().encode(expectedMessage);
+    const sigBytes = bs58.decode(signatureBase58);
+    const pubKeyBytes = bs58.decode(mainWalletAddress);
+    const localValid = nacl.sign.detached.verify(messageBytes, sigBytes, pubKeyBytes);
+    console.log(`[AgentBind] Local verification: ${localValid ? 'PASS' : 'FAIL'}`);
+    console.log(`[AgentBind] Signed message: ${expectedMessage}`);
+
     const body: Record<string, unknown> = {
       account: mainWalletAddress,
       agent_wallet: mainWalletAddress,
       signature: signatureBase58,
       timestamp,
       expiry_window: expiryWindow,
-      type: OPERATION_TYPES.BIND_AGENT_WALLET,
       agent_public_key: agentPublicKey,
     };
     console.log('[AgentBind] Sending to Pacifica:', JSON.stringify(body, null, 2));
