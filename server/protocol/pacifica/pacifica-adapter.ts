@@ -368,13 +368,19 @@ export class PacificaAdapter implements ProtocolAdapter {
       throw err;
     }
 
+    const equity = parseFloat(response.account_equity);
+    const balance = parseFloat(response.balance);
+    const availableMargin = parseFloat(response.available_to_spend);
+    const maintenanceMargin = parseFloat(response.total_margin_used);
+    const unrealizedPnl = equity - balance;
+
     return {
-      equity: parseFloat(response.equity),
-      balance: parseFloat(response.balance),
-      unrealizedPnl: parseFloat(response.unrealized_pnl),
-      availableMargin: parseFloat(response.available_margin),
-      maintenanceMargin: parseFloat(response.maintenance_margin),
-      feeTier: response.fee_tier,
+      equity,
+      balance,
+      unrealizedPnl,
+      availableMargin,
+      maintenanceMargin,
+      feeTier: String(response.fee_level),
       subaccountId: response.subaccount_id,
     };
   }

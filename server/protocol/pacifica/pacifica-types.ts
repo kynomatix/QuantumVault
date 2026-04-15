@@ -45,12 +45,21 @@ export interface PacificaFundingResponse {
 }
 
 export interface PacificaAccountResponse {
-  equity: string;
+  account_equity: string;
   balance: string;
-  unrealized_pnl: string;
-  available_margin: string;
-  maintenance_margin: string;
-  fee_tier: string;
+  available_to_spend: string;
+  available_to_withdraw: string;
+  total_margin_used: string;
+  pending_balance: string;
+  pending_interest: string;
+  cross_mmr: string;
+  spot_collateral: string;
+  fee_level: number;
+  maker_fee: string;
+  taker_fee: string;
+  positions_count: number;
+  orders_count: number;
+  stop_orders_count: number;
   subaccount_id?: string;
 }
 
