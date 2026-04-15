@@ -94,8 +94,8 @@ const DISPLAY_NAMES: Record<string, string> = {
 };
 
 function countDecimals(val: number): number {
-  if (Math.floor(val) === val) return 0;
-  const s = val.toString();
+  if (!Number.isFinite(val) || Math.floor(val) === val) return 0;
+  const s = val.toFixed(20).replace(/0+$/, '');
   const dotIndex = s.indexOf('.');
   return dotIndex < 0 ? 0 : s.length - dotIndex - 1;
 }
@@ -336,6 +336,9 @@ export class PacificaAdapter implements ProtocolAdapter {
 
   quantizeOrderSize(internalSymbol: string, size: number): number {
     this.ensureInitialized();
+    if (!Number.isFinite(size) || size <= 0) {
+      throw new Error(`PacificaAdapter: invalid order size ${size}`);
+    }
     const market = this.marketDetailsMap.get(internalSymbol.toUpperCase());
     if (!market) {
       throw new Error(`PacificaAdapter: unknown market "${internalSymbol}"`);
@@ -346,8 +349,26 @@ export class PacificaAdapter implements ProtocolAdapter {
     return parseFloat(raw.toFixed(decimals));
   }
 
+  quantizeOrderSizeCeil(internalSymbol: string, size: number): number {
+    this.ensureInitialized();
+    if (!Number.isFinite(size) || size <= 0) {
+      throw new Error(`PacificaAdapter: invalid order size ${size}`);
+    }
+    const market = this.marketDetailsMap.get(internalSymbol.toUpperCase());
+    if (!market) {
+      throw new Error(`PacificaAdapter: unknown market "${internalSymbol}"`);
+    }
+    const lotSize = market.lotSize;
+    const decimals = countDecimals(lotSize);
+    const raw = Math.ceil(size / lotSize) * lotSize;
+    return parseFloat(raw.toFixed(decimals));
+  }
+
   quantizePrice(internalSymbol: string, price: number): number {
     this.ensureInitialized();
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error(`PacificaAdapter: invalid price ${price}`);
+    }
     const market = this.marketDetailsMap.get(internalSymbol.toUpperCase());
     if (!market) {
       throw new Error(`PacificaAdapter: unknown market "${internalSymbol}"`);
@@ -494,16 +515,19 @@ export class PacificaAdapter implements ProtocolAdapter {
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
     const slippagePct = params.maxSlippagePct ?? 0.5;
-    const quantizedSize = this.quantizeOrderSize(params.internalSymbol, params.sizeBase);
-    if (quantizedSize <= 0) {
+    const isReduceOnly = params.reduceOnly ?? false;
+    const orderSize = isReduceOnly
+      ? this.quantizeOrderSizeCeil(params.internalSymbol, params.sizeBase)
+      : this.quantizeOrderSize(params.internalSymbol, params.sizeBase);
+    if (orderSize <= 0) {
       throw new Error(`Order size ${params.sizeBase} rounds to zero for ${params.internalSymbol} (lot size too large)`);
     }
 
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
-      amount: String(quantizedSize),
+      amount: String(orderSize),
       side: mapToProtocolSide(params.side),
-      reduce_only: params.reduceOnly ?? false,
+      reduce_only: isReduceOnly,
       slippage_percent: String(slippagePct),
     };
 
@@ -534,7 +558,10 @@ export class PacificaAdapter implements ProtocolAdapter {
   async placeLimitOrder(params: LimitOrderParams): Promise<OrderResult> {
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
-    const quantizedSize = this.quantizeOrderSize(params.internalSymbol, params.sizeBase);
+    const isReduceOnly = params.reduceOnly ?? false;
+    const quantizedSize = isReduceOnly
+      ? this.quantizeOrderSizeCeil(params.internalSymbol, params.sizeBase)
+      : this.quantizeOrderSize(params.internalSymbol, params.sizeBase);
     if (quantizedSize <= 0) {
       throw new Error(`Order size ${params.sizeBase} rounds to zero for ${params.internalSymbol} (lot size too large)`);
     }
