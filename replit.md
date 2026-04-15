@@ -31,7 +31,7 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 
 **Workflow:** When starting a phase, check the Phase Navigation Index for which sections to read. Work through Section 17's phase checklist top-to-bottom. Phase 3 has explicit Group A→B→C ordering — follow it.
 
-**Status:** Phase 8 (Subaccount Isolation) in progress. Group A (adapter fixes) and Group B (schema + bot creation) complete. Group C (trade execution wiring) and Group D (migration + cleanup) remaining.
+**Status:** Phase 8 (Subaccount Isolation) in progress. Groups A, B, C complete. Group D (migration + cleanup) remaining.
 
 **Phase 8 Progress (as of April 15, 2026):**
 - Pacifica subaccount adapter methods fixed and verified on mainnet (creation + listing work)
@@ -40,6 +40,7 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 - Deposit/withdraw flows updated to transfer funds to/from bot subaccounts
 - Schema: `bot_subaccount_key_encrypted`, `subaccount_status` columns added; reuses `protocol_subaccount_id` for bot's subaccount public key
 - Frontend: Bot management drawer shows truncated subaccount address with Solscan link + copy button
+- **Group C**: Trade execution signs with bot's own keypair for Pacifica subaccounts; `computeTradeSizingAndTopUp` auto-topup uses protocol transfers; read endpoints (`/api/bots/:botId/balance`, `/api/bots/:botId/overview`, `/api/trading-bots`) query live protocol data for Pacifica subaccount bots; invariant check validates bot keypair matches stored public key
 
 ### Engineering Standards for Migration Work
 
