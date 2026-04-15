@@ -2720,6 +2720,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         wallet.agentPublicKey,
       );
       console.log(`[AgentBind] Prepared bind message for ${wallet.agentPublicKey.slice(0, 8)}... on behalf of ${req.walletAddress!.slice(0, 8)}...`);
+      console.log(`[AgentBind] Message to sign: ${message}`);
+      console.log(`[AgentBind] timestamp=${timestamp}, expiryWindow=${expiryWindow}`);
       res.json({ message, timestamp, expiryWindow, agentPublicKey: wallet.agentPublicKey });
     } catch (error: any) {
       console.error("[AgentBind] prepare-bind error:", error);
@@ -2741,6 +2743,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (typeof adapter.confirmAgentBind !== 'function') {
         return res.status(501).json({ error: "Protocol does not support agent binding" });
       }
+      console.log(`[AgentBind] confirm-bind: signature=${signature.slice(0, 20)}..., timestamp=${timestamp}, expiryWindow=${expiryWindow}`);
+      console.log(`[AgentBind] confirm-bind: mainWallet=${req.walletAddress!}, agentPubKey=${wallet.agentPublicKey}`);
       await adapter.confirmAgentBind(
         req.walletAddress!,
         wallet.agentPublicKey,

@@ -1080,8 +1080,10 @@ export class PacificaAdapter implements ProtocolAdapter {
       signature: signatureBase58,
       timestamp,
       expiry_window: expiryWindow,
+      type: OPERATION_TYPES.BIND_AGENT_WALLET,
       agent_public_key: agentPublicKey,
     };
+    console.log('[AgentBind] Sending to Pacifica:', JSON.stringify(body, null, 2));
     await this.post('/agent/bind', body);
   }
 
