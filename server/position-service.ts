@@ -181,26 +181,26 @@ export class PositionService {
           // priceBuffer = freeCollateral / (|size| * (1 + maintenanceWeight))
           // This gives a more conservative (safer) liquidation price estimate
           let liquidationPrice: number | null = null;
-          if (onChainPos && Math.abs(onChainSize) > 0.0001) {
+          const posSize = onChainPos ? onChainSize : dbSize;
+          const posMarket = onChainPos?.market || dbPosition?.market || market;
+          const posSide = onChainPos ? onChainPos.side : (dbSize > 0 ? 'LONG' : 'SHORT');
+          const posMarkPrice = onChainPos?.markPrice || (dbPosition ? parseFloat(dbPosition.avgEntryPrice) : 0);
+
+          if (Math.abs(posSize) > 0.0001 && posMarkPrice > 0) {
             if (accountInfo.freeCollateral <= 0) {
-              // Already at or past liquidation threshold
-              liquidationPrice = onChainPos.markPrice;
+              liquidationPrice = posMarkPrice;
             } else {
-              // Get market-specific maintenance margin weight
-              const maintenanceWeight = getMaintenanceMarginWeight(onChainPos.market);
-              
-              // Adjusted formula: divide by (1 + maintenanceWeight) to account for
-              // the additional margin required as position value changes
-              const adjustedSize = Math.abs(onChainSize) * (1 + maintenanceWeight);
+              const maintenanceWeight = getMaintenanceMarginWeight(posMarket);
+              const adjustedSize = Math.abs(posSize) * (1 + maintenanceWeight);
               const priceBuffer = accountInfo.freeCollateral / adjustedSize;
               
-              if (onChainPos.side === 'LONG') {
-                liquidationPrice = Math.max(0, onChainPos.markPrice - priceBuffer);
+              if (posSide === 'LONG') {
+                liquidationPrice = Math.max(0, posMarkPrice - priceBuffer);
               } else {
-                liquidationPrice = onChainPos.markPrice + priceBuffer;
+                liquidationPrice = posMarkPrice + priceBuffer;
               }
               
-              console.log(`[PositionService] Liquidation price calc: market=${onChainPos.market}, maintenanceWeight=${(maintenanceWeight * 100).toFixed(2)}%, markPrice=${onChainPos.markPrice.toFixed(2)}, freeCollateral=${accountInfo.freeCollateral.toFixed(2)}, priceBuffer=${priceBuffer.toFixed(2)}, liqPrice=${liquidationPrice?.toFixed(2)}`);
+              console.log(`[PositionService] Liquidation price calc: market=${posMarket}, maintenanceWeight=${(maintenanceWeight * 100).toFixed(2)}%, markPrice=${posMarkPrice.toFixed(2)}, freeCollateral=${accountInfo.freeCollateral.toFixed(2)}, priceBuffer=${priceBuffer.toFixed(2)}, liqPrice=${liquidationPrice?.toFixed(2)}`);
             }
           }
           

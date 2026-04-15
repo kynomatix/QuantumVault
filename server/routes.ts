@@ -30,7 +30,7 @@ async function _lookupMainWallet(agentPublicKey: string): Promise<string> {
   return w.address;
 }
 
-function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entryPrice: number; markPrice: number; unrealizedPnl: number }) {
+function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entryPrice: number; markPrice: number; unrealizedPnl: number; liquidationPrice?: number | null }) {
   return {
     marketIndex: 0,
     market: p.internalSymbol,
@@ -45,6 +45,7 @@ function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entr
     unrealizedPnlPercent: p.entryPrice > 0
       ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
       : 0,
+    liquidationPrice: p.liquidationPrice ?? null,
   };
 }
 
@@ -3743,7 +3744,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               market: pos.market,
               baseSize: pos.baseAssetAmount,
               notionalValue: pos.sizeUsd,
-              liquidationPrice: null,
+              liquidationPrice: pos.liquidationPrice ?? null,
               entryPrice: pos.entryPrice,
               unrealizedPnl: pos.unrealizedPnl,
             });
@@ -3763,12 +3764,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             ? (markPrice - entryPrice) * Math.abs(baseSize)
             : (entryPrice - markPrice) * Math.abs(baseSize);
           unrealizedPnl += posUnrealizedPnl;
+
+          let estLiqPrice: number | null = null;
+          if (freeCollateral > 0 && Math.abs(baseSize) > 0.0001) {
+            const priceBuffer = freeCollateral / Math.abs(baseSize);
+            estLiqPrice = baseSize > 0
+              ? Math.max(0, markPrice - priceBuffer)
+              : markPrice + priceBuffer;
+          }
+
           formattedPositions.push({
             marketIndex: 0,
             market: pos.market,
             baseSize,
             notionalValue: Math.abs(baseSize) * markPrice,
-            liquidationPrice: null,
+            liquidationPrice: estLiqPrice,
             entryPrice,
             unrealizedPnl: posUnrealizedPnl,
           });
