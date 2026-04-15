@@ -3254,19 +3254,25 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      // If botId provided, verify ownership and get subaccount
       let tradingBotId: string | null = null;
       let subAccountId = 0;
+      let botForTransfer: TradingBot | null = null;
       if (botId) {
         const bot = await storage.getTradingBotById(botId);
         if (!bot || bot.walletAddress !== req.walletAddress) {
           return res.status(403).json({ error: "Bot not found or not owned" });
         }
         tradingBotId = botId;
-        subAccountId = bot.driftSubaccountId ?? 0;
-        console.log(`[Drift Deposit] Bot ${bot.name} (${botId}) has driftSubaccountId=${bot.driftSubaccountId}, using subAccountId=${subAccountId}`);
+        if (bot.protocolSubaccountId && bot.botSubaccountKeyEncrypted && bot.subaccountStatus === 'active') {
+          subAccountId = 0;
+          botForTransfer = bot;
+          console.log(`[Deposit] Bot ${bot.name} has Pacifica subaccount ${bot.protocolSubaccountId}, depositing to agent main then transferring`);
+        } else {
+          subAccountId = bot.driftSubaccountId ?? 0;
+          console.log(`[Deposit] Bot ${bot.name} using legacy subAccountId=${subAccountId}`);
+        }
       } else {
-        console.log(`[Drift Deposit] No botId provided, depositing to main account (subaccount 0)`);
+        console.log(`[Deposit] No botId provided, depositing to main account (subaccount 0)`);
       }
 
       // Security v3: Get UMK and decrypt agent key (same path as webhooks)
@@ -3341,41 +3347,75 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: result.error || "Deposit failed" });
       }
 
+      let subaccountTransferSuccess = true;
+      if (botForTransfer) {
+        try {
+          const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
+          const adapter = getDefaultAdapter() as PacificaAdapter;
+          const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+
+          console.log(`[Deposit] Transferring ${amount} USDC from agent wallet to bot subaccount ${botForTransfer.protocolSubaccountId}`);
+          const transferResult = await adapter.transferBetweenSubaccounts({
+            agentSecretKey: agentKeypair.secretKey,
+            agentPublicKey: agentKeypair.publicKey.toString(),
+            fromSubaccountId: agentKeypair.publicKey.toString(),
+            toSubaccountId: botForTransfer.protocolSubaccountId!,
+            amount,
+          });
+
+          if (!transferResult.success) {
+            subaccountTransferSuccess = false;
+            console.error(`[Deposit] Transfer to bot subaccount failed: ${transferResult.error}. Funds remain in agent main account.`);
+          } else {
+            console.log(`[Deposit] Successfully transferred ${amount} USDC to bot subaccount ${botForTransfer.protocolSubaccountId}`);
+          }
+        } catch (transferErr: any) {
+          subaccountTransferSuccess = false;
+          console.error(`[Deposit] Transfer to bot subaccount error: ${transferErr.message}. Funds remain in agent main account.`);
+        }
+      }
+
+      const depositNotes = botForTransfer
+        ? (subaccountTransferSuccess ? `Deposit to bot subaccount ${botForTransfer.protocolSubaccountId}` : `Deposit to agent main (subaccount transfer failed)`)
+        : (tradingBotId ? `Deposit to bot` : 'Deposit to exchange');
+
       try {
         await storage.createEquityEvent({
           walletAddress: req.walletAddress!,
-          tradingBotId,
+          tradingBotId: subaccountTransferSuccess ? tradingBotId : null,
           eventType: 'drift_deposit',
           amount: String(amount),
           txSignature: result.signature || null,
-          notes: tradingBotId ? `Deposit to bot` : 'Deposit to Drift Protocol',
+          notes: depositNotes,
         });
       } catch (eventErr: any) {
-        console.error(`[Drift Deposit] CRITICAL: On-chain deposit succeeded (tx: ${result.signature}) but equity event recording failed:`, eventErr.message);
-        console.error(`[Drift Deposit] Untracked deposit: wallet=${req.walletAddress}, botId=${tradingBotId}, amount=${amount}, subAccount=${subAccountId}`);
+        console.error(`[Deposit] Equity event recording failed:`, eventErr.message);
         if (result.signature) {
           const existing = await storage.getEquityEventByTxSignature(result.signature);
           if (!existing) {
             try {
               await storage.createEquityEvent({
                 walletAddress: req.walletAddress!,
-                tradingBotId,
+                tradingBotId: subaccountTransferSuccess ? tradingBotId : null,
                 eventType: 'drift_deposit',
                 amount: String(amount),
                 txSignature: result.signature,
-                notes: tradingBotId ? `Deposit to bot (recovered)` : 'Deposit to Drift Protocol (recovered)',
+                notes: `${depositNotes} (recovered)`,
               });
-              console.log(`[Drift Deposit] Equity event retry succeeded`);
             } catch (retryErr: any) {
-              console.error(`[Drift Deposit] Equity event retry also failed:`, retryErr.message);
+              console.error(`[Deposit] Equity event retry also failed:`, retryErr.message);
             }
-          } else {
-            console.log(`[Drift Deposit] Event already recorded for tx ${result.signature}, skipping retry`);
           }
         }
       }
 
-      res.json(result);
+      res.json({
+        ...result,
+        subaccountTransferSuccess: botForTransfer ? subaccountTransferSuccess : undefined,
+        subaccountTransferWarning: botForTransfer && !subaccountTransferSuccess
+          ? 'Exchange deposit succeeded but transfer to bot subaccount failed. Funds are in your agent wallet.'
+          : undefined,
+      });
     } catch (error) {
       console.error("Agent drift deposit error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -3456,11 +3496,43 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
       }
 
+      let withdrawFromMain = false;
+      if (botId) {
+        const bot = await storage.getTradingBotById(botId);
+        if (bot?.protocolSubaccountId && bot?.botSubaccountKeyEncrypted && bot?.subaccountStatus === 'active') {
+          try {
+            const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
+            const { decrypt } = await import('./crypto');
+            const adapter = getDefaultAdapter() as PacificaAdapter;
+            
+            const botKeyBase58 = decrypt(bot.botSubaccountKeyEncrypted);
+            const botSecretKey = bs58.decode(botKeyBase58);
+
+            console.log(`[Withdraw] Transferring ${amount} USDC from bot subaccount ${bot.protocolSubaccountId} to agent wallet`);
+            const transferResult = await adapter.transferBetweenSubaccounts({
+              agentSecretKey: botSecretKey,
+              agentPublicKey: bot.protocolSubaccountId,
+              fromSubaccountId: bot.protocolSubaccountId,
+              toSubaccountId: wallet.agentPublicKey,
+              amount,
+            });
+
+            if (!transferResult.success) {
+              return res.status(400).json({ error: `Failed to transfer from bot subaccount: ${transferResult.error}` });
+            }
+            console.log(`[Withdraw] Successfully transferred ${amount} USDC from bot subaccount to agent wallet`);
+            withdrawFromMain = true;
+          } catch (transferErr: any) {
+            return res.status(500).json({ error: `Subaccount transfer failed: ${transferErr.message}` });
+          }
+        }
+      }
+
       const result = await executeAgentDriftWithdraw(
         wallet.agentPublicKey,
         wallet.agentPrivateKeyEncrypted,
         amount,
-        subAccountId
+        withdrawFromMain ? 0 : subAccountId
       );
 
       if (!result.success) {
@@ -5059,6 +5131,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           netPnlPercent,
           isPublished: !!publishedBot && publishedBot.isActive,
           publishedBotId: publishedBot?.id || null,
+          botAgentPublicKey: bot.protocolSubaccountId || null,
         };
       }));
       
@@ -5121,13 +5194,39 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const webhookSecret = generateWebhookSecret();
       
-      // Use on-chain discovery combined with database state to find the next valid sequential subaccount ID
-      // This ensures Drift's sequential requirement is met and avoids conflicts with pending creations
-      let nextSubaccountId: number;
+      let nextSubaccountId: number = 0;
+      let botSubaccountPublicKey: string | null = null;
+      let botSubaccountKeyEncrypted: string | null = null;
+      let subaccountStatus: string = 'none';
+
+      if (wallet.agentPublicKey && wallet.agentPrivateKeyEncrypted) {
+        const { Keypair } = await import('@solana/web3.js');
+        const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
+
+        const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+        const botKeypair = Keypair.generate();
+
+        console.log(`[Bot Creation] Creating Pacifica subaccount: ${botKeypair.publicKey.toString()} under agent ${agentKeypair.publicKey.toString()}`);
+
+        try {
+          const adapter = getDefaultAdapter() as PacificaAdapter;
+          await adapter.createSubaccountWithKey(
+            agentKeypair.secretKey,
+            botKeypair.secretKey,
+          );
+
+          botSubaccountPublicKey = botKeypair.publicKey.toString();
+          botSubaccountKeyEncrypted = legacyEncrypt(bs58.encode(botKeypair.secretKey));
+          subaccountStatus = 'active';
+          console.log(`[Bot Creation] Pacifica subaccount created: ${botSubaccountPublicKey}`);
+        } catch (subErr: any) {
+          console.error(`[Bot Creation] Pacifica subaccount creation failed:`, subErr.message);
+          return res.status(500).json({ error: `Failed to create trading subaccount: ${subErr.message}` });
+        }
+      }
+
       try {
-        // Get all subaccount IDs currently allocated in the database for this wallet
         const dbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
-        
         if (wallet.agentPublicKey) {
           const existingOnChain = await discoverOnChainSubaccounts(wallet.agentPublicKey);
           const dbIdSet = new Set(dbAllocatedIds);
@@ -5155,23 +5254,15 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               }
             }
           }
-          
-          // Re-fetch allocated IDs after sync (may have added orphaned bots)
           const updatedDbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
-          
           nextSubaccountId = await getNextOnChainSubaccountId(wallet.agentPublicKey, updatedDbAllocatedIds);
-          console.log(`[Bot Creation] On-chain discovery returned subaccount ID: ${nextSubaccountId}`);
         } else {
-          // No agent wallet yet - find next ID not in database
           const usedSet = new Set(dbAllocatedIds);
           nextSubaccountId = 1;
-          while (usedSet.has(nextSubaccountId)) {
-            nextSubaccountId++;
-          }
-          console.log(`[Bot Creation] No agent wallet, using next available ID: ${nextSubaccountId}`);
+          while (usedSet.has(nextSubaccountId)) nextSubaccountId++;
         }
       } catch (error) {
-        console.error(`[Bot Creation] On-chain discovery failed, falling back to database:`, error);
+        console.error(`[Bot Creation] Subaccount ID fallback:`, error);
         nextSubaccountId = await storage.getNextSubaccountId(req.walletAddress!);
       }
 
@@ -5181,6 +5272,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         market,
         webhookSecret,
         driftSubaccountId: nextSubaccountId,
+        protocolSubaccountId: botSubaccountPublicKey,
+        activeProtocol: botSubaccountPublicKey ? 'pacifica' : null,
+        botSubaccountKeyEncrypted,
+        subaccountStatus,
         isActive: true,
         side: side || 'both',
         leverage: leverage || 1,
@@ -5196,6 +5291,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       res.json({
         ...bot,
         webhookUrl,
+        botAgentPublicKey: botSubaccountPublicKey,
       });
     } catch (error) {
       console.error("Create trading bot error:", error);

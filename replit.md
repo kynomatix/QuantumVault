@@ -31,7 +31,15 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 
 **Workflow:** When starting a phase, check the Phase Navigation Index for which sections to read. Work through Section 17's phase checklist top-to-bottom. Phase 3 has explicit Group A→B→C ordering — follow it.
 
-**Status:** Phase 6 canary running. **CRITICAL FINDING (April 15, 2026): Pacifica subaccounts are wallet-based, not numeric.** The `POST /account/subaccount/create` endpoint requires: `main_account`, `subaccount` (a NEW keypair), `timestamp`, `main_signature`, `sub_signature`. Our `createSubaccountWithKey` was completely wrong — wrong field names, wrong flow, never tested. Subaccounts were never actually created on Pacifica, which is why `subaccount_id` queries returned total-account data. The fix is to generate one keypair per bot and register each as a Pacifica subaccount — this preserves volume/fee consolidation under the main account. See §8 of PACIFICA_MIGRATION.md for full findings and implementation plan (Phase 8). Interim: DB-based bot accounting is live and correct.
+**Status:** Phase 8 (Subaccount Isolation) in progress. Group A (adapter fixes) and Group B (schema + bot creation) complete. Group C (trade execution wiring) and Group D (migration + cleanup) remaining.
+
+**Phase 8 Progress (as of April 15, 2026):**
+- Pacifica subaccount adapter methods fixed and verified on mainnet (creation + listing work)
+- Agent wallet confirmed as valid `main_account` for subaccounts (no Phantom signing needed)
+- New bots now get per-bot Pacifica subaccounts with encrypted private keys stored in DB
+- Deposit/withdraw flows updated to transfer funds to/from bot subaccounts
+- Schema: `bot_subaccount_key_encrypted`, `subaccount_status` columns added; reuses `protocol_subaccount_id` for bot's subaccount public key
+- Frontend: Bot management drawer shows truncated subaccount address with Solscan link + copy button
 
 ### Engineering Standards for Migration Work
 
