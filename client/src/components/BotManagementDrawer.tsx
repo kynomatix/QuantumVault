@@ -182,7 +182,6 @@ export function BotManagementDrawer({
 
   const [activeTab, setActiveTab] = useState('overview');
   const [botBalance, setBotBalance] = useState<number>(0);
-  const [interestEarned, setInterestEarned] = useState<number>(0);
   const [mainAccountBalance, setMainAccountBalance] = useState<number>(0);
   const [driftBalance, setDriftBalance] = useState<number>(0);
   const [driftFreeCollateral, setDriftFreeCollateral] = useState<number>(0);
@@ -220,7 +219,6 @@ export function BotManagementDrawer({
   const [refreshPositionLoading, setRefreshPositionLoading] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [shareCardOpen, setShareCardOpen] = useState(false);
-  const [usdcApy, setUsdcApy] = useState<number | null>(null);
   const [publishedBotId, setPublishedBotId] = useState<string | null>(null);
   const [performanceTimeframe, setPerformanceTimeframe] = useState<'7d' | '30d' | '90d' | 'all'>('7d');
   const [performanceView, setPerformanceView] = useState<'dollar' | 'percent'>('dollar');
@@ -229,19 +227,6 @@ export function BotManagementDrawer({
   const [performanceTotalPnl, setPerformanceTotalPnl] = useState<number>(0);
   const [performanceTradeCount, setPerformanceTradeCount] = useState<number>(0);
   const [manualTradeLoading, setManualTradeLoading] = useState<'long' | 'short' | null>(null);
-
-  // Fetch USDC deposit APY
-  const fetchUsdcApy = async () => {
-    try {
-      const response = await fetch('/api/exchange/usdc-apy');
-      if (response.ok) {
-        const data = await safeResponseJson(response);
-        setUsdcApy(data.apy);
-      }
-    } catch (error) {
-      console.error('Failed to fetch USDC APY:', error);
-    }
-  };
 
   // Fetch published bot status
   const fetchPublishedStatus = async () => {
@@ -264,7 +249,6 @@ export function BotManagementDrawer({
 
   useEffect(() => {
     if (isOpen) {
-      fetchUsdcApy();
       fetchPublishedStatus();
     }
   }, [isOpen, bot?.id]);
@@ -353,7 +337,6 @@ export function BotManagementDrawer({
         
         // Balance data
         setBotBalance(data.usdcBalance ?? 0);
-        setInterestEarned(data.estimatedDailyInterest ?? 0);
         setMainAccountBalance(data.mainAccountBalance ?? 0);
         setDriftBalance(data.totalCollateral ?? 0);
         setDriftFreeCollateral(data.freeCollateral ?? 0);
@@ -441,7 +424,6 @@ export function BotManagementDrawer({
       if (balanceRes?.ok) {
         const data = await safeResponseJson(balanceRes);
         setBotBalance(data.usdcBalance ?? 0);
-        setInterestEarned(data.estimatedDailyInterest ?? 0);
       }
 
       if (agentRes?.ok) {
@@ -1202,7 +1184,7 @@ export function BotManagementDrawer({
                         <Info className="w-3 h-3 text-muted-foreground" />
                       </TooltipTrigger>
                       <TooltipContent>
-                        <p>Total traded volume = FUEL earned (1 FUEL per $1)</p>
+                        <p>Total traded volume across all executed trades</p>
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
@@ -1418,30 +1400,6 @@ export function BotManagementDrawer({
                   <p className="text-xs mt-1">Position will appear when bot executes a trade</p>
                 </div>
               )}
-            </div>
-
-            <div>
-              <p className="text-xs text-muted-foreground mb-2">Lending Interest</p>
-              <div className="grid grid-cols-3 gap-3">
-                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
-                  <p className="text-xs text-muted-foreground">Daily</p>
-                  <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-interest-card">
-                    {balanceLoading ? '-' : `+$${interestEarned.toFixed(4)}`}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
-                  <p className="text-xs text-muted-foreground">APY</p>
-                  <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-usdc-apy">
-                    {usdcApy !== null ? `~${usdcApy.toFixed(1)}%` : '-'}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-center">
-                  <p className="text-xs text-muted-foreground">Est. Monthly</p>
-                  <p className="text-lg font-semibold text-blue-400 mt-1" data-testid="text-total-interest">
-                    {balanceLoading ? '-' : `$${(interestEarned * 30).toFixed(2)}`}
-                  </p>
-                </div>
-              </div>
             </div>
 
             <div className="p-4 rounded-xl border bg-muted/20" data-testid="performance-chart-container">

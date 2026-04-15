@@ -4701,7 +4701,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         storage.getBotNetDeposited(botId),
         storage.getBotTradeCount(botId),
         storage.getBotPosition(botId, bot.market),
-        getUsdcApy(),
       ]);
       
       // Extract results with defaults for failed calls
@@ -4743,7 +4742,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           }
         }
       }
-      const apyResult = results[6].status === 'fulfilled' ? results[6].value : { apy: 5.3, stale: true };
       
       // Log any failures for debugging
       const failures = results.filter(r => r.status === 'rejected');
@@ -4752,10 +4750,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           failures.map((f, i) => `[${i}]: ${(f as PromiseRejectedResult).reason}`).join(', '));
       }
       
-      // Calculate interest
-      const currentApy = apyResult.apy / 100;
-      const dailyInterestRate = currentApy / 365;
-      const estimatedDailyInterest = accountInfo.usdcBalance * dailyInterestRate;
+      // Prevent false PNL: if the exchange account has no equity yet (e.g. deposit pending
+      // or subaccount not created on Pacifica), clamp netDeposited to totalCollateral
+      // so we don't show a phantom loss.
+      if (accountInfo.totalCollateral === 0 && netDeposited > 0) {
+        netDeposited = 0;
+      }
       
       // Build position response
       const position = posData.position?.hasPosition ? {
@@ -4795,29 +4795,24 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         pauseReason: bot.pauseReason,
         autoTopUp: bot.autoTopUp,
         
-        // From getDriftAccountInfo (1 RPC)
+        // From adapter getAccountInfo
         usdcBalance: accountInfo.usdcBalance,
         totalCollateral: accountInfo.totalCollateral,
         freeCollateral: accountInfo.freeCollateral,
         hasOpenPositions: accountInfo.hasOpenPositions,
         subAccountId,
         
-        // From getAgentUsdcBalance (1 RPC)
+        // From getAgentUsdcBalance
         mainAccountBalance,
         
-        // From PositionService (reuses on-chain data, may add 1 RPC for oracle price)
+        // From PositionService
         position,
         
-        // From database (no RPC)
+        // From database
         netDeposited,
         tradeCount,
         realizedPnl: parseFloat(dbPosition?.realizedPnl || "0"),
         totalFees: parseFloat(dbPosition?.totalFees || "0"),
-        
-        // Calculated
-        estimatedDailyInterest: Math.max(0, estimatedDailyInterest),
-        driftApy: currentApy,
-        apyStale: apyResult.stale || false,
         
         // Webhook URL (constructed dynamically)
         webhookUrl,
@@ -9036,14 +9031,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const realizedPnl = parseFloat(position?.realizedPnl || "0");
       const totalFees = parseFloat(position?.totalFees || "0");
       
-      // Interest calculation: Use the current Drift balance to estimate daily interest
-      // Note: We don't have per-bot deposit tracking, so we can't calculate exact interest
-      // Use dynamic APY from shared helper (fetches fresh if cache expired)
-      const apyResult = await getUsdcApy();
-      const currentApy = apyResult.apy / 100; // Convert percentage to decimal
-      const dailyInterestRate = currentApy / 365;
-      const estimatedDailyInterest = balance * dailyInterestRate;
-      
       res.json({ 
         driftSubaccountId: bot.driftSubaccountId,
         subaccountExists: exists,
@@ -9051,9 +9038,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         realizedPnl,
         totalFees,
         tradeCount,
-        estimatedDailyInterest: Math.max(0, estimatedDailyInterest),
-        driftApy: currentApy,
-        apyStale: apyResult.stale || false,
       });
     } catch (error) {
       console.error("Bot balance error:", error);
