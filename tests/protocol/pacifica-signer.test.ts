@@ -273,7 +273,8 @@ describe('PacificaSigner', () => {
       expect(OPERATION_TYPES.SET_POSITION_TPSL).toBe('set_position_tpsl');
       expect(OPERATION_TYPES.SUBACCOUNT_INITIATE).toBe('subaccount_initiate');
       expect(OPERATION_TYPES.SUBACCOUNT_CONFIRM).toBe('subaccount_confirm');
-      expect(OPERATION_TYPES.SUBACCOUNT_TRANSFER).toBe('subaccount_transfer');
+      expect(OPERATION_TYPES.SUBACCOUNT_TRANSFER).toBe('transfer_funds');
+      expect(OPERATION_TYPES.LIST_SUBACCOUNTS).toBe('list_subaccounts');
       expect(OPERATION_TYPES.CREATE_STOP_ORDER).toBe('create_stop_order');
       expect(OPERATION_TYPES.CANCEL_STOP_ORDER).toBe('cancel_stop_order');
       expect(OPERATION_TYPES.CREATE_API_KEY).toBe('create_api_key');
