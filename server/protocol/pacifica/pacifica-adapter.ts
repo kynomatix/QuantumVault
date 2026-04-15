@@ -515,19 +515,15 @@ export class PacificaAdapter implements ProtocolAdapter {
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
     if (params.leverage && params.leverage > 0 && !params.reduceOnly) {
-      try {
-        await this.setLeverage({
-          agentPublicKey: params.agentPublicKey,
-          agentSecretKey: params.agentSecretKey,
-          mainWalletAddress: params.mainWalletAddress,
-          internalSymbol: params.internalSymbol,
-          leverage: params.leverage,
-          subaccountId: params.subaccountId,
-        });
-        console.log(`[PacificaAdapter] Set leverage to ${params.leverage}x for ${params.internalSymbol} before order`);
-      } catch (err: any) {
-        console.warn(`[PacificaAdapter] setLeverage pre-order failed (continuing): ${err.message}`);
-      }
+      await this.setLeverage({
+        agentPublicKey: params.agentPublicKey,
+        agentSecretKey: params.agentSecretKey,
+        mainWalletAddress: params.mainWalletAddress,
+        internalSymbol: params.internalSymbol,
+        leverage: params.leverage,
+        subaccountId: params.subaccountId,
+      });
+      console.log(`[PacificaAdapter] Set leverage to ${params.leverage}x for ${params.internalSymbol} before order`);
     }
 
     const slippagePct = params.maxSlippagePct ?? 0.5;
@@ -715,7 +711,7 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
-      leverage: String(params.leverage),
+      leverage: Math.floor(params.leverage),
     };
 
     const body = signer.buildRequestBody(
