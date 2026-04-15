@@ -70,7 +70,9 @@ async function getAllPrices(): Promise<Record<string, number>> {
   return getDefaultAdapter().getAllPrices();
 }
 
-async function forceRefreshPrices(): Promise<void> { }
+async function forceRefreshPrices(): Promise<Record<string, number>> {
+  return getDefaultAdapter().getAllPrices();
+}
 
 async function buildDepositTransaction(walletAddress: string, amountUsdc: number) {
   const { PacificaTxBuilder } = await import('./protocol/pacifica/pacifica-tx-builder');
