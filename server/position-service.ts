@@ -7,10 +7,10 @@ function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
 }
 
-async function fetchPerpPositions(agentPublicKey: string, subaccountId: number): Promise<any[]> {
+async function fetchPerpPositions(agentPublicKey: string, subaccountId: number): Promise<{ positions: any[]; fetchFailed: boolean }> {
   try {
     const positions = await getDefaultAdapter().getPositions(agentPublicKey, _subIdStr(subaccountId));
-    return positions.map(p => ({
+    return { positions: positions.map(p => ({
       marketIndex: 0,
       market: p.internalSymbol,
       baseAssetAmount: p.baseSize,
@@ -21,9 +21,10 @@ async function fetchPerpPositions(agentPublicKey: string, subaccountId: number):
       unrealizedPnlPercent: p.entryPrice > 0
         ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
         : 0,
-    }));
-  } catch {
-    return [];
+    })), fetchFailed: false };
+  } catch (err) {
+    console.log(`[PositionService] fetchPerpPositions failed: ${err instanceof Error ? err.message : err}`);
+    return { positions: [], fetchFailed: true };
   }
 }
 
@@ -109,12 +110,10 @@ export class PositionService {
     let driftDetails: PositionData['driftDetails'] = undefined;
 
     try {
-      // ALWAYS use byte-parsing for position reading to avoid SDK WebSocket memory leaks
-      // The SDK creates WebSocket connections that don't properly cleanup
       console.log(`[PositionService] Using byte-parsing position fetching for ${market}`);
-      const onChainPositions = await fetchPerpPositions(agentPublicKey, subAccountId);
+      const fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
       const normalizedMarket = normalizeMarket(market);
-      onChainPos = onChainPositions.find(p => 
+      onChainPos = fetchResult.positions.find(p => 
         normalizeMarket(p.market) === normalizedMarket
       ) || null;
 
@@ -122,7 +121,7 @@ export class PositionService {
       const dbSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
       const onChainSize = onChainPos?.baseAssetAmount || 0;
 
-      if (Math.abs(dbSize - onChainSize) > 0.0001) {
+      if (!fetchResult.fetchFailed && Math.abs(dbSize - onChainSize) > 0.0001) {
         driftDetected = true;
         driftDetails = {
           onChainSize,
@@ -131,30 +130,28 @@ export class PositionService {
         };
         console.warn(`[PositionService] DRIFT DETECTED for bot ${botId} ${market}: DB=${dbSize}, OnChain=${onChainSize}, diff=${driftDetails.difference}`);
 
-        // SAFETY: Only auto-correct if we have a valid on-chain position OR the DB shows a position
-        // that doesn't exist on-chain. Never auto-correct to 0 if DB has no position (could be wrong wallet).
-        const shouldAutoCorrect = onChainPos !== null || (dbSize !== 0 && onChainSize === 0);
-        
-        if (shouldAutoCorrect) {
+        if (onChainPos !== null && Math.abs(onChainSize) > 0.0001) {
           await storage.upsertBotPosition({
             tradingBotId: botId,
             walletAddress,
             market,
             baseSize: String(onChainSize),
-            avgEntryPrice: onChainPos ? String(onChainPos.entryPrice) : "0",
-            costBasis: onChainPos ? String(Math.abs(onChainSize) * onChainPos.entryPrice) : "0",
+            avgEntryPrice: String(onChainPos.entryPrice),
+            costBasis: String(Math.abs(onChainSize) * onChainPos.entryPrice),
             realizedPnl: dbPosition?.realizedPnl || "0",
             totalFees: dbPosition?.totalFees || "0",
             lastTradeId: dbPosition?.lastTradeId || null,
             lastTradeAt: new Date(),
           });
           console.log(`[PositionService] Auto-corrected database from on-chain data`);
-        } else {
-          console.warn(`[PositionService] Skipping auto-correction: on-chain empty and DB empty - possible wallet mismatch`);
+        } else if (dbSize !== 0 && onChainSize === 0) {
+          console.log(`[PositionService] On-chain empty but DB has position (${dbSize} ${market}) — preserving DB as source of truth`);
         }
+      } else if (fetchResult.fetchFailed && Math.abs(dbSize) > 0.0001) {
+        console.log(`[PositionService] Position fetch failed — preserving DB position (${dbSize} ${market})`);
       }
 
-      const hasPosition = Math.abs(onChainSize) > 0.0001;
+      const hasPosition = fetchResult.fetchFailed ? Math.abs(dbSize) > 0.0001 : Math.abs(onChainSize) > 0.0001;
       const realizedPnl = dbPosition ? parseFloat(dbPosition.realizedPnl) : 0;
       const totalFees = dbPosition ? parseFloat(dbPosition.totalFees || "0") : 0;
 
@@ -295,10 +292,10 @@ export class PositionService {
     // ALWAYS use byte-parsing for position reading - it's lightweight and doesn't create WebSocket connections
     // The SDK approach causes memory leaks due to WebSocket connections that don't cleanup
     console.log(`[PositionService] getPositionForExecution: Using byte-parsing for ${market} (subaccount ${subAccountId})`);
-    const onChainPositions = await fetchPerpPositions(agentPublicKey, subAccountId);
+    const fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
     
     const normalizedMarket = normalizeMarket(market);
-    const onChainPos = onChainPositions.find((p: any) => 
+    const onChainPos = fetchResult.positions.find((p: any) => 
       normalizeMarket(p.market) === normalizedMarket
     );
 

@@ -174,22 +174,45 @@ export async function syncPositionFromOnChain(
       
       console.log(`[Sync] On-chain position: ${onChainBaseSize.toFixed(4)} ${market} @ $${onChainPos.entryPrice.toFixed(2)}, cumulative PnL: $${newRealizedPnl.toFixed(4)}`);
       return { success: true, position, tradePnl, isClosingTrade: tradePnl !== 0, onChainEntryPrice: onChainPos.entryPrice };
-    } else {
+    } else if (tradeSize > 0 && tradeFillPrice > 0) {
+      const normalizedSide = tradeSide.toLowerCase();
+      const tradeSigned = normalizedSide === 'long' ? tradeSize : -tradeSize;
+      const isSameDirection = (previousBaseSize >= 0 && normalizedSide === 'long') ||
+                              (previousBaseSize <= 0 && normalizedSide === 'short');
+      
+      let newBaseSize: number;
+      let newAvgEntry: number;
+      
+      if (Math.abs(previousBaseSize) < 0.0001) {
+        newBaseSize = tradeSigned;
+        newAvgEntry = tradeFillPrice;
+      } else if (isSameDirection) {
+        newBaseSize = previousBaseSize + tradeSigned;
+        const totalCost = Math.abs(previousBaseSize) * previousAvgEntry + tradeSize * tradeFillPrice;
+        newAvgEntry = totalCost / Math.abs(newBaseSize);
+      } else {
+        newBaseSize = previousBaseSize + tradeSigned;
+        newAvgEntry = Math.abs(newBaseSize) > 0.0001 ? (Math.abs(newBaseSize) > Math.abs(previousBaseSize) ? tradeFillPrice : previousAvgEntry) : 0;
+      }
+      
       const position = await storage.upsertBotPosition({
         tradingBotId: botId,
         walletAddress,
         market,
-        baseSize: "0",
-        avgEntryPrice: "0",
-        costBasis: "0",
+        baseSize: String(newBaseSize),
+        avgEntryPrice: String(newAvgEntry),
+        costBasis: String(Math.abs(newBaseSize) * newAvgEntry),
         realizedPnl: String(newRealizedPnl),
         totalFees: String(newTotalFees),
         lastTradeId: tradeId,
         lastTradeAt: new Date(),
       });
       
-      console.log(`[Sync] Position cleared, cumulative realized PnL: $${newRealizedPnl.toFixed(4)}`);
-      return { success: true, position, tradePnl, isClosingTrade: tradePnl !== 0 };
+      console.log(`[Sync] On-chain empty — computed from trade data: ${newBaseSize.toFixed(4)} ${market} @ $${newAvgEntry.toFixed(2)}, PnL: $${newRealizedPnl.toFixed(4)}`);
+      return { success: true, position, tradePnl, isClosingTrade: Math.abs(newBaseSize) < 0.0001, onChainEntryPrice: tradeFillPrice };
+    } else {
+      console.log(`[Sync] On-chain empty and no trade data — preserving DB position (${previousBaseSize} ${market})`);
+      return { success: true, tradePnl: 0, isClosingTrade: false };
     }
   } catch (error) {
     console.error(`[Sync] Failed to sync position from on-chain:`, error);
@@ -416,19 +439,8 @@ export async function reconcileBotPosition(
           lastTradeId: dbPosition?.lastTradeId || null,
           lastTradeAt: new Date(),
         });
-      } else if (dbPosition && Math.abs(dbBaseSize) > 0.0001) {
-        await storage.upsertBotPosition({
-          tradingBotId: botId,
-          walletAddress,
-          market,
-          baseSize: "0",
-          avgEntryPrice: "0",
-          costBasis: "0",
-          realizedPnl: dbPosition.realizedPnl,
-          totalFees: dbPosition.totalFees,
-          lastTradeId: dbPosition.lastTradeId,
-          lastTradeAt: new Date(),
-        });
+      } else if (dbPosition && Math.abs(dbBaseSize) > 0.0001 && !onChainPos) {
+        console.log(`[Reconcile] On-chain shows no position but DB has ${dbBaseSize} ${market} — preserving DB (source of truth). Position clearing only happens via explicit trade execution.`);
       }
     }
     
