@@ -254,6 +254,7 @@ async function executePerpOrder(
       sizeBase: sizeInBase,
       reduceOnly,
       subaccountId: _subIdStr(subAccountId),
+      maxSlippagePct: _slippageBps / 100,
     });
     return {
       success: orderResult.success,
@@ -304,6 +305,7 @@ async function closePerpPosition(
         sizeBase: positionSizeBase,
         reduceOnly: true,
         subaccountId: _subIdStr(subAccountId),
+        maxSlippagePct: _slippageBps / 100,
       });
     } else {
       orderResult = await adapter.closePosition({

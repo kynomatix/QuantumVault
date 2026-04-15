@@ -480,11 +480,14 @@ export class PacificaAdapter implements ProtocolAdapter {
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
+    const slippagePct = params.maxSlippagePct ?? 0.5;
+
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
       amount: String(params.sizeBase),
       side: mapToProtocolSide(params.side),
       reduce_only: params.reduceOnly ?? false,
+      max_slippage: String(slippagePct),
     };
 
     if (params.clientOrderId) {
