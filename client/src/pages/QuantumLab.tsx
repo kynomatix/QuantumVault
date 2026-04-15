@@ -435,7 +435,12 @@ export default function QuantumLab() {
   const [autoRefine, setAutoRefine] = useState(false);
   const [pendingAutoRefine, setPendingAutoRefine] = useState(false);
   const autoRefineRef = useRef(false);
-  useEffect(() => { autoRefineRef.current = autoRefine; }, [autoRefine]);
+  const autoRefineCountRef = useRef(0);
+  const AUTO_REFINE_MAX = 5;
+  useEffect(() => {
+    autoRefineRef.current = autoRefine;
+    if (!autoRefine) autoRefineCountRef.current = 0;
+  }, [autoRefine]);
   const eventSourceRef = useRef<EventSource | null>(null);
   const activeRunIdRef = useRef(activeRunId);
   useEffect(() => { activeRunIdRef.current = activeRunId; }, [activeRunId]);
@@ -585,7 +590,12 @@ export default function QuantumLab() {
             queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
             queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
             if (autoRefineRef.current && completedRunId) {
-              toast({ title: "Optimization complete", description: "Auto-refining top results in 3s..." });
+              if (autoRefineCountRef.current >= AUTO_REFINE_MAX) {
+                setAutoRefine(false);
+                toast({ title: "Auto-refine limit reached", description: `Completed ${AUTO_REFINE_MAX} consecutive refine runs. Stopping to prevent runaway loops.` });
+              } else {
+              const remaining = AUTO_REFINE_MAX - autoRefineCountRef.current;
+              toast({ title: "Optimization complete", description: `Auto-refining top results in 3s... (${remaining} refine${remaining === 1 ? "" : "s"} remaining)` });
               setPendingAutoRefine(true);
               (async () => {
                 await new Promise(r => setTimeout(r, 3000));
@@ -594,6 +604,7 @@ export default function QuantumLab() {
                   toast({ title: "Auto-refine cancelled", description: "Results are ready in the Results tab." });
                   return;
                 }
+                autoRefineCountRef.current += 1;
                 try {
                   const res = await apiRequest("POST", `/api/lab/runs/${completedRunId}/refine`, {});
                   const refineData = await safeResponseJson(res);
@@ -611,6 +622,7 @@ export default function QuantumLab() {
                   toast({ title: "Auto-refine failed", description: err.message, variant: "destructive" });
                 }
               })();
+              }
             } else {
               toast({ title: "Optimization complete", description: "Results are ready in the Results tab." });
               (async () => {
@@ -905,7 +917,7 @@ export default function QuantumLab() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
-                    <span className="text-sm text-amber-200">Auto-refine starting shortly...</span>
+                    <span className="text-sm text-amber-200">Auto-refine starting shortly... ({AUTO_REFINE_MAX - autoRefineCountRef.current} remaining)</span>
                   </div>
                   <button
                     className="text-xs px-3 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 transition-colors"
