@@ -3512,29 +3512,35 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
 
           console.log(`[Deposit] Waiting for exchange deposit to settle before transferring to bot subaccount...`);
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          await new Promise(resolve => setTimeout(resolve, 5000));
 
           let transferSuccess = false;
-          for (let attempt = 1; attempt <= 3; attempt++) {
-            console.log(`[Deposit] Transfer attempt ${attempt}/3: ${amount} USDC agent→${botForTransfer.protocolSubaccountId}`);
-            const transferResult = await adapter.transferBetweenSubaccounts({
-              agentSecretKey: agentKeypair.secretKey,
-              agentPublicKey: agentKeypair.publicKey.toString(),
-              fromSubaccountId: agentKeypair.publicKey.toString(),
-              toSubaccountId: botForTransfer.protocolSubaccountId!,
-              amount,
-            });
+          for (let attempt = 1; attempt <= 5; attempt++) {
+            try {
+              console.log(`[Deposit] Transfer attempt ${attempt}/5: ${amount} USDC agent→${botForTransfer.protocolSubaccountId}`);
+              const transferResult = await adapter.transferBetweenSubaccounts({
+                agentSecretKey: agentKeypair.secretKey,
+                agentPublicKey: agentKeypair.publicKey.toString(),
+                fromSubaccountId: agentKeypair.publicKey.toString(),
+                toSubaccountId: botForTransfer.protocolSubaccountId!,
+                amount,
+              });
 
-            if (transferResult.success) {
-              console.log(`[Deposit] Successfully transferred ${amount} USDC to bot subaccount ${botForTransfer.protocolSubaccountId}`);
-              transferSuccess = true;
-              break;
-            } else {
-              console.warn(`[Deposit] Transfer attempt ${attempt} failed: ${transferResult.error}`);
-              if (attempt < 3) {
-                console.log(`[Deposit] Waiting 3s before retry (deposit may still be settling)...`);
-                await new Promise(resolve => setTimeout(resolve, 3000));
+              if (transferResult.success) {
+                console.log(`[Deposit] Successfully transferred ${amount} USDC to bot subaccount ${botForTransfer.protocolSubaccountId}`);
+                transferSuccess = true;
+                break;
+              } else {
+                console.warn(`[Deposit] Transfer attempt ${attempt} failed: ${transferResult.error}`);
               }
+            } catch (attemptErr: any) {
+              console.warn(`[Deposit] Transfer attempt ${attempt} error: ${attemptErr.message}`);
+            }
+
+            if (attempt < 5) {
+              const delay = attempt <= 2 ? 5000 : 10000;
+              console.log(`[Deposit] Waiting ${delay / 1000}s before retry (deposit may still be settling)...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
             }
           }
 
@@ -3555,7 +3561,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       try {
         await storage.createEquityEvent({
           walletAddress: req.walletAddress!,
-          tradingBotId: subaccountTransferSuccess ? tradingBotId : null,
+          tradingBotId: tradingBotId || null,
           eventType: 'drift_deposit',
           amount: String(amount),
           txSignature: result.signature || null,
@@ -3569,7 +3575,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             try {
               await storage.createEquityEvent({
                 walletAddress: req.walletAddress!,
-                tradingBotId: subaccountTransferSuccess ? tradingBotId : null,
+                tradingBotId: tradingBotId || null,
                 eventType: 'drift_deposit',
                 amount: String(amount),
                 txSignature: result.signature,
