@@ -230,6 +230,14 @@ export function BotManagementDrawer({
   const [performanceTotalPnl, setPerformanceTotalPnl] = useState<number>(0);
   const [performanceTradeCount, setPerformanceTradeCount] = useState<number>(0);
   const [manualTradeLoading, setManualTradeLoading] = useState<'long' | 'short' | null>(null);
+  const [tpslOpen, setTpslOpen] = useState(false);
+  const [tpslMode, setTpslMode] = useState<'price' | 'percent'>('percent');
+  const [tpInput, setTpInput] = useState('');
+  const [slInput, setSlInput] = useState('');
+  const [tpslLoading, setTpslLoading] = useState(false);
+  const [tpslCancelLoading, setTpslCancelLoading] = useState(false);
+  const [activeTp, setActiveTp] = useState<number | null>(null);
+  const [activeSl, setActiveSl] = useState<number | null>(null);
 
   // Fetch published bot status
   const fetchPublishedStatus = async () => {
@@ -726,6 +734,111 @@ export function BotManagementDrawer({
       });
     } finally {
       setClosePositionLoading(false);
+    }
+  };
+
+  const handleSetTpSl = async () => {
+    if (!localBot) return;
+    const entryPrice = botPosition?.avgEntryPrice;
+    if (!entryPrice || entryPrice <= 0) {
+      toast({ title: 'Cannot set TP/SL', description: 'Entry price not available', variant: 'destructive' });
+      return;
+    }
+
+    let takeProfitPrice: number | undefined;
+    let stopLossPrice: number | undefined;
+
+    if (tpInput) {
+      const tpVal = parseFloat(tpInput);
+      if (isNaN(tpVal) || tpVal <= 0) {
+        toast({ title: 'Invalid take profit', description: 'Enter a valid positive number', variant: 'destructive' });
+        return;
+      }
+      if (tpslMode === 'percent') {
+        const multiplier = botPosition?.side === 'LONG' ? 1 + tpVal / 100 : 1 - tpVal / 100;
+        takeProfitPrice = parseFloat((entryPrice * multiplier).toFixed(4));
+      } else {
+        takeProfitPrice = tpVal;
+      }
+    }
+
+    if (slInput) {
+      const slVal = parseFloat(slInput);
+      if (isNaN(slVal) || slVal <= 0) {
+        toast({ title: 'Invalid stop loss', description: 'Enter a valid positive number', variant: 'destructive' });
+        return;
+      }
+      if (tpslMode === 'percent') {
+        const multiplier = botPosition?.side === 'LONG' ? 1 - slVal / 100 : 1 + slVal / 100;
+        stopLossPrice = parseFloat((entryPrice * multiplier).toFixed(4));
+      } else {
+        stopLossPrice = slVal;
+      }
+    }
+
+    if (!takeProfitPrice && !stopLossPrice) {
+      toast({ title: 'Enter a value', description: 'Set at least a take profit or stop loss', variant: 'destructive' });
+      return;
+    }
+
+    setTpslLoading(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${localBot.id}/set-tpsl?wallet=${walletAddress}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ takeProfitPrice, stopLossPrice }),
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || 'Failed to set TP/SL');
+
+      if (takeProfitPrice) setActiveTp(takeProfitPrice);
+      if (stopLossPrice) setActiveSl(stopLossPrice);
+
+      toast({
+        title: 'TP/SL set',
+        description: [
+          takeProfitPrice ? `TP: $${formatPrice(takeProfitPrice)}` : '',
+          stopLossPrice ? `SL: $${formatPrice(stopLossPrice)}` : '',
+        ].filter(Boolean).join(' | '),
+      });
+      setTpInput('');
+      setSlInput('');
+      setTpslOpen(false);
+    } catch (error) {
+      toast({
+        title: 'Failed to set TP/SL',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setTpslLoading(false);
+    }
+  };
+
+  const handleCancelTpSl = async () => {
+    if (!localBot) return;
+    setTpslCancelLoading(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${localBot.id}/cancel-tpsl?wallet=${walletAddress}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || 'Failed to cancel TP/SL');
+
+      setActiveTp(null);
+      setActiveSl(null);
+      toast({ title: 'TP/SL cleared', description: 'Take profit and stop loss removed' });
+    } catch (error) {
+      toast({
+        title: 'Failed to clear TP/SL',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setTpslCancelLoading(false);
     }
   };
 
@@ -1432,12 +1545,125 @@ export function BotManagementDrawer({
                     </div>
                   )}
                   
+                  {(activeTp || activeSl) && (
+                    <div className="flex items-center gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-sm" data-testid="tpsl-active-banner">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                      <div className="flex-1 font-mono text-xs">
+                        {activeTp && <span className="text-emerald-500" data-testid="text-active-tp">TP: ${formatPrice(activeTp)}</span>}
+                        {activeTp && activeSl && <span className="text-muted-foreground mx-1">|</span>}
+                        {activeSl && <span className="text-red-500" data-testid="text-active-sl">SL: ${formatPrice(activeSl)}</span>}
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-5 w-5 p-0"
+                        onClick={handleCancelTpSl}
+                        disabled={tpslCancelLoading}
+                        data-testid="button-cancel-tpsl"
+                      >
+                        {tpslCancelLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <XCircle className="w-3 h-3 text-muted-foreground hover:text-foreground" />}
+                      </Button>
+                    </div>
+                  )}
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setTpslOpen(!tpslOpen)}
+                    className="w-full"
+                    data-testid="button-toggle-tpsl"
+                  >
+                    <Settings className="w-3.5 h-3.5 mr-2" />
+                    {tpslOpen ? 'Hide' : 'Set'} TP / SL
+                  </Button>
+
+                  {tpslOpen && (
+                    <div className="space-y-3 p-3 rounded-lg border border-border/50 bg-background/30" data-testid="tpsl-form">
+                      <div className="flex items-center gap-1 rounded-md bg-muted p-0.5">
+                        <button
+                          className={`flex-1 text-xs py-1 px-2 rounded transition-colors ${tpslMode === 'percent' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground'}`}
+                          onClick={() => setTpslMode('percent')}
+                          data-testid="button-tpsl-mode-percent"
+                        >
+                          Percentage
+                        </button>
+                        <button
+                          className={`flex-1 text-xs py-1 px-2 rounded transition-colors ${tpslMode === 'price' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground'}`}
+                          onClick={() => setTpslMode('price')}
+                          data-testid="button-tpsl-mode-price"
+                        >
+                          Price
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-xs text-emerald-500 font-medium mb-1 block">
+                            Take Profit {tpslMode === 'percent' ? '(%)' : '($)'}
+                          </label>
+                          <Input
+                            type="number"
+                            step={tpslMode === 'percent' ? '0.5' : '0.01'}
+                            min="0"
+                            placeholder={tpslMode === 'percent' ? '2.0' : formatPrice(botPosition?.avgEntryPrice)}
+                            value={tpInput}
+                            onChange={(e) => setTpInput(e.target.value)}
+                            className="h-8 text-sm font-mono"
+                            data-testid="input-tp"
+                          />
+                          {tpInput && tpslMode === 'percent' && botPosition?.avgEntryPrice && (
+                            <p className="text-[10px] text-muted-foreground mt-0.5 font-mono" data-testid="text-tp-preview">
+                              = ${formatPrice(botPosition.avgEntryPrice * (botPosition.side === 'LONG' ? 1 + parseFloat(tpInput || '0') / 100 : 1 - parseFloat(tpInput || '0') / 100))}
+                            </p>
+                          )}
+                        </div>
+                        <div>
+                          <label className="text-xs text-red-500 font-medium mb-1 block">
+                            Stop Loss {tpslMode === 'percent' ? '(%)' : '($)'}
+                          </label>
+                          <Input
+                            type="number"
+                            step={tpslMode === 'percent' ? '0.5' : '0.01'}
+                            min="0"
+                            placeholder={tpslMode === 'percent' ? '1.0' : formatPrice(botPosition?.avgEntryPrice)}
+                            value={slInput}
+                            onChange={(e) => setSlInput(e.target.value)}
+                            className="h-8 text-sm font-mono"
+                            data-testid="input-sl"
+                          />
+                          {slInput && tpslMode === 'percent' && botPosition?.avgEntryPrice && (
+                            <p className="text-[10px] text-muted-foreground mt-0.5 font-mono" data-testid="text-sl-preview">
+                              = ${formatPrice(botPosition.avgEntryPrice * (botPosition.side === 'LONG' ? 1 - parseFloat(slInput || '0') / 100 : 1 + parseFloat(slInput || '0') / 100))}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+
+                      <Button
+                        size="sm"
+                        onClick={handleSetTpSl}
+                        disabled={tpslLoading || (!tpInput && !slInput)}
+                        className="w-full"
+                        data-testid="button-submit-tpsl"
+                      >
+                        {tpslLoading ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+                            Setting...
+                          </>
+                        ) : (
+                          'Set TP / SL on Exchange'
+                        )}
+                      </Button>
+                    </div>
+                  )}
+
                   <Button
                     variant="destructive"
                     size="sm"
                     onClick={handleClosePosition}
                     disabled={closePositionLoading}
-                    className="w-full mt-2"
+                    className="w-full"
                     data-testid="button-close-position"
                   >
                     {closePositionLoading ? (

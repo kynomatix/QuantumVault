@@ -4151,6 +4151,107 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
+  app.post("/api/trading-bots/:id/set-tpsl", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) return res.status(404).json({ error: "Bot not found" });
+      if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
+
+      const wallet = await storage.getWallet(bot.walletAddress);
+      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not configured" });
+      }
+
+      const { takeProfitPrice, stopLossPrice } = req.body;
+      if (takeProfitPrice === undefined && stopLossPrice === undefined) {
+        return res.status(400).json({ error: "At least one of takeProfitPrice or stopLossPrice is required" });
+      }
+      if (takeProfitPrice !== undefined && (typeof takeProfitPrice !== 'number' || !Number.isFinite(takeProfitPrice) || takeProfitPrice <= 0)) {
+        return res.status(400).json({ error: "takeProfitPrice must be a finite positive number" });
+      }
+      if (stopLossPrice !== undefined && (typeof stopLossPrice !== 'number' || !Number.isFinite(stopLossPrice) || stopLossPrice <= 0)) {
+        return res.status(400).json({ error: "stopLossPrice must be a finite positive number" });
+      }
+
+      const dbPosition = await storage.getBotPosition(bot.id, bot.market);
+      if (!dbPosition || Math.abs(Number(dbPosition.currentSize || 0)) < 0.0001) {
+        return res.status(400).json({ error: "No open position — TP/SL can only be set on an active position" });
+      }
+
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      const { secretKey, publicKey } = _decryptToSecretKey(wallet.agentPrivateKeyEncrypted);
+      const agentPubKey = wallet.agentPublicKey || publicKey;
+      const mainWalletAddress = await _lookupMainWallet(agentPubKey);
+      const adapter = getDefaultAdapter();
+
+      if (!adapter.setTpSl) {
+        return res.status(400).json({ error: "Current protocol adapter does not support TP/SL" });
+      }
+
+      const result = await adapter.setTpSl({
+        agentPublicKey: agentPubKey,
+        agentSecretKey: secretKey,
+        mainWalletAddress,
+        internalSymbol: bot.market,
+        takeProfitPrice: takeProfitPrice || undefined,
+        stopLossPrice: stopLossPrice || undefined,
+        subaccountId: _subIdStr(subAccountId),
+      });
+
+      console.log(`[SetTpSl] Set TP/SL for bot ${bot.id} (${bot.market}): TP=${takeProfitPrice ?? 'none'}, SL=${stopLossPrice ?? 'none'}, orderId=${result.orderId}`);
+
+      res.json({
+        success: true,
+        takeProfitPrice: takeProfitPrice || null,
+        stopLossPrice: stopLossPrice || null,
+        orderId: result.orderId,
+      });
+    } catch (error) {
+      console.error("[SetTpSl] Error:", error);
+      res.status(500).json({ error: error instanceof Error ? error.message : "Failed to set TP/SL" });
+    }
+  });
+
+  app.post("/api/trading-bots/:id/cancel-tpsl", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) return res.status(404).json({ error: "Bot not found" });
+      if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
+
+      const wallet = await storage.getWallet(bot.walletAddress);
+      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not configured" });
+      }
+
+      const subAccountId = bot.driftSubaccountId ?? 0;
+      const { secretKey, publicKey } = _decryptToSecretKey(wallet.agentPrivateKeyEncrypted);
+      const agentPubKey = wallet.agentPublicKey || publicKey;
+      const mainWalletAddress = await _lookupMainWallet(agentPubKey);
+      const adapter = getDefaultAdapter();
+
+      if (!adapter.setTpSl) {
+        return res.status(400).json({ error: "Current protocol adapter does not support TP/SL" });
+      }
+
+      const result = await adapter.setTpSl({
+        agentPublicKey: agentPubKey,
+        agentSecretKey: secretKey,
+        mainWalletAddress,
+        internalSymbol: bot.market,
+        takeProfitPrice: 0,
+        stopLossPrice: 0,
+        subaccountId: _subIdStr(subAccountId),
+      });
+
+      console.log(`[CancelTpSl] Cleared TP/SL for bot ${bot.id} (${bot.market}), orderId=${result.orderId}`);
+
+      res.json({ success: true, orderId: result.orderId });
+    } catch (error) {
+      console.error("[CancelTpSl] Error:", error);
+      res.status(500).json({ error: error instanceof Error ? error.message : "Failed to cancel TP/SL" });
+    }
+  });
+
   // Close a specific market position in a bot's subaccount (for cleaning up dust/misrouted positions)
   app.post("/api/trading-bots/:id/close-market-position", requireWallet, async (req, res) => {
     console.log(`[CloseMarketPosition] *** CLOSE MARKET POSITION REQUEST *** botId=${req.params.id}`);
