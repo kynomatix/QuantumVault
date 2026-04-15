@@ -1076,6 +1076,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   ): Promise<void> {
     const body: Record<string, unknown> = {
       account: mainWalletAddress,
+      agent_wallet: agentPublicKey,
       signature: signatureBase58,
       timestamp,
       expiry_window: expiryWindow,
