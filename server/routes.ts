@@ -3034,13 +3034,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     try {
       const walletAddress = req.walletAddress!;
       
-      // Get agent wallet - Drift accounts are created from agent wallet, not user wallet
       const wallet = await storage.getWallet(walletAddress);
       const agentAddress = wallet?.agentPublicKey;
       
-      const mainAccountBalance = agentAddress ? await getDriftBalance(agentAddress, 0) : 0;
+      const exchangeAccountInfo = agentAddress ? await getDriftAccountInfo(agentAddress, 0) : { totalCollateral: 0 };
+      const exchangeBalance = exchangeAccountInfo.totalCollateral;
       
       const bots = await storage.getTradingBots(walletAddress);
+      
+      let prices: Record<string, number> = {};
+      try {
+        prices = await getAllPrices();
+      } catch (e) { /* prices unavailable */ }
       
       const botAllocations: Array<{
         botId: string;
@@ -3050,38 +3055,50 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }> = [];
       
       let allocatedToBot = 0;
-      let hasLegacyBots = false;
       
       for (const bot of bots) {
-        if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
-          hasLegacyBots = true;
-          continue;
+        let botBalance = 0;
+        try {
+          const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
+          const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+          const position = await storage.getBotPosition(bot.id, bot.market);
+          const realizedPnl = parseFloat(position?.realizedPnl || '0');
+          const totalFees = parseFloat(position?.totalFees || '0');
+          
+          let unrealizedPnl = 0;
+          if (position) {
+            const baseSize = parseFloat(position.baseSize);
+            const entryPrice = parseFloat(position.avgEntryPrice);
+            const markPrice = prices[position.market] || entryPrice;
+            if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
+              unrealizedPnl = baseSize > 0
+                ? (markPrice - entryPrice) * Math.abs(baseSize)
+                : (entryPrice - markPrice) * Math.abs(baseSize);
+            }
+          }
+          
+          botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+        } catch (err) {
+          console.warn(`[capital] Failed to calc bot balance for ${bot.id}:`, err);
         }
         
-        const balance = agentAddress ? await getDriftBalance(agentAddress, bot.driftSubaccountId) : 0;
-        
-        // Only add to allocatedToBot if not subaccount 0 (already counted in mainAccountBalance)
-        if (bot.driftSubaccountId !== 0) {
-          allocatedToBot += balance;
-        }
-        
+        allocatedToBot += botBalance;
         botAllocations.push({
           botId: bot.id,
           botName: bot.name,
-          subaccountId: bot.driftSubaccountId,
-          balance,
+          subaccountId: bot.driftSubaccountId ?? 0,
+          balance: botBalance,
         });
       }
       
-      // Total equity = main account (subaccount 0) + allocated to other bot subaccounts
-      const totalEquity = mainAccountBalance + allocatedToBot;
+      const mainAccountBalance = Math.max(0, exchangeBalance - allocatedToBot);
+      const totalEquity = exchangeBalance;
       
       res.json({
         mainAccountBalance,
         allocatedToBot,
         totalEquity,
         botAllocations,
-        ...(hasLegacyBots && { warning: "Some legacy bots without subaccounts exist and are not included in the capital breakdown" }),
       });
     } catch (error) {
       console.error("Get capital pool error:", error);
@@ -3701,12 +3718,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
 
-      const bots = await storage.getTradingBots(req.walletAddress!);
-      const subAccountIds = Array.from(new Set(bots.map(b => b.driftSubaccountId ?? 0)));
-      if (subAccountIds.length === 0) subAccountIds.push(0);
-
-      const primarySubAccountId = subAccountIds[0];
-      const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, primarySubAccountId);
+      const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, 0);
 
       const totalCollateral = accountInfo.totalCollateral;
       const freeCollateral = accountInfo.freeCollateral;
@@ -3714,55 +3726,35 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       let unrealizedPnl = 0;
       const formattedPositions: any[] = [];
 
-      for (const subId of subAccountIds) {
-        const positions = await getPerpPositions(wallet.agentPublicKey, subId);
-        for (const pos of positions) {
-          if (pos.baseAssetAmount && Math.abs(pos.baseAssetAmount) > 0.0001) {
-            unrealizedPnl += pos.unrealizedPnl || 0;
-            formattedPositions.push({
-              marketIndex: pos.marketIndex,
-              market: pos.market,
-              baseSize: pos.baseAssetAmount,
-              notionalValue: pos.sizeUsd,
-              liquidationPrice: pos.liquidationPrice ?? null,
-              entryPrice: pos.entryPrice,
-              unrealizedPnl: pos.unrealizedPnl,
-            });
-          }
+      const dbPositions = await storage.getBotPositions(req.walletAddress!);
+      const prices = await getAllPrices();
+      for (const pos of dbPositions) {
+        const baseSize = parseFloat(pos.baseSize);
+        if (Math.abs(baseSize) < 0.0001) continue;
+        const entryPrice = parseFloat(pos.avgEntryPrice);
+        const markPrice = prices[pos.market] || entryPrice;
+        const posUnrealizedPnl = baseSize > 0
+          ? (markPrice - entryPrice) * Math.abs(baseSize)
+          : (entryPrice - markPrice) * Math.abs(baseSize);
+        unrealizedPnl += posUnrealizedPnl;
+
+        let estLiqPrice: number | null = null;
+        if (freeCollateral > 0 && Math.abs(baseSize) > 0.0001) {
+          const priceBuffer = freeCollateral / Math.abs(baseSize);
+          estLiqPrice = baseSize > 0
+            ? Math.max(0, markPrice - priceBuffer)
+            : markPrice + priceBuffer;
         }
-      }
 
-      if (formattedPositions.length === 0) {
-        const dbPositions = await storage.getBotPositions(req.walletAddress!);
-        const prices = await getAllPrices();
-        for (const pos of dbPositions) {
-          const baseSize = parseFloat(pos.baseSize);
-          if (Math.abs(baseSize) < 0.0001) continue;
-          const entryPrice = parseFloat(pos.avgEntryPrice);
-          const markPrice = prices[pos.market] || entryPrice;
-          const posUnrealizedPnl = baseSize > 0
-            ? (markPrice - entryPrice) * Math.abs(baseSize)
-            : (entryPrice - markPrice) * Math.abs(baseSize);
-          unrealizedPnl += posUnrealizedPnl;
-
-          let estLiqPrice: number | null = null;
-          if (freeCollateral > 0 && Math.abs(baseSize) > 0.0001) {
-            const priceBuffer = freeCollateral / Math.abs(baseSize);
-            estLiqPrice = baseSize > 0
-              ? Math.max(0, markPrice - priceBuffer)
-              : markPrice + priceBuffer;
-          }
-
-          formattedPositions.push({
-            marketIndex: 0,
-            market: pos.market,
-            baseSize,
-            notionalValue: Math.abs(baseSize) * markPrice,
-            liquidationPrice: estLiqPrice,
-            entryPrice,
-            unrealizedPnl: posUnrealizedPnl,
-          });
-        }
+        formattedPositions.push({
+          marketIndex: 0,
+          market: pos.market,
+          baseSize,
+          notionalValue: Math.abs(baseSize) * markPrice,
+          liquidationPrice: estLiqPrice,
+          entryPrice,
+          unrealizedPnl: posUnrealizedPnl,
+        });
       }
 
       let healthFactor = 100;
@@ -3777,7 +3769,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         freeCollateral,
         unrealizedPnl,
         positions: formattedPositions,
-        subAccountId: primarySubAccountId,
+        subAccountId: 0,
         isEstimate: true,
         estimateNote: "Health metrics from exchange account data",
       });
@@ -4775,37 +4767,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         netDeposited = await storage.getWalletNetDeposited(req.walletAddress!);
       }
       
-      if (bot.driftSubaccountId && bot.driftSubaccountId > 0) {
-        try {
-          const wallet = await storage.getWallet(req.walletAddress!);
-          if (wallet?.agentPublicKey) {
-            const stats = bot.stats as any || {};
-            const totalTrades = stats.totalTrades || 0;
-            const tradeCount = await storage.getBotTradeCount(botId);
-            const hasNoTrades = totalTrades === 0 && tradeCount === 0;
-
-            if (hasNoTrades) {
-              const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, bot.driftSubaccountId);
-              const onChainBalance = accountInfo.totalCollateral;
-              const gap = onChainBalance - netDeposited;
-
-              if (gap > 1.0 && onChainBalance > 0.01) {
-                const reconciled = await storage.reconcileDeposit(
-                  req.walletAddress!,
-                  botId,
-                  gap,
-                  onChainBalance
-                );
-                if (reconciled) {
-                  netDeposited = onChainBalance;
-                }
-              }
-            }
-          }
-        } catch (reconcileErr) {
-          console.warn(`[Reconciliation] Failed to check on-chain balance for bot ${botId}:`, reconcileErr);
-        }
-      }
+      // NOTE: Deposit reconciliation disabled — Pacifica uses a single shared account
+      // so exchange balance != per-bot balance. DB equity events are the source of truth.
       
       res.json({ netDeposited });
     } catch (error) {
@@ -4814,7 +4777,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  // Get bot-specific Drift account info from its subaccount
   app.get("/api/bots/:botId/balance", requireWallet, async (req, res) => {
     try {
       const { botId } = req.params;
@@ -4833,17 +4795,44 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const subAccountId = bot.driftSubaccountId ?? 0;
       
-      // Use byte-parsing only - no SDK to avoid memory leaks
-      const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
+      let prices: Record<string, number> = {};
+      try {
+        prices = await getAllPrices();
+      } catch (e) { /* prices unavailable */ }
+
+      const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
+      const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+      const position = await storage.getBotPosition(bot.id, bot.market);
+      const realizedPnl = parseFloat(position?.realizedPnl || '0');
+      const totalFees = parseFloat(position?.totalFees || '0');
+      
+      let unrealizedPnl = 0;
+      const hasOpenPositions = !!(position && Math.abs(parseFloat(position.baseSize)) > 0.0001);
+      if (position) {
+        const baseSize = parseFloat(position.baseSize);
+        const entryPrice = parseFloat(position.avgEntryPrice);
+        const markPrice = prices[position.market] || entryPrice;
+        if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
+          unrealizedPnl = baseSize > 0
+            ? (markPrice - entryPrice) * Math.abs(baseSize)
+            : (entryPrice - markPrice) * Math.abs(baseSize);
+        }
+      }
+      
+      const botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+      const freeCollateral = netDeposited + realizedPnl - totalFees;
+      
       res.json({ 
-        balance: accountInfo.usdcBalance,
-        totalCollateral: accountInfo.totalCollateral,
-        freeCollateral: accountInfo.freeCollateral,
-        hasOpenPositions: accountInfo.hasOpenPositions,
+        balance: botBalance,
+        usdcBalance: botBalance,
+        totalCollateral: botBalance,
+        freeCollateral: Math.max(0, freeCollateral),
+        hasOpenPositions,
         subAccountId,
+        subaccountExists: netDeposited > 0,
       });
     } catch (error) {
-      console.error("Get bot drift balance error:", error);
+      console.error("Get bot balance error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -4869,10 +4858,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const subAccountId = bot.driftSubaccountId ?? 0;
       
-      // Parallel fetch with graceful degradation using Promise.allSettled
-      // This allows partial data if some calls fail (e.g., RPC rate limits)
+      let prices: Record<string, number> = {};
+      try {
+        prices = await getAllPrices();
+      } catch (e) { /* prices unavailable */ }
+
       const results = await Promise.allSettled([
-        getDriftAccountInfo(wallet.agentPublicKey, subAccountId),
         getAgentUsdcBalance(wallet.agentPublicKey),
         PositionService.getPosition(
           bot.id,
@@ -4885,14 +4876,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         storage.getBotNetDeposited(botId),
         storage.getBotTradeCount(botId),
         storage.getBotPosition(botId, bot.market),
+        storage.getBotEquityEvents(bot.id, 1000),
       ]);
       
-      // Extract results with defaults for failed calls
-      const accountInfo = results[0].status === 'fulfilled' ? results[0].value : { 
-        usdcBalance: 0, totalCollateral: 0, freeCollateral: 0, hasOpenPositions: false 
-      };
-      const mainAccountBalance = results[1].status === 'fulfilled' ? results[1].value : 0;
-      const posData = results[2].status === 'fulfilled' ? results[2].value : { 
+      const mainAccountBalance = results[0].status === 'fulfilled' ? results[0].value : 0;
+      const posData = results[1].status === 'fulfilled' ? results[1].value : { 
         position: null, 
         source: 'error', 
         driftDetected: false,
@@ -4900,45 +4888,44 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         driftDetails: null,
         healthMetrics: null,
       };
-      let netDeposited = results[3].status === 'fulfilled' ? results[3].value : 0;
-      const tradeCount = results[4].status === 'fulfilled' ? results[4].value : 0;
-      const dbPosition = results[5].status === 'fulfilled' ? results[5].value : null;
-
-      if (subAccountId > 0) {
-        const stats = bot.stats as any || {};
-        const hasNoTrades = (stats.totalTrades || 0) === 0 && tradeCount === 0;
-        const onChainBalance = accountInfo.totalCollateral;
-        const gap = onChainBalance - netDeposited;
-
-        if (hasNoTrades && gap > 1.0 && onChainBalance > 0.01) {
-          try {
-            const reconciled = await storage.reconcileDeposit(
-              req.walletAddress!,
-              botId,
-              gap,
-              onChainBalance
-            );
-            if (reconciled) {
-              netDeposited = onChainBalance;
-            }
-          } catch (reconcileErr: any) {
-            console.warn(`[Reconciliation] Overview reconcile failed:`, reconcileErr.message);
-          }
+      let netDeposited = results[2].status === 'fulfilled' ? results[2].value : 0;
+      const tradeCount = results[3].status === 'fulfilled' ? results[3].value : 0;
+      const dbPosition = results[4].status === 'fulfilled' ? results[4].value : null;
+      const botEvents = results[5].status === 'fulfilled' ? results[5].value : [];
+      
+      const eventsNetDeposited = (botEvents as any[]).reduce((sum: number, e: any) => sum + parseFloat(e.amount || '0'), 0);
+      if (eventsNetDeposited > 0) netDeposited = eventsNetDeposited;
+      
+      const realizedPnl = parseFloat(dbPosition?.realizedPnl || '0');
+      const totalFees = parseFloat(dbPosition?.totalFees || '0');
+      
+      let unrealizedPnl = 0;
+      const hasOpenPositions = !!(dbPosition && Math.abs(parseFloat(dbPosition.baseSize)) > 0.0001);
+      if (dbPosition) {
+        const baseSize = parseFloat(dbPosition.baseSize);
+        const entryPrice = parseFloat(dbPosition.avgEntryPrice);
+        const markPrice = prices[dbPosition.market] || entryPrice;
+        if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
+          unrealizedPnl = baseSize > 0
+            ? (markPrice - entryPrice) * Math.abs(baseSize)
+            : (entryPrice - markPrice) * Math.abs(baseSize);
         }
       }
       
-      // Log any failures for debugging
+      const botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+      const botFreeCollateral = Math.max(0, netDeposited + realizedPnl - totalFees);
+      
+      const accountInfo = {
+        usdcBalance: botBalance,
+        totalCollateral: botBalance,
+        freeCollateral: botFreeCollateral,
+        hasOpenPositions,
+      };
+      
       const failures = results.filter(r => r.status === 'rejected');
       if (failures.length > 0) {
         console.warn(`[Bot Overview] ${failures.length} calls failed:`, 
           failures.map((f, i) => `[${i}]: ${(f as PromiseRejectedResult).reason}`).join(', '));
-      }
-      
-      // Prevent false PNL: if the exchange account has no equity yet (e.g. deposit pending
-      // or subaccount not created on Pacifica), clamp netDeposited to totalCollateral
-      // so we don't show a phantom loss.
-      if (accountInfo.totalCollateral === 0 && netDeposited > 0) {
-        netDeposited = 0;
       }
       
       // Build position response
@@ -5016,7 +5003,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const bots = await storage.getTradingBots(req.walletAddress!);
       const wallet = await storage.getWallet(req.walletAddress!);
       
-      // Enrich with actual trade counts, position data, net PnL, and publish status from database
+      let prices: Record<string, number> = {};
+      try {
+        prices = await getAllPrices();
+      } catch (e) { /* prices unavailable */ }
+
       const enrichedBots = await Promise.all(bots.map(async (bot) => {
         const [tradeCount, position, publishedBot] = await Promise.all([
           storage.getBotTradeCount(bot.id),
@@ -5024,25 +5015,32 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           storage.getPublishedBotByTradingBotId(bot.id),
         ]);
         
-        // Calculate net deposited from equity events for this bot's subaccount
         let netDeposited = 0;
-        let driftBalance = 0;
+        let botBalance = 0;
         let netPnl = 0;
         let netPnlPercent = 0;
         
         try {
-          // Get equity events for THIS specific bot using the trading_bot_id
           const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
           netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
           
-          // Get drift balance for this bot's subaccount
-          if (wallet?.agentPublicKey) {
-            const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, bot.driftSubaccountId ?? 0);
-            driftBalance = accountInfo.totalCollateral;
+          const realizedPnl = parseFloat(position?.realizedPnl || '0');
+          const totalFees = parseFloat(position?.totalFees || '0');
+          
+          let unrealizedPnl = 0;
+          if (position) {
+            const baseSize = parseFloat(position.baseSize);
+            const entryPrice = parseFloat(position.avgEntryPrice);
+            const markPrice = prices[position.market] || entryPrice;
+            if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
+              unrealizedPnl = baseSize > 0
+                ? (markPrice - entryPrice) * Math.abs(baseSize)
+                : (entryPrice - markPrice) * Math.abs(baseSize);
+            }
           }
           
-          // Calculate true Net P&L = drift balance - net deposited
-          netPnl = driftBalance - netDeposited;
+          botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+          netPnl = botBalance - netDeposited;
           netPnlPercent = netDeposited > 0 ? (netPnl / netDeposited) * 100 : 0;
         } catch (err) {
           console.warn(`[trading-bots] Failed to calculate net PnL for bot ${bot.id}:`, err);
@@ -5053,7 +5051,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           actualTradeCount: tradeCount,
           realizedPnl: position?.realizedPnl || "0",
           totalFees: position?.totalFees || "0",
-          driftBalance,
+          driftBalance: botBalance,
           netDeposited,
           netPnl,
           netPnlPercent,
@@ -8873,66 +8871,66 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  // Get total equity across all bot subaccounts and agent wallet
-  // OPTIMIZED: Uses batch RPC call instead of N sequential calls
   app.get("/api/total-equity", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
       const bots = await storage.getTradingBots(req.walletAddress!);
       const agentAddress = wallet?.agentPublicKey;
       
-      // Collect all subaccount IDs that need to be fetched (deduplicated)
-      const subAccountIdSet = new Set<number>();
-      for (const bot of bots) {
-        if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
-          subAccountIdSet.add(bot.driftSubaccountId);
-        }
-      }
-      const subAccountIds = Array.from(subAccountIdSet);
-      
-      // BATCH OPTIMIZATION: Fetch all data in parallel
-      // Previously: N bots × 3 RPC calls = 3N RPC calls
-      // Now: 2 RPC for agent balances + 2 RPC for all subaccounts = 4 RPC total
-      const [agentBalance, solBalance, batchAccountInfo] = await Promise.all([
+      const [agentBalance, solBalance, exchangeAccountInfo] = await Promise.all([
         agentAddress ? getAgentUsdcBalance(agentAddress) : Promise.resolve(0),
         agentAddress ? getAgentSolBalance(agentAddress) : Promise.resolve(0),
-        agentAddress && subAccountIds.length > 0 
-          ? getBatchDriftAccountInfo(agentAddress, subAccountIds)
-          : Promise.resolve(new Map()),
+        agentAddress ? getDriftAccountInfo(agentAddress, 0) : Promise.resolve({ totalCollateral: 0 }),
       ]);
       
-      // Build subaccount balances from batch result
-      let driftBalance = 0;
+      const exchangeBalance = exchangeAccountInfo.totalCollateral;
+      
+      let prices: Record<string, number> = {};
+      try {
+        prices = await getAllPrices();
+      } catch (e) { /* prices unavailable */ }
+
       const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
       
       for (const bot of bots) {
-        if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
-          const accountInfo = batchAccountInfo.get(bot.driftSubaccountId);
-          if (accountInfo) {
-            driftBalance += accountInfo.totalCollateral;
-            subaccountBalances.push({
-              botId: bot.id,
-              botName: bot.name,
-              subaccountId: bot.driftSubaccountId,
-              balance: accountInfo.totalCollateral,
-            });
-          } else {
-            // Subaccount doesn't exist or failed to fetch
-            subaccountBalances.push({
-              botId: bot.id,
-              botName: bot.name,
-              subaccountId: bot.driftSubaccountId,
-              balance: 0,
-            });
+        let botBalance = 0;
+        try {
+          const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
+          const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+          const position = await storage.getBotPosition(bot.id, bot.market);
+          const realizedPnl = parseFloat(position?.realizedPnl || '0');
+          const totalFees = parseFloat(position?.totalFees || '0');
+          
+          let unrealizedPnl = 0;
+          if (position) {
+            const baseSize = parseFloat(position.baseSize);
+            const entryPrice = parseFloat(position.avgEntryPrice);
+            const markPrice = prices[position.market] || entryPrice;
+            if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
+              unrealizedPnl = baseSize > 0
+                ? (markPrice - entryPrice) * Math.abs(baseSize)
+                : (entryPrice - markPrice) * Math.abs(baseSize);
+            }
           }
+          
+          botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+        } catch (err) {
+          console.warn(`[total-equity] Failed to calc bot balance for ${bot.id}:`, err);
         }
+        
+        subaccountBalances.push({
+          botId: bot.id,
+          botName: bot.name,
+          subaccountId: bot.driftSubaccountId ?? 0,
+          balance: botBalance,
+        });
       }
       
-      const totalEquity = agentBalance + driftBalance;
+      const totalEquity = agentBalance + exchangeBalance;
       
       res.json({ 
         agentBalance,
-        driftBalance,
+        driftBalance: exchangeBalance,
         totalEquity,
         solBalance,
         botCount: bots.length,
@@ -9178,7 +9176,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  // Bot balance - get subaccount balance from Drift plus realized PnL from positions
   app.get("/api/bot/:botId/balance", requireWallet, async (req, res) => {
     try {
       const { botId } = req.params;
@@ -9190,35 +9187,37 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
-        return res.status(400).json({ error: "Bot has no trading subaccount assigned" });
-      }
 
-      // Get the agent wallet address - this is where Drift funds are held
-      const wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet || !wallet.agentPublicKey) {
-        return res.status(400).json({ error: "Agent wallet not initialized" });
-      }
-      const agentAddress = wallet.agentPublicKey;
-
-      // Get bot position for realized PnL and trade count
-      const [position, tradeCount] = await Promise.all([
+      const [position, tradeCount, botEvents] = await Promise.all([
         storage.getBotPosition(botId, bot.market),
         storage.getBotTradeCount(botId),
+        storage.getBotEquityEvents(bot.id, 1000),
       ]);
 
-      // Check if subaccount exists on-chain using agent wallet (not user wallet)
-      const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
-      const balance = exists ? await getDriftBalance(agentAddress, bot.driftSubaccountId) : 0;
-      
-      // Calculate realized PnL and fees from position tracking
+      const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
       const realizedPnl = parseFloat(position?.realizedPnl || "0");
       const totalFees = parseFloat(position?.totalFees || "0");
       
+      let unrealizedPnl = 0;
+      if (position) {
+        let prices: Record<string, number> = {};
+        try { prices = await getAllPrices(); } catch (e) { /* */ }
+        const baseSize = parseFloat(position.baseSize);
+        const entryPrice = parseFloat(position.avgEntryPrice);
+        const markPrice = prices[position.market] || entryPrice;
+        if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
+          unrealizedPnl = baseSize > 0
+            ? (markPrice - entryPrice) * Math.abs(baseSize)
+            : (entryPrice - markPrice) * Math.abs(baseSize);
+        }
+      }
+      
+      const botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+      
       res.json({ 
-        driftSubaccountId: bot.driftSubaccountId,
-        subaccountExists: exists,
-        usdcBalance: balance,
+        driftSubaccountId: bot.driftSubaccountId ?? 0,
+        subaccountExists: netDeposited > 0,
+        usdcBalance: botBalance,
         realizedPnl,
         totalFees,
         tradeCount,
@@ -10234,20 +10233,16 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
       }
       
-      // Get Drift subaccount balances
       for (const bot of bots) {
         if (bot.isActive) activeBotCount++;
-        
-        if (wallet?.agentPublicKey && bot.driftSubaccountId) {
-          try {
-            const accountInfo = await getDriftAccountInfo(
-              wallet.agentPublicKey,
-              bot.driftSubaccountId
-            );
-            currentBalance += accountInfo.usdcBalance || 0;
-          } catch (error) {
-            console.error(`[Portfolio] Error getting balance for bot ${bot.id}:`, error);
-          }
+      }
+      
+      if (wallet?.agentPublicKey) {
+        try {
+          const exchangeInfo = await getDriftAccountInfo(wallet.agentPublicKey, 0);
+          currentBalance += exchangeInfo.totalCollateral || 0;
+        } catch (error) {
+          console.error("[Portfolio] Error getting exchange balance:", error);
         }
       }
       

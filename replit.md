@@ -31,7 +31,7 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 
 **Workflow:** When starting a phase, check the Phase Navigation Index for which sections to read. Work through Section 17's phase checklist top-to-bottom. Phase 3 has explicit Group A→B→C ordering — follow it.
 
-**Status:** Phase 5 COMPLETE. Agent bind RESOLVED — two-step Phantom-signing flow implemented. The key discovery: Pacifica's bind endpoint requires the MAIN wallet to sign (not the agent), and the operation data field is `agent_wallet` (not `agent_public_key`). Flow: prepare-bind → Phantom signMessage → confirm-bind. Market list is dynamically sourced from the Pacifica adapter (63 markets with real leverage values).
+**Status:** Phase 6 canary running. **CRITICAL FINDING: Pacifica ignores `subaccount_id` — single shared account per wallet.** All bot balances/PnL are now computed from DB (equity events + position tracking), not from exchange queries. Exchange is queried once for total account balance only. See §8 of PACIFICA_MIGRATION.md for full details. True margin isolation requires either multiple agent wallets or Pacifica's per-position isolated margin mode (future work).
 
 ### Engineering Standards for Migration Work
 
