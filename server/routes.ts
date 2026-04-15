@@ -2705,21 +2705,71 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.post("/api/agent/bind", requireWallet, async (req, res) => {
+  const pendingBindChallenges = new Map<string, { timestamp: number; expiryWindow: number; createdAt: number }>();
+  const BIND_CHALLENGE_TTL_MS = 60_000;
+  const MAX_BIND_CHALLENGES = 100;
+
+  app.post("/api/agent/prepare-bind", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet || !wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet || !wallet.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
       const adapter = getDefaultAdapter() as any;
-      if (typeof adapter.bindAgentWallet !== 'function') {
+      if (typeof adapter.prepareBindMessage !== 'function') {
         return res.status(501).json({ error: "Protocol does not support agent binding" });
       }
-      const { secretKey } = _decryptToSecretKey(wallet.agentPrivateKeyEncrypted);
-      await adapter.bindAgentWallet(req.walletAddress!, secretKey);
+      const { message, timestamp, expiryWindow } = adapter.prepareBindMessage(
+        req.walletAddress!,
+        wallet.agentPublicKey,
+      );
+      if (pendingBindChallenges.size >= MAX_BIND_CHALLENGES) {
+        const now = Date.now();
+        for (const [k, v] of pendingBindChallenges) {
+          if (now - v.createdAt > BIND_CHALLENGE_TTL_MS) pendingBindChallenges.delete(k);
+        }
+      }
+      pendingBindChallenges.set(req.walletAddress!, { timestamp, expiryWindow, createdAt: Date.now() });
+      res.json({ message, timestamp, expiryWindow, agentPublicKey: wallet.agentPublicKey });
+    } catch (error: any) {
+      console.error("[AgentBind] prepare-bind error:", error);
+      res.status(500).json({ error: error.message || "Failed to prepare bind" });
+    }
+  });
+
+  app.post("/api/agent/confirm-bind", requireWallet, async (req, res) => {
+    try {
+      const { signature } = req.body;
+      if (!signature || typeof signature !== 'string') {
+        return res.status(400).json({ error: "Missing or invalid signature" });
+      }
+      const challenge = pendingBindChallenges.get(req.walletAddress!);
+      if (!challenge) {
+        return res.status(400).json({ error: "No pending bind challenge — call prepare-bind first" });
+      }
+      if (Date.now() - challenge.createdAt > BIND_CHALLENGE_TTL_MS) {
+        pendingBindChallenges.delete(req.walletAddress!);
+        return res.status(400).json({ error: "Bind challenge expired — call prepare-bind again" });
+      }
+      pendingBindChallenges.delete(req.walletAddress!);
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet || !wallet.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+      const adapter = getDefaultAdapter() as any;
+      if (typeof adapter.confirmBind !== 'function') {
+        return res.status(501).json({ error: "Protocol does not support agent binding" });
+      }
+      await adapter.confirmBind(
+        req.walletAddress!,
+        wallet.agentPublicKey,
+        signature,
+        challenge.timestamp,
+        challenge.expiryWindow,
+      );
       res.json({ success: true });
     } catch (error: any) {
-      console.error("[AgentBind] bind error:", error);
+      console.error("[AgentBind] confirm-bind error:", error);
       res.status(500).json({ error: error.message || "Failed to bind agent wallet" });
     }
   });

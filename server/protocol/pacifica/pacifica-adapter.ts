@@ -36,7 +36,7 @@ import type {
   Unsubscribe,
 } from '../protocol-types.js';
 import { SymbolRegistry, buildPacificaMappings } from '../symbol-registry.js';
-import { PacificaSigner, OPERATION_TYPES } from './pacifica-signer.js';
+import { PacificaSigner, OPERATION_TYPES, buildSigningMessage } from './pacifica-signer.js';
 import {
   PACIFICA_PROGRAM_ID,
   PACIFICA_CENTRAL_STATE,
@@ -1030,20 +1030,38 @@ export class PacificaAdapter implements ProtocolAdapter {
     return this.listSubaccounts(agentPublicKey);
   }
 
-  async bindAgentWallet(
+  prepareBindMessage(
     mainWalletAddress: string,
-    agentSecretKey: Uint8Array,
-  ): Promise<void> {
-    const signer = new PacificaSigner(agentSecretKey);
-    const agentPublicKey = signer.getPublicKey();
-    const operationData = { agent_public_key: agentPublicKey };
-    const body = signer.buildRequestBody(
+    agentPublicKey: string,
+  ): { message: string; timestamp: number; expiryWindow: number } {
+    const timestamp = Date.now();
+    const expiryWindow = 30000;
+    const operationData = { agent_wallet: agentPublicKey };
+    const message = buildSigningMessage(
       OPERATION_TYPES.BIND_AGENT_WALLET,
       operationData,
-      mainWalletAddress,
-      agentPublicKey,
+      timestamp,
+      expiryWindow,
     );
-    console.log(`[AgentBind] Binding agent=${agentPublicKey.slice(0, 8)}... to account=${mainWalletAddress.slice(0, 8)}... (agent signs)`);
+    console.log(`[AgentBind] Prepared bind message for agent=${agentPublicKey.slice(0, 8)}... account=${mainWalletAddress.slice(0, 8)}...`);
+    return { message, timestamp, expiryWindow };
+  }
+
+  async confirmBind(
+    mainWalletAddress: string,
+    agentPublicKey: string,
+    signatureBase58: string,
+    timestamp: number,
+    expiryWindow: number,
+  ): Promise<void> {
+    const body = {
+      account: mainWalletAddress,
+      signature: signatureBase58,
+      timestamp,
+      expiry_window: expiryWindow,
+      agent_wallet: agentPublicKey,
+    };
+    console.log(`[AgentBind] Confirming bind agent=${agentPublicKey.slice(0, 8)}... to account=${mainWalletAddress.slice(0, 8)}...`);
     await this.post('/agent/bind', body);
     console.log(`[AgentBind] Successfully bound agent=${agentPublicKey.slice(0, 8)}...`);
   }
