@@ -10,10 +10,10 @@ function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
 }
 
-async function fetchPerpPositions(agentPublicKey: string, subaccountId: number): Promise<any[]> {
+async function fetchPerpPositions(agentPublicKey: string, subaccountId: number): Promise<{ positions: any[]; fetchFailed: boolean }> {
   try {
     const positions = await getDefaultAdapter().getPositions(agentPublicKey, _subIdStr(subaccountId));
-    return positions.map(p => ({
+    return { positions: positions.map(p => ({
       marketIndex: 0,
       market: p.internalSymbol,
       baseAssetAmount: p.baseSize,
@@ -24,9 +24,10 @@ async function fetchPerpPositions(agentPublicKey: string, subaccountId: number):
       unrealizedPnlPercent: p.entryPrice > 0
         ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
         : 0,
-    }));
-  } catch {
-    return [];
+    })), fetchFailed: false };
+  } catch (err) {
+    console.log(`[fetchPerpPositions] Failed to fetch positions: ${err instanceof Error ? err.message : err}`);
+    return { positions: [], fetchFailed: true };
   }
 }
 
@@ -71,45 +72,82 @@ export async function syncPositionFromOnChain(
     console.log(`[Sync] Force syncing bot ${botId} from on-chain (market=${market}, subaccount=${subAccountId})`);
     
     // Query actual on-chain position using raw RPC (no WebSocket)
-    const onChainPositions = await fetchPerpPositions(agentPublicKey, subAccountId);
+    const fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
     const normalizedMarket = normalizeMarket(market);
-    const onChainPos = onChainPositions.find(p => normalizeMarket(p.market) === normalizedMarket);
+    const onChainPos = fetchResult.positions.find(p => normalizeMarket(p.market) === normalizedMarket);
     
-    // Get existing DB position to calculate realized PnL delta
     const dbPosition = await storage.getBotPosition(botId, market);
     const existingRealizedPnl = dbPosition ? parseFloat(dbPosition.realizedPnl) : 0;
     const existingFees = dbPosition ? parseFloat(dbPosition.totalFees) : 0;
     const previousBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
     const previousAvgEntry = dbPosition ? parseFloat(dbPosition.avgEntryPrice) : 0;
     
+    if (fetchResult.fetchFailed && tradeSize > 0 && tradeFillPrice > 0) {
+      console.log(`[Sync] Position fetch failed — using trade data as fallback`);
+      const normalizedSide = tradeSide.toLowerCase();
+      const tradeSigned = normalizedSide === 'long' ? tradeSize : -tradeSize;
+      const isSameDirection = (previousBaseSize >= 0 && normalizedSide === 'long') ||
+                              (previousBaseSize <= 0 && normalizedSide === 'short');
+      
+      let newBaseSize: number;
+      let newAvgEntry: number;
+      let tradePnl = 0;
+      
+      if (Math.abs(previousBaseSize) < 0.0001) {
+        newBaseSize = tradeSigned;
+        newAvgEntry = tradeFillPrice;
+      } else if (isSameDirection) {
+        newBaseSize = previousBaseSize + tradeSigned;
+        const totalCost = Math.abs(previousBaseSize) * previousAvgEntry + tradeSize * tradeFillPrice;
+        newAvgEntry = totalCost / Math.abs(newBaseSize);
+      } else {
+        const closedSize = Math.min(Math.abs(previousBaseSize), tradeSize);
+        const feeRatio = closedSize / tradeSize;
+        const closeFee = tradeFee * feeRatio;
+        tradePnl = previousBaseSize > 0
+          ? (tradeFillPrice - previousAvgEntry) * closedSize - closeFee
+          : (previousAvgEntry - tradeFillPrice) * closedSize - closeFee;
+        newBaseSize = previousBaseSize + tradeSigned;
+        newAvgEntry = Math.abs(newBaseSize) > 0.0001 ? (Math.abs(newBaseSize) > Math.abs(previousBaseSize) ? tradeFillPrice : previousAvgEntry) : 0;
+      }
+      
+      const newRealizedPnl = existingRealizedPnl + tradePnl;
+      const newTotalFees = existingFees + tradeFee;
+      
+      const position = await storage.upsertBotPosition({
+        tradingBotId: botId,
+        walletAddress,
+        market,
+        baseSize: String(newBaseSize),
+        avgEntryPrice: String(newAvgEntry),
+        costBasis: String(Math.abs(newBaseSize) * newAvgEntry),
+        realizedPnl: String(newRealizedPnl),
+        totalFees: String(newTotalFees),
+        lastTradeId: tradeId,
+        lastTradeAt: new Date(),
+      });
+      
+      console.log(`[Sync] Fallback position: ${newBaseSize.toFixed(4)} ${market} @ $${newAvgEntry.toFixed(2)} (fetch failed, used trade data)`);
+      return { success: true, position, tradePnl, isClosingTrade: tradePnl !== 0, onChainEntryPrice: tradeFillPrice };
+    }
+    
     const onChainBaseSize = onChainPos?.baseAssetAmount || 0;
     
-    // Calculate realized PnL from this trade
-    // Realized PnL occurs when position size decreases (closing or reducing position)
     let tradePnl = 0;
     
     if (Math.abs(previousBaseSize) > 0.0001 && tradeFillPrice > 0 && tradeSize > 0) {
-      // Normalize trade side for comparison
       const normalizedSide = tradeSide.toLowerCase();
-      
-      // Check if this trade reduced the position (opposite side)
       const isReducing = (previousBaseSize > 0 && normalizedSide === 'short') ||
                          (previousBaseSize < 0 && normalizedSide === 'long');
       
       if (isReducing) {
-        // Calculate PnL on the closed portion only
         const closedSize = Math.min(Math.abs(previousBaseSize), tradeSize);
-        
-        // Prorate fee: only the portion of fee for the closed size affects realized PnL
-        // If trade size > closed size (flip/overclose), some fee goes to the new position
         const feeRatio = closedSize / tradeSize;
         const closeFee = tradeFee * feeRatio;
         
         if (previousBaseSize > 0) {
-          // Was LONG, selling to close - PnL = (fillPrice - avgEntry) * closedSize - prorated fee
           tradePnl = (tradeFillPrice - previousAvgEntry) * closedSize - closeFee;
         } else {
-          // Was SHORT, buying to close - PnL = (avgEntry - fillPrice) * closedSize - prorated fee
           tradePnl = (previousAvgEntry - tradeFillPrice) * closedSize - closeFee;
         }
         
@@ -121,7 +159,6 @@ export async function syncPositionFromOnChain(
     const newTotalFees = existingFees + tradeFee;
     
     if (onChainPos && Math.abs(onChainBaseSize) > 0.0001) {
-      // Position exists on-chain - update DB with actual values
       const position = await storage.upsertBotPosition({
         tradingBotId: botId,
         walletAddress,
@@ -138,7 +175,6 @@ export async function syncPositionFromOnChain(
       console.log(`[Sync] On-chain position: ${onChainBaseSize.toFixed(4)} ${market} @ $${onChainPos.entryPrice.toFixed(2)}, cumulative PnL: $${newRealizedPnl.toFixed(4)}`);
       return { success: true, position, tradePnl, isClosingTrade: tradePnl !== 0, onChainEntryPrice: onChainPos.entryPrice };
     } else {
-      // No position on-chain (position fully closed)
       const position = await storage.upsertBotPosition({
         tradingBotId: botId,
         walletAddress,
@@ -329,9 +365,13 @@ export async function reconcileBotPosition(
   market: string
 ): Promise<{ synced: boolean; discrepancy: boolean; liquidation?: boolean }> {
   try {
-    const onChainPositions = await fetchPerpPositions(agentPublicKey, subAccountId);
+    const fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+    if (fetchResult.fetchFailed) {
+      console.log(`[Reconcile] Skipping reconciliation for bot ${botId} — position fetch failed`);
+      return { synced: false, discrepancy: false };
+    }
     const normalizedMarket = normalizeMarket(market);
-    const onChainPos = onChainPositions.find(p => normalizeMarket(p.market) === normalizedMarket);
+    const onChainPos = fetchResult.positions.find(p => normalizeMarket(p.market) === normalizedMarket);
     const dbPosition = await storage.getBotPosition(botId, market);
     
     const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;

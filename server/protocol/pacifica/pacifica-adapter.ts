@@ -432,7 +432,6 @@ export class PacificaAdapter implements ProtocolAdapter {
       }
       throw err;
     }
-
     if (!Array.isArray(response)) return [];
     return response.map((p) => this.mapPosition(p));
   }
@@ -562,7 +561,6 @@ export class PacificaAdapter implements ProtocolAdapter {
       (body as Record<string, unknown>).subaccount_id = params.subaccountId;
     }
 
-    console.log(`[PacificaAdapter] create_market request body:`, JSON.stringify(body, null, 2));
     const response: PacificaOrderResponse = await this.post('/orders/create_market', body);
 
     return this.mapOrderResponse(response, params.clientOrderId);
