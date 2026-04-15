@@ -399,7 +399,14 @@ export async function reconcileBotPosition(
     
     const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
     const onChainBaseSize = onChainPos?.baseAssetAmount || 0;
+    const onChainHasRealPosition = onChainPos && Math.abs(onChainBaseSize) > 0.0001;
     
+    if (Math.abs(dbBaseSize) > 0.0001 && !onChainHasRealPosition) {
+      console.log(`[Reconcile] On-chain empty/zero but DB has ${dbBaseSize} ${market} — preserving DB (source of truth). Position clearing only happens via explicit trade execution.`);
+      lastReconcileTime.set(botId, Date.now());
+      return { synced: true, discrepancy: false };
+    }
+
     const hasDiscrepancy = Math.abs(dbBaseSize - onChainBaseSize) > 0.0001;
     
     if (hasDiscrepancy) {
@@ -426,7 +433,7 @@ export async function reconcileBotPosition(
         }
       }
 
-      if (onChainPos && Math.abs(onChainBaseSize) > 0.0001) {
+      if (onChainHasRealPosition) {
         await storage.upsertBotPosition({
           tradingBotId: botId,
           walletAddress,
@@ -439,8 +446,6 @@ export async function reconcileBotPosition(
           lastTradeId: dbPosition?.lastTradeId || null,
           lastTradeAt: new Date(),
         });
-      } else if (dbPosition && Math.abs(dbBaseSize) > 0.0001 && !onChainPos) {
-        console.log(`[Reconcile] On-chain shows no position but DB has ${dbBaseSize} ${market} — preserving DB (source of truth). Position clearing only happens via explicit trade execution.`);
       }
     }
     
