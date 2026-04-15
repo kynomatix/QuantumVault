@@ -102,7 +102,8 @@ export class PositionService {
     agentPublicKey: string,
     subAccountId: number,
     market: string,
-    agentPrivateKeyEncrypted?: string
+    agentPrivateKeyEncrypted?: string,
+    botSubaccountPublicKey?: string
   ): Promise<PositionData> {
     const timestamp = new Date();
     let onChainPos: OnChainPosition | null = null;
@@ -110,8 +111,31 @@ export class PositionService {
     let driftDetails: PositionData['driftDetails'] = undefined;
 
     try {
-      console.log(`[PositionService] Using byte-parsing position fetching for ${market}`);
-      const fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+      let fetchResult;
+      if (botSubaccountPublicKey) {
+        console.log(`[PositionService] Using adapter for ${market} (bot subaccount ${botSubaccountPublicKey.slice(0,8)}...)`);
+        try {
+          const positions = await getDefaultAdapter().getPositions(botSubaccountPublicKey);
+          fetchResult = { positions: positions.map(p => ({
+            marketIndex: 0,
+            market: p.internalSymbol,
+            baseAssetAmount: p.baseSize,
+            side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
+            entryPrice: p.entryPrice,
+            markPrice: p.markPrice,
+            unrealizedPnl: p.unrealizedPnl,
+            unrealizedPnlPercent: p.entryPrice > 0 && p.baseSize !== 0
+              ? ((p.unrealizedPnl / (Math.abs(p.baseSize) * p.entryPrice)) * 100)
+              : 0,
+          })), fetchFailed: false };
+        } catch (err) {
+          console.log(`[PositionService] bot subaccount getPosition failed: ${err instanceof Error ? err.message : err}`);
+          fetchResult = { positions: [], fetchFailed: true };
+        }
+      } else {
+        console.log(`[PositionService] Using byte-parsing position fetching for ${market}`);
+        fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+      }
       const normalizedMarket = normalizeMarket(market);
       onChainPos = fetchResult.positions.find(p => 
         normalizeMarket(p.market) === normalizedMarket
@@ -160,7 +184,9 @@ export class PositionService {
       let healthMetrics: PositionData['healthMetrics'] = undefined;
       if (hasPosition) {
         try {
-          const accountInfo = await fetchDriftAccountInfo(agentPublicKey, subAccountId);
+          const accountInfo = botSubaccountPublicKey
+            ? await fetchDriftAccountInfo(botSubaccountPublicKey, 0)
+            : await fetchDriftAccountInfo(agentPublicKey, subAccountId);
           
           // Health Factor = (freeCollateral / totalCollateral) * 100
           // This matches Drift's approach: 100% when fully free, lower as margin is used

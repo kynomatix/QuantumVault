@@ -60,13 +60,35 @@ export async function syncPositionFromOnChain(
   tradeFee: number,
   tradeFillPrice: number = 0,
   tradeSide: string = '',
-  tradeSize: number = 0
+  tradeSize: number = 0,
+  botSubaccountPublicKey?: string
 ): Promise<{ success: boolean; position?: any; error?: string; tradePnl?: number; isClosingTrade?: boolean; onChainEntryPrice?: number }> {
   try {
-    console.log(`[Sync] Force syncing bot ${botId} from on-chain (market=${market}, subaccount=${subAccountId})`);
+    console.log(`[Sync] Force syncing bot ${botId} from on-chain (market=${market}, subaccount=${subAccountId}${botSubaccountPublicKey ? ', pacifica=' + botSubaccountPublicKey.slice(0,8) + '...' : ''})`);
     
-    // Query actual on-chain position using raw RPC (no WebSocket)
-    const fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+    let fetchResult;
+    if (botSubaccountPublicKey) {
+      try {
+        const positions = await getDefaultAdapter().getPositions(botSubaccountPublicKey);
+        fetchResult = { positions: positions.map(p => ({
+          marketIndex: 0,
+          market: p.internalSymbol,
+          baseAssetAmount: p.baseSize,
+          side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
+          entryPrice: p.entryPrice,
+          markPrice: p.markPrice,
+          unrealizedPnl: p.unrealizedPnl,
+          unrealizedPnlPercent: p.entryPrice > 0 && p.baseSize !== 0
+            ? ((p.unrealizedPnl / (Math.abs(p.baseSize) * p.entryPrice)) * 100)
+            : 0,
+        })), fetchFailed: false };
+      } catch (err) {
+        console.log(`[Sync] Bot subaccount position fetch failed: ${err instanceof Error ? err.message : err}`);
+        fetchResult = { positions: [], fetchFailed: true };
+      }
+    } else {
+      fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+    }
     const normalizedMarket = normalizeMarket(market);
     const onChainPos = fetchResult.positions.find(p => normalizeMarket(p.market) === normalizedMarket);
     
@@ -220,10 +242,33 @@ export async function reconcileBotPosition(
   walletAddress: string,
   agentPublicKey: string,
   subAccountId: number,
-  market: string
+  market: string,
+  botSubaccountPublicKey?: string
 ): Promise<{ synced: boolean; discrepancy: boolean; liquidation?: boolean }> {
   try {
-    const fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+    let fetchResult;
+    if (botSubaccountPublicKey) {
+      try {
+        const positions = await getDefaultAdapter().getPositions(botSubaccountPublicKey);
+        fetchResult = { positions: positions.map(p => ({
+          marketIndex: 0,
+          market: p.internalSymbol,
+          baseAssetAmount: p.baseSize,
+          side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
+          entryPrice: p.entryPrice,
+          markPrice: p.markPrice,
+          unrealizedPnl: p.unrealizedPnl,
+          unrealizedPnlPercent: p.entryPrice > 0 && p.baseSize !== 0
+            ? ((p.unrealizedPnl / (Math.abs(p.baseSize) * p.entryPrice)) * 100)
+            : 0,
+        })), fetchFailed: false };
+      } catch (err) {
+        console.log(`[Reconcile] Bot subaccount position fetch failed for ${botId}: ${err instanceof Error ? err.message : err}`);
+        fetchResult = { positions: [], fetchFailed: true };
+      }
+    } else {
+      fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+    }
     if (fetchResult.fetchFailed) {
       console.log(`[Reconcile] Skipping reconciliation for bot ${botId} — position fetch failed`);
       return { synced: false, discrepancy: false };
@@ -285,12 +330,14 @@ export async function reconcileAllBotsForWallet(walletAddress: string): Promise<
   
   for (const bot of bots) {
     const subAccountId = bot.driftSubaccountId ?? 0;
+    const botSubPubKey = (bot.protocolSubaccountId && bot.subaccountStatus === 'active') ? bot.protocolSubaccountId : undefined;
     const result = await reconcileBotPosition(
       bot.id,
       walletAddress,
       wallet.agentPublicKey,
       subAccountId,
-      bot.market
+      bot.market,
+      botSubPubKey
     );
     if (result.discrepancy) discrepancies++;
   }

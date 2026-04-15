@@ -1664,7 +1664,8 @@ async function routeSignalToSubscribers(
               tradeFee,
               fillPrice,
               side,
-              contractSize
+              contractSize,
+              subBotCtx?.botPublicKey
             );
 
             if (syncResult?.onChainEntryPrice && syncResult.onChainEntryPrice > 0 && Math.abs(syncResult.onChainEntryPrice - fillPrice) > 0.001) {
@@ -4195,7 +4196,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         // but the database wasn't updated
         try {
           const { reconcileBotPosition } = await import("./reconciliation-service.js");
-          await reconcileBotPosition(bot.id, wallet.address, wallet.agentPublicKey, subAccountId, bot.market);
+          await reconcileBotPosition(bot.id, wallet.address, wallet.agentPublicKey, subAccountId, bot.market, closeBotCtx?.botPublicKey);
           console.log(`[ClosePosition] Ran reconciliation after "already closed" scenario`);
         } catch (reconcileErr) {
           console.warn(`[ClosePosition] Reconciliation failed (non-critical):`, reconcileErr);
@@ -4368,7 +4369,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         closeFee,
         fillPrice,
         closeSide,
-        closeSize
+        closeSize,
+        closeBotCtx?.botPublicKey
       );
       
       // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
@@ -4727,7 +4729,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         tradeFee,
         fillPrice,
         side,
-        contractSize
+        contractSize,
+        manualBotCtx?.botPublicKey
       );
 
       // Update trade with real on-chain fill price if available (more accurate than oracle estimate)
@@ -4792,6 +4795,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const subAccountId = bot.driftSubaccountId ?? 0;
+      const refreshBotCtx = getBotSubaccountContext(bot);
       
       // Also force refresh oracle prices while we're at it
       const freshPrices = await forceRefreshPrices();
@@ -4808,7 +4812,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         0, // no fee
         0, // no fill price
         '', // no side
-        0  // no size
+        0,  // no size
+        refreshBotCtx?.botPublicKey
       );
 
       if (syncResult.success) {
@@ -5167,7 +5172,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           overviewQueryAccount,
           overviewQuerySubId,
           bot.market,
-          wallet.agentPrivateKeyEncrypted ?? undefined
+          wallet.agentPrivateKeyEncrypted ?? undefined,
+          overviewBotCtx?.botPublicKey
         ),
         storage.getBotNetDeposited(botId),
         storage.getBotTradeCount(botId),
@@ -5712,7 +5718,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 closeFee,
                 result.fillPrice || 0,
                 closeSide,
-                closeSize
+                closeSize,
+                pauseBotCtx?.botPublicKey
               );
               
               positionClosed = positionVerified;
@@ -6410,15 +6417,19 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const subAccountId = bot.driftSubaccountId ?? 0;
+      const posBotCtx = getBotSubaccountContext(bot);
+      const posQueryAccount = posBotCtx ? posBotCtx.botPublicKey : wallet.agentPublicKey;
+      const posQuerySubId = posBotCtx ? 0 : subAccountId;
       
       // Use PositionService - always queries on-chain first, auto-corrects database drift
       const posData = await PositionService.getPosition(
         bot.id,
         bot.walletAddress,
-        wallet.agentPublicKey,
-        subAccountId,
+        posQueryAccount,
+        posQuerySubId,
         bot.market,
-        wallet.agentPrivateKeyEncrypted ?? undefined
+        wallet.agentPrivateKeyEncrypted ?? undefined,
+        posBotCtx?.botPublicKey
       );
 
       if (!posData.position?.hasPosition) {
@@ -7117,7 +7128,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                   closeFee,
                   closeFillPrice,
                   closeSide,
-                  closeSize
+                  closeSize,
+                  webhookBotCtx?.botPublicKey
                 );
 
                 const closeNotionalVolume = closeSize * closeFillPrice;
@@ -7435,7 +7447,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             // Defer sync for no-signature case (fire-and-forget)
             (async () => {
               try {
-                await syncPositionFromOnChain(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market, closeTrade.id, closeFee, closeFillPrice, closeSide, closeSize);
+                await syncPositionFromOnChain(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market, closeTrade.id, closeFee, closeFillPrice, closeSide, closeSize, webhookBotCtx?.botPublicKey);
               } catch (err) {
                 console.error(`[Webhook] Deferred flip close sync failed (non-blocking): ${err}`);
               }
@@ -7474,7 +7486,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             // Defer sync and stats for flip close (fire-and-forget, non-blocking)
             (async () => {
               try {
-                await syncPositionFromOnChain(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market, closeTrade.id, closeFee, closeFillPrice, closeSide, closeSize);
+                await syncPositionFromOnChain(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market, closeTrade.id, closeFee, closeFillPrice, closeSide, closeSize, webhookBotCtx?.botPublicKey);
                 
                 const flipCloseVolume = closeSize * closeFillPrice;
                 const stats1 = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
@@ -7754,7 +7766,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             tradeFee,
             fillPrice,
             side,
-            finalContractSize
+            finalContractSize,
+            webhookBotCtx?.botPublicKey
           );
 
           // CRITICAL: Verify trade tx actually succeeded on-chain
@@ -8284,7 +8297,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               closeFee,
               closeFillPrice,
               closeSide,
-              closeSize
+              closeSize,
+              userWebhookBotCtx?.botPublicKey
             );
             
             // Update bot stats
@@ -8694,7 +8708,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         userTradeFee,
         userFillPrice,
         side,
-        contractSize
+        contractSize,
+        userWebhookBotCtx?.botPublicKey
       );
 
       if (syncResult?.onChainEntryPrice && syncResult.onChainEntryPrice > 0 && Math.abs(syncResult.onChainEntryPrice - userFillPrice) > 0.001) {
@@ -10539,7 +10554,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             estimatedFee,
             fillPrice,
             side.toLowerCase() as 'long' | 'short',
-            size
+            size,
+            retryBotCtx?.botPublicKey
           );
           console.log(`[Retry Trade] Position synced from on-chain with correct entry price`);
         } catch (syncErr) {
