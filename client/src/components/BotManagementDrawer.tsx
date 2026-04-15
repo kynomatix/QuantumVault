@@ -558,7 +558,7 @@ export function BotManagementDrawer({
         throw new Error(friendlyMessage);
       }
 
-      toast({ title: `Successfully removed $${amount} from bot`, description: `Transaction: ${data.signature?.slice(0, 8)}...` });
+      toast({ title: `Successfully removed $${amount} from bot`, description: data.signature ? `Transaction: ${data.signature.slice(0, 8)}...` : 'Withdrawal complete' });
       setRemoveEquityAmount('');
       setTimeout(() => fetchBotOverview(), 1500);
     } catch (error) {
