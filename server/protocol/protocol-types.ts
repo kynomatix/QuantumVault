@@ -43,6 +43,7 @@ export interface MarketOrderParams {
   subaccountId?: string;
   builderCode?: string;
   maxSlippagePct?: number;
+  leverage?: number;
 }
 
 export interface LimitOrderParams {

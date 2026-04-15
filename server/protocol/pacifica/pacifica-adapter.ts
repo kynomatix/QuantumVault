@@ -531,6 +531,10 @@ export class PacificaAdapter implements ProtocolAdapter {
       slippage_percent: String(slippagePct),
     };
 
+    if (params.leverage && params.leverage > 0) {
+      operationData.leverage = String(params.leverage);
+    }
+
     if (params.clientOrderId) {
       operationData.client_order_id = params.clientOrderId;
     }

@@ -240,6 +240,7 @@ async function executePerpOrder(
   _slippageBps: number = 50,
   _privateKeyBase58?: string,
   expectedAgentPubkey?: string,
+  leverage?: number,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string | null }> {
   try {
     const { secretKey, publicKey } = _decryptToSecretKey(encryptedPrivateKey);
@@ -255,6 +256,7 @@ async function executePerpOrder(
       reduceOnly,
       subaccountId: _subIdStr(subAccountId),
       maxSlippagePct: _slippageBps / 100,
+      leverage,
     });
     return {
       success: orderResult.success,
@@ -1473,7 +1475,8 @@ async function routeSignalToSubscribers(
             false,
             subSlippageBps,
             undefined,
-            subWallet.agentPublicKey || undefined
+            subWallet.agentPublicKey || undefined,
+            subBot.leverage || 1,
           );
 
           if (orderResult.success) {
@@ -4315,7 +4318,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         false,
         userSlippageBps,
         undefined,
-        wallet.agentPublicKey
+        wallet.agentPublicKey,
+        bot.leverage || 1,
       );
 
       if (!orderResult.success) {
