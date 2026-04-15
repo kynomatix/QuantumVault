@@ -3032,16 +3032,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Existing user = has at least one bot (they've completed onboarding before)
       const isExistingUser = bots.length > 0;
       
-      // SOL requirements for bot creation:
-      // - 0.035 SOL per subaccount rent
-      // - 0.005 SOL for trading gas
-      // If no Drift account exists: need 2x rent (subaccount 0 + bot subaccount) = 0.075 SOL
-      // If Drift account exists: need 1x rent (just bot subaccount) = 0.04 SOL
-      const SUBACCOUNT_RENT = 0.035;
       const TRADING_GAS = 0.005;
-      const requiredSolForBot = driftAccountExists 
-        ? SUBACCOUNT_RENT + TRADING_GAS  // 0.04 SOL
-        : (SUBACCOUNT_RENT * 2) + TRADING_GAS; // 0.075 SOL
+      const requiredSolForBot = TRADING_GAS;
       
       const solDeficit = Math.max(0, requiredSolForBot - solBalance);
       const canCreateBot = solBalance >= requiredSolForBot;
@@ -4937,17 +4929,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           subaccountExists(wallet.agentPublicKey, 0),
         ]);
         
-        // 0.035 SOL per subaccount rent + 0.005 SOL for trading gas
-        const SUBACCOUNT_RENT = 0.035;
         const TRADING_GAS = 0.005;
-        const requiredSol = driftAccountExists 
-          ? SUBACCOUNT_RENT + TRADING_GAS  // 0.04 SOL
-          : (SUBACCOUNT_RENT * 2) + TRADING_GAS; // 0.075 SOL (need to create subaccount 0 + bot subaccount)
+        const requiredSol = TRADING_GAS;
         
         if (solBalance < requiredSol) {
           const deficit = requiredSol - solBalance;
           return res.status(400).json({ 
-            error: `Insufficient SOL for bot creation. Need ${requiredSol.toFixed(3)} SOL, have ${solBalance.toFixed(4)} SOL. Please deposit at least ${deficit.toFixed(3)} SOL to your agent wallet.` 
+            error: `Insufficient SOL for transaction fees. Need ${requiredSol.toFixed(3)} SOL, have ${solBalance.toFixed(4)} SOL. Please deposit at least ${deficit.toFixed(3)} SOL to your agent wallet.` 
           });
         }
       }
@@ -9376,18 +9364,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         });
       }
       
-      // Server-side SOL balance check for subscription (same as bot creation)
-      // 0.035 SOL per subaccount rent + 0.005 SOL for trading gas
-      const SUBACCOUNT_RENT = 0.035;
       const TRADING_GAS = 0.005;
-      const requiredSol = driftAccountExists 
-        ? SUBACCOUNT_RENT + TRADING_GAS  // 0.04 SOL
-        : (SUBACCOUNT_RENT * 2) + TRADING_GAS; // 0.075 SOL
+      const requiredSol = TRADING_GAS;
       
-      if (solBalance < requiredSol - 0.001) { // Small tolerance for floating point
+      if (solBalance < requiredSol - 0.001) {
         const deficit = requiredSol - solBalance;
         return res.status(400).json({ 
-          error: `Insufficient SOL for subscription. Need ${requiredSol.toFixed(3)} SOL, have ${solBalance.toFixed(4)} SOL. Please deposit at least ${deficit.toFixed(3)} SOL to your agent wallet.` 
+          error: `Insufficient SOL for transaction fees. Need ${requiredSol.toFixed(3)} SOL, have ${solBalance.toFixed(4)} SOL. Please deposit at least ${deficit.toFixed(3)} SOL to your agent wallet.` 
         });
       }
 

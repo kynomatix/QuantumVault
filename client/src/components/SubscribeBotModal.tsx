@@ -232,10 +232,10 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
               <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
               <div className="space-y-1">
                 <p className="text-sm font-medium text-yellow-400">
-                  Insufficient SOL for Subscription
+                  Insufficient SOL for Transaction Fees
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Subscribing requires {solRequirement.required.toFixed(3)} SOL for subaccount rent and transaction fees. 
+                  Subscribing requires {solRequirement.required.toFixed(3)} SOL for transaction fees. 
                   Your agent wallet has {solRequirement.current.toFixed(4)} SOL.
                 </p>
                 <p className="text-xs text-yellow-400/80">

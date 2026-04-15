@@ -3859,7 +3859,7 @@ export default function AppPage() {
                     { id: 'settling', label: 'Settling PnL to USDC', icon: Activity },
                     { id: 'sweeping', label: 'Sweeping funds to main account', icon: ArrowUpFromLine },
                     { id: 'withdrawing', label: 'Withdrawing to agent wallet', icon: Wallet },
-                    { id: 'deleting', label: 'Deleting subaccounts & recovering rent', icon: Trash2 },
+                    { id: 'deleting', label: 'Cleaning up subaccounts', icon: Trash2 },
                     { id: 'complete', label: 'Reset complete', icon: Check },
                   ].map((step, index) => {
                     const stepOrder = ['closing', 'settling', 'sweeping', 'withdrawing', 'deleting', 'complete'];

@@ -438,10 +438,10 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
             <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
             <div className="space-y-1">
               <p className="text-sm font-medium text-yellow-400" data-testid="text-sol-warning-title">
-                Insufficient SOL for Bot Setup
+                Insufficient SOL for Transaction Fees
               </p>
               <p className="text-xs text-muted-foreground">
-                Creating a bot requires {solRequirement.required.toFixed(3)} SOL for subaccount rent and transaction fees. 
+                Creating a bot requires {solRequirement.required.toFixed(3)} SOL for transaction fees. 
                 Your agent wallet has {solRequirement.current.toFixed(4)} SOL.
               </p>
               <p className="text-xs text-yellow-400/80" data-testid="text-sol-deficit">
@@ -709,13 +709,13 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
           </CollapsibleContent>
         </Collapsible>
 
-        <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+        <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
           <div className="flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 text-yellow-500 mt-0.5 flex-shrink-0" />
+            <AlertCircle className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
             <div className="text-xs">
-              <p className="font-medium text-yellow-500">Subaccount Rent</p>
+              <p className="font-medium text-blue-500">Trading Subaccount</p>
               <p className="text-muted-foreground">
-                Creating a bot allocates a trading subaccount which requires ~0.035 SOL rent from your agent wallet's gas balance. This rent is reclaimable when you delete the bot.
+                Each bot gets its own isolated trading subaccount. A small amount of SOL (~0.005) is needed in your agent wallet for transaction fees.
               </p>
             </div>
           </div>
