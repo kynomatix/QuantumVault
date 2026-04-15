@@ -10794,6 +10794,43 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     next();
   };
   
+  app.post("/api/admin/rescue-transfer", requireAdminAuth, async (req, res) => {
+    try {
+      const { botId, amount } = req.body;
+      const bot = await storage.getTradingBotById(botId);
+      if (!bot || !bot.protocolSubaccountId || !bot.botSubaccountKeyEncrypted) {
+        return res.status(400).json({ error: "Bot not found or no Pacifica subaccount" });
+      }
+      const wallet = await storage.getWallet(bot.walletAddress);
+      if (!wallet?.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "No agent wallet" });
+      }
+      const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
+      const adapter = getDefaultAdapter() as PacificaAdapter;
+      const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+      const transferResult = await adapter.transferBetweenSubaccounts({
+        agentSecretKey: agentKeypair.secretKey,
+        agentPublicKey: agentKeypair.publicKey.toString(),
+        fromSubaccountId: agentKeypair.publicKey.toString(),
+        toSubaccountId: bot.protocolSubaccountId,
+        amount,
+      });
+      if (transferResult.success) {
+        await storage.createEquityEvent({
+          walletAddress: bot.walletAddress,
+          tradingBotId: bot.id,
+          eventType: 'drift_deposit',
+          amount: String(amount),
+          txSignature: null,
+          notes: `Rescue transfer: agent→${bot.protocolSubaccountId.slice(0,8)}... $${amount}`,
+        });
+      }
+      res.json(transferResult);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.get("/api/admin/execution-diagnostics", requireAdminAuth, async (req, res) => {
     try {
       const diag = getSwiftDiagnostics();
