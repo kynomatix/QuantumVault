@@ -404,12 +404,16 @@ export function startPeriodicReconciliation(): void {
         
         for (const bot of botsToReconcile) {
           const subAccountId = bot.driftSubaccountId ?? 0;
+          const botSubPubKey = (bot.subaccountStatus === 'active' && bot.protocolSubaccountId)
+            ? bot.protocolSubaccountId
+            : undefined;
           await reconcileBotPosition(
             bot.id,
             walletAddress,
             wallet.agentPublicKey,
             subAccountId,
-            bot.market
+            bot.market,
+            botSubPubKey
           );
         }
       }
