@@ -31,7 +31,7 @@ QuantumVault is migrating from Drift Protocol to a protocol-agnostic adapter arc
 
 **Workflow:** When starting a phase, check the Phase Navigation Index for which sections to read. Work through Section 17's phase checklist top-to-bottom. Phase 3 has explicit Group A→B→C ordering — follow it.
 
-**Status:** Phase 6 canary running. **CRITICAL FINDING: Pacifica ignores `subaccount_id` — single shared account per wallet.** All bot balances/PnL are now computed from DB (equity events + position tracking), not from exchange queries. Exchange is queried once for total account balance only. See §8 of PACIFICA_MIGRATION.md for full details. True margin isolation requires either multiple agent wallets or Pacifica's per-position isolated margin mode (future work).
+**Status:** Phase 6 canary running. **CRITICAL FINDING (April 15, 2026): Pacifica subaccounts are wallet-based, not numeric.** The `POST /account/subaccount/create` endpoint requires: `main_account`, `subaccount` (a NEW keypair), `timestamp`, `main_signature`, `sub_signature`. Our `createSubaccountWithKey` was completely wrong — wrong field names, wrong flow, never tested. Subaccounts were never actually created on Pacifica, which is why `subaccount_id` queries returned total-account data. The fix is to generate one keypair per bot and register each as a Pacifica subaccount — this preserves volume/fee consolidation under the main account. See §8 of PACIFICA_MIGRATION.md for full findings and implementation plan (Phase 8). Interim: DB-based bot accounting is live and correct.
 
 ### Engineering Standards for Migration Work
 
