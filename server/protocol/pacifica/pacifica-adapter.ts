@@ -1256,16 +1256,17 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   private mapPosition(p: PacificaPositionResponse): ProtocolPosition {
-    const size = parseFloat(p.size);
+    const rawAmount = parseFloat(p.amount || p.size || '0');
+    const size = p.side === 'ask' ? -rawAmount : rawAmount;
     return {
       internalSymbol: this.safeProtocolToInternal(p.symbol),
       baseSize: size,
       entryPrice: parseFloat(p.entry_price),
-      markPrice: parseFloat(p.mark_price),
-      unrealizedPnl: parseFloat(p.unrealized_pnl),
-      leverage: parseFloat(p.leverage),
+      markPrice: p.mark_price ? parseFloat(p.mark_price) : parseFloat(p.entry_price),
+      unrealizedPnl: p.unrealized_pnl ? parseFloat(p.unrealized_pnl) : 0,
+      leverage: p.leverage ? parseFloat(p.leverage) : null,
       liquidationPrice: p.liquidation_price ? parseFloat(p.liquidation_price) : null,
-      marginMode: p.margin_mode,
+      marginMode: p.margin_mode || (p.isolated ? 'isolated' : 'cross'),
       subaccountId: p.subaccount_id,
     };
   }

@@ -65,13 +65,20 @@ export interface PacificaAccountResponse {
 
 export interface PacificaPositionResponse {
   symbol: string;
-  size: string;
+  side: string;
+  amount: string;
   entry_price: string;
-  mark_price: string;
-  unrealized_pnl: string;
-  leverage: string;
+  margin: string;
+  funding: string;
+  isolated: boolean;
   liquidation_price: string | null;
-  margin_mode: 'cross' | 'isolated';
+  created_at: number;
+  updated_at: number;
+  size?: string;
+  mark_price?: string;
+  unrealized_pnl?: string;
+  leverage?: string;
+  margin_mode?: 'cross' | 'isolated';
   subaccount_id?: string;
 }
 

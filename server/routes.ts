@@ -10842,6 +10842,26 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
+  app.get("/api/admin/debug-positions/:botId", requireAdminAuth, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.botId);
+      if (!bot) return res.status(404).json({ error: "Bot not found" });
+      const wallet = await storage.getWallet(bot.walletAddress);
+      const agentPubKey = wallet?.agentPublicKey || '';
+      const botPubKey = bot.protocolSubaccountId || '';
+      const adapter = getDefaultAdapter();
+      const results: Record<string, any> = {};
+      try { results.botKeyOnly = await adapter.getPositions(botPubKey); } catch (e: any) { results.botKeyOnly_error = e.message; }
+      try { const rawResp = await (adapter as any).get('/positions', { account: botPubKey }); results.rawPositions = rawResp; } catch (e: any) { results.rawPositions_error = e.message; }
+      try { results.agentWithBotSub = await adapter.getPositions(agentPubKey, botPubKey); } catch (e: any) { results.agentWithBotSub_error = e.message; }
+      try { results.agentOnly = await adapter.getPositions(agentPubKey); } catch (e: any) { results.agentOnly_error = e.message; }
+      try { results.accountInfo = await adapter.getAccountInfo(botPubKey); } catch (e: any) { results.accountInfo_error = e.message; }
+      res.json({ agentPubKey, botPubKey, results });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.get("/api/admin/execution-diagnostics", requireAdminAuth, async (req, res) => {
     try {
       const diag = getSwiftDiagnostics();
