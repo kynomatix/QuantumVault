@@ -2705,55 +2705,22 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.post("/api/agent/prepare-bind", requireWallet, async (req, res) => {
+  app.post("/api/agent/bind", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet || !wallet.agentPublicKey) {
+      if (!wallet || !wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
       const adapter = getDefaultAdapter() as any;
-      if (typeof adapter.prepareAgentBind !== 'function') {
+      if (typeof adapter.bindAgentWallet !== 'function') {
         return res.status(501).json({ error: "Protocol does not support agent binding" });
       }
-      const { message, timestamp, expiryWindow } = adapter.prepareAgentBind(
-        req.walletAddress!,
-        wallet.agentPublicKey,
-      );
-      console.log(`[AgentBind] Prepared bind message for agent=${wallet.agentPublicKey.slice(0, 8)}... account=${req.walletAddress!.slice(0, 8)}...`);
-      res.json({ message, timestamp, expiryWindow, agentPublicKey: wallet.agentPublicKey });
-    } catch (error: any) {
-      console.error("[AgentBind] prepare-bind error:", error);
-      res.status(500).json({ error: error.message || "Failed to prepare agent binding" });
-    }
-  });
-
-  app.post("/api/agent/confirm-bind", requireWallet, async (req, res) => {
-    try {
-      const { signature, timestamp, expiryWindow } = req.body;
-      if (!signature || !timestamp || !expiryWindow) {
-        return res.status(400).json({ error: "Missing signature, timestamp, or expiryWindow" });
-      }
-      const wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet || !wallet.agentPublicKey) {
-        return res.status(400).json({ error: "Agent wallet not initialized" });
-      }
-      const adapter = getDefaultAdapter() as any;
-      if (typeof adapter.confirmAgentBind !== 'function') {
-        return res.status(501).json({ error: "Protocol does not support agent binding" });
-      }
-      console.log(`[AgentBind] confirm-bind: account=${req.walletAddress!.slice(0, 8)}..., agent=${wallet.agentPublicKey.slice(0, 8)}...`);
-      await adapter.confirmAgentBind(
-        req.walletAddress!,
-        wallet.agentPublicKey,
-        signature,
-        timestamp,
-        expiryWindow,
-      );
-      console.log(`[AgentBind] Successfully bound agent ${wallet.agentPublicKey.slice(0, 8)}... for wallet ${req.walletAddress!.slice(0, 8)}...`);
+      const { secretKey } = _decryptToSecretKey(wallet.agentPrivateKeyEncrypted);
+      await adapter.bindAgentWallet(req.walletAddress!, secretKey);
       res.json({ success: true });
     } catch (error: any) {
-      console.error("[AgentBind] confirm-bind error:", error);
-      res.status(500).json({ error: error.message || "Failed to confirm agent binding" });
+      console.error("[AgentBind] bind error:", error);
+      res.status(500).json({ error: error.message || "Failed to bind agent wallet" });
     }
   });
 

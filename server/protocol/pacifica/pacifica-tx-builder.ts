@@ -184,7 +184,7 @@ export class PacificaTxBuilder implements UserTransactionBuilder {
     throw new Error(
       'PacificaTxBuilder.buildBindAgentWalletTransaction: Pacifica agent wallet registration ' +
       'is a REST API call with signature, not an on-chain transaction. ' +
-      'Use PacificaAdapter.registerAgentWallet() instead.',
+      'Use PacificaAdapter.bindAgentWallet() instead.',
     );
   }
 

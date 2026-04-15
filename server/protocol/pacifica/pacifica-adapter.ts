@@ -36,9 +36,7 @@ import type {
   Unsubscribe,
 } from '../protocol-types.js';
 import { SymbolRegistry, buildPacificaMappings } from '../symbol-registry.js';
-import nacl from 'tweetnacl';
-import bs58 from 'bs58';
-import { PacificaSigner, OPERATION_TYPES, buildSigningMessage } from './pacifica-signer.js';
+import { PacificaSigner, OPERATION_TYPES } from './pacifica-signer.js';
 import {
   PACIFICA_PROGRAM_ID,
   PACIFICA_CENTRAL_STATE,
@@ -1032,74 +1030,22 @@ export class PacificaAdapter implements ProtocolAdapter {
     return this.listSubaccounts(agentPublicKey);
   }
 
-  async registerAgentWallet(
-    mainWalletSecretKey: Uint8Array,
+  async bindAgentWallet(
     mainWalletAddress: string,
-    agentPublicKey: string,
+    agentSecretKey: Uint8Array,
   ): Promise<void> {
-    const signer = new PacificaSigner(mainWalletSecretKey);
-
-    const operationData: Record<string, unknown> = {
-      agent_public_key: agentPublicKey,
-    };
-
+    const signer = new PacificaSigner(agentSecretKey);
+    const agentPublicKey = signer.getPublicKey();
+    const operationData = { agent_public_key: agentPublicKey };
     const body = signer.buildRequestBody(
       OPERATION_TYPES.BIND_AGENT_WALLET,
       operationData,
       mainWalletAddress,
-      null,
+      agentPublicKey,
     );
-
+    console.log(`[AgentBind] Binding agent=${agentPublicKey.slice(0, 8)}... to account=${mainWalletAddress.slice(0, 8)}... (agent signs)`);
     await this.post('/agent/bind', body);
-  }
-
-  prepareAgentBind(
-    mainWalletAddress: string,
-    agentPublicKey: string,
-  ): { message: string; timestamp: number; expiryWindow: number } {
-    const timestamp = Date.now();
-    const expiryWindow = 30000;
-    const operationData = { agent_public_key: agentPublicKey };
-    const message = buildSigningMessage(
-      OPERATION_TYPES.BIND_AGENT_WALLET,
-      operationData,
-      timestamp,
-      expiryWindow,
-    );
-    return { message, timestamp, expiryWindow };
-  }
-
-  async confirmAgentBind(
-    mainWalletAddress: string,
-    agentPublicKey: string,
-    signatureBase58: string,
-    timestamp: number,
-    expiryWindow: number,
-  ): Promise<void> {
-    const expectedMessage = buildSigningMessage(
-      OPERATION_TYPES.BIND_AGENT_WALLET,
-      { agent_public_key: agentPublicKey },
-      timestamp,
-      expiryWindow,
-    );
-    const messageBytes = new TextEncoder().encode(expectedMessage);
-    const sigBytes = bs58.decode(signatureBase58);
-    const pubKeyBytes = bs58.decode(mainWalletAddress);
-    const localValid = nacl.sign.detached.verify(messageBytes, sigBytes, pubKeyBytes);
-    console.log(`[AgentBind] Local verification: ${localValid ? 'PASS' : 'FAIL'}, account=${mainWalletAddress.slice(0, 8)}..., agent=${agentPublicKey.slice(0, 8)}...`);
-    if (!localValid) {
-      throw new Error('Agent bind signature failed local verification — aborting before sending to Pacifica');
-    }
-
-    const body: Record<string, unknown> = {
-      account: mainWalletAddress,
-      agent_wallet: mainWalletAddress,
-      signature: signatureBase58,
-      timestamp,
-      expiry_window: expiryWindow,
-      agent_public_key: agentPublicKey,
-    };
-    await this.post('/agent/bind', body);
+    console.log(`[AgentBind] Successfully bound agent=${agentPublicKey.slice(0, 8)}...`);
   }
 
   async settlePnl(_params: SettlePnlParams): Promise<SettleResult> {
