@@ -883,7 +883,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     internalSymbol: string;
     subaccountId?: string;
   }): Promise<CancelResult> {
-    const protocolSymbol = this.internalToProtocol(params.internalSymbol);
+    const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
     let stopOrders: Array<{ order_id: string }> = [];
     try {
