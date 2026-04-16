@@ -95,7 +95,7 @@ const DISPLAY_NAMES: Record<string, string> = {
 
 function countDecimals(val: number): number {
   if (!Number.isFinite(val) || Math.floor(val) === val) return 0;
-  const s = val.toFixed(20).replace(/0+$/, '');
+  const s = String(val);
   const dotIndex = s.indexOf('.');
   return dotIndex < 0 ? 0 : s.length - dotIndex - 1;
 }
