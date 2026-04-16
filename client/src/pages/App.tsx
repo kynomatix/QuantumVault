@@ -2077,7 +2077,6 @@ export default function AppPage() {
                             const isExecuted = trade.status === 'executed';
                             
                             const getSideColor = () => {
-                              if (isTpSlClose) return 'text-emerald-400';
                               if (isCloseSignal) return 'text-amber-400';
                               if (isLong) return 'text-emerald-400';
                               return 'text-red-400';
