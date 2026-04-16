@@ -810,7 +810,6 @@ export class PacificaAdapter implements ProtocolAdapter {
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
       side: positionSide,
-      reduce_only: true,
     };
 
     if (params.takeProfitPrice !== undefined) {
