@@ -806,22 +806,23 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     const isLong = positionSide === 'bid';
     const TP_SLIPPAGE = 0.001;
-    const SL_SLIPPAGE = 0.005;
 
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
       side: positionSide,
+      reduce_only: true,
     };
 
     if (params.takeProfitPrice !== undefined) {
       if (params.takeProfitPrice > 0) {
-        const tpStop = String(params.takeProfitPrice);
-        const tpLimit = isLong
-          ? String(params.takeProfitPrice * (1 - TP_SLIPPAGE))
-          : String(params.takeProfitPrice * (1 + TP_SLIPPAGE));
+        const tpStopQ = this.quantizePrice(params.internalSymbol, params.takeProfitPrice);
+        const tpLimitRaw = isLong
+          ? params.takeProfitPrice * (1 - TP_SLIPPAGE)
+          : params.takeProfitPrice * (1 + TP_SLIPPAGE);
+        const tpLimitQ = this.quantizePrice(params.internalSymbol, tpLimitRaw);
         operationData.take_profit = {
-          stop_price: tpStop,
-          limit_price: tpLimit,
+          stop_price: String(tpStopQ),
+          limit_price: String(tpLimitQ),
         };
       } else {
         operationData.take_profit = null;
@@ -829,20 +830,16 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
     if (params.stopLossPrice !== undefined) {
       if (params.stopLossPrice > 0) {
-        const slStop = String(params.stopLossPrice);
-        const slLimit = isLong
-          ? String(params.stopLossPrice * (1 - SL_SLIPPAGE))
-          : String(params.stopLossPrice * (1 + SL_SLIPPAGE));
+        const slStopQ = this.quantizePrice(params.internalSymbol, params.stopLossPrice);
         operationData.stop_loss = {
-          stop_price: slStop,
-          limit_price: slLimit,
+          stop_price: String(slStopQ),
         };
       } else {
         operationData.stop_loss = null;
       }
     }
 
-    console.log(`[PacificaAdapter.setTpSl] operationData:`, JSON.stringify(operationData));
+    console.log(`[PacificaAdapter.setTpSl] positionSide=${positionSide} isLong=${isLong} operationData:`, JSON.stringify(operationData));
 
     const body = signer.buildRequestBody(
       OPERATION_TYPES.SET_POSITION_TPSL,
