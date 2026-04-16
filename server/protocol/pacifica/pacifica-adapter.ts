@@ -806,10 +806,11 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     const isLong = positionSide === 'bid';
     const TP_SLIPPAGE = 0.001;
+    const closingSide = isLong ? 'ask' : 'bid';
 
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
-      side: positionSide,
+      side: closingSide,
     };
 
     if (params.takeProfitPrice !== undefined) {
@@ -838,7 +839,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       }
     }
 
-    console.log(`[PacificaAdapter.setTpSl] positionSide=${positionSide} isLong=${isLong} operationData:`, JSON.stringify(operationData));
+    console.log(`[PacificaAdapter.setTpSl] positionSide=${positionSide} closingSide=${closingSide} isLong=${isLong} operationData:`, JSON.stringify(operationData));
 
     const body = signer.buildRequestBody(
       OPERATION_TYPES.SET_POSITION_TPSL,
