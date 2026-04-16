@@ -283,7 +283,7 @@ export default function Landing() {
                 variants={fadeInUp}
                 className="text-lg sm:text-xl text-white/80 max-w-2xl mx-auto mb-10 leading-relaxed drop-shadow-md"
               >
-                Deploy algorithmic trading bots on Solana's fastest Perp-DEXs. 
+                Deploy algorithmic trading bots across 40+ markets on Solana. 
                 Non-custodial, TradingView-powered, and built for serious traders.
               </motion.p>
               
