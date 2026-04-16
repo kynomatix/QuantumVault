@@ -2124,17 +2124,23 @@ export function BotManagementDrawer({
               ) : (
                 <div className="space-y-2 flex-1 overflow-y-auto">
                   {trades.map((trade) => {
-                    const isLong = trade.side === 'LONG';
                     const isFailed = trade.status === 'failed';
                     const isLiquidated = trade.status === 'liquidated';
                     const payload = trade.webhookPayload as any;
                     const action = payload?.data?.action?.toLowerCase() || payload?.action?.toLowerCase() || '';
                     const positionSize = payload?.position_size || payload?.data?.position_size;
-                    const isClose = action === 'close' || trade.side === 'CLOSE' || positionSize === '0' || positionSize === 0;
+                    const closeReason = payload?.closeReason;
+                    const isOnChainClose = trade.executionMethod === 'on-chain-detected';
+                    const isTpSl = closeReason === 'tpsl';
+                    const isClose = action === 'close' || trade.side === 'CLOSE' || positionSize === '0' || positionSize === 0 || isOnChainClose || isTpSl;
+                    const isLong = !isClose && trade.side === 'LONG';
                     
                     const getTradeIcon = () => {
                       if (isLiquidated) {
                         return <AlertTriangle className="h-4 w-4 text-orange-500" />;
+                      }
+                      if (isTpSl) {
+                        return <XCircle className="h-4 w-4 text-emerald-500" />;
                       }
                       if (isClose) {
                         return <XCircle className="h-4 w-4 text-amber-500" />;
@@ -2146,13 +2152,16 @@ export function BotManagementDrawer({
                     };
                     
                     const getTradeLabel = () => {
-                      if (isLiquidated) return 'LIQUIDATED';
-                      if (isClose) return 'CLOSE';
-                      return trade.side;
+                      if (isLiquidated) return 'Liquidated';
+                      if (isTpSl) return 'TP/SL Close';
+                      if (isClose && closeReason === 'external_close') return 'Close';
+                      if (isClose) return 'Close';
+                      return trade.side === 'LONG' ? 'Long' : trade.side === 'SHORT' ? 'Short' : trade.side;
                     };
                     
                     const getIconBgClass = () => {
                       if (isLiquidated) return 'bg-orange-500/10';
+                      if (isTpSl) return 'bg-emerald-500/10';
                       if (isClose) return 'bg-amber-500/10';
                       if (isLong) return 'bg-emerald-500/10';
                       return 'bg-red-500/10';
@@ -2160,6 +2169,7 @@ export function BotManagementDrawer({
                     
                     const getLabelColor = () => {
                       if (isLiquidated) return 'text-orange-500';
+                      if (isTpSl) return 'text-emerald-500';
                       if (isClose) return 'text-amber-500';
                       if (isLong) return 'text-emerald-500';
                       return 'text-red-500';

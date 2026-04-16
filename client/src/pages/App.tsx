@@ -1635,13 +1635,26 @@ export default function AppPage() {
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2">
                                 <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
-                                  trade.side === 'LONG' || trade.side === 'BUY' 
-                                    ? 'bg-green-500/20 text-green-500' 
-                                    : trade.side === 'SHORT' || trade.side === 'SELL'
-                                      ? 'bg-red-500/20 text-red-500'
-                                      : 'bg-muted text-muted-foreground'
+                                  (() => {
+                                    const p = trade.webhookPayload as any;
+                                    const isOnChainClose = trade.executionMethod === 'on-chain-detected';
+                                    const isTpSlClose = p?.closeReason === 'tpsl';
+                                    const isCloseAction = trade.side === 'CLOSE' || isOnChainClose || isTpSlClose;
+                                    if (isCloseAction && isTpSlClose) return 'bg-emerald-500/20 text-emerald-500';
+                                    if (isCloseAction) return 'bg-amber-500/20 text-amber-500';
+                                    if (trade.side === 'LONG' || trade.side === 'BUY') return 'bg-green-500/20 text-green-500';
+                                    if (trade.side === 'SHORT' || trade.side === 'SELL') return 'bg-red-500/20 text-red-500';
+                                    return 'bg-muted text-muted-foreground';
+                                  })()
                                 }`}>
-                                  {trade.side === 'CLOSE' ? 'CLOSE' : trade.side}
+                                  {(() => {
+                                    const p = trade.webhookPayload as any;
+                                    const isOnChainClose = trade.executionMethod === 'on-chain-detected';
+                                    const isTpSlClose = p?.closeReason === 'tpsl';
+                                    if (isTpSlClose) return 'TP/SL Close';
+                                    if (trade.side === 'CLOSE' || isOnChainClose) return 'Close';
+                                    return trade.side === 'LONG' ? 'Long' : trade.side === 'SHORT' ? 'Short' : trade.side;
+                                  })()}
                                 </span>
                                 <span className="text-sm font-medium">{trade.market}</span>
                               </div>
@@ -2052,13 +2065,17 @@ export default function AppPage() {
                           {tradesData.slice(0, 10).map((trade: any, i: number) => {
                             const payload = trade.webhookPayload;
                             const positionSize = payload?.position_size || payload?.data?.position_size;
-                            const isCloseSignal = positionSize === '0' || positionSize === 0 || trade.side === 'CLOSE';
-                            const isLong = trade.side?.toUpperCase() === 'LONG';
-                            const isShort = trade.side?.toUpperCase() === 'SHORT';
+                            const closeReason = payload?.closeReason;
+                            const isOnChainClose = trade.executionMethod === 'on-chain-detected';
+                            const isTpSlClose = closeReason === 'tpsl';
+                            const isCloseSignal = positionSize === '0' || positionSize === 0 || trade.side === 'CLOSE' || isOnChainClose || isTpSlClose;
+                            const isLong = !isCloseSignal && trade.side?.toUpperCase() === 'LONG';
+                            const isShort = !isCloseSignal && trade.side?.toUpperCase() === 'SHORT';
                             const isFailed = trade.status === 'failed';
                             const isExecuted = trade.status === 'executed';
                             
                             const getSideColor = () => {
+                              if (isTpSlClose) return 'text-emerald-400';
                               if (isCloseSignal) return 'text-amber-400';
                               if (isLong) return 'text-emerald-400';
                               return 'text-red-400';
@@ -2071,8 +2088,9 @@ export default function AppPage() {
                             };
                             
                             const getSideLabel = () => {
-                              if (isCloseSignal) return 'CLOSE';
-                              return trade.side?.toUpperCase();
+                              if (isTpSlClose) return 'TP/SL Close';
+                              if (isCloseSignal) return 'Close';
+                              return trade.side === 'LONG' ? 'Long' : trade.side === 'SHORT' ? 'Short' : trade.side;
                             };
                             
                             const getStatusStyle = () => {
