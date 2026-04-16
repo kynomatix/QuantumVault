@@ -2132,8 +2132,9 @@ export function BotManagementDrawer({
                     const closeReason = payload?.closeReason;
                     const isOnChainClose = trade.executionMethod === 'on-chain-detected';
                     const isTpSl = closeReason === 'tpsl';
-                    const isClose = action === 'close' || trade.side === 'CLOSE' || positionSize === '0' || positionSize === 0 || isOnChainClose || isTpSl;
-                    const isLong = !isClose && trade.side === 'LONG';
+                    const sideUpper = trade.side?.toUpperCase();
+                    const isClose = action === 'close' || sideUpper === 'CLOSE' || positionSize === '0' || positionSize === 0 || isOnChainClose || isTpSl;
+                    const isLong = !isClose && (sideUpper === 'LONG' || sideUpper === 'BUY');
                     
                     const getTradeIcon = () => {
                       if (isLiquidated) {
@@ -2151,7 +2152,7 @@ export function BotManagementDrawer({
                     const getTradeLabel = () => {
                       if (isLiquidated) return 'LIQUIDATED';
                       if (isClose) return 'CLOSE';
-                      return trade.side;
+                      return sideUpper;
                     };
                     
                     const getIconBgClass = () => {
