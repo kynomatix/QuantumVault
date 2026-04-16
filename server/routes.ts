@@ -9482,18 +9482,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const bots = await storage.getTradingBots(req.walletAddress!);
       const agentAddress = wallet?.agentPublicKey;
       
-      const [agentBalance, solBalance, exchangeAccountInfo] = await Promise.all([
+      const [agentBalance, solBalance, aggregateAccountInfo] = await Promise.all([
         agentAddress ? getAgentUsdcBalance(agentAddress) : Promise.resolve(0),
         agentAddress ? getAgentSolBalance(agentAddress) : Promise.resolve(0),
-        agentAddress ? getDriftAccountInfo(agentAddress, 0) : Promise.resolve({ totalCollateral: 0 }),
+        agentAddress ? getDriftAccountInfo(agentAddress, 0) : Promise.resolve({ totalCollateral: 0, freeCollateral: 0 }),
       ]);
       
-      const exchangeBalance = exchangeAccountInfo.totalCollateral;
-      
-      let prices: Record<string, number> = {};
-      try {
-        prices = await getAllPrices();
-      } catch (e) { /* prices unavailable */ }
+      const aggregateExchangeEquity = aggregateAccountInfo.totalCollateral;
 
       const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
       
@@ -9505,25 +9500,27 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             const liveInfo = await getDriftAccountInfoForBot('', 0, eqBotCtx);
             botBalance = liveInfo.totalCollateral;
           } else {
-          const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
-          const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
-          const position = await storage.getBotPosition(bot.id, bot.market);
-          const realizedPnl = parseFloat(position?.realizedPnl || '0');
-          const totalFees = parseFloat(position?.totalFees || '0');
-          
-          let unrealizedPnl = 0;
-          if (position) {
-            const baseSize = parseFloat(position.baseSize);
-            const entryPrice = parseFloat(position.avgEntryPrice);
-            const markPrice = prices[position.market] || entryPrice;
-            if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-              unrealizedPnl = baseSize > 0
-                ? (markPrice - entryPrice) * Math.abs(baseSize)
-                : (entryPrice - markPrice) * Math.abs(baseSize);
+            let prices: Record<string, number> = {};
+            try { prices = await getAllPrices(); } catch (e) { /* prices unavailable */ }
+            const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
+            const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+            const position = await storage.getBotPosition(bot.id, bot.market);
+            const realizedPnl = parseFloat(position?.realizedPnl || '0');
+            const totalFees = parseFloat(position?.totalFees || '0');
+            
+            let unrealizedPnl = 0;
+            if (position) {
+              const baseSize = parseFloat(position.baseSize);
+              const entryPrice = parseFloat(position.avgEntryPrice);
+              const markPrice = prices[position.market] || entryPrice;
+              if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
+                unrealizedPnl = baseSize > 0
+                  ? (markPrice - entryPrice) * Math.abs(baseSize)
+                  : (entryPrice - markPrice) * Math.abs(baseSize);
+              }
             }
-          }
-          
-          botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+            
+            botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
           }
         } catch (err) {
           console.warn(`[total-equity] Failed to calc bot balance for ${bot.id}:`, err);
@@ -9537,16 +9534,20 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         });
       }
       
-      const mainFreeCollateral = exchangeAccountInfo.freeCollateral ?? exchangeBalance;
       const totalBotBalances = subaccountBalances.reduce((sum, b) => sum + b.balance, 0);
-      const inTrading = exchangeBalance + totalBotBalances;
+      const mainAccountEquity = aggregateExchangeEquity;
+      const mainAccountFreeCollateral = aggregateAccountInfo.freeCollateral ?? 0;
+      
+      const inTrading = mainAccountEquity + totalBotBalances;
       const totalEquity = agentBalance + inTrading;
+      
+      console.log(`[total-equity] agent=$${agentBalance.toFixed(2)} mainAcct=$${mainAccountEquity.toFixed(2)} bots=$${totalBotBalances.toFixed(2)} inTrading=$${inTrading.toFixed(2)} mainFree=$${mainAccountFreeCollateral.toFixed(2)} total=$${totalEquity.toFixed(2)}`);
       
       res.json({ 
         agentBalance,
         exchangeBalance: inTrading,
-        mainAccountBalance: exchangeBalance,
-        mainAccountFreeCollateral: mainFreeCollateral,
+        mainAccountBalance: mainAccountEquity,
+        mainAccountFreeCollateral,
         totalEquity,
         solBalance,
         botCount: bots.length,
