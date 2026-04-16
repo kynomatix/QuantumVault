@@ -3989,7 +3989,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [balanceChecked, setBalanceChecked] = useState(false);
-  const [solRequired, setSolRequired] = useState(0.04);
+  const [solRequired, setSolRequired] = useState(0.005);
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
   const levDD = drawdownPercent * leverage;
@@ -4006,6 +4006,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const enableTopUp = bufferPercent > 30;
   const enableReinvest = leverage <= 5 && drawdownPercent < 15;
 
+  const PACIFICA_MIN_DEPOSIT = 10;
   const canShowCreateButton = capitalNum > 0 && survivable && ticker && timeframe;
 
   const fetchBalanceAndAgent = useCallback(async () => {
@@ -4065,6 +4066,10 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
     const solBal = agentSolBalance ?? 0;
 
     const totalCapitalNeeded = effectiveTradeSize + equityBuffer;
+    if (capitalNum < PACIFICA_MIN_DEPOSIT) {
+      setCreateError(`Minimum capital is $${PACIFICA_MIN_DEPOSIT} (Pacifica minimum deposit). Increase capital to continue.`);
+      return;
+    }
     if (totalCapitalNeeded > usdcBal) {
       setCreateError(`Insufficient USDC. Need $${totalCapitalNeeded.toLocaleString()} ($${effectiveTradeSize.toLocaleString()} investment + $${equityBuffer.toLocaleString()} DD protection), have $${usdcBal.toFixed(2)}`);
       return;
@@ -4115,33 +4120,19 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         console.error('Failed to update bot settings, but bot was created');
       }
 
+      const totalDeposit = effectiveTradeSize + equityBuffer;
       const depositRes = await fetch('/api/exchange/deposit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ amount: effectiveTradeSize, botId: bot.id }),
+        body: JSON.stringify({ amount: totalDeposit, botId: bot.id }),
       });
 
       let fundingFailed = false;
-      let equityDepositFailed = false;
       if (!depositRes.ok) {
         const err = await safeResponseJson(depositRes);
         fundingFailed = true;
         setCreateError(`Bot created but funding failed: ${err.error || 'Unknown error'}. You can fund it later from the bot details page.`);
-      }
-
-      if (!fundingFailed && equityBuffer > 0) {
-        const equityDepositRes = await fetch('/api/exchange/deposit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ amount: equityBuffer, botId: bot.id }),
-        });
-
-        if (!equityDepositRes.ok) {
-          equityDepositFailed = true;
-          setCreateError(`Bot created and investment deposited ($${effectiveTradeSize}), but DD protection equity deposit ($${equityBuffer}) failed. You can add it manually from the bot management drawer.`);
-        }
       }
 
       setCreatedBot(bot);
@@ -4157,16 +4148,10 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       queryClient.invalidateQueries({ queryKey: ["/api/trading-bots"] });
 
       const totalDeposited = effectiveTradeSize + equityBuffer;
-      if (!fundingFailed && !equityDepositFailed) {
+      if (!fundingFailed) {
         toast({
           title: 'Bot created and funded!',
-          description: `${botName} — $${totalDeposited.toLocaleString()} deposited ($${effectiveTradeSize.toLocaleString()} investment + $${equityBuffer.toLocaleString()} DD protection) at ${leverage}x leverage`,
-        });
-      } else if (equityDepositFailed) {
-        toast({
-          title: 'Bot created — DD protection not deposited',
-          description: `Investment of $${effectiveTradeSize.toLocaleString()} deposited, but DD protection equity ($${equityBuffer.toLocaleString()}) failed. Add it from the bot management drawer.`,
-          variant: 'destructive',
+          description: `${botName} — $${totalDeposited.toLocaleString()} deposited ($${effectiveTradeSize.toLocaleString()} trade + $${equityBuffer.toLocaleString()} DD buffer) at ${leverage}x leverage`,
         });
       } else {
         toast({
@@ -4191,6 +4176,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
     if (!isAuthenticated) return "Connect your wallet to create a bot";
     if (balanceLoading) return "Checking wallet balance...";
     if (!hasAgentWallet) return "Set up your agent wallet first (go to Wallet page)";
+    if (capitalNum < PACIFICA_MIN_DEPOSIT) return `Minimum capital is $${PACIFICA_MIN_DEPOSIT} (Pacifica minimum deposit). Increase capital to continue.`;
     if (!hasSufficientBalance) return `Need $${(effectiveTradeSize + equityBuffer).toLocaleString()} USDC ($${effectiveTradeSize.toLocaleString()} investment + $${equityBuffer.toLocaleString()} DD protection) and ${solRequired} SOL in agent wallet`;
     return null;
   };
