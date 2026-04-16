@@ -813,30 +813,22 @@ export class PacificaAdapter implements ProtocolAdapter {
       side: closingSide,
     };
 
-    if (params.takeProfitPrice !== undefined) {
-      if (params.takeProfitPrice > 0) {
-        const tpStopQ = this.quantizePrice(params.internalSymbol, params.takeProfitPrice);
-        const tpLimitRaw = isLong
-          ? params.takeProfitPrice * (1 - TP_SLIPPAGE)
-          : params.takeProfitPrice * (1 + TP_SLIPPAGE);
-        const tpLimitQ = this.quantizePrice(params.internalSymbol, tpLimitRaw);
-        operationData.take_profit = {
-          stop_price: String(tpStopQ),
-          limit_price: String(tpLimitQ),
-        };
-      } else {
-        operationData.take_profit = null;
-      }
+    if (params.takeProfitPrice !== undefined && params.takeProfitPrice > 0) {
+      const tpStopQ = this.quantizePrice(params.internalSymbol, params.takeProfitPrice);
+      const tpLimitRaw = isLong
+        ? params.takeProfitPrice * (1 - TP_SLIPPAGE)
+        : params.takeProfitPrice * (1 + TP_SLIPPAGE);
+      const tpLimitQ = this.quantizePrice(params.internalSymbol, tpLimitRaw);
+      operationData.take_profit = {
+        stop_price: String(tpStopQ),
+        limit_price: String(tpLimitQ),
+      };
     }
-    if (params.stopLossPrice !== undefined) {
-      if (params.stopLossPrice > 0) {
-        const slStopQ = this.quantizePrice(params.internalSymbol, params.stopLossPrice);
-        operationData.stop_loss = {
-          stop_price: String(slStopQ),
-        };
-      } else {
-        operationData.stop_loss = null;
-      }
+    if (params.stopLossPrice !== undefined && params.stopLossPrice > 0) {
+      const slStopQ = this.quantizePrice(params.internalSymbol, params.stopLossPrice);
+      operationData.stop_loss = {
+        stop_price: String(slStopQ),
+      };
     }
 
     console.log(`[PacificaAdapter.setTpSl] positionSide=${positionSide} closingSide=${closingSide} isLong=${isLong} operationData:`, JSON.stringify(operationData));
