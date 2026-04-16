@@ -532,7 +532,7 @@ export default function Landing() {
 
               {/* Two-column layout for smaller groups */}
               <div className="grid lg:grid-cols-2 gap-8">
-                {/* Portfolio & Yield */}
+                {/* Portfolio Management */}
                 <motion.div
                   initial={{ opacity: 0, y: 40 }}
                   whileInView={{ opacity: 1, y: 0 }}
@@ -544,7 +544,7 @@ export default function Landing() {
                     <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-green-500/20 to-emerald-500/20 flex items-center justify-center">
                       <PiggyBank className="w-5 h-5 text-green-400" />
                     </div>
-                    <h3 className="font-display font-semibold text-xl">Portfolio & Yield</h3>
+                    <h3 className="font-display font-semibold text-xl">Portfolio Management</h3>
                   </div>
                   <div className="space-y-4">
                     <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-green-500/30 transition-colors">
@@ -560,8 +560,8 @@ export default function Landing() {
                       <div className="flex items-start gap-3">
                         <Percent className="w-5 h-5 text-green-400 mt-0.5" />
                         <div>
-                          <h4 className="font-semibold text-sm mb-1">USDC Yield</h4>
-                          <p className="text-xs text-muted-foreground">Earn lending interest on idle deposits while waiting for signals.</p>
+                          <h4 className="font-semibold text-sm mb-1">Equity Tracking</h4>
+                          <p className="text-xs text-muted-foreground">Real-time portfolio snapshots with daily equity curves and deposit history.</p>
                         </div>
                       </div>
                     </div>
