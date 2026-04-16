@@ -1621,53 +1621,58 @@ export default function AppPage() {
                     <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Recent Activity</h4>
                     {tradesData && tradesData.length > 0 ? (
                       <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                        {tradesData.slice(0, 10).map((trade: any) => (
-                          <div 
-                            key={trade.id} 
-                            className={`p-3 rounded-lg border ${
-                              trade.status === 'executed' 
-                                ? 'bg-green-500/5 border-green-500/20' 
-                                : trade.status === 'failed' 
-                                  ? 'bg-red-500/5 border-red-500/20'
-                                  : 'bg-muted/30 border-border/50'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
-                                  (() => {
-                                    const p = trade.webhookPayload as any;
-                                    const isOnChainClose = trade.executionMethod === 'on-chain-detected';
-                                    const isTpSlClose = p?.closeReason === 'tpsl';
-                                    const isCloseAction = trade.side === 'CLOSE' || isOnChainClose || isTpSlClose;
-                                    if (isCloseAction) return 'bg-amber-500/20 text-amber-500';
-                                    if (trade.side === 'LONG' || trade.side === 'BUY') return 'bg-green-500/20 text-green-500';
-                                    if (trade.side === 'SHORT' || trade.side === 'SELL') return 'bg-red-500/20 text-red-500';
-                                    return 'bg-muted text-muted-foreground';
-                                  })()
+                        {tradesData.slice(0, 10).map((trade: any) => {
+                          const p = trade.webhookPayload as any;
+                          const isOnChainClose = trade.executionMethod === 'on-chain-detected';
+                          const isTpSlClose = p?.closeReason === 'tpsl';
+                          const sideUp = trade.side?.toUpperCase();
+                          const isCloseAction = sideUp === 'CLOSE' || isOnChainClose || isTpSlClose || p?.action === 'close';
+                          const isLongTrade = !isCloseAction && (sideUp === 'LONG' || sideUp === 'BUY');
+
+                          const rowBg = trade.status === 'failed'
+                            ? 'bg-red-500/5 border-red-500/20'
+                            : isCloseAction
+                              ? 'bg-amber-500/5 border-amber-500/20'
+                              : trade.status === 'executed'
+                                ? 'bg-green-500/5 border-green-500/20'
+                                : 'bg-muted/30 border-border/50';
+
+                          const badgeStyle = isCloseAction
+                            ? 'bg-amber-500/20 text-amber-500'
+                            : isLongTrade
+                              ? 'bg-green-500/20 text-green-500'
+                              : (sideUp === 'SHORT' || sideUp === 'SELL')
+                                ? 'bg-red-500/20 text-red-500'
+                                : 'bg-muted text-muted-foreground';
+
+                          const label = isCloseAction ? 'CLOSE' : sideUp;
+
+                          return (
+                            <div 
+                              key={trade.id} 
+                              className={`p-3 rounded-lg border ${rowBg}`}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${badgeStyle}`}>
+                                    {label}
+                                  </span>
+                                  <span className="text-sm font-medium">{trade.market}</span>
+                                </div>
+                                <span className={`text-xs ${
+                                  trade.status === 'executed' ? 'text-green-500' : 
+                                  trade.status === 'failed' ? 'text-red-500' : 'text-muted-foreground'
                                 }`}>
-                                  {(() => {
-                                    const p = trade.webhookPayload as any;
-                                    const isOnChainClose = trade.executionMethod === 'on-chain-detected';
-                                    if (trade.side === 'CLOSE' || isOnChainClose || p?.closeReason === 'tpsl') return 'CLOSE';
-                                    return trade.side?.toUpperCase();
-                                  })()}
+                                  {trade.status}
                                 </span>
-                                <span className="text-sm font-medium">{trade.market}</span>
                               </div>
-                              <span className={`text-xs ${
-                                trade.status === 'executed' ? 'text-green-500' : 
-                                trade.status === 'failed' ? 'text-red-500' : 'text-muted-foreground'
-                              }`}>
-                                {trade.status}
-                              </span>
+                              <div className="flex items-center justify-between mt-1.5 text-xs text-muted-foreground">
+                                <span>{trade.botName}</span>
+                                <span>{new Date(trade.executedAt).toLocaleTimeString()}</span>
+                              </div>
                             </div>
-                            <div className="flex items-center justify-between mt-1.5 text-xs text-muted-foreground">
-                              <span>{trade.botName}</span>
-                              <span>{new Date(trade.executedAt).toLocaleTimeString()}</span>
-                            </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     ) : (
                       <div className="text-center py-8 text-muted-foreground">
