@@ -2152,11 +2152,11 @@ export function BotManagementDrawer({
                     };
                     
                     const getTradeLabel = () => {
-                      if (isLiquidated) return 'Liquidated';
-                      if (isTpSl) return 'TP/SL Close';
-                      if (isClose && closeReason === 'external_close') return 'Close';
-                      if (isClose) return 'Close';
-                      return trade.side === 'LONG' ? 'Long' : trade.side === 'SHORT' ? 'Short' : trade.side;
+                      if (isLiquidated) return 'LIQUIDATED';
+                      if (isTpSl) return 'TP/SL CLOSE';
+                      if (isClose && closeReason === 'external_close') return 'CLOSE';
+                      if (isClose) return 'CLOSE';
+                      return trade.side;
                     };
                     
                     const getIconBgClass = () => {

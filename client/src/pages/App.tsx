@@ -2088,9 +2088,9 @@ export default function AppPage() {
                             };
                             
                             const getSideLabel = () => {
-                              if (isTpSlClose) return 'TP/SL Close';
-                              if (isCloseSignal) return 'Close';
-                              return trade.side === 'LONG' ? 'Long' : trade.side === 'SHORT' ? 'Short' : trade.side;
+                              if (isTpSlClose) return 'TP/SL CLOSE';
+                              if (isCloseSignal) return 'CLOSE';
+                              return trade.side?.toUpperCase();
                             };
                             
                             const getStatusStyle = () => {

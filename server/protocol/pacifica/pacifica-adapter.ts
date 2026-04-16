@@ -884,36 +884,55 @@ export class PacificaAdapter implements ProtocolAdapter {
     subaccountId?: string;
   }): Promise<CancelResult> {
     const protocolSymbol = this.internalToProtocol(params.internalSymbol);
-    const stopOrders = await this.getOpenStopOrders(params.agentPublicKey, params.subaccountId, protocolSymbol);
-    console.log(`[PacificaAdapter.cancelTpSlOrders] Found ${stopOrders.length} stop orders for ${protocolSymbol}:`, JSON.stringify(stopOrders));
 
-    if (stopOrders.length === 0) {
+    let stopOrders: Array<{ order_id: string }> = [];
+    try {
+      stopOrders = await this.getOpenStopOrders(params.agentPublicKey, params.subaccountId, protocolSymbol);
+      console.log(`[PacificaAdapter.cancelTpSlOrders] Found ${stopOrders.length} stop orders for ${protocolSymbol}`);
+    } catch (err: any) {
+      console.log(`[PacificaAdapter.cancelTpSlOrders] Stop order listing failed (${err.message}), using cancelAllOrders fallback`);
+    }
+
+    if (stopOrders.length > 0) {
+      let canceledCount = 0;
+      const errors: string[] = [];
+      for (const order of stopOrders) {
+        try {
+          const result = await this.cancelStopOrder({
+            agentPublicKey: params.agentPublicKey,
+            agentSecretKey: params.agentSecretKey,
+            mainWalletAddress: params.mainWalletAddress,
+            orderId: order.order_id,
+            subaccountId: params.subaccountId,
+          });
+          if (result.success) canceledCount++;
+          else if (result.error) errors.push(result.error);
+        } catch (err: any) {
+          errors.push(err.message || String(err));
+        }
+      }
+      return {
+        success: canceledCount > 0 || errors.length === 0,
+        canceledCount,
+        error: errors.length > 0 ? errors.join('; ') : undefined,
+      };
+    }
+
+    console.log(`[PacificaAdapter.cancelTpSlOrders] Canceling all orders for ${protocolSymbol} via cancel_all`);
+    try {
+      const result = await this.cancelAllOrders({
+        agentPublicKey: params.agentPublicKey,
+        agentSecretKey: params.agentSecretKey,
+        mainWalletAddress: params.mainWalletAddress,
+        symbol: params.internalSymbol,
+        subaccountId: params.subaccountId,
+      });
+      console.log(`[PacificaAdapter.cancelTpSlOrders] cancel_all result: canceled=${result.canceledCount}`);
+      return result;
+    } catch (err: any) {
+      console.log(`[PacificaAdapter.cancelTpSlOrders] cancel_all also failed: ${err.message}`);
       return { success: true, canceledCount: 0 };
     }
-
-    let canceledCount = 0;
-    const errors: string[] = [];
-    for (const order of stopOrders) {
-      try {
-        const result = await this.cancelStopOrder({
-          agentPublicKey: params.agentPublicKey,
-          agentSecretKey: params.agentSecretKey,
-          mainWalletAddress: params.mainWalletAddress,
-          orderId: order.order_id,
-          subaccountId: params.subaccountId,
-        });
-        if (result.success) canceledCount++;
-        else if (result.error) errors.push(result.error);
-      } catch (err: any) {
-        errors.push(err.message || String(err));
-      }
-    }
-
-    return {
-      success: canceledCount > 0 || errors.length === 0,
-      canceledCount,
-      error: errors.length > 0 ? errors.join('; ') : undefined,
-    };
   }
 
   async cancelStopOrder(params: CancelStopOrderParams): Promise<CancelResult> {
