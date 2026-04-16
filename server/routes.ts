@@ -5983,7 +5983,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             const { decrypt } = await import('./crypto');
             const bs58Mod = await import('bs58');
             const bs58Default = bs58Mod.default || bs58Mod;
-            const adapter = getDefaultAdapter() as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
+            const adapter = getDefaultAdapter();
 
             const botKeyBase58 = decrypt(bot.botSubaccountKeyEncrypted);
             const botSecretKey = bs58Default.decode(botKeyBase58);
@@ -7371,7 +7371,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                         const { decrypt } = await import('./crypto');
                         const bs58Mod = await import('bs58');
                         const bs58Default = bs58Mod.default || bs58Mod;
-                        const adapter = getDefaultAdapter() as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
+                        const adapter = getDefaultAdapter();
 
                         const botKeyBase58 = decrypt(bot.botSubaccountKeyEncrypted);
                         const botSecretKey = bs58Default.decode(botKeyBase58);
