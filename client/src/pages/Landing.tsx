@@ -428,7 +428,7 @@ export default function Landing() {
               >
                 <Zap className="w-4 h-4 text-primary" />
               </motion.div>
-              Powered by Drift Protocol on Solana
+              Powered by Pacifica on Solana
             </motion.span>
           </div>
         </section>
@@ -520,7 +520,7 @@ export default function Landing() {
                   <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
                     <Zap className="w-5 h-5 text-accent mb-3" />
                     <h4 className="font-semibold text-sm mb-1">Lightning Fast</h4>
-                    <p className="text-xs text-muted-foreground">Sub-second execution on Solana and Drift.</p>
+                    <p className="text-xs text-muted-foreground">Sub-second execution on Solana and Pacifica.</p>
                   </div>
                   <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
                     <Lock className="w-5 h-5 text-accent mb-3" />
@@ -597,7 +597,7 @@ export default function Landing() {
                         <Globe className="w-5 h-5 text-blue-400 mt-0.5" />
                         <div>
                           <h4 className="font-semibold text-sm mb-1">All Markets</h4>
-                          <p className="text-xs text-muted-foreground">Auto-discovery of all Drift markets. New listings available instantly.</p>
+                          <p className="text-xs text-muted-foreground">Auto-discovery of all Pacifica markets. New listings available instantly.</p>
                         </div>
                       </div>
                     </div>

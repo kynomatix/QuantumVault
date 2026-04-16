@@ -280,7 +280,7 @@ export default function AppPage() {
   const [equityLoading, setEquityLoading] = useState(false);
   const equityInitialLoadDone = useRef(false);
 
-  // Fetch total equity, agent balance, and drift balance together
+  // Fetch total equity, agent balance, and exchange balance together
   useEffect(() => {
     if (!connected) {
       setTotalEquity(null);
@@ -784,7 +784,7 @@ export default function AppPage() {
               // Agent has zero SOL - fresh agent wallet (new or reset), show welcome popup
               setWelcomePopupOpen(true);
             } else if (data.isExistingUser && data.driftAccountExists) {
-              // Only show low gas toast for existing users who have an active Drift account
+              // Only show low gas toast for existing users who have an active exchange account
               // This avoids showing it during initial setup or when user is just browsing
               toast({
                 title: 'Low Gas Balance',
@@ -3276,7 +3276,7 @@ export default function AppPage() {
                                   </p>
                                   <Button
                                     variant="outline"
-                                    onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentPublicKey}`, '_blank')}
+                                    onClick={() => window.open(`https://app.pacifica.fi/portfolio?authority=${agentPublicKey}`, '_blank')}
                                     className="w-full sm:w-auto"
                                     data-testid="button-view-exchange"
                                   >

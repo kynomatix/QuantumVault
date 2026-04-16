@@ -817,7 +817,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                         variant="ghost"
                         size="icon"
                         className="h-6 w-6"
-                        onClick={() => window.open(`https://app.drift.trade/portfolio/accounts?authority=${agentWallet?.agentPublicKey}`, '_blank')}
+                        onClick={() => window.open(`https://app.pacifica.fi/portfolio?authority=${agentWallet?.agentPublicKey}`, '_blank')}
                         disabled={!agentWallet?.agentPublicKey}
                         title="View on Exchange"
                         data-testid="button-view-on-exchange"

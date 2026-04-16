@@ -163,7 +163,7 @@ function TitleSlide() {
         variants={fadeIn}
         className="text-xl md:text-2xl lg:text-3xl text-primary font-medium max-w-3xl mb-6 relative z-10"
       >
-        Automated Trading Infrastructure for Drift Protocol
+        Automated Trading Infrastructure for Pacifica
       </motion.p>
       
       <motion.p 
@@ -247,8 +247,8 @@ function MarketOpportunitySlide() {
       <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl w-full mb-12">
         {[
           { value: "$3-5B", label: "DeFi Perps TVL", sub: "Growing 100%+ YoY" },
-          { value: "$1B+", label: "Drift Protocol TVL", sub: "Surpassed Jan 2025" },
-          { value: "$133B+", label: "Drift Cumulative Volume", sub: "All-time trading" }
+          { value: "$1B+", label: "Pacifica TVL", sub: "Growing rapidly" },
+          { value: "$133B+", label: "Pacifica Cumulative Volume", sub: "All-time trading" }
         ].map((stat, i) => (
           <motion.div 
             key={i}
@@ -272,7 +272,7 @@ function MarketOpportunitySlide() {
           </h3>
           <ul className="space-y-3 text-sm">
             <li><strong className="text-white">TAM:</strong> <span className="text-muted-foreground">$3-5B DeFi perpetual futures market</span></li>
-            <li><strong className="text-white">SAM:</strong> <span className="text-muted-foreground">$1B+ Drift Protocol ecosystem</span></li>
+            <li><strong className="text-white">SAM:</strong> <span className="text-muted-foreground">$1B+ Pacifica ecosystem</span></li>
             <li><strong className="text-white">SOM:</strong> <span className="text-muted-foreground">$50M automated trading segment</span></li>
           </ul>
         </div>
@@ -299,9 +299,9 @@ function MarketOpportunitySlide() {
       </motion.div>
       
       <motion.div variants={fadeIn} className="mt-8 flex flex-wrap gap-3 justify-center text-[10px] text-muted-foreground/60">
-        <a href="https://defillama.com/protocol/drift-trade" target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors underline" data-testid="link-defillama">DefiLlama</a>
+        <a href="https://defillama.com/protocol/pacifica" target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors underline" data-testid="link-defillama">DefiLlama</a>
         <span>|</span>
-        <a href="https://www.drift.trade/updates" target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors underline" data-testid="link-drift-blog">Drift Blog (Jan 2025)</a>
+        <a href="https://pacifica.fi" target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors underline" data-testid="link-pacifica">Pacifica</a>
         <span>|</span>
         <a href="https://coinbureau.com/review/pionex-review/" target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors underline" data-testid="link-pionex-review">CoinBureau Pionex Review</a>
       </motion.div>
@@ -377,7 +377,7 @@ function ProductFeaturesSlide() {
         Core Features
       </motion.h2>
       <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-12 text-center max-w-2xl">
-        Enterprise-grade infrastructure built on Drift Protocol
+        Enterprise-grade infrastructure built on Pacifica
       </motion.p>
       
       <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 max-w-6xl w-full">
@@ -463,7 +463,7 @@ function HowItWorksSlide() {
           <ArrowRight className="w-5 h-5 text-indigo-500/60" />
           <span className="px-4 py-2 rounded-xl bg-indigo-800/30 border border-indigo-600/40 text-indigo-300 font-medium">QuantumVault</span>
           <ArrowRight className="w-5 h-5 text-indigo-400/60" />
-          <span className="px-4 py-2 rounded-xl bg-violet-800/30 border border-violet-600/40 text-violet-300 font-medium">Drift Protocol</span>
+          <span className="px-4 py-2 rounded-xl bg-violet-800/30 border border-violet-600/40 text-violet-300 font-medium">Pacifica</span>
           <ArrowRight className="w-5 h-5 text-violet-400/60" />
           <span className="px-4 py-2 rounded-xl bg-violet-700/40 border border-violet-500/50 text-violet-200 font-medium">Position Executed</span>
         </div>
@@ -774,7 +774,7 @@ function CompetitiveSlide() {
       
       <motion.div variants={fadeIn} className="grid grid-cols-2 md:grid-cols-4 gap-3 max-w-4xl w-full">
         {[
-          { icon: <Rocket className="w-5 h-5" />, title: "First Mover", desc: "Early in Drift ecosystem" },
+          { icon: <Rocket className="w-5 h-5" />, title: "First Mover", desc: "Early in Pacifica ecosystem" },
           { icon: <Shield className="w-5 h-5" />, title: "Security First", desc: "Non-custodial by design" },
           { icon: <Store className="w-5 h-5" />, title: "Network Effects", desc: "Marketplace flywheel" },
           { icon: <Layers className="w-5 h-5" />, title: "Full Stack", desc: "End-to-end solution" }
@@ -917,7 +917,7 @@ function QuantumLabSlide() {
 function TechStackSlide() {
   const tech = [
     { name: "Solana", desc: "400ms blocks, sub-cent fees" },
-    { name: "Drift Protocol", desc: "$1B+ TVL, 80+ markets" },
+    { name: "Pacifica", desc: "High-performance perp DEX on Solana" },
     { name: "Swift Protocol", desc: "Gasless execution with auto failover" },
     { name: "TradingView", desc: "Strategy & webhook integration" },
     { name: "React + TypeScript", desc: "Modern web application" },
@@ -1053,7 +1053,7 @@ function VaultsSlide() {
         Vaults: Capital Efficiency
       </motion.h2>
       <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-12 text-center max-w-2xl">
-        Advanced capital management utilizing Drift's lending and borrowing
+        Advanced capital management utilizing Pacifica's lending and borrowing
       </motion.p>
       
       <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 gap-5 max-w-4xl w-full">
@@ -1061,7 +1061,7 @@ function VaultsSlide() {
           { icon: <Layers className="w-6 h-6" />, title: "Multi-Asset Collateral", desc: "Deposit USDC, SOL, BTC, ETH, or LSTs as collateral" },
           { icon: <Coins className="w-6 h-6" />, title: "Intelligent Borrowing", desc: "Borrow USDC against collateral without selling assets" },
           { icon: <PiggyBank className="w-6 h-6" />, title: "Yield Optimization", desc: "Earn staking yields while using assets as collateral" },
-          { icon: <Sparkles className="w-6 h-6" />, title: "DRIFT Rewards", desc: "Auto-collect and compound trading reward tokens" }
+          { icon: <Sparkles className="w-6 h-6" />, title: "Trading Rewards", desc: "Auto-collect and compound trading reward tokens" }
         ].map((feature, i) => (
           <motion.div 
             key={i}
@@ -1100,7 +1100,7 @@ function TeamSlide() {
           </div>
           <h3 className="text-2xl font-bold mb-1">Kryptolytix</h3>
           <p className="text-primary mb-1">Founder & Lead Developer</p>
-          <p className="text-violet-400 text-sm mb-4">Drift Ambassador</p>
+          <p className="text-violet-400 text-sm mb-4">Pacifica Builder</p>
           <p className="text-sm text-muted-foreground mb-6 max-w-sm mx-auto">
             Full-stack developer with deep expertise in Solana, DeFi protocols, 
             and automated trading systems. Previously built trading infrastructure 

@@ -2285,8 +2285,8 @@ export function BotManagementDrawer({
                       switch (type) {
                         case 'agent_deposit': return 'Deposit to Bot Wallet';
                         case 'agent_withdraw': return 'Withdraw from Bot Wallet';
-                        case 'drift_deposit': return 'Deposit to Trading';
-                        case 'drift_withdraw': return 'Withdraw from Trading';
+                        case 'drift_deposit': return 'Deposit to Bot';
+                        case 'drift_withdraw': return 'Withdraw from Bot';
                         default: return type.replace(/_/g, ' ');
                       }
                     };
