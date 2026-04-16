@@ -40,6 +40,50 @@ function getBotSubaccountContext(bot: TradingBot): BotSubaccountContext | null {
   return null;
 }
 
+async function sweepPacificaSubaccount(
+  bot: TradingBot,
+  agentPublicKey: string,
+  logPrefix: string = '[Delete]',
+): Promise<{ handled: boolean; swept: boolean; amount: number; error?: string }> {
+  const botCtx = getBotSubaccountContext(bot);
+  if (!botCtx) return { handled: false, swept: false, amount: 0 };
+
+  try {
+    const adapter = getDefaultAdapter();
+    const accountInfo = await adapter.getAccountInfo(botCtx.botPublicKey);
+    const balance = accountInfo?.equity ?? accountInfo?.freeCollateral ?? 0;
+    console.log(`${logPrefix} Pacifica subaccount ${botCtx.botPublicKey.slice(0, 8)}... balance: $${balance.toFixed(6)}`);
+
+    if (balance > 0.001) {
+      const botKeyBase58 = decrypt(botCtx.botEncryptedKey);
+      const botSecretKey = bs58.decode(botKeyBase58);
+
+      console.log(`${logPrefix} Transferring $${balance.toFixed(4)} from bot subaccount ${botCtx.botPublicKey.slice(0, 8)}... to agent wallet`);
+      const transferResult = await adapter.transferBetweenSubaccounts({
+        agentSecretKey: botSecretKey,
+        agentPublicKey: botCtx.botPublicKey,
+        fromSubaccountId: botCtx.botPublicKey,
+        toSubaccountId: agentPublicKey,
+        amount: balance,
+      });
+
+      if (!transferResult.success) {
+        console.error(`${logPrefix} Pacifica sweep failed: ${transferResult.error}`);
+        return { handled: true, swept: false, amount: balance, error: transferResult.error };
+      }
+
+      console.log(`${logPrefix} Pacifica sweep successful: $${balance.toFixed(4)} returned to agent wallet`);
+      return { handled: true, swept: true, amount: balance };
+    }
+
+    console.log(`${logPrefix} Pacifica subaccount has dust/zero balance, proceeding with deletion`);
+    return { handled: true, swept: false, amount: 0 };
+  } catch (err: any) {
+    console.error(`${logPrefix} Pacifica sweep error: ${err.message}`);
+    return { handled: true, swept: false, amount: 0, error: err.message };
+  }
+}
+
 function _resolveSigningContext(
   agentEncryptedKey: string,
   subAccountId: number,
@@ -5878,6 +5922,28 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
       }
       
+      // Pacifica subaccount sweep — transfer funds back to agent wallet before deletion
+      if (getBotSubaccountContext(bot) && agentAddress) {
+        const sweepResult = await sweepPacificaSubaccount(bot, agentAddress, '[Delete]');
+        if (sweepResult.handled) {
+          if (sweepResult.error && sweepResult.amount > 0.01) {
+            return res.status(500).json({
+              error: `Cannot delete bot - failed to sweep $${sweepResult.amount.toFixed(2)} from Pacifica subaccount: ${sweepResult.error}`,
+              message: "Please withdraw funds manually before deleting."
+            });
+          }
+          await storage.deleteTradingBot(req.params.id);
+          return res.json({
+            success: true,
+            swept: sweepResult.swept,
+            withdrawnAmount: sweepResult.amount,
+            message: sweepResult.swept
+              ? `Swept $${sweepResult.amount.toFixed(2)} USDC from Pacifica subaccount to agent wallet before deletion`
+              : 'Bot deleted'
+          });
+        }
+      }
+
       // CRITICAL: If bot has a subaccount but wallet/agent is missing, refuse to delete
       // This prevents orphaning funds when wallet record is corrupted or missing
       if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
@@ -5897,7 +5963,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.json({ success: true });
       }
 
-      // Check if bot has a drift subaccount with potential funds
+      // Legacy: Check if bot has a drift subaccount with potential funds
       if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
         // Check if subaccount exists and has balance - use AGENT wallet address, not user wallet
         const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
@@ -6134,6 +6200,28 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
       }
       
+      // Pacifica subaccount sweep — transfer funds back to agent wallet before deletion
+      if (getBotSubaccountContext(bot) && agentAddress) {
+        const sweepResult = await sweepPacificaSubaccount(bot, agentAddress, '[ForceDelete]');
+        if (sweepResult.handled) {
+          if (sweepResult.error && sweepResult.amount > 0.01) {
+            return res.status(500).json({
+              error: `Cannot delete bot - failed to sweep $${sweepResult.amount.toFixed(2)} from Pacifica subaccount: ${sweepResult.error}`,
+              message: "Please withdraw funds manually before deleting."
+            });
+          }
+          await storage.deleteTradingBot(req.params.id);
+          return res.json({
+            success: true,
+            swept: sweepResult.swept,
+            amount: sweepResult.amount,
+            message: sweepResult.swept
+              ? `Swept $${sweepResult.amount.toFixed(2)} USDC from Pacifica subaccount to agent wallet before deletion`
+              : 'Bot deleted'
+          });
+        }
+      }
+
       // CRITICAL: If bot has a subaccount but wallet/agent is missing, refuse to delete
       if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
         if (!wallet || !agentAddress || !wallet.agentPrivateKeyEncrypted) {
@@ -6152,7 +6240,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.json({ success: true, swept: false });
       }
 
-      // Must have a subaccount to sweep
+      // Legacy: Must have a drift subaccount to sweep
       if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
         // No subaccount, just delete directly
         await storage.deleteTradingBot(req.params.id);
