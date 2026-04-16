@@ -825,7 +825,7 @@ export class PacificaAdapter implements ProtocolAdapter {
           limit_price: String(tpLimitQ),
         };
       } else {
-        operationData.take_profit = {};
+        operationData.take_profit = { stop_price: "0", limit_price: "0" };
       }
     }
     if (params.stopLossPrice !== undefined) {
@@ -835,7 +835,7 @@ export class PacificaAdapter implements ProtocolAdapter {
           stop_price: String(slStopQ),
         };
       } else {
-        operationData.stop_loss = {};
+        operationData.stop_loss = { stop_price: "0" };
       }
     }
 
