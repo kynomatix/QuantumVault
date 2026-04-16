@@ -4533,6 +4533,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Current protocol adapter does not support TP/SL" });
       }
 
+      if (adapter.cancelTpSlOrders) {
+        try {
+          const cancelResult = await adapter.cancelTpSlOrders({
+            agentPublicKey: signing.publicKey,
+            agentSecretKey: signing.secretKey,
+            mainWalletAddress,
+            internalSymbol: bot.market,
+            subaccountId: signing.subaccountId,
+          });
+          console.log(`[SetTpSl] Pre-cleared existing TP/SL for bot ${bot.id}: canceled=${cancelResult.canceledCount}`);
+        } catch (err: any) {
+          console.log(`[SetTpSl] Pre-clear failed (non-fatal): ${err.message}`);
+        }
+      }
+
       const result = await adapter.setTpSl({
         agentPublicKey: signing.publicKey,
         agentSecretKey: signing.secretKey,
@@ -4589,12 +4604,23 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           internalSymbol: bot.market,
           subaccountId: signing.subaccountId,
         });
-        console.log(`[CancelTpSl] Canceled ${result.canceledCount} stop orders for bot ${bot.id} (${bot.market})`);
+        console.log(`[CancelTpSl] cancel_all response for bot ${bot.id} (${bot.market}): canceled_count=${result.canceledCount}, success=${result.success}, error=${result.error || 'none'}`);
+
+        let positionStillOpen = false;
+        try {
+          const positions = await adapter.getPositions(signing.publicKey, signing.subaccountId);
+          const pos = positions.find((p: any) => p.internalSymbol.toUpperCase() === bot.market.toUpperCase());
+          positionStillOpen = !!pos && Math.abs(pos.baseSize) > 0.0001;
+          console.log(`[CancelTpSl] Position verification after cancel: ${positionStillOpen ? `still open (size=${pos?.baseSize})` : 'no position found'}`);
+        } catch (err: any) {
+          console.log(`[CancelTpSl] Position verification skipped: ${err.message}`);
+        }
+
         const clearedRiskConfig = { ...(bot.riskConfig as Record<string, unknown> || {}) };
         delete clearedRiskConfig.takeProfitPrice;
         delete clearedRiskConfig.stopLossPrice;
         await storage.updateTradingBot(bot.id, { riskConfig: clearedRiskConfig });
-        res.json({ success: true, canceledCount: result.canceledCount });
+        res.json({ success: true, canceledCount: result.canceledCount, positionStillOpen });
       } else if (adapter.setTpSl) {
         const result = await adapter.setTpSl({
           agentPublicKey: signing.publicKey,
