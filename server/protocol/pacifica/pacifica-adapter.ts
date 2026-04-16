@@ -852,9 +852,20 @@ export class PacificaAdapter implements ProtocolAdapter {
       (body as Record<string, unknown>).subaccount_id = params.subaccountId;
     }
 
-    const response: PacificaOrderResponse = await this.post('/positions/tpsl', body);
+    const response = await this.post('/positions/tpsl', body);
 
-    return this.mapOrderResponse(response);
+    console.log(`[PacificaAdapter.setTpSl] response:`, JSON.stringify(response));
+
+    if (response && typeof response === 'object' && 'order_id' in response) {
+      return this.mapOrderResponse(response as PacificaOrderResponse);
+    }
+
+    return {
+      success: true,
+      orderId: response?.order_id ?? response?.id ?? `tpsl-${Date.now()}`,
+      status: 'open' as const,
+      rawResponse: response,
+    };
   }
 
   async cancelStopOrder(params: CancelStopOrderParams): Promise<CancelResult> {
