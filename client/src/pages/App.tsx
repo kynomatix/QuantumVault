@@ -263,6 +263,7 @@ export default function AppPage() {
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [exchangeBalance, setExchangeBalance] = useState<number | null>(null);
+  const [mainAccountFreeCollateral, setMainAccountFreeCollateral] = useState<number>(0);
   const [agentBalance, setAgentBalance] = useState<number | null>(null);
   const [solBalance, setSolBalance] = useState<number | null>(null);
   const [equityLoading, setEquityLoading] = useState(false);
@@ -290,6 +291,7 @@ export default function AppPage() {
           setTotalEquity(data.totalEquity ?? 0);
           setAgentBalance(data.agentBalance ?? 0);
           setExchangeBalance(data.exchangeBalance ?? 0);
+          setMainAccountFreeCollateral(data.mainAccountFreeCollateral ?? 0);
           setSolBalance(data.solBalance ?? 0);
           equityInitialLoadDone.current = true;
         }
@@ -446,6 +448,7 @@ export default function AppPage() {
             setTotalEquity(data.totalEquity ?? 0);
             setAgentBalance(data.agentBalance ?? 0);
             setExchangeBalance(data.exchangeBalance ?? 0);
+            setMainAccountFreeCollateral(data.mainAccountFreeCollateral ?? 0);
             setSolBalance(data.solBalance ?? 0);
           }
         });
@@ -1033,12 +1036,13 @@ export default function AppPage() {
   };
 
   const handleRecoverExchangeFunds = async () => {
-    if (!exchangeBalance || exchangeBalance <= 0) {
-      toast({ title: 'No funds to recover', variant: 'destructive' });
+    const withdrawAmount = mainAccountFreeCollateral;
+    if (withdrawAmount <= 0) {
+      toast({ title: 'No funds to recover from main account', variant: 'destructive' });
       return;
     }
 
-    if (!confirm(`Withdraw $${exchangeBalance.toFixed(2)} from the exchange main account back to your agent wallet?`)) {
+    if (!confirm(`Withdraw $${withdrawAmount.toFixed(2)} from the exchange main account back to your agent wallet?`)) {
       return;
     }
 
@@ -1048,7 +1052,7 @@ export default function AppPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ amount: exchangeBalance }),
+        body: JSON.stringify({ amount: withdrawAmount }),
       });
 
       if (!response.ok) {
@@ -1059,25 +1063,23 @@ export default function AppPage() {
       const data = await safeResponseJson(response);
       toast({
         title: 'Funds Recovered!',
-        description: `$${exchangeBalance.toFixed(2)} withdrawn to agent wallet${data.signature ? ` (tx: ${data.signature.slice(0, 8)}...)` : ''}`
+        description: `$${withdrawAmount.toFixed(2)} withdrawn to agent wallet${data.signature ? ` (tx: ${data.signature.slice(0, 8)}...)` : ''}`
       });
 
-      const recoveredAmount = exchangeBalance;
-      setExchangeBalance(0);
-      setAgentBalance((prev) => (prev ?? 0) + recoveredAmount);
+      setMainAccountFreeCollateral(0);
+      setAgentBalance((prev) => (prev ?? 0) + withdrawAmount);
 
-      for (let i = 0; i < 3; i++) {
-        await new Promise(r => setTimeout(r, 3000));
-        try {
-          const eqRes = await fetch('/api/total-equity', { credentials: 'include' });
-          if (eqRes.ok) {
-            const eqData = await safeResponseJson(eqRes);
-            setTotalEquity(eqData.totalEquity ?? 0);
-            setAgentBalance(eqData.agentBalance ?? 0);
-            setExchangeBalance(eqData.exchangeBalance ?? 0);
-          }
-        } catch {}
-      }
+      await new Promise(r => setTimeout(r, 5000));
+      try {
+        const eqRes = await fetch('/api/total-equity', { credentials: 'include' });
+        if (eqRes.ok) {
+          const eqData = await safeResponseJson(eqRes);
+          setTotalEquity(eqData.totalEquity ?? 0);
+          setAgentBalance(eqData.agentBalance ?? 0);
+          setExchangeBalance(eqData.exchangeBalance ?? 0);
+          setMainAccountFreeCollateral(eqData.mainAccountFreeCollateral ?? 0);
+        }
+      } catch {}
     } catch (error: any) {
       console.error('Recovery error:', error);
       toast({
@@ -1377,14 +1379,15 @@ export default function AppPage() {
                       <span className="text-muted-foreground">In Trading</span>
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-emerald-400" data-testid="text-in-trading">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
-                        {(exchangeBalance ?? 0) > 0 && (
+                        {mainAccountFreeCollateral > 0.01 && (
                           <button
                             onClick={handleRecoverExchangeFunds}
                             disabled={recoveringExchangeFunds}
                             className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                            title={`$${mainAccountFreeCollateral.toFixed(2)} in main account`}
                             data-testid="button-recover-exchange"
                           >
-                            {recoveringExchangeFunds ? '...' : 'Recover'}
+                            {recoveringExchangeFunds ? '...' : `Recover $${mainAccountFreeCollateral.toFixed(2)}`}
                           </button>
                         )}
                       </div>
@@ -1427,14 +1430,14 @@ export default function AppPage() {
                       <span className="text-muted-foreground">In Trading</span>
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
-                        {(exchangeBalance ?? 0) > 0 && (
+                        {mainAccountFreeCollateral > 0.01 && (
                           <button
                             onClick={handleRecoverExchangeFunds}
                             disabled={recoveringExchangeFunds}
                             className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
                             data-testid="button-recover-exchange-mobile"
                           >
-                            {recoveringExchangeFunds ? '...' : 'Recover'}
+                            {recoveringExchangeFunds ? '...' : `Recover $${mainAccountFreeCollateral.toFixed(2)}`}
                           </button>
                         )}
                       </div>

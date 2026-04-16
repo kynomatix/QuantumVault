@@ -9453,6 +9453,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         });
       }
       
+      const mainFreeCollateral = exchangeAccountInfo.freeCollateral ?? exchangeBalance;
       const totalBotBalances = subaccountBalances.reduce((sum, b) => sum + b.balance, 0);
       const inTrading = exchangeBalance + totalBotBalances;
       const totalEquity = agentBalance + inTrading;
@@ -9460,6 +9461,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       res.json({ 
         agentBalance,
         exchangeBalance: inTrading,
+        mainAccountBalance: exchangeBalance,
+        mainAccountFreeCollateral: mainFreeCollateral,
         totalEquity,
         solBalance,
         botCount: bots.length,
