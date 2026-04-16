@@ -75,6 +75,7 @@ export interface ProtocolAdapter {
   placeStopOrder?(params: StopOrderParams): Promise<OrderResult>;
   setTpSl?(params: TpSlParams): Promise<OrderResult>;
   cancelStopOrder?(params: CancelStopOrderParams): Promise<CancelResult>;
+  cancelTpSlOrders?(params: { agentPublicKey: string; agentSecretKey: Uint8Array; mainWalletAddress: string; internalSymbol: string; subaccountId?: string }): Promise<CancelResult>;
 
   executeDeposit(params: AgentDepositParams): Promise<DepositResult>;
   executeWithdraw(params: AgentWithdrawParams): Promise<WithdrawResult>;

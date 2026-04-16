@@ -4574,25 +4574,33 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const mainWalletAddress = await _lookupMainWallet(agentPubKey);
       const adapter = getDefaultAdapter();
 
-      if (!adapter.setTpSl) {
-        return res.status(400).json({ error: "Current protocol adapter does not support TP/SL" });
-      }
-
       const signing = _resolveSigningContext(wallet.agentPrivateKeyEncrypted, subAccountId, cancelBotCtx);
 
-      const result = await adapter.setTpSl({
-        agentPublicKey: signing.publicKey,
-        agentSecretKey: signing.secretKey,
-        mainWalletAddress,
-        internalSymbol: bot.market,
-        takeProfitPrice: 0,
-        stopLossPrice: 0,
-        subaccountId: signing.subaccountId,
-      });
-
-      console.log(`[CancelTpSl] Cleared TP/SL for bot ${bot.id} (${bot.market}), orderId=${result.orderId}`);
-
-      res.json({ success: true, orderId: result.orderId });
+      if (adapter.cancelTpSlOrders) {
+        const result = await adapter.cancelTpSlOrders({
+          agentPublicKey: signing.publicKey,
+          agentSecretKey: signing.secretKey,
+          mainWalletAddress,
+          internalSymbol: bot.market,
+          subaccountId: signing.subaccountId,
+        });
+        console.log(`[CancelTpSl] Canceled ${result.canceledCount} stop orders for bot ${bot.id} (${bot.market})`);
+        res.json({ success: true, canceledCount: result.canceledCount });
+      } else if (adapter.setTpSl) {
+        const result = await adapter.setTpSl({
+          agentPublicKey: signing.publicKey,
+          agentSecretKey: signing.secretKey,
+          mainWalletAddress,
+          internalSymbol: bot.market,
+          takeProfitPrice: 0,
+          stopLossPrice: 0,
+          subaccountId: signing.subaccountId,
+        });
+        console.log(`[CancelTpSl] Cleared TP/SL for bot ${bot.id} (${bot.market}), orderId=${result.orderId}`);
+        res.json({ success: true, orderId: result.orderId });
+      } else {
+        return res.status(400).json({ error: "Current protocol adapter does not support TP/SL" });
+      }
     } catch (error) {
       console.error("[CancelTpSl] Error:", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "Failed to cancel TP/SL" });

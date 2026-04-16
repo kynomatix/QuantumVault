@@ -813,30 +813,22 @@ export class PacificaAdapter implements ProtocolAdapter {
       side: closingSide,
     };
 
-    if (params.takeProfitPrice !== undefined) {
-      if (params.takeProfitPrice > 0) {
-        const tpStopQ = this.quantizePrice(params.internalSymbol, params.takeProfitPrice);
-        const tpLimitRaw = isLong
-          ? params.takeProfitPrice * (1 - TP_SLIPPAGE)
-          : params.takeProfitPrice * (1 + TP_SLIPPAGE);
-        const tpLimitQ = this.quantizePrice(params.internalSymbol, tpLimitRaw);
-        operationData.take_profit = {
-          stop_price: String(tpStopQ),
-          limit_price: String(tpLimitQ),
-        };
-      } else {
-        operationData.take_profit = { stop_price: "0", limit_price: "0" };
-      }
+    if (params.takeProfitPrice !== undefined && params.takeProfitPrice > 0) {
+      const tpStopQ = this.quantizePrice(params.internalSymbol, params.takeProfitPrice);
+      const tpLimitRaw = isLong
+        ? params.takeProfitPrice * (1 - TP_SLIPPAGE)
+        : params.takeProfitPrice * (1 + TP_SLIPPAGE);
+      const tpLimitQ = this.quantizePrice(params.internalSymbol, tpLimitRaw);
+      operationData.take_profit = {
+        stop_price: String(tpStopQ),
+        limit_price: String(tpLimitQ),
+      };
     }
-    if (params.stopLossPrice !== undefined) {
-      if (params.stopLossPrice > 0) {
-        const slStopQ = this.quantizePrice(params.internalSymbol, params.stopLossPrice);
-        operationData.stop_loss = {
-          stop_price: String(slStopQ),
-        };
-      } else {
-        operationData.stop_loss = { stop_price: "0" };
-      }
+    if (params.stopLossPrice !== undefined && params.stopLossPrice > 0) {
+      const slStopQ = this.quantizePrice(params.internalSymbol, params.stopLossPrice);
+      operationData.stop_loss = {
+        stop_price: String(slStopQ),
+      };
     }
 
     console.log(`[PacificaAdapter.setTpSl] positionSide=${positionSide} closingSide=${closingSide} isLong=${isLong} operationData:`, JSON.stringify(operationData));
@@ -865,6 +857,62 @@ export class PacificaAdapter implements ProtocolAdapter {
       orderId: response?.order_id ?? response?.id ?? `tpsl-${Date.now()}`,
       status: 'open' as const,
       rawResponse: response,
+    };
+  }
+
+  async getOpenStopOrders(agentPublicKey: string, subaccountId?: string, symbol?: string): Promise<Array<{ order_id: string; symbol: string; side: string; stop_price: string; limit_price?: string; order_type?: string }>> {
+    const params: Record<string, string> = { account: agentPublicKey };
+    if (subaccountId) params.subaccount_id = subaccountId;
+    if (symbol) params.symbol = symbol;
+    try {
+      const response = await this.get('/orders/stop', params);
+      if (!Array.isArray(response)) return [];
+      return response;
+    } catch (err: any) {
+      if (err.message && (err.message.includes('404') || err.message.includes('Not Found'))) {
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  async cancelTpSlOrders(params: {
+    agentPublicKey: string;
+    agentSecretKey: Uint8Array;
+    mainWalletAddress: string;
+    internalSymbol: string;
+    subaccountId?: string;
+  }): Promise<CancelResult> {
+    const protocolSymbol = this.internalToProtocol(params.internalSymbol);
+    const stopOrders = await this.getOpenStopOrders(params.agentPublicKey, params.subaccountId, protocolSymbol);
+    console.log(`[PacificaAdapter.cancelTpSlOrders] Found ${stopOrders.length} stop orders for ${protocolSymbol}:`, JSON.stringify(stopOrders));
+
+    if (stopOrders.length === 0) {
+      return { success: true, canceledCount: 0 };
+    }
+
+    let canceledCount = 0;
+    const errors: string[] = [];
+    for (const order of stopOrders) {
+      try {
+        const result = await this.cancelStopOrder({
+          agentPublicKey: params.agentPublicKey,
+          agentSecretKey: params.agentSecretKey,
+          mainWalletAddress: params.mainWalletAddress,
+          orderId: order.order_id,
+          subaccountId: params.subaccountId,
+        });
+        if (result.success) canceledCount++;
+        else if (result.error) errors.push(result.error);
+      } catch (err: any) {
+        errors.push(err.message || String(err));
+      }
+    }
+
+    return {
+      success: canceledCount > 0 || errors.length === 0,
+      canceledCount,
+      error: errors.length > 0 ? errors.join('; ') : undefined,
     };
   }
 
