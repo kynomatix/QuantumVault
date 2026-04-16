@@ -196,7 +196,7 @@ async function detectOnChainClose(
           detected: true,
           reason: 'liquidation',
           fillPrice: entryPrice,
-          pnl: -(absSize * entryPrice),
+          pnl: 0,
           fee: 0,
         };
       }
