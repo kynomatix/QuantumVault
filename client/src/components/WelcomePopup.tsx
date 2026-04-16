@@ -36,7 +36,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
   const { executionEnabled, executionLoading, enableExecution, refetchStatus } = useExecutionAuthorization();
 
   const [displayName, setDisplayName] = useState('');
-  const [solDepositAmount, setSolDepositAmount] = useState('0.1');
+  const [solDepositAmount, setSolDepositAmount] = useState('0.02');
   const [isDepositing, setIsDepositing] = useState(false);
   const [depositSuccess, setDepositSuccess] = useState(false);
   const [copiedAddress, setCopiedAddress] = useState(false);
@@ -759,7 +759,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
             Welcome to QuantumVault
           </DialogTitle>
           <DialogDescription>
-            To enable automated trading, your agent wallet needs SOL for transaction fees and initial account setup on Solana.
+            To enable automated trading, your agent wallet needs a small amount of SOL to cover token transfer fees when depositing and moving USDC between accounts.
           </DialogDescription>
         </DialogHeader>
 
@@ -790,7 +790,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
                 <div className="text-sm">
                   <p className="font-medium text-orange-500 mb-1">Why SOL is Required</p>
                   <p className="text-muted-foreground">
-                    SOL is used for a one-time account setup (trading account initialization) and ongoing transaction fees. Without it, your trading agent cannot execute trades.
+                    A small amount of SOL covers the Solana network fees for USDC token transfers — depositing funds and moving collateral between bot accounts. Trade execution itself does not consume SOL.
                   </p>
                 </div>
               </div>
@@ -833,7 +833,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
                 type="number"
                 step="0.01"
                 min="0"
-                placeholder="0.1"
+                placeholder="0.02"
                 value={solDepositAmount}
                 onChange={(e) => setSolDepositAmount(e.target.value)}
                 className="flex-1"
@@ -849,7 +849,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              Recommended: 0.1 SOL (covers account setup + ~1000 transactions)
+              Recommended: 0.02 SOL (covers hundreds of USDC token transfers)
             </p>
           </div>
         </div>
