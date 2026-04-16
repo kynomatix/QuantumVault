@@ -1036,7 +1036,7 @@ export default function AppPage() {
   };
 
   const handleRecoverExchangeFunds = async () => {
-    const withdrawAmount = mainAccountFreeCollateral;
+    const withdrawAmount = Math.floor(mainAccountFreeCollateral * 100) / 100;
     if (withdrawAmount <= 0) {
       toast({ title: 'No funds to recover from main account', variant: 'destructive' });
       return;
