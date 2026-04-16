@@ -24,8 +24,11 @@ interface Trade {
   errorMessage?: string | null;
   recoveredFromError?: string | null;
   retryAttempts?: number | null;
+  executionMethod?: string | null;
   webhookPayload?: {
     position_size?: string | number;
+    action?: string;
+    closeReason?: string;
     data?: {
       position_size?: string | number;
     };
@@ -74,8 +77,11 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
   const getTradeInfo = (trade: Trade) => {
     const payload = trade.webhookPayload;
     const positionSize = payload?.position_size || payload?.data?.position_size;
-    const isCloseSignal = positionSize === '0' || positionSize === 0 || trade.side === 'CLOSE';
-    const isLong = trade.side?.toUpperCase() === 'LONG';
+    const sideUp = trade.side?.toUpperCase();
+    const isOnChainClose = trade.executionMethod === 'on-chain-detected';
+    const isTpSlClose = payload?.closeReason === 'tpsl';
+    const isCloseSignal = positionSize === '0' || positionSize === 0 || sideUp === 'CLOSE' || isOnChainClose || isTpSlClose || payload?.action === 'close';
+    const isLong = !isCloseSignal && (sideUp === 'LONG' || sideUp === 'BUY');
     const isFailed = trade.status === 'failed';
     const isExecuted = trade.status === 'executed';
     const isRecovered = trade.status === 'recovered';
