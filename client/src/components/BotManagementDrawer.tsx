@@ -496,19 +496,11 @@ export function BotManagementDrawer({
 
     setAddEquityLoading(true);
     try {
-      const hasPacificaSubaccount = bot?.subaccountStatus === 'active' && bot?.protocolSubaccountId;
-      const url = hasPacificaSubaccount
-        ? `/api/bot/${bot!.id}/deposit`
-        : '/api/exchange/deposit';
-      const body = hasPacificaSubaccount
-        ? { amount }
-        : { amount, botId: bot?.id };
-
-      const res = await fetch(url, {
+      const res = await fetch('/api/exchange/deposit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify(body),
+        body: JSON.stringify({ amount, botId: bot?.id }),
       });
 
       const data = await safeResponseJson(res);
@@ -517,7 +509,7 @@ export function BotManagementDrawer({
         throw new Error(data.error || 'Failed to add to bot');
       }
 
-      toast({ title: `Successfully added $${amount} to bot`, description: data.message || (data.signature ? `Transaction: ${data.signature.slice(0, 8)}...` : 'Transfer complete') });
+      toast({ title: `Successfully added $${amount} to bot`, description: data.signature ? `Transaction: ${data.signature.slice(0, 8)}...` : 'Transfer complete' });
       setAddEquityAmount('');
       setTimeout(() => fetchBotOverview(), 1500);
     } catch (error) {
@@ -546,19 +538,11 @@ export function BotManagementDrawer({
 
     setRemoveEquityLoading(true);
     try {
-      const hasPacificaSubaccount = bot?.subaccountStatus === 'active' && bot?.protocolSubaccountId;
-      const url = hasPacificaSubaccount
-        ? `/api/bot/${bot!.id}/withdraw`
-        : '/api/exchange/withdraw';
-      const body = hasPacificaSubaccount
-        ? { amount }
-        : { amount, botId: bot?.id };
-
-      const res = await fetch(url, {
+      const res = await fetch('/api/exchange/withdraw', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify(body),
+        body: JSON.stringify({ amount, botId: bot?.id }),
       });
 
       const data = await safeResponseJson(res);
@@ -573,7 +557,7 @@ export function BotManagementDrawer({
         throw new Error(friendlyMessage);
       }
 
-      toast({ title: `Successfully removed $${amount} from bot`, description: data.message || (data.signature ? `Transaction: ${data.signature.slice(0, 8)}...` : 'Withdrawal complete') });
+      toast({ title: `Successfully removed $${amount} from bot`, description: data.signature ? `Transaction: ${data.signature.slice(0, 8)}...` : 'Withdrawal complete' });
       setRemoveEquityAmount('');
       setTimeout(() => fetchBotOverview(), 1500);
     } catch (error) {

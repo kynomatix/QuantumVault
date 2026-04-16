@@ -129,6 +129,7 @@ export default function AppPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [withdrawingBotId, setWithdrawingBotId] = useState<string | null>(null);
+  const [recoveringExchangeFunds, setRecoveringExchangeFunds] = useState(false);
   const [botBalances, setBotBalances] = useState<Record<string, { balance: number; exists: boolean }>>({});
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [botToDelete, setBotToDelete] = useState<{ id: string; name: string; balance: number; isLegacy?: boolean; agentPublicKey?: string } | null>(null);
@@ -1031,6 +1032,50 @@ export default function AppPage() {
     }
   };
 
+  const handleRecoverExchangeFunds = async () => {
+    if (!exchangeBalance || exchangeBalance <= 0) {
+      toast({ title: 'No funds to recover', variant: 'destructive' });
+      return;
+    }
+
+    if (!confirm(`Withdraw $${exchangeBalance.toFixed(2)} from the exchange main account back to your agent wallet?`)) {
+      return;
+    }
+
+    setRecoveringExchangeFunds(true);
+    try {
+      const response = await fetch('/api/exchange/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ amount: exchangeBalance }),
+      });
+
+      if (!response.ok) {
+        const error = await safeResponseJson(response);
+        throw new Error(error.error || 'Withdrawal failed');
+      }
+
+      const data = await safeResponseJson(response);
+      toast({
+        title: 'Funds Recovered!',
+        description: `$${exchangeBalance.toFixed(2)} withdrawn to agent wallet${data.signature ? ` (tx: ${data.signature.slice(0, 8)}...)` : ''}`
+      });
+
+      setExchangeBalance(0);
+      setAgentBalance((prev) => (prev ?? 0) + exchangeBalance);
+    } catch (error: any) {
+      console.error('Recovery error:', error);
+      toast({
+        title: 'Recovery Failed',
+        description: error.message || 'Please try again',
+        variant: 'destructive'
+      });
+    } finally {
+      setRecoveringExchangeFunds(false);
+    }
+  };
+
   const handleDeleteBot = async (botId: string, botName: string) => {
     const botBalance = botBalances[botId]?.balance ?? 0;
     
@@ -1314,9 +1359,21 @@ export default function AppPage() {
                       <span className="text-muted-foreground">Available</span>
                       <span className="font-mono text-primary" data-testid="text-main-account">${agentBalance?.toFixed(2) ?? '0.00'}</span>
                     </div>
-                    <div className="flex justify-between text-xs">
+                    <div className="flex justify-between text-xs items-center">
                       <span className="text-muted-foreground">In Trading</span>
-                      <span className="font-mono text-emerald-400" data-testid="text-in-trading">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-emerald-400" data-testid="text-in-trading">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
+                        {(exchangeBalance ?? 0) > 0 && (
+                          <button
+                            onClick={handleRecoverExchangeFunds}
+                            disabled={recoveringExchangeFunds}
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                            data-testid="button-recover-exchange"
+                          >
+                            {recoveringExchangeFunds ? '...' : 'Recover'}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1352,9 +1409,21 @@ export default function AppPage() {
                       <span className="text-muted-foreground">Available</span>
                       <span className="font-mono text-primary" data-testid="text-main-account-mobile">${agentBalance?.toFixed(2) ?? '0.00'}</span>
                     </div>
-                    <div className="flex justify-between text-xs">
+                    <div className="flex justify-between text-xs items-center">
                       <span className="text-muted-foreground">In Trading</span>
-                      <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
+                        {(exchangeBalance ?? 0) > 0 && (
+                          <button
+                            onClick={handleRecoverExchangeFunds}
+                            disabled={recoveringExchangeFunds}
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                            data-testid="button-recover-exchange-mobile"
+                          >
+                            {recoveringExchangeFunds ? '...' : 'Recover'}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
