@@ -1640,7 +1640,6 @@ export default function AppPage() {
                                     const isOnChainClose = trade.executionMethod === 'on-chain-detected';
                                     const isTpSlClose = p?.closeReason === 'tpsl';
                                     const isCloseAction = trade.side === 'CLOSE' || isOnChainClose || isTpSlClose;
-                                    if (isCloseAction && isTpSlClose) return 'bg-emerald-500/20 text-emerald-500';
                                     if (isCloseAction) return 'bg-amber-500/20 text-amber-500';
                                     if (trade.side === 'LONG' || trade.side === 'BUY') return 'bg-green-500/20 text-green-500';
                                     if (trade.side === 'SHORT' || trade.side === 'SELL') return 'bg-red-500/20 text-red-500';
@@ -1650,10 +1649,8 @@ export default function AppPage() {
                                   {(() => {
                                     const p = trade.webhookPayload as any;
                                     const isOnChainClose = trade.executionMethod === 'on-chain-detected';
-                                    const isTpSlClose = p?.closeReason === 'tpsl';
-                                    if (isTpSlClose) return 'TP/SL Close';
-                                    if (trade.side === 'CLOSE' || isOnChainClose) return 'Close';
-                                    return trade.side === 'LONG' ? 'Long' : trade.side === 'SHORT' ? 'Short' : trade.side;
+                                    if (trade.side === 'CLOSE' || isOnChainClose || p?.closeReason === 'tpsl') return 'CLOSE';
+                                    return trade.side?.toUpperCase();
                                   })()}
                                 </span>
                                 <span className="text-sm font-medium">{trade.market}</span>
@@ -2088,7 +2085,6 @@ export default function AppPage() {
                             };
                             
                             const getSideLabel = () => {
-                              if (isTpSlClose) return 'TP/SL CLOSE';
                               if (isCloseSignal) return 'CLOSE';
                               return trade.side?.toUpperCase();
                             };

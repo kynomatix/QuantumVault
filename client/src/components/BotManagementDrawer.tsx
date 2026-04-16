@@ -2139,9 +2139,6 @@ export function BotManagementDrawer({
                       if (isLiquidated) {
                         return <AlertTriangle className="h-4 w-4 text-orange-500" />;
                       }
-                      if (isTpSl) {
-                        return <XCircle className="h-4 w-4 text-emerald-500" />;
-                      }
                       if (isClose) {
                         return <XCircle className="h-4 w-4 text-amber-500" />;
                       }
@@ -2153,15 +2150,12 @@ export function BotManagementDrawer({
                     
                     const getTradeLabel = () => {
                       if (isLiquidated) return 'LIQUIDATED';
-                      if (isTpSl) return 'TP/SL CLOSE';
-                      if (isClose && closeReason === 'external_close') return 'CLOSE';
                       if (isClose) return 'CLOSE';
                       return trade.side;
                     };
                     
                     const getIconBgClass = () => {
                       if (isLiquidated) return 'bg-orange-500/10';
-                      if (isTpSl) return 'bg-emerald-500/10';
                       if (isClose) return 'bg-amber-500/10';
                       if (isLong) return 'bg-emerald-500/10';
                       return 'bg-red-500/10';
@@ -2169,7 +2163,6 @@ export function BotManagementDrawer({
                     
                     const getLabelColor = () => {
                       if (isLiquidated) return 'text-orange-500';
-                      if (isTpSl) return 'text-emerald-500';
                       if (isClose) return 'text-amber-500';
                       if (isLong) return 'text-emerald-500';
                       return 'text-red-500';
