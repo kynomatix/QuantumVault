@@ -433,7 +433,11 @@ export class PacificaAdapter implements ProtocolAdapter {
       throw err;
     }
     if (!Array.isArray(response)) return [];
-    return response.map((p) => this.mapPosition(p));
+    let prices: Record<string, number> = {};
+    try {
+      prices = await this.getAllPrices();
+    } catch { /* prices unavailable, will use entry price fallback */ }
+    return response.map((p) => this.mapPosition(p, prices));
   }
 
   async getBalances(agentPublicKey: string, subaccountId?: string): Promise<BalanceInfo> {
@@ -1267,11 +1271,16 @@ export class PacificaAdapter implements ProtocolAdapter {
     });
   }
 
-  private mapPosition(p: PacificaPositionResponse): ProtocolPosition {
+  private mapPosition(p: PacificaPositionResponse, oraclePrices: Record<string, number> = {}): ProtocolPosition {
     const rawAmount = parseFloat(p.amount || p.size || '0');
     const size = p.side === 'ask' ? -rawAmount : rawAmount;
     const entryPrice = parseFloat(p.entry_price);
-    const markPrice = p.mark_price ? parseFloat(p.mark_price) : entryPrice;
+    const internalSymbol = this.safeProtocolToInternal(p.symbol);
+
+    let markPrice = p.mark_price ? parseFloat(p.mark_price) : 0;
+    if (!markPrice || markPrice === 0) {
+      markPrice = oraclePrices[internalSymbol] || entryPrice;
+    }
 
     let unrealizedPnl = p.unrealized_pnl ? parseFloat(p.unrealized_pnl) : 0;
     if (unrealizedPnl === 0 && Math.abs(size) > 0.0001 && markPrice > 0 && entryPrice > 0 && markPrice !== entryPrice) {
@@ -1281,7 +1290,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
 
     return {
-      internalSymbol: this.safeProtocolToInternal(p.symbol),
+      internalSymbol,
       baseSize: size,
       entryPrice,
       markPrice,

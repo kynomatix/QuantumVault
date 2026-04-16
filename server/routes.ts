@@ -5331,14 +5331,30 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           failures.map((f, i) => `[${i}]: ${(f as PromiseRejectedResult).reason}`).join(', '));
       }
       
-      // Build position response
+      // Build position response — use oracle price for currentPrice/unrealizedPnl
+      // to match /api/positions behavior (Pacifica may omit mark_price)
+      let enrichedCurrentPrice = posData.position?.currentPrice ?? 0;
+      let enrichedUnrealizedPnl = posData.position?.unrealizedPnl ?? 0;
+      if (posData.position?.hasPosition && posData.position.avgEntryPrice) {
+        const oraclePrice = prices[posData.position.market] || prices[bot.market] || 0;
+        if (oraclePrice > 0) {
+          enrichedCurrentPrice = oraclePrice;
+          const baseSize = posData.position.size ?? 0;
+          if (baseSize > 0.0001) {
+            enrichedUnrealizedPnl = posData.position.side === 'LONG'
+              ? (oraclePrice - posData.position.avgEntryPrice) * baseSize
+              : (posData.position.avgEntryPrice - oraclePrice) * baseSize;
+          }
+        }
+      }
+
       const position = posData.position?.hasPosition ? {
         hasPosition: true,
         side: posData.position.side,
         size: posData.position.size,
         avgEntryPrice: posData.position.avgEntryPrice,
-        currentPrice: posData.position.currentPrice,
-        unrealizedPnl: posData.position.unrealizedPnl,
+        currentPrice: enrichedCurrentPrice,
+        unrealizedPnl: enrichedUnrealizedPnl,
         realizedPnl: posData.position.realizedPnl,
         market: posData.position.market,
         source: posData.source,
@@ -6611,13 +6627,26 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         });
       }
 
+      let posCurrentPrice = posData.position.currentPrice;
+      let posUnrealizedPnl = posData.position.unrealizedPnl;
+      const oraclePrice = await getMarketPrice(bot.market);
+      if (oraclePrice && oraclePrice > 0) {
+        posCurrentPrice = oraclePrice;
+        const baseSize = posData.position.size ?? 0;
+        if (baseSize > 0.0001) {
+          posUnrealizedPnl = posData.position.side === 'LONG'
+            ? (oraclePrice - posData.position.avgEntryPrice) * baseSize
+            : (posData.position.avgEntryPrice - oraclePrice) * baseSize;
+        }
+      }
+
       res.json({
         hasPosition: true,
         side: posData.position.side,
         size: posData.position.size,
         avgEntryPrice: posData.position.avgEntryPrice,
-        currentPrice: posData.position.currentPrice,
-        unrealizedPnl: posData.position.unrealizedPnl,
+        currentPrice: posCurrentPrice,
+        unrealizedPnl: posUnrealizedPnl,
         realizedPnl: posData.position.realizedPnl,
         market: posData.position.market,
         source: posData.source,
