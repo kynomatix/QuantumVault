@@ -646,7 +646,9 @@ export class PacificaAdapter implements ProtocolAdapter {
   async cancelAllOrders(params: CancelAllOrdersParams): Promise<CancelResult> {
     const signer = new PacificaSigner(params.agentSecretKey);
 
-    const operationData: Record<string, unknown> = {};
+    const operationData: Record<string, unknown> = {
+      all_symbols: !params.symbol,
+    };
 
     if (params.symbol) {
       operationData.symbol = this.getRegistry().internalToProtocol(params.symbol);
