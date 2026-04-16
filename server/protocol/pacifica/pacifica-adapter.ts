@@ -795,7 +795,7 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     let positionSide: string = 'bid';
     try {
-      const positions = await this.getPositions(params.agentPublicKey);
+      const positions = await this.getPositions(params.agentPublicKey, params.subaccountId);
       const pos = positions.find(p => p.internalSymbol === params.internalSymbol);
       if (pos) {
         positionSide = pos.baseSize >= 0 ? 'bid' : 'ask';
@@ -804,17 +804,45 @@ export class PacificaAdapter implements ProtocolAdapter {
       console.warn(`[SetTpSl] Could not fetch position side, defaulting to 'bid':`, err);
     }
 
+    const isLong = positionSide === 'bid';
+    const TP_SLIPPAGE = 0.001;
+    const SL_SLIPPAGE = 0.005;
+
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
       side: positionSide,
     };
 
     if (params.takeProfitPrice !== undefined) {
-      operationData.take_profit_price = String(params.takeProfitPrice);
+      if (params.takeProfitPrice > 0) {
+        const tpStop = String(params.takeProfitPrice);
+        const tpLimit = isLong
+          ? String(params.takeProfitPrice * (1 - TP_SLIPPAGE))
+          : String(params.takeProfitPrice * (1 + TP_SLIPPAGE));
+        operationData.take_profit = {
+          stop_price: tpStop,
+          limit_price: tpLimit,
+        };
+      } else {
+        operationData.take_profit = null;
+      }
     }
     if (params.stopLossPrice !== undefined) {
-      operationData.stop_loss_price = String(params.stopLossPrice);
+      if (params.stopLossPrice > 0) {
+        const slStop = String(params.stopLossPrice);
+        const slLimit = isLong
+          ? String(params.stopLossPrice * (1 - SL_SLIPPAGE))
+          : String(params.stopLossPrice * (1 + SL_SLIPPAGE));
+        operationData.stop_loss = {
+          stop_price: slStop,
+          limit_price: slLimit,
+        };
+      } else {
+        operationData.stop_loss = null;
+      }
     }
+
+    console.log(`[PacificaAdapter.setTpSl] operationData:`, JSON.stringify(operationData));
 
     const body = signer.buildRequestBody(
       OPERATION_TYPES.SET_POSITION_TPSL,
