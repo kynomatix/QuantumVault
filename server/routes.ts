@@ -4523,31 +4523,24 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const subAccountId = bot.driftSubaccountId ?? 0;
       const tpslBotCtx = getBotSubaccountContext(bot);
-      const { secretKey, publicKey } = _decryptToSecretKey(wallet.agentPrivateKeyEncrypted);
-      const agentPubKey = wallet.agentPublicKey || publicKey;
-      const mainWalletAddress = await _lookupMainWallet(agentPubKey);
+      const signing = _resolveSigningContext(wallet.agentPrivateKeyEncrypted, subAccountId, tpslBotCtx);
+      const mainWalletAddress = await _lookupMainWallet(
+        tpslBotCtx ? wallet.agentPublicKey : signing.publicKey
+      );
       const adapter = getDefaultAdapter();
 
       if (!adapter.setTpSl) {
         return res.status(400).json({ error: "Current protocol adapter does not support TP/SL" });
       }
 
-      let tpslSecretKey = secretKey;
-      let tpslPublicKey = agentPubKey;
-      if (tpslBotCtx) {
-        const botKeyBase58 = decrypt(tpslBotCtx.botEncryptedKey);
-        tpslSecretKey = bs58.decode(botKeyBase58);
-        tpslPublicKey = tpslBotCtx.botPublicKey;
-      }
-
       const result = await adapter.setTpSl({
-        agentPublicKey: tpslPublicKey,
-        agentSecretKey: tpslSecretKey,
+        agentPublicKey: signing.publicKey,
+        agentSecretKey: signing.secretKey,
         mainWalletAddress,
         internalSymbol: bot.market,
         takeProfitPrice: takeProfitPrice || undefined,
         stopLossPrice: stopLossPrice || undefined,
-        subaccountId: tpslBotCtx ? '0' : _subIdStr(subAccountId),
+        subaccountId: signing.subaccountId,
       });
 
       console.log(`[SetTpSl] Set TP/SL for bot ${bot.id} (${bot.market}): TP=${takeProfitPrice ?? 'none'}, SL=${stopLossPrice ?? 'none'}, orderId=${result.orderId}`);
@@ -4576,8 +4569,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const subAccountId = bot.driftSubaccountId ?? 0;
-      const { secretKey, publicKey } = _decryptToSecretKey(wallet.agentPrivateKeyEncrypted);
-      const agentPubKey = wallet.agentPublicKey || publicKey;
+      const cancelBotCtx = getBotSubaccountContext(bot);
+      const agentPubKey = wallet.agentPublicKey;
       const mainWalletAddress = await _lookupMainWallet(agentPubKey);
       const adapter = getDefaultAdapter();
 
@@ -4585,14 +4578,16 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Current protocol adapter does not support TP/SL" });
       }
 
+      const signing = _resolveSigningContext(wallet.agentPrivateKeyEncrypted, subAccountId, cancelBotCtx);
+
       const result = await adapter.setTpSl({
-        agentPublicKey: agentPubKey,
-        agentSecretKey: secretKey,
+        agentPublicKey: signing.publicKey,
+        agentSecretKey: signing.secretKey,
         mainWalletAddress,
         internalSymbol: bot.market,
         takeProfitPrice: 0,
         stopLossPrice: 0,
-        subaccountId: _subIdStr(subAccountId),
+        subaccountId: signing.subaccountId,
       });
 
       console.log(`[CancelTpSl] Cleared TP/SL for bot ${bot.id} (${bot.market}), orderId=${result.orderId}`);

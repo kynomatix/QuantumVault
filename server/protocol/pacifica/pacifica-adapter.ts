@@ -790,6 +790,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
+    console.log(`[PacificaAdapter.setTpSl] account=${params.agentPublicKey.slice(0,8)}... symbol=${protocolSymbol} subaccountId=${params.subaccountId ?? 'none'} TP=${params.takeProfitPrice ?? 'none'} SL=${params.stopLossPrice ?? 'none'}`);
+
     let positionSide: string = 'bid';
     try {
       const positions = await this.getPositions(params.agentPublicKey);
