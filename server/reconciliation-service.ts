@@ -1,6 +1,7 @@
 import { storage } from "./storage";
 import { normalizeMarket } from "./protocol/symbol-registry";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
+import type { TradeRecord } from "./protocol/protocol-types";
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -40,6 +41,155 @@ const RECONCILE_INTERVAL_MS = 60 * 1000; // 60 seconds
 
 let reconcileInterval: NodeJS.Timeout | null = null;
 const lastReconcileTime = new Map<string, number>();
+
+interface CloseDetectionResult {
+  detected: boolean;
+  reason: 'tpsl' | 'liquidation' | 'external_close';
+  fillPrice?: number;
+  pnl?: number;
+  fee?: number;
+  protocolTradeId?: string;
+}
+
+async function detectOnChainClose(
+  botId: string,
+  agentPublicKey: string,
+  market: string,
+  dbPosition: { baseSize: string; avgEntryPrice: string; realizedPnl?: string; totalFees?: string; lastTradeId?: string | null },
+  botSubaccountPublicKey?: string,
+): Promise<CloseDetectionResult> {
+  const noDetection: CloseDetectionResult = { detected: false, reason: 'external_close' };
+
+  try {
+    const adapter = getDefaultAdapter();
+    const normalizedMarket = normalizeMarket(market);
+    const dbBaseSize = parseFloat(dbPosition.baseSize);
+    const entryPrice = parseFloat(dbPosition.avgEntryPrice);
+    const positionSide = dbBaseSize > 0 ? 'long' : 'short';
+    const closeSide = positionSide === 'long' ? 'short' : 'long';
+    const absSize = Math.abs(dbBaseSize);
+
+    let recentTrades: TradeRecord[] = [];
+    try {
+      const fiveMinAgo = Date.now() - 5 * 60 * 1000;
+      recentTrades = await adapter.getTradeHistory(agentPublicKey, {
+        limit: 50,
+        startTime: fiveMinAgo,
+        ...(botSubaccountPublicKey ? { subaccountId: botSubaccountPublicKey } : {}),
+      });
+    } catch (err) {
+      console.log(`[Reconcile] Trade history fetch failed for ${botId}: ${err instanceof Error ? err.message : err}`);
+    }
+
+    const closingFills = recentTrades
+      .filter(t =>
+        normalizeMarket(t.internalSymbol) === normalizedMarket &&
+        t.side === closeSide
+      )
+      .sort((a, b) => b.timestamp - a.timestamp);
+
+    let aggregatedSize = 0;
+    let weightedPriceSum = 0;
+    let totalFee = 0;
+    const matchedTradeIds: string[] = [];
+
+    for (const fill of closingFills) {
+      aggregatedSize += fill.size;
+      weightedPriceSum += fill.price * fill.size;
+      totalFee += fill.fee;
+      matchedTradeIds.push(fill.tradeId);
+      if (aggregatedSize >= absSize * 0.95) break;
+    }
+
+    const hasClosingTrades = aggregatedSize >= absSize * 0.80;
+
+    let closeReason: 'tpsl' | 'liquidation' | 'external_close' = 'external_close';
+
+    const bot = await storage.getTradingBotById(botId);
+    const riskConfig = bot?.riskConfig as Record<string, unknown> | undefined;
+
+    if (hasClosingTrades) {
+      const avgFillPrice = weightedPriceSum / aggregatedSize;
+
+      const hasTpSl = riskConfig && (
+        (riskConfig.takeProfitPercent && Number(riskConfig.takeProfitPercent) > 0) ||
+        (riskConfig.stopLossPercent && Number(riskConfig.stopLossPercent) > 0)
+      );
+
+      if (hasTpSl) {
+        const tpPct = Number(riskConfig?.takeProfitPercent || 0);
+        const slPct = Number(riskConfig?.stopLossPercent || 0);
+
+        const tpPrice = positionSide === 'long'
+          ? entryPrice * (1 + tpPct / 100)
+          : entryPrice * (1 - tpPct / 100);
+        const slPrice = positionSide === 'long'
+          ? entryPrice * (1 - slPct / 100)
+          : entryPrice * (1 + slPct / 100);
+
+        const hitTp = tpPct > 0 && (
+          positionSide === 'long'
+            ? avgFillPrice >= tpPrice * 0.99
+            : avgFillPrice <= tpPrice * 1.01
+        );
+        const hitSl = slPct > 0 && (
+          positionSide === 'long'
+            ? avgFillPrice <= slPrice * 1.01
+            : avgFillPrice >= slPrice * 0.99
+        );
+
+        if (hitTp || hitSl) {
+          closeReason = 'tpsl';
+          console.log(`[Reconcile] TP/SL detected for bot ${botId}: ${hitTp ? 'TP' : 'SL'} hit at $${avgFillPrice.toFixed(4)} (entry=$${entryPrice.toFixed(4)}, TP=$${tpPrice.toFixed(4)}, SL=$${slPrice.toFixed(4)})`);
+        }
+      }
+
+      const pnl = positionSide === 'long'
+        ? (avgFillPrice - entryPrice) * absSize
+        : (entryPrice - avgFillPrice) * absSize;
+
+      if (closeReason === 'external_close') {
+        try {
+          const subAcct = botSubaccountPublicKey || undefined;
+          const accountInfo = await adapter.getAccountInfo(agentPublicKey, subAcct);
+          if (accountInfo.equity < 1 && accountInfo.balance < 1) {
+            closeReason = 'liquidation';
+            console.log(`[Reconcile] Likely liquidation for bot ${botId}: account equity=$${accountInfo.equity.toFixed(2)}, balance=$${accountInfo.balance.toFixed(2)}`);
+          }
+        } catch { /* non-critical */ }
+      }
+
+      return {
+        detected: true,
+        reason: closeReason,
+        fillPrice: avgFillPrice,
+        pnl,
+        fee: totalFee,
+        protocolTradeId: matchedTradeIds.join(','),
+      };
+    }
+
+    try {
+      const subAcct = botSubaccountPublicKey || undefined;
+      const accountInfo = await adapter.getAccountInfo(agentPublicKey, subAcct);
+      if (accountInfo.equity < 1 && accountInfo.balance < 1) {
+        console.log(`[Reconcile] Likely liquidation for bot ${botId} (no closing trades found): equity=$${accountInfo.equity.toFixed(2)}, balance=$${accountInfo.balance.toFixed(2)}`);
+        return {
+          detected: true,
+          reason: 'liquidation',
+          fillPrice: entryPrice,
+          pnl: -(absSize * entryPrice),
+          fee: 0,
+        };
+      }
+    } catch { /* non-critical */ }
+
+    return noDetection;
+  } catch (err) {
+    console.error(`[Reconcile] detectOnChainClose error for bot ${botId}:`, err);
+    return noDetection;
+  }
+}
 
 /**
  * Force sync position from on-chain Drift to database
@@ -282,7 +432,77 @@ export async function reconcileBotPosition(
     const onChainHasRealPosition = onChainPos && Math.abs(onChainBaseSize) > 0.0001;
     
     if (Math.abs(dbBaseSize) > 0.0001 && !onChainHasRealPosition) {
-      console.log(`[Reconcile] On-chain empty/zero but DB has ${dbBaseSize} ${market} — preserving DB (source of truth). Position clearing only happens via explicit trade execution.`);
+      const closeDetection = await detectOnChainClose(
+        botId, agentPublicKey, market, dbPosition!, botSubaccountPublicKey
+      );
+
+      if (closeDetection.detected) {
+        const dedupKey = closeDetection.protocolTradeId
+          ? `reconcile-close-${closeDetection.protocolTradeId}`
+          : `reconcile-close-${botId}-${market}-${Date.now()}`;
+
+        const existingTrades = await storage.getBotTrades(botId, 5);
+        const alreadyRecorded = closeDetection.protocolTradeId && existingTrades.some(t => {
+          const payload = t.webhookPayload as Record<string, unknown> | null;
+          return payload?.protocolTradeId === closeDetection.protocolTradeId;
+        });
+
+        if (alreadyRecorded) {
+          console.log(`[Reconcile] Close already recorded for bot ${botId} ${market} (tradeId=${closeDetection.protocolTradeId}), skipping duplicate`);
+          lastReconcileTime.set(botId, Date.now());
+          return { synced: true, discrepancy: false };
+        }
+
+        console.log(`[Reconcile] Position closed on-chain for bot ${botId} ${market}: reason=${closeDetection.reason}, fill=$${closeDetection.fillPrice?.toFixed(4) ?? '?'}, pnl=$${closeDetection.pnl?.toFixed(4) ?? '?'}`);
+
+        await storage.createBotTrade({
+          tradingBotId: botId,
+          walletAddress,
+          market,
+          side: dbBaseSize > 0 ? 'short' : 'long',
+          size: String(Math.abs(dbBaseSize)),
+          price: String(closeDetection.fillPrice ?? parseFloat(dbPosition!.avgEntryPrice)),
+          fee: String(closeDetection.fee ?? 0),
+          pnl: String(closeDetection.pnl ?? 0),
+          status: closeDetection.reason === 'liquidation' ? 'liquidated' : 'executed',
+          protocolFillId: dedupKey,
+          webhookPayload: {
+            reconciled: true,
+            closeReason: closeDetection.reason,
+            detectedAt: new Date().toISOString(),
+            protocolTradeId: closeDetection.protocolTradeId,
+          },
+          executionMethod: 'on-chain-detected',
+        });
+
+        await storage.upsertBotPosition({
+          tradingBotId: botId,
+          walletAddress,
+          market,
+          baseSize: "0",
+          avgEntryPrice: dbPosition!.avgEntryPrice,
+          costBasis: "0",
+          realizedPnl: String(parseFloat(dbPosition!.realizedPnl || "0") + (closeDetection.pnl ?? 0)),
+          totalFees: String(parseFloat(dbPosition!.totalFees || "0") + (closeDetection.fee ?? 0)),
+          lastTradeId: dbPosition!.lastTradeId,
+          lastTradeAt: new Date(),
+        });
+
+        if (closeDetection.reason === 'tpsl') {
+          const bot = await storage.getTradingBotById(botId);
+          if (bot?.riskConfig) {
+            const rc = bot.riskConfig as Record<string, unknown>;
+            delete rc.takeProfitPercent;
+            delete rc.stopLossPercent;
+            await storage.updateTradingBot(botId, { riskConfig: rc } as any);
+          }
+        }
+
+        lastReconcileTime.set(botId, Date.now());
+        return { synced: true, discrepancy: true, liquidation: closeDetection.reason === 'liquidation' };
+      }
+
+      console.log(`[Reconcile] On-chain empty but DB has ${dbBaseSize} ${market} — no closing trade found on-chain, preserving DB.`);
       lastReconcileTime.set(botId, Date.now());
       return { synced: true, discrepancy: false };
     }

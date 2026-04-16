@@ -467,12 +467,13 @@ export class PacificaAdapter implements ProtocolAdapter {
     }));
   }
 
-  async getTradeHistory(agentPublicKey: string, params?: HistoryParams): Promise<TradeRecord[]> {
+  async getTradeHistory(agentPublicKey: string, params?: HistoryParams & { subaccountId?: string }): Promise<TradeRecord[]> {
     const queryParams: Record<string, string> = { account: agentPublicKey };
     if (params?.startTime) queryParams.start_time = String(params.startTime);
     if (params?.endTime) queryParams.end_time = String(params.endTime);
     if (params?.limit) queryParams.limit = String(params.limit);
     if (params?.offset) queryParams.offset = String(params.offset);
+    if (params?.subaccountId) queryParams.subaccount_id = params.subaccountId;
 
     const response: PacificaTradeResponse[] = await this.get('/account/trades', queryParams);
 
