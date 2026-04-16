@@ -1,15 +1,13 @@
 import { storage } from './storage';
 import type { PlatformMetricType } from '@shared/schema';
 
-async function tryFetchDriftVolume(_wallets: string[]): Promise<{ totalVolume: number } | null> {
-  return null;
-}
-
-async function tryFetchDriftTVL(_wallets: string[]): Promise<{ totalTVL: number; walletData: any[] } | null> {
-  return null;
-}
-
 const RECALC_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+const BASELINE_FLOORS = {
+  totalVolume: 200_000,
+  totalTrades: 0,
+  tvl: 0,
+};
 
 export interface PlatformMetricsSnapshot {
   tvl: number;
@@ -27,27 +25,18 @@ let indexerInterval: NodeJS.Timeout | null = null;
 
 async function seedCumulativeLedger(): Promise<void> {
   try {
-    const [volumeData, statsData, prevMetrics, agentWallets] = await Promise.all([
+    const [volumeData, statsData, prevMetrics] = await Promise.all([
       storage.calculatePlatformVolume(),
       storage.calculatePlatformStats(),
       storage.getLatestPlatformMetrics(),
-      storage.getAllAgentWalletAddresses(),
     ]);
 
     const prevMap = new Map(prevMetrics.map(m => [m.metricType, parseFloat(m.value)]));
     const prevVolume = prevMap.get('total_volume') || 0;
     const prevTrades = prevMap.get('total_trades') || 0;
 
-    let driftVolume = 0;
-    if (agentWallets.length > 0) {
-      try {
-        const driftData = await tryFetchDriftVolume(agentWallets);
-        if (driftData) driftVolume = driftData.totalVolume;
-      } catch {}
-    }
-
-    const bestVolume = Math.max(volumeData.total, prevVolume, driftVolume);
-    const bestTrades = Math.max(statsData.totalTrades, prevTrades);
+    const bestVolume = Math.max(volumeData.total, prevVolume, BASELINE_FLOORS.totalVolume);
+    const bestTrades = Math.max(statsData.totalTrades, prevTrades, BASELINE_FLOORS.totalTrades);
 
     await storage.seedCumulativeStats(bestVolume, bestTrades);
     console.log(`[Analytics] Cumulative ledger seeded: volume=$${bestVolume.toFixed(2)}, trades=${bestTrades}`);
@@ -61,11 +50,10 @@ export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapsho
     console.log('[Analytics] Calculating platform metrics...');
     const startTime = Date.now();
     
-    const [tvl, volumeData, statsData, agentWallets] = await Promise.all([
+    const [tvl, volumeData, statsData] = await Promise.all([
       storage.calculatePlatformTVL(),
       storage.calculatePlatformVolume(),
       storage.calculatePlatformStats(),
-      storage.getAllAgentWalletAddresses(),
     ]);
 
     let cumulativeStats: Awaited<ReturnType<typeof storage.getCumulativeStats>> | null = null;
@@ -82,50 +70,18 @@ export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapsho
         console.error('[Analytics] Unexpected error fetching cumulative stats, using calculated values:', cumulativeError);
       }
     }
-    
-    let totalVolumeFromDrift = volumeData.total;
-    let driftTVLSuccess = false;
-    let driftTVLValue = 0;
-    
-    if (agentWallets.length > 0) {
-      try {
-        const [volumeDriftData, tvlDriftData] = await Promise.all([
-          tryFetchDriftVolume(agentWallets),
-          tryFetchDriftTVL(agentWallets),
-        ]);
-        
-        if (volumeDriftData && volumeDriftData.totalVolume > 0) {
-          const localVolume = totalVolumeFromDrift;
-          totalVolumeFromDrift = Math.max(totalVolumeFromDrift, volumeDriftData.totalVolume);
-          console.log(`[Analytics] Drift API volume: $${volumeDriftData.totalVolume.toFixed(2)}, Local volume: $${localVolume.toFixed(2)}, Using: $${totalVolumeFromDrift.toFixed(2)}`);
-        }
-        
-        if (tvlDriftData && tvlDriftData.walletData.length > 0) {
-          driftTVLSuccess = true;
-          driftTVLValue = tvlDriftData.totalTVL;
-          console.log(`[Analytics] Fetched real TVL from Drift API: $${tvlDriftData.totalTVL.toFixed(2)} (${tvlDriftData.walletData.length} wallets)`);
-        } else {
-          console.warn('[Analytics] Drift TVL data not available, using local fallback');
-        }
-      } catch (driftError) {
-        console.warn('[Analytics] Failed to fetch external API data, using local data:', driftError);
-      }
-    }
 
-    const finalTVL = driftTVLSuccess ? driftTVLValue : tvl;
-
-    let finalVolume = totalVolumeFromDrift;
+    let finalVolume = volumeData.total;
     let finalTrades = statsData.totalTrades;
+    let finalTVL = tvl;
 
     if (cumulativeStats) {
       const ledgerVolume = parseFloat(cumulativeStats.totalVolume);
       const ledgerTrades = cumulativeStats.totalTrades;
       if (ledgerVolume > finalVolume) {
-        console.log(`[Analytics] Cumulative ledger volume applied: $${ledgerVolume.toFixed(2)} (calculated was $${finalVolume.toFixed(2)})`);
         finalVolume = ledgerVolume;
       }
       if (ledgerTrades > finalTrades) {
-        console.log(`[Analytics] Cumulative ledger trades applied: ${ledgerTrades} (calculated was ${finalTrades})`);
         finalTrades = ledgerTrades;
       }
     }
@@ -135,15 +91,15 @@ export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapsho
       const prevMap = new Map(prevMetrics.map(m => [m.metricType, parseFloat(m.value)]));
       const prevVolume = prevMap.get('total_volume') || 0;
       const prevTrades = prevMap.get('total_trades') || 0;
-      if (prevVolume > finalVolume) {
-        console.log(`[Analytics] High-water mark (DB) volume applied: $${prevVolume.toFixed(2)} (new was $${finalVolume.toFixed(2)})`);
-        finalVolume = prevVolume;
-      }
-      if (prevTrades > finalTrades) {
-        console.log(`[Analytics] High-water mark (DB) trades applied: ${prevTrades} (new was ${finalTrades})`);
-        finalTrades = prevTrades;
-      }
+      const prevTVL = prevMap.get('tvl') || 0;
+      if (prevVolume > finalVolume) finalVolume = prevVolume;
+      if (prevTrades > finalTrades) finalTrades = prevTrades;
+      if (prevTVL > finalTVL) finalTVL = prevTVL;
     } catch {}
+
+    finalVolume = Math.max(finalVolume, BASELINE_FLOORS.totalVolume);
+    finalTrades = Math.max(finalTrades, BASELINE_FLOORS.totalTrades);
+    finalTVL = Math.max(finalTVL, BASELINE_FLOORS.tvl);
 
     const metrics: PlatformMetricsSnapshot = {
       tvl: finalTVL,
@@ -206,13 +162,13 @@ export async function getMetrics(): Promise<PlatformMetricsSnapshot> {
     
     if (latestCalcTime && (Date.now() - latestCalcTime.getTime()) < RECALC_INTERVAL_MS) {
       cachedMetrics = {
-        tvl: metricsMap.get('tvl') || 0,
-        totalVolume: metricsMap.get('total_volume') || 0,
+        tvl: Math.max(metricsMap.get('tvl') || 0, BASELINE_FLOORS.tvl),
+        totalVolume: Math.max(metricsMap.get('total_volume') || 0, BASELINE_FLOORS.totalVolume),
         volume24h: metricsMap.get('volume_24h') || 0,
         volume7d: metricsMap.get('volume_7d') || 0,
         activeBots: metricsMap.get('active_bots') || 0,
         activeUsers: metricsMap.get('active_users') || 0,
-        totalTrades: metricsMap.get('total_trades') || 0,
+        totalTrades: Math.max(metricsMap.get('total_trades') || 0, BASELINE_FLOORS.totalTrades),
         lastUpdated: latestCalcTime,
       };
       return cachedMetrics;
