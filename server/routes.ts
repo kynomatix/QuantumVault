@@ -4545,6 +4545,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       console.log(`[SetTpSl] Set TP/SL for bot ${bot.id} (${bot.market}): TP=${takeProfitPrice ?? 'none'}, SL=${stopLossPrice ?? 'none'}, orderId=${result.orderId}`);
 
+      const updatedRiskConfig = { ...(bot.riskConfig as Record<string, unknown> || {}) };
+      if (takeProfitPrice) updatedRiskConfig.takeProfitPrice = takeProfitPrice;
+      if (stopLossPrice) updatedRiskConfig.stopLossPrice = stopLossPrice;
+      await storage.updateTradingBot(bot.id, { riskConfig: updatedRiskConfig });
+
       res.json({
         success: true,
         takeProfitPrice: takeProfitPrice || null,
@@ -4585,6 +4590,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           subaccountId: signing.subaccountId,
         });
         console.log(`[CancelTpSl] Canceled ${result.canceledCount} stop orders for bot ${bot.id} (${bot.market})`);
+        const clearedRiskConfig = { ...(bot.riskConfig as Record<string, unknown> || {}) };
+        delete clearedRiskConfig.takeProfitPrice;
+        delete clearedRiskConfig.stopLossPrice;
+        await storage.updateTradingBot(bot.id, { riskConfig: clearedRiskConfig });
         res.json({ success: true, canceledCount: result.canceledCount });
       } else if (adapter.setTpSl) {
         const result = await adapter.setTpSl({
