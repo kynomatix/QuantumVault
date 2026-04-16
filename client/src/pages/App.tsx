@@ -60,6 +60,16 @@ import {
   ArrowUp,
   ArrowDown
 } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogFooter,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogAction,
+  AlertDialogCancel,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -130,6 +140,7 @@ export default function AppPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [withdrawingBotId, setWithdrawingBotId] = useState<string | null>(null);
   const [recoveringExchangeFunds, setRecoveringExchangeFunds] = useState(false);
+  const [showRecoverDialog, setShowRecoverDialog] = useState(false);
   const [botBalances, setBotBalances] = useState<Record<string, { balance: number; exists: boolean }>>({});
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [botToDelete, setBotToDelete] = useState<{ id: string; name: string; balance: number; isLegacy?: boolean; agentPublicKey?: string } | null>(null);
@@ -1042,10 +1053,7 @@ export default function AppPage() {
       return;
     }
 
-    if (!confirm(`Withdraw $${withdrawAmount.toFixed(2)} from the exchange main account back to your agent wallet?`)) {
-      return;
-    }
-
+    setShowRecoverDialog(false);
     setRecoveringExchangeFunds(true);
     try {
       const response = await fetch('/api/exchange/withdraw', {
@@ -1381,13 +1389,15 @@ export default function AppPage() {
                         <span className="font-mono text-emerald-400" data-testid="text-in-trading">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
                         {mainAccountFreeCollateral > 0.01 && (
                           <button
-                            onClick={handleRecoverExchangeFunds}
+                            onClick={() => setShowRecoverDialog(true)}
                             disabled={recoveringExchangeFunds}
                             className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
                             title={`$${mainAccountFreeCollateral.toFixed(2)} in main account`}
                             data-testid="button-recover-exchange"
                           >
-                            {recoveringExchangeFunds ? '...' : `Recover $${mainAccountFreeCollateral.toFixed(2)}`}
+                            {recoveringExchangeFunds ? (
+                              <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Recovering...</span>
+                            ) : `Recover $${(Math.floor(mainAccountFreeCollateral * 100) / 100).toFixed(2)}`}
                           </button>
                         )}
                       </div>
@@ -1432,12 +1442,14 @@ export default function AppPage() {
                         <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
                         {mainAccountFreeCollateral > 0.01 && (
                           <button
-                            onClick={handleRecoverExchangeFunds}
+                            onClick={() => setShowRecoverDialog(true)}
                             disabled={recoveringExchangeFunds}
                             className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
                             data-testid="button-recover-exchange-mobile"
                           >
-                            {recoveringExchangeFunds ? '...' : `Recover $${mainAccountFreeCollateral.toFixed(2)}`}
+                            {recoveringExchangeFunds ? (
+                              <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Recovering...</span>
+                            ) : `Recover $${(Math.floor(mainAccountFreeCollateral * 100) / 100).toFixed(2)}`}
                           </button>
                         )}
                       </div>
@@ -4150,6 +4162,53 @@ export default function AppPage() {
           </motion.div>
         </div>
       )}
+
+      <AlertDialog open={showRecoverDialog} onOpenChange={setShowRecoverDialog}>
+        <AlertDialogContent className="border-amber-500/30 bg-background" data-testid="modal-recover-funds">
+          <AlertDialogHeader>
+            <div className="flex items-center gap-3 mb-1">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
+                <ArrowUpFromLine className="w-5 h-5 text-amber-400" />
+              </div>
+              <AlertDialogTitle className="text-lg">Recover Funds</AlertDialogTitle>
+            </div>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 pt-2">
+                <p>
+                  You have <span className="font-semibold text-amber-400">${(Math.floor(mainAccountFreeCollateral * 100) / 100).toFixed(2)} USDC</span> sitting in your exchange main account that isn't allocated to any bot.
+                </p>
+                <div className="bg-muted/50 rounded-lg p-3 space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">From</span>
+                    <span>Exchange Main Account</span>
+                  </div>
+                  <div className="flex justify-center">
+                    <ArrowDown className="w-4 h-4 text-amber-400" />
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">To</span>
+                    <span>Agent Wallet (SPL USDC)</span>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  This moves unallocated funds off the exchange back to your agent wallet for safekeeping. Bot subaccount balances are not affected.
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="mt-2">
+            <AlertDialogCancel data-testid="button-recover-cancel">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleRecoverExchangeFunds}
+              className="bg-amber-500 hover:bg-amber-600 text-black font-medium"
+              data-testid="button-recover-confirm"
+            >
+              <ArrowUpFromLine className="w-4 h-4 mr-2" />
+              Recover ${(Math.floor(mainAccountFreeCollateral * 100) / 100).toFixed(2)}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {deleteModalOpen && botToDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
