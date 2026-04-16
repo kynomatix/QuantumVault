@@ -171,8 +171,27 @@ async function detectOnChainClose(
     try {
       const subAcct = botSubaccountPublicKey || undefined;
       const accountInfo = await adapter.getAccountInfo(agentPublicKey, subAcct);
+
+      const hasTpSlConfig = riskConfig && (
+        Number(riskConfig.takeProfitPrice || 0) > 0 ||
+        Number(riskConfig.stopLossPrice || 0) > 0 ||
+        Number(riskConfig.takeProfitPercent || 0) > 0 ||
+        Number(riskConfig.stopLossPercent || 0) > 0
+      );
+
+      if (hasTpSlConfig) {
+        console.log(`[Reconcile] Position closed for bot ${botId} with TP/SL configured (no trade history, balance=$${accountInfo.balance.toFixed(2)}): classified as tpsl`);
+        return {
+          detected: true,
+          reason: 'tpsl',
+          fillPrice: entryPrice,
+          pnl: 0,
+          fee: 0,
+        };
+      }
+
       if (accountInfo.equity < 1 && accountInfo.balance < 1) {
-        console.log(`[Reconcile] Likely liquidation for bot ${botId} (no closing trades found): equity=$${accountInfo.equity.toFixed(2)}, balance=$${accountInfo.balance.toFixed(2)}`);
+        console.log(`[Reconcile] Likely liquidation for bot ${botId} (no closing trades, no TP/SL configured): equity=$${accountInfo.equity.toFixed(2)}, balance=$${accountInfo.balance.toFixed(2)}`);
         return {
           detected: true,
           reason: 'liquidation',
@@ -182,18 +201,11 @@ async function detectOnChainClose(
         };
       }
 
-      const hasTpSlConfig = riskConfig && (
-        Number(riskConfig.takeProfitPrice || 0) > 0 ||
-        Number(riskConfig.stopLossPrice || 0) > 0 ||
-        Number(riskConfig.takeProfitPercent || 0) > 0 ||
-        Number(riskConfig.stopLossPercent || 0) > 0
-      );
       if (accountInfo.balance > 1 || accountInfo.equity > 1) {
-        const reason = hasTpSlConfig ? 'tpsl' : 'external_close';
-        console.log(`[Reconcile] Position closed for bot ${botId} (no trade history but balance=$${accountInfo.balance.toFixed(2)}): classified as ${reason}`);
+        console.log(`[Reconcile] Position closed for bot ${botId} (no trade history, balance=$${accountInfo.balance.toFixed(2)}): classified as external_close`);
         return {
           detected: true,
-          reason,
+          reason: 'external_close',
           fillPrice: entryPrice,
           pnl: 0,
           fee: 0,
