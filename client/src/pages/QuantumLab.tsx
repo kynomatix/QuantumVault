@@ -4133,6 +4133,12 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         const err = await safeResponseJson(depositRes);
         fundingFailed = true;
         setCreateError(`Bot created but funding failed: ${err.error || 'Unknown error'}. You can fund it later from the bot details page.`);
+      } else {
+        const depositData = await safeResponseJson(depositRes);
+        if (depositData.subaccountTransferWarning) {
+          fundingFailed = true;
+          setCreateError(`Bot created and USDC deposited on-chain, but transfer to bot subaccount failed. Use "Add to Bot" in the bot management drawer to retry. Funds are safe in your exchange main account.`);
+        }
       }
 
       setCreatedBot(bot);

@@ -1062,8 +1062,22 @@ export default function AppPage() {
         description: `$${exchangeBalance.toFixed(2)} withdrawn to agent wallet${data.signature ? ` (tx: ${data.signature.slice(0, 8)}...)` : ''}`
       });
 
+      const recoveredAmount = exchangeBalance;
       setExchangeBalance(0);
-      setAgentBalance((prev) => (prev ?? 0) + exchangeBalance);
+      setAgentBalance((prev) => (prev ?? 0) + recoveredAmount);
+
+      for (let i = 0; i < 3; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          const eqRes = await fetch('/api/total-equity', { credentials: 'include' });
+          if (eqRes.ok) {
+            const eqData = await safeResponseJson(eqRes);
+            setTotalEquity(eqData.totalEquity ?? 0);
+            setAgentBalance(eqData.agentBalance ?? 0);
+            setExchangeBalance(eqData.exchangeBalance ?? 0);
+          }
+        } catch {}
+      }
     } catch (error: any) {
       console.error('Recovery error:', error);
       toast({

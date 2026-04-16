@@ -487,6 +487,8 @@ export function BotManagementDrawer({
     }
   }, [isOpen, bot?.id, activeTab]);
 
+  const [addEquityStatus, setAddEquityStatus] = useState('');
+
   const handleAddEquity = async () => {
     const amount = parseFloat(addEquityAmount);
     if (isNaN(amount) || amount <= 0) {
@@ -495,6 +497,7 @@ export function BotManagementDrawer({
     }
 
     setAddEquityLoading(true);
+    setAddEquityStatus('Depositing USDC on-chain...');
     try {
       const res = await fetch('/api/exchange/deposit', {
         method: 'POST',
@@ -509,13 +512,30 @@ export function BotManagementDrawer({
         throw new Error(data.error || 'Failed to add to bot');
       }
 
-      toast({ title: `Successfully added $${amount} to bot`, description: data.signature ? `Transaction: ${data.signature.slice(0, 8)}...` : 'Transfer complete' });
+      if (data.subaccountTransferWarning) {
+        toast({ 
+          title: 'Partial Success', 
+          description: data.subaccountTransferWarning,
+          variant: 'destructive',
+        });
+      } else {
+        toast({ title: `Successfully added $${amount} to bot`, description: data.signature ? `Transaction: ${data.signature.slice(0, 8)}...` : 'Transfer complete' });
+      }
       setAddEquityAmount('');
-      setTimeout(() => fetchBotOverview(), 1500);
+
+      setAddEquityStatus('Verifying balance...');
+      const verifyBalance = async (retries: number, delay: number) => {
+        for (let i = 0; i < retries; i++) {
+          await new Promise(r => setTimeout(r, delay));
+          await fetchBotOverview();
+        }
+      };
+      await verifyBalance(3, 3000);
     } catch (error) {
       toast({ title: 'Failed to add to bot', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
     } finally {
       setAddEquityLoading(false);
+      setAddEquityStatus('');
     }
   };
 
@@ -559,7 +579,11 @@ export function BotManagementDrawer({
 
       toast({ title: `Successfully removed $${amount} from bot`, description: data.signature ? `Transaction: ${data.signature.slice(0, 8)}...` : 'Withdrawal complete' });
       setRemoveEquityAmount('');
-      setTimeout(() => fetchBotOverview(), 1500);
+
+      for (let i = 0; i < 3; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        await fetchBotOverview();
+      }
     } catch (error) {
       toast({ title: 'Withdrawal failed', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
     } finally {
@@ -1885,9 +1909,16 @@ export function BotManagementDrawer({
                   {addEquityLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Add'}
                 </Button>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Transfer USDC from your wallet to the bot for trading
-              </p>
+              {addEquityStatus ? (
+                <p className="text-xs text-amber-500 flex items-center gap-1.5">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  {addEquityStatus}
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Transfer USDC from your wallet to the bot for trading
+                </p>
+              )}
             </div>
 
             <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
