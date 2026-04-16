@@ -986,7 +986,7 @@ export default function AppPage() {
       return;
     }
 
-    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+    if (!solanaWallet.publicKey) {
       toast({ title: 'Wallet not connected', variant: 'destructive' });
       return;
     }
@@ -1008,24 +1008,13 @@ export default function AppPage() {
         throw new Error(error.error || 'Withdrawal failed');
       }
 
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
+      const data = await safeResponseJson(response);
       
-      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
-      const signedTx = await solanaWallet.signTransaction(transaction);
-      const signature = await connection.sendRawTransaction(signedTx.serialize());
-      
-      await confirmTransactionWithFallback(connection, {
-        signature,
-        blockhash,
-        lastValidBlockHeight,
-      });
-
       toast({ 
         title: 'Withdrawal Successful!', 
-        description: message 
+        description: data.message || `Withdrew $${botBalance.balance.toFixed(2)} to agent wallet`
       });
       
-      // Refresh balances
       setBotBalances(prev => ({
         ...prev,
         [botId]: { ...prev[botId], balance: 0 }

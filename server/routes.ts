@@ -3582,7 +3582,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         try {
           const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
           const adapter = getDefaultAdapter() as PacificaAdapter;
-          const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+          const agentKeypair = Keypair.fromSecretKey(secretKeyCopy);
 
           console.log(`[Deposit] Waiting for exchange deposit to settle before transferring to bot subaccount...`);
           await new Promise(resolve => setTimeout(resolve, 5000));
@@ -9471,7 +9471,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  // Bot deposit - transfer from main Drift account to bot's subaccount
   app.post("/api/bot/:botId/deposit", requireWallet, async (req, res) => {
     try {
       const { botId } = req.params;
@@ -9484,27 +9483,65 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
-        return res.status(400).json({ error: "Bot has no trading subaccount assigned" });
-      }
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
       }
 
-      const result = await buildTransferToSubaccountTransaction(
-        req.walletAddress!,
-        0, // from main account
-        bot.driftSubaccountId,
-        amount
-      );
-      res.json(result);
+      const botCtx = getBotSubaccountContext(bot);
+      if (!botCtx) {
+        return res.status(400).json({ error: "Bot has no active trading subaccount" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet?.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const umkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!umkResult) {
+        return res.status(403).json({ error: "Execution not enabled. Please enable execution authorization first." });
+      }
+      const agentKeyResult = await decryptAgentKeyWithFallback(req.walletAddress!, umkResult.umk, wallet);
+      umkResult.cleanup();
+      if (!agentKeyResult) {
+        return res.status(500).json({ error: "Agent key decryption failed" });
+      }
+      const agentKeypair = Keypair.fromSecretKey(Buffer.from(agentKeyResult.secretKey));
+      agentKeyResult.cleanup();
+
+      const adapter = getDefaultAdapter();
+      const transferResult = await adapter.transferBetweenSubaccounts({
+        agentSecretKey: agentKeypair.secretKey,
+        agentPublicKey: agentKeypair.publicKey.toString(),
+        fromSubaccountId: agentKeypair.publicKey.toString(),
+        toSubaccountId: botCtx.botPublicKey,
+        amount,
+      });
+
+      if (!transferResult.success) {
+        return res.status(400).json({ error: transferResult.error || "Transfer failed" });
+      }
+
+      try {
+        await storage.createEquityEvent({
+          walletAddress: req.walletAddress!,
+          tradingBotId: botId,
+          eventType: 'drift_deposit',
+          amount: String(amount),
+          txSignature: null,
+          notes: `Transfer to bot subaccount ${botCtx.botPublicKey}`,
+        });
+      } catch (eventErr: any) {
+        console.error(`[Bot Deposit] Equity event recording failed:`, eventErr.message);
+      }
+
+      res.json({ success: true, message: `Transferred $${amount} to bot subaccount` });
     } catch (error: any) {
       console.error("Bot deposit error:", error);
-      res.status(500).json({ error: error.message || "Failed to build deposit transaction" });
+      res.status(500).json({ error: error.message || "Failed to deposit to bot" });
     }
   });
 
-  // Bot withdraw - transfer from bot's subaccount back to main Drift account
   app.post("/api/bot/:botId/withdraw", requireWallet, async (req, res) => {
     try {
       const { botId } = req.params;
@@ -9517,23 +9554,62 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      if (bot.driftSubaccountId === null || bot.driftSubaccountId === undefined) {
-        return res.status(400).json({ error: "Bot has no trading subaccount assigned" });
-      }
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
       }
 
-      const result = await buildTransferFromSubaccountTransaction(
-        req.walletAddress!,
-        bot.driftSubaccountId,
-        0, // to main account
-        amount
-      );
-      res.json(result);
+      const botCtx = getBotSubaccountContext(bot);
+      if (!botCtx) {
+        return res.status(400).json({ error: "Bot has no active trading subaccount" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet?.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const umkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!umkResult) {
+        return res.status(403).json({ error: "Execution not enabled. Please enable execution authorization first." });
+      }
+      const agentKeyResult = await decryptAgentKeyWithFallback(req.walletAddress!, umkResult.umk, wallet);
+      umkResult.cleanup();
+      if (!agentKeyResult) {
+        return res.status(500).json({ error: "Agent key decryption failed" });
+      }
+      const agentKeypair = Keypair.fromSecretKey(Buffer.from(agentKeyResult.secretKey));
+      agentKeyResult.cleanup();
+
+      const adapter = getDefaultAdapter();
+      const transferResult = await adapter.transferBetweenSubaccounts({
+        agentSecretKey: botCtx.botSecretKey,
+        agentPublicKey: botCtx.botPublicKey,
+        fromSubaccountId: botCtx.botPublicKey,
+        toSubaccountId: agentKeypair.publicKey.toString(),
+        amount,
+      });
+
+      if (!transferResult.success) {
+        return res.status(400).json({ error: transferResult.error || "Withdraw failed" });
+      }
+
+      try {
+        await storage.createEquityEvent({
+          walletAddress: req.walletAddress!,
+          tradingBotId: botId,
+          eventType: 'drift_withdraw',
+          amount: String(-amount),
+          txSignature: null,
+          notes: `Withdraw from bot subaccount ${botCtx.botPublicKey}`,
+        });
+      } catch (eventErr: any) {
+        console.error(`[Bot Withdraw] Equity event recording failed:`, eventErr.message);
+      }
+
+      res.json({ success: true, message: `Withdrew $${amount} from bot subaccount` });
     } catch (error: any) {
       console.error("Bot withdraw error:", error);
-      res.status(500).json({ error: error.message || "Failed to build withdraw transaction" });
+      res.status(500).json({ error: error.message || "Failed to withdraw from bot" });
     }
   });
 
