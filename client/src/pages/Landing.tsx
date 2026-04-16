@@ -285,6 +285,7 @@ export default function Landing() {
               >
                 Deploy algorithmic trading bots on Solana's fastest Perp-DEXs. 
                 Non-custodial, TradingView-powered, and built for serious traders.
+                Support for crypto, stocks, commodities, and forex pairs.
               </motion.p>
               
               <motion.div variants={fadeInUp} className="flex flex-col sm:flex-row items-center justify-center gap-4">
