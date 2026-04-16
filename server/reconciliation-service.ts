@@ -111,28 +111,27 @@ async function detectOnChainClose(
     if (hasClosingTrades) {
       const avgFillPrice = weightedPriceSum / aggregatedSize;
 
-      const hasTpSl = riskConfig && (
-        (riskConfig.takeProfitPercent && Number(riskConfig.takeProfitPercent) > 0) ||
-        (riskConfig.stopLossPercent && Number(riskConfig.stopLossPercent) > 0)
-      );
+      const tpPriceAbs = Number(riskConfig?.takeProfitPrice || 0);
+      const slPriceAbs = Number(riskConfig?.stopLossPrice || 0);
+      const tpPct = Number(riskConfig?.takeProfitPercent || 0);
+      const slPct = Number(riskConfig?.stopLossPercent || 0);
+
+      const tpPrice = tpPriceAbs > 0 ? tpPriceAbs : (tpPct > 0
+        ? (positionSide === 'long' ? entryPrice * (1 + tpPct / 100) : entryPrice * (1 - tpPct / 100))
+        : 0);
+      const slPrice = slPriceAbs > 0 ? slPriceAbs : (slPct > 0
+        ? (positionSide === 'long' ? entryPrice * (1 - slPct / 100) : entryPrice * (1 + slPct / 100))
+        : 0);
+
+      const hasTpSl = tpPrice > 0 || slPrice > 0;
 
       if (hasTpSl) {
-        const tpPct = Number(riskConfig?.takeProfitPercent || 0);
-        const slPct = Number(riskConfig?.stopLossPercent || 0);
-
-        const tpPrice = positionSide === 'long'
-          ? entryPrice * (1 + tpPct / 100)
-          : entryPrice * (1 - tpPct / 100);
-        const slPrice = positionSide === 'long'
-          ? entryPrice * (1 - slPct / 100)
-          : entryPrice * (1 + slPct / 100);
-
-        const hitTp = tpPct > 0 && (
+        const hitTp = tpPrice > 0 && (
           positionSide === 'long'
             ? avgFillPrice >= tpPrice * 0.99
             : avgFillPrice <= tpPrice * 1.01
         );
-        const hitSl = slPct > 0 && (
+        const hitSl = slPrice > 0 && (
           positionSide === 'long'
             ? avgFillPrice <= slPrice * 1.01
             : avgFillPrice >= slPrice * 0.99
@@ -179,6 +178,24 @@ async function detectOnChainClose(
           reason: 'liquidation',
           fillPrice: entryPrice,
           pnl: -(absSize * entryPrice),
+          fee: 0,
+        };
+      }
+
+      const hasTpSlConfig = riskConfig && (
+        Number(riskConfig.takeProfitPrice || 0) > 0 ||
+        Number(riskConfig.stopLossPrice || 0) > 0 ||
+        Number(riskConfig.takeProfitPercent || 0) > 0 ||
+        Number(riskConfig.stopLossPercent || 0) > 0
+      );
+      if (accountInfo.balance > 1 || accountInfo.equity > 1) {
+        const reason = hasTpSlConfig ? 'tpsl' : 'external_close';
+        console.log(`[Reconcile] Position closed for bot ${botId} (no trade history but balance=$${accountInfo.balance.toFixed(2)}): classified as ${reason}`);
+        return {
+          detected: true,
+          reason,
+          fillPrice: entryPrice,
+          pnl: 0,
           fee: 0,
         };
       }
@@ -488,12 +505,14 @@ export async function reconcileBotPosition(
           lastTradeAt: new Date(),
         });
 
-        if (closeDetection.reason === 'tpsl') {
-          const bot = await storage.getTradingBotById(botId);
-          if (bot?.riskConfig) {
-            const rc = bot.riskConfig as Record<string, unknown>;
+        {
+          const botForClear = await storage.getTradingBotById(botId);
+          if (botForClear?.riskConfig) {
+            const rc = botForClear.riskConfig as Record<string, unknown>;
             delete rc.takeProfitPercent;
             delete rc.stopLossPercent;
+            delete rc.takeProfitPrice;
+            delete rc.stopLossPrice;
             await storage.updateTradingBot(botId, { riskConfig: rc } as any);
           }
         }

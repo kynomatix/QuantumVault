@@ -98,6 +98,7 @@ interface TradingBot {
   autoWithdrawThreshold?: string | null;
   autoTopUp?: boolean;
   pauseReason?: string | null;
+  riskConfig?: Record<string, unknown>;
   stats: {
     totalTrades: number;
     winningTrades: number;
@@ -239,6 +240,17 @@ export function BotManagementDrawer({
   const [tpslCancelLoading, setTpslCancelLoading] = useState(false);
   const [activeTp, setActiveTp] = useState<number | null>(null);
   const [activeSl, setActiveSl] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (bot?.riskConfig) {
+      const tp = Number(bot.riskConfig.takeProfitPrice || 0);
+      const sl = Number(bot.riskConfig.stopLossPrice || 0);
+      if (tp > 0) setActiveTp(tp);
+      else setActiveTp(null);
+      if (sl > 0) setActiveSl(sl);
+      else setActiveSl(null);
+    }
+  }, [bot?.id, bot?.riskConfig]);
 
   // Fetch published bot status
   const fetchPublishedStatus = async () => {
