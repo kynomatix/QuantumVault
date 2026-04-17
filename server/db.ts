@@ -37,6 +37,29 @@ export async function ensureSchema() {
       )`,
       `CREATE INDEX IF NOT EXISTS idx_lab_opt_runs_user_status ON lab_optimization_runs (user_id, status, id)`,
       `CREATE INDEX IF NOT EXISTS idx_lab_opt_results_run_id ON lab_optimization_results (run_id)`,
+
+      // --- Phase 7 / Item 12g: per-bot subaccount auth mode (Drift-blocker). ---
+      // Idempotent: safe to run on fresh DB, partially-migrated DB, or fully-migrated DB.
+      // Backfill rule (one-time historical reconstruction): a bot with a stored
+      // subaccount keypair (bot_subaccount_key_encrypted IS NOT NULL) was using
+      // external_key auth (Pacifica-style); everything else used main_plus_id (Drift-style).
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS subaccount_auth_mode text`,
+      `UPDATE trading_bots SET subaccount_auth_mode = 'external_key'
+         WHERE subaccount_auth_mode IS NULL AND bot_subaccount_key_encrypted IS NOT NULL`,
+      `UPDATE trading_bots SET subaccount_auth_mode = 'main_plus_id'
+         WHERE subaccount_auth_mode IS NULL`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_subaccount_auth_mode_check
+           CHECK (subaccount_auth_mode IN ('external_key', 'main_plus_id'));
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_external_key_invariant
+           CHECK (
+             NOT (subaccount_auth_mode = 'external_key' AND subaccount_status = 'active')
+             OR (protocol_subaccount_id IS NOT NULL AND bot_subaccount_key_encrypted IS NOT NULL)
+           );
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `ALTER TABLE trading_bots ALTER COLUMN subaccount_auth_mode SET NOT NULL`,
     ];
     for (const sql of migrations) {
       await client.query(sql);
