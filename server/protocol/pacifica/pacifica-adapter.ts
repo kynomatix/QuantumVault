@@ -453,6 +453,19 @@ export class PacificaAdapter implements ProtocolAdapter {
     };
   }
 
+  async getWalletCollateralBalance(walletAddress: string): Promise<number> {
+    try {
+      const connection = new Connection(getPrimaryRpcUrl(), 'confirmed');
+      const ownerPubkey = new PublicKey(walletAddress);
+      const collateralMintPubkey = new PublicKey(this.collateralMint);
+      const ata = getAssociatedTokenAddress(collateralMintPubkey, ownerPubkey);
+      const accountInfo = await connection.getTokenAccountBalance(ata);
+      return accountInfo.value.uiAmount || 0;
+    } catch {
+      return 0;
+    }
+  }
+
   async getEquityHistory(agentPublicKey: string, params?: HistoryParams): Promise<EquityPoint[]> {
     const queryParams: Record<string, string> = { account: agentPublicKey };
     if (params?.startTime) queryParams.start_time = String(params.startTime);

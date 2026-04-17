@@ -32,7 +32,7 @@ async function getAccountBalance(account: string, subaccountId: string | undefin
   }
 }
 
-async function getWalletUsdcBalance(agentPublicKey: string): Promise<number> {
+async function getAgentSplBalance(agentPublicKey: string): Promise<number> {
   try {
     return await getAgentUsdcBalance(agentPublicKey);
   } catch {
@@ -76,7 +76,7 @@ async function processWalletSnapshot(walletAddress: string): Promise<void> {
   
   if (wallet.agentPublicKey) {
     try {
-      const agentBalance = await getWalletUsdcBalance(wallet.agentPublicKey);
+      const agentBalance = await getAgentSplBalance(wallet.agentPublicKey);
       totalBalance += agentBalance;
     } catch (error) {
       console.error(`[Portfolio Snapshots] Error getting agent wallet balance:`, error);
