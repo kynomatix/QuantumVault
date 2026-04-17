@@ -91,6 +91,19 @@ export interface ProtocolAdapter {
   subscribeToFills?(agentPublicKey: string, callback: (fill: FillEvent) => void): Unsubscribe;
   subscribeToPositionUpdates?(agentPublicKey: string, callback: (pos: ProtocolPosition) => void): Unsubscribe;
   subscribeToOrderUpdates?(agentPublicKey: string, callback: (order: OrderUpdate) => void): Unsubscribe;
+
+  prepareBindMessage?(
+    userAddress: string,
+    agentPublicKey: string,
+  ): { message: string; timestamp: number; expiryWindow: number };
+
+  confirmBind?(
+    userAddress: string,
+    agentPublicKey: string,
+    signature: string,
+    timestamp: number,
+    expiryWindow: number,
+  ): Promise<void>;
 }
 
 export interface UserTransactionBuilder {

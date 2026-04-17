@@ -2945,11 +2945,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet || !wallet.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
-      const adapter = getDefaultAdapter() as any;
+      const adapter = getDefaultAdapter();
       if (typeof adapter.prepareBindMessage !== 'function') {
         return res.status(501).json({ error: "Protocol does not support agent binding" });
       }
-      const { message, timestamp, expiryWindow } = adapter.prepareBindMessage(
+      const { message, timestamp, expiryWindow } = adapter.prepareBindMessage!(
         req.walletAddress!,
         wallet.agentPublicKey,
       );
@@ -2986,11 +2986,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet || !wallet.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
-      const adapter = getDefaultAdapter() as any;
+      const adapter = getDefaultAdapter();
       if (typeof adapter.confirmBind !== 'function') {
         return res.status(501).json({ error: "Protocol does not support agent binding" });
       }
-      await adapter.confirmBind(
+      await adapter.confirmBind!(
         req.walletAddress!,
         wallet.agentPublicKey,
         signature,
