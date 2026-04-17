@@ -39,10 +39,18 @@ export function getDefaultAdapter(): ProtocolAdapter {
 
 export function getAdapterForBot(bot: { id?: number | string; activeProtocol: string | null }): ProtocolAdapter {
   if (!bot.activeProtocol) {
+    // Bots with activeProtocol=null are dormant legacy Drift bots from before the
+    // adapter pattern existed (no Pacifica subaccount, no migrated collateral — they
+    // cannot be re-pointed to Pacifica). New bots always set activeProtocol='pacifica'
+    // at creation. The fallback to the default adapter is a read-side bandaid only;
+    // these bots don't trade. Before the Drift adapter is registered (Group D item 17),
+    // these rows MUST be backfilled to active_protocol='drift' so they route to the
+    // Drift adapter where they actually live — NOT silently treated as Pacifica bots.
     const fallback = getDefaultAdapter();
     console.warn(
-      `[AdapterRegistry] Bot ${bot.id ?? '<unknown>'} has activeProtocol=null; falling back to default adapter "${fallback.protocolName}". ` +
-      `This is safe today (single-protocol) but MUST be resolved before a second adapter (Drift) is registered — backfill active_protocol on legacy bots.`,
+      `[AdapterRegistry] Bot ${bot.id ?? '<unknown>'} has activeProtocol=null (dormant legacy Drift bot); ` +
+      `read-only fallback to "${fallback.protocolName}" adapter. ` +
+      `MUST backfill these rows to active_protocol='drift' before DriftAdapter registers (Group D item 17).`,
     );
     return fallback;
   }
