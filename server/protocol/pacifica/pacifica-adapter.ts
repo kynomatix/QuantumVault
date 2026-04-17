@@ -182,6 +182,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       supportsCloseSubaccount: false,
       maxSubaccounts: null,
       settlementType: 'hybrid',
+      requiresExternalSubaccountKey: true,
     };
   }
 

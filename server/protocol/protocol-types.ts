@@ -314,6 +314,7 @@ export interface AdapterCapabilities {
   supportsCloseSubaccount: boolean;
   maxSubaccounts: number | null;
   settlementType: 'on-chain' | 'off-chain' | 'hybrid';
+  requiresExternalSubaccountKey: boolean;
 }
 
 export type Unsubscribe = () => void;

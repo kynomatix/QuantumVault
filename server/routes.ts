@@ -5623,25 +5623,28 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         const { Keypair } = await import('@solana/web3.js');
 
         const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
-        const botKeypair = Keypair.generate();
-
-        console.log(`[Bot Creation] Creating Pacifica subaccount: ${botKeypair.publicKey.toString()} under agent ${agentKeypair.publicKey.toString()}`);
-
         const adapter = getDefaultAdapter();
+        const caps = adapter.getCapabilities();
+
+        const botKeypair = caps.requiresExternalSubaccountKey ? Keypair.generate() : null;
+
+        console.log(`[Bot Creation] Creating ${adapter.protocolName} subaccount under agent ${agentKeypair.publicKey.toString()}${botKeypair ? ` with pre-generated sub key ${botKeypair.publicKey.toString()}` : ''}`);
 
         try {
-          await adapter.createSubaccount({
+          const sub = await adapter.createSubaccount({
             mainSecretKey: agentKeypair.secretKey,
-            subSecretKey: botKeypair.secretKey,
+            subSecretKey: botKeypair?.secretKey,
             agentPublicKey: agentKeypair.publicKey.toString(),
           });
 
-          botSubaccountPublicKey = botKeypair.publicKey.toString();
-          botSubaccountKeyEncrypted = legacyEncrypt(bs58.encode(botKeypair.secretKey));
+          botSubaccountPublicKey = sub.subaccountId;
+          botSubaccountKeyEncrypted = botKeypair
+            ? legacyEncrypt(bs58.encode(botKeypair.secretKey))
+            : null;
           subaccountStatus = 'active';
-          console.log(`[Bot Creation] Pacifica subaccount created: ${botSubaccountPublicKey}`);
+          console.log(`[Bot Creation] ${adapter.protocolName} subaccount created: ${botSubaccountPublicKey}`);
         } catch (subErr: any) {
-          console.error(`[Bot Creation] Pacifica subaccount creation failed:`, subErr.message);
+          console.error(`[Bot Creation] ${adapter.protocolName} subaccount creation failed:`, subErr.message);
           return res.status(500).json({ error: `Failed to create trading subaccount: ${subErr.message}` });
         }
       }
@@ -5694,7 +5697,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         webhookSecret,
         driftSubaccountId: nextSubaccountId,
         protocolSubaccountId: botSubaccountPublicKey,
-        activeProtocol: botSubaccountPublicKey ? 'pacifica' : null,
+        activeProtocol: botSubaccountPublicKey ? getDefaultAdapter().protocolName : null,
         botSubaccountKeyEncrypted,
         subaccountStatus,
         isActive: true,
