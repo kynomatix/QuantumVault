@@ -98,6 +98,7 @@ interface TradingBot {
   // pubkey for Pacifica, a derived sub address for Drift), not an "agent"
   // pubkey. The old name implied an off-chain wallet role.
   botSubaccountIdentifier?: string | null;
+  activeProtocol?: 'pacifica' | 'drift' | null;
   profitReinvest?: boolean;
   autoWithdrawThreshold?: string | null;
   autoTopUp?: boolean;
@@ -2552,6 +2553,18 @@ export function BotManagementDrawer({
                         {displayBot.botSubaccountIdentifier.slice(0, 4)}...{displayBot.botSubaccountIdentifier.slice(-4)}
                         <ExternalLink className="w-3 h-3" />
                       </a>
+                      {displayBot.activeProtocol === 'pacifica' && (
+                        <a
+                          href={`https://app.pacifica.fi/portfolio/${displayBot.botSubaccountIdentifier}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-1 rounded hover:bg-muted transition-colors"
+                          title="View subaccount on Pacifica"
+                          data-testid="link-subaccount-pacifica"
+                        >
+                          <ExternalLink className="w-3 h-3 text-muted-foreground" />
+                        </a>
+                      )}
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(displayBot.botSubaccountIdentifier!);
