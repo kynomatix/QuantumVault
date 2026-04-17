@@ -1203,6 +1203,18 @@ async function distributeCreatorProfitShare(params: {
 
   console.log(`[ProfitShare] Processing: trade=${tradeId}, pnl=$${realizedPnl.toFixed(4)}, share=${profitSharePercent}%, amount=$${profitShareAmount.toFixed(4)}, creator=${creatorWalletAddress}`);
 
+  // 12i: Look up subscriber bot once to get the canonical `protocolSubaccountId`
+  // (populated correctly per auth mode by 12f/12h-A: pubkey for Pacifica, numeric
+  // string for Drift). Prefer this over the legacy `String(driftSubaccountId)` cast,
+  // which only happens to be correct for Drift bots and would store the wrong
+  // identifier shape for any future Pacifica subscriber.
+  const subscriberBotRow = await storage.getTradingBotById(subscriberBotId);
+  const canonicalProtocolSubaccountId =
+    subscriberBotRow?.protocolSubaccountId ?? String(driftSubaccountId);
+  if (!subscriberBotRow?.protocolSubaccountId) {
+    console.warn(`[ProfitShare] IOU for trade ${tradeId} (bot ${subscriberBotId}) missing canonical protocolSubaccountId on bot row; falling back to String(driftSubaccountId)=${String(driftSubaccountId)}`);
+  }
+
   // Helper function to create IOU on failure
   const createIouOnFailure = async (errorMsg: string) => {
     try {
@@ -1216,7 +1228,7 @@ async function distributeCreatorProfitShare(params: {
         tradeId,
         publishedBotId: publishedBot.id,
         driftSubaccountId,
-        protocolSubaccountId: String(driftSubaccountId),
+        protocolSubaccountId: canonicalProtocolSubaccountId,
       });
       console.log(`[ProfitShare] IOU created for $${profitShareAmount.toFixed(4)} to ${creatorWalletAddress} (trade: ${tradeId})`);
     } catch (iouErr: any) {

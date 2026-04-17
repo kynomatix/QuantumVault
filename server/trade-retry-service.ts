@@ -853,6 +853,15 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                     // Helper to create IOU on failure
                     const createIouOnFailure = async (errorMsg: string) => {
                       try {
+                        // 12i: Prefer canonical job.protocolSubaccountId (resolved upstream
+                        // via bot row in queueTradeRetry / processRetryJobs). Do NOT fall
+                        // back to String(job.subAccountId) — for Pacifica that would store
+                        // a numeric-shaped value where a base58 pubkey is expected, silently
+                        // poisoning IOU rows. If the canonical value is missing, store NULL
+                        // and emit a warning so it's visible in logs.
+                        if (!job.protocolSubaccountId) {
+                          console.warn(`[TradeRetry] IOU for trade ${tradeId} missing canonical protocolSubaccountId (job.botId=${job.botId}, subAccountId=${job.subAccountId}); storing NULL`);
+                        }
                         await storage.createPendingProfitShare({
                           subscriberBotId: job.botId,
                           subscriberWalletAddress: job.walletAddress,
@@ -863,7 +872,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                           tradeId: tradeId || `retry-${job.id}`,
                           publishedBotId: subscription.publishedBot.id,
                           driftSubaccountId: job.subAccountId,
-                          protocolSubaccountId: job.protocolSubaccountId ?? String(job.subAccountId),
+                          protocolSubaccountId: job.protocolSubaccountId ?? null,
                         });
                         console.log(`[TradeRetry] IOU created for $${profitShareAmount.toFixed(4)} to ${creatorWallet}`);
                       } catch (iouErr: any) {
