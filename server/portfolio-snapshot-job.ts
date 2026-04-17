@@ -1,14 +1,31 @@
 import { storage } from "./storage";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
 import { getAgentUsdcBalance } from "./agent-wallet";
+import type { TradingBot, Wallet } from "@shared/schema";
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
 }
 
-async function getAccountBalance(agentPublicKey: string, subaccountId: number): Promise<number> {
+/**
+ * Resolves the correct (account, subaccountId) pair to query the perp adapter for a bot.
+ * - Pacifica bots: protocolSubaccountId is a Solana keypair pubkey passed as `account`.
+ * - Drift bots: wallet.agentPublicKey + numeric driftSubaccountId.
+ * Returns null when neither path is viable (skip).
+ */
+function resolveBotAdapterArgs(bot: TradingBot, wallet: Wallet): { account: string; subaccountId?: string } | null {
+  if (bot.protocolSubaccountId && bot.subaccountStatus === 'active') {
+    return { account: bot.protocolSubaccountId };
+  }
+  if (wallet.agentPublicKey && bot.driftSubaccountId != null) {
+    return { account: wallet.agentPublicKey, subaccountId: _subIdStr(bot.driftSubaccountId) };
+  }
+  return null;
+}
+
+async function getAccountBalance(account: string, subaccountId: string | undefined): Promise<number> {
   try {
-    const info = await getDefaultAdapter().getAccountInfo(agentPublicKey, _subIdStr(subaccountId));
+    const info = await getDefaultAdapter().getAccountInfo(account, subaccountId);
     return info.balance || 0;
   } catch {
     return 0;
@@ -70,11 +87,9 @@ async function processWalletSnapshot(walletAddress: string): Promise<void> {
     try {
       if (bot.isActive) activeBotCount++;
       
-      if (wallet.agentPublicKey && bot.driftSubaccountId) {
-        const balance = await getAccountBalance(
-          wallet.agentPublicKey,
-          bot.driftSubaccountId
-        );
+      const adapterArgs = resolveBotAdapterArgs(bot, wallet);
+      if (adapterArgs) {
+        const balance = await getAccountBalance(adapterArgs.account, adapterArgs.subaccountId);
         totalBalance += balance;
       }
     } catch (error) {

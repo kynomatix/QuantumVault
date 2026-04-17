@@ -1,13 +1,30 @@
 import { storage } from "./storage";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
+import type { TradingBot, Wallet } from "@shared/schema";
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
 }
 
-async function getAccountEquity(agentPublicKey: string, subaccountId: number): Promise<{ usdcBalance: number; unrealizedPnl: number }> {
+/**
+ * Resolves the correct (account, subaccountId) pair to query the perp adapter for a bot.
+ * - Pacifica bots: protocolSubaccountId is a Solana keypair pubkey passed as `account`.
+ * - Drift bots: wallet.agentPublicKey + numeric driftSubaccountId.
+ * Returns null when neither path is viable (skip).
+ */
+function resolveBotAdapterArgs(bot: TradingBot, wallet: Wallet): { account: string; subaccountId?: string } | null {
+  if (bot.protocolSubaccountId && bot.subaccountStatus === 'active') {
+    return { account: bot.protocolSubaccountId };
+  }
+  if (wallet.agentPublicKey && bot.driftSubaccountId != null) {
+    return { account: wallet.agentPublicKey, subaccountId: _subIdStr(bot.driftSubaccountId) };
+  }
+  return null;
+}
+
+async function getAccountEquity(account: string, subaccountId: string | undefined): Promise<{ usdcBalance: number; unrealizedPnl: number }> {
   try {
-    const info = await getDefaultAdapter().getAccountInfo(agentPublicKey, _subIdStr(subaccountId));
+    const info = await getDefaultAdapter().getAccountInfo(account, subaccountId);
     return { usdcBalance: info.balance || 0, unrealizedPnl: info.unrealizedPnl || 0 };
   } catch {
     return { usdcBalance: 0, unrealizedPnl: 0 };
@@ -28,15 +45,18 @@ export async function takePnlSnapshots(): Promise<void> {
       
       try {
         const sourceTradingBot = await storage.getTradingBotById(publishedBot.tradingBotId);
-        if (!sourceTradingBot || !sourceTradingBot.driftSubaccountId) continue;
+        if (!sourceTradingBot) continue;
         
         const wallet = await storage.getWallet(sourceTradingBot.walletAddress);
-        if (!wallet?.agentPublicKey) continue;
+        if (!wallet) continue;
         
-        const accountInfo = await getAccountEquity(
-          wallet.agentPublicKey,
-          sourceTradingBot.driftSubaccountId
-        );
+        const adapterArgs = resolveBotAdapterArgs(sourceTradingBot, wallet);
+        if (!adapterArgs) {
+          console.log(`[PnL Snapshots] Skipping bot ${sourceTradingBot.id} (${sourceTradingBot.name}): no active subaccount context (protocolStatus=${sourceTradingBot.subaccountStatus}, drift=${sourceTradingBot.driftSubaccountId})`);
+          continue;
+        }
+        
+        const accountInfo = await getAccountEquity(adapterArgs.account, adapterArgs.subaccountId);
         
         const stats = sourceTradingBot.stats as any || {};
         const realizedPnl = stats.totalPnl || 0;

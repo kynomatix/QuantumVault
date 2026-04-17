@@ -470,12 +470,12 @@ app.use((req, res, next) => {
               continue;
             }
 
-            if (bot.driftSubaccountId == null) {
+            if (bot.driftSubaccountId == null && !bot.protocolSubaccountId) {
               await storage.updateBotTrade(trade.id, {
                 status: "failed",
-                errorMessage: "Trade interrupted by server restart — bot has no subaccount ID, cannot safely retry",
+                errorMessage: "Trade interrupted by server restart — bot has no subaccount context (neither drift nor protocol), cannot safely retry",
               });
-              log(`Trade ${trade.id} cannot retry — bot ${bot.id} missing driftSubaccountId, marked failed`);
+              log(`Trade ${trade.id} cannot retry — bot ${bot.id} missing both driftSubaccountId and protocolSubaccountId, marked failed`);
               continue;
             }
 
@@ -488,7 +488,8 @@ app.use((req, res, next) => {
                 market: trade.market,
                 side: normalizedSide,
                 size: parseFloat(trade.size),
-                subAccountId: bot.driftSubaccountId,
+                subAccountId: bot.driftSubaccountId ?? 0,
+                protocolSubaccountId: bot.protocolSubaccountId ?? undefined,
                 reduceOnly: isClose,
                 slippageBps: wallet.slippageBps || 50,
                 priority: isClose ? "critical" : "normal",

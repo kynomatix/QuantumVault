@@ -189,6 +189,7 @@ export interface RetryJob {
   side: 'long' | 'short' | 'close';
   size: number;
   subAccountId: number;
+  protocolSubaccountId?: string;
   reduceOnly: boolean;
   slippageBps: number;
   privateKeyBase58?: string;
@@ -402,6 +403,26 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
   const nextRetryAt = Date.now() + backoff;
   const createdAt = Date.now();
   
+  // Resolve protocolSubaccountId centrally: prefer caller-provided value, else look up
+  // the bot row for the source of truth. NEVER fall back to String(subAccountId) — that
+  // would store a numeric Drift index masquerading as a Pacifica pubkey, which the
+  // restart-reconstruction path would then prefer over the real bot.protocolSubaccountId.
+  let resolvedProtocolSubaccountId: string | null = job.protocolSubaccountId ?? null;
+  if (!resolvedProtocolSubaccountId) {
+    try {
+      const botRow = await storage.getTradingBotById(job.botId);
+      if (botRow?.protocolSubaccountId) {
+        resolvedProtocolSubaccountId = botRow.protocolSubaccountId;
+      }
+    } catch (lookupErr) {
+      console.warn(`[TradeRetry] Failed to look up bot ${job.botId} for protocolSubaccountId:`, lookupErr);
+    }
+  }
+  // Hydrate the in-memory job copy too so retry execution has the same value.
+  if (resolvedProtocolSubaccountId && !job.protocolSubaccountId) {
+    (job as RetryJob).protocolSubaccountId = resolvedProtocolSubaccountId;
+  }
+  
   // Persist to database FIRST to get the database-generated ID
   // This ensures in-memory and database IDs match for updates/restarts
   let dbJobId: string;
@@ -423,7 +444,7 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
       webhookPayload: job.webhookPayload || null,
       entryPrice: job.entryPrice?.toString() || null,
       protocol: 'pacifica',
-      protocolSubaccountId: String(job.subAccountId),
+      protocolSubaccountId: resolvedProtocolSubaccountId,
       agentPublicKey: job.agentPublicKey || null,
     });
     dbJobId = dbJob.id;
@@ -842,7 +863,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                           tradeId: tradeId || `retry-${job.id}`,
                           publishedBotId: subscription.publishedBot.id,
                           driftSubaccountId: job.subAccountId,
-                          protocolSubaccountId: String(job.subAccountId),
+                          protocolSubaccountId: job.protocolSubaccountId ?? String(job.subAccountId),
                         });
                         console.log(`[TradeRetry] IOU created for $${profitShareAmount.toFixed(4)} to ${creatorWallet}`);
                       } catch (iouErr: any) {
@@ -1147,6 +1168,10 @@ export async function startRetryWorker(): Promise<void> {
           side: dbJob.side as 'long' | 'short' | 'close',
           size: parseFloat(dbJob.size),
           subAccountId: bot.driftSubaccountId || 0,
+          // Prefer current bot.protocolSubaccountId (source of truth) over the dbJob
+          // snapshot, in case the bot's subaccount changed or DB has stale/legacy values
+          // from before the centralized resolution path was added.
+          protocolSubaccountId: bot.protocolSubaccountId ?? dbJob.protocolSubaccountId ?? undefined,
           reduceOnly: dbJob.side === 'close',
           slippageBps: wallet.slippageBps || 50,
           priority: dbJob.priority as 'critical' | 'normal',
