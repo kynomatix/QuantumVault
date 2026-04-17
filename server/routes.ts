@@ -5651,6 +5651,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       let botSubaccountPublicKey: string | null = null;
       let botSubaccountKeyEncrypted: string | null = null;
       let subaccountStatus: string = 'none';
+      // 12h Option A: holds the adapter-returned canonical numeric subaccount ID for
+      // `main_plus_id` mode (Drift). For `external_key` mode (Pacifica) this stays null
+      // because the adapter returns a pubkey string, not a numeric ID. When set, this
+      // value (not the pre-allocated `nextSubaccountId`) is persisted into the legacy
+      // `driftSubaccountId` column to keep DB and on-chain state in sync.
+      let adapterReturnedNumericSubaccountId: number | null = null;
 
       const defaultAdapter = getDefaultAdapter();
       const defaultCaps = defaultAdapter.getCapabilities();
@@ -5680,6 +5686,29 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             ? legacyEncrypt(bs58.encode(botKeypair.secretKey))
             : null;
           subaccountStatus = 'active';
+
+          // 12h Option A: For `main_plus_id` mode (Drift), the adapter is the canonical
+          // source of the numeric subaccount ID. Parse and validate it now; we'll
+          // reconcile against the pre-allocated `nextSubaccountId` once that's computed.
+          if (subaccountAuthMode === 'main_plus_id') {
+            const parsed = Number.parseInt(sub.subaccountId, 10);
+            // Postgres `integer` max = 2,147,483,647. Round-trip check rejects scientific
+            // notation, decimals, leading zeros, signs, and any non-pure-digit input.
+            const PG_INTEGER_MAX = 2_147_483_647;
+            if (
+              !Number.isSafeInteger(parsed) ||
+              parsed < 0 ||
+              parsed > PG_INTEGER_MAX ||
+              String(parsed) !== sub.subaccountId.trim()
+            ) {
+              console.error(`[Bot Creation] ${adapter.protocolName} adapter returned invalid numeric subaccountId for main_plus_id mode: "${sub.subaccountId}" (parsed=${parsed})`);
+              return res.status(500).json({
+                error: `Failed to create trading subaccount: adapter returned invalid subaccount ID format`,
+              });
+            }
+            adapterReturnedNumericSubaccountId = parsed;
+          }
+
           console.log(`[Bot Creation] ${adapter.protocolName} subaccount created: ${botSubaccountPublicKey}`);
         } catch (subErr: any) {
           console.error(`[Bot Creation] ${adapter.protocolName} subaccount creation failed:`, subErr.message);
@@ -5729,12 +5758,27 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         nextSubaccountId = await storage.getNextSubaccountId(req.walletAddress!);
       }
 
+      // 12h Option A: For `main_plus_id` mode (Drift), prefer the adapter's canonical
+      // numeric ID over the pre-allocated `nextSubaccountId`. They should match — if
+      // they don't, the adapter's value is the source of truth (it reflects what was
+      // actually created on-chain) and we log the divergence loudly.
+      const persistedDriftSubaccountId = adapterReturnedNumericSubaccountId ?? nextSubaccountId;
+      if (
+        adapterReturnedNumericSubaccountId !== null &&
+        adapterReturnedNumericSubaccountId !== nextSubaccountId
+      ) {
+        console.warn(
+          `[Bot Creation] Subaccount ID divergence: pre-allocated=${nextSubaccountId}, adapter-returned=${adapterReturnedNumericSubaccountId}. ` +
+          `Persisting adapter value as canonical (driftSubaccountId=${adapterReturnedNumericSubaccountId}).`
+        );
+      }
+
       const bot = await storage.createTradingBot({
         walletAddress: req.walletAddress!,
         name,
         market,
         webhookSecret,
-        driftSubaccountId: nextSubaccountId,
+        driftSubaccountId: persistedDriftSubaccountId,
         protocolSubaccountId: botSubaccountPublicKey,
         activeProtocol: botSubaccountPublicKey ? defaultAdapter.protocolName : null,
         botSubaccountKeyEncrypted,
