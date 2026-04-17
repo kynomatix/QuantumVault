@@ -52,9 +52,10 @@ async function initializeProtocolAdapter(): Promise<void> {
   // Separate try-block so a Drift initialization failure cannot take down Pacifica
   // (which carries the entire live trading load: $200K+ volume, 9 active bots).
   // Bots route to this adapter only when their row has active_protocol='drift'
-  // — which today is gated by the schema check constraint (item 18 unlocks it).
-  // Registration alone is therefore safe: dormant legacy bots (active_protocol=null)
-  // still hit the read-only fallback in getAdapterForBot until backfilled.
+  // — enforced by the schema CHECK constraint (item 18) and the NOT NULL column.
+  // Registration alone is safe: any bot with active_protocol='drift' resolves
+  // here through getAdapterForBot(); the prior null-fallback bandaid for dormant
+  // legacy rows was removed alongside item 18 closeout (rows backfilled to 'drift').
   //
   // initialize() is wrapped in a hard timeout: if Drift's RPC failover or SDK
   // load hangs, the bounded race rejects so the rest of startup (route binding,

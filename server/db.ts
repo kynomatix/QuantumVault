@@ -70,7 +70,7 @@ export async function ensureSchema() {
       // always set active_protocol explicitly at creation (item 18 fixed the four
       // insert sites in routes.ts). After backfill, the column is constrained to
       // ('pacifica', 'drift') and made NOT NULL — this lets `getAdapterForBot()`
-      // drop its warn-logging null fallback in a follow-up cleanup.
+      // drop its warn-logging null fallback (removed in the item-18 closeout commit).
       //
       // ATOMICITY: the three steps (UPDATE → ADD CONSTRAINT → SET NOT NULL) are
       // wrapped in a single PL/pgSQL DO block so they execute in one transaction.
