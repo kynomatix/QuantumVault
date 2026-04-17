@@ -37,15 +37,22 @@ export function getDefaultAdapter(): ProtocolAdapter {
   return adapter;
 }
 
-export function getAdapterForBot(bot: { activeProtocol: string | null }): ProtocolAdapter {
+export function getAdapterForBot(bot: { id?: number | string; activeProtocol: string | null }): ProtocolAdapter {
   if (!bot.activeProtocol) {
-    throw new Error(
-      'AdapterRegistry: bot has no active_protocol assigned — cannot resolve adapter',
+    const fallback = getDefaultAdapter();
+    console.warn(
+      `[AdapterRegistry] Bot ${bot.id ?? '<unknown>'} has activeProtocol=null; falling back to default adapter "${fallback.protocolName}". ` +
+      `This is safe today (single-protocol) but MUST be resolved before a second adapter (Drift) is registered — backfill active_protocol on legacy bots.`,
     );
+    return fallback;
   }
   const adapter = adapters.get(bot.activeProtocol);
   if (!adapter) {
-    throw new Error(`AdapterRegistry: no adapter registered for "${bot.activeProtocol}"`);
+    throw new Error(
+      `AdapterRegistry: bot has active_protocol="${bot.activeProtocol}" but no adapter is registered for it. ` +
+      `Registered adapters: [${Array.from(adapters.keys()).join(', ') || 'none'}]. ` +
+      `This is a configuration bug — do not silently fall back to the default adapter, as it would route the trade to the wrong protocol.`,
+    );
   }
   return adapter;
 }

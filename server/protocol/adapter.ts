@@ -39,6 +39,8 @@ import type {
 export interface ProtocolAdapter {
   readonly protocolName: string;
   readonly protocolVersion: string;
+  readonly collateralMint: string;
+  readonly collateralSymbol: string;
 
   initialize(): Promise<void>;
   shutdown(): Promise<void>;
@@ -87,7 +89,7 @@ export interface ProtocolAdapter {
   discoverSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]>;
   closeSubaccount?(agentPublicKey: string, subaccountId: string): Promise<void>;
   subaccountExists?(walletAddress: string, subaccountId: string): Promise<boolean>;
-  getWalletUsdcBalance?(walletAddress: string): Promise<number>;
+  getWalletCollateralBalance?(walletAddress: string): Promise<number>;
   getAdapterDiagnostics?(): Promise<Record<string, unknown>>;
 
   settlePnl(params: SettlePnlParams): Promise<SettleResult>;
@@ -112,6 +114,8 @@ export interface ProtocolAdapter {
 
 export interface UserTransactionBuilder {
   readonly protocolName: string;
+  readonly collateralMint: string;
+  readonly collateralSymbol: string;
 
   buildBindAgentWalletTransaction(
     mainWalletAddress: string,

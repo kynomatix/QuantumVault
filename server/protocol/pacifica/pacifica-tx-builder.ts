@@ -9,6 +9,7 @@ import * as crypto from 'crypto';
 import type { UserTransactionBuilder } from '../adapter.js';
 import type { TransactionBuildResult } from '../protocol-types.js';
 import { PacificaSigner, OPERATION_TYPES } from './pacifica-signer.js';
+import { PACIFICA_USDC_MINT } from './pacifica-constants.js';
 import { getPrimaryRpcUrl } from '../../rpc-config.js';
 
 const PACIFICA_PROGRAM_ID = new PublicKey('PCFA5iYgmqK6MqPhWNKg7Yv7auX7VZ4Cx7T1eJyrAMH');
@@ -72,6 +73,8 @@ function buildDepositInstruction(
 
 export class PacificaTxBuilder implements UserTransactionBuilder {
   readonly protocolName = 'pacifica';
+  readonly collateralMint = PACIFICA_USDC_MINT;
+  readonly collateralSymbol = 'USDC';
   private apiBaseUrl: string;
 
   constructor(apiBaseUrl: string = 'https://api.pacifica.fi/api/v1') {

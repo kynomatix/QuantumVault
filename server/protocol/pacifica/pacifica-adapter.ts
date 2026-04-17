@@ -37,6 +37,7 @@ import type {
 } from '../protocol-types.js';
 import { SymbolRegistry, buildPacificaMappings } from '../symbol-registry.js';
 import { PacificaSigner, OPERATION_TYPES, buildSigningMessage } from './pacifica-signer.js';
+import { PACIFICA_USDC_MINT } from './pacifica-constants.js';
 import {
   PACIFICA_PROGRAM_ID,
   PACIFICA_CENTRAL_STATE,
@@ -119,6 +120,8 @@ const DEFAULT_CONFIG: PacificaAdapterConfig = {
 export class PacificaAdapter implements ProtocolAdapter {
   readonly protocolName = 'pacifica';
   readonly protocolVersion = '1.0.0';
+  readonly collateralMint = PACIFICA_USDC_MINT;
+  readonly collateralSymbol = 'USDC';
 
   private config: PacificaAdapterConfig;
   private registry: SymbolRegistry | null = null;
