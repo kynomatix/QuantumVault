@@ -157,6 +157,7 @@ export const tradingBots = pgTable("trading_bots", {
   activeProtocol: text("active_protocol"),
   botSubaccountKeyEncrypted: text("bot_subaccount_key_encrypted"),
   subaccountStatus: text("subaccount_status").default("none"),
+  subaccountAuthMode: text("subaccount_auth_mode").$type<'external_key' | 'main_plus_id'>().notNull(),
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

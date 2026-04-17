@@ -30,7 +30,12 @@ interface BotSubaccountContext {
 }
 
 function getBotSubaccountContext(bot: TradingBot): BotSubaccountContext | null {
-  if (bot.protocolSubaccountId && bot.botSubaccountKeyEncrypted && bot.subaccountStatus === 'active') {
+  if (
+    bot.subaccountAuthMode === 'external_key' &&
+    bot.subaccountStatus === 'active' &&
+    bot.protocolSubaccountId &&
+    bot.botSubaccountKeyEncrypted
+  ) {
     return {
       useBotKeypair: true,
       botPublicKey: bot.protocolSubaccountId,
@@ -3519,13 +3524,27 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           return res.status(403).json({ error: "Bot not found or not owned" });
         }
         tradingBotId = botId;
-        if (bot.protocolSubaccountId && bot.botSubaccountKeyEncrypted && bot.subaccountStatus === 'active') {
+        if (
+          bot.subaccountAuthMode === 'external_key' &&
+          bot.subaccountStatus === 'active' &&
+          bot.protocolSubaccountId &&
+          bot.botSubaccountKeyEncrypted
+        ) {
           subAccountId = 0;
           botForTransfer = bot;
-          console.log(`[Deposit] Bot ${bot.name} has Pacifica subaccount ${bot.protocolSubaccountId}, depositing to agent main then transferring`);
+          console.log(`[Deposit] Bot ${bot.name} uses external_key auth (subaccount ${bot.protocolSubaccountId}), depositing to agent main then transferring`);
+        } else if (bot.subaccountAuthMode === 'external_key') {
+          // Invariant violation: mode says external_key but required fields are missing/inactive.
+          // Fail fast rather than silently fall through to legacy Drift path (would misroute funds).
+          const detail = `subaccountAuthMode=external_key but status=${bot.subaccountStatus}, hasProtocolSubaccountId=${!!bot.protocolSubaccountId}, hasKey=${!!bot.botSubaccountKeyEncrypted}`;
+          console.error(`[Deposit][INTEGRITY] Bot ${bot.id}: ${detail}`);
+          return res.status(409).json({
+            code: 'BOT_SUBACCOUNT_INTEGRITY_ERROR',
+            error: `Bot ${bot.id} integrity error: ${detail}`,
+          });
         } else {
           subAccountId = bot.driftSubaccountId ?? 0;
-          console.log(`[Deposit] Bot ${bot.name} using legacy subAccountId=${subAccountId}`);
+          console.log(`[Deposit] Bot ${bot.name} using main_plus_id auth, subAccountId=${subAccountId}`);
         }
       } else {
         console.log(`[Deposit] No botId provided, depositing to main account (subaccount 0)`);
@@ -3776,7 +3795,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       let withdrawFromMain = false;
       if (botId) {
         const bot = await storage.getTradingBotById(botId);
-        if (bot?.protocolSubaccountId && bot?.botSubaccountKeyEncrypted && bot?.subaccountStatus === 'active') {
+        if (
+          bot?.subaccountAuthMode === 'external_key' &&
+          bot?.subaccountStatus === 'active' &&
+          bot?.protocolSubaccountId &&
+          bot?.botSubaccountKeyEncrypted
+        ) {
           try {
             const { decrypt } = await import('./crypto');
             const adapter = getDefaultAdapter();
@@ -3801,6 +3825,15 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           } catch (transferErr: any) {
             return res.status(500).json({ error: `Subaccount transfer failed: ${transferErr.message}` });
           }
+        } else if (bot?.subaccountAuthMode === 'external_key') {
+          // Invariant violation: mode says external_key but required fields are missing/inactive.
+          // Fail fast rather than silently fall through to legacy Drift withdraw path.
+          const detail = `subaccountAuthMode=external_key but status=${bot.subaccountStatus}, hasProtocolSubaccountId=${!!bot.protocolSubaccountId}, hasKey=${!!bot.botSubaccountKeyEncrypted}`;
+          console.error(`[Withdraw][INTEGRITY] Bot ${bot.id}: ${detail}`);
+          return res.status(409).json({
+            code: 'BOT_SUBACCOUNT_INTEGRITY_ERROR',
+            error: `Bot ${bot.id} integrity error: ${detail}`,
+          });
         }
       }
 
@@ -5619,12 +5652,17 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       let botSubaccountKeyEncrypted: string | null = null;
       let subaccountStatus: string = 'none';
 
+      const defaultAdapter = getDefaultAdapter();
+      const defaultCaps = defaultAdapter.getCapabilities();
+      const subaccountAuthMode: 'external_key' | 'main_plus_id' =
+        defaultCaps.requiresExternalSubaccountKey ? 'external_key' : 'main_plus_id';
+
       if (wallet.agentPublicKey && wallet.agentPrivateKeyEncrypted) {
         const { Keypair } = await import('@solana/web3.js');
 
         const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
-        const adapter = getDefaultAdapter();
-        const caps = adapter.getCapabilities();
+        const adapter = defaultAdapter;
+        const caps = defaultCaps;
 
         const botKeypair = caps.requiresExternalSubaccountKey ? Keypair.generate() : null;
 
@@ -5671,6 +5709,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                   maxPositionSize: null,
                   signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
                   riskConfig: {},
+                  subaccountAuthMode: 'main_plus_id',
                 } as any);
                 console.log(`[Bot Creation] Created recovered bot ${orphanedBot.id} for orphaned subaccount ${subId}`);
               } catch (syncErr: any) {
@@ -5697,9 +5736,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         webhookSecret,
         driftSubaccountId: nextSubaccountId,
         protocolSubaccountId: botSubaccountPublicKey,
-        activeProtocol: botSubaccountPublicKey ? getDefaultAdapter().protocolName : null,
+        activeProtocol: botSubaccountPublicKey ? defaultAdapter.protocolName : null,
         botSubaccountKeyEncrypted,
         subaccountStatus,
+        subaccountAuthMode,
         isActive: true,
         side: side || 'both',
         leverage: leverage || 1,
@@ -10373,6 +10413,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 maxPositionSize: null,
                 signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
                 riskConfig: {},
+                subaccountAuthMode: 'main_plus_id',
               } as any);
               console.log(`[Marketplace] Created recovered bot for orphaned subaccount ${subId}`);
             } catch (syncErr: any) {
@@ -10407,6 +10448,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         isActive: true,
         sourcePublishedBotId: publishedBot.id,
         driftSubaccountId: nextSubaccountId,
+        subaccountAuthMode: 'main_plus_id',
       } as any);
       
       // Deposit USDC from agent wallet directly to the new bot's Drift subaccount
@@ -11219,8 +11261,14 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     try {
       const { botId, amount } = req.body;
       const bot = await storage.getTradingBotById(botId);
-      if (!bot || !bot.protocolSubaccountId || !bot.botSubaccountKeyEncrypted) {
-        return res.status(400).json({ error: "Bot not found or no Pacifica subaccount" });
+      if (
+        !bot ||
+        bot.subaccountAuthMode !== 'external_key' ||
+        bot.subaccountStatus !== 'active' ||
+        !bot.protocolSubaccountId ||
+        !bot.botSubaccountKeyEncrypted
+      ) {
+        return res.status(400).json({ error: "Bot not found or does not have an active external_key subaccount" });
       }
       const wallet = await storage.getWallet(bot.walletAddress);
       if (!wallet?.agentPrivateKeyEncrypted) {

@@ -581,7 +581,9 @@ export async function reconcileAllBotsForWallet(walletAddress: string): Promise<
   
   for (const bot of bots) {
     const subAccountId = bot.driftSubaccountId ?? 0;
-    const botSubPubKey = (bot.protocolSubaccountId && bot.subaccountStatus === 'active') ? bot.protocolSubaccountId : undefined;
+    const botSubPubKey = (bot.subaccountAuthMode === 'external_key' && bot.subaccountStatus === 'active' && bot.protocolSubaccountId)
+      ? bot.protocolSubaccountId
+      : undefined;
     const result = await reconcileBotPosition(
       bot.id,
       walletAddress,
@@ -655,7 +657,7 @@ export function startPeriodicReconciliation(): void {
         
         for (const bot of botsToReconcile) {
           const subAccountId = bot.driftSubaccountId ?? 0;
-          const botSubPubKey = (bot.subaccountStatus === 'active' && bot.protocolSubaccountId)
+          const botSubPubKey = (bot.subaccountAuthMode === 'external_key' && bot.subaccountStatus === 'active' && bot.protocolSubaccountId)
             ? bot.protocolSubaccountId
             : undefined;
           await reconcileBotPosition(

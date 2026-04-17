@@ -13,10 +13,12 @@ function _subIdStr(subAccountId: number): string | undefined {
  * Returns null when neither path is viable (skip).
  */
 function resolveBotAdapterArgs(bot: TradingBot, wallet: Wallet): { account: string; subaccountId?: string } | null {
-  if (bot.protocolSubaccountId && bot.subaccountStatus === 'active') {
+  if (bot.subaccountAuthMode === 'external_key') {
+    if (bot.subaccountStatus !== 'active' || !bot.protocolSubaccountId) return null;
     return { account: bot.protocolSubaccountId };
   }
-  if (wallet.agentPublicKey && bot.driftSubaccountId != null) {
+  if (bot.subaccountAuthMode === 'main_plus_id') {
+    if (!wallet.agentPublicKey || bot.driftSubaccountId == null) return null;
     return { account: wallet.agentPublicKey, subaccountId: _subIdStr(bot.driftSubaccountId) };
   }
   return null;
