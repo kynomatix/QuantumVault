@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb, unique, json, index, serial, real } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb, unique, json, index, serial, real, check } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -163,6 +163,14 @@ export const tradingBots = pgTable("trading_bots", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ([
   index("idx_trading_bots_protocol_subaccount").on(table.activeProtocol, table.protocolSubaccountId),
+  check(
+    "trading_bots_subaccount_auth_mode_check",
+    sql`${table.subaccountAuthMode} IN ('external_key', 'main_plus_id')`,
+  ),
+  check(
+    "trading_bots_external_key_invariant",
+    sql`NOT (${table.subaccountAuthMode} = 'external_key' AND ${table.subaccountStatus} = 'active') OR (${table.protocolSubaccountId} IS NOT NULL AND ${table.botSubaccountKeyEncrypted} IS NOT NULL)`,
+  ),
 ]));
 
 export const insertTradingBotSchema = createInsertSchema(tradingBots).omit({
