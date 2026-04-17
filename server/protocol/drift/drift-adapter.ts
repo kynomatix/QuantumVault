@@ -74,6 +74,22 @@ import { getActiveRpcUrl } from './drift-rpc-failover.js';
 // ============================================================================
 export const USDT_MINT_MAINNET = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
 
+// Returns parsed integer if input is a canonical decimal-digit string
+// representing a safe non-negative integer; otherwise null. Rejects whitespace
+// (`' '`, `'\t'`), scientific notation (`'1e2'`), hex (`'0x2'`), signs
+// (`'+5'`, `'-5'`), decimals (`'5.0'`), and other non-canonical forms that
+// `Number()` would silently coerce. Shared by DriftAdapter (strict + tolerant
+// parsers) and DriftTxBuilder so all subaccount-id parsing is consistent.
+export function tryParseCanonicalSubaccountId(
+  subaccountId: string | undefined | null,
+): number | null {
+  if (subaccountId === undefined || subaccountId === null) return null;
+  if (!/^[0-9]+$/.test(subaccountId)) return null;
+  const n = Number(subaccountId);
+  if (!Number.isSafeInteger(n) || n < 0) return null;
+  return n;
+}
+
 const DEFAULT_TICK_SIZE = 0.01;
 const DEFAULT_LOT_SIZE = 0.01;
 const DEFAULT_MAX_LEVERAGE = 20;
@@ -607,17 +623,19 @@ export class DriftAdapter implements ProtocolAdapter {
   // Strict parser for write paths (orders, deposits, transfers, settle).
   // We DO want to throw rather than silently route a write to subaccount 0
   // when the caller passed garbage — that would cause real loss.
+  // Empty/undefined is allowed and means "default to 0" (callers without a
+  // subaccountId field, e.g. legacy single-account flows).
   private parseSubaccountId(subaccountId?: string): number {
     if (subaccountId === undefined || subaccountId === null || subaccountId === '') {
       return 0;
     }
-    const numeric = Number(subaccountId);
-    if (!Number.isSafeInteger(numeric) || numeric < 0) {
+    const parsed = tryParseCanonicalSubaccountId(subaccountId);
+    if (parsed === null) {
       throw new Error(
-        `DriftAdapter: invalid subaccountId "${subaccountId}" — must be a non-negative integer string`,
+        `DriftAdapter: invalid subaccountId "${subaccountId}" — must be a canonical non-negative integer string (decimal digits only, no whitespace, no scientific/hex notation)`,
       );
     }
-    return numeric;
+    return parsed;
   }
 
   // 12i contract: read methods (getAccountInfo / getPositions / getBalances /
@@ -629,8 +647,8 @@ export class DriftAdapter implements ProtocolAdapter {
     if (subaccountId === undefined || subaccountId === null || subaccountId === '') {
       return 0;
     }
-    const numeric = Number(subaccountId);
-    if (!Number.isSafeInteger(numeric) || numeric < 0) {
+    const parsed = tryParseCanonicalSubaccountId(subaccountId);
+    if (parsed === null) {
       console.warn(
         `[DriftAdapter] parseSubaccountIdForRead: unparseable subaccountId "${subaccountId}" ` +
           `received in a read method; defaulting to 0 to keep the batch alive (12i contract). ` +
@@ -638,7 +656,7 @@ export class DriftAdapter implements ProtocolAdapter {
       );
       return 0;
     }
-    return numeric;
+    return parsed;
   }
 
   private mapAccountInfo(
