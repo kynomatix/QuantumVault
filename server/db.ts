@@ -60,6 +60,32 @@ export async function ensureSchema() {
            );
        EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
       `ALTER TABLE trading_bots ALTER COLUMN subaccount_auth_mode SET NOT NULL`,
+
+      // --- Phase 7 / Group D item 18: formalize active_protocol allowed values. ---
+      // Idempotent: safe to run on fresh DB, partially-migrated DB, or fully-migrated DB.
+      // Backfill rule (one-time historical reconstruction): the only NULL rows in
+      // production today are the dormant pre-adapter Drift bots described in item 12d
+      // (legacy bots with no Pacifica subaccount and no migrated collateral; they
+      // cannot be re-pointed to Pacifica). They are by definition Drift. New bots
+      // always set active_protocol explicitly at creation (item 18 fixed the four
+      // insert sites in routes.ts). After backfill, the column is constrained to
+      // ('pacifica', 'drift') and made NOT NULL — this lets `getAdapterForBot()`
+      // drop its warn-logging null fallback in a follow-up cleanup.
+      //
+      // ATOMICITY: the three steps (UPDATE → ADD CONSTRAINT → SET NOT NULL) are
+      // wrapped in a single PL/pgSQL DO block so they execute in one transaction.
+      // Without this, a concurrent writer (e.g. an old instance during rolling
+      // deploy) could insert a NULL row between the UPDATE and the SET NOT NULL,
+      // causing the latter to fail and leaving the schema partially tightened.
+      // The inner BEGIN/EXCEPTION handles the duplicate-constraint case on re-run.
+      `DO $$ BEGIN
+         UPDATE trading_bots SET active_protocol = 'drift' WHERE active_protocol IS NULL;
+         BEGIN
+           ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check
+             CHECK (active_protocol IN ('pacifica', 'drift'));
+         EXCEPTION WHEN duplicate_object THEN NULL; END;
+         ALTER TABLE trading_bots ALTER COLUMN active_protocol SET NOT NULL;
+       END $$`,
     ];
     for (const sql of migrations) {
       await client.query(sql);

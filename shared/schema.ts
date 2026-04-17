@@ -154,7 +154,13 @@ export const tradingBots = pgTable("trading_bots", {
   pauseReason: text("pause_reason"), // Reason why bot was auto-paused (e.g., "Insufficient margin")
   
   protocolSubaccountId: text("protocol_subaccount_id"),
-  activeProtocol: text("active_protocol"),
+  // Group D item 18 (April 17, 2026): which protocol adapter created/owns this bot.
+  // Allowed values are constrained at the DB level by `trading_bots_active_protocol_check`
+  // (see check() block below) and bootstrapped from the runtime migration in
+  // server/db.ts ensureSchema() (which also backfills any pre-existing NULL rows to
+  // 'drift' before applying NOT NULL). Drizzle's $type<...> here documents the union;
+  // the SQL CHECK is the actual enforcement.
+  activeProtocol: text("active_protocol").$type<'pacifica' | 'drift'>().notNull(),
   botSubaccountKeyEncrypted: text("bot_subaccount_key_encrypted"),
   subaccountStatus: text("subaccount_status").default("none"),
   subaccountAuthMode: text("subaccount_auth_mode").$type<'external_key' | 'main_plus_id'>().notNull(),
@@ -170,6 +176,10 @@ export const tradingBots = pgTable("trading_bots", {
   check(
     "trading_bots_external_key_invariant",
     sql`NOT (${table.subaccountAuthMode} = 'external_key' AND ${table.subaccountStatus} = 'active') OR (${table.protocolSubaccountId} IS NOT NULL AND ${table.botSubaccountKeyEncrypted} IS NOT NULL)`,
+  ),
+  check(
+    "trading_bots_active_protocol_check",
+    sql`${table.activeProtocol} IN ('pacifica', 'drift')`,
   ),
 ]));
 

@@ -456,10 +456,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async clearProtocolSubaccount(botId: string): Promise<void> {
+    // Group D item 18 (April 17, 2026): activeProtocol is now NOT NULL with a CHECK
+    // constraint (see shared/schema.ts and server/db.ts). The protocol tag is a
+    // permanent property of the bot — it records which adapter created the bot,
+    // not transient state that should be cleared alongside the subaccount ID.
+    // This method clears only the on-chain subaccount identifier; the protocol
+    // tag remains so any future re-creation routes through the same adapter.
     await db.update(tradingBots)
       .set({
         protocolSubaccountId: null,
-        activeProtocol: null,
         updatedAt: sql`NOW()`,
       } as any)
       .where(eq(tradingBots.id, botId));
@@ -471,7 +476,12 @@ export class DatabaseStorage implements IStorage {
       eq(tradingBots.protocolSubaccountId, protocolSubaccountId),
     ];
     if (protocol) {
-      conditions.push(eq(tradingBots.activeProtocol, protocol));
+      // Cast: the column's narrowed union type ('pacifica'|'drift') is enforced by
+      // the SQL CHECK constraint on writes. For this SELECT predicate, an out-of-
+      // domain value won't be rejected — it just yields no matches. Callers that
+      // want input validation should narrow the parameter upstream (e.g. with a
+      // Zod enum) rather than relying on the cast for safety.
+      conditions.push(eq(tradingBots.activeProtocol, protocol as 'pacifica' | 'drift'));
     }
     const result = await db.select()
       .from(tradingBots)

@@ -5749,6 +5749,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                   signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
                   riskConfig: {},
                   subaccountAuthMode: 'main_plus_id',
+                  // Group D item 18: orphan recovery in main bot-creation flow scans
+                  // on-chain Drift subaccounts via discoverOnChainSubaccounts; any bot
+                  // created here is by definition a Drift bot.
+                  activeProtocol: 'drift',
                 } as any);
                 console.log(`[Bot Creation] Created recovered bot ${orphanedBot.id} for orphaned subaccount ${subId}`);
               } catch (syncErr: any) {
@@ -5790,7 +5794,14 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         webhookSecret,
         driftSubaccountId: persistedDriftSubaccountId,
         protocolSubaccountId: botSubaccountPublicKey,
-        activeProtocol: botSubaccountPublicKey ? defaultAdapter.protocolName : null,
+        // Group D item 18 (April 17, 2026): always tag the bot with the adapter that
+        // created it, regardless of subaccount auth mode. The previous conditional
+        // (botSubaccountPublicKey ? ... : null) only emitted a value for `external_key`
+        // mode (Pacifica's keypair-generation branch). For `main_plus_id` mode bots
+        // (Drift) it would have written NULL, which the new schema CHECK constraint
+        // forbids. The tag is a property of the protocol the bot was created against,
+        // not of how its subaccount is authed — both modes need the tag.
+        activeProtocol: defaultAdapter.protocolName,
         botSubaccountKeyEncrypted,
         subaccountStatus,
         subaccountAuthMode,
@@ -10468,6 +10479,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
                 riskConfig: {},
                 subaccountAuthMode: 'main_plus_id',
+                // Group D item 18: orphan recovery in marketplace flow — same Drift-only
+                // semantics as the main creation site's recovery branch.
+                activeProtocol: 'drift',
               } as any);
               console.log(`[Marketplace] Created recovered bot for orphaned subaccount ${subId}`);
             } catch (syncErr: any) {
@@ -10542,6 +10556,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         sourcePublishedBotId: publishedBot.id,
         driftSubaccountId: persistedSubaccountId,
         subaccountAuthMode: 'main_plus_id',
+        // Group D item 18: marketplace subscriber bot creation — Drift-only by
+        // construction today (see item 17d comment above for the rationale: this
+        // flow uses `getAdapter('drift')` for createSubaccount, persists
+        // driftSubaccountId, and calls executeAgentDeposit which is Drift's path).
+        activeProtocol: 'drift',
       } as any);
       
       // Deposit USDC from agent wallet directly to the new bot's Drift subaccount
