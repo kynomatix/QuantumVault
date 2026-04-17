@@ -5628,15 +5628,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         console.log(`[Bot Creation] Creating Pacifica subaccount: ${botKeypair.publicKey.toString()} under agent ${agentKeypair.publicKey.toString()}`);
 
         const adapter = getDefaultAdapter();
-        if (!adapter.createSubaccountWithKey) {
-          return res.status(500).json({ error: 'Active protocol does not support subaccount creation' });
-        }
 
         try {
-          await adapter.createSubaccountWithKey(
-            agentKeypair.secretKey,
-            botKeypair.secretKey,
-          );
+          await adapter.createSubaccount({
+            mainSecretKey: agentKeypair.secretKey,
+            subSecretKey: botKeypair.secretKey,
+            agentPublicKey: agentKeypair.publicKey.toString(),
+          });
 
           botSubaccountPublicKey = botKeypair.publicKey.toString();
           botSubaccountKeyEncrypted = legacyEncrypt(bs58.encode(botKeypair.secretKey));

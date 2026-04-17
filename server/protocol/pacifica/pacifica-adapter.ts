@@ -1,4 +1,4 @@
-import type { ProtocolAdapter } from '../adapter.js';
+import type { ProtocolAdapter, CreateSubaccountInput } from '../adapter.js';
 import type {
   ProtocolMarket,
   ProtocolPosition,
@@ -1165,22 +1165,15 @@ export class PacificaAdapter implements ProtocolAdapter {
     };
   }
 
-  async createSubaccount(
-    _agentPublicKey: string,
-    _label?: string,
-  ): Promise<SubaccountInfo> {
-    throw new Error(
-      'PacificaAdapter.createSubaccount: Pacifica requires dual-signature subaccount creation. ' +
-      'Use createSubaccountWithKey(mainSecretKey, subSecretKey) instead.',
-    );
-  }
-
-  async createSubaccountWithKey(
-    mainSecretKey: Uint8Array,
-    subSecretKey: Uint8Array,
-  ): Promise<SubaccountInfo> {
-    const mainSigner = new PacificaSigner(mainSecretKey);
-    const subSigner = new PacificaSigner(subSecretKey);
+  async createSubaccount(input: CreateSubaccountInput): Promise<SubaccountInfo> {
+    if (!input.subSecretKey) {
+      throw new Error(
+        'PacificaAdapter.createSubaccount: subSecretKey is required. ' +
+        'Pacifica uses dual-signature subaccount creation — caller must pre-generate a subaccount keypair and pass its secret key.',
+      );
+    }
+    const mainSigner = new PacificaSigner(input.mainSecretKey);
+    const subSigner = new PacificaSigner(input.subSecretKey);
     const timestamp = Date.now();
     const expiryWindow = 5000;
 

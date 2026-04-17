@@ -36,6 +36,13 @@ import type {
   TransactionBuildResult,
 } from './protocol-types.js';
 
+export interface CreateSubaccountInput {
+  mainSecretKey: Uint8Array;
+  subSecretKey?: Uint8Array;
+  agentPublicKey: string;
+  label?: string;
+}
+
 export interface ProtocolAdapter {
   readonly protocolName: string;
   readonly protocolVersion: string;
@@ -83,8 +90,7 @@ export interface ProtocolAdapter {
   executeWithdraw(params: AgentWithdrawParams): Promise<WithdrawResult>;
   transferBetweenSubaccounts(params: TransferParams): Promise<TransferResult>;
 
-  createSubaccount(agentPublicKey: string, label?: string): Promise<SubaccountInfo>;
-  createSubaccountWithKey?(mainSecretKey: Uint8Array, subSecretKey: Uint8Array): Promise<SubaccountInfo>;
+  createSubaccount(input: CreateSubaccountInput): Promise<SubaccountInfo>;
   listSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]>;
   discoverSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]>;
   closeSubaccount?(agentPublicKey: string, subaccountId: string): Promise<void>;
