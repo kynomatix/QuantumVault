@@ -833,19 +833,28 @@ export function BotManagementDrawer({
       const data = await safeResponseJson(res);
       if (!res.ok) throw new Error(data.error || 'Failed to set TP/SL');
 
-      if (takeProfitPrice) setActiveTp(takeProfitPrice);
-      if (stopLossPrice) setActiveSl(stopLossPrice);
+      const appliedTp: number | null = data.appliedTakeProfitPrice ?? null;
+      const appliedSl: number | null = data.appliedStopLossPrice ?? null;
+      if (appliedTp != null) setActiveTp(appliedTp);
+      if (appliedSl != null) setActiveSl(appliedSl);
 
+      const baseDesc = [
+        appliedTp != null ? `TP: $${formatPrice(appliedTp)}` : '',
+        appliedSl != null ? `SL: $${formatPrice(appliedSl)}` : '',
+      ].filter(Boolean).join(' | ');
+      const dropped: Array<{ leg: 'tp' | 'sl' }> = data.droppedLegs ?? [];
       toast({
-        title: 'TP/SL set',
-        description: [
-          takeProfitPrice ? `TP: $${formatPrice(takeProfitPrice)}` : '',
-          stopLossPrice ? `SL: $${formatPrice(stopLossPrice)}` : '',
-        ].filter(Boolean).join(' | '),
+        title: data.warning ? 'TP/SL partially set' : 'TP/SL set',
+        description: data.warning ? `${baseDesc} — ${data.warning}` : baseDesc,
+        variant: data.warning ? 'destructive' : undefined,
       });
-      setTpInput('');
-      setSlInput('');
-      setTpslOpen(false);
+      // Clear inputs only for legs that were actually applied; keep rejected
+      // leg's input populated so the user can correct and resubmit.
+      const tpDropped = dropped.some(l => l.leg === 'tp');
+      const slDropped = dropped.some(l => l.leg === 'sl');
+      if (!tpDropped) setTpInput('');
+      if (!slDropped) setSlInput('');
+      if (!data.warning) setTpslOpen(false);
     } catch (error) {
       toast({
         title: 'Failed to set TP/SL',

@@ -813,11 +813,13 @@ export class PacificaAdapter implements ProtocolAdapter {
     console.log(`[PacificaAdapter.setTpSl] account=${params.agentPublicKey.slice(0,8)}... symbol=${protocolSymbol} subaccountId=${params.subaccountId ?? 'none'} TP=${params.takeProfitPrice ?? 'none'} SL=${params.stopLossPrice ?? 'none'}`);
 
     let positionSide: string = 'bid';
+    let havePosition = false;
     try {
       const positions = await this.getPositions(params.agentPublicKey, params.subaccountId);
       const pos = positions.find(p => p.internalSymbol === params.internalSymbol);
-      if (pos) {
+      if (pos && Math.abs(pos.baseSize) > 0.0001) {
         positionSide = pos.baseSize >= 0 ? 'bid' : 'ask';
+        havePosition = true;
       }
     } catch (err) {
       console.warn(`[SetTpSl] Could not fetch position side, defaulting to 'bid':`, err);
@@ -827,24 +829,105 @@ export class PacificaAdapter implements ProtocolAdapter {
     const TP_SLIPPAGE = 0.001;
     const closingSide = isLong ? 'ask' : 'bid';
 
+    const tpRequested = params.takeProfitPrice !== undefined && params.takeProfitPrice > 0;
+    const slRequested = params.stopLossPrice !== undefined && params.stopLossPrice > 0;
+
+    // Pre-flight: validate trigger prices against current mark when a real position
+    // exists and at least one leg was requested. Skips the cancel-only call path
+    // (TP=0, SL=0) which is used by /cancel-tpsl to clear existing triggers.
+    //
+    // Note: the only callers of setTpSl in the codebase are the user-facing
+    // /set-tpsl and /cancel-tpsl routes. There is no separate strategy-loop
+    // call site that would need its own retry guard — a structured
+    // { success: false } here is observed by the route, surfaced to the user,
+    // and the bot's next strategy tick decides what to do.
+    let droppedLegMessage: string | null = null;
+    const droppedLegs: Array<{ leg: 'tp' | 'sl'; reason: string }> = [];
+    let tpInvalid = false;
+    let slInvalid = false;
+    if (havePosition && (tpRequested || slRequested)) {
+      let mark: number | null = null;
+      try {
+        mark = await this.getPrice(params.internalSymbol);
+      } catch (err) {
+        console.warn(`[SetTpSl] Could not fetch mark price for validation:`, err);
+      }
+
+      if (mark && mark > 0) {
+        const sideLabel = isLong ? 'long' : 'short';
+        const errs: string[] = [];
+
+        if (tpRequested) {
+          const tp = params.takeProfitPrice as number;
+          const tpOk = isLong ? tp > mark : tp < mark;
+          if (!tpOk) {
+            tpInvalid = true;
+            const direction = isLong ? 'above' : 'below';
+            const reason = `Take profit ${tp} is already past the current price ${mark} for a ${sideLabel} position — choose a price ${direction} ${mark}`;
+            errs.push(reason);
+            droppedLegs.push({ leg: 'tp', reason });
+          }
+        }
+        if (slRequested) {
+          const sl = params.stopLossPrice as number;
+          const slOk = isLong ? sl < mark : sl > mark;
+          if (!slOk) {
+            slInvalid = true;
+            const direction = isLong ? 'below' : 'above';
+            const reason = `Stop loss ${sl} is already past the current price ${mark} for a ${sideLabel} position — choose a price ${direction} ${mark}`;
+            errs.push(reason);
+            droppedLegs.push({ leg: 'sl', reason });
+          }
+        }
+
+        const bothRequested = tpRequested && slRequested;
+        const bothInvalid = bothRequested && tpInvalid && slInvalid;
+        const onlyOneRequestedAndInvalid =
+          (!bothRequested) && ((tpRequested && tpInvalid) || (slRequested && slInvalid));
+
+        if (bothInvalid || onlyOneRequestedAndInvalid) {
+          const message = errs.join('; ');
+          console.warn(`[SetTpSl] Pre-flight rejection (no request sent): ${message}`);
+          return {
+            success: false,
+            status: 'rejected',
+            error: message,
+            appliedTakeProfitPrice: null,
+            appliedStopLossPrice: null,
+            droppedLegs,
+          };
+        }
+
+        if (tpInvalid || slInvalid) {
+          droppedLegMessage = errs.join('; ');
+          console.warn(`[SetTpSl] Dropping invalid leg, proceeding with the other: ${droppedLegMessage}`);
+        }
+      } else {
+        console.warn(`[SetTpSl] Mark price unavailable; skipping pre-flight validation for ${params.internalSymbol}`);
+      }
+    }
+
+    const appliedTp = tpRequested && !tpInvalid ? (params.takeProfitPrice as number) : null;
+    const appliedSl = slRequested && !slInvalid ? (params.stopLossPrice as number) : null;
+
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
       side: closingSide,
     };
 
-    if (params.takeProfitPrice !== undefined && params.takeProfitPrice > 0) {
-      const tpStopQ = this.quantizePrice(params.internalSymbol, params.takeProfitPrice);
+    if (tpRequested && !tpInvalid) {
+      const tpStopQ = this.quantizePrice(params.internalSymbol, params.takeProfitPrice as number);
       const tpLimitRaw = isLong
-        ? params.takeProfitPrice * (1 - TP_SLIPPAGE)
-        : params.takeProfitPrice * (1 + TP_SLIPPAGE);
+        ? (params.takeProfitPrice as number) * (1 - TP_SLIPPAGE)
+        : (params.takeProfitPrice as number) * (1 + TP_SLIPPAGE);
       const tpLimitQ = this.quantizePrice(params.internalSymbol, tpLimitRaw);
       operationData.take_profit = {
         stop_price: String(tpStopQ),
         limit_price: String(tpLimitQ),
       };
     }
-    if (params.stopLossPrice !== undefined && params.stopLossPrice > 0) {
-      const slStopQ = this.quantizePrice(params.internalSymbol, params.stopLossPrice);
+    if (slRequested && !slInvalid) {
+      const slStopQ = this.quantizePrice(params.internalSymbol, params.stopLossPrice as number);
       operationData.stop_loss = {
         stop_price: String(slStopQ),
       };
@@ -868,7 +951,12 @@ export class PacificaAdapter implements ProtocolAdapter {
     console.log(`[PacificaAdapter.setTpSl] response:`, JSON.stringify(response));
 
     if (response && typeof response === 'object' && 'order_id' in response) {
-      return this.mapOrderResponse(response as PacificaOrderResponse);
+      const mapped = this.mapOrderResponse(response as PacificaOrderResponse);
+      mapped.appliedTakeProfitPrice = appliedTp;
+      mapped.appliedStopLossPrice = appliedSl;
+      if (droppedLegs.length) mapped.droppedLegs = droppedLegs;
+      if (droppedLegMessage) mapped.error = droppedLegMessage;
+      return mapped;
     }
 
     return {
@@ -876,6 +964,10 @@ export class PacificaAdapter implements ProtocolAdapter {
       orderId: response?.order_id ?? response?.id ?? `tpsl-${Date.now()}`,
       status: 'open' as const,
       rawResponse: response,
+      appliedTakeProfitPrice: appliedTp,
+      appliedStopLossPrice: appliedSl,
+      ...(droppedLegs.length ? { droppedLegs } : {}),
+      ...(droppedLegMessage ? { error: droppedLegMessage } : {}),
     };
   }
 

@@ -4627,18 +4627,37 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         subaccountId: signing.subaccountId,
       });
 
-      console.log(`[SetTpSl] Set TP/SL for bot ${bot.id} (${bot.market}): TP=${takeProfitPrice ?? 'none'}, SL=${stopLossPrice ?? 'none'}, orderId=${result.orderId}`);
+      if (!result.success) {
+        console.warn(`[SetTpSl] Adapter pre-flight rejection for bot ${bot.id} (${bot.market}): ${result.error}`);
+        return res.status(400).json({
+          success: false,
+          status: result.status,
+          error: result.error || 'TP/SL rejected by pre-flight validation',
+          appliedTakeProfitPrice: result.appliedTakeProfitPrice ?? null,
+          appliedStopLossPrice: result.appliedStopLossPrice ?? null,
+          droppedLegs: result.droppedLegs ?? [],
+        });
+      }
+
+      const appliedTp = result.appliedTakeProfitPrice ?? null;
+      const appliedSl = result.appliedStopLossPrice ?? null;
+
+      console.log(`[SetTpSl] Set TP/SL for bot ${bot.id} (${bot.market}): TP=${appliedTp ?? 'none'}, SL=${appliedSl ?? 'none'}, orderId=${result.orderId}${result.error ? ` (warning: ${result.error})` : ''}`);
 
       const updatedRiskConfig = { ...(bot.riskConfig as Record<string, unknown> || {}) };
-      if (takeProfitPrice) updatedRiskConfig.takeProfitPrice = takeProfitPrice;
-      if (stopLossPrice) updatedRiskConfig.stopLossPrice = stopLossPrice;
+      if (appliedTp != null) updatedRiskConfig.takeProfitPrice = appliedTp;
+      if (appliedSl != null) updatedRiskConfig.stopLossPrice = appliedSl;
       await storage.updateTradingBot(bot.id, { riskConfig: updatedRiskConfig });
 
       res.json({
         success: true,
-        takeProfitPrice: takeProfitPrice || null,
-        stopLossPrice: stopLossPrice || null,
+        takeProfitPrice: appliedTp,
+        stopLossPrice: appliedSl,
+        appliedTakeProfitPrice: appliedTp,
+        appliedStopLossPrice: appliedSl,
+        droppedLegs: result.droppedLegs ?? [],
         orderId: result.orderId,
+        ...(result.error ? { warning: result.error } : {}),
       });
     } catch (error) {
       console.error("[SetTpSl] Error:", error);

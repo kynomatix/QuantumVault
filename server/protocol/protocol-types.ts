@@ -80,6 +80,14 @@ export interface OrderResult {
   fee?: number;
   error?: string;
   rawResponse?: unknown;
+  /**
+   * For TP/SL operations: indicates which legs were actually applied vs.
+   * dropped during pre-flight validation. Populated by adapters that
+   * implement setTpSl with a wrong-side-of-mark guard.
+   */
+  appliedTakeProfitPrice?: number | null;
+  appliedStopLossPrice?: number | null;
+  droppedLegs?: Array<{ leg: 'tp' | 'sl'; reason: string }>;
 }
 
 export interface CancelOrderParams {
