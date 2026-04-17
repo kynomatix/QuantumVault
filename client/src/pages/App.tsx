@@ -783,7 +783,7 @@ export default function AppPage() {
             if (data.solBalance === 0) {
               // Agent has zero SOL - fresh agent wallet (new or reset), show welcome popup
               setWelcomePopupOpen(true);
-            } else if (data.isExistingUser && data.driftAccountExists) {
+            } else if (data.isExistingUser && data.exchangeAccountExists) {
               // Only show low gas toast for existing users who have an active exchange account
               // This avoids showing it during initial setup or when user is just browsing
               toast({

@@ -173,7 +173,7 @@ async function getUsdcBalance(walletAddress: string): Promise<number> {
   return getAgentUsdcBalance(walletAddress);
 }
 
-async function getDriftBalance(walletAddress: string, subAccountId: number = 0): Promise<number> {
+async function getExchangeBalance(walletAddress: string, subAccountId: number = 0): Promise<number> {
   try {
     const info = await getDefaultAdapter().getAccountInfo(walletAddress, _subIdStr(subAccountId));
     return info.balance;
@@ -196,14 +196,14 @@ async function subaccountExists(walletAddress: string, subAccountId: number): Pr
 }
 
 async function buildAgentDriftDepositTransaction(_a: string, _b: string, _c: number) {
-  throw new Error('Pacifica agent deposits are executed directly. Use executeAgentDriftDeposit instead.');
+  throw new Error('Pacifica agent deposits are executed directly. Use executeAgentDeposit instead.');
 }
 
 async function buildAgentDriftWithdrawTransaction(_a: string, _b: string, _c: number) {
   throw new Error('Pacifica agent withdrawals are API-based. Use executeAgentDriftWithdraw instead.');
 }
 
-async function executeAgentDriftDeposit(
+async function executeAgentDeposit(
   agentPublicKey: string,
   privateKeyOrEncrypted: string,
   amountUsdc: number,
@@ -277,11 +277,11 @@ async function executeAgentTransferBetweenSubaccounts(
   }
 }
 
-async function getAgentDriftBalance(agentPublicKey: string): Promise<number> {
-  return getDriftBalance(agentPublicKey, 0);
+async function getAgentExchangeBalance(agentPublicKey: string): Promise<number> {
+  return getExchangeBalance(agentPublicKey, 0);
 }
 
-async function getDriftAccountInfo(walletAddress: string, subAccountId: number = 0) {
+async function getExchangeAccountInfo(walletAddress: string, subAccountId: number = 0) {
   try {
     const info = await getDefaultAdapter().getAccountInfo(walletAddress, _subIdStr(subAccountId));
     return _mapAccountInfoToDrift(info);
@@ -377,7 +377,7 @@ async function getPerpPositions(walletAddress: string, subAccountId: number = 0,
   } catch { return []; }
 }
 
-async function getDriftAccountInfoForBot(agentPublicKey: string, subAccountId: number, botCtx: BotSubaccountContext | null) {
+async function getExchangeAccountInfoForBot(agentPublicKey: string, subAccountId: number, botCtx: BotSubaccountContext | null) {
   if (botCtx) {
     try {
       const info = await getDefaultAdapter().getAccountInfo(botCtx.botPublicKey);
@@ -387,7 +387,7 @@ async function getDriftAccountInfoForBot(agentPublicKey: string, subAccountId: n
       return { usdcBalance: 0, totalCollateral: 0, freeCollateral: 0, hasOpenPositions: false, marginUsed: 0, unrealizedPnl: 0, totalPositionNotional: 0 };
     }
   }
-  return getDriftAccountInfo(agentPublicKey, subAccountId);
+  return getExchangeAccountInfo(agentPublicKey, subAccountId);
 }
 
 async function closePerpPosition(
@@ -512,7 +512,35 @@ import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, re
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
 
-async function getSwiftMetrics() { try { return (await import("./swift-metrics")).getSwiftMetrics(); } catch { return null; } }
+async function getSwiftMetrics() {
+  try {
+    const s = (await import("./drift-service")).getSwiftHealthTracker().getSnapshot();
+    return {
+      summary: {
+        totalOrders: s.totalAttempts,
+        successCount: s.successCount,
+        failureCount: s.failureCount,
+        fallbackCount: s.fallbackCount,
+        successRate: s.successRate,
+        avgLatencyMs: s.avgLatencyMs,
+        avgPriceImprovementBps: s.avgPriceImprovementBps,
+      },
+      perMarket: Object.fromEntries(
+        Object.entries(s.perOperation).map(([market, m]) => [market, {
+          totalOrders: m.totalAttempts,
+          successCount: m.successCount,
+          failureCount: m.failureCount,
+          fallbackCount: m.fallbackCount,
+          avgLatencyMs: m.avgLatencyMs,
+          successRate: m.successRate,
+        }])
+      ),
+      errorDistribution: s.errorDistribution,
+      uptimeSinceReset: s.uptimeSinceReset,
+      lastResetAt: s.lastResetAt,
+    };
+  } catch { return null; }
+}
 async function getSwiftDiagnostics() { try { return (await import("./swift-config")).getSwiftDiagnostics(); } catch { return null; } }
 import nacl from "tweetnacl";
 import { PublicKey } from "@solana/web3.js";
@@ -730,7 +758,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
   let freeCollateral = 0;
 
   try {
-    const accountInfo = await getDriftAccountInfoForBot(agentPublicKey, subAccountId, botCtx ?? null);
+    const accountInfo = await getExchangeAccountInfoForBot(agentPublicKey, subAccountId, botCtx ?? null);
     freeCollateral = Math.max(0, accountInfo.freeCollateral);
   } catch (collateralErr: any) {
     console.warn(`${logPrefix} Could not check collateral: ${collateralErr.message}`);
@@ -772,12 +800,11 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
     if (topUpNeeded > 0) {
       try {
         if (botCtx) {
-          const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
-          const adapter = getDefaultAdapter() as PacificaAdapter;
+          const adapter = getDefaultAdapter();
           const agentKeypair = getAgentKeypair(agentPrivateKeyEncrypted);
           const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
 
-          const agentAccountInfo = await getDriftAccountInfo(agentPublicKey, 0);
+          const agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0);
           const agentFreeCollateral = agentAccountInfo.freeCollateral;
           console.log(`${logPrefix} Agent main account free collateral: $${agentFreeCollateral.toFixed(2)}, need: $${depositAmount.toFixed(2)}`);
 
@@ -813,7 +840,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
 
           if (agentUsdcBalance >= topUpNeeded) {
             const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
-            const depositResult = await executeAgentDriftDeposit(
+            const depositResult = await executeAgentDeposit(
               agentPublicKey,
               agentPrivateKeyEncrypted,
               depositAmount,
@@ -945,12 +972,11 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
 
         try {
           if (botCtx) {
-            const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
-            const adapter = getDefaultAdapter() as PacificaAdapter;
+            const adapter = getDefaultAdapter();
             const agentKeypair = getAgentKeypair(agentPrivateKeyEncrypted);
             const depositAmount = Math.ceil(shortfall * 100) / 100;
 
-            const agentAccountInfo = await getDriftAccountInfo(agentPublicKey, 0);
+            const agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0);
             if (agentAccountInfo.freeCollateral >= depositAmount) {
               const transferResult = await adapter.transferBetweenSubaccounts({
                 agentSecretKey: agentKeypair.secretKey,
@@ -985,7 +1011,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
 
           if (agentUsdcBalance >= shortfall) {
             const depositAmount = Math.ceil(shortfall * 100) / 100;
-            const depositResult = await executeAgentDriftDeposit(
+            const depositResult = await executeAgentDeposit(
               agentPublicKey,
               agentPrivateKeyEncrypted,
               depositAmount,
@@ -2748,7 +2774,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           }
 
           // 2c. Get balance and sweep to subaccount 0
-          const accountInfo = await getDriftAccountInfo(agentPubKey, subId);
+          const accountInfo = await getExchangeAccountInfo(agentPubKey, subId);
           const balance = accountInfo.usdcBalance;
           
           if (balance > 0.001) {
@@ -2772,7 +2798,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           }
 
           // 2d. Verify subaccount is empty before deletion
-          const verifyInfo = await getDriftAccountInfo(agentPubKey, subId);
+          const verifyInfo = await getExchangeAccountInfo(agentPubKey, subId);
           if (verifyInfo.hasOpenPositions || verifyInfo.usdcBalance > 0.001 || verifyInfo.totalCollateral > 0.001) {
             log(`Subaccount ${subId} still has funds or positions, skipping deletion`);
             errors.push(`Subaccount ${subId} still has funds ($${verifyInfo.usdcBalance.toFixed(2)}) or positions - cannot delete`);
@@ -2842,7 +2868,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           }
 
           // 3c. Withdraw all funds from Drift to agent wallet
-          const accountInfo = await getDriftAccountInfo(agentPubKey, 0);
+          const accountInfo = await getExchangeAccountInfo(agentPubKey, 0);
           const balance = accountInfo.usdcBalance;
           
           if (balance > 0.001) {
@@ -3051,7 +3077,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           });
         }
 
-        const accountInfo = await getDriftAccountInfo(agentPubKey, subId);
+        const accountInfo = await getExchangeAccountInfo(agentPubKey, subId);
         if (accountInfo.usdcBalance > 0.01) {
           return res.status(400).json({ 
             error: `Cannot reset: You have $${accountInfo.usdcBalance.toFixed(2)} in trading subaccount ${subId}. Please use 'Reset Trading Account' to withdraw funds first.`,
@@ -3263,7 +3289,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const wallet = await storage.getWallet(walletAddress);
       const agentAddress = wallet?.agentPublicKey;
       
-      const exchangeAccountInfo = agentAddress ? await getDriftAccountInfo(agentAddress, 0) : { totalCollateral: 0 };
+      const exchangeAccountInfo = agentAddress ? await getExchangeAccountInfo(agentAddress, 0) : { totalCollateral: 0 };
       const exchangeBalance = exchangeAccountInfo.totalCollateral;
       
       const bots = await storage.getTradingBots(walletAddress);
@@ -3287,7 +3313,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         try {
           const capBotCtx = getBotSubaccountContext(bot);
           if (capBotCtx) {
-            const liveInfo = await getDriftAccountInfoForBot('', 0, capBotCtx);
+            const liveInfo = await getExchangeAccountInfoForBot('', 0, capBotCtx);
             botBalance = liveInfo.totalCollateral;
           } else {
           const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
@@ -3349,7 +3375,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const [balance, solBalance, bots, driftAccountExists] = await Promise.all([
+      const [balance, solBalance, bots, exchangeAccountExists] = await Promise.all([
         getAgentUsdcBalance(wallet.agentPublicKey),
         getAgentSolBalance(wallet.agentPublicKey),
         storage.getTradingBots(req.walletAddress!),
@@ -3370,7 +3396,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         balance,
         solBalance,
         isExistingUser,
-        driftAccountExists,
+        exchangeAccountExists,
         botCreationSolRequirement: {
           required: requiredSolForBot,
           current: solBalance,
@@ -3563,7 +3589,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       console.log(`[Drift Deposit] Key validation passed. Executing deposit: amount=${amount}, subAccountId=${subAccountId} (v3 security)`);
       
-      const result = await executeAgentDriftDeposit(
+      const result = await executeAgentDeposit(
         wallet.agentPublicKey,
         privateKeyBase58,
         amount,
@@ -3580,8 +3606,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       let subaccountTransferSuccess = true;
       if (botForTransfer) {
         try {
-          const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
-          const adapter = getDefaultAdapter() as PacificaAdapter;
+          const adapter = getDefaultAdapter();
           const agentKeypair = Keypair.fromSecretKey(secretKeyCopy);
 
           console.log(`[Deposit] Waiting for exchange deposit to settle before transferring to bot subaccount...`);
@@ -3753,9 +3778,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         const bot = await storage.getTradingBotById(botId);
         if (bot?.protocolSubaccountId && bot?.botSubaccountKeyEncrypted && bot?.subaccountStatus === 'active') {
           try {
-            const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
             const { decrypt } = await import('./crypto');
-            const adapter = getDefaultAdapter() as PacificaAdapter;
+            const adapter = getDefaultAdapter();
             
             const botKeyBase58 = decrypt(bot.botSubaccountKeyEncrypted);
             const botSecretKey = bs58.decode(botKeyBase58);
@@ -3842,7 +3866,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, 0);
+      const accountInfo = await getExchangeAccountInfo(wallet.agentPublicKey, 0);
       res.json({ 
         balance: accountInfo.usdcBalance,
         freeCollateral: accountInfo.freeCollateral,
@@ -4052,7 +4076,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const formattedPositions: any[] = [];
       const prices = await getAllPrices();
 
-      const agentAccountInfo = await getDriftAccountInfo(wallet.agentPublicKey, 0);
+      const agentAccountInfo = await getExchangeAccountInfo(wallet.agentPublicKey, 0);
       totalCollateral += agentAccountInfo.totalCollateral;
       freeCollateral += agentAccountInfo.freeCollateral;
 
@@ -4060,7 +4084,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         const hmBotCtx = getBotSubaccountContext(bot);
         if (hmBotCtx) {
           try {
-            const botInfo = await getDriftAccountInfoForBot('', 0, hmBotCtx);
+            const botInfo = await getExchangeAccountInfoForBot('', 0, hmBotCtx);
             totalCollateral += botInfo.totalCollateral;
             freeCollateral += botInfo.freeCollateral;
             unrealizedPnl += botInfo.unrealizedPnl;
@@ -5200,7 +5224,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       if (balBotCtx) {
         try {
-          const liveInfo = await getDriftAccountInfoForBot(wallet.agentPublicKey!, subAccountId, balBotCtx);
+          const liveInfo = await getExchangeAccountInfoForBot(wallet.agentPublicKey!, subAccountId, balBotCtx);
           const livePositions = await getPerpPositions(wallet.agentPublicKey!, subAccountId, balBotCtx);
           const hasOpen = livePositions.some((p: any) => Math.abs(p.baseAssetAmount) > 0.0001);
           return res.json({
@@ -5305,7 +5329,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         storage.getBotTradeCount(botId),
         storage.getBotPosition(botId, bot.market),
         storage.getBotEquityEvents(bot.id, 1000),
-        overviewBotCtx ? getDriftAccountInfoForBot(wallet.agentPublicKey, subAccountId, overviewBotCtx) : Promise.resolve(null),
+        overviewBotCtx ? getExchangeAccountInfoForBot(wallet.agentPublicKey, subAccountId, overviewBotCtx) : Promise.resolve(null),
       ]);
       
       const mainAccountBalance = results[0].status === 'fulfilled' ? results[0].value : 0;
@@ -5488,7 +5512,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           }, 0);
 
           if (botCtx && wallet?.agentPublicKey) {
-            const liveInfo = await getDriftAccountInfoForBot(wallet.agentPublicKey, 0, botCtx);
+            const liveInfo = await getExchangeAccountInfoForBot(wallet.agentPublicKey, 0, botCtx);
             botBalance = liveInfo.totalCollateral;
             netPnl = botBalance - netDeposited;
             netPnlPercent = totalDeposits > 0 ? (netPnl / totalDeposits) * 100 : 0;
@@ -5572,7 +5596,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       // Server-side SOL balance check for bot creation
       if (wallet.agentPublicKey) {
-        const [solBalance, driftAccountExists] = await Promise.all([
+        const [solBalance, exchangeAccountExists] = await Promise.all([
           getAgentSolBalance(wallet.agentPublicKey),
           subaccountExists(wallet.agentPublicKey, 0),
         ]);
@@ -5597,15 +5621,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       if (wallet.agentPublicKey && wallet.agentPrivateKeyEncrypted) {
         const { Keypair } = await import('@solana/web3.js');
-        const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
 
         const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
         const botKeypair = Keypair.generate();
 
         console.log(`[Bot Creation] Creating Pacifica subaccount: ${botKeypair.publicKey.toString()} under agent ${agentKeypair.publicKey.toString()}`);
 
+        const adapter = getDefaultAdapter();
+        if (!adapter.createSubaccountWithKey) {
+          return res.status(500).json({ error: 'Active protocol does not support subaccount creation' });
+        }
+
         try {
-          const adapter = getDefaultAdapter() as PacificaAdapter;
           await adapter.createSubaccountWithKey(
             agentKeypair.secretKey,
             botKeypair.secretKey,
@@ -6095,7 +6122,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
 
           if (exists) {
-            const balance = await getDriftBalance(agentAddress, bot.driftSubaccountId);
+            const balance = await getExchangeBalance(agentAddress, bot.driftSubaccountId);
 
             if (bot.driftSubaccountId > 0 && balance > 0.01) {
               if (!wallet.agentPrivateKeyEncrypted) {
@@ -6216,7 +6243,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       // Bot without driftSubaccountId - check subaccount 0 (main account) for safety
       // This prevents orphaning funds in the main Drift account
-      const mainBalance = await getDriftBalance(agentAddress, 0);
+      const mainBalance = await getExchangeBalance(agentAddress, 0);
       if (mainBalance > 0.01) {
         console.log(`[Delete] Warning: Main Drift account has $${mainBalance.toFixed(2)} - may be from this bot`);
         // Don't block deletion for main account funds, but log warning
@@ -6338,7 +6365,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       // Check balance using correct agent wallet address
-      const balance = await getDriftBalance(agentAddress, bot.driftSubaccountId);
+      const balance = await getExchangeBalance(agentAddress, bot.driftSubaccountId);
       
       if (balance <= 0.01) {
         // No meaningful balance, try to close subaccount to reclaim rent
@@ -7423,8 +7450,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 try {
                   const botCtx = getBotSubaccountContext(bot);
                   const accountInfo = botCtx
-                    ? await getDriftAccountInfoForBot(wallet.agentPublicKey!, subAccountId, botCtx)
-                    : await getDriftAccountInfo(wallet.agentPublicKey!, subAccountId);
+                    ? await getExchangeAccountInfoForBot(wallet.agentPublicKey!, subAccountId, botCtx)
+                    : await getExchangeAccountInfo(wallet.agentPublicKey!, subAccountId);
                   const currentEquity = accountInfo.totalCollateral;
 
                   if (currentEquity > autoWithdrawThreshold) {
@@ -8666,7 +8693,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             const autoWithdrawThreshold = parseFloat(bot.autoWithdrawThreshold || "0");
             if (autoWithdrawThreshold > 0) {
               try {
-                const accountInfo = await getDriftAccountInfo(wallet.agentPublicKey, subAccountId);
+                const accountInfo = await getExchangeAccountInfo(wallet.agentPublicKey, subAccountId);
                 const currentEquity = accountInfo.totalCollateral;
                 
                 if (currentEquity > autoWithdrawThreshold) {
@@ -9534,7 +9561,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
       const [usdcBalance, driftBalance] = await Promise.all([
         getUsdcBalance(walletAddress),
-        getDriftBalance(walletAddress),
+        getExchangeBalance(walletAddress),
       ]);
       res.json({ usdcBalance, exchangeBalance: driftBalance });
     } catch (error) {
@@ -9552,7 +9579,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const [agentBalance, solBalance, aggregateAccountInfo] = await Promise.all([
         agentAddress ? getAgentUsdcBalance(agentAddress) : Promise.resolve(0),
         agentAddress ? getAgentSolBalance(agentAddress) : Promise.resolve(0),
-        agentAddress ? getDriftAccountInfo(agentAddress, 0) : Promise.resolve({ totalCollateral: 0, freeCollateral: 0 }),
+        agentAddress ? getExchangeAccountInfo(agentAddress, 0) : Promise.resolve({ totalCollateral: 0, freeCollateral: 0 }),
       ]);
       
       const aggregateExchangeEquity = aggregateAccountInfo.totalCollateral;
@@ -9564,7 +9591,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         try {
           const eqBotCtx = getBotSubaccountContext(bot);
           if (eqBotCtx) {
-            const liveInfo = await getDriftAccountInfoForBot('', 0, eqBotCtx);
+            const liveInfo = await getExchangeAccountInfoForBot('', 0, eqBotCtx);
             botBalance = liveInfo.totalCollateral;
           } else {
             let prices: Record<string, number> = {};
@@ -9952,7 +9979,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       if (balSingularCtx) {
         const [liveInfo, tradeCount] = await Promise.all([
-          getDriftAccountInfoForBot('', 0, balSingularCtx),
+          getExchangeAccountInfoForBot('', 0, balSingularCtx),
           storage.getBotTradeCount(botId),
         ]);
         return res.json({
@@ -10190,7 +10217,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       try {
         const wallet = await storage.getWallet(req.walletAddress!);
         if (wallet?.agentPublicKey && tradingBot.driftSubaccountId) {
-          const accountInfo = await getDriftAccountInfo(
+          const accountInfo = await getExchangeAccountInfo(
             wallet.agentPublicKey,
             tradingBot.driftSubaccountId
           );
@@ -10296,7 +10323,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
       
       // Check available balance in agent wallet (SPL USDC token account, not Drift subaccount)
-      const [agentUsdcBalance, solBalance, driftAccountExists] = await Promise.all([
+      const [agentUsdcBalance, solBalance, exchangeAccountExists] = await Promise.all([
         getUsdcBalance(wallet.agentPublicKey),
         getAgentSolBalance(wallet.agentPublicKey),
         subaccountExists(wallet.agentPublicKey, 0),
@@ -10383,7 +10410,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       // Deposit USDC from agent wallet directly to the new bot's Drift subaccount
       console.log(`[Marketplace] Depositing $${capitalInvested} from agent wallet to subaccount ${nextSubaccountId} for subscriber bot`);
-      const depositResult = await executeAgentDriftDeposit(
+      const depositResult = await executeAgentDeposit(
         wallet.agentPublicKey,
         wallet.agentPrivateKeyEncrypted,
         capitalInvested,
@@ -10787,7 +10814,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const retryBotCtxForTopUp = getBotSubaccountContext(bot);
       if (bot.autoTopUp && targetEquity > 0) {
         try {
-          const accountInfo = await getDriftAccountInfoForBot(wallet.agentPublicKey!, subAccountId, retryBotCtxForTopUp);
+          const accountInfo = await getExchangeAccountInfoForBot(wallet.agentPublicKey!, subAccountId, retryBotCtxForTopUp);
           const currentEquity = Math.max(0, accountInfo.freeCollateral);
           const topUpNeeded = Math.max(0, targetEquity - currentEquity);
           
@@ -10795,11 +10822,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           
           if (topUpNeeded > 0) {
             if (retryBotCtxForTopUp) {
-              const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
-              const adapter = getDefaultAdapter() as PacificaAdapter;
+              const adapter = getDefaultAdapter();
               const agentKeypairForTopUp = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
               const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
-              const agentMainInfo = await getDriftAccountInfo(wallet.agentPublicKey!, 0);
+              const agentMainInfo = await getExchangeAccountInfo(wallet.agentPublicKey!, 0);
               if (agentMainInfo.freeCollateral >= depositAmount) {
                 const transferResult = await adapter.transferBetweenSubaccounts({
                   agentSecretKey: agentKeypairForTopUp.secretKey,
@@ -10830,7 +10856,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             
             if (agentUsdcBalance >= topUpNeeded) {
               const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
-              const depositResult = await executeAgentDriftDeposit(
+              const depositResult = await executeAgentDeposit(
                 wallet.agentPublicKey!,
                 wallet.agentPrivateKeyEncrypted,
                 depositAmount,
@@ -11053,7 +11079,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       if (wallet?.agentPublicKey) {
         try {
-          const exchangeInfo = await getDriftAccountInfo(wallet.agentPublicKey, 0);
+          const exchangeInfo = await getExchangeAccountInfo(wallet.agentPublicKey, 0);
           currentBalance += exchangeInfo.totalCollateral || 0;
         } catch (error) {
           console.error("[Portfolio] Error getting exchange balance:", error);
@@ -11064,7 +11090,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         const pfBotCtx = getBotSubaccountContext(bot);
         if (pfBotCtx) {
           try {
-            const botInfo = await getDriftAccountInfoForBot('', 0, pfBotCtx);
+            const botInfo = await getExchangeAccountInfoForBot('', 0, pfBotCtx);
             currentBalance += botInfo.totalCollateral || 0;
           } catch (err) {
             console.warn(`[Portfolio] Failed to query Pacifica bot ${bot.id}:`, err);
@@ -11199,8 +11225,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet?.agentPrivateKeyEncrypted) {
         return res.status(400).json({ error: "No agent wallet" });
       }
-      const { PacificaAdapter } = await import('./protocol/pacifica/pacifica-adapter');
-      const adapter = getDefaultAdapter() as PacificaAdapter;
+      const adapter = getDefaultAdapter();
       const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
       const transferResult = await adapter.transferBetweenSubaccounts({
         agentSecretKey: agentKeypair.secretKey,

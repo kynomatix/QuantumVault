@@ -82,9 +82,13 @@ export interface ProtocolAdapter {
   transferBetweenSubaccounts(params: TransferParams): Promise<TransferResult>;
 
   createSubaccount(agentPublicKey: string, label?: string): Promise<SubaccountInfo>;
+  createSubaccountWithKey?(mainSecretKey: Uint8Array, subSecretKey: Uint8Array): Promise<SubaccountInfo>;
   listSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]>;
   discoverSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]>;
   closeSubaccount?(agentPublicKey: string, subaccountId: string): Promise<void>;
+  subaccountExists?(walletAddress: string, subaccountId: string): Promise<boolean>;
+  getWalletUsdcBalance?(walletAddress: string): Promise<number>;
+  getAdapterDiagnostics?(): Promise<Record<string, unknown>>;
 
   settlePnl(params: SettlePnlParams): Promise<SettleResult>;
 

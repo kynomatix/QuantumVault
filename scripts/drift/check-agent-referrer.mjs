@@ -1,5 +1,18 @@
 #!/usr/bin/env node
 /**
+ * DRIFT REFERRAL DIAGNOSTIC — when Drift Protocol relaunches, run this BEFORE allowing
+ * users to resume trading. It verifies that each agent wallet has the `kryptolytix`
+ * referrer code recorded on-chain in the Drift `UserStats` PDA.
+ *
+ * Correct referrer attribution is required for platform revenue sharing. Wallets
+ * that don't have the referrer set must have their UserStats PDA reinitialized or
+ * the agent wallet re-registered through Drift before trading begins.
+ *
+ * Usage:
+ *   node scripts/drift/check-agent-referrer.mjs
+ *
+ * Requires: SOLANA_RPC_URL in environment (mainnet endpoint)
+ *
  * Diagnostic script to check if agent wallets have the platform referrer set on-chain
  * This reads the UserStats account for each agent and checks the referrer field
  */

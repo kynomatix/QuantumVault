@@ -10,10 +10,13 @@ import { getAgentKeypair } from './agent-wallet';
 import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 import { shouldUseSwift } from './swift-config';
 import { executeSwiftOrder, type SwiftOrderResult } from './swift-executor';
-import { recordSwiftAttempt, recordSwiftSuccess as recordSwiftMetricSuccess, recordSwiftFailure as recordSwiftMetricFailure, recordSwiftFallback } from './swift-metrics';
+import { AdapterHealthTracker } from './protocol/adapter-health';
 import { decrypt } from './crypto';
 import { getMarketPrice } from './drift-price';
 import { buildPerpMarketNames, buildPerpMarketIndices, syncFromSdk, writeExecutorJson, CANONICAL_PERP_MARKETS, PERP_ALIASES } from './market-registry';
+
+const swiftHealthTracker = new AdapterHealthTracker();
+export function getSwiftHealthTracker(): AdapterHealthTracker { return swiftHealthTracker; }
 
 // ============================================================================
 // ERROR CATEGORIES - Clear, distinguishable error prefixes for debugging
@@ -2053,110 +2056,6 @@ export async function getPerpPositions(walletAddress: string, subAccountId: numb
   }
 }
 
-/**
- * @deprecated DO NOT USE - Causes memory leaks due to SDK WebSocket connections that don't cleanup.
- * Use getPerpPositions() (byte-parsing) instead for all position reading.
- * This function is kept for reference/debugging only.
- * 
- * SDK-based position fetching - was more reliable than custom byte parsing,
- * but the WebSocket connections cause "accountUnsubscribe timeout" errors
- * and JavaScript heap out of memory crashes under load.
- */
-export async function getPerpPositionsSDK(
-  encryptedPrivateKey: string, 
-  subAccountId: number = 0
-): Promise<PerpPosition[]> {
-  const positions: PerpPosition[] = [];
-  
-  try {
-    // Use cached SDK for precision constants
-    const sdk = await getDriftSDK();
-    const { QUOTE_PRECISION, BASE_PRECISION } = sdk;
-    console.log(`[Drift SDK] Fetching perp positions for subaccount ${subAccountId}`);
-    
-    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
-    
-    try {
-      const user = driftClient.getUser();
-      
-      // Force refresh from on-chain
-      try {
-        await user.fetchAccounts();
-      } catch (refreshError) {
-        console.warn('[Drift SDK] Could not refresh accounts:', refreshError);
-      }
-      
-      // Fetch current prices
-      const prices: Record<number, number> = {};
-      try {
-        const priceRes = await fetch(`http://localhost:5000/api/prices`);
-        if (priceRes.ok) {
-          const priceData = await priceRes.json();
-          prices[0] = priceData['SOL-PERP'] || 136;
-          prices[1] = priceData['BTC-PERP'] || 90000;
-          prices[2] = priceData['ETH-PERP'] || 3000;
-        }
-      } catch (e) {
-        prices[0] = 136; prices[1] = 90000; prices[2] = 3000;
-      }
-      
-      // Get positions using SDK's reliable method
-      const perpPositions = user.getActivePerpPositions();
-      
-      for (const pos of perpPositions) {
-        const marketIndex = pos.marketIndex;
-        const marketName = PERP_MARKET_NAMES[marketIndex] || `PERP-${marketIndex}`;
-        
-        // Use toString() + parseFloat() to preserve precision for large blockchain integers
-        const baseAssetAmount = parseFloat(pos.baseAssetAmount.toString()) / BASE_PRECISION.toNumber();
-        const quoteAssetAmount = Math.abs(parseFloat(pos.quoteAssetAmount.toString())) / QUOTE_PRECISION.toNumber();
-        const quoteEntryAmount = Math.abs(parseFloat(pos.quoteEntryAmount?.toString() || '0')) / QUOTE_PRECISION.toNumber();
-        
-        const side: 'LONG' | 'SHORT' = baseAssetAmount > 0 ? 'LONG' : 'SHORT';
-        const markPrice = prices[marketIndex] || 0;
-        
-        // Calculate entry price: use quoteEntryAmount (not quoteAssetAmount) for accurate entry price
-        const entryPrice = Math.abs(baseAssetAmount) > 0 
-          ? Math.abs(quoteEntryAmount / baseAssetAmount) 
-          : 0;
-        
-        const sizeUsd = Math.abs(baseAssetAmount) * markPrice;
-        const unrealizedPnl = side === 'LONG' 
-          ? (markPrice - entryPrice) * Math.abs(baseAssetAmount)
-          : (entryPrice - markPrice) * Math.abs(baseAssetAmount);
-        const unrealizedPnlPercent = Math.abs(quoteEntryAmount) > 0 
-          ? (unrealizedPnl / Math.abs(quoteEntryAmount)) * 100 
-          : 0;
-        
-        console.log(`[Drift SDK] Position: market=${marketName}, base=${baseAssetAmount.toFixed(4)}, side=${side}, entry=$${entryPrice.toFixed(2)}, mark=$${markPrice.toFixed(2)}`);
-        
-        positions.push({
-          marketIndex,
-          market: marketName,
-          baseAssetAmount,
-          quoteAssetAmount,
-          quoteEntryAmount,
-          side,
-          sizeUsd,
-          entryPrice,
-          markPrice,
-          unrealizedPnl,
-          unrealizedPnlPercent,
-        });
-      }
-      
-      await cleanup();
-      console.log(`[Drift SDK] Found ${positions.length} open perp positions`);
-      return positions;
-    } catch (innerError) {
-      await cleanup();
-      throw innerError;
-    }
-  } catch (error) {
-    console.error(`[Drift SDK] Error fetching positions:`, error);
-    return positions;
-  }
-}
 
 export async function buildInitializeSubaccountTransaction(
   walletAddress: string,
@@ -3132,7 +3031,7 @@ async function swiftLateOpenRecovery(
       (baselineSide !== 'FLAT' && recoverySize > baselineSize + 0.0001);
     if (positionChanged) {
       console.log(`[Drift] *** SWIFT LATE-FILL RECOVERY *** Position changed from ${baselineSide}/${baselineSize} to ${recoveryPos.side}/${recoverySize}. Legacy error was false alarm — Swift filled the trade.`);
-      recordSwiftMetricSuccess(market, 0, undefined);
+      swiftHealthTracker.recordSuccess(market, 0, undefined);
       return {
         success: true,
         signature: 'swift-late-fill-recovery',
@@ -3188,7 +3087,7 @@ export async function executePerpOrder(
   let preSwiftPositionSide = 'FLAT';
   if (swiftCheck) {
     console.log(`[Drift] Attempting Swift execution for ${market} ${side}`);
-    recordSwiftAttempt(market);
+    swiftHealthTracker.recordAttempt(market);
     try {
       const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
       const agentPubkey = expectedAgentPubkey || '';
@@ -3210,7 +3109,7 @@ export async function executePerpOrder(
 
       if (swiftResult.success && swiftResult.txSignature) {
         console.log(`[Drift] Swift execution succeeded with tx for ${market}: tx=${swiftResult.txSignature}, latency=${swiftResult.auctionDurationMs}ms`);
-        recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
+        swiftHealthTracker.recordSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
         return {
           success: true,
           signature: swiftResult.txSignature,
@@ -3252,7 +3151,7 @@ export async function executePerpOrder(
             console.log(`[Drift] Swift open verification result: side=${postSwiftPos.side}, size=${postSwiftPos.size} (saved as guard baseline)`);
             if (postSwiftPos.side !== 'FLAT' && Math.abs(postSwiftPos.size) > 0.0001) {
               console.log(`[Drift] Swift open VERIFIED: position found on-chain (${postSwiftPos.side} ${postSwiftPos.size}) after ${AUCTION_WAIT_MS}ms auction wait`);
-              recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
+              swiftHealthTracker.recordSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
               console.log(`[Drift] Swift fill price: on-chain entry=$${postSwiftPos.entryPrice?.toFixed(6) || 'N/A'}, oracle estimate=$${swiftResult.fillPrice?.toFixed(6) || 'N/A'}`);
               return {
                 success: true,
@@ -3271,13 +3170,13 @@ export async function executePerpOrder(
         } catch (verifyErr: any) {
           console.warn(`[Drift] Swift open verification failed, falling back to legacy:`, verifyErr?.message);
         }
-        recordSwiftMetricFailure(market, 'auction_not_filled');
-        recordSwiftFallback(market);
+        swiftHealthTracker.recordFailure(market, 'auction_not_filled');
+        swiftHealthTracker.recordFallback(market);
       }
 
       if (swiftResult.errorClassification === 'permanent') {
         console.error(`[Drift] Swift permanent error for ${market}: ${swiftResult.error}`);
-        recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
+        swiftHealthTracker.recordFailure(market, swiftResult.errorClassification || 'unknown');
         return {
           success: false,
           error: swiftResult.error,
@@ -3286,12 +3185,12 @@ export async function executePerpOrder(
       }
 
       console.log(`[Drift] Swift failed (${swiftResult.errorClassification}), falling back to legacy: ${swiftResult.error}`);
-      recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
-      recordSwiftFallback(market);
+      swiftHealthTracker.recordFailure(market, swiftResult.errorClassification || 'unknown');
+      swiftHealthTracker.recordFallback(market);
     } catch (swiftError: any) {
       console.error(`[Drift] Swift attempt threw unexpected error, falling back to legacy:`, swiftError?.message || swiftError);
-      recordSwiftMetricFailure(market, 'unexpected_error');
-      recordSwiftFallback(market);
+      swiftHealthTracker.recordFailure(market, 'unexpected_error');
+      swiftHealthTracker.recordFallback(market);
     }
   }
   
@@ -3319,7 +3218,7 @@ export async function executePerpOrder(
           (preSwiftPositionSide !== 'FLAT' && guardSize > preSwiftPositionSize + 0.0001);
         if (positionChanged) {
           console.log(`[Drift] *** LATE SWIFT FILL DETECTED *** Position changed from ${preSwiftPositionSide}/${preSwiftPositionSize} to ${guardPos.side}/${guardSize} after initial 8s check. Returning success instead of running legacy.`);
-          recordSwiftMetricSuccess(market, 0, undefined);
+          swiftHealthTracker.recordSuccess(market, 0, undefined);
           return {
             success: true,
             signature: 'swift-late-auction-fill',
@@ -3547,7 +3446,7 @@ export async function closePerpPosition(
   if (shouldUseSwift(closeNotional) && positionSide && positionSizeBase && positionSizeBase > 0) {
     const closeSide = positionSide === 'long' ? 'short' : 'long';
     console.log(`[Drift] Attempting Swift close for ${market}, closing ${positionSide} position with ${closeSide} reduce-only order, size: ${positionSizeBase}, notional=$${closeNotional?.toFixed(2)}`);
-    recordSwiftAttempt(market);
+    swiftHealthTracker.recordAttempt(market);
     try {
       const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
       const agentPubkey = expectedAgentPubkey || '';
@@ -3569,7 +3468,7 @@ export async function closePerpPosition(
 
       if (swiftResult.success && swiftResult.txSignature) {
         console.log(`[Drift] Swift close succeeded for ${market}: tx=${swiftResult.txSignature}, latency=${swiftResult.auctionDurationMs}ms`);
-        recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
+        swiftHealthTracker.recordSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
         return {
           success: true,
           signature: swiftResult.txSignature,
@@ -3602,7 +3501,7 @@ export async function closePerpPosition(
           console.log(`[Drift] Swift close verification result: side=${postSwiftPos.side}, size=${postSwiftPos.size}`);
           if (postSwiftPos.side === 'FLAT' || Math.abs(postSwiftPos.size) < 0.0001) {
             console.log(`[Drift] Swift close verified: position is FLAT after auction wait`);
-            recordSwiftMetricSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
+            swiftHealthTracker.recordSuccess(market, swiftResult.auctionDurationMs || 0, swiftResult.priceImprovement);
             return {
               success: true,
               signature: 'swift-auction-fill',
@@ -3614,17 +3513,17 @@ export async function closePerpPosition(
         } catch (verifyErr: any) {
           console.warn(`[Drift] Swift close verification failed, falling back to legacy:`, verifyErr?.message);
         }
-        recordSwiftMetricFailure(market, 'auction_not_filled');
-        recordSwiftFallback(market);
+        swiftHealthTracker.recordFailure(market, 'auction_not_filled');
+        swiftHealthTracker.recordFallback(market);
       } else {
         console.log(`[Drift] Swift close failed (${swiftResult.errorClassification}), ALWAYS falling back to legacy for close orders: ${swiftResult.error}`);
-        recordSwiftMetricFailure(market, swiftResult.errorClassification || 'unknown');
-        recordSwiftFallback(market);
+        swiftHealthTracker.recordFailure(market, swiftResult.errorClassification || 'unknown');
+        swiftHealthTracker.recordFallback(market);
       }
     } catch (swiftError: any) {
       console.error(`[Drift] Swift close threw unexpected error, falling back to legacy:`, swiftError?.message || swiftError);
-      recordSwiftMetricFailure(market, 'unexpected_error');
-      recordSwiftFallback(market);
+      swiftHealthTracker.recordFailure(market, 'unexpected_error');
+      swiftHealthTracker.recordFallback(market);
     }
   } else if (shouldUseSwift() && (!positionSide || !positionSizeBase)) {
     console.log(`[Drift] Swift available but positionSide/positionSizeBase not provided for close, using legacy`);
@@ -3654,7 +3553,7 @@ export async function closePerpPosition(
           (positionSizeBase && closeGuardSize < positionSizeBase * 0.5);
         if (closeWasFilled) {
           console.log(`[Drift] *** LATE SWIFT CLOSE FILL DETECTED *** Position changed from ${positionSide}/${positionSizeBase} to ${closeGuardPos.side}/${closeGuardSize} after initial 8s check. Returning success instead of running legacy close.`);
-          recordSwiftMetricSuccess(market, 0, undefined);
+          swiftHealthTracker.recordSuccess(market, 0, undefined);
           return {
             success: true,
             signature: 'swift-late-auction-fill',
@@ -3843,207 +3742,6 @@ export interface HealthMetrics {
   }>;
 }
 
-/**
- * @deprecated DO NOT USE - Causes memory leaks due to SDK WebSocket connections that don't cleanup.
- * Use getDriftAccountInfo() (byte-parsing) instead for health metrics.
- * This function is kept for reference/debugging only.
- */
-export async function getAccountHealthMetrics(
-  encryptedPrivateKey: string,
-  subAccountId: number = 0
-): Promise<{ success: boolean; data?: HealthMetrics; error?: string }> {
-  try {
-    // Use cached SDK for precision constants
-    const sdk = await getDriftSDK();
-    const { QUOTE_PRECISION, BASE_PRECISION } = sdk;
-    console.log(`[Drift] [DEPRECATED] Fetching health metrics for subaccount ${subAccountId}`);
-    
-    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
-    
-    try {
-      const user = driftClient.getUser();
-      
-      // Force refresh user account data from on-chain to avoid stale cache
-      try {
-        await user.fetchAccounts();
-        console.log('[Drift] User account data refreshed from on-chain');
-      } catch (refreshError) {
-        console.warn('[Drift] Could not refresh user accounts, using cached data:', refreshError);
-      }
-      
-      // Get health metrics from SDK
-      // Drift UI Health = 1 - (Maintenance Margin / Total Collateral)
-      // Health ranges 0-100% where 100% = fully healthy, 0% = liquidation
-      let healthFactor = 100;
-      let marginRatio = 0;
-      let totalCollateral = 0;
-      let freeCollateral = 0;
-      let unrealizedPnl = 0;
-      let maintenanceMargin = 0;
-      
-      try {
-        // Get maintenance total collateral (with maintenance asset weights) - this matches Drift UI
-        // MarginCategory is 'Initial' | 'Maintenance' string type
-        const maintenanceCollateralBN = user.getTotalCollateral('Maintenance' as any);
-        totalCollateral = maintenanceCollateralBN.toNumber() / QUOTE_PRECISION.toNumber();
-        console.log(`[Drift] Total collateral (maintenance): $${totalCollateral.toFixed(2)}`);
-        
-        // Get maintenance margin requirement
-        const maintenanceMarginBN = user.getMaintenanceMarginRequirement();
-        maintenanceMargin = maintenanceMarginBN.toNumber() / QUOTE_PRECISION.toNumber();
-        console.log(`[Drift] Maintenance margin: $${maintenanceMargin.toFixed(2)}`);
-        
-        // Calculate health factor using Drift UI formula: Health = 1 - (Maintenance Margin / Collateral)
-        if (totalCollateral > 0) {
-          healthFactor = Math.max(0, Math.min(100, 100 * (1 - maintenanceMargin / totalCollateral)));
-        } else {
-          healthFactor = maintenanceMargin > 0 ? 0 : 100;
-        }
-        console.log(`[Drift] Calculated health (Drift formula): ${healthFactor.toFixed(1)}%`);
-      } catch (e) {
-        console.warn('[Drift] Could not get maintenance margin, falling back to SDK getHealth:', e);
-        try {
-          // Fallback: try without MarginCategory
-          const totalCollateralBN = user.getTotalCollateral();
-          totalCollateral = totalCollateralBN.toNumber() / QUOTE_PRECISION.toNumber();
-          
-          const health = user.getHealth();
-          healthFactor = typeof health === 'number' ? health : (health as any).toNumber?.() ?? 100;
-          console.log(`[Drift] Fallback SDK health: ${healthFactor}`);
-        } catch (e2) {
-          console.warn('[Drift] Could not get health:', e2);
-        }
-      }
-      
-      try {
-        // Margin ratio (higher = more risk)
-        const marginRatioVal = user.getMarginRatio();
-        const marginRatioNum = typeof marginRatioVal === 'number' ? marginRatioVal : (marginRatioVal as any).toNumber?.() ?? 0;
-        marginRatio = marginRatioNum / 10000; // Convert from basis points
-        console.log(`[Drift] Margin ratio: ${marginRatio}%`);
-      } catch (e) {
-        console.warn('[Drift] Could not get margin ratio:', e);
-      }
-      
-      try {
-        // Free (unreserved) collateral in USDC
-        const freeCollateralBN = user.getFreeCollateral();
-        freeCollateral = freeCollateralBN.toNumber() / QUOTE_PRECISION.toNumber();
-        console.log(`[Drift] Free collateral: $${freeCollateral.toFixed(2)}`);
-      } catch (e) {
-        console.warn('[Drift] Could not get free collateral:', e);
-      }
-      
-      try {
-        // Unrealized PnL across all positions
-        const unrealizedPnlBN = user.getUnrealizedPNL(true);
-        unrealizedPnl = unrealizedPnlBN.toNumber() / QUOTE_PRECISION.toNumber();
-        console.log(`[Drift] Unrealized PnL: $${unrealizedPnl.toFixed(2)}`);
-      } catch (e) {
-        console.warn('[Drift] Could not get unrealized PnL:', e);
-      }
-      
-      // Get per-position metrics including liquidation prices
-      const positions: HealthMetrics['positions'] = [];
-      
-      try {
-        const perpPositions = user.getActivePerpPositions();
-        
-        for (const pos of perpPositions) {
-          const marketIndex = pos.marketIndex;
-          const marketName = Object.entries(PERP_MARKET_INDICES).find(([_, idx]) => idx === marketIndex)?.[0] || `PERP-${marketIndex}`;
-          
-          // Use toString() + parseFloat() to preserve precision for large blockchain integers
-          const baseSize = parseFloat(pos.baseAssetAmount.toString()) / BASE_PRECISION.toNumber();
-          const quoteValue = Math.abs(parseFloat(pos.quoteAssetAmount.toString())) / QUOTE_PRECISION.toNumber();
-          const quoteEntryValue = Math.abs(parseFloat(pos.quoteEntryAmount?.toString() || '0')) / QUOTE_PRECISION.toNumber();
-          
-          // Calculate entry price using quoteEntryAmount for accurate average entry
-          let entryPrice = 0;
-          if (baseSize !== 0) {
-            entryPrice = Math.abs(quoteEntryValue / baseSize);
-          }
-          
-          // Get unrealized PnL for this position
-          let posUnrealizedPnl = 0;
-          try {
-            const posPnl = user.getUnrealizedPNL(true, marketIndex);
-            posUnrealizedPnl = posPnl.toNumber() / QUOTE_PRECISION.toNumber();
-          } catch (e) {
-            // Ignore
-          }
-          
-          // Calculate liquidation price
-          // This is an approximation: when margin ratio exceeds maintenance margin, liquidation occurs
-          // For a simple approximation: liquidationPrice ≈ entryPrice * (1 - freeCollateral/notional) for longs
-          // or entryPrice * (1 + freeCollateral/notional) for shorts
-          let liquidationPrice: number | null = null;
-          try {
-            // Use SDK method if available, otherwise estimate
-            const perpMarket = driftClient.getPerpMarketAccount(marketIndex);
-            if (perpMarket && freeCollateral > 0 && quoteValue > 0) {
-              const maintenanceMarginRatio = perpMarket.marginRatioMaintenance / 10000;
-              const isLong = baseSize > 0;
-              
-              // Simplified liquidation price calculation
-              // Real calculation should use SDK's calculateLiquidationPrice if available
-              const leverageRatio = quoteValue / totalCollateral;
-              const marginBuffer = freeCollateral / quoteValue;
-              
-              if (isLong) {
-                // For longs, price needs to drop by marginBuffer%
-                liquidationPrice = entryPrice * (1 - marginBuffer);
-              } else {
-                // For shorts, price needs to rise by marginBuffer%
-                liquidationPrice = entryPrice * (1 + marginBuffer);
-              }
-              
-              // Ensure liquidation price is reasonable
-              if (liquidationPrice < 0) liquidationPrice = null;
-            }
-          } catch (e) {
-            console.warn(`[Drift] Could not calculate liquidation price for ${marketName}:`, e);
-          }
-          
-          positions.push({
-            marketIndex,
-            market: marketName,
-            baseSize,
-            notionalValue: quoteValue,
-            liquidationPrice,
-            entryPrice,
-            unrealizedPnl: posUnrealizedPnl,
-          });
-        }
-      } catch (e) {
-        console.warn('[Drift] Could not get perp positions:', e);
-      }
-      
-      await cleanup();
-      
-      return {
-        success: true,
-        data: {
-          healthFactor,
-          marginRatio,
-          totalCollateral,
-          freeCollateral,
-          unrealizedPnl,
-          positions,
-        },
-      };
-    } catch (userError) {
-      await cleanup();
-      throw userError;
-    }
-  } catch (error) {
-    console.error('[Drift] Health metrics error:', error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
 
 /**
  * Close a Drift subaccount to reclaim the rent (~0.035 SOL).

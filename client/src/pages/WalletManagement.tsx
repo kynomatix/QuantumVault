@@ -65,10 +65,10 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [copiedAddress, setCopiedAddress] = useState(false);
   
-  const [agentToDriftAmount, setAgentToDriftAmount] = useState('');
+  const [agentToExchangeAmount, setAgentToExchangeAmount] = useState('');
   const [isAgentToDrift, setIsAgentToDrift] = useState(false);
   
-  const [driftToAgentAmount, setDriftToAgentAmount] = useState('');
+  const [exchangeToAgentAmount, setExchangeToAgentAmount] = useState('');
   const [isDriftToAgent, setIsDriftToAgent] = useState(false);
   
   const [withdrawToWalletAmount, setWithdrawToWalletAmount] = useState('');
@@ -340,13 +340,13 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
 
   const setMaxAgentToDrift = () => {
     if (agentWallet?.balance) {
-      setAgentToDriftAmount(agentWallet.balance.toString());
+      setAgentToExchangeAmount(agentWallet.balance.toString());
     }
   };
 
   const setMaxDriftToAgent = () => {
     if (capitalPool?.mainAccountBalance) {
-      setDriftToAgentAmount(capitalPool.mainAccountBalance.toString());
+      setExchangeToAgentAmount(capitalPool.mainAccountBalance.toString());
     }
   };
 
@@ -525,7 +525,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   };
 
   const handleAgentToDrift = async () => {
-    const amount = parseFloat(agentToDriftAmount);
+    const amount = parseFloat(agentToExchangeAmount);
     if (!amount || amount <= 0) {
       toast({ title: 'Enter a valid amount', variant: 'destructive' });
       return;
@@ -573,7 +573,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
         description: message || `Deposited ${amount} USDC to Trading Account`
       });
       
-      setAgentToDriftAmount('');
+      setAgentToExchangeAmount('');
       await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool()]);
     } catch (error: any) {
       console.error('Agent to trading account error:', error);
@@ -588,7 +588,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   };
 
   const handleDriftToAgent = async () => {
-    const amount = parseFloat(driftToAgentAmount);
+    const amount = parseFloat(exchangeToAgentAmount);
     if (!amount || amount <= 0) {
       toast({ title: 'Enter a valid amount', variant: 'destructive' });
       return;
@@ -636,7 +636,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
         description: message || `Withdrew ${amount} USDC from Trading Account to Agent Wallet`
       });
       
-      setDriftToAgentAmount('');
+      setExchangeToAgentAmount('');
       await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool()]);
     } catch (error: any) {
       console.error('Trading account to Agent error:', error);
