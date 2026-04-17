@@ -190,7 +190,13 @@ export interface WithdrawResult {
 }
 
 export interface TransferParams {
-  agentPublicKey: string;
+  // NOTE: `agentPublicKey` was dropped in Group D item 17a (April 17, 2026).
+  // It was never read by PacificaAdapter (the only impl at the time) and the
+  // three routes.ts call sites passed bot.protocolSubaccountId — semantically
+  // wrong (a sub pubkey, not a main pubkey) and for Drift would have been
+  // outright incorrect. DriftAdapter now derives the agent pubkey internally
+  // from `agentSecretKey` via Keypair.fromSecretKey, which is the canonical
+  // source for write operations signed by the agent keypair.
   agentSecretKey: Uint8Array;
   mainWalletAddress: string;
   fromSubaccountId: string;

@@ -11,7 +11,8 @@ import type { Request as ExpressRequest, Response as ExpressResponse, NextFuncti
 import { db } from "./db";
 import { desc, eq, sql } from "drizzle-orm";
 import { ZodError } from "zod";
-import { getDefaultAdapter } from './protocol/adapter-registry';
+import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
+import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { getAgentKeypair } from './agent-wallet';
 
 function _subIdStr(subAccountId: number): string | undefined {
@@ -66,7 +67,7 @@ async function sweepPacificaSubaccount(
       console.log(`${logPrefix} Transferring $${balance.toFixed(4)} from bot subaccount ${botCtx.botPublicKey.slice(0, 8)}... to agent wallet`);
       const transferResult = await adapter.transferBetweenSubaccounts({
         agentSecretKey: botSecretKey,
-        agentPublicKey: botCtx.botPublicKey,
+        mainWalletAddress: agentPublicKey,
         fromSubaccountId: botCtx.botPublicKey,
         toSubaccountId: agentPublicKey,
         amount: balance,
@@ -269,7 +270,6 @@ async function executeAgentTransferBetweenSubaccounts(
     const { secretKey } = _decryptToSecretKey(encryptedPrivateKey);
     const mainWalletAddress = await _lookupMainWallet(agentPublicKey);
     const result = await getDefaultAdapter().transferBetweenSubaccounts({
-      agentPublicKey,
       agentSecretKey: secretKey,
       mainWalletAddress,
       fromSubaccountId: String(fromSubAccountId),
@@ -817,7 +817,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
             console.log(`${logPrefix} Transferring $${depositAmount} from agent to bot subaccount ${botCtx.botPublicKey}`);
             const transferResult = await adapter.transferBetweenSubaccounts({
               agentSecretKey: agentKeypair.secretKey,
-              agentPublicKey: agentKeypair.publicKey.toString(),
+              mainWalletAddress: agentKeypair.publicKey.toString(),
               fromSubaccountId: agentKeypair.publicKey.toString(),
               toSubaccountId: botCtx.botPublicKey,
               amount: depositAmount,
@@ -985,7 +985,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
             if (agentAccountInfo.freeCollateral >= depositAmount) {
               const transferResult = await adapter.transferBetweenSubaccounts({
                 agentSecretKey: agentKeypair.secretKey,
-                agentPublicKey: agentKeypair.publicKey.toString(),
+                mainWalletAddress: agentKeypair.publicKey.toString(),
                 fromSubaccountId: agentKeypair.publicKey.toString(),
                 toSubaccountId: botCtx.botPublicKey,
                 amount: depositAmount,
@@ -3649,7 +3649,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               console.log(`[Deposit] Transfer attempt ${attempt}/5: ${amount} USDC agent→${botForTransfer.protocolSubaccountId}`);
               const transferResult = await adapter.transferBetweenSubaccounts({
                 agentSecretKey: agentKeypair.secretKey,
-                agentPublicKey: agentKeypair.publicKey.toString(),
+                mainWalletAddress: agentKeypair.publicKey.toString(),
                 fromSubaccountId: agentKeypair.publicKey.toString(),
                 toSubaccountId: botForTransfer.protocolSubaccountId!,
                 amount,
@@ -3823,7 +3823,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             console.log(`[Withdraw] Transferring ${amount} USDC from bot subaccount ${bot.protocolSubaccountId} to agent wallet`);
             const transferResult = await adapter.transferBetweenSubaccounts({
               agentSecretKey: botSecretKey,
-              agentPublicKey: bot.protocolSubaccountId,
+              mainWalletAddress: wallet.agentPublicKey,
               fromSubaccountId: bot.protocolSubaccountId,
               toSubaccountId: wallet.agentPublicKey,
               amount,
@@ -5596,7 +5596,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           netPnlPercent,
           isPublished: !!publishedBot && publishedBot.isActive,
           publishedBotId: publishedBot?.id || null,
-          botAgentPublicKey: bot.protocolSubaccountId || null,
+          botSubaccountIdentifier: bot.protocolSubaccountId || null,
         };
       }));
       
@@ -5702,23 +5702,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           // 12h Option A: For `main_plus_id` mode (Drift), the adapter is the canonical
           // source of the numeric subaccount ID. Parse and validate it now; we'll
           // reconcile against the pre-allocated `nextSubaccountId` once that's computed.
+          // Group D item 17d: validation lifted into shared helper so the marketplace
+          // creation path (which now also calls adapter.createSubaccount) applies the
+          // identical contract.
           if (subaccountAuthMode === 'main_plus_id') {
-            const parsed = Number.parseInt(sub.subaccountId, 10);
-            // Postgres `integer` max = 2,147,483,647. Round-trip check rejects scientific
-            // notation, decimals, leading zeros, signs, and any non-pure-digit input.
-            const PG_INTEGER_MAX = 2_147_483_647;
-            if (
-              !Number.isSafeInteger(parsed) ||
-              parsed < 0 ||
-              parsed > PG_INTEGER_MAX ||
-              String(parsed) !== sub.subaccountId.trim()
-            ) {
-              console.error(`[Bot Creation] ${adapter.protocolName} adapter returned invalid numeric subaccountId for main_plus_id mode: "${sub.subaccountId}" (parsed=${parsed})`);
+            try {
+              adapterReturnedNumericSubaccountId = parseAndValidateAdapterSubaccountId(
+                sub.subaccountId,
+                adapter.protocolName,
+              );
+            } catch (validationErr: any) {
+              console.error(`[Bot Creation] ${validationErr.message}`);
               return res.status(500).json({
                 error: `Failed to create trading subaccount: adapter returned invalid subaccount ID format`,
               });
             }
-            adapterReturnedNumericSubaccountId = parsed;
           }
 
           console.log(`[Bot Creation] ${adapter.protocolName} subaccount created: ${botSubaccountPublicKey}`);
@@ -5811,7 +5809,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       res.json({
         ...bot,
         webhookUrl,
-        botAgentPublicKey: botSubaccountPublicKey,
+        botSubaccountIdentifier: botSubaccountPublicKey,
       });
     } catch (error) {
       console.error("Create trading bot error:", error);
@@ -6177,7 +6175,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 console.log(`[Delete] Step 1: Transfer $${sweepAmount.toFixed(2)} from bot subaccount → main account`);
                 const transferResult = await adapter.transferBetweenSubaccounts({
                   agentSecretKey: botSecretKey,
-                  agentPublicKey: bot.protocolSubaccountId,
+                  mainWalletAddress: wallet.agentPublicKey!,
                   fromSubaccountId: bot.protocolSubaccountId,
                   toSubaccountId: wallet.agentPublicKey!,
                   amount: sweepAmount,
@@ -7570,7 +7568,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                         console.log(`[Webhook] AUTO-WITHDRAW Step 1: Transfer $${withdrawAmount.toFixed(2)} from bot subaccount ${bot.protocolSubaccountId} → main account`);
                         const transferResult = await adapter.transferBetweenSubaccounts({
                           agentSecretKey: botSecretKey,
-                          agentPublicKey: bot.protocolSubaccountId,
+                          mainWalletAddress: wallet.agentPublicKey!,
                           fromSubaccountId: bot.protocolSubaccountId,
                           toSubaccountId: wallet.agentPublicKey!,
                           amount: withdrawAmount,
@@ -9791,7 +9789,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const adapter = getDefaultAdapter();
       const transferResult = await adapter.transferBetweenSubaccounts({
         agentSecretKey: agentKeypair.secretKey,
-        agentPublicKey: agentKeypair.publicKey.toString(),
+        mainWalletAddress: agentKeypair.publicKey.toString(),
         fromSubaccountId: agentKeypair.publicKey.toString(),
         toSubaccountId: botCtx.botPublicKey,
         amount,
@@ -9862,7 +9860,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const adapter = getDefaultAdapter();
       const transferResult = await adapter.transferBetweenSubaccounts({
         agentSecretKey: botCtx.botSecretKey,
-        agentPublicKey: botCtx.botPublicKey,
+        mainWalletAddress: agentKeypair.publicKey.toString(),
         fromSubaccountId: botCtx.botPublicKey,
         toSubaccountId: agentKeypair.publicKey.toString(),
         amount,
@@ -10488,6 +10486,45 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         nextSubaccountId = await storage.getNextSubaccountId(req.walletAddress!);
       }
 
+      // Group D item 17d (April 17, 2026): route marketplace subaccount creation
+      // through the protocol adapter so the same parse/validate/persist contract
+      // as the main bot-creation site applies. The marketplace flow today is
+      // Drift-only by construction (it persists `driftSubaccountId`, calls
+      // `executeAgentDeposit` which is the Drift deposit path, and uses
+      // `discoverOnChainSubaccounts`/`getNextOnChainSubaccountId` which are Drift
+      // helpers). Use `getAdapter('drift')` EXPLICITLY rather than the default
+      // adapter — defaultAdapter is Pacifica, and PacificaAdapter.createSubaccount
+      // requires a generated `subSecretKey` (caps.requiresExternalSubaccountKey=true)
+      // which this flow does not produce, so calling the default would always
+      // throw and silently fall back, masking real adapter behavior.
+      // When marketplace gains cross-protocol bot sharing, the adapter must be
+      // selected from the published bot's protocol, not hardcoded here.
+      // NOTE: known dbAllocatedIds-awareness gap — DriftAdapter.createSubaccount
+      // does not pass updatedDbAllocatedIds through. Same gap exists at the main
+      // creation site today. Tracked for a separate cleanup; not introduced here.
+      let persistedSubaccountId: number = nextSubaccountId;
+      try {
+        const { getAdapter } = await import("./protocol/adapter-registry");
+        const marketplaceAdapter = getAdapter('drift');
+        const marketplaceAgentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+        const sub = await marketplaceAdapter.createSubaccount({
+          mainSecretKey: marketplaceAgentKeypair.secretKey,
+          agentPublicKey: marketplaceAgentKeypair.publicKey.toString(),
+        });
+        const parsed = parseAndValidateAdapterSubaccountId(sub.subaccountId, marketplaceAdapter.protocolName);
+        if (parsed !== nextSubaccountId) {
+          console.warn(
+            `[Marketplace] Subaccount ID divergence: pre-allocated=${nextSubaccountId}, ` +
+            `adapter-returned=${parsed}. Persisting adapter value as canonical (driftSubaccountId=${parsed}).`
+          );
+        }
+        persistedSubaccountId = parsed;
+      } catch (subErr: any) {
+        console.error(
+          `[Marketplace] adapter.createSubaccount failed; falling back to pre-allocated ID ${nextSubaccountId}: ${subErr.message}`
+        );
+      }
+
       // Create subscriber's bot with same settings but their own capital (with subaccount ID already set)
       // maxPositionSize = investment × leverage (same as normal bot creation)
       const effectiveLeverage = leverage || originalBot.leverage || 1;
@@ -10503,17 +10540,17 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         webhookSecret,
         isActive: true,
         sourcePublishedBotId: publishedBot.id,
-        driftSubaccountId: nextSubaccountId,
+        driftSubaccountId: persistedSubaccountId,
         subaccountAuthMode: 'main_plus_id',
       } as any);
       
       // Deposit USDC from agent wallet directly to the new bot's Drift subaccount
-      console.log(`[Marketplace] Depositing $${capitalInvested} from agent wallet to subaccount ${nextSubaccountId} for subscriber bot`);
+      console.log(`[Marketplace] Depositing $${capitalInvested} from agent wallet to subaccount ${persistedSubaccountId} for subscriber bot`);
       const depositResult = await executeAgentDeposit(
         wallet.agentPublicKey,
         wallet.agentPrivateKeyEncrypted,
         capitalInvested,
-        nextSubaccountId
+        persistedSubaccountId
       );
       
       if (!depositResult.success) {
@@ -10928,7 +10965,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               if (agentMainInfo.freeCollateral >= depositAmount) {
                 const transferResult = await adapter.transferBetweenSubaccounts({
                   agentSecretKey: agentKeypairForTopUp.secretKey,
-                  agentPublicKey: agentKeypairForTopUp.publicKey.toString(),
+                  mainWalletAddress: agentKeypairForTopUp.publicKey.toString(),
                   fromSubaccountId: agentKeypairForTopUp.publicKey.toString(),
                   toSubaccountId: retryBotCtxForTopUp.botPublicKey,
                   amount: depositAmount,
@@ -11334,7 +11371,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
       const transferResult = await adapter.transferBetweenSubaccounts({
         agentSecretKey: agentKeypair.secretKey,
-        agentPublicKey: agentKeypair.publicKey.toString(),
+        mainWalletAddress: agentKeypair.publicKey.toString(),
         fromSubaccountId: agentKeypair.publicKey.toString(),
         toSubaccountId: bot.protocolSubaccountId,
         amount,
@@ -11362,14 +11399,34 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const wallet = await storage.getWallet(bot.walletAddress);
       const agentPubKey = wallet?.agentPublicKey || '';
       const botPubKey = bot.protocolSubaccountId || '';
-      const adapter = getDefaultAdapter();
+      // Group D item 17c (April 17, 2026): protocol-aware probe selection.
+      // Pacifica uses keypair-identified subaccounts (botPubKey is canonical),
+      // Drift uses (mainWallet, numericSubId). Running Pacifica's botKeyOnly /
+      // rawPositions probes against a Drift bot would either error or silently
+      // return Pacifica-shaped nonsense. Use the bot's own adapter and only
+      // the probes that are semantically valid for that protocol.
+      const adapter = getAdapterForBot(bot);
       const results: Record<string, any> = {};
-      try { results.botKeyOnly = await adapter.getPositions(botPubKey); } catch (e: any) { results.botKeyOnly_error = e.message; }
-      try { const rawResp = await (adapter as any).get('/positions', { account: botPubKey }); results.rawPositions = rawResp; } catch (e: any) { results.rawPositions_error = e.message; }
-      try { results.agentWithBotSub = await adapter.getPositions(agentPubKey, botPubKey); } catch (e: any) { results.agentWithBotSub_error = e.message; }
-      try { results.agentOnly = await adapter.getPositions(agentPubKey); } catch (e: any) { results.agentOnly_error = e.message; }
-      try { results.accountInfo = await adapter.getAccountInfo(botPubKey); } catch (e: any) { results.accountInfo_error = e.message; }
-      res.json({ agentPubKey, botPubKey, results });
+      if (bot.activeProtocol === 'drift') {
+        const subId =
+          bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined
+            ? String(bot.driftSubaccountId)
+            : null;
+        if (subId === null) {
+          results.error = 'Drift bot has no driftSubaccountId; cannot probe positions.';
+        } else {
+          try { results.driftPositions = await adapter.getPositions(agentPubKey, subId); } catch (e: any) { results.driftPositions_error = e.message; }
+          try { results.driftAccountInfo = await adapter.getAccountInfo(agentPubKey); } catch (e: any) { results.driftAccountInfo_error = e.message; }
+        }
+      } else {
+        // Pacifica (default): keep all 5 existing probes for diagnostic parity.
+        try { results.botKeyOnly = await adapter.getPositions(botPubKey); } catch (e: any) { results.botKeyOnly_error = e.message; }
+        try { const rawResp = await (adapter as any).get('/positions', { account: botPubKey }); results.rawPositions = rawResp; } catch (e: any) { results.rawPositions_error = e.message; }
+        try { results.agentWithBotSub = await adapter.getPositions(agentPubKey, botPubKey); } catch (e: any) { results.agentWithBotSub_error = e.message; }
+        try { results.agentOnly = await adapter.getPositions(agentPubKey); } catch (e: any) { results.agentOnly_error = e.message; }
+        try { results.accountInfo = await adapter.getAccountInfo(botPubKey); } catch (e: any) { results.accountInfo_error = e.message; }
+      }
+      res.json({ activeProtocol: bot.activeProtocol, agentPubKey, botPubKey, results });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

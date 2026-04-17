@@ -93,7 +93,11 @@ interface TradingBot {
   totalInvestment: string;
   maxPositionSize: string | null;
   driftSubaccountId?: number | null;
-  botAgentPublicKey?: string | null;
+  // Renamed from `botAgentPublicKey` in Group D item 17b (April 17, 2026):
+  // the value is the on-chain identifier of the trading subaccount (a sub
+  // pubkey for Pacifica, a derived sub address for Drift), not an "agent"
+  // pubkey. The old name implied an off-chain wallet role.
+  botSubaccountIdentifier?: string | null;
   profitReinvest?: boolean;
   autoWithdrawThreshold?: string | null;
   autoTopUp?: boolean;
@@ -2529,28 +2533,28 @@ export function BotManagementDrawer({
               </div>
             </div>
 
-            {(displayBot?.botAgentPublicKey || (displayBot?.driftSubaccountId !== null && displayBot?.driftSubaccountId !== undefined)) && (
+            {(displayBot?.botSubaccountIdentifier || (displayBot?.driftSubaccountId !== null && displayBot?.driftSubaccountId !== undefined)) && (
               <div className="p-4 rounded-xl border border-border/50 bg-muted/30">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Info className="w-4 h-4 text-muted-foreground" />
                     <span className="text-sm text-muted-foreground">Trading Subaccount</span>
                   </div>
-                  {displayBot.botAgentPublicKey ? (
+                  {displayBot.botSubaccountIdentifier ? (
                     <div className="flex items-center gap-1.5">
                       <a
-                        href={`https://solscan.io/account/${displayBot.botAgentPublicKey}`}
+                        href={`https://solscan.io/account/${displayBot.botSubaccountIdentifier}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-sm font-mono font-medium hover:text-primary transition-colors flex items-center gap-1"
                         data-testid="link-subaccount-solscan"
                       >
-                        {displayBot.botAgentPublicKey.slice(0, 4)}...{displayBot.botAgentPublicKey.slice(-4)}
+                        {displayBot.botSubaccountIdentifier.slice(0, 4)}...{displayBot.botSubaccountIdentifier.slice(-4)}
                         <ExternalLink className="w-3 h-3" />
                       </a>
                       <button
                         onClick={() => {
-                          navigator.clipboard.writeText(displayBot.botAgentPublicKey!);
+                          navigator.clipboard.writeText(displayBot.botSubaccountIdentifier!);
                           toast({ title: 'Copied', description: 'Subaccount address copied to clipboard' });
                         }}
                         className="p-1 rounded hover:bg-muted transition-colors"

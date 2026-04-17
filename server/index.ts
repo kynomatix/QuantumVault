@@ -47,6 +47,47 @@ async function initializeProtocolAdapter(): Promise<void> {
       setAdapterHealth('pacifica', 'degraded');
     } catch { }
   }
+
+  // Group D item 17 (April 17, 2026): register DriftAdapter alongside Pacifica.
+  // Separate try-block so a Drift initialization failure cannot take down Pacifica
+  // (which carries the entire live trading load: $200K+ volume, 9 active bots).
+  // Bots route to this adapter only when their row has active_protocol='drift'
+  // — which today is gated by the schema check constraint (item 18 unlocks it).
+  // Registration alone is therefore safe: dormant legacy bots (active_protocol=null)
+  // still hit the read-only fallback in getAdapterForBot until backfilled.
+  //
+  // initialize() is wrapped in a hard timeout: if Drift's RPC failover or SDK
+  // load hangs, the bounded race rejects so the rest of startup (route binding,
+  // server.listen) is not blocked. Adapter is marked degraded on timeout —
+  // future calls to getAdapter('drift') still return the registered instance,
+  // they just hit an uninitialized DriftClient and surface a real error rather
+  // than silently waiting forever.
+  const DRIFT_INIT_TIMEOUT_MS = 30_000;
+  try {
+    const { DriftAdapter } = await import("./protocol/drift/drift-adapter");
+    const { registerAdapter, setAdapterHealth } = await import("./protocol/adapter-registry");
+    const driftAdapter = new DriftAdapter();
+    registerAdapter(driftAdapter);
+    await Promise.race([
+      driftAdapter.initialize(),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(
+          () => reject(new Error(`DriftAdapter.initialize() timed out after ${DRIFT_INIT_TIMEOUT_MS}ms`)),
+          DRIFT_INIT_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+    setAdapterHealth('drift', 'ready');
+    console.log('[Startup] Drift adapter registered and initialized');
+  } catch (err: any) {
+    console.error('[Startup] Drift adapter initialization failed:', err.message || err);
+    try {
+      const { setAdapterHealth, listAdapters } = await import("./protocol/adapter-registry");
+      if (listAdapters().includes('drift')) {
+        setAdapterHealth('drift', 'degraded');
+      }
+    } catch { }
+  }
 }
 import { createLabSupervisor, getLabAuthSecret } from "./lab/supervisor";
 import { createProxyMiddleware } from "http-proxy-middleware";

@@ -1,5 +1,5 @@
 import bs58 from 'bs58';
-import { Connection } from '@solana/web3.js';
+import { Connection, Keypair } from '@solana/web3.js';
 
 import type { ProtocolAdapter, CreateSubaccountInput } from '../adapter.js';
 import type {
@@ -478,8 +478,15 @@ export class DriftAdapter implements ProtocolAdapter {
     const toSubId = this.parseSubaccountId(params.toSubaccountId);
     const encryptedPrivateKey = encrypt(bs58.encode(params.agentSecretKey));
 
+    // Group D item 17a: TransferParams.agentPublicKey was dropped because it
+    // was never read by Pacifica and the routes.ts call sites passed the bot
+    // sub pubkey rather than the agent main pubkey — wrong for Drift. Derive
+    // the agent pubkey directly from the agent secret key (the canonical
+    // source for any agent-signed write). This is the only signer involved.
+    const agentPublicKey = Keypair.fromSecretKey(params.agentSecretKey).publicKey.toString();
+
     const result = await executeAgentTransferBetweenSubaccounts(
-      params.agentPublicKey,
+      agentPublicKey,
       encryptedPrivateKey,
       fromSubId,
       toSubId,
