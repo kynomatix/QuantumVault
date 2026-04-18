@@ -12,6 +12,7 @@ import { db } from "./db";
 import { desc, eq, sql } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
+import { PACIFICA_MIN_TRANSFER_USDC } from './protocol/pacifica/pacifica-constants';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { getAgentKeypair } from './agent-wallet';
 
@@ -60,7 +61,7 @@ async function sweepPacificaSubaccount(
     const balance = accountInfo?.equity ?? accountInfo?.freeCollateral ?? 0;
     console.log(`${logPrefix} Pacifica subaccount ${botCtx.botPublicKey.slice(0, 8)}... balance: $${balance.toFixed(6)}`);
 
-    if (balance > 0.001) {
+    if (balance >= PACIFICA_MIN_TRANSFER_USDC) {
       const botKeyBase58 = decrypt(botCtx.botEncryptedKey);
       const botSecretKey = bs58.decode(botKeyBase58);
 
@@ -82,7 +83,31 @@ async function sweepPacificaSubaccount(
       return { handled: true, swept: true, amount: balance };
     }
 
-    console.log(`${logPrefix} Pacifica subaccount has dust/zero balance, proceeding with deletion`);
+    if (balance > 0) {
+      // Residual balance is below the $10 Pacifica minimum transfer. We cannot sweep
+      // it back to the agent wallet, so we record the dust amount as an equity event
+      // for later reconciliation and proceed with deletion anyway. We record every
+      // positive sub-$10 residual (including tiny amounts) so the missing-cents
+      // investigation can account for all stranded funds.
+      console.log(
+        `${logPrefix} Pacifica subaccount balance $${balance.toFixed(6)} is below $${PACIFICA_MIN_TRANSFER_USDC} minimum — skipping sweep, recording dust and deleting bot`,
+      );
+      try {
+        await storage.createEquityEvent({
+          walletAddress: bot.walletAddress,
+          tradingBotId: bot.id,
+          eventType: 'pacifica_dust_stranded',
+          amount: String(balance),
+          txSignature: null,
+          notes: `Bot deleted with $${balance.toFixed(6)} stranded in Pacifica subaccount ${botCtx.botPublicKey} (below $${PACIFICA_MIN_TRANSFER_USDC} minimum transfer)`,
+        });
+      } catch (eventErr: any) {
+        console.error(`${logPrefix} Failed to record stranded dust event: ${eventErr.message}`);
+      }
+      return { handled: true, swept: false, amount: balance };
+    }
+
+    console.log(`${logPrefix} Pacifica subaccount has zero balance, proceeding with deletion`);
     return { handled: true, swept: false, amount: 0 };
   } catch (err: any) {
     console.error(`${logPrefix} Pacifica sweep error: ${err.message}`);
@@ -3743,6 +3768,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
       if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      // Pacifica enforces a $10 minimum on every protocol-level money movement
+      // (bot subaccount → main, and main → external wallet). Reject up-front
+      // so the user gets a clear message instead of a cryptic protocol failure.
+      if (getDefaultAdapter().protocolName === 'pacifica' && amount < PACIFICA_MIN_TRANSFER_USDC) {
+        return res.status(400).json({ error: `Pacifica minimum is $${PACIFICA_MIN_TRANSFER_USDC}` });
       }
 
       // If botId provided, verify ownership and get subaccount
@@ -7583,7 +7615,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                     const excessAmount = currentEquity - autoWithdrawThreshold;
                     const withdrawAmount = Math.floor(Math.max(0, excessAmount - 0.01) * 100) / 100;
 
-                    if (withdrawAmount > 0.1) {
+                    // Pacifica enforces a $10 minimum on every money-movement leg
+                    // (subaccount → main → external wallet). For Pacifica bots we hold
+                    // the auto-withdraw until the excess accrues to ≥ $10. For Drift
+                    // bots we keep the legacy >$0.10 dust filter.
+                    const minAutoWithdraw = botCtx ? PACIFICA_MIN_TRANSFER_USDC : 0.1;
+
+                    if (withdrawAmount >= minAutoWithdraw) {
                       console.log(`[Webhook] AUTO-WITHDRAW: Equity $${currentEquity.toFixed(2)} exceeds threshold $${autoWithdrawThreshold.toFixed(2)}, withdrawing $${withdrawAmount.toFixed(2)}`);
 
                       if (botCtx && bot.protocolSubaccountId && bot.botSubaccountKeyEncrypted) {
@@ -7651,6 +7689,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                           console.error(`[Webhook] AUTO-WITHDRAW FAILED: ${withdrawResult.error}`);
                         }
                       }
+                    } else if (excessAmount > 0) {
+                      console.log(`[Webhook] AUTO-WITHDRAW skipped: candidate $${withdrawAmount.toFixed(4)} below minimum $${minAutoWithdraw} (equity $${currentEquity.toFixed(2)} vs threshold $${autoWithdrawThreshold.toFixed(2)}); funds will accumulate until threshold is met`);
                     }
                   }
                 } catch (autoWithdrawErr: any) {
@@ -9799,6 +9839,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Bot has no active trading subaccount" });
       }
 
+      if (amount < PACIFICA_MIN_TRANSFER_USDC) {
+        return res.status(400).json({ error: `Pacifica minimum is $${PACIFICA_MIN_TRANSFER_USDC}` });
+      }
+
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet?.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
@@ -9868,6 +9912,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const botCtx = getBotSubaccountContext(bot);
       if (!botCtx) {
         return res.status(400).json({ error: "Bot has no active trading subaccount" });
+      }
+
+      if (amount < PACIFICA_MIN_TRANSFER_USDC) {
+        return res.status(400).json({ error: `Pacifica minimum is $${PACIFICA_MIN_TRANSFER_USDC}` });
       }
 
       const wallet = await storage.getWallet(req.walletAddress!);
@@ -10999,6 +11047,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               const adapter = getDefaultAdapter();
               const agentKeypairForTopUp = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
               const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
+              if (depositAmount < PACIFICA_MIN_TRANSFER_USDC) {
+                console.log(`[Retry Trade] Auto top-up skipped: $${depositAmount.toFixed(2)} below Pacifica $${PACIFICA_MIN_TRANSFER_USDC} minimum transfer`);
+              } else {
               const agentMainInfo = await getExchangeAccountInfo(wallet.agentPublicKey!, 0);
               if (agentMainInfo.freeCollateral >= depositAmount) {
                 const transferResult = await adapter.transferBetweenSubaccounts({
@@ -11023,6 +11074,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 }
               } else {
                 console.log(`[Retry Trade] Agent main insufficient for top-up ($${agentMainInfo.freeCollateral.toFixed(2)} < $${depositAmount.toFixed(2)})`);
+              }
               }
             } else {
             const agentUsdcBalance = await getAgentUsdcBalance(wallet.agentPublicKey!);

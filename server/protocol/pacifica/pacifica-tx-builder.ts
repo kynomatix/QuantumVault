@@ -9,7 +9,7 @@ import * as crypto from 'crypto';
 import type { UserTransactionBuilder } from '../adapter.js';
 import type { TransactionBuildResult } from '../protocol-types.js';
 import { PacificaSigner, OPERATION_TYPES } from './pacifica-signer.js';
-import { PACIFICA_USDC_MINT } from './pacifica-constants.js';
+import { PACIFICA_USDC_MINT, PACIFICA_MIN_TRANSFER_USDC } from './pacifica-constants.js';
 import { getPrimaryRpcUrl } from '../../rpc-config.js';
 
 const PACIFICA_PROGRAM_ID = new PublicKey('PCFA5iYgmqK6MqPhWNKg7Yv7auX7VZ4Cx7T1eJyrAMH');
@@ -100,8 +100,8 @@ export class PacificaTxBuilder implements UserTransactionBuilder {
     if (!Number.isFinite(amountUsdc) || amountUsdc <= 0) {
       throw new Error('Invalid deposit amount: must be a positive number');
     }
-    if (amountUsdc < 10) {
-      throw new Error('Pacifica minimum deposit is $10');
+    if (amountUsdc < PACIFICA_MIN_TRANSFER_USDC) {
+      throw new Error(`Pacifica minimum deposit is $${PACIFICA_MIN_TRANSFER_USDC}`);
     }
 
     const userPubkey = new PublicKey(walletAddress);

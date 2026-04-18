@@ -37,7 +37,9 @@ import type {
 } from '../protocol-types.js';
 import { SymbolRegistry, buildPacificaMappings } from '../symbol-registry.js';
 import { PacificaSigner, OPERATION_TYPES, buildSigningMessage } from './pacifica-signer.js';
-import { PACIFICA_USDC_MINT } from './pacifica-constants.js';
+import { PACIFICA_USDC_MINT, PACIFICA_MIN_TRANSFER_USDC } from './pacifica-constants.js';
+
+export { PACIFICA_MIN_TRANSFER_USDC } from './pacifica-constants.js';
 import {
   PACIFICA_PROGRAM_ID,
   PACIFICA_CENTRAL_STATE,
@@ -1078,8 +1080,8 @@ export class PacificaAdapter implements ProtocolAdapter {
       if (!Number.isFinite(params.amount) || params.amount <= 0) {
         return { success: false, error: 'Invalid deposit amount: must be a positive number' };
       }
-      if (params.amount < 10) {
-        return { success: false, error: 'Pacifica minimum deposit is $10' };
+      if (params.amount < PACIFICA_MIN_TRANSFER_USDC) {
+        return { success: false, error: `Pacifica minimum deposit is $${PACIFICA_MIN_TRANSFER_USDC}` };
       }
 
       const agentKeypair = Keypair.fromSecretKey(params.agentSecretKey);
@@ -1198,6 +1200,13 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async executeWithdraw(params: AgentWithdrawParams): Promise<WithdrawResult> {
+    if (!Number.isFinite(params.amount) || params.amount <= 0) {
+      return { success: false, error: 'Invalid withdraw amount: must be a positive number' };
+    }
+    if (params.amount < PACIFICA_MIN_TRANSFER_USDC) {
+      return { success: false, error: `Pacifica minimum withdraw is $${PACIFICA_MIN_TRANSFER_USDC}` };
+    }
+
     const signer = new PacificaSigner(params.agentSecretKey);
 
     const operationData: Record<string, unknown> = {
