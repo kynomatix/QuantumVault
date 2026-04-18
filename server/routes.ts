@@ -8853,46 +8853,97 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               }
             }
             
-            // AUTO-WITHDRAW: Check if equity exceeds threshold and withdraw excess profits
+            // AUTO-WITHDRAW: Check if equity exceeds threshold and withdraw excess profits.
+            // Pacifica bots require a two-step flow: bot-subaccount → main account (transfer),
+            // then main account → agent wallet (withdraw). Minimum is $10 per leg.
+            // Legacy/Drift bots use a single-step withdraw with a $0.10 minimum.
             let autoWithdrawInfo = null;
             const autoWithdrawThreshold = parseFloat(bot.autoWithdrawThreshold || "0");
             if (autoWithdrawThreshold > 0) {
               try {
-                const accountInfo = await getExchangeAccountInfo(wallet.agentPublicKey, subAccountId);
+                const botCtx = getBotSubaccountContext(bot);
+                const accountInfo = botCtx
+                  ? await getExchangeAccountInfoForBot(wallet.agentPublicKey!, subAccountId, botCtx)
+                  : await getExchangeAccountInfo(wallet.agentPublicKey, subAccountId);
                 const currentEquity = accountInfo.totalCollateral;
-                
+
                 if (currentEquity > autoWithdrawThreshold) {
                   const excessAmount = currentEquity - autoWithdrawThreshold;
-                  const withdrawAmount = Math.max(0, excessAmount - 0.01);
-                  
-                  if (withdrawAmount > 0.1) {
+                  const withdrawAmount = Math.floor(Math.max(0, excessAmount - 0.01) * 100) / 100;
+                  const minAutoWithdraw = botCtx ? PACIFICA_MIN_TRANSFER_USDC : 0.1;
+
+                  if (withdrawAmount >= minAutoWithdraw) {
                     console.log(`[User Webhook] AUTO-WITHDRAW: Equity $${currentEquity.toFixed(2)} exceeds threshold $${autoWithdrawThreshold.toFixed(2)}, withdrawing $${withdrawAmount.toFixed(2)}`);
-                    
-                    const withdrawResult = await executeAgentDriftWithdraw(
-                      wallet.agentPublicKey,
-                      wallet.agentPrivateKeyEncrypted!,
-                      withdrawAmount,
-                      subAccountId
-                    );
-                    
-                    if (withdrawResult.success) {
-                      console.log(`[User Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn, tx: ${withdrawResult.signature}`);
-                      autoWithdrawInfo = {
+
+                    if (botCtx && bot.protocolSubaccountId && bot.botSubaccountKeyEncrypted) {
+                      const { decrypt } = await import('./crypto');
+                      const bs58Mod = await import('bs58');
+                      const bs58Default = bs58Mod.default || bs58Mod;
+                      const adapter = getDefaultAdapter();
+
+                      const botKeyBase58 = decrypt(bot.botSubaccountKeyEncrypted);
+                      const botSecretKey = bs58Default.decode(botKeyBase58);
+
+                      console.log(`[User Webhook] AUTO-WITHDRAW Step 1: Transfer $${withdrawAmount.toFixed(2)} from bot subaccount ${bot.protocolSubaccountId} → main account`);
+                      const transferResult = await adapter.transferBetweenSubaccounts({
+                        agentSecretKey: botSecretKey,
+                        mainWalletAddress: wallet.agentPublicKey!,
+                        fromSubaccountId: bot.protocolSubaccountId,
+                        toSubaccountId: wallet.agentPublicKey!,
                         amount: withdrawAmount,
-                        txSignature: withdrawResult.signature,
-                      };
-                      
-                      await storage.createEquityEvent({
-                        walletAddress: bot.walletAddress,
-                        tradingBotId: botId,
-                        eventType: 'auto_withdraw',
-                        amount: String(withdrawAmount),
-                        txSignature: withdrawResult.signature || null,
-                        notes: `Auto-withdraw triggered: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)}`,
                       });
+
+                      if (!transferResult.success) {
+                        console.error(`[User Webhook] AUTO-WITHDRAW transfer failed: ${transferResult.error}`);
+                      } else {
+                        console.log(`[User Webhook] AUTO-WITHDRAW Step 2: Withdraw $${withdrawAmount.toFixed(2)} from main account → agent wallet`);
+                        const withdrawResult = await executeAgentDriftWithdraw(
+                          wallet.agentPublicKey!,
+                          wallet.agentPrivateKeyEncrypted!,
+                          withdrawAmount,
+                          0
+                        );
+
+                        if (withdrawResult.success) {
+                          console.log(`[User Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn, tx: ${withdrawResult.signature}`);
+                          autoWithdrawInfo = { amount: withdrawAmount, txSignature: withdrawResult.signature };
+                          await storage.createEquityEvent({
+                            walletAddress: bot.walletAddress,
+                            tradingBotId: botId,
+                            eventType: 'auto_withdraw',
+                            amount: String(withdrawAmount),
+                            txSignature: withdrawResult.signature || null,
+                            notes: `Auto-withdraw: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)} (bot→main→wallet)`,
+                          });
+                        } else {
+                          console.error(`[User Webhook] AUTO-WITHDRAW on-chain withdraw failed: ${withdrawResult.error} (funds are in main account, use Recover button)`);
+                        }
+                      }
                     } else {
-                      console.error(`[User Webhook] AUTO-WITHDRAW FAILED: ${withdrawResult.error}`);
+                      const withdrawResult = await executeAgentDriftWithdraw(
+                        wallet.agentPublicKey,
+                        wallet.agentPrivateKeyEncrypted!,
+                        withdrawAmount,
+                        subAccountId
+                      );
+
+                      if (withdrawResult.success) {
+                        console.log(`[User Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn, tx: ${withdrawResult.signature}`);
+                        autoWithdrawInfo = { amount: withdrawAmount, txSignature: withdrawResult.signature };
+                        await storage.createEquityEvent({
+                          walletAddress: bot.walletAddress,
+                          tradingBotId: botId,
+                          eventType: 'auto_withdraw',
+                          amount: String(withdrawAmount),
+                          txSignature: withdrawResult.signature || null,
+                          notes: `Auto-withdraw triggered: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)}`,
+                        });
+                      } else {
+                        console.error(`[User Webhook] AUTO-WITHDRAW FAILED: ${withdrawResult.error}`);
+                      }
                     }
+                  } else if (excessAmount > 0) {
+                    console.log(`[User Webhook] AUTO-WITHDRAW skipped: candidate $${withdrawAmount.toFixed(4)} below minimum $${minAutoWithdraw} (equity $${currentEquity.toFixed(2)} vs threshold $${autoWithdrawThreshold.toFixed(2)}); funds will accumulate`);
                   }
                 }
               } catch (autoWithdrawErr: any) {
