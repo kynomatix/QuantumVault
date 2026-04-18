@@ -70,6 +70,8 @@ import type {
   PacificaFundingResponse,
 } from './pacifica-types.js';
 import { mapPacificaSide, mapToProtocolSide } from './pacifica-types.js';
+import { pacificaQuota, QuotaExhaustedError, type RequestPriority } from './pacifica-quota.js';
+import { pacificaCache } from './pacifica-cache.js';
 
 const MAX_MARKET_CACHE_SIZE = 200;
 const MARKET_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -131,6 +133,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   private priceCache: Map<string, CacheEntry<number>> = new Map();
   private marketDetailsMap: Map<string, ProtocolMarket> = new Map();
   private initialized = false;
+  private telemetryInterval: NodeJS.Timeout | null = null;
 
   constructor(config?: Partial<PacificaAdapterConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -149,6 +152,16 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
 
     this.initialized = true;
+
+    // Start credit-budget telemetry: emits one log line per minute summarizing
+    // upstream credit consumption, cache hit rate, and any rejected requests.
+    if (!this.telemetryInterval) {
+      this.telemetryInterval = setInterval(() => this.logTelemetry(), 60_000);
+      // Don't keep the event loop alive just for telemetry
+      if (typeof this.telemetryInterval.unref === 'function') {
+        this.telemetryInterval.unref();
+      }
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -156,6 +169,27 @@ export class PacificaAdapter implements ProtocolAdapter {
     this.marketCache = null;
     this.marketDetailsMap.clear();
     this.initialized = false;
+    if (this.telemetryInterval) {
+      clearInterval(this.telemetryInterval);
+      this.telemetryInterval = null;
+    }
+    pacificaCache.invalidateAll();
+  }
+
+  private logTelemetry(): void {
+    const q = pacificaQuota.snapshot();
+    const c = pacificaCache.snapshot();
+    const top = q.topEndpoints
+      .map((e) => `${e.path}=${e.credits}c/${e.calls}x`)
+      .join(' ');
+    console.log(
+      `[pacifica-telemetry] credits=${q.creditsUsed}/${q.totalBudget} (60s) | ` +
+        `served=${q.requestsServed} rejected=${q.requestsRejected} | ` +
+        `cache: ${c.entries} entries, ${c.hitRatePct}% hit, ${c.dedupedJoins} deduped | ` +
+        `top: ${top || '(none)'}`,
+    );
+    pacificaQuota.resetCounters();
+    pacificaCache.resetCounters();
   }
 
   async healthCheck(): Promise<{ healthy: boolean; latencyMs: number; error?: string }> {
@@ -238,7 +272,10 @@ export class PacificaAdapter implements ProtocolAdapter {
       const batch = staleSymbols.slice(i, i + BATCH_SIZE);
       const settled = await Promise.allSettled(
         batch.map(async ({ internal, protocol }) => {
-          const book = await this.get('/book', { symbol: protocol, depth: '1' });
+          // Bulk price refresh is non-critical: trading reads fresh quotes
+          // separately. Mark as background so it never starves /account or
+          // /positions calls that the user dashboard depends on.
+          const book = await this.get('/book', { symbol: protocol, depth: '1' }, { priority: 'background' });
           const bids = book?.l?.[0];
           const asks = book?.l?.[1];
           const bestBid = bids?.[0]?.p ? parseFloat(bids[0].p) : NaN;
@@ -1592,37 +1629,144 @@ export class PacificaAdapter implements ProtocolAdapter {
     return json;
   }
 
-  private async get(path: string, params?: Record<string, string>): Promise<any> {
-    let url = `${this.config.baseUrl}${path}`;
-    if (params && Object.keys(params).length > 0) {
-      const searchParams = new URLSearchParams(params);
-      url += `?${searchParams.toString()}`;
-    }
+  /**
+   * GET request with credit-budget control, response cache, and in-flight dedup.
+   *
+   * Layered behavior (caller transparent):
+   *   1. Fresh cache hit → return immediately, zero upstream cost
+   *   2. In-flight dedup → if an identical fetch is already running, await it
+   *   3. Quota check → if budget exhausted, return STALE data (when available)
+   *      or throw QuotaExhaustedError. Never blindly spend over budget.
+   *   4. Fetch → record spend on Pacifica's 60s rolling counter
+   *   5. On HTTP 429 → fall back to stale cache if available (graceful degrade)
+   *
+   * Options:
+   *   - priority: 'critical' may use full budget (writes / urgent reconcile),
+   *               'normal' (default) uses 80% of budget,
+   *               'background' uses 50% of budget (cron sweeps)
+   *   - bypassCache: skip cache lookup but still record + dedup. Use when the
+   *                  caller absolutely needs fresh data (e.g. post-trade verify).
+   */
+  private async get(
+    path: string,
+    params?: Record<string, string>,
+    options?: { priority?: RequestPriority; bypassCache?: boolean },
+  ): Promise<any> {
+    const priority = options?.priority ?? 'normal';
+    const bypassCache = options?.bypassCache === true;
+    const cacheKey = pacificaCache.buildKey(path, params);
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
+    if (!bypassCache) {
+      const fresh = pacificaCache.getFresh(cacheKey);
+      if (fresh !== undefined) return fresh;
+    }
+    pacificaCache.noteMiss();
+
+    return pacificaCache.dedup(cacheKey, async () => {
+      // Re-check cache inside the dedup gate in case a sibling caller filled
+      // it between our miss and acquiring the dedup slot.
+      if (!bypassCache) {
+        const fresh = pacificaCache.getFresh(cacheKey);
+        if (fresh !== undefined) return fresh;
+      }
+
+      // Quota guardrail. If we cannot afford the call:
+      //   - If stale cache is available → return it immediately (graceful)
+      //   - Otherwise wait up to MAX_WAIT_MS for the sliding window to free
+      //     credits before throwing. This handles cold-start fan-out without
+      //     corrupting downstream callers that interpret "throw" as "value=0".
+      if (!pacificaQuota.canAfford(path, priority)) {
+        const stale = pacificaCache.getStale(cacheKey);
+        if (stale) {
+          pacificaQuota.noteRejection();
+          console.warn(
+            `[pacifica-quota] budget exhausted, serving stale ${path} ` +
+              `(age=${Math.round(stale.ageMs / 1000)}s, used=${pacificaQuota.currentSpend()}c)`,
+          );
+          return stale.data;
+        }
+
+        // No stale fallback. Wait for budget to free up.
+        const MAX_WAIT_MS = 8_000;
+        const POLL_INTERVAL_MS = 250;
+        const deadline = Date.now() + MAX_WAIT_MS;
+        while (Date.now() < deadline) {
+          const sleepMs = Math.min(
+            POLL_INTERVAL_MS,
+            Math.max(50, pacificaQuota.msUntilNextRefund()),
+            deadline - Date.now(),
+          );
+          await new Promise((resolve) => setTimeout(resolve, sleepMs));
+          if (pacificaQuota.canAfford(path, priority)) break;
+        }
+
+        if (!pacificaQuota.canAfford(path, priority)) {
+          pacificaQuota.noteRejection();
+          console.warn(
+            `[pacifica-quota] gave up after ${MAX_WAIT_MS}ms wait for ${path} ` +
+              `(used=${pacificaQuota.currentSpend()}c)`,
+          );
+          throw new QuotaExhaustedError(path, pacificaQuota.currentSpend());
+        }
+      }
+
+      let url = `${this.config.baseUrl}${path}`;
+      if (params && Object.keys(params).length > 0) {
+        const searchParams = new URLSearchParams(params);
+        url += `?${searchParams.toString()}`;
+      }
+
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } finally {
+        // Pacifica meters the request whether it succeeds or fails (including
+        // 4xx/5xx), so always record the spend.
+        pacificaQuota.record(path);
+      }
+
+      if (!response.ok) {
+        // Graceful fallback on rate-limit: serve stale cache if any.
+        if (response.status === 429) {
+          const stale = pacificaCache.getStale(cacheKey);
+          if (stale) {
+            console.warn(
+              `[pacifica-quota] upstream 429 on ${path}, serving stale ` +
+                `(age=${Math.round(stale.ageMs / 1000)}s)`,
+            );
+            return stale.data;
+          }
+        }
+        const errorBody = await response.text().catch(() => '');
+        throw new Error(
+          `PacificaAdapter GET ${path}: ${response.status} ${response.statusText} — ${errorBody}`,
+        );
+      }
+
+      const json = await response.json();
+      const data = this.unwrapEnvelope(json);
+      pacificaCache.set(cacheKey, path, data);
+      return data;
     });
-
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => '');
-      throw new Error(
-        `PacificaAdapter GET ${path}: ${response.status} ${response.statusText} — ${errorBody}`,
-      );
-    }
-
-    const json = await response.json();
-    return this.unwrapEnvelope(json);
   }
 
   private async post(path: string, body: unknown): Promise<any> {
     const url = `${this.config.baseUrl}${path}`;
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } finally {
+      // POSTs also consume credits; charge default cost.
+      pacificaQuota.record(path);
+    }
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
@@ -1632,7 +1776,25 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
 
     const json = await response.json();
-    return this.unwrapEnvelope(json);
+    const data = this.unwrapEnvelope(json);
+
+    // Invalidate caches whose contents are mutated by this write so that the
+    // next reader sees post-trade state rather than the pre-trade snapshot.
+    // Path-based heuristic: any order/position/balance-mutating endpoint
+    // invalidates positions + account cache for ALL subaccounts. Aggressive
+    // but safe — worst case is one cold-cache fetch per subaccount.
+    if (
+      path.includes('/orders') ||
+      path.includes('/positions') ||
+      path.includes('/deposit') ||
+      path.includes('/withdraw') ||
+      path.includes('/transfer')
+    ) {
+      pacificaCache.invalidate('/positions');
+      pacificaCache.invalidate('/account');
+    }
+
+    return data;
   }
 
   private static assessRiskTier(maxLeverage: number): 'recommended' | 'caution' | 'high_risk' {
