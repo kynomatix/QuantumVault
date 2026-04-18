@@ -126,6 +126,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   readonly protocolVersion = '1.0.0';
   readonly collateralMint = PACIFICA_USDC_MINT;
   readonly collateralSymbol = 'USDC';
+  readonly minTransferAmount = PACIFICA_MIN_TRANSFER_USDC;
 
   private config: PacificaAdapterConfig;
   private registry: SymbolRegistry | null = null;

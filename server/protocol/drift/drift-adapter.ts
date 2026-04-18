@@ -140,6 +140,7 @@ export class DriftAdapter implements ProtocolAdapter {
   readonly protocolVersion = '2';
   readonly collateralMint = USDT_MINT_MAINNET;
   readonly collateralSymbol = 'USDT';
+  readonly minTransferAmount = 0.1;
 
   private initialized = false;
 

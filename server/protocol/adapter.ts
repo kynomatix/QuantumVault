@@ -48,6 +48,8 @@ export interface ProtocolAdapter {
   readonly protocolVersion: string;
   readonly collateralMint: string;
   readonly collateralSymbol: string;
+  /** Minimum USDC (or collateral) amount for any single transfer or withdrawal on this exchange. */
+  readonly minTransferAmount: number;
 
   initialize(): Promise<void>;
   shutdown(): Promise<void>;
