@@ -69,24 +69,36 @@ async function detectOnChainClose(
     const closeSide = positionSide === 'long' ? 'short' : 'long';
     const absSize = Math.abs(dbBaseSize);
 
-    let recentTrades: TradeRecord[] = [];
-    try {
-      const fiveMinAgo = Date.now() - 5 * 60 * 1000;
-      recentTrades = await adapter.getTradeHistory(agentPublicKey, {
-        limit: 50,
-        startTime: fiveMinAgo,
-        ...(botSubaccountPublicKey ? { subaccountId: botSubaccountPublicKey } : {}),
-      });
-    } catch (err) {
-      console.log(`[Reconcile] Trade history fetch failed for ${botId}: ${err instanceof Error ? err.message : err}`);
-    }
+    const fetchClosingFills = async (windowMs: number): Promise<TradeRecord[]> => {
+      try {
+        const startTime = Date.now() - windowMs;
+        const trades = await adapter.getTradeHistory(agentPublicKey, {
+          limit: 200,
+          startTime,
+          ...(botSubaccountPublicKey ? { subaccountId: botSubaccountPublicKey } : {}),
+        });
+        return trades
+          .filter(t =>
+            normalizeMarket(t.internalSymbol) === normalizedMarket &&
+            t.side === closeSide
+          )
+          .sort((a, b) => b.timestamp - a.timestamp);
+      } catch (err) {
+        console.log(`[Reconcile] Trade history fetch failed for ${botId} (window=${windowMs}ms): ${err instanceof Error ? err.message : err}`);
+        return [];
+      }
+    };
 
-    const closingFills = recentTrades
-      .filter(t =>
-        normalizeMarket(t.internalSymbol) === normalizedMarket &&
-        t.side === closeSide
-      )
-      .sort((a, b) => b.timestamp - a.timestamp);
+    const sumFillSize = (fills: TradeRecord[]) => fills.reduce((s, f) => s + f.size, 0);
+
+    let closingFills = await fetchClosingFills(5 * 60 * 1000);
+    if (sumFillSize(closingFills) < absSize * 0.80) {
+      console.log(`[Reconcile] Closing fills in 5min window insufficient for bot ${botId} (got ${sumFillSize(closingFills).toFixed(6)} of ${absSize.toFixed(6)}), retrying with 60min window`);
+      const widerFills = await fetchClosingFills(60 * 60 * 1000);
+      if (sumFillSize(widerFills) > sumFillSize(closingFills)) {
+        closingFills = widerFills;
+      }
+    }
 
     let aggregatedSize = 0;
     let weightedPriceSum = 0;
@@ -172,20 +184,55 @@ async function detectOnChainClose(
       const subAcct = botSubaccountPublicKey || undefined;
       const accountInfo = await adapter.getAccountInfo(agentPublicKey, subAcct);
 
-      const hasTpSlConfig = riskConfig && (
-        Number(riskConfig.takeProfitPrice || 0) > 0 ||
-        Number(riskConfig.stopLossPrice || 0) > 0 ||
-        Number(riskConfig.takeProfitPercent || 0) > 0 ||
-        Number(riskConfig.stopLossPercent || 0) > 0
-      );
+      const tpPriceAbs = Number(riskConfig?.takeProfitPrice || 0);
+      const slPriceAbs = Number(riskConfig?.stopLossPrice || 0);
+      const tpPct = Number(riskConfig?.takeProfitPercent || 0);
+      const slPct = Number(riskConfig?.stopLossPercent || 0);
+
+      const tpPrice = tpPriceAbs > 0 ? tpPriceAbs : (tpPct > 0
+        ? (positionSide === 'long' ? entryPrice * (1 + tpPct / 100) : entryPrice * (1 - tpPct / 100))
+        : 0);
+      const slPrice = slPriceAbs > 0 ? slPriceAbs : (slPct > 0
+        ? (positionSide === 'long' ? entryPrice * (1 - slPct / 100) : entryPrice * (1 + slPct / 100))
+        : 0);
+
+      const hasTpSlConfig = tpPrice > 0 || slPrice > 0;
+
+      const computePnl = (fillPrice: number): number => positionSide === 'long'
+        ? (fillPrice - entryPrice) * absSize
+        : (entryPrice - fillPrice) * absSize;
 
       if (hasTpSlConfig) {
-        console.log(`[Reconcile] Position closed for bot ${botId} with TP/SL configured (no trade history, balance=$${accountInfo.balance.toFixed(2)}): classified as tpsl`);
+        const marketPrice = await fetchMarketPrice(market);
+
+        let estimatedFillPrice: number;
+        let chosenLabel: string;
+
+        if (tpPrice > 0 && slPrice > 0 && marketPrice && marketPrice > 0) {
+          const distToTp = Math.abs(marketPrice - tpPrice);
+          const distToSl = Math.abs(marketPrice - slPrice);
+          if (distToTp <= distToSl) {
+            estimatedFillPrice = tpPrice;
+            chosenLabel = 'TP';
+          } else {
+            estimatedFillPrice = slPrice;
+            chosenLabel = 'SL';
+          }
+        } else if (tpPrice > 0) {
+          estimatedFillPrice = tpPrice;
+          chosenLabel = 'TP';
+        } else {
+          estimatedFillPrice = slPrice;
+          chosenLabel = 'SL';
+        }
+
+        const pnl = computePnl(estimatedFillPrice);
+        console.log(`[Reconcile] Position closed for bot ${botId} with TP/SL configured (no trade history, balance=$${accountInfo.balance.toFixed(2)}): classified as tpsl, estimated ${chosenLabel} fill=$${estimatedFillPrice.toFixed(4)}, pnl=$${pnl.toFixed(4)}`);
         return {
           detected: true,
           reason: 'tpsl',
-          fillPrice: entryPrice,
-          pnl: 0,
+          fillPrice: estimatedFillPrice,
+          pnl,
           fee: 0,
         };
       }
@@ -202,12 +249,15 @@ async function detectOnChainClose(
       }
 
       if (accountInfo.balance > 1 || accountInfo.equity > 1) {
-        console.log(`[Reconcile] Position closed for bot ${botId} (no trade history, balance=$${accountInfo.balance.toFixed(2)}): classified as external_close`);
+        const marketPrice = await fetchMarketPrice(market);
+        const fillPrice = marketPrice && marketPrice > 0 ? marketPrice : entryPrice;
+        const pnl = marketPrice && marketPrice > 0 ? computePnl(marketPrice) : 0;
+        console.log(`[Reconcile] Position closed for bot ${botId} (no trade history, balance=$${accountInfo.balance.toFixed(2)}): classified as external_close, estimated fill=$${fillPrice.toFixed(4)} (${marketPrice ? 'market' : 'entry-fallback'}), pnl=$${pnl.toFixed(4)}`);
         return {
           detected: true,
           reason: 'external_close',
-          fillPrice: entryPrice,
-          pnl: 0,
+          fillPrice,
+          pnl,
           fee: 0,
         };
       }
