@@ -56,6 +56,21 @@ export function registerLabRoutes(app: Express): void {
       const { sql } = await import("drizzle-orm");
       await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true}'::jsonb WHERE id = 1 AND NOT (strategy_settings ? 'nativeEngine')`);
       await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true}'::jsonb WHERE id IN (3, 5, 10) AND NOT (strategy_settings ? 'nativeEngine')`);
+
+      // Copy Flux Momentum (id=1) from BuhE wallet to AqTT wallet if not already there
+      await db.execute(sql`
+        INSERT INTO lab_strategies (user_id, name, description, pine_script, parsed_inputs, groups, strategy_settings, created_at)
+        SELECT
+          'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
+          name, description, pine_script, parsed_inputs, groups, strategy_settings, NOW()
+        FROM lab_strategies
+        WHERE id = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM lab_strategies
+          WHERE user_id = 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez'
+          AND name = (SELECT name FROM lab_strategies WHERE id = 1)
+        )
+      `);
     } catch (e) {}
   })();
 
