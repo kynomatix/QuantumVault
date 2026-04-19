@@ -71,6 +71,15 @@ export function registerLabRoutes(app: Express): void {
           AND name = (SELECT name FROM lab_strategies WHERE id = 1)
         )
       `);
+
+      // Cancel stuck runs 512 and 513 — run 512 is in a crash-retry loop (AVAX/USDT combo,
+      // exit code 1, stalling watchdog) causing DB connection exhaustion across all background
+      // tasks. Run 513 is queued behind it and would inherit the same problem.
+      await db.execute(sql`
+        UPDATE lab_optimization_runs
+        SET status = 'failed', completed_at = NOW()
+        WHERE id IN (512, 513) AND status IN ('running', 'paused', 'queued')
+      `);
     } catch (e) {}
   })();
 
