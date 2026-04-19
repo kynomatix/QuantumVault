@@ -348,15 +348,15 @@ function ProductFeaturesSlide() {
     },
     {
       icon: <RefreshCw className="w-6 h-6" />,
-      title: "Dual Execution Paths",
-      description: "Automatic failover between Swift and on-chain ensures trades execute in any conditions",
+      title: "Exchange Resilience",
+      description: "Adapter architecture enables automatic exchange switching — bots stay running regardless of protocol availability",
       gradient: "from-purple-500/20 to-indigo-500/10",
       border: "border-purple-500/30"
     },
     {
       icon: <Activity className="w-6 h-6" />,
-      title: "Gasless Execution",
-      description: "Swift Protocol routes trades through market maker auctions — zero gas, lower overhead",
+      title: "Near-Zero Fees",
+      description: "Solana's sub-cent transaction fees keep execution overhead minimal — no gas surprises on any trade",
       gradient: "from-blue-500/20 to-cyan-500/10",
       border: "border-blue-500/30"
     },
@@ -918,7 +918,7 @@ function TechStackSlide() {
   const tech = [
     { name: "Solana", desc: "400ms blocks, sub-cent fees" },
     { name: "Pacifica", desc: "High-performance perp DEX on Solana" },
-    { name: "Swift Protocol", desc: "Gasless execution with auto failover" },
+    { name: "Adapter Architecture", desc: "Protocol-agnostic layer enabling multi-exchange support" },
     { name: "TradingView", desc: "Strategy & webhook integration" },
     { name: "React + TypeScript", desc: "Modern web application" },
     { name: "PostgreSQL", desc: "Reliable data persistence" },
@@ -979,7 +979,7 @@ function RoadmapSlide() {
       quarter: "Q1 2026",
       title: "Foundation",
       status: "complete",
-      items: ["Core trading bots", "TradingView webhooks", "Signal marketplace", "Profit sharing", "Swift Protocol (gasless)"]
+      items: ["Core trading bots", "TradingView webhooks", "Signal marketplace", "Profit sharing", "Pacifica mainnet launch"]
     },
     {
       quarter: "Q2 2026",
