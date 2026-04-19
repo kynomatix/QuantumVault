@@ -3423,8 +3423,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         subaccountExists(wallet.agentPublicKey, 0),
       ]);
       
-      // Existing user = has at least one bot (they've completed onboarding before)
-      const isExistingUser = bots.length > 0;
+      // Existing user = has completed onboarding at some point.
+      // Using bot count alone is wrong — a user who deposited funds and enabled execution
+      // but hasn't created a bot yet is still an existing user and should not see the
+      // new-user welcome popup again.
+      const isExistingUser = wallet.executionEnabled || bots.length > 0 || balance > 0;
       
       const TRADING_GAS = 0.005;
       const requiredSolForBot = TRADING_GAS;
