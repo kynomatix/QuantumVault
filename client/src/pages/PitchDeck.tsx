@@ -985,13 +985,13 @@ function RoadmapSlide() {
       quarter: "Q2 2026",
       title: "Growth",
       status: "current",
-      items: ["Grid trading", "Advanced analytics", "Mobile optimization", "Multi-strategy bots"]
+      items: ["Adapter architecture (Ports & Adapters)", "Multi-exchange infrastructure", "Grid trading", "Advanced analytics", "Mobile optimization"]
     },
     {
       quarter: "Q3 2026",
-      title: "AI Integration",
+      title: "AI & Multi-Exchange",
       status: "upcoming",
-      items: ["AI portfolio management", "Smart bot optimization", "Predictive analytics", "Auto risk adjustment"]
+      items: ["Multi-exchange routing (auto best-price)", "AI portfolio management", "Smart bot optimization", "Predictive analytics", "Auto risk adjustment"]
     },
     {
       quarter: "Q4 2026",
