@@ -80,6 +80,67 @@ export function registerLabRoutes(app: Express): void {
         SET status = 'failed', completed_at = NOW()
         WHERE id IN (512, 513) AND status IN ('running', 'paused', 'queued')
       `);
+
+      // Import best NEAR/2h and ICP/2h results from dev into production.
+      // Each migration file holds the full run metadata + single best result (rank=1).
+      // The sentinel mode='imported' makes the NOT EXISTS guard unique and idempotent.
+      const { readFileSync } = await import("fs");
+      const { join, dirname } = await import("path");
+      const { fileURLToPath } = await import("url");
+      const __dir = dirname(fileURLToPath(import.meta.url));
+
+      const migrationFiles = [
+        join(__dir, "migrations", "near_2h_best.json"),
+        join(__dir, "migrations", "icp_2h_best.json"),
+      ];
+
+      for (const file of migrationFiles) {
+        const data = JSON.parse(readFileSync(file, "utf-8"));
+
+        // Step 1: insert stub run (idempotent — guarded by user_id + tickers + mode='imported')
+        await db.execute(sql`
+          INSERT INTO lab_optimization_runs
+            (user_id, strategy_id, tickers, timeframes, start_date, end_date,
+             random_samples, top_k, refinements_per_seed, min_trades, max_drawdown_cap,
+             mode, status, total_configs_tested, created_at, completed_at)
+          SELECT
+            ${data.user_id}, ${data.strategy_id},
+            ${JSON.stringify(data.tickers)}::jsonb, ${JSON.stringify(data.timeframes)}::jsonb,
+            ${data.start_date}, ${data.end_date},
+            ${data.random_samples}, ${data.top_k}, ${data.refinements_per_seed},
+            ${data.min_trades}, ${data.max_drawdown_cap},
+            'imported', 'complete', ${data.total_configs_tested}, NOW(), NOW()
+          WHERE NOT EXISTS (
+            SELECT 1 FROM lab_optimization_runs
+            WHERE user_id = ${data.user_id}
+              AND tickers = ${JSON.stringify(data.tickers)}::jsonb
+              AND mode = 'imported'
+          )
+        `);
+
+        // Step 2: insert result linked to that run (idempotent — guarded by run_id + ticker + rank)
+        await db.execute(sql`
+          INSERT INTO lab_optimization_results
+            (run_id, ticker, timeframe, rank, net_profit_percent, win_rate_percent,
+             max_drawdown_percent, profit_factor, total_trades, params, trades, equity_curve)
+          SELECT
+            r.id,
+            ${data.ticker}, ${data.timeframe}, ${data.rank},
+            ${data.net_profit_percent}, ${data.win_rate_percent}, ${data.max_drawdown_percent},
+            ${data.profit_factor}, ${data.total_trades},
+            ${JSON.stringify(data.params)}::jsonb,
+            ${JSON.stringify(data.trades)}::jsonb,
+            ${JSON.stringify(data.equity_curve)}::jsonb
+          FROM lab_optimization_runs r
+          WHERE r.user_id = ${data.user_id}
+            AND r.tickers = ${JSON.stringify(data.tickers)}::jsonb
+            AND r.mode = 'imported'
+          AND NOT EXISTS (
+            SELECT 1 FROM lab_optimization_results res
+            WHERE res.run_id = r.id AND res.ticker = ${data.ticker} AND res.rank = ${data.rank}
+          )
+        `);
+      }
     } catch (e) {}
   })();
 
