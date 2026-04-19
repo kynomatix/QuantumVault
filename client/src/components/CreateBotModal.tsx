@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
 import { useWallet } from '@solana/wallet-adapter-react';
+import { useBindAgentWallet } from '@/hooks/useBindAgentWallet';
 import { useConnection } from '@solana/wallet-adapter-react';
 import { Transaction } from '@solana/web3.js';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
@@ -96,6 +97,7 @@ interface CreateBotModalProps {
 export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, defaultLeverage = 3 }: CreateBotModalProps) {
   const { toast } = useToast();
   const wallet = useWallet();
+  const bindAgentWallet = useBindAgentWallet(wallet);
   const { connection } = useConnection();
   const { executionEnabled, executionLoading, enableExecution, refetchStatus } = useExecutionAuthorization();
   const { getMaxLeverage: getMaxLeverageFromCache } = useLeverageLimits();
@@ -299,22 +301,38 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     setIsCreating(true);
     try {
       // Step 1: Create the bot
-      const res = await fetch('/api/trading-bots', {
+      const botRequestBody = {
+        walletAddress,
+        name: newBot.name,
+        market: newBot.market,
+        leverage: newBot.leverage,
+        totalInvestment: fundingAmount > 0 ? String(fundingAmount) : '100',
+      };
+      let res = await fetch('/api/trading-bots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          walletAddress,
-          name: newBot.name,
-          market: newBot.market,
-          leverage: newBot.leverage,
-          totalInvestment: fundingAmount > 0 ? String(fundingAmount) : '100',
-        }),
+        body: JSON.stringify(botRequestBody),
       });
       
       if (!res.ok) {
         const error = await safeResponseJson(res);
-        toast({ title: 'Failed to create bot', description: error.error, variant: 'destructive' });
-        return;
+        if (error.error?.includes('Account not found')) {
+          const bound = await bindAgentWallet();
+          if (!bound) { setIsCreating(false); return; }
+          res = await fetch('/api/trading-bots', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(botRequestBody),
+          });
+          if (!res.ok) {
+            const retryError = await safeResponseJson(res);
+            toast({ title: 'Failed to create bot', description: retryError.error, variant: 'destructive' });
+            return;
+          }
+        } else {
+          toast({ title: 'Failed to create bot', description: error.error, variant: 'destructive' });
+          return;
+        }
       }
       
       const bot = await safeResponseJson(res);

@@ -17,6 +17,7 @@ import { useToast } from "@/hooks/use-toast";
 
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useWallet } from "@/hooks/useWallet";
+import { useBindAgentWallet } from "@/hooks/useBindAgentWallet";
 import {
   Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
@@ -3978,7 +3979,8 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const [capital, setCapital] = useState("1000");
   const capitalNum = parseFloat(capital) || 0;
   const { toast } = useToast();
-  const { publicKeyString: walletAddress, sessionConnected } = useWallet();
+  const { publicKeyString: walletAddress, sessionConnected, signMessage, publicKey } = useWallet();
+  const bindAgentWallet = useBindAgentWallet({ signMessage, publicKey });
 
   const [isCreating, setIsCreating] = useState(false);
   const [createdBot, setCreatedBot] = useState<any>(null);
@@ -4084,22 +4086,39 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       const market = tickerToMarket(ticker);
       const botName = generateBotName();
 
-      const res = await fetch('/api/trading-bots', {
+      const botRequestBody = {
+        walletAddress,
+        name: botName,
+        market,
+        leverage,
+        totalInvestment: String(effectiveTradeSize),
+      };
+
+      let res = await fetch('/api/trading-bots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          walletAddress,
-          name: botName,
-          market,
-          leverage,
-          totalInvestment: String(effectiveTradeSize),
-        }),
+        body: JSON.stringify(botRequestBody),
       });
 
       if (!res.ok) {
         const error = await safeResponseJson(res);
-        setCreateError(error.error || 'Failed to create bot');
-        return;
+        if (error.error?.includes('Account not found')) {
+          const bound = await bindAgentWallet();
+          if (!bound) { setIsCreating(false); return; }
+          res = await fetch('/api/trading-bots', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(botRequestBody),
+          });
+          if (!res.ok) {
+            const retryError = await safeResponseJson(res);
+            setCreateError(retryError.error || 'Failed to create bot');
+            return;
+          }
+        } else {
+          setCreateError(error.error || 'Failed to create bot');
+          return;
+        }
       }
 
       const bot = await safeResponseJson(res);
