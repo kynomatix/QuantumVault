@@ -1411,9 +1411,12 @@ export class PacificaAdapter implements ProtocolAdapter {
       }
       depositTxSignature = depositResult.txSignature;
 
-      // 3. Poll for Pacifica to index the deposit (typically a few seconds).
+      // 3. Poll for Pacifica to index the deposit. Solana confirms quickly but
+      // Pacifica's indexer can lag 30–60s under load, so we give it 90s before
+      // surfacing a retry message. Funds are always safe — a timeout just means
+      // the retry path will see them already credited.
       const pollStart = Date.now();
-      const pollTimeoutMs = 30_000;
+      const pollTimeoutMs = 90_000;
       const pollIntervalMs = 2_000;
       let indexed = false;
       let lastBalance = currentMainBalance;
@@ -1429,9 +1432,10 @@ export class PacificaAdapter implements ProtocolAdapter {
       }
       if (!indexed) {
         throw new Error(
-          `provisionFundedSubaccount: Pacifica did not index deposit within 30s. ` +
+          `provisionFundedSubaccount: Pacifica did not index deposit within 90s. ` +
           `Deposit txSignature=${depositTxSignature || 'unknown'}, lastObservedBalance=$${lastBalance}. ` +
-          `Funds are safe — please retry bot creation in a moment.`,
+          `Your funds are safe and will appear in your main account shortly — ` +
+          `simply retry bot creation in a moment and it will use the already-deposited funds.`,
         );
       }
       console.log(`[PacificaAdapter] provisionFundedSubaccount: Pacifica indexed deposit in ${((Date.now() - pollStart) / 1000).toFixed(1)}s, mainBalance=$${lastBalance}`);
