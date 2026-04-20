@@ -5914,6 +5914,30 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         | { funded: boolean; wasNewAccount: boolean; depositTxSignature?: string; warning?: string; fundedAmount: number }
         | undefined;
 
+      // Record the equity event so the P&L system has the correct deposit baseline.
+      // This is the same write that /api/exchange/deposit does after a successful deposit.
+      // Without it, the balance in the bot subaccount would appear as pure profit.
+      if (provisionResult?.funded === true && provisionResult.fundedAmount > 0) {
+        try {
+          await storage.createEquityEvent({
+            walletAddress: req.walletAddress!,
+            tradingBotId: bot.id,
+            eventType: 'drift_deposit',
+            amount: String(provisionResult.fundedAmount),
+            txSignature: provisionResult.depositTxSignature || null,
+            notes: `Initial funding for bot subaccount ${botSubaccountPublicKey}${provisionResult.wasNewAccount ? ' (new Pacifica account)' : ''}`,
+          });
+          console.log(`[Bot Creation] Equity event recorded: $${provisionResult.fundedAmount} deposit for bot ${bot.id}`);
+        } catch (eventErr: any) {
+          console.error(`[Bot Creation] Failed to record equity event for bot ${bot.id}:`, eventErr.message);
+          // Non-fatal — bot is created and funded. P&L will be off but funds are safe.
+        }
+      }
+
+      const provisionResultForResponse = (req as any)._pacificaProvisionResult as
+        | { funded: boolean; wasNewAccount: boolean; depositTxSignature?: string; warning?: string; fundedAmount: number }
+        | undefined;
+
       res.json({
         ...bot,
         webhookUrl,
