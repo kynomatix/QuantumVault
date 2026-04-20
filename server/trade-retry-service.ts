@@ -153,18 +153,35 @@ async function driftSettleAllPnl(encryptedKey: string, subAccountId: number): Pr
 }
 
 async function driftExecuteAgentWithdraw(
-  agentPublicKey: string, encryptedKey: string, amount: number, subAccountId: number
+  agentPublicKey: string, encryptedKey: string, amount: number, subAccountId: number,
+  feeContext?: { tradingBotId?: string | null; context?: string },
 ): Promise<any> {
   try {
     const keypair = getAgentKeypair(encryptedKey);
     const mainWalletAddress = await _lookupMainWallet(agentPublicKey);
-    const result = await getDefaultAdapter().executeWithdraw({
+    const adapter = getDefaultAdapter();
+    const result = await adapter.executeWithdraw({
       agentPublicKey,
       agentSecretKey: keypair.secretKey,
       mainWalletAddress,
       amount,
       subaccountId: _subIdStr(subAccountId),
     });
+    if (result.success && adapter.protocolName === 'pacifica') {
+      try {
+        const { PACIFICA_WITHDRAW_FEE_USDC } = await import('./protocol/pacifica/pacifica-constants');
+        await storage.createEquityEvent({
+          walletAddress: mainWalletAddress,
+          tradingBotId: feeContext?.tradingBotId ?? null,
+          eventType: 'pacifica_withdraw_fee',
+          amount: String(-PACIFICA_WITHDRAW_FEE_USDC),
+          txSignature: result.txSignature ?? null,
+          notes: 'Exchange withdrawal fee (charged by Pacifica, not QuantumVault)',
+        });
+      } catch (feeErr: any) {
+        console.error(`[${feeContext?.context ?? 'TradeRetry'}] Failed to record Pacifica withdraw fee event (non-blocking):`, feeErr.message);
+      }
+    }
     return { success: result.success, signature: result.txSignature, error: result.error };
   } catch (error: any) {
     return { success: false, error: error.message || String(error) };

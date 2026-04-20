@@ -11,3 +11,11 @@ export const PACIFICA_USDC_MINT = IS_MAINNET
 // cleanly instead of failing at the protocol with cryptic errors or leaving
 // dust stuck in subaccounts.
 export const PACIFICA_MIN_TRANSFER_USDC = 10;
+
+// Pacifica charges a flat $1 USDC fee on every on-chain withdrawal (deducted
+// by the exchange before funds land in the Solana wallet). Internal
+// subaccount-to-subaccount transfers do NOT incur this fee. We record it as
+// a separate equity event after each successful on-chain withdraw so the
+// user-visible balance math reconciles automatically.
+// Source: https://docs.pacifica.fi/trading-on-pacifica/deposits-and-withdrawals
+export const PACIFICA_WITHDRAW_FEE_USDC = 1;

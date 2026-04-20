@@ -266,6 +266,7 @@ async function executeAgentDriftWithdraw(
   encryptedPrivateKey: string,
   amountUsdc: number,
   subAccountId: number = 0,
+  feeContext?: { tradingBotId?: string | null; context?: string },
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const { secretKey } = _decryptToSecretKey(encryptedPrivateKey);
@@ -277,9 +278,47 @@ async function executeAgentDriftWithdraw(
       amount: amountUsdc,
       subaccountId: _subIdStr(subAccountId),
     });
+    if (result.success) {
+      // Pacifica charges $1 USDC per on-chain withdrawal — mirror it as its
+      // own equity event so user-visible balances reconcile. No-op for Drift.
+      await recordPacificaWithdrawFeeIfApplicable({
+        walletAddress: mainWalletAddress,
+        tradingBotId: feeContext?.tradingBotId ?? null,
+        txSignature: result.txSignature ?? null,
+        context: feeContext?.context ?? 'Withdraw',
+      });
+    }
     return { success: result.success, signature: result.txSignature, error: result.error };
   } catch (error: any) {
     return { success: false, error: error.message || String(error) };
+  }
+}
+
+// Pacifica deducts a flat $1 USDC fee on every on-chain withdrawal. We don't
+// take this fee — Pacifica does — but the user-visible balance change won't
+// match the recorded withdraw amount unless we mirror it as its own equity
+// event. Call this AFTER any successful on-chain withdraw (subaccount→
+// agent wallet leg). Never call after a pure subaccount-to-subaccount
+// transfer — those are internal and free.
+async function recordPacificaWithdrawFeeIfApplicable(args: {
+  walletAddress: string;
+  tradingBotId: string | null;
+  txSignature: string | null;
+  context: string; // for logs only
+}): Promise<void> {
+  try {
+    if (getDefaultAdapter().protocolName !== 'pacifica') return;
+    const { PACIFICA_WITHDRAW_FEE_USDC } = await import('./protocol/pacifica/pacifica-constants');
+    await storage.createEquityEvent({
+      walletAddress: args.walletAddress,
+      tradingBotId: args.tradingBotId,
+      eventType: 'pacifica_withdraw_fee',
+      amount: String(-PACIFICA_WITHDRAW_FEE_USDC),
+      txSignature: args.txSignature,
+      notes: 'Exchange withdrawal fee (charged by Pacifica, not QuantumVault)',
+    });
+  } catch (feeErr: any) {
+    console.error(`[${args.context}] Failed to record Pacifica withdraw fee event (non-blocking):`, feeErr.message);
   }
 }
 
@@ -3887,7 +3926,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         wallet.agentPublicKey,
         wallet.agentPrivateKeyEncrypted,
         amount,
-        withdrawFromMain ? 0 : subAccountId
+        withdrawFromMain ? 0 : subAccountId,
+        { tradingBotId, context: 'Withdraw' }
       );
 
       if (!result.success) {
@@ -7735,7 +7775,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                             wallet.agentPublicKey!,
                             wallet.agentPrivateKeyEncrypted,
                             withdrawAmount,
-                            0
+                            0,
+                            { tradingBotId: botId, context: 'Webhook AUTO-WITHDRAW' }
                           );
 
                           if (withdrawResult.success) {
@@ -7757,7 +7798,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                           wallet.agentPublicKey!,
                           wallet.agentPrivateKeyEncrypted,
                           withdrawAmount,
-                          subAccountId
+                          subAccountId,
+                          { tradingBotId: botId, context: 'Webhook AUTO-WITHDRAW' }
                         );
 
                         if (withdrawResult.success) {
@@ -8986,7 +9028,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                           wallet.agentPublicKey!,
                           wallet.agentPrivateKeyEncrypted!,
                           withdrawAmount,
-                          0
+                          0,
+                          { tradingBotId: botId, context: 'User Webhook AUTO-WITHDRAW' }
                         );
 
                         if (withdrawResult.success) {
@@ -9009,7 +9052,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                         wallet.agentPublicKey,
                         wallet.agentPrivateKeyEncrypted!,
                         withdrawAmount,
-                        subAccountId
+                        subAccountId,
+                        { tradingBotId: botId, context: 'User Webhook AUTO-WITHDRAW' }
                       );
 
                       if (withdrawResult.success) {

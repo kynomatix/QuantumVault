@@ -58,6 +58,8 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
       case 'sol_deposit': return 'SOL Deposit (Gas)';
       case 'sol_withdraw': return 'SOL Withdraw (Gas)';
       case 'auto_topup': return 'Auto top-up';
+      case 'auto_withdraw': return 'Auto Withdraw';
+      case 'pacifica_withdraw_fee': return 'Exchange Fee (Pacifica)';
       default: 
         // Convert snake_case to Title Case
         return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());

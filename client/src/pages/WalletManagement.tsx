@@ -976,7 +976,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                     </Button>
                   </div>
                 </div>
-                
+
                 <Button
                   className="w-full bg-gradient-to-r from-primary to-accent h-12 text-base"
                   onClick={handleWithdrawToWallet}
