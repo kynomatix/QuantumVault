@@ -5742,7 +5742,16 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         // the deposit-to-register quirk (Pacifica only registers the main_account
         // record on first deposit). For existing accounts the deposit step is
         // skipped automatically via the gap calc inside the adapter method.
-        const fundingAmountNum = totalInvestment ? Number(totalInvestment) : 0;
+        //
+        // QuantumLab sends `initialFundingAmount` separately when it wants to deposit
+        // more than `totalInvestment` (e.g. trade size + drawdown-protection buffer).
+        // Fall back to totalInvestment when not provided so other clients (CreateBotModal)
+        // continue to work unchanged.
+        const initialFundingRaw = (req.body as any).initialFundingAmount;
+        const initialFundingNum = initialFundingRaw != null ? Number(initialFundingRaw) : NaN;
+        const fundingAmountNum = Number.isFinite(initialFundingNum) && initialFundingNum > 0
+          ? initialFundingNum
+          : (totalInvestment ? Number(totalInvestment) : 0);
         const usePacificaAtomicProvision =
           adapter.protocolName === 'pacifica' &&
           botKeypair !== null &&

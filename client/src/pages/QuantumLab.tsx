@@ -4086,12 +4086,17 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       const market = tickerToMarket(ticker);
       const botName = generateBotName();
 
+      // QuantumLab funds the bot subaccount with effectiveTradeSize + equityBuffer.
+      // The buffer is drawdown-survival cushion: it sits in the subaccount but doesn't
+      // increase the bot's stated investment / position-sizing baseline.
+      const totalDepositForRequest = effectiveTradeSize + equityBuffer;
       const botRequestBody = {
         walletAddress,
         name: botName,
         market,
         leverage,
         totalInvestment: String(effectiveTradeSize),
+        initialFundingAmount: String(totalDepositForRequest),
       };
 
       const res = await fetch('/api/trading-bots', {
