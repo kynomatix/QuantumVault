@@ -21,6 +21,41 @@ import { decrypt as legacyDecrypt } from './crypto';
 import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
 import { Keypair } from '@solana/web3.js';
+import bs58 from 'bs58';
+
+/**
+ * Parse a legacy-decrypted agent secret key.
+ *
+ * Historically this code assumed the plaintext was a JSON array (`[1,2,3,...]`),
+ * but `agent-wallet.ts#getAgentKeypair` actually stores keys as base58 strings.
+ * Most wallets in production are base58 — JSON.parse fails on them with
+ * "Unexpected non-whitespace character after JSON at position 1", which broke
+ * the deposit / Add Funds flow for every wallet that used the legacy fallback.
+ *
+ * Try base58 first (current format), fall back to JSON array (older format) for
+ * any wallets that may still be in that shape. Throw a clear error if neither works.
+ */
+function parseLegacyAgentKeyPlaintext(plaintext: string): Uint8Array {
+  // Format 1 (current): base58-encoded 64-byte secret key (~88 chars)
+  try {
+    const decoded = bs58.decode(plaintext.trim());
+    if (decoded.length === 64) {
+      return new Uint8Array(decoded);
+    }
+  } catch {
+    // not base58, try JSON next
+  }
+  // Format 2 (legacy): JSON array `[1,2,3,...]`
+  try {
+    const arr = JSON.parse(plaintext);
+    if (Array.isArray(arr) && arr.length === 64) {
+      return new Uint8Array(arr);
+    }
+  } catch {
+    // not JSON either
+  }
+  throw new Error('Legacy agent key plaintext is neither valid base58 (64 bytes) nor a 64-element JSON array');
+}
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const NONCE_TTL_MS = 5 * 60 * 1000;
@@ -756,9 +791,10 @@ export async function migrateAgentKeyToV3(
   legacyEncryptedKey: string
 ): Promise<{ encryptedV3: string } | null> {
   try {
-    // Decrypt the legacy key
-    const legacyKeyJson = legacyDecrypt(legacyEncryptedKey);
-    const legacyKeyBuffer = Buffer.from(JSON.parse(legacyKeyJson));
+    // Decrypt the legacy key (plaintext can be base58 or JSON-array; helper handles both)
+    const legacyKeyPlaintext = legacyDecrypt(legacyEncryptedKey);
+    const legacyKeyBytes = parseLegacyAgentKeyPlaintext(legacyKeyPlaintext);
+    const legacyKeyBuffer = Buffer.from(legacyKeyBytes);
     
     // Re-encrypt with v3 format
     const encryptedV3 = encryptAgentKeyV3(umk, legacyKeyBuffer, walletAddress);
@@ -835,8 +871,8 @@ export async function decryptAgentKeyWithFallback(
   // Fall back to legacy if v3 not available or failed
   if (wallet.agentPrivateKeyEncrypted) {
     try {
-      const legacyKeyJson = legacyDecrypt(wallet.agentPrivateKeyEncrypted);
-      const secretKey = new Uint8Array(JSON.parse(legacyKeyJson));
+      const legacyKeyPlaintext = legacyDecrypt(wallet.agentPrivateKeyEncrypted);
+      const secretKey = parseLegacyAgentKeyPlaintext(legacyKeyPlaintext);
       
       // Log that we used legacy fallback (for migration tracking)
       if (wallet.agentPrivateKeyEncryptedV3) {
