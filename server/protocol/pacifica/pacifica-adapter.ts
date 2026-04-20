@@ -1415,12 +1415,20 @@ export class PacificaAdapter implements ProtocolAdapter {
       // Pacifica's indexer can lag 30–60s under load, so we give it 90s before
       // surfacing a retry message. Funds are always safe — a timeout just means
       // the retry path will see them already credited.
+      //
+      // Pacifica's REST API is rate-limited (~300 req/hour). We use a stepped
+      // backoff so the typical fast-path (indexed in 5–15s) only costs ~5
+      // requests, and the worst-case 90s wait costs ~17 requests instead of 45.
       const pollStart = Date.now();
       const pollTimeoutMs = 90_000;
-      const pollIntervalMs = 2_000;
       let indexed = false;
       let lastBalance = currentMainBalance;
       while (Date.now() - pollStart < pollTimeoutMs) {
+        const elapsedMs = Date.now() - pollStart;
+        // 0–15s: poll every 2s (fast path — most deposits index here)
+        // 15–45s: poll every 5s
+        // 45–90s: poll every 8s
+        const pollIntervalMs = elapsedMs < 15_000 ? 2_000 : elapsedMs < 45_000 ? 5_000 : 8_000;
         await new Promise(r => setTimeout(r, pollIntervalMs));
         const probe = await this.getAccountInfo(input.agentPublicKey).catch(() => null);
         if (probe?.exists && probe.balance >= input.fundingAmount) {
