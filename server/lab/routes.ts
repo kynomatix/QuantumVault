@@ -994,10 +994,10 @@ export function registerLabRoutes(app: Express): void {
         jobId: job.id, status: "error", stage: `Error: ${err.message}`,
         current: 0, total: 0, percent: 0, elapsed: 0, error: err.message,
       });
+      clearActiveWorker();
       if (runId) {
         try {
           await labStorage.pauseRun(runId);
-          clearActiveWorker();
           autoRetryAfterCrash(runId, job.id, err.message);
         } catch { await labStorage.failRun(runId).catch(() => {}); }
       }
@@ -1850,9 +1850,12 @@ export function registerLabRoutes(app: Express): void {
         try { activeWorker.terminate(); } catch {}
         clearActiveWorker();
       }
-      const evicted = labStorage.forceEvictAllJobs();
+      const evicted = labStorage.forceEvictJobsByWallet(walletAddress);
       const staleRuns = await db.select().from(labOptimizationRuns).where(
-        or(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.status, "paused"))!
+        and(
+          eq(labOptimizationRuns.userId, walletAddress),
+          or(eq(labOptimizationRuns.status, "running"), eq(labOptimizationRuns.status, "paused"))!
+        )!
       );
       let clearedConflicts = 0;
       for (const staleRun of staleRuns) {
@@ -1868,7 +1871,7 @@ export function registerLabRoutes(app: Express): void {
         clearedConflicts++;
       }
       if (evicted > 0 || clearedConflicts > 0) {
-        console.log(`[QuantumLab] Refine: force-cleared ${evicted} in-memory jobs, ${clearedConflicts} DB runs`);
+        console.log(`[QuantumLab] Refine: force-cleared ${evicted} in-memory jobs, ${clearedConflicts} DB runs (wallet-scoped: ${walletAddress})`);
       }
 
       const job = labStorage.createJob(config, { hasActiveWorker: !!activeWorker });

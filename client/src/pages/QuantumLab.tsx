@@ -711,7 +711,6 @@ export default function QuantumLab() {
       return data as { items: any[]; activeRun: any | null };
     },
     refetchInterval: queueOpen ? 5000 : 15000,
-    structuralSharing: false,
   });
 
   const lastReconnectRunIdRef = useRef<number | null>(null);
