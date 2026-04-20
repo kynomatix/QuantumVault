@@ -5737,38 +5737,75 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
         const botKeypair = caps.requiresExternalSubaccountKey ? Keypair.generate() : null;
 
-        console.log(`[Bot Creation] Creating ${adapter.protocolName} subaccount under agent ${agentKeypair.publicKey.toString()}${botKeypair ? ` with pre-generated sub key ${botKeypair.publicKey.toString()}` : ''}`);
+        // Pacifica atomic provision path: if the active adapter is Pacifica and a
+        // funding amount was provided, use provisionFundedSubaccount which handles
+        // the deposit-to-register quirk (Pacifica only registers the main_account
+        // record on first deposit). For existing accounts the deposit step is
+        // skipped automatically via the gap calc inside the adapter method.
+        const fundingAmountNum = totalInvestment ? Number(totalInvestment) : 0;
+        const usePacificaAtomicProvision =
+          adapter.protocolName === 'pacifica' &&
+          botKeypair !== null &&
+          Number.isFinite(fundingAmountNum) &&
+          fundingAmountNum > 0;
+
+        console.log(`[Bot Creation] Creating ${adapter.protocolName} subaccount under agent ${agentKeypair.publicKey.toString()}${botKeypair ? ` with pre-generated sub key ${botKeypair.publicKey.toString()}` : ''}${usePacificaAtomicProvision ? ` (atomic provision, fundingAmount=$${fundingAmountNum})` : ''}`);
 
         try {
-          const sub = await adapter.createSubaccount({
-            mainSecretKey: agentKeypair.secretKey,
-            subSecretKey: botKeypair?.secretKey,
-            agentPublicKey: agentKeypair.publicKey.toString(),
-          });
+          if (usePacificaAtomicProvision) {
+            const pacificaAdapter = adapter as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
+            const result = await pacificaAdapter.provisionFundedSubaccount({
+              mainSecretKey: agentKeypair.secretKey,
+              subSecretKey: botKeypair!.secretKey,
+              agentPublicKey: agentKeypair.publicKey.toString(),
+              fundingAmount: fundingAmountNum,
+            });
 
-          botSubaccountPublicKey = sub.subaccountId;
-          botSubaccountKeyEncrypted = botKeypair
-            ? legacyEncrypt(bs58.encode(botKeypair.secretKey))
-            : null;
-          subaccountStatus = 'active';
+            botSubaccountPublicKey = result.subaccountId;
+            botSubaccountKeyEncrypted = legacyEncrypt(bs58.encode(botKeypair!.secretKey));
+            subaccountStatus = 'active';
 
-          // 12h Option A: For `main_plus_id` mode (Drift), the adapter is the canonical
-          // source of the numeric subaccount ID. Parse and validate it now; we'll
-          // reconcile against the pre-allocated `nextSubaccountId` once that's computed.
-          // Group D item 17d: validation lifted into shared helper so the marketplace
-          // creation path (which now also calls adapter.createSubaccount) applies the
-          // identical contract.
-          if (subaccountAuthMode === 'main_plus_id') {
-            try {
-              adapterReturnedNumericSubaccountId = parseAndValidateAdapterSubaccountId(
-                sub.subaccountId,
-                adapter.protocolName,
-              );
-            } catch (validationErr: any) {
-              console.error(`[Bot Creation] ${validationErr.message}`);
-              return res.status(500).json({
-                error: `Failed to create trading subaccount: adapter returned invalid subaccount ID format`,
-              });
+            // Stash provisioning result for the response builder below.
+            (req as any)._pacificaProvisionResult = {
+              funded: result.transferSucceeded,
+              wasNewAccount: result.wasNewAccount,
+              depositTxSignature: result.depositTxSignature,
+              warning: result.warning,
+              fundedAmount: result.transferSucceeded ? fundingAmountNum : 0,
+            };
+
+            console.log(`[Bot Creation] Pacifica atomic provision done: subaccount=${botSubaccountPublicKey} wasNew=${result.wasNewAccount} transferred=${result.transferSucceeded}${result.warning ? ` warning="${result.warning}"` : ''}`);
+          } else {
+            const sub = await adapter.createSubaccount({
+              mainSecretKey: agentKeypair.secretKey,
+              subSecretKey: botKeypair?.secretKey,
+              agentPublicKey: agentKeypair.publicKey.toString(),
+            });
+
+            botSubaccountPublicKey = sub.subaccountId;
+            botSubaccountKeyEncrypted = botKeypair
+              ? legacyEncrypt(bs58.encode(botKeypair.secretKey))
+              : null;
+            subaccountStatus = 'active';
+
+            // 12h Option A: For `main_plus_id` mode (Drift), the adapter is the canonical
+            // source of the numeric subaccount ID. Parse and validate it now; we'll
+            // reconcile against the pre-allocated `nextSubaccountId` once that's computed.
+            // Group D item 17d: validation lifted into shared helper so the marketplace
+            // creation path (which now also calls adapter.createSubaccount) applies the
+            // identical contract.
+            if (subaccountAuthMode === 'main_plus_id') {
+              try {
+                adapterReturnedNumericSubaccountId = parseAndValidateAdapterSubaccountId(
+                  sub.subaccountId,
+                  adapter.protocolName,
+                );
+              } catch (validationErr: any) {
+                console.error(`[Bot Creation] ${validationErr.message}`);
+                return res.status(500).json({
+                  error: `Failed to create trading subaccount: adapter returned invalid subaccount ID format`,
+                });
+              }
             }
           }
 
@@ -5870,10 +5907,24 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const webhookUrl = generateWebhookUrl(bot.id, webhookSecret);
       await storage.updateTradingBot(bot.id, { webhookUrl } as any);
 
+      // Pacifica atomic-provision: surface funding status so frontend skips the
+      // follow-up /api/exchange/deposit call (the deposit + transfer already happened
+      // server-side inside provisionFundedSubaccount).
+      const provisionResult = (req as any)._pacificaProvisionResult as
+        | { funded: boolean; wasNewAccount: boolean; depositTxSignature?: string; warning?: string; fundedAmount: number }
+        | undefined;
+
       res.json({
         ...bot,
         webhookUrl,
         botSubaccountIdentifier: botSubaccountPublicKey,
+        ...(provisionResult ? {
+          funded: provisionResult.funded,
+          fundedAmount: provisionResult.fundedAmount,
+          wasNewAccount: provisionResult.wasNewAccount,
+          depositTxSignature: provisionResult.depositTxSignature,
+          fundingWarning: provisionResult.warning,
+        } : {}),
       });
     } catch (error) {
       console.error("Create trading bot error:", error);

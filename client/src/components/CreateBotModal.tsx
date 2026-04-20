@@ -308,74 +308,74 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
         leverage: newBot.leverage,
         totalInvestment: fundingAmount > 0 ? String(fundingAmount) : '100',
       };
-      let res = await fetch('/api/trading-bots', {
+      const res = await fetch('/api/trading-bots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(botRequestBody),
       });
-      
+
       if (!res.ok) {
         const error = await safeResponseJson(res);
-        if (error.error?.includes('Account not found')) {
-          const bound = await bindAgentWallet();
-          if (!bound) { setIsCreating(false); return; }
-          res = await fetch('/api/trading-bots', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(botRequestBody),
-          });
-          if (!res.ok) {
-            const retryError = await safeResponseJson(res);
-            toast({ title: 'Failed to create bot', description: retryError.error, variant: 'destructive' });
-            return;
-          }
-        } else {
-          toast({ title: 'Failed to create bot', description: error.error, variant: 'destructive' });
-          return;
-        }
+        toast({ title: 'Failed to create bot', description: error.error, variant: 'destructive' });
+        return;
       }
-      
+
       const bot = await safeResponseJson(res);
       setCreatedBot(bot);
-      
-      // Step 2: If funding amount provided, deposit to the bot's subaccount
+
+      // Update settings (leverage / maxPositionSize) regardless of funding path.
       if (fundingAmount > 0) {
-        // First update bot settings - maxPositionSize = investment × leverage
         const settingsRes = await fetch(`/api/trading-bots/${bot.id}?wallet=${walletAddress}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ 
+          body: JSON.stringify({
             leverage: newBot.leverage,
             maxPositionSize: fundingAmount * newBot.leverage,
           }),
         });
-        
         if (!settingsRes.ok) {
           console.error('Failed to update bot settings, but bot was created');
         }
-        
-        // Then deposit the investment amount to the bot's trading subaccount
+      }
+
+      // Pacifica atomic-provision: backend already deposited + transferred when
+      // bot.funded === true (or bot.fundingWarning is set after subaccount-only success).
+      // Otherwise (Drift, or no funding) follow the legacy two-step deposit path.
+      const backendHandledFunding = bot.funded === true || typeof bot.fundingWarning === 'string';
+
+      if (fundingAmount > 0 && !backendHandledFunding) {
         const depositRes = await fetch('/api/exchange/deposit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify({ amount: fundingAmount, botId: bot.id }),
         });
-        
+
         if (depositRes.ok) {
-          toast({ 
-            title: 'Bot created and funded!', 
-            description: `Invested $${fundingAmount.toFixed(2)} with ${newBot.leverage}x leverage = $${(fundingAmount * newBot.leverage).toFixed(2)} max position` 
+          toast({
+            title: 'Bot created and funded!',
+            description: `Invested $${fundingAmount.toFixed(2)} with ${newBot.leverage}x leverage = $${(fundingAmount * newBot.leverage).toFixed(2)} max position`,
           });
         } else {
           const err = await safeResponseJson(depositRes);
-          toast({ 
-            title: 'Bot created but funding failed', 
+          toast({
+            title: 'Bot created but funding failed',
             description: err.error || 'You can fund it later from the bot details',
-            variant: 'destructive' 
+            variant: 'destructive',
           });
         }
+      } else if (fundingAmount > 0 && bot.funded === true) {
+        toast({
+          title: 'Bot created and funded!',
+          description: `Invested $${fundingAmount.toFixed(2)} with ${newBot.leverage}x leverage = $${(fundingAmount * newBot.leverage).toFixed(2)} max position`,
+        });
+      } else if (fundingAmount > 0 && bot.fundingWarning) {
+        toast({
+          title: 'Bot created — funding needs attention',
+          description: bot.fundingWarning,
+          variant: 'destructive',
+        });
       } else {
         toast({ title: 'Bot created! Copy your webhook details below.' });
       }

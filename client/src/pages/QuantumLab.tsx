@@ -4094,7 +4094,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         totalInvestment: String(effectiveTradeSize),
       };
 
-      let res = await fetch('/api/trading-bots', {
+      const res = await fetch('/api/trading-bots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(botRequestBody),
@@ -4102,23 +4102,8 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
 
       if (!res.ok) {
         const error = await safeResponseJson(res);
-        if (error.error?.includes('Account not found')) {
-          const bound = await bindAgentWallet();
-          if (!bound) { setIsCreating(false); return; }
-          res = await fetch('/api/trading-bots', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(botRequestBody),
-          });
-          if (!res.ok) {
-            const retryError = await safeResponseJson(res);
-            setCreateError(retryError.error || 'Failed to create bot');
-            return;
-          }
-        } else {
-          setCreateError(error.error || 'Failed to create bot');
-          return;
-        }
+        setCreateError(error.error || 'Failed to create bot');
+        return;
       }
 
       const bot = await safeResponseJson(res);
@@ -4139,25 +4124,34 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         console.error('Failed to update bot settings, but bot was created');
       }
 
+      // Pacifica atomic-provision: backend deposited + transferred when bot.funded === true.
+      // Otherwise (Drift, or atomic provision skipped) follow the legacy two-step deposit path.
       const totalDeposit = effectiveTradeSize + equityBuffer;
-      const depositRes = await fetch('/api/exchange/deposit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ amount: totalDeposit, botId: bot.id }),
-      });
+      const backendHandledFunding = bot.funded === true || typeof bot.fundingWarning === 'string';
 
       let fundingFailed = false;
-      if (!depositRes.ok) {
-        const err = await safeResponseJson(depositRes);
-        fundingFailed = true;
-        setCreateError(`Bot created but funding failed: ${err.error || 'Unknown error'}. You can fund it later from the bot details page.`);
-      } else {
-        const depositData = await safeResponseJson(depositRes);
-        if (depositData.subaccountTransferWarning) {
+      if (!backendHandledFunding) {
+        const depositRes = await fetch('/api/exchange/deposit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ amount: totalDeposit, botId: bot.id }),
+        });
+
+        if (!depositRes.ok) {
+          const err = await safeResponseJson(depositRes);
           fundingFailed = true;
-          setCreateError(`Bot created and USDC deposited on-chain, but transfer to bot subaccount failed. Use "Add to Bot" in the bot management drawer to retry. Funds are safe in your exchange main account.`);
+          setCreateError(`Bot created but funding failed: ${err.error || 'Unknown error'}. You can fund it later from the bot details page.`);
+        } else {
+          const depositData = await safeResponseJson(depositRes);
+          if (depositData.subaccountTransferWarning) {
+            fundingFailed = true;
+            setCreateError(`Bot created and USDC deposited on-chain, but transfer to bot subaccount failed. Use "Add to Bot" in the bot management drawer to retry. Funds are safe in your exchange main account.`);
+          }
         }
+      } else if (bot.fundingWarning) {
+        fundingFailed = true;
+        setCreateError(bot.fundingWarning);
       }
 
       setCreatedBot(bot);

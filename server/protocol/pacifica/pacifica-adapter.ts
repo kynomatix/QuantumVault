@@ -460,6 +460,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       maintenanceMargin,
       feeTier: String(response.fee_level),
       subaccountId: response.subaccount_id,
+      exists: true,
     };
   }
 
@@ -1349,6 +1350,159 @@ export class PacificaAdapter implements ProtocolAdapter {
       label: undefined,
       equity: 0,
       status: 'confirmed',
+    };
+  }
+
+  /**
+   * Atomic first-bot provisioning for Pacifica.
+   *
+   * Pacifica only registers a `main_account` record once it observes a USDC deposit
+   * to its vault from that wallet. `subaccount/create` requires this record to exist.
+   * For brand-new agent wallets we therefore must: deposit → wait for indexing →
+   * create subaccount → transfer to subaccount, all in one server-side flow.
+   *
+   * For wallets that ALREADY have a registered Pacifica account, this method skips
+   * the deposit step (gap calc returns 0 if main balance already covers fundingAmount)
+   * and behaves identically to the existing two-step flow.
+   *
+   * Idempotency: if any step fails after the deposit lands, retrying recomputes the
+   * gap from live state and won't double-deposit. Subaccount creation generates a
+   * fresh keypair per call so a retry produces a NEW subaccount — caller must save
+   * the bot row immediately on success and use the existing "Add Funds" path to
+   * recover from a transfer-only failure.
+   */
+  async provisionFundedSubaccount(input: {
+    mainSecretKey: Uint8Array;
+    subSecretKey: Uint8Array;
+    agentPublicKey: string;
+    fundingAmount: number;
+  }): Promise<{
+    subaccountId: string;
+    wasNewAccount: boolean;
+    transferSucceeded: boolean;
+    depositTxSignature?: string;
+    warning?: string;
+  }> {
+    if (!Number.isFinite(input.fundingAmount) || input.fundingAmount < PACIFICA_MIN_TRANSFER_USDC) {
+      throw new Error(
+        `provisionFundedSubaccount: fundingAmount must be >= $${PACIFICA_MIN_TRANSFER_USDC} (Pacifica minimum). Got: ${input.fundingAmount}`,
+      );
+    }
+
+    // 1. Read current state
+    const initialInfo = await this.getAccountInfo(input.agentPublicKey);
+    const wasNewAccount = !initialInfo.exists;
+    const currentMainBalance = initialInfo.exists ? initialInfo.balance : 0;
+
+    // 2. Compute deposit gap. If gap is positive but below minimum, bump to minimum.
+    let depositTxSignature: string | undefined;
+    const rawGap = input.fundingAmount - currentMainBalance;
+    if (rawGap > 0) {
+      const depositAmount = Math.max(rawGap, PACIFICA_MIN_TRANSFER_USDC);
+      console.log(`[PacificaAdapter] provisionFundedSubaccount: depositing $${depositAmount} (gap=$${rawGap.toFixed(2)}, mainBalance=$${currentMainBalance.toFixed(2)}, fundingAmount=$${input.fundingAmount}, wasNewAccount=${wasNewAccount})`);
+
+      const depositResult = await this.executeDeposit({
+        agentPublicKey: input.agentPublicKey,
+        agentSecretKey: input.mainSecretKey,
+        amount: depositAmount,
+      });
+      if (!depositResult.success) {
+        throw new Error(`provisionFundedSubaccount: deposit failed: ${depositResult.error}`);
+      }
+      depositTxSignature = depositResult.txSignature;
+
+      // 3. Poll for Pacifica to index the deposit (typically a few seconds).
+      const pollStart = Date.now();
+      const pollTimeoutMs = 30_000;
+      const pollIntervalMs = 2_000;
+      let indexed = false;
+      let lastBalance = currentMainBalance;
+      while (Date.now() - pollStart < pollTimeoutMs) {
+        await new Promise(r => setTimeout(r, pollIntervalMs));
+        const probe = await this.getAccountInfo(input.agentPublicKey).catch(() => null);
+        if (probe?.exists && probe.balance >= input.fundingAmount) {
+          indexed = true;
+          lastBalance = probe.balance;
+          break;
+        }
+        if (probe) lastBalance = probe.balance;
+      }
+      if (!indexed) {
+        throw new Error(
+          `provisionFundedSubaccount: Pacifica did not index deposit within 30s. ` +
+          `Deposit txSignature=${depositTxSignature || 'unknown'}, lastObservedBalance=$${lastBalance}. ` +
+          `Funds are safe — please retry bot creation in a moment.`,
+        );
+      }
+      console.log(`[PacificaAdapter] provisionFundedSubaccount: Pacifica indexed deposit in ${((Date.now() - pollStart) / 1000).toFixed(1)}s, mainBalance=$${lastBalance}`);
+    } else {
+      console.log(`[PacificaAdapter] provisionFundedSubaccount: skipping deposit (mainBalance=$${currentMainBalance} already covers fundingAmount=$${input.fundingAmount})`);
+    }
+
+    // 4. Create subaccount. Pacifica's eventual consistency means even after our
+    // poll succeeds, create can still 422. Retry up to 3x with 5s backoff.
+    let subaccountInfo: SubaccountInfo | null = null;
+    let lastCreateError: Error | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        subaccountInfo = await this.createSubaccount({
+          mainSecretKey: input.mainSecretKey,
+          subSecretKey: input.subSecretKey,
+          agentPublicKey: input.agentPublicKey,
+        });
+        break;
+      } catch (err: any) {
+        lastCreateError = err;
+        const is422 = (err?.message || '').includes('422') || (err?.message || '').includes('Account not found');
+        if (is422 && attempt < 3) {
+          console.warn(`[PacificaAdapter] provisionFundedSubaccount: createSubaccount attempt ${attempt}/3 failed with 422, retrying in 5s — ${err.message}`);
+          await new Promise(r => setTimeout(r, 5_000));
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (!subaccountInfo) {
+      throw new Error(`provisionFundedSubaccount: createSubaccount failed after 3 attempts: ${lastCreateError?.message || 'unknown'}`);
+    }
+    const subaccountId = subaccountInfo.subaccountId;
+
+    // 5. Transfer fundingAmount from main → new subaccount. If this fails, the
+    // subaccount exists with $0 and funds remain in main. Caller saves the bot row
+    // and surfaces the warning so user can recover via existing Add Funds flow.
+    try {
+      const transferResult = await this.transferBetweenSubaccounts({
+        agentSecretKey: input.mainSecretKey,
+        mainWalletAddress: input.agentPublicKey,
+        fromSubaccountId: '', // empty = transfer from main account (adapter falls back to signer pubkey)
+        toSubaccountId: subaccountId,
+        amount: input.fundingAmount,
+      });
+      if (!transferResult.success) {
+        return {
+          subaccountId,
+          wasNewAccount,
+          transferSucceeded: false,
+          depositTxSignature,
+          warning: `Subaccount created but transfer failed: ${transferResult.error || 'unknown'}. Funds are safe in your main account — use Add Funds to retry.`,
+        };
+      }
+    } catch (err: any) {
+      return {
+        subaccountId,
+        wasNewAccount,
+        transferSucceeded: false,
+        depositTxSignature,
+        warning: `Subaccount created but transfer threw: ${err.message}. Funds are safe in your main account — use Add Funds to retry.`,
+      };
+    }
+
+    console.log(`[PacificaAdapter] provisionFundedSubaccount: complete. subaccount=${subaccountId} wasNewAccount=${wasNewAccount} funded=$${input.fundingAmount}`);
+    return {
+      subaccountId,
+      wasNewAccount,
+      transferSucceeded: true,
+      depositTxSignature,
     };
   }
 
