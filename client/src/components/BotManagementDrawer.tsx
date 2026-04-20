@@ -2503,15 +2503,17 @@ export function BotManagementDrawer({
                       When equity exceeds ${parseFloat(editAutoWithdrawThreshold).toFixed(2)}, excess profits will be withdrawn automatically
                     </p>
                   )}
-                  <p
-                    className="text-xs text-amber-500/90 flex items-start gap-1 leading-relaxed"
-                    data-testid="text-auto-withdraw-fee-notice"
-                  >
-                    <Info className="w-3 h-3 mt-0.5 shrink-0" />
-                    <span>
-                      Pacifica charges a flat <span className="font-medium">$1 USDC</span> fee per on-chain withdrawal. To avoid the fee eating into small profits, set the threshold so each auto-withdrawal sweeps a meaningful amount (e.g. $20+). The fee is charged by the exchange — not QuantumVault.
-                    </span>
-                  </p>
+                  {editAutoWithdrawThreshold && parseFloat(editAutoWithdrawThreshold) > 0 && (
+                    <p
+                      className="text-xs text-amber-500/90 flex items-start gap-1 leading-relaxed"
+                      data-testid="text-auto-withdraw-fee-notice"
+                    >
+                      <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                      <span>
+                        Pacifica charges a flat <span className="font-medium">$1 USDC</span> fee per on-chain withdrawal. To avoid the fee eating into small profits, set the threshold so each auto-withdrawal sweeps a meaningful amount (e.g. $20+). The fee is charged by the exchange — not QuantumVault.
+                      </span>
+                    </p>
+                  )}
                 </div>
 
                 {/* Auto Top-Up Toggle */}
