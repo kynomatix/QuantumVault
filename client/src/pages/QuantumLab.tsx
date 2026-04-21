@@ -759,6 +759,8 @@ export default function QuantumLab() {
           } else if (jobRes.status === 404) {
             console.log(`[AutoReconnect] Run ${ar.id} no longer active`);
             break;
+          } else {
+            console.log(`[AutoReconnect] Run ${ar.id} unexpected status ${jobRes.status} (attempt ${i + 1}/${maxAttempts})`);
           }
         } catch (err) {
           console.log(`[AutoReconnect] /runs/${ar.id}/job attempt ${i + 1} error:`, err);
