@@ -86,6 +86,25 @@ export async function ensureSchema() {
          EXCEPTION WHEN duplicate_object THEN NULL; END;
          ALTER TABLE trading_bots ALTER COLUMN active_protocol SET NOT NULL;
        END $$`,
+
+      // --- Clone the two native-engine community strategies (SBR v1 and
+      // Adaptive Regime V3.8) from the BuhE wallet to the AqTT wallet.
+      // Idempotent: NOT EXISTS guard means re-running is a no-op once the
+      // AqTT-owned copies are present. Copies share Pine source, parsed
+      // inputs, groups, and strategy_settings (including nativeEngine=true),
+      // so the AqTT copies route through the same native engine path as
+      // the originals.
+      `INSERT INTO lab_strategies (user_id, name, description, pine_script, parsed_inputs, groups, strategy_settings)
+       SELECT 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
+              src.name, src.description, src.pine_script, src.parsed_inputs, src.groups, src.strategy_settings
+         FROM lab_strategies src
+        WHERE src.user_id = 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41'
+          AND src.name IN ('SBR v1 – Structure Break & Retest', 'Adaptive Regime V3.8')
+          AND NOT EXISTS (
+            SELECT 1 FROM lab_strategies dest
+             WHERE dest.user_id = 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez'
+               AND dest.name = src.name
+          )`,
     ];
     for (const sql of migrations) {
       await client.query(sql);
