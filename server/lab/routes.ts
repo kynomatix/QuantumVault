@@ -2386,23 +2386,8 @@ export function registerLabRoutes(app: Express): void {
       if (pumpQueueRunning || workerStarting) return;
 
       const HEARTBEAT_STALE_MS = 240_000;
-      const now = Date.now();
-
       const RUN_STARTUP_GRACE_MS = 120_000;
-      if (activeWorker) {
-        const silenceMs = lastWorkerMessageTime ? now - lastWorkerMessageTime : 0;
-        if (silenceMs <= HEARTBEAT_STALE_MS) return;
-        console.log(`[QuantumLab] Scheduler: active worker silent for ${Math.round(silenceMs / 1000)}s, watchdog should handle — skipping`);
-        return;
-      }
-
-      if (lastWorkerMessageTime && (now - lastWorkerMessageTime) < HEARTBEAT_STALE_MS) {
-        return;
-      }
-
-      if (lastRunStartedAt && (now - lastRunStartedAt) < RUN_STARTUP_GRACE_MS) {
-        return;
-      }
+      const now = Date.now();
 
       const runningInDb = await db.select().from(labOptimizationRuns).where(
         eq(labOptimizationRuns.status, "running")
@@ -2411,6 +2396,9 @@ export function registerLabRoutes(app: Express): void {
         const cp = run.checkpoint as any;
         const lastHb = cp?.lastHeartbeat as number | undefined;
         if (lastHb && (now - lastHb) < HEARTBEAT_STALE_MS) {
+          continue;
+        }
+        if (!lastHb && lastRunStartedAt && (now - lastRunStartedAt) < RUN_STARTUP_GRACE_MS) {
           continue;
         }
         const hasResults = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
@@ -2424,6 +2412,21 @@ export function registerLabRoutes(app: Express): void {
           await labStorage.failRun(run.id);
           console.log(`[QuantumLab] Scheduler: orphaned run ${run.id} → failed (no progress, no heartbeat)`);
         }
+      }
+
+      if (activeWorker) {
+        const silenceMs = lastWorkerMessageTime ? now - lastWorkerMessageTime : 0;
+        if (silenceMs <= HEARTBEAT_STALE_MS) return;
+        console.log(`[QuantumLab] Scheduler: active worker silent for ${Math.round(silenceMs / 1000)}s, watchdog should handle — skipping`);
+        return;
+      }
+
+      if (lastWorkerMessageTime && (now - lastWorkerMessageTime) < HEARTBEAT_STALE_MS) {
+        return;
+      }
+
+      if (lastRunStartedAt && (now - lastRunStartedAt) < RUN_STARTUP_GRACE_MS) {
+        return;
       }
 
       const allPaused = await db.select().from(labOptimizationRuns).where(
