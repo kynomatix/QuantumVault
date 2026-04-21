@@ -915,8 +915,8 @@ export default function QuantumLab() {
                   <div className="flex items-center gap-3">
                     <Loader2 className="w-5 h-5 animate-spin text-violet-400" />
                     <div>
-                      <p className="text-sm font-medium text-white">Reconnecting to server...</p>
-                      <p className="text-xs text-white/50">The server is restarting. Your run will resume automatically.</p>
+                      <p className="text-sm font-medium text-white">Reattaching to your run...</p>
+                      <p className="text-xs text-white/50">Your run is still active on the server. Reconnecting the live progress feed.</p>
                     </div>
                   </div>
                 </Card>
