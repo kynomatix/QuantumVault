@@ -1993,7 +1993,8 @@ export function registerLabRoutes(app: Express): void {
   });
 
   const QUEUE_CACHE_TTL_MS = 2000;
-  const queueCache = new Map<string, { data: any; expiresAt: number }>();
+  const QUEUE_STALE_GRACE_MS = 60_000;
+  const queueCache = new Map<string, { data: any; expiresAt: number; cachedAt: number }>();
   const queueInFlight = new Map<string, Promise<any>>();
 
   async function computeQueuePayload(walletAddress: string) {
@@ -2045,29 +2046,33 @@ export function registerLabRoutes(app: Express): void {
   }
 
   app.get("/api/lab/queue", requireLabAuth, async (req: Request, res: Response) => {
+    const walletAddress = (req as any).walletAddress as string;
+    const now = Date.now();
+    const cached = queueCache.get(walletAddress);
+    if (cached && cached.expiresAt > now) {
+      return res.json(cached.data);
+    }
+    let inFlight = queueInFlight.get(walletAddress);
+    if (!inFlight) {
+      inFlight = (async () => {
+        try {
+          const data = await computeQueuePayload(walletAddress);
+          queueCache.set(walletAddress, { data, expiresAt: Date.now() + QUEUE_CACHE_TTL_MS, cachedAt: Date.now() });
+          return data;
+        } finally {
+          queueInFlight.delete(walletAddress);
+        }
+      })();
+      queueInFlight.set(walletAddress, inFlight);
+    }
     try {
-      const walletAddress = (req as any).walletAddress as string;
-      const now = Date.now();
-      const cached = queueCache.get(walletAddress);
-      if (cached && cached.expiresAt > now) {
-        return res.json(cached.data);
-      }
-      let inFlight = queueInFlight.get(walletAddress);
-      if (!inFlight) {
-        inFlight = (async () => {
-          try {
-            const data = await computeQueuePayload(walletAddress);
-            queueCache.set(walletAddress, { data, expiresAt: Date.now() + QUEUE_CACHE_TTL_MS });
-            return data;
-          } finally {
-            queueInFlight.delete(walletAddress);
-          }
-        })();
-        queueInFlight.set(walletAddress, inFlight);
-      }
       const data = await inFlight;
       res.json(data);
     } catch (err: any) {
+      if (cached && now - cached.cachedAt < QUEUE_STALE_GRACE_MS) {
+        console.log(`[QuantumLab] /api/lab/queue refresh failed (${err.message}), serving stale (${Math.round((now - cached.cachedAt) / 1000)}s old)`);
+        return res.json({ ...cached.data, stale: true });
+      }
       res.status(500).json({ error: err.message });
     }
   });
