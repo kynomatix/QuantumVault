@@ -358,31 +358,58 @@ export function runBacktest(
       const atrNow = isNaN(slAtr[i]) ? close[i] * 0.02 : slAtr[i];
       let exited = false;
 
-      if (useTP1 && !position.tp1Hit && position.tp1Level !== 0) {
-        const hit = isLong ? close[i] >= position.tp1Level : close[i] <= position.tp1Level;
+      // Stop loss is checked FIRST against bar low/high (TradingView conservative
+      // semantics: when both SL and TP fall inside the same bar's range, SL fills
+      // first because intra-bar order is unknowable). Fill price gaps to open if
+      // the bar opened beyond the stop level.
+      {
+        const slHit = isLong ? low[i] <= position.stopLoss : high[i] >= position.stopLoss;
+        if (slHit) {
+          const fillPrice = isLong
+            ? Math.min(open[i], position.stopLoss)
+            : Math.max(open[i], position.stopLoss);
+          const reason = position.beActive ? "BE Stop" : position.trailActive ? "Trail Stop" : "Stop Loss";
+          closePosition(position, i, fillPrice, reason);
+          position = null;
+          exited = true;
+          barsSinceExit = -1;
+        }
+      }
+
+      if (position && !exited && useTP1 && !position.tp1Hit && position.tp1Level !== 0) {
+        const hit = isLong ? high[i] >= position.tp1Level : low[i] <= position.tp1Level;
         if (hit) {
-          doPartialClose(position, position.remainingQty * (tp1QtyPct / 100), close[i]);
+          const fillPrice = isLong
+            ? Math.max(open[i], position.tp1Level)
+            : Math.min(open[i], position.tp1Level);
+          doPartialClose(position, position.remainingQty * (tp1QtyPct / 100), fillPrice);
           position.tp1Hit = true;
         }
       }
 
-      if (useTP2 && !position.tp2Hit && position.tp1Hit && position.tp2Level !== 0) {
-        const hit = isLong ? close[i] >= position.tp2Level : close[i] <= position.tp2Level;
+      if (position && !exited && useTP2 && !position.tp2Hit && position.tp1Hit && position.tp2Level !== 0) {
+        const hit = isLong ? high[i] >= position.tp2Level : low[i] <= position.tp2Level;
         if (hit) {
-          doPartialClose(position, position.remainingQty * (tp2QtyPct / 100), close[i]);
+          const fillPrice = isLong
+            ? Math.max(open[i], position.tp2Level)
+            : Math.min(open[i], position.tp2Level);
+          doPartialClose(position, position.remainingQty * (tp2QtyPct / 100), fillPrice);
           position.tp2Hit = true;
         }
       }
 
-      if (useTP3 && !position.tp3Hit && position.tp2Hit && position.tp3Level !== 0) {
-        const hit = isLong ? close[i] >= position.tp3Level : close[i] <= position.tp3Level;
+      if (position && !exited && useTP3 && !position.tp3Hit && position.tp2Hit && position.tp3Level !== 0) {
+        const hit = isLong ? high[i] >= position.tp3Level : low[i] <= position.tp3Level;
         if (hit) {
-          doPartialClose(position, position.remainingQty * (tp3QtyPct / 100), close[i]);
+          const fillPrice = isLong
+            ? Math.max(open[i], position.tp3Level)
+            : Math.min(open[i], position.tp3Level);
+          doPartialClose(position, position.remainingQty * (tp3QtyPct / 100), fillPrice);
           position.tp3Hit = true;
         }
       }
 
-      if (position.remainingQty <= 0.001) {
+      if (position && position.remainingQty <= 0.001) {
         const tpLabel = position.tp3Hit ? "TP3" : position.tp2Hit ? "TP2" : "TP1";
         const avgExitPnlPct = position.direction === "long"
           ? ((close[i] - position.entryPrice) / position.entryPrice) * 100
