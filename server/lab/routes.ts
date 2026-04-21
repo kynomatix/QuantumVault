@@ -1992,50 +1992,81 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
+  const QUEUE_CACHE_TTL_MS = 2000;
+  const queueCache = new Map<string, { data: any; expiresAt: number }>();
+  const queueInFlight = new Map<string, Promise<any>>();
+
+  async function computeQueuePayload(walletAddress: string) {
+    const queued = await labStorage.getQueuedRuns(walletAddress);
+    const strategyIds = [...new Set(queued.map(r => r.strategyId))];
+    const strategyNames: Record<number, string> = {};
+    for (const sid of strategyIds) {
+      const strat = await labStorage.getStrategy(sid);
+      if (strat) strategyNames[sid] = strat.name;
+    }
+    const items = queued.map(r => {
+      const snapshot = r.configSnapshot as any;
+      return {
+        id: r.id,
+        strategyId: r.strategyId,
+        type: snapshot?.type || "new",
+        tickers: r.tickers,
+        timeframes: r.timeframes,
+        strategyName: strategyNames[r.strategyId] || null,
+        queueOrder: r.queueOrder,
+        createdAt: r.createdAt,
+        mode: r.mode,
+        sourceRunId: snapshot?.sourceRunId || null,
+        targetTicker: snapshot?.targetTicker || null,
+        targetTimeframe: snapshot?.targetTimeframe || null,
+      };
+    });
+    let activeRun: any = null;
+    const activeRunRows = await db.select().from(labOptimizationRuns)
+      .where(and(eq(labOptimizationRuns.userId, walletAddress), inArray(labOptimizationRuns.status, ["running", "paused"])))
+      .orderBy(desc(labOptimizationRuns.id)).limit(1);
+    if (activeRunRows.length > 0) {
+      const ar = activeRunRows[0];
+      if (!strategyNames[ar.strategyId]) {
+        const strat = await labStorage.getStrategy(ar.strategyId);
+        if (strat) strategyNames[ar.strategyId] = strat.name;
+      }
+      activeRun = {
+        id: ar.id,
+        strategyId: ar.strategyId,
+        tickers: ar.tickers,
+        timeframes: ar.timeframes,
+        status: ar.status,
+        mode: ar.mode,
+        strategyName: strategyNames[ar.strategyId] || null,
+      };
+    }
+    return { items, activeRun };
+  }
+
   app.get("/api/lab/queue", requireLabAuth, async (req: Request, res: Response) => {
     try {
-      const walletAddress = (req as any).walletAddress;
-      const queued = await labStorage.getQueuedRuns(walletAddress);
-      const strategyIds = [...new Set(queued.map(r => r.strategyId))];
-      const strategyNames: Record<number, string> = {};
-      for (const sid of strategyIds) {
-        const strat = await labStorage.getStrategy(sid);
-        if (strat) strategyNames[sid] = strat.name;
+      const walletAddress = (req as any).walletAddress as string;
+      const now = Date.now();
+      const cached = queueCache.get(walletAddress);
+      if (cached && cached.expiresAt > now) {
+        return res.json(cached.data);
       }
-      const items = queued.map(r => {
-        const snapshot = r.configSnapshot as any;
-        return {
-          id: r.id,
-          strategyId: r.strategyId,
-          type: snapshot?.type || "new",
-          tickers: r.tickers,
-          timeframes: r.timeframes,
-          strategyName: strategyNames[r.strategyId] || null,
-          queueOrder: r.queueOrder,
-          createdAt: r.createdAt,
-          mode: r.mode,
-          sourceRunId: snapshot?.sourceRunId || null,
-          targetTicker: snapshot?.targetTicker || null,
-          targetTimeframe: snapshot?.targetTimeframe || null,
-        };
-      });
-      let activeRun: any = null;
-      const activeRunRows = await db.select().from(labOptimizationRuns)
-        .where(and(eq(labOptimizationRuns.userId, walletAddress), inArray(labOptimizationRuns.status, ["running", "paused"])))
-        .orderBy(desc(labOptimizationRuns.id)).limit(1);
-      if (activeRunRows.length > 0) {
-        const ar = activeRunRows[0];
-        activeRun = {
-          id: ar.id,
-          strategyId: ar.strategyId,
-          tickers: ar.tickers,
-          timeframes: ar.timeframes,
-          status: ar.status,
-          mode: ar.mode,
-          strategyName: strategyNames[ar.strategyId] || null,
-        };
+      let inFlight = queueInFlight.get(walletAddress);
+      if (!inFlight) {
+        inFlight = (async () => {
+          try {
+            const data = await computeQueuePayload(walletAddress);
+            queueCache.set(walletAddress, { data, expiresAt: Date.now() + QUEUE_CACHE_TTL_MS });
+            return data;
+          } finally {
+            queueInFlight.delete(walletAddress);
+          }
+        })();
+        queueInFlight.set(walletAddress, inFlight);
       }
-      res.json({ items, activeRun });
+      const data = await inFlight;
+      res.json(data);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
