@@ -255,7 +255,9 @@ export function runBacktest(
 
   const trades: LabTradeRecord[] = [];
   const equityValues: number[] = new Array(n);
+  const equityIntrabarWorst: number[] = new Array(n);
   let equity = config.initialCapital;
+  let pendingExit: { reason: string } | null = null;
 
   interface Position {
     direction: "long" | "short";
@@ -323,6 +325,18 @@ export function runBacktest(
   }
 
   for (let i = 0; i < n; i++) {
+    // Indicator-based exits queued on the previous bar fire at this bar's open
+    // (matching Pine Script's process_orders_on_close=false semantics: orders
+    // placed at bar close fill at the next bar's open).
+    if (pendingExit !== null && position !== null && i > 0) {
+      closePosition(position, i, open[i], pendingExit.reason);
+      position = null;
+      barsSinceExit = -1;
+      pendingExit = null;
+    } else if (pendingExit !== null && position === null) {
+      pendingExit = null;
+    }
+
     if (pendingEntry !== null && i > 0) {
       const fillPrice = open[i];
       position = {
@@ -349,6 +363,7 @@ export function runBacktest(
 
     if (i < warmup) {
       equityValues[i] = equity;
+      equityIntrabarWorst[i] = equity;
       continue;
     }
 
@@ -376,35 +391,38 @@ export function runBacktest(
         }
       }
 
+      // TP1/TP2/TP3 are independent limit orders in Pine — each fires on its own
+      // price level regardless of whether earlier TPs hit. Each closes a fraction
+      // of the ORIGINAL position size (not the remaining size).
       if (position && !exited && useTP1 && !position.tp1Hit && position.tp1Level !== 0) {
         const hit = isLong ? high[i] >= position.tp1Level : low[i] <= position.tp1Level;
         if (hit) {
           const fillPrice = isLong
             ? Math.max(open[i], position.tp1Level)
             : Math.min(open[i], position.tp1Level);
-          doPartialClose(position, position.remainingQty * (tp1QtyPct / 100), fillPrice);
+          doPartialClose(position, Math.min(tp1QtyPct / 100, position.remainingQty), fillPrice);
           position.tp1Hit = true;
         }
       }
 
-      if (position && !exited && useTP2 && !position.tp2Hit && position.tp1Hit && position.tp2Level !== 0) {
+      if (position && !exited && useTP2 && !position.tp2Hit && position.tp2Level !== 0) {
         const hit = isLong ? high[i] >= position.tp2Level : low[i] <= position.tp2Level;
         if (hit) {
           const fillPrice = isLong
             ? Math.max(open[i], position.tp2Level)
             : Math.min(open[i], position.tp2Level);
-          doPartialClose(position, position.remainingQty * (tp2QtyPct / 100), fillPrice);
+          doPartialClose(position, Math.min(tp2QtyPct / 100, position.remainingQty), fillPrice);
           position.tp2Hit = true;
         }
       }
 
-      if (position && !exited && useTP3 && !position.tp3Hit && position.tp2Hit && position.tp3Level !== 0) {
+      if (position && !exited && useTP3 && !position.tp3Hit && position.tp3Level !== 0) {
         const hit = isLong ? high[i] >= position.tp3Level : low[i] <= position.tp3Level;
         if (hit) {
           const fillPrice = isLong
             ? Math.max(open[i], position.tp3Level)
             : Math.min(open[i], position.tp3Level);
-          doPartialClose(position, position.remainingQty * (tp3QtyPct / 100), fillPrice);
+          doPartialClose(position, Math.min(tp3QtyPct / 100, position.remainingQty), fillPrice);
           position.tp3Hit = true;
         }
       }
@@ -479,49 +497,40 @@ export function runBacktest(
         }
       }
 
-      if (position && !exited) {
-        const slHit = isLong ? close[i] <= position.stopLoss : close[i] >= position.stopLoss;
-        if (slHit) {
-          const reason = position.beActive ? "BE Stop" : position.trailActive ? "Trail Stop" : "Stop Loss";
-          closePosition(position, i, close[i], reason);
-          position = null;
-          exited = true;
-          barsSinceExit = -1;
-        }
-      }
-
-      if (position && !exited) {
+      // Indicator-based exits are evaluated on bar close but the order is
+      // queued and fills at the NEXT bar's open (Pine process_orders_on_close=false).
+      // Position remains open through end of this bar; pendingExit fires at top of
+      // next bar. SL/TP price-triggered exits already executed above for this bar.
+      if (position && !exited && pendingExit === null) {
         if (exitOnMomFlip) {
           const momBearish = !isNaN(mom[i]) && mom[i] < 0;
           const momFall = !isNaN(mom[i]) && !isNaN(mom[i - 1]) && mom[i] < mom[i - 1];
           const momBullish = !isNaN(mom[i]) && mom[i] > 0;
           const momRise = !isNaN(mom[i]) && !isNaN(mom[i - 1]) && mom[i] > mom[i - 1];
-          if (isLong && momBearish && momFall) { closePosition(position, i, close[i], "Mom Flip"); position = null; exited = true; barsSinceExit = -1; }
-          if (!exited && !isLong && momBullish && momRise) { closePosition(position!, i, close[i], "Mom Flip"); position = null; exited = true; barsSinceExit = -1; }
+          if (isLong && momBearish && momFall) pendingExit = { reason: "Mom Flip" };
+          if (pendingExit === null && !isLong && momBullish && momRise) pendingExit = { reason: "Mom Flip" };
         }
 
-        if (!exited && exitOnHullFlip && hull) {
+        if (pendingExit === null && exitOnHullFlip && hull) {
           const hullBull = !isNaN(hull[i]) && !isNaN(hull[i - 2]) && hull[i] - hull[i - 2] > 0;
           const hullBear = !isNaN(hull[i]) && !isNaN(hull[i - 2]) && hull[i] - hull[i - 2] < 0;
-          if (isLong && hullBear) { closePosition(position!, i, close[i], "Hull Flip"); position = null; exited = true; barsSinceExit = -1; }
-          if (!exited && !isLong && hullBull) { closePosition(position!, i, close[i], "Hull Flip"); position = null; exited = true; barsSinceExit = -1; }
+          if (isLong && hullBear) pendingExit = { reason: "Hull Flip" };
+          if (pendingExit === null && !isLong && hullBull) pendingExit = { reason: "Hull Flip" };
         }
 
-        if (!exited && exitOnResqueeze) {
-          if (sqz[i] && i > 0 && !sqz[i - 1]) {
-            closePosition(position!, i, close[i], "Re-Squeeze"); position = null; exited = true; barsSinceExit = -1;
-          }
+        if (pendingExit === null && exitOnResqueeze) {
+          if (sqz[i] && i > 0 && !sqz[i - 1]) pendingExit = { reason: "Re-Squeeze" };
         }
 
-        if (!exited && exitOnRsiExtreme && useRsi && rsiVals) {
-          if (isLong && !isNaN(rsiVals[i]) && rsiVals[i] >= rsiOB) { closePosition(position!, i, close[i], "RSI OB"); position = null; exited = true; barsSinceExit = -1; }
-          if (!exited && !isLong && !isNaN(rsiVals[i]) && rsiVals[i] <= rsiOS) { closePosition(position!, i, close[i], "RSI OS"); position = null; exited = true; barsSinceExit = -1; }
+        if (pendingExit === null && exitOnRsiExtreme && useRsi && rsiVals) {
+          if (isLong && !isNaN(rsiVals[i]) && rsiVals[i] >= rsiOB) pendingExit = { reason: "RSI OB" };
+          if (pendingExit === null && !isLong && !isNaN(rsiVals[i]) && rsiVals[i] <= rsiOS) pendingExit = { reason: "RSI OS" };
         }
 
-        if (!exited && exitOnAdxDrop && useAdx && adxVals) {
+        if (pendingExit === null && exitOnAdxDrop && useAdx && adxVals) {
           if (!isNaN(adxVals[i]) && !isNaN(adxVals[i - 1]) &&
               adxVals[i] < adxDropLevel && adxVals[i - 1] >= adxDropLevel) {
-            closePosition(position!, i, close[i], "ADX Drop"); position = null; exited = true; barsSinceExit = -1;
+            pendingExit = { reason: "ADX Drop" };
           }
         }
       }
@@ -539,6 +548,7 @@ export function runBacktest(
       barsSinceExit++;
       if (barsSinceExit < cooldownBars || !inDateRange) {
         equityValues[i] = equity;
+        equityIntrabarWorst[i] = equity;
         continue;
       }
 
@@ -631,14 +641,28 @@ export function runBacktest(
         ? ((close[i] - position.entryPrice) / position.entryPrice) * position.remainingQty * config.positionSize
         : ((position.entryPrice - close[i]) / position.entryPrice) * position.remainingQty * config.positionSize;
       equityValues[i] = equity + unrealized;
+      // Intrabar worst-case equity: long position priced at bar low, short at bar high.
+      // This captures the deepest mark-to-market drawdown that occurred during the bar
+      // for any open position — TradingView reports this as "Max equity drawdown (intrabar)".
+      const worstPrice = dir === "long" ? low[i] : high[i];
+      const worstUnrealized = dir === "long"
+        ? ((worstPrice - position.entryPrice) / position.entryPrice) * position.remainingQty * config.positionSize
+        : ((position.entryPrice - worstPrice) / position.entryPrice) * position.remainingQty * config.positionSize;
+      equityIntrabarWorst[i] = equity + worstUnrealized;
     } else {
       equityValues[i] = equity;
+      equityIntrabarWorst[i] = equity;
     }
   }
 
   if (position) {
     const lastClose = close[n - 1];
-    closePosition(position, n - 1, lastClose, "Open Position");
+    // If an indicator-based exit was queued on the final bar, there is no next
+    // bar to fill at the open — preserve the queued reason on the forced close
+    // so end-of-test exit-reason stats stay aligned with Pine.
+    const finalReason = pendingExit !== null ? pendingExit.reason : "Open Position";
+    closePosition(position, n - 1, lastClose, finalReason);
+    pendingExit = null;
   }
 
   let winCount = 0;
@@ -654,12 +678,17 @@ export function runBacktest(
   }
   const netProfitPercent = ((equity - config.initialCapital) / config.initialCapital) * 100;
 
+  // Drawdown is computed against running peak equity, comparing to the bar's
+  // intrabar worst (using bar low for longs / high for shorts). This matches
+  // TradingView's "Max equity drawdown (intrabar)" reading rather than the
+  // close-to-close-only number, which understates true risk.
   let maxEquity = config.initialCapital;
   let maxDrawdown = 0;
   for (let i = 0; i < n; i++) {
-    const eq = equityValues[i];
-    if (eq > maxEquity) maxEquity = eq;
-    const dd = ((maxEquity - eq) / maxEquity) * 100;
+    const eqClose = equityValues[i];
+    const eqWorst = equityIntrabarWorst[i] ?? eqClose;
+    if (eqClose > maxEquity) maxEquity = eqClose;
+    const dd = ((maxEquity - eqWorst) / maxEquity) * 100;
     if (dd > maxDrawdown) maxDrawdown = dd;
   }
 
