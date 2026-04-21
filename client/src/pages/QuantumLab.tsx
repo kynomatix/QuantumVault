@@ -721,7 +721,8 @@ export default function QuantumLab() {
 
   useEffect(() => {
     const ar = queueBadgeData?.activeRun;
-    if (!ar || activeJobId) return;
+    if (!ar) return;
+    if (activeJobId && activeRunIdRef.current === ar.id) return;
     if (ar.status !== "running" && ar.status !== "paused") return;
     if (autoReconnectingRef.current && lastReconnectRunIdRef.current === ar.id) return;
 
