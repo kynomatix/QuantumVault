@@ -458,8 +458,10 @@ export default function QuantumLab() {
 
     async function pollForNewJob() {
       if (!isMounted) return;
-      setSseReconnecting(true);
       console.log(`[SSE] Entering reconnect poll mode for run ${activeRunIdRef.current}`);
+      const overlayDelayMs = 7000;
+      const overlayTimer = setTimeout(() => { if (isMounted) setSseReconnecting(true); }, overlayDelayMs);
+      const clearOverlay = () => { clearTimeout(overlayTimer); if (isMounted) setSseReconnecting(false); };
       const pollStart = Date.now();
 
       while (isMounted && Date.now() - pollStart < MAX_POLL_DURATION_MS) {
@@ -474,7 +476,7 @@ export default function QuantumLab() {
               const jobData = await safeResponseJson(jobRes);
               if (jobData.jobId && isMounted) {
                 console.log(`[SSE] Reconnected to job ${jobData.jobId} for run ${runId}`);
-                setSseReconnecting(false);
+                clearOverlay();
                 if (jobData.jobId !== currentJobId) {
                   setActiveJobId(jobData.jobId);
                 } else {
@@ -504,7 +506,7 @@ export default function QuantumLab() {
                 const jobData2 = await safeResponseJson(jobRes2);
                 if (jobData2.jobId && isMounted) {
                   console.log(`[SSE] Found job ${jobData2.jobId} for active run ${activeRun.id}`);
-                  setSseReconnecting(false);
+                  clearOverlay();
                   setActiveRunId(activeRun.id);
                   setActiveJobId(jobData2.jobId);
                   return;
@@ -522,7 +524,7 @@ export default function QuantumLab() {
       }
 
       if (!isMounted) return;
-      setSseReconnecting(false);
+      clearOverlay();
 
       try {
         const runsRes = await fetch("/api/lab/runs", { credentials: "include" });
@@ -531,13 +533,15 @@ export default function QuantumLab() {
           const sortedRuns = [...runs].sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
           const activeRun = sortedRuns.find((r: any) => r.status === "running" || r.status === "paused");
           if (activeRun) {
-            toast({ title: "Connection lost", description: "Run is still active. Refresh the page to reconnect.", variant: "default" });
+            toast({ title: "Reconnect timed out", description: "Your run is still active on the server. Open the queue tab to reattach.", variant: "default" });
           } else {
-            const matchedRun = sortedRuns.find((r: any) => r.status === "paused" || r.status === "failed");
-            if (matchedRun?.status === "paused") {
-              toast({ title: "Server restarted", description: "Your run is paused and can be resumed from History.", variant: "default" });
+            const matchedRun = sortedRuns.find((r: any) => r.status === "paused" || r.status === "failed" || r.status === "complete");
+            if (matchedRun?.status === "complete") {
+              toast({ title: "Run finished", description: "Results are ready in the Results tab.", variant: "default" });
+            } else if (matchedRun?.status === "paused") {
+              toast({ title: "Run paused", description: "It can be resumed from History.", variant: "default" });
             } else {
-              toast({ title: "Optimization interrupted", description: "The server restarted. Check History for details.", variant: "destructive" });
+              toast({ title: "Run ended", description: "Check History for details.", variant: "default" });
             }
           }
         }
@@ -725,13 +729,16 @@ export default function QuantumLab() {
     lastReconnectRunIdRef.current = ar.id;
     const token = ++reconnectTokenRef.current;
     console.log(`[AutoReconnect] Detected ${ar.status} run ${ar.id}, attempting job lookup... (token=${token})`);
-    setSseReconnecting(true);
+    const overlayTimer = setTimeout(() => {
+      if (reconnectTokenRef.current === token) setSseReconnecting(true);
+    }, 7000);
+    const clearOverlay = () => { clearTimeout(overlayTimer); setSseReconnecting(false); };
 
     (async () => {
       const maxAttempts = (ar.status === "running" || ar.status === "paused") ? 36 : 3;
       const delayMs = 5000;
       for (let i = 0; i < maxAttempts; i++) {
-        if (reconnectTokenRef.current !== token) return;
+        if (reconnectTokenRef.current !== token) { clearTimeout(overlayTimer); return; }
         try {
           const jobRes = await fetch(`/api/lab/runs/${ar.id}/job`, { credentials: "include" });
           if (jobRes.ok) {
@@ -739,8 +746,10 @@ export default function QuantumLab() {
             if (jobData.jobId && reconnectTokenRef.current === token) {
               setActiveRunId(ar.id);
               setActiveJobId(jobData.jobId);
-              setSseReconnecting(false);
+              clearOverlay();
               console.log(`[AutoReconnect] Connected to job ${jobData.jobId} for run ${ar.id}`);
+            } else {
+              clearTimeout(overlayTimer);
             }
             autoReconnectingRef.current = false;
             return;
@@ -758,10 +767,12 @@ export default function QuantumLab() {
       if (reconnectTokenRef.current === token) {
         autoReconnectingRef.current = false;
         lastReconnectRunIdRef.current = null;
-        setSseReconnecting(false);
+        clearOverlay();
+      } else {
+        clearTimeout(overlayTimer);
       }
     })();
-    return () => { autoReconnectingRef.current = false; };
+    return () => { autoReconnectingRef.current = false; clearTimeout(overlayTimer); };
   }, [queueBadgeData, activeJobId, toast]);
   const queueCount = (queueBadgeData?.items?.length ?? 0) + (queueBadgeData?.activeRun ? 1 : 0);
 
