@@ -337,7 +337,7 @@ function ProblemSlide() {
     {
       icon: <Shield className="w-5 h-5" />,
       title: 'Security is still DeFi\'s weak spot',
-      desc: 'Bot platforms hold keys, expose seeds, or skip key recovery entirely. One mistake = total loss.',
+      desc: 'Bot tools either custody your funds CEX-style or hand you a raw seed to paste into a config — both end badly when something breaks.',
     },
     {
       icon: <Server className="w-5 h-5" />,
