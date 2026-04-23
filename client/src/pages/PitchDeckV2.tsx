@@ -387,8 +387,8 @@ function SolutionSlide() {
     },
     {
       icon: <ShieldCheck className="w-6 h-6" />,
-      title: 'Bank-grade security',
-      desc: 'Agent wallets encrypted with AES-256-GCM and fully restorable from seed — no lock-in, no lock-out.',
+      title: 'Wallet is your key',
+      desc: 'Your wallet is your login, treasury and security key — we never hold your funds. Agent wallets are encrypted with AES-256-GCM and fully restorable from seed: no lock-in, no lock-out.',
     },
     {
       icon: <Users className="w-6 h-6" />,
