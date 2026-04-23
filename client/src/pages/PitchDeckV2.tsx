@@ -175,49 +175,107 @@ function TitleSlide() {
 
 // ─────────────── 2. Founder Journey ───────────────
 function FounderJourneySlide() {
-  const beats = [
-    'Lived through the last cycle as a trader — watched perp DEXs go from niche to mainstream',
-    'Saw Hyperliquid, Aster and Drift redefine what a perp DEX could be',
-    'Felt the gap firsthand: powerful protocols, almost zero automation built for normal users',
-    'Built QuantumVault to be the trading cockpit I wished existed last cycle — and need this one',
+  const eras = [
+    {
+      years: '2011 – 2018',
+      title: 'Origin',
+      color: 'sky',
+      beats: [
+        'Bought my first Bitcoin at ~$7 in 2011 — captivated by the idea of decentralised money',
+        'Lost a wallet to SD-card corruption in 2015 — self-custody lesson #1, learned the hard way',
+        'Moved to Hong Kong in 2017, rebuilt the stack, watched the 2018 crash, started learning technical analysis',
+      ],
+    },
+    {
+      years: '2019 – 2022',
+      title: 'Going Deep',
+      color: 'violet',
+      beats: [
+        'Delta-neutral funding, orderflow trading, automated strategies in FTX QuantZone',
+        'Solana DeFi from the early days — Saber, Sunny, Francium, Tulip, Quarry — looping & leveraged yield farming',
+        'Built a YouTube audience as kryptolytix; played DeFi on 14 chains, kept coming back to Solana for UX',
+        'Luna → FTX → Mango drain reinforced self-custody lesson #2',
+      ],
+    },
+    {
+      years: '2023 – 2025',
+      title: 'Building',
+      color: 'fuchsia',
+      beats: [
+        'TradingView + Pine Script bots — mechanical rules, emotion out, the only way to survive long-term',
+        'Worked with other Solana projects through 2024, shipped real product, learned how things actually get built',
+        '2025: first QuantumVault attempt — early Claude, too ambitious, shelved; built a pump.fun-style app on Kaspa L2 to stay sharp',
+        'Became a Drift Ambassador and started producing content for the protocol',
+      ],
+    },
+    {
+      years: '2026',
+      title: 'QuantumVault, For Real',
+      color: 'amber',
+      beats: [
+        'Daughter born late 2025 — trade automation went from "cool" to "necessary"',
+        'Went all-in Jan 2026, shipped on Drift with referral integration baked into account creation',
+        'Drift $280M hack hit one month later — refactored to a protocol-agnostic adapter architecture in days',
+        'Pacifica is now the primary venue; smart routing across adapters and a Lulo-style portfolio Vaults layer are next',
+      ],
+    },
   ];
+
+  const colorMap: Record<string, { border: string; bg: string; text: string; chip: string }> = {
+    sky:     { border: 'border-sky-400/30',     bg: 'bg-sky-500/[0.06]',     text: 'text-sky-300',     chip: 'bg-sky-500/15 border-sky-400/30' },
+    violet:  { border: 'border-violet-400/30',  bg: 'bg-violet-500/[0.06]',  text: 'text-violet-300',  chip: 'bg-violet-500/15 border-violet-400/30' },
+    fuchsia: { border: 'border-fuchsia-400/30', bg: 'bg-fuchsia-500/[0.06]', text: 'text-fuchsia-300', chip: 'bg-fuchsia-500/15 border-fuchsia-400/30' },
+    amber:   { border: 'border-amber-400/30',   bg: 'bg-amber-500/[0.06]',   text: 'text-amber-300',   chip: 'bg-amber-500/15 border-amber-400/30' },
+  };
 
   return (
     <Slide>
       <SectionBadge color="accent"><Sparkles className="w-4 h-4" /> Founder Journey</SectionBadge>
 
-      <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-6 text-center">
-        Why I'm Building This
+      <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
+        Why I'm The One To Build This
       </motion.h2>
 
-      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-10 text-center max-w-2xl">
-        A short, personal story about the last cycle — and the gap that shaped QuantumVault.
+      <motion.p variants={fadeIn} className="text-base md:text-lg text-muted-foreground mb-8 text-center max-w-3xl">
+        15 years of crypto. Three self-custody lessons. Two full cycles as a trader, builder and content creator.
       </motion.p>
 
-      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl w-full mb-8">
-        {beats.map((b, i) => (
-          <motion.div
-            key={i}
-            variants={fadeIn}
-            className="flex items-start gap-3 p-5 rounded-2xl bg-white/[0.03] border border-white/[0.07]"
-            data-testid={`text-founder-beat-${i}`}
-          >
-            <div className="w-8 h-8 rounded-lg bg-violet-500/15 border border-violet-500/30 flex items-center justify-center text-violet-300 flex-shrink-0 text-sm font-bold">
-              {i + 1}
-            </div>
-            <span className="text-sm md:text-base text-white/85">{b}</span>
-          </motion.div>
-        ))}
+      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-6xl w-full mb-6">
+        {eras.map((era, i) => {
+          const c = colorMap[era.color];
+          return (
+            <motion.div
+              key={i}
+              variants={fadeIn}
+              className={`p-5 rounded-2xl border ${c.border} ${c.bg}`}
+              data-testid={`card-era-${i}`}
+            >
+              <div className="flex items-baseline gap-3 mb-3">
+                <span className={`text-xs font-mono uppercase tracking-widest px-2 py-0.5 rounded border ${c.chip} ${c.text}`}>
+                  {era.years}
+                </span>
+                <h3 className={`text-lg md:text-xl font-bold ${c.text}`}>{era.title}</h3>
+              </div>
+              <ul className="space-y-1.5">
+                {era.beats.map((b, j) => (
+                  <li key={j} className="text-xs md:text-sm text-white/80 flex items-start gap-2 leading-relaxed">
+                    <span className={`${c.text} mt-1 flex-shrink-0`}>▸</span>
+                    <span>{b}</span>
+                  </li>
+                ))}
+              </ul>
+            </motion.div>
+          );
+        })}
       </motion.div>
 
       <motion.div
         variants={fadeIn}
-        className="max-w-3xl w-full p-5 rounded-2xl border border-dashed border-fuchsia-400/30 bg-fuchsia-500/[0.04] text-center"
+        className="max-w-4xl w-full px-6 py-4 rounded-2xl border border-white/[0.08] bg-white/[0.03] text-center"
       >
-        <div className="text-xs uppercase tracking-widest text-fuchsia-300 mb-2">Speaker Note</div>
-        <p className="text-sm text-white/70 italic">
-          This slide is a launchpad — speak to your own crypto journey, the perp DEX wave you watched, and why
-          closing this gap matters to you personally.
+        <p className="text-sm md:text-base text-white/85">
+          <span className="text-fuchsia-300 font-semibold">Mechanical, multi-protocol, non-custodial.</span>{' '}
+          Built by someone who's been on every side of this trade — and learned the hard way.
         </p>
       </motion.div>
     </Slide>
