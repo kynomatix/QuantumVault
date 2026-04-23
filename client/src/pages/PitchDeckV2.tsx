@@ -750,7 +750,7 @@ function AskSlide() {
   const asks = [
     { icon: <Users className="w-6 h-6" />, title: 'Early Users', desc: 'Onboard the first 100 active traders to QuantumVault on Pacifica.' },
     { icon: <DollarSign className="w-6 h-6" />, title: 'Strategic Capital', desc: 'Scale the protocol, extend QuantumLab, and fund a derivatives data-feed API budget — plugging directly into existing TradingView infrastructure to expand strategy complexity without additional engineering overhead.' },
-    { icon: <Rocket className="w-6 h-6" />, title: 'Ecosystem Partners', desc: 'Connections across Superteam, Pacifica and the Solana DeFi stack.' },
+    { icon: <Rocket className="w-6 h-6" />, title: 'Ecosystem Partners', desc: 'Introductions to other Solana perp venues — Phoenix (incoming), Flash Trade, Zeta — to plug into our protocol-agnostic adapter layer. Smart routing across venues helps bootstrap the smaller books while giving QV users best-execution by default.' },
   ];
 
   return (
