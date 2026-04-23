@@ -203,7 +203,7 @@ function FounderJourneySlide() {
       color: 'fuchsia',
       beats: [
         'TradingView + Pine Script bots — mechanical rules, emotion out, the only way to survive long-term',
-        'Worked with other Solana projects through 2024, shipped real product, learned how things actually get built',
+        'Worked with EVM/Solidity teams through 2024, shipped real product, learned how things actually get built',
         '2025: first QuantumVault attempt — early Claude, too ambitious, shelved; built a pump.fun-style app on Kaspa L2 to stay sharp',
         'Became a Drift Ambassador and started producing content for the protocol',
       ],
