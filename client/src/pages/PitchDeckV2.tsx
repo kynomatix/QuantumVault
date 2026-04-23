@@ -194,7 +194,7 @@ function FounderJourneySlide() {
         'Delta-neutral funding, orderflow trading, automated strategies in FTX QuantZone',
         'Solana DeFi from the early days — Saber, Sunny, Francium, Tulip, Quarry — looping & leveraged yield farming',
         'Built a YouTube audience as kryptolytix; played DeFi on 14 chains, kept coming back to Solana for UX',
-        'Luna → FTX → Mango drain reinforced self-custody lesson #2',
+        'Luna → Mango drain → FTX reinforced self-custody lesson #2',
       ],
     },
     {
