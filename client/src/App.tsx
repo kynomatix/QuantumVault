@@ -10,6 +10,7 @@ import AppPage from "@/pages/App";
 import DocsPage from "@/pages/Docs";
 import Analytics from "@/pages/Analytics";
 import PitchDeck from "@/pages/PitchDeck";
+import PitchDeckV2 from "@/pages/PitchDeckV2";
 import Admin from "@/pages/Admin";
 import QuantumLab from "@/pages/QuantumLab";
 
@@ -21,6 +22,7 @@ function Router() {
       <Route path="/docs" component={DocsPage} />
       <Route path="/analytics" component={Analytics} />
       <Route path="/pitch-deck" component={PitchDeck} />
+      <Route path="/pitch-deck-v2" component={PitchDeckV2} />
       <Route path="/admin" component={Admin} />
       <Route path="/quantumlab" component={QuantumLab} />
       <Route component={NotFound} />
