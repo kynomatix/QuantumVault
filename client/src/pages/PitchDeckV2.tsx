@@ -748,7 +748,7 @@ function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
 // ─────────────── 11. The Ask ───────────────
 function AskSlide() {
   const asks = [
-    { icon: <Users className="w-6 h-6" />, title: 'Early Users', desc: 'Onboard the first 100 active traders to QuantumVault on Pacifica.' },
+    { icon: <Users className="w-6 h-6" />, title: 'Early Users & Creators', desc: 'Onboard the first 100 active traders to QuantumVault, plus partnerships with content creators who specialise in trade automation — multiplying reach where the audience already lives.' },
     { icon: <DollarSign className="w-6 h-6" />, title: 'Strategic Capital', desc: 'Scale the protocol, extend QuantumLab, and fund a derivatives data-feed API budget — plugging directly into existing TradingView infrastructure to expand strategy complexity without additional engineering overhead.' },
     { icon: <Rocket className="w-6 h-6" />, title: 'Ecosystem Partners', desc: 'Introductions to other Solana perp venues — Phoenix (incoming), Flash Trade, Zeta — to plug into our protocol-agnostic adapter layer. Smart routing across venues helps bootstrap the smaller books while giving QV users best-execution by default.' },
   ];
