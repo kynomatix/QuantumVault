@@ -749,7 +749,7 @@ function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
 function AskSlide() {
   const asks = [
     { icon: <Users className="w-6 h-6" />, title: 'Early Users', desc: 'Onboard the first 100 active traders to QuantumVault on Pacifica.' },
-    { icon: <DollarSign className="w-6 h-6" />, title: 'Strategic Capital', desc: 'Funding to extend QuantumLab, expand markets, and scale infra.' },
+    { icon: <DollarSign className="w-6 h-6" />, title: 'Strategic Capital', desc: 'Scale the protocol, extend QuantumLab, and fund a derivatives data-feed API budget — plugging directly into existing TradingView infrastructure to expand strategy complexity without additional engineering overhead.' },
     { icon: <Rocket className="w-6 h-6" />, title: 'Ecosystem Partners', desc: 'Connections across Superteam, Pacifica and the Solana DeFi stack.' },
   ];
 
