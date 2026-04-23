@@ -395,6 +395,11 @@ function SolutionSlide() {
       title: 'Creators get paid',
       desc: 'Strategy authors set a 0–10% profit share on their public bots — followers copy-trade, creators earn a kickback for the work. No CEX gatekeeper deciding whose strategies are allowed.',
     },
+    {
+      icon: <PiggyBank className="w-6 h-6" />,
+      title: 'Auto profit withdrawal',
+      desc: 'Profits sweep off the venue back to your wallet at thresholds you set — bank wins, not the house. When Drift was drained, the auto-swept profits in our agent wallet were what survived. Tomorrow that same capital flows into QuantumVault Vaults to be put back to work.',
+    },
   ];
 
   return (
@@ -408,7 +413,7 @@ function SolutionSlide() {
         Sophistication of a CEX. Custody of DeFi. Built for the new perp DEX era.
       </motion.p>
 
-      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-3 gap-5 max-w-5xl w-full mb-8">
+      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 max-w-6xl w-full mb-8">
         {pillars.map((p, i) => (
           <motion.div
             key={i}
