@@ -69,13 +69,23 @@ async function detectOnChainClose(
     const closeSide = positionSide === 'long' ? 'short' : 'long';
     const absSize = Math.abs(dbBaseSize);
 
+    // For Pacifica external_key bots (where each bot has its own subaccount key),
+    // the funded "account" on Pacifica IS the bot subaccount key itself — the
+    // agent key is just a delegated signer with $0 balance. Querying with the
+    // agent key returns 200 with zeros and falsely trips the liquidation
+    // classifier. For Drift (no botSubaccountPublicKey) we keep the original
+    // agent+subaccountId behavior unchanged.
+    const readAccount = botSubaccountPublicKey || agentPublicKey;
+    const readSubaccountId = botSubaccountPublicKey ? undefined : undefined; // Pacifica direct-sub mode doesn't need subaccount_id; Drift path also passes undefined here for /account-style reads
+
+    let tradeHistoryFetchFailed = false;
     const fetchClosingFills = async (windowMs: number): Promise<TradeRecord[]> => {
       try {
         const startTime = Date.now() - windowMs;
-        const trades = await adapter.getTradeHistory(agentPublicKey, {
+        const trades = await adapter.getTradeHistory(readAccount, {
           limit: 200,
           startTime,
-          ...(botSubaccountPublicKey ? { subaccountId: botSubaccountPublicKey } : {}),
+          ...(readSubaccountId ? { subaccountId: readSubaccountId } : {}),
         });
         return trades
           .filter(t =>
@@ -84,6 +94,7 @@ async function detectOnChainClose(
           )
           .sort((a, b) => b.timestamp - a.timestamp);
       } catch (err) {
+        tradeHistoryFetchFailed = true;
         console.log(`[Reconcile] Trade history fetch failed for ${botId} (window=${windowMs}ms): ${err instanceof Error ? err.message : err}`);
         return [];
       }
@@ -161,9 +172,8 @@ async function detectOnChainClose(
 
       if (closeReason === 'external_close') {
         try {
-          const subAcct = botSubaccountPublicKey || undefined;
-          const accountInfo = await adapter.getAccountInfo(agentPublicKey, subAcct);
-          if (accountInfo.equity < 1 && accountInfo.balance < 1) {
+          const accountInfo = await adapter.getAccountInfo(readAccount, readSubaccountId);
+          if (accountInfo.exists !== false && accountInfo.equity < 1 && accountInfo.balance < 1) {
             closeReason = 'liquidation';
             console.log(`[Reconcile] Likely liquidation for bot ${botId}: account equity=$${accountInfo.equity.toFixed(2)}, balance=$${accountInfo.balance.toFixed(2)}`);
           }
@@ -180,9 +190,30 @@ async function detectOnChainClose(
       };
     }
 
+    // CRITICAL GUARD (Pacifica only): if we couldn't fetch trade history at
+    // all (e.g. Pacifica /account/trades 404 or transient API failure), we
+    // have no real evidence a close happened. Refuse to classify — preserve
+    // DB and let the next reconcile tick try again. This prevents phantom
+    // "liquidated" rows when the real close already executed but we can't
+    // verify it. Scoped to bots with botSubaccountPublicKey (Pacifica
+    // external_key path) because the Drift adapter intentionally throws
+    // NotSupportedError for getTradeHistory and relies on the account-info
+    // fallback below — applying this guard to Drift would suppress its
+    // legitimate close-detection paths.
+    if (tradeHistoryFetchFailed && botSubaccountPublicKey) {
+      console.log(`[Reconcile] Trade history unavailable for Pacifica bot ${botId} ${market} — refusing to classify close (preserving DB position to avoid phantom liquidation row)`);
+      return noDetection;
+    }
+
     try {
-      const subAcct = botSubaccountPublicKey || undefined;
-      const accountInfo = await adapter.getAccountInfo(agentPublicKey, subAcct);
+      const accountInfo = await adapter.getAccountInfo(readAccount, readSubaccountId);
+
+      // If the account read itself failed (404 sentinel), don't infer
+      // liquidation from zero balance — we have no signal at all.
+      if (accountInfo.exists === false) {
+        console.log(`[Reconcile] Account info unavailable for bot ${botId} ${market} (exists=false) — refusing to classify close`);
+        return noDetection;
+      }
 
       const tpPriceAbs = Number(riskConfig?.takeProfitPrice || 0);
       const slPriceAbs = Number(riskConfig?.stopLossPrice || 0);
@@ -295,37 +326,79 @@ export async function syncPositionFromOnChain(
   try {
     console.log(`[Sync] Force syncing bot ${botId} from on-chain (market=${market}, subaccount=${subAccountId}${botSubaccountPublicKey ? ', pacifica=' + botSubaccountPublicKey.slice(0,8) + '...' : ''})`);
     
-    let fetchResult;
-    if (botSubaccountPublicKey) {
-      try {
-        const positions = await getDefaultAdapter().getPositions(botSubaccountPublicKey);
-        fetchResult = { positions: positions.map(p => ({
-          marketIndex: 0,
-          market: p.internalSymbol,
-          baseAssetAmount: p.baseSize,
-          side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
-          entryPrice: p.entryPrice,
-          markPrice: p.markPrice,
-          unrealizedPnl: p.unrealizedPnl,
-          unrealizedPnlPercent: p.entryPrice > 0 && p.baseSize !== 0
-            ? ((p.unrealizedPnl / (Math.abs(p.baseSize) * p.entryPrice)) * 100)
-            : 0,
-        })), fetchFailed: false };
-      } catch (err) {
-        console.log(`[Sync] Bot subaccount position fetch failed: ${err instanceof Error ? err.message : err}`);
-        fetchResult = { positions: [], fetchFailed: true };
+    const fetchOnce = async () => {
+      if (botSubaccountPublicKey) {
+        try {
+          const positions = await getDefaultAdapter().getPositions(botSubaccountPublicKey);
+          return { positions: positions.map(p => ({
+            marketIndex: 0,
+            market: p.internalSymbol,
+            baseAssetAmount: p.baseSize,
+            side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
+            entryPrice: p.entryPrice,
+            markPrice: p.markPrice,
+            unrealizedPnl: p.unrealizedPnl,
+            unrealizedPnlPercent: p.entryPrice > 0 && p.baseSize !== 0
+              ? ((p.unrealizedPnl / (Math.abs(p.baseSize) * p.entryPrice)) * 100)
+              : 0,
+          })), fetchFailed: false };
+        } catch (err) {
+          console.log(`[Sync] Bot subaccount position fetch failed: ${err instanceof Error ? err.message : err}`);
+          return { positions: [], fetchFailed: true };
+        }
+      } else {
+        return await fetchPerpPositions(agentPublicKey, subAccountId);
       }
-    } else {
-      fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
-    }
+    };
+
+    let fetchResult = await fetchOnce();
     const normalizedMarket = normalizeMarket(market);
-    const onChainPos = fetchResult.positions.find(p => normalizeMarket(p.market) === normalizedMarket);
-    
+    let onChainPos = fetchResult.positions.find(p => normalizeMarket(p.market) === normalizedMarket);
+
     const dbPosition = await storage.getBotPosition(botId, market);
     const existingRealizedPnl = dbPosition ? parseFloat(dbPosition.realizedPnl) : 0;
     const existingFees = dbPosition ? parseFloat(dbPosition.totalFees) : 0;
     const previousBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
     const previousAvgEntry = dbPosition ? parseFloat(dbPosition.avgEntryPrice) : 0;
+
+    // STALE-READ GUARD: After a close/reduce trade, the protocol's positions
+    // endpoint may still return the pre-close position for a brief window
+    // (Pacifica in particular has propagation lag of a few seconds). If we
+    // overwrite the DB with that stale read, the next reconcile tick will see
+    // DB=full-size, on-chain=empty, and wrongly classify it as a liquidation.
+    // So: when the trade is reducing AND on-chain still mirrors the pre-trade
+    // size+side, retry the fetch a few times. If it still mirrors, skip the
+    // overwrite and let the trade-data fallback path compute the new state.
+    const normalizedTradeSide = tradeSide.toLowerCase();
+    const isReducingTrade = tradeSize > 0 && Math.abs(previousBaseSize) > 0.0001 && (
+      (previousBaseSize > 0 && normalizedTradeSide === 'short') ||
+      (previousBaseSize < 0 && normalizedTradeSide === 'long')
+    );
+    const stillMirrorsPrev = (pos: typeof onChainPos) => {
+      if (!pos) return false;
+      const sameSign = (previousBaseSize > 0 && pos.baseAssetAmount > 0) ||
+                       (previousBaseSize < 0 && pos.baseAssetAmount < 0);
+      const sizeRatio = Math.abs(pos.baseAssetAmount) / Math.abs(previousBaseSize);
+      return sameSign && sizeRatio >= 0.95;
+    };
+    if (isReducingTrade && stillMirrorsPrev(onChainPos)) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await new Promise(r => setTimeout(r, 1500));
+        const retry = await fetchOnce();
+        const retryPos = retry.positions.find(p => normalizeMarket(p.market) === normalizedMarket);
+        console.log(`[Sync] Stale-read guard attempt ${attempt}: on-chain size=${retryPos?.baseAssetAmount?.toFixed(4) ?? '0'} (previous=${previousBaseSize.toFixed(4)})`);
+        if (!stillMirrorsPrev(retryPos)) {
+          fetchResult = retry;
+          onChainPos = retryPos;
+          break;
+        }
+      }
+      if (stillMirrorsPrev(onChainPos)) {
+        console.log(`[Sync] On-chain still mirrors pre-close state after retries — skipping overwrite to prevent stale write. Falling back to trade-data computation.`);
+        fetchResult = { positions: [], fetchFailed: true };
+        onChainPos = undefined;
+      }
+    }
     
     if (fetchResult.fetchFailed && tradeSize > 0 && tradeFillPrice > 0) {
       console.log(`[Sync] Position fetch failed — using trade data as fallback`);
