@@ -325,7 +325,7 @@ function SolutionSlide() {
     {
       icon: <Bot className="w-6 h-6" />,
       title: 'CEX-feel automation',
-      desc: 'sendaifun agent auto-approves transactions so DeFi feels like Binance — without the custody.',
+      desc: 'VaultSigner — our in-house signing agent (inspired by sendai-fun) — auto-approves transactions so DeFi feels like Binance, without the custody.',
     },
     {
       icon: <ShieldCheck className="w-6 h-6" />,
@@ -555,6 +555,7 @@ function TechStackSlide() {
       items: [
         'React 19.2',
         'TypeScript',
+        'Vite 7',
         'Wouter',
         'TanStack React Query',
         'Tailwind CSS v4',
@@ -576,7 +577,7 @@ function TechStackSlide() {
     {
       icon: <Cpu className="w-5 h-5" />,
       title: 'Blockchain',
-      items: ['Solana Web3.js', 'SPL Token Support', 'Pacifica'],
+      items: ['Solana Web3.js', 'SPL Token Support', 'Anchor Framework', 'Pacifica', 'Drift Protocol SDK (legacy)'],
     },
     {
       icon: <Zap className="w-5 h-5" />,
