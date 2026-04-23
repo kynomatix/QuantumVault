@@ -38,7 +38,7 @@ import {
   Server,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import superteamHero from '@assets/image_1776904601248.png';
+const superteamHero = '/images/superteam-melbourne-hero.png';
 
 interface PlatformMetrics {
   tvl: number;
