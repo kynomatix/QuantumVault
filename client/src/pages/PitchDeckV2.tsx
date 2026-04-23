@@ -391,9 +391,9 @@ function SolutionSlide() {
       desc: 'Agent wallets encrypted with AES-256-GCM and fully restorable from seed — no lock-in, no lock-out.',
     },
     {
-      icon: <Wallet className="w-6 h-6" />,
-      title: 'Wallet as account',
-      desc: 'Your wallet is your login, your treasury, and your security key. We never hold your funds.',
+      icon: <Users className="w-6 h-6" />,
+      title: 'Creators get paid',
+      desc: 'Strategy authors set a 0–10% profit share on their public bots — followers copy-trade, creators earn a kickback for the work. No CEX gatekeeper deciding whose strategies are allowed.',
     },
   ];
 
@@ -711,19 +711,38 @@ function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
       <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
         Live on Mainnet
       </motion.h2>
-      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-12 text-center">
+      <motion.p variants={fadeIn} className="text-base md:text-lg text-muted-foreground mb-8 text-center">
         Real numbers, fetched live from QuantumVault
       </motion.p>
 
-      <motion.div variants={fadeIn} className="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-4xl w-full mb-8">
+      {/* Hero metric: cumulative trading volume */}
+      <motion.div
+        variants={fadeInScale}
+        className="max-w-3xl w-full p-8 rounded-3xl bg-gradient-to-br from-violet-500/15 via-fuchsia-500/10 to-violet-500/5 border border-fuchsia-400/30 text-center mb-6"
+        data-testid="metric-volume-hero"
+      >
+        <div className="flex items-center justify-center gap-2 text-fuchsia-300 mb-2">
+          <Activity className="w-5 h-5" />
+          <span className="text-xs uppercase tracking-widest font-semibold">Cumulative Trading Volume</span>
+        </div>
+        <div className="text-5xl md:text-7xl font-bold bg-gradient-to-r from-violet-200 via-fuchsia-200 to-violet-200 bg-clip-text text-transparent mb-2">
+          {metrics?.totalVolume ? formatCurrency(metrics.totalVolume) : '...'}
+        </div>
+        <p className="text-sm text-white/70 max-w-xl mx-auto">
+          Real, on-chain perpetual volume routed through QuantumVault by automated strategies — the kind of
+          persistent, programmatic flow venues compete to attract.
+        </p>
+      </motion.div>
+
+      <motion.div variants={fadeIn} className="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-4xl w-full mb-6">
         {stats.map((stat, i) => (
           <motion.div
             key={i}
             variants={fadeInScale}
-            className="p-6 rounded-2xl bg-gradient-to-br from-violet-500/10 to-fuchsia-500/5 border border-violet-500/20 text-center"
+            className="p-5 rounded-2xl bg-gradient-to-br from-violet-500/10 to-fuchsia-500/5 border border-violet-500/20 text-center"
           >
-            <div className="flex items-center justify-center text-violet-400 mb-3">{stat.icon}</div>
-            <div className="text-3xl md:text-4xl font-bold text-violet-300 mb-1" data-testid={stat.testId}>
+            <div className="flex items-center justify-center text-violet-400 mb-2">{stat.icon}</div>
+            <div className="text-2xl md:text-3xl font-bold text-violet-300 mb-1" data-testid={stat.testId}>
               {stat.value}
             </div>
             <div className="text-xs text-muted-foreground">{stat.label}</div>
@@ -748,7 +767,7 @@ function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
 // ─────────────── 11. The Ask ───────────────
 function AskSlide() {
   const asks = [
-    { icon: <Users className="w-6 h-6" />, title: 'Early Users & Creators', desc: 'Onboard the first 100 active traders to QuantumVault, plus partnerships with content creators who specialise in trade automation — multiplying reach where the audience already lives.' },
+    { icon: <Users className="w-6 h-6" />, title: 'Early Users & Creators', desc: 'Onboard the first 100 active traders, plus partnerships with content creators who specialise in trade automation. Our 0–10% creator profit-share lets them monetise strategies they share with their audience — multiplying reach where the audience already lives.' },
     { icon: <DollarSign className="w-6 h-6" />, title: 'Strategic Capital', desc: 'Scale the protocol, extend QuantumLab, and fund a derivatives data-feed API budget — plugging directly into existing TradingView infrastructure to expand strategy complexity without additional engineering overhead.' },
     { icon: <Rocket className="w-6 h-6" />, title: 'Ecosystem Partners', desc: 'Introductions to other Solana perp venues — Phoenix (incoming), Flash Trade, Zeta — to plug into our protocol-agnostic adapter layer. Smart routing across venues helps bootstrap the smaller books while giving QV users best-execution by default.' },
   ];
