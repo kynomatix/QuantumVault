@@ -104,21 +104,24 @@ function SectionBadge({ children, color = 'primary' }: { children: React.ReactNo
   );
 }
 
-// ─────────────── 1. Title / Event hero ───────────────
+// ─────────────── 1. Event hero (pure image) ───────────────
+function EventHeroSlide() {
+  return (
+    <Slide className="relative overflow-hidden p-0 items-stretch">
+      <img
+        src={superteamHero}
+        alt="Superteam Melbourne — Outback Frontier · QuantumVault"
+        className="w-full h-full object-contain bg-black"
+        data-testid="img-superteam-hero"
+      />
+    </Slide>
+  );
+}
+
+// ─────────────── 2. Title ───────────────
 function TitleSlide() {
   return (
-    <Slide className="text-center relative overflow-hidden p-0">
-      <div className="absolute inset-0">
-        <img
-          src={superteamHero}
-          alt="Superteam Melbourne — Outback Frontier"
-          className="w-full h-full object-cover"
-          data-testid="img-superteam-hero"
-        />
-        <div className="absolute inset-0 bg-gradient-to-b from-background/70 via-background/60 to-background/95" />
-        <div className="absolute inset-0 bg-gradient-to-r from-background/70 via-transparent to-background/70" />
-      </div>
-
+    <Slide className="text-center relative overflow-hidden">
       <GradientOrb className="w-[500px] h-[500px] -top-64 -left-64" />
       <GradientOrb className="w-[500px] h-[500px] -bottom-64 -right-64" color="accent" />
 
@@ -809,6 +812,7 @@ export default function PitchDeckV2() {
   });
 
   const slides = [
+    <EventHeroSlide key="event-hero" />,
     <TitleSlide key="title" />,
     <FounderJourneySlide key="founder" />,
     <MarketShiftSlide key="shift" />,
