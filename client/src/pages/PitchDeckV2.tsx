@@ -492,7 +492,7 @@ function MarketOpportunitySlide() {
           </div>
           <div className="flex flex-col md:flex-row md:items-baseline gap-1 md:gap-3" data-testid="text-som">
             <span className="text-violet-300 font-bold md:w-72">Serviceable Obtainable Market:</span>
-            <span className="text-sm md:text-base text-white/85">$50M automated trading segment</span>
+            <span className="text-sm md:text-base text-white/85">$300M+ monthly bot-routed volume on Pacifica — Pionex captured $1B+/day on CEX rails; we're the first serious bot platform on Pacifica's $10B/month rails</span>
           </div>
         </div>
       </motion.div>
