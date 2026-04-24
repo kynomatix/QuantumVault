@@ -955,7 +955,14 @@ async function run() {
     };
 
     const sharedArrays = pinePlan ? createSharedArrays(candles) : undefined;
-    const sharedIndicatorCache = pinePlan ? new Map<string, any>() : undefined;
+    // CORRECTNESS FIX: do NOT share the indicator cache across parameter combos.
+    // The Pine runtime's indicator cache key is derived from the argument variable
+    // NAME (e.g. "atr_len") rather than the resolved VALUE. Reusing a single cache
+    // across different parameter sets returns stale results from the first combo to
+    // every subsequent combo, making the optimizer effectively ignore parameter
+    // changes for any indicator that takes a parameter input. Each runBacktest call
+    // creates its own private cache when this is undefined (runtime.ts line ~400).
+    const sharedIndicatorCache: Map<string, any> | undefined = undefined;
 
     const defaultParams: Record<string, any> = {};
     for (const input of inputs) {
@@ -1015,7 +1022,6 @@ async function run() {
       send({ type: "combo-complete", combo: key, results: topForCombo });
 
       delete candlesByCombo[key];
-      sharedIndicatorCache?.clear();
       continue;
     }
 
@@ -1384,7 +1390,6 @@ async function run() {
     send({ type: "combo-complete", combo: key, results: topForCombo });
 
     delete candlesByCombo[key];
-    sharedIndicatorCache?.clear();
   }
 
   allResults.sort((a, b) => scoreResult(b) - scoreResult(a));
