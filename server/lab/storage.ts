@@ -725,6 +725,7 @@ export class LabDatabaseStorage implements ILabStorage {
       maxDrawdownPercent: labOptimizationResults.maxDrawdownPercent,
       profitFactor: labOptimizationResults.profitFactor,
       totalTrades: labOptimizationResults.totalTrades,
+      sharpeRatio: labOptimizationResults.sharpeRatio,
       params: labOptimizationResults.params,
     }).from(labOptimizationResults)
       .where(inArray(labOptimizationResults.runId, completedRuns))
@@ -753,6 +754,7 @@ export class LabDatabaseStorage implements ILabStorage {
       maxDrawdownPercent: r.maxDrawdownPercent,
       profitFactor: r.profitFactor,
       totalTrades: r.totalTrades,
+      sharpeRatio: r.sharpeRatio,
       params: r.params,
       levProfit: r._levProfit,
       leverage: r._lev,

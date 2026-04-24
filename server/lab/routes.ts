@@ -346,6 +346,7 @@ export function registerLabRoutes(app: Express): void {
           maxDrawdownPercent: r.maxDrawdownPercent,
           profitFactor: r.profitFactor,
           totalTrades: r.totalTrades,
+          sharpeRatio: r.sharpeRatio,
           params: r.params,
           trades: ((r.trades as any[]) ?? []).map((t: any) => ({
             direction: t.direction,
@@ -479,6 +480,7 @@ export function registerLabRoutes(app: Express): void {
         maxDrawdownPercent: r.maxDrawdownPercent,
         profitFactor: r.profitFactor,
         totalTrades: r.totalTrades,
+        sharpeRatio: r.sharpeRatio,
         params: r.params,
       }));
       res.json(slim);
