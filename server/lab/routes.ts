@@ -118,16 +118,28 @@ export function registerLabRoutes(app: Express): void {
           )
         `);
 
+        // Compute Sharpe ratio from trades for migration imports (mirrors storage.ts logic)
+        const importTrades: any[] = Array.isArray(data.trades) ? data.trades : [];
+        let importSharpe = 0;
+        if (importTrades.length >= 2) {
+          const returns = importTrades.map((t: any) => Number(t?.pnlPercent ?? 0));
+          const n = returns.length;
+          const mean = returns.reduce((s, r) => s + r, 0) / n;
+          const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / (n - 1);
+          const stdDev = Math.sqrt(variance);
+          importSharpe = stdDev > 0 ? Math.round((mean / stdDev) * 100) / 100 : 0;
+        }
+
         // Step 2: insert result linked to that run (idempotent — guarded by run_id + ticker + rank)
         await db.execute(sql`
           INSERT INTO lab_optimization_results
             (run_id, ticker, timeframe, rank, net_profit_percent, win_rate_percent,
-             max_drawdown_percent, profit_factor, total_trades, params, trades, equity_curve)
+             max_drawdown_percent, profit_factor, total_trades, sharpe_ratio, params, trades, equity_curve)
           SELECT
             r.id,
             ${data.ticker}, ${data.timeframe}, ${data.rank},
             ${data.net_profit_percent}, ${data.win_rate_percent}, ${data.max_drawdown_percent},
-            ${data.profit_factor}, ${data.total_trades},
+            ${data.profit_factor}, ${data.total_trades}, ${importSharpe},
             ${JSON.stringify(data.params)}::jsonb,
             ${JSON.stringify(data.trades)}::jsonb,
             ${JSON.stringify(data.equity_curve)}::jsonb

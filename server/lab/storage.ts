@@ -12,6 +12,16 @@ import { randomUUID } from "crypto";
 
 const MAX_CONCURRENT_JOBS = 1;
 
+function calcSharpeFromTrades(trades: unknown): number {
+  if (!Array.isArray(trades) || trades.length < 2) return 0;
+  const returns = trades.map((t: any) => Number(t?.pnlPercent ?? 0));
+  const n = returns.length;
+  const mean = returns.reduce((s, r) => s + r, 0) / n;
+  const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / (n - 1);
+  const stdDev = Math.sqrt(variance);
+  return stdDev > 0 ? Math.round((mean / stdDev) * 100) / 100 : 0;
+}
+
 export interface LabJob {
   id: string;
   config: LabOptimizationConfig;
@@ -399,6 +409,7 @@ export class LabDatabaseStorage implements ILabStorage {
       maxDrawdownPercent: r.maxDrawdownPercent,
       profitFactor: r.profitFactor,
       totalTrades: r.totalTrades,
+      sharpeRatio: r.sharpeRatio ?? calcSharpeFromTrades(r.trades),
       params: r.params,
       trades: r.trades,
       equityCurve: r.equityCurve,
@@ -440,6 +451,7 @@ export class LabDatabaseStorage implements ILabStorage {
         maxDrawdownPercent: r.maxDrawdownPercent,
         profitFactor: r.profitFactor,
         totalTrades: r.totalTrades,
+        sharpeRatio: r.sharpeRatio ?? calcSharpeFromTrades(r.trades),
         params: r.params,
         trades: r.trades ?? [],
         equityCurve: r.equityCurve ?? [],

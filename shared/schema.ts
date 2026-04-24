@@ -970,6 +970,7 @@ export interface LabTradeRecord {
 export interface LabBacktestResult {
   ticker: string;
   timeframe: string;
+  sharpeRatio?: number;
   netProfitPercent: number;
   winRatePercent: number;
   maxDrawdownPercent: number;
