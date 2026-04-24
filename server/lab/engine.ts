@@ -678,6 +678,15 @@ export function runBacktest(
   }
   const netProfitPercent = ((equity - config.initialCapital) / config.initialCapital) * 100;
 
+  const tradeReturns = trades.map(t => t.pnlPercent);
+  let sharpeRatio = 0;
+  if (tradeReturns.length >= 2) {
+    const mean = tradeReturns.reduce((s, r) => s + r, 0) / tradeReturns.length;
+    const variance = tradeReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / (tradeReturns.length - 1);
+    const stdDev = Math.sqrt(variance);
+    sharpeRatio = stdDev > 0 ? Math.round((mean / stdDev) * 100) / 100 : 0;
+  }
+
   // Drawdown is computed against running peak equity, comparing to the bar's
   // intrabar worst (using bar low for longs / high for shorts). This matches
   // TradingView's "Max equity drawdown (intrabar)" reading rather than the
@@ -709,6 +718,7 @@ export function runBacktest(
     maxDrawdownPercent: Math.round(maxDrawdown * 100) / 100,
     profitFactor: grossLoss > 0 ? Math.round((grossProfit / grossLoss) * 100) / 100 : grossProfit > 0 ? 999 : 0,
     totalTrades: trades.length,
+    sharpeRatio,
     params,
     trades,
     equityCurve,

@@ -870,6 +870,7 @@ export const labOptimizationResults = pgTable("lab_optimization_results", {
   params: jsonb("params").notNull(),
   trades: jsonb("trades"),
   equityCurve: jsonb("equity_curve"),
+  sharpeRatio: real("sharpe_ratio"),
 });
 
 export const labInsightsReports = pgTable("lab_insights_reports", {

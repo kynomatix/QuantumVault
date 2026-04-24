@@ -47,15 +47,16 @@ import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema"
 type MainTab = "main" | "results" | "heatmap" | "insights";
 const CONSERVATIVE_FALLBACK = 5;
 
-type SortKey = "netProfitPercent" | "levProfit" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades";
+type SortKey = "netProfitPercent" | "levProfit" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades" | "sharpeRatio";
 type SortDir = "asc" | "desc";
-type RankingMode = "profit" | "winrate" | "balanced" | "conservative";
+type RankingMode = "profit" | "winrate" | "balanced" | "conservative" | "sharpe";
 
 const RANKING_LABELS: Record<RankingMode, string> = {
   profit: "Best Profit",
   winrate: "Best Win Rate",
   balanced: "Balanced",
   conservative: "Conservative",
+  sharpe: "Best Sharpe",
 };
 
 function calcParamCombinations(inputs: LabPineInput[]): number {
@@ -128,7 +129,7 @@ function formatCombinations(n: number): string {
   return n.toLocaleString();
 }
 
-function rankScore(r: { netProfitPercent: number; winRatePercent: number; maxDrawdownPercent: number; profitFactor: number }, mode: RankingMode): number {
+function rankScore(r: { netProfitPercent: number; winRatePercent: number; maxDrawdownPercent: number; profitFactor: number; sharpeRatio?: number | null }, mode: RankingMode): number {
   switch (mode) {
     case "profit":
       return r.netProfitPercent;
@@ -138,6 +139,8 @@ function rankScore(r: { netProfitPercent: number; winRatePercent: number; maxDra
       return r.netProfitPercent * 0.35 + r.winRatePercent * 0.25 + (100 - r.maxDrawdownPercent) * 0.20 + r.profitFactor * 10 * 0.20;
     case "conservative":
       return (100 - r.maxDrawdownPercent) * 0.40 + r.winRatePercent * 0.35 + r.profitFactor * 10 * 0.15 + r.netProfitPercent * 0.10;
+    case "sharpe":
+      return r.sharpeRatio ?? 0;
   }
 }
 
@@ -2742,6 +2745,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       const mult = sortDir === "desc" ? -1 : 1;
       if (sortKey === "maxDrawdownPercent") return (a[sortKey] - b[sortKey]) * -mult;
       if (sortKey === "levProfit") return (getLevProfit(a) - getLevProfit(b)) * mult;
+      if (sortKey === "sharpeRatio") return ((a.sharpeRatio ?? -Infinity) - (b.sharpeRatio ?? -Infinity)) * mult;
       return (a[sortKey] - b[sortKey]) * mult;
     });
     return arr;
@@ -2940,6 +2944,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                 <SortHeader label="Win Rate %" sortKey="winRatePercent" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="Max DD %" sortKey="maxDrawdownPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="PF" sortKey="profitFactor" current={sortKey} dir={sortDir} onClick={handleSort} />
+                <SortHeader label="Sharpe" sortKey="sharpeRatio" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="Trades" sortKey="totalTrades" current={sortKey} dir={sortDir} onClick={handleSort} />
                 {onRefine && <th className="w-8"></th>}
                 {strategy?.pineScript && <th className="w-8"></th>}
@@ -2973,6 +2978,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                       <td className={`py-2.5 px-2 text-right font-mono ${r.winRatePercent >= 50 ? "text-sky-400" : "text-indigo-400"}`}>{r.winRatePercent.toFixed(1)}%</td>
                       <td className={`py-2.5 px-2 text-right font-mono ${r.maxDrawdownPercent <= 30 ? "text-sky-400" : "text-purple-400"}`}>{r.maxDrawdownPercent.toFixed(1)}%</td>
                       <td className={`py-2.5 px-2 text-right font-mono ${r.profitFactor >= 1.5 ? "text-sky-400" : "text-white"}`}>{r.profitFactor.toFixed(2)}</td>
+                      <td className={`py-2.5 px-2 text-right font-mono ${r.sharpeRatio == null ? "text-white/30" : r.sharpeRatio >= 1 ? "text-sky-400" : r.sharpeRatio >= 0 ? "text-white/70" : "text-purple-400"}`}>{r.sharpeRatio != null ? r.sharpeRatio.toFixed(2) : "—"}</td>
                       <td className="py-2.5 px-2 text-right font-mono text-white/60">{r.totalTrades}</td>
                       {onRefine && (
                         <td className="py-2.5 px-2 text-center">
@@ -3038,6 +3044,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.winRatePercent >= 50 ? "text-sky-400/70" : "text-indigo-400/70"}`}>{sr.winRatePercent.toFixed(1)}%</td>
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.maxDrawdownPercent <= 30 ? "text-sky-400/70" : "text-purple-400/70"}`}>{sr.maxDrawdownPercent.toFixed(1)}%</td>
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.profitFactor >= 1.5 ? "text-sky-400/70" : "text-white/50"}`}>{sr.profitFactor.toFixed(2)}</td>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${sr.sharpeRatio == null ? "text-white/20" : sr.sharpeRatio >= 1 ? "text-sky-400/70" : sr.sharpeRatio >= 0 ? "text-white/40" : "text-purple-400/70"}`}>{sr.sharpeRatio != null ? sr.sharpeRatio.toFixed(2) : "—"}</td>
                           <td className="py-2 px-2 text-right font-mono text-xs text-white/40">{sr.totalTrades}</td>
                           {onRefine && <td></td>}
                           {strategy?.pineScript && (
@@ -4587,6 +4594,7 @@ function Top10Leaderboard({ strategyId, pineScript, strategyName }: { strategyId
               <th className="text-right py-2 px-2">Win Rate</th>
               <th className="text-right py-2 px-2">Max DD</th>
               <th className="text-right py-2 px-2">PF</th>
+              <th className="text-right py-2 px-2">Sharpe</th>
               <th className="text-right py-2 px-2">Trades</th>
               <th className="text-right py-2 px-2">Leverage</th>
               {pineScript && <th className="text-center py-2 px-2 w-8"></th>}
@@ -4609,6 +4617,7 @@ function Top10Leaderboard({ strategyId, pineScript, strategyName }: { strategyId
                   <td className="text-right py-2 px-2 text-white/60 tabular-nums">{r.winRatePercent.toFixed(1)}%</td>
                   <td className="text-right py-2 px-2 text-purple-400/70 tabular-nums">{r.maxDrawdownPercent.toFixed(1)}%</td>
                   <td className="text-right py-2 px-2 text-white/60 tabular-nums">{r.profitFactor.toFixed(2)}</td>
+                  <td className={`text-right py-2 px-2 tabular-nums ${r.sharpeRatio == null ? "text-white/30" : r.sharpeRatio >= 1 ? "text-sky-400" : r.sharpeRatio >= 0 ? "text-white/60" : "text-purple-400"}`}>{r.sharpeRatio != null ? r.sharpeRatio.toFixed(2) : "—"}</td>
                   <td className="text-right py-2 px-2 text-white/60 tabular-nums">{r.totalTrades}</td>
                   <td className="text-right py-2 px-2 text-violet-400 font-semibold">{r.leverage}x</td>
                   {pineScript && (
