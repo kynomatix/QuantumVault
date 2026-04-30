@@ -246,9 +246,9 @@ function MarketOpportunitySlide() {
       
       <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl w-full mb-12">
         {[
-          { value: "$3-5B", label: "DeFi Perps TVL", sub: "Growing 100%+ YoY" },
-          { value: "$1B+", label: "Pacifica TVL", sub: "Growing rapidly" },
-          { value: "$133B+", label: "Pacifica Cumulative Volume", sub: "All-time trading" }
+          { value: "$612B+", label: "DeFi Perps Monthly Volume", sub: "Growing 100%+ YoY" },
+          { value: "$10B+", label: "Pacifica Monthly Volume", sub: "Growing rapidly" },
+          { value: "$142B+", label: "Pacifica Cumulative Volume", sub: "All-time trading" }
         ].map((stat, i) => (
           <motion.div 
             key={i}
@@ -271,9 +271,9 @@ function MarketOpportunitySlide() {
             TAM Analysis
           </h3>
           <ul className="space-y-3 text-sm">
-            <li><strong className="text-white">TAM:</strong> <span className="text-muted-foreground">$3-5B DeFi perpetual futures market</span></li>
-            <li><strong className="text-white">SAM:</strong> <span className="text-muted-foreground">$1B+ Pacifica ecosystem</span></li>
-            <li><strong className="text-white">SOM:</strong> <span className="text-muted-foreground">$50M automated trading segment</span></li>
+            <li><strong className="text-white">TAM:</strong> <span className="text-muted-foreground">$612B+ monthly DeFi perpetual futures volume</span></li>
+            <li><strong className="text-white">SAM:</strong> <span className="text-muted-foreground">$10B+ Pacifica monthly volume</span></li>
+            <li><strong className="text-white">SOM:</strong> <span className="text-muted-foreground">$300M+ monthly bot-routed volume on Pacifica — Pionex captured $1B+/day on CEX rails; we're the first serious bot platform on Pacifica's $10B/month rails</span></li>
           </ul>
         </div>
         <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
