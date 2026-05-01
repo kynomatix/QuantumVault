@@ -533,7 +533,18 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (params?.offset) queryParams.offset = String(params.offset);
     if (params?.subaccountId) queryParams.subaccount_id = params.subaccountId;
 
-    const response: PacificaTradeResponse[] = await this.get('/account/trades', queryParams);
+    // Pacifica returns 404 when no trades exist in the queried window (rather
+    // than an empty array). Treat that as "no trades" — consistent with how
+    // getAccountInfo and getPositions handle 404 above.
+    let response: PacificaTradeResponse[];
+    try {
+      response = await this.get('/account/trades', queryParams);
+    } catch (err: any) {
+      if (err?.message && err.message.includes('404')) {
+        return [];
+      }
+      throw err;
+    }
 
     return response.map((t) => ({
       tradeId: t.trade_id,
