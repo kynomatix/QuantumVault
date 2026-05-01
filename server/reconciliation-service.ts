@@ -110,6 +110,17 @@ async function detectOnChainClose(
         closingFills = widerFills;
       }
     }
+    // Final fallback: 24h window. Catches closes that happened well before the
+    // reconciler ran (e.g. when bot was offline, or our previous tick was
+    // blocked by a bug). Without this, we'd fall through to the market-price
+    // estimate in the account-info path and record an incorrect fill price.
+    if (sumFillSize(closingFills) < absSize * 0.80) {
+      console.log(`[Reconcile] Closing fills in 60min window still insufficient for bot ${botId}, retrying with 24h window`);
+      const widestFills = await fetchClosingFills(24 * 60 * 60 * 1000);
+      if (sumFillSize(widestFills) > sumFillSize(closingFills)) {
+        closingFills = widestFills;
+      }
+    }
 
     let aggregatedSize = 0;
     let weightedPriceSum = 0;
@@ -637,6 +648,30 @@ export async function reconcileBotPosition(
           lastTradeId: dbPosition!.lastTradeId,
           lastTradeAt: new Date(),
         });
+
+        // Update bot.stats so totalVolume / totalTrades / win-loss reflect
+        // reconciler-detected closes too (the webhook handler updates these
+        // when WE execute a trade; without this, closes detected via
+        // reconciliation never bump the stats).
+        try {
+          const botForStats = await storage.getTradingBotById(botId);
+          if (botForStats) {
+            const existingStats = (botForStats.stats as any) || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
+            const closeNotional = (closeDetection.fillPrice ?? parseFloat(dbPosition!.avgEntryPrice)) * Math.abs(dbBaseSize);
+            const closePnl = closeDetection.pnl ?? 0;
+            await storage.updateTradingBotStats(botId, {
+              ...existingStats,
+              totalTrades: (existingStats.totalTrades || 0) + 1,
+              winningTrades: closePnl > 0 ? (existingStats.winningTrades || 0) + 1 : (existingStats.winningTrades || 0),
+              losingTrades: closePnl < 0 ? (existingStats.losingTrades || 0) + 1 : (existingStats.losingTrades || 0),
+              totalPnl: (existingStats.totalPnl || 0) + closePnl,
+              totalVolume: (existingStats.totalVolume || 0) + closeNotional,
+              lastTradeAt: new Date().toISOString(),
+            });
+          }
+        } catch (statsErr) {
+          console.error(`[Reconcile] Failed to update bot.stats for ${botId}:`, statsErr);
+        }
 
         {
           const botForClear = await storage.getTradingBotById(botId);
