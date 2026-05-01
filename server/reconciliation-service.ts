@@ -190,28 +190,26 @@ async function detectOnChainClose(
       };
     }
 
-    // CRITICAL GUARD (Pacifica only): if we couldn't fetch trade history at
-    // all (e.g. Pacifica /account/trades 404 or transient API failure), we
-    // have no real evidence a close happened. Refuse to classify — preserve
-    // DB and let the next reconcile tick try again. This prevents phantom
-    // "liquidated" rows when the real close already executed but we can't
-    // verify it. Scoped to bots with botSubaccountPublicKey (Pacifica
-    // external_key path) because the Drift adapter intentionally throws
-    // NotSupportedError for getTradeHistory and relies on the account-info
-    // fallback below — applying this guard to Drift would suppress its
-    // legitimate close-detection paths.
+    // No closing fills found via trade history (either the API returned 404
+    // for this account, or the fills didn't match). Fall through to the
+    // account-info check, which can still detect the close via balance/equity.
+    // NOTE: A Pacifica /account/trades 404 is itself meaningful signal —
+    // it often means the account was stopped out and has no open trades.
+    // Refusing to fall through here (the old CRITICAL GUARD) caused the
+    // periodic reconciler to permanently stall on stopped-out positions.
     if (tradeHistoryFetchFailed && botSubaccountPublicKey) {
-      console.log(`[Reconcile] Trade history unavailable for Pacifica bot ${botId} ${market} — refusing to classify close (preserving DB position to avoid phantom liquidation row)`);
-      return noDetection;
+      console.log(`[Reconcile] Trade history unavailable for Pacifica bot ${botId} ${market} — falling through to account-info check`);
     }
 
     try {
       const accountInfo = await adapter.getAccountInfo(readAccount, readSubaccountId);
 
-      // If the account read itself failed (404 sentinel), don't infer
-      // liquidation from zero balance — we have no signal at all.
+      // Account read 404 with NO matching fills: we have no signal at all.
+      // Preserve DB and let the next tick try again. This is the one remaining
+      // hard guard — if neither trades nor account-info is accessible, we
+      // refuse to close rather than risk a phantom entry.
       if (accountInfo.exists === false) {
-        console.log(`[Reconcile] Account info unavailable for bot ${botId} ${market} (exists=false) — refusing to classify close`);
+        console.log(`[Reconcile] Account info unavailable for bot ${botId} ${market} (exists=false) — preserving DB position`);
         return noDetection;
       }
 
