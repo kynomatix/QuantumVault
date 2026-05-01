@@ -9383,7 +9383,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         await storage.updateBotTrade(trade.id, tradeUpdate);
       }
 
-      // Update bot stats (including volume for FUEL tracking)
+      // Update bot stats (totals shown in dashboard / leaderboard)
       const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
       await storage.updateTradingBotStats(botId, {
         ...stats,
