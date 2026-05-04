@@ -55,8 +55,8 @@ export function registerLabRoutes(app: Express): void {
     try {
       const { sql } = await import("drizzle-orm");
       await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true}'::jsonb WHERE id = 1 AND NOT (strategy_settings ? 'nativeEngine')`);
-      // Strategies 3/5/10 (SBR etc) use Pine — remove accidental nativeEngine flag
-      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings - 'nativeEngine' WHERE id IN (3, 5, 10)`);
+      // Strategies 3/5/9/10 (SBR etc) use Pine — remove accidental nativeEngine flag
+      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings - 'nativeEngine' WHERE id IN (3, 5, 9, 10)`);
 
       // Copy Flux Momentum (id=1) from BuhE wallet to AqTT wallet if not already there
       await db.execute(sql`
