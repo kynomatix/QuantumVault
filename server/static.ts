@@ -67,8 +67,18 @@ export function serveStatic(app: Express) {
     },
   }));
 
-  // fall through to index.html if the file doesn't exist
-  app.use("*", (_req, res) => {
-    res.sendFile(path.resolve(distPath, "index.html"));
+  // fall through to index.html — dynamically set og:url to the actual request
+  // URL so X/LinkedIn don't deduplicate sub-route cards against the root cache
+  app.use("*", (req, res) => {
+    const indexPath = path.resolve(distPath, "index.html");
+    let html = fs.readFileSync(indexPath, "utf8");
+    const canonicalBase = "https://myquantumvault.com";
+    const requestUrl = `${canonicalBase}${req.path === "/" ? "" : req.path}`;
+    html = html.replace(
+      /<meta\s+property="og:url"\s+content="[^"]*"\s*\/>/,
+      `<meta property="og:url" content="${requestUrl}" />`
+    );
+    res.setHeader("Content-Type", "text/html");
+    res.send(html);
   });
 }
