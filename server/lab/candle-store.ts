@@ -35,6 +35,13 @@ export async function getCachedCandles(
       return null;
     }
 
+    const lastCachedTime = Number(rows[rows.length - 1].time);
+    const tailGapCandles = Math.floor((endMs - lastCachedTime) / tfMs);
+    if (tailGapCandles > 3) {
+      console.log(`[CandleCache] Tail gap: ${tailGapCandles} candles behind for ${symbol} ${timeframe} (last cached: ${new Date(lastCachedTime).toISOString()}, requested end: ${new Date(endMs).toISOString()}) — refetching to append tail`);
+      return null;
+    }
+
     if (tfMs >= 28800000 && rows.length >= 3) {
       const sampleSize = Math.min(rows.length, 20);
       let misaligned = 0;

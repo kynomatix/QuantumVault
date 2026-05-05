@@ -2,6 +2,7 @@ import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "./indicators";
 import { runPineBacktest, type PinePlan, type PineSharedArrays } from "./pine/index";
 import { runAdaptiveRegimeBacktest } from "./engine-ar38";
+import { runSbrBacktest } from "./engine-sbr";
 
 export type { PinePlan } from "./pine/index";
 export type { PineSharedArrays } from "./pine/index";
@@ -49,7 +50,11 @@ export function runBacktest(
     }, shared, sharedIndicatorCache);
   }
 
-  if (config.strategyId === 3 || config.strategyId === 5 || config.strategyId === 10) {
+  if (config.strategyId === 3 || config.strategyId === 9) {
+    return runSbrBacktest(candles, params, ticker, timeframe, config);
+  }
+
+  if (config.strategyId === 5 || config.strategyId === 10) {
     return runAdaptiveRegimeBacktest(candles, params, ticker, timeframe, config);
   }
 
