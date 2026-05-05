@@ -197,6 +197,7 @@ export function BotManagementDrawer({
   const [exchangeFreeCollateral, setExchangeFreeCollateral] = useState<number>(0);
   const [hasOpenPositions, setHasOpenPositions] = useState<boolean>(false);
   const [balanceLoading, setBalanceLoading] = useState(false);
+  const [hasBalanceLoaded, setHasBalanceLoaded] = useState(false);
   const [trades, setTrades] = useState<BotTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(false);
   const [equityEvents, setEquityEvents] = useState<EquityEvent[]>([]);
@@ -222,6 +223,7 @@ export function BotManagementDrawer({
   const [dataPartial, setDataPartial] = useState(false);
   const [botPosition, setBotPosition] = useState<BotPosition | null>(null);
   const [positionLoading, setPositionLoading] = useState(false);
+  const [hasPositionLoaded, setHasPositionLoaded] = useState(false);
   const [netDeposited, setNetDeposited] = useState<number>(0);
   const [closePositionLoading, setClosePositionLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -371,11 +373,13 @@ export function BotManagementDrawer({
         setExchangeFreeCollateral(data.freeCollateral ?? 0);
         setHasOpenPositions(data.hasOpenPositions ?? false);
         setNetDeposited(data.netDeposited ?? 0);
+        setHasBalanceLoaded(true);
         
         // Position data
         if (data.position) {
           setBotPosition(data.position);
         }
+        setHasPositionLoaded(true);
         
         // Webhook URL
         if (data.webhookUrl) {
@@ -480,6 +484,10 @@ export function BotManagementDrawer({
 
   useEffect(() => {
     if (isOpen && bot) {
+      // Reset first-load tracking when drawer opens or bot changes
+      setHasBalanceLoaded(false);
+      setHasPositionLoaded(false);
+
       // Use consolidated endpoint for initial load and refreshes
       fetchBotOverview();
       setActiveTab('overview');
@@ -492,6 +500,9 @@ export function BotManagementDrawer({
       }, 15000);
       
       return () => clearInterval(refreshInterval);
+    } else if (!isOpen) {
+      setHasBalanceLoaded(false);
+      setHasPositionLoaded(false);
     }
   }, [isOpen, bot?.id]);
 
@@ -1314,7 +1325,7 @@ export function BotManagementDrawer({
                   </TooltipProvider>
                 </div>
                 <p className="text-2xl font-bold mt-1" data-testid="text-bot-equity">
-                  {balanceLoading ? (
+                  {balanceLoading && !hasBalanceLoaded ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
                     `$${exchangeBalance.toFixed(2)}`
@@ -1342,7 +1353,7 @@ export function BotManagementDrawer({
                   }`}
                   data-testid="text-net-pnl"
                 >
-                  {balanceLoading ? (
+                  {balanceLoading && !hasBalanceLoaded ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
                     `${(exchangeBalance - netDeposited) >= 0 ? '+' : ''}$${(exchangeBalance - netDeposited).toFixed(2)}`
@@ -1369,7 +1380,7 @@ export function BotManagementDrawer({
                   }`}
                   data-testid="text-return-pct"
                 >
-                  {balanceLoading ? (
+                  {balanceLoading && !hasBalanceLoaded ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : netDeposited > 0 ? (
                     `${(((exchangeBalance - netDeposited) / netDeposited) * 100).toFixed(2)}%`
@@ -1482,7 +1493,7 @@ export function BotManagementDrawer({
                 )}
               </div>
               
-              {positionLoading ? (
+              {positionLoading && !hasPositionLoaded ? (
                 <div className="flex items-center justify-center py-4">
                   <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
                 </div>
@@ -1875,7 +1886,7 @@ export function BotManagementDrawer({
                   <div>
                     <p className="text-sm text-muted-foreground">Agent Wallet</p>
                     <p className="text-2xl font-bold mt-1" data-testid="text-agent-balance">
-                      {balanceLoading ? (
+                      {balanceLoading && !hasBalanceLoaded ? (
                         <Loader2 className="w-5 h-5 animate-spin" />
                       ) : (
                         `$${mainAccountBalance.toFixed(2)}`
@@ -1890,7 +1901,7 @@ export function BotManagementDrawer({
                   <div>
                     <p className="text-sm text-muted-foreground">Bot Balance</p>
                     <p className="text-2xl font-bold mt-1" data-testid="text-trading-balance">
-                      {balanceLoading ? (
+                      {balanceLoading && !hasBalanceLoaded ? (
                         <Loader2 className="w-5 h-5 animate-spin" />
                       ) : (
                         `$${botBalance.toFixed(2)}`
