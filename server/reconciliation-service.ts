@@ -55,7 +55,7 @@ async function detectOnChainClose(
   botId: string,
   agentPublicKey: string,
   market: string,
-  dbPosition: { baseSize: string; avgEntryPrice: string; realizedPnl?: string; totalFees?: string; lastTradeId?: string | null },
+  dbPosition: { baseSize: string; avgEntryPrice: string; realizedPnl?: string; totalFees?: string; lastTradeId?: string | null; lastTradeAt?: Date | null },
   botSubaccountPublicKey?: string,
 ): Promise<CloseDetectionResult> {
   const noDetection: CloseDetectionResult = { detected: false, reason: 'external_close' };
@@ -212,23 +212,24 @@ async function detectOnChainClose(
       console.log(`[Reconcile] Trade history unavailable for Pacifica bot ${botId} ${market} — falling through to account-info check`);
     }
 
-    // EVIDENCE-BASED CLOSE DETECTION:
-    // Without a matched closing fill, we refuse to synthesize a close from
-    // estimated prices (TP/SL or market). Doing so produces phantom trades
-    // when the adapter's positions API has propagation lag (e.g. Pacifica
-    // showing 0 size for ~10s after an entry fills).
+    // No closing fills found. Before falling back to account-info estimation,
+    // check position age. If the position was opened within the last 3 minutes,
+    // the adapter's positions API may still be propagating (observed: Pacifica
+    // shows 0 size for ~10s after an entry fills). Estimating a close price in
+    // that window produces phantom trades. Return noDetection and let the next
+    // reconcile tick (60s) retry — by then propagation lag has resolved.
     //
-    // The ONLY exception is liquidation: when account equity AND balance are
-    // both effectively zero, the position cannot still be open regardless of
-    // what the fills API says, so we record it as a liquidation at entry
-    // price with $0 pnl (the actual loss equals the lost margin, captured
-    // elsewhere via equity tracking).
+    // The 3-minute threshold gives an 18× safety margin over the worst observed
+    // Pacifica lag (~10s) while being short enough that real closes (TP/SL,
+    // manual) still get estimated fill prices within a couple of reconcile ticks.
     //
-    // For every other "no fills + position appears closed" scenario, return
-    // noDetection and let the next reconcile tick retry. Real exchange-side
-    // closes (manual, TP/SL, external) always produce an opposite-side fill
-    // that the hasClosingTrades branch above will catch as soon as fill
-    // history reflects it.
+    // Liquidation is exempt: equity+balance both near zero is unambiguous signal
+    // regardless of position age.
+    const positionAgeMs = dbPosition.lastTradeAt
+      ? Date.now() - new Date(dbPosition.lastTradeAt).getTime()
+      : Infinity;
+    const MIN_AGE_FOR_ESTIMATION_MS = 3 * 60 * 1000; // 3 minutes
+
     try {
       const accountInfo = await adapter.getAccountInfo(readAccount, readSubaccountId);
 
@@ -248,7 +249,77 @@ async function detectOnChainClose(
         };
       }
 
-      console.log(`[Reconcile] No closing fills found for bot ${botId} ${market} and account is solvent (balance=$${accountInfo.balance.toFixed(2)}, equity=$${accountInfo.equity.toFixed(2)}) — treating as stale read, preserving DB position for next tick`);
+      if (positionAgeMs < MIN_AGE_FOR_ESTIMATION_MS) {
+        console.log(`[Reconcile] No closing fills for bot ${botId} ${market} but position is only ${(positionAgeMs / 1000).toFixed(0)}s old — treating as propagation lag, preserving DB position`);
+        return noDetection;
+      }
+
+      const tpPriceAbs = Number(riskConfig?.takeProfitPrice || 0);
+      const slPriceAbs = Number(riskConfig?.stopLossPrice || 0);
+      const tpPct = Number(riskConfig?.takeProfitPercent || 0);
+      const slPct = Number(riskConfig?.stopLossPercent || 0);
+
+      const tpPrice = tpPriceAbs > 0 ? tpPriceAbs : (tpPct > 0
+        ? (positionSide === 'long' ? entryPrice * (1 + tpPct / 100) : entryPrice * (1 - tpPct / 100))
+        : 0);
+      const slPrice = slPriceAbs > 0 ? slPriceAbs : (slPct > 0
+        ? (positionSide === 'long' ? entryPrice * (1 - slPct / 100) : entryPrice * (1 + slPct / 100))
+        : 0);
+
+      const hasTpSlConfig = tpPrice > 0 || slPrice > 0;
+
+      const computePnl = (fillPrice: number): number => positionSide === 'long'
+        ? (fillPrice - entryPrice) * absSize
+        : (entryPrice - fillPrice) * absSize;
+
+      if (hasTpSlConfig) {
+        const marketPrice = await fetchMarketPrice(market);
+
+        let estimatedFillPrice: number;
+        let chosenLabel: string;
+
+        if (tpPrice > 0 && slPrice > 0 && marketPrice && marketPrice > 0) {
+          const distToTp = Math.abs(marketPrice - tpPrice);
+          const distToSl = Math.abs(marketPrice - slPrice);
+          if (distToTp <= distToSl) {
+            estimatedFillPrice = tpPrice;
+            chosenLabel = 'TP';
+          } else {
+            estimatedFillPrice = slPrice;
+            chosenLabel = 'SL';
+          }
+        } else if (tpPrice > 0) {
+          estimatedFillPrice = tpPrice;
+          chosenLabel = 'TP';
+        } else {
+          estimatedFillPrice = slPrice;
+          chosenLabel = 'SL';
+        }
+
+        const pnl = computePnl(estimatedFillPrice);
+        console.log(`[Reconcile] Position closed for bot ${botId} with TP/SL configured (no trade history, age=${(positionAgeMs / 1000).toFixed(0)}s, balance=$${accountInfo.balance.toFixed(2)}): classified as tpsl, estimated ${chosenLabel} fill=$${estimatedFillPrice.toFixed(4)}, pnl=$${pnl.toFixed(4)}`);
+        return {
+          detected: true,
+          reason: 'tpsl',
+          fillPrice: estimatedFillPrice,
+          pnl,
+          fee: 0,
+        };
+      }
+
+      if (accountInfo.balance > 1 || accountInfo.equity > 1) {
+        const marketPrice = await fetchMarketPrice(market);
+        const fillPrice = marketPrice && marketPrice > 0 ? marketPrice : entryPrice;
+        const pnl = marketPrice && marketPrice > 0 ? computePnl(marketPrice) : 0;
+        console.log(`[Reconcile] Position closed for bot ${botId} (no trade history, age=${(positionAgeMs / 1000).toFixed(0)}s, balance=$${accountInfo.balance.toFixed(2)}): classified as external_close, estimated fill=$${fillPrice.toFixed(4)} (${marketPrice ? 'market' : 'entry-fallback'}), pnl=$${pnl.toFixed(4)}`);
+        return {
+          detected: true,
+          reason: 'external_close',
+          fillPrice,
+          pnl,
+          fee: 0,
+        };
+      }
     } catch { /* non-critical */ }
 
     return noDetection;
