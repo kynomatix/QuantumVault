@@ -56,8 +56,8 @@ export function registerLabRoutes(app: Express): void {
       const { sql } = await import("drizzle-orm");
       // SBR strategies: set nativeEngine + engineType by name (safe across dev/prod where IDs differ)
       await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true, "engineType": "sbr"}'::jsonb WHERE name ILIKE '%SBR%'`);
-      // Adaptive Regime strategies: set engineType:"ar38" (nativeEngine already set previously)
-      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"engineType": "ar38"}'::jsonb WHERE name ILIKE '%Adaptive Regime%' AND NOT (strategy_settings ? 'engineType')`);
+      // Adaptive Regime strategies: set nativeEngine + engineType:"ar38" by name
+      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true, "engineType": "ar38"}'::jsonb WHERE name ILIKE '%Adaptive Regime%'`);
       // Z-Score strategies: no native engine exists — remove nativeEngine flag if wrongly set
       await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings - 'nativeEngine' WHERE name ILIKE '%Z-Score%' AND (strategy_settings ? 'nativeEngine')`);
 
