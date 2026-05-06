@@ -7,11 +7,22 @@ import { queryClient } from '@/lib/queryClient';
 
 export { useConnection };
 
-// Helper to get referral code from URL
+// Helper to get referral code from URL, with a sessionStorage fallback for
+// users arriving via a marketplace share link (where the referral code is the
+// bot creator's code stashed by MarketplaceBotPage).
 const getReferralCodeFromUrl = (): string | null => {
   if (typeof window === 'undefined') return null;
   const params = new URLSearchParams(window.location.search);
-  return params.get('ref');
+  const fromUrl = params.get('ref');
+  if (fromUrl) return fromUrl;
+  try {
+    const raw = sessionStorage.getItem('pendingMarketplaceIntent');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { referralCode?: string | null };
+    return parsed?.referralCode || null;
+  } catch {
+    return null;
+  }
 };
 
 // Per-wallet auth promise map for single-flight pattern

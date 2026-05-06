@@ -13,6 +13,7 @@ import PitchDeck from "@/pages/PitchDeck";
 import PitchDeckV2 from "@/pages/PitchDeckV2";
 import Admin from "@/pages/Admin";
 import QuantumLab from "@/pages/QuantumLab";
+import MarketplaceBotPage from "@/pages/MarketplaceBotPage";
 
 function Router() {
   return (
@@ -25,6 +26,7 @@ function Router() {
       <Route path="/pitch-deck-v2" component={PitchDeckV2} />
       <Route path="/admin" component={Admin} />
       <Route path="/quantumlab" component={QuantumLab} />
+      <Route path="/marketplace/:id" component={MarketplaceBotPage} />
       <Route component={NotFound} />
     </Switch>
   );

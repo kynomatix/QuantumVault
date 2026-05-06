@@ -65,10 +65,9 @@ export function PublishBotModal({ isOpen, onClose, bot, walletAddress, referralC
 
   const getShareUrl = (botId: string) => {
     const baseUrl = 'https://myquantumvault.com';
-    
-    let url = `${baseUrl}/app?bot=${botId}`;
+    let url = `${baseUrl}/marketplace/${botId}`;
     if (referralCode) {
-      url += `&ref=${referralCode}`;
+      url += `?ref=${referralCode}`;
     }
     return url;
   };

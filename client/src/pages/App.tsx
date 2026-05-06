@@ -154,6 +154,8 @@ export default function AppPage() {
   const [welcomePopupOpen, setWelcomePopupOpen] = useState(false);
   const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
   const welcomeCheckedRef = useRef(false);
+  const [welcomeChecked, setWelcomeChecked] = useState(false);
+  const intentConsumedRef = useRef(false);
   const prevWalletRef = useRef<string | null>(null);
   const pendingRefreshRef = useRef(false);
   
@@ -757,6 +759,8 @@ export default function AppPage() {
   // Reset welcome check when wallet changes
   useEffect(() => {
     welcomeCheckedRef.current = false;
+    setWelcomeChecked(false);
+    intentConsumedRef.current = false;
     setAgentPublicKey(null);
   }, [publicKeyString]);
 
@@ -793,6 +797,7 @@ export default function AppPage() {
             }
           }
           welcomeCheckedRef.current = true;
+          setWelcomeChecked(true);
         } else if (res.status === 400) {
           // Agent wallet not initialized - need to trigger full auth with signature
           // This happens when session was restored from cookie but agent wallet was never created
@@ -814,6 +819,7 @@ export default function AppPage() {
             }
           }
           welcomeCheckedRef.current = true;
+          setWelcomeChecked(true);
         }
       } catch (error) {
         console.error('Error checking agent balance:', error);
@@ -822,6 +828,61 @@ export default function AppPage() {
     
     return () => clearTimeout(timeoutId);
   }, [sessionConnected, publicKeyString]);
+
+  // Consume any pending marketplace intent (set by MarketplaceBotPage) once
+  // the session is established and the welcome popup has finished. Opens the
+  // SubscribeBotModal for the bot the user originally clicked through to.
+  useEffect(() => {
+    if (!sessionConnected) return;
+    if (!welcomeChecked) return;
+    if (welcomePopupOpen) return;
+    if (intentConsumedRef.current) return;
+
+    let raw: string | null = null;
+    try {
+      raw = sessionStorage.getItem('pendingMarketplaceIntent');
+    } catch {
+      return;
+    }
+    if (!raw) return;
+
+    let intent: { publishedBotId?: string; createdAt?: number } | null = null;
+    try {
+      intent = JSON.parse(raw);
+    } catch {
+      try { sessionStorage.removeItem('pendingMarketplaceIntent'); } catch {}
+      return;
+    }
+    if (!intent?.publishedBotId) {
+      try { sessionStorage.removeItem('pendingMarketplaceIntent'); } catch {}
+      return;
+    }
+    // Drop intents older than 1 hour to avoid surprising returning users.
+    if (intent.createdAt && Date.now() - intent.createdAt > 60 * 60 * 1000) {
+      try { sessionStorage.removeItem('pendingMarketplaceIntent'); } catch {}
+      return;
+    }
+
+    intentConsumedRef.current = true;
+    const targetBotId = intent.publishedBotId;
+    (async () => {
+      try {
+        const res = await fetch(`/api/marketplace/${targetBotId}`, { credentials: 'include' });
+        if (!res.ok) {
+          try { sessionStorage.removeItem('pendingMarketplaceIntent'); } catch {}
+          return;
+        }
+        const bot = (await safeResponseJson(res)) as PublishedBot;
+        try { sessionStorage.removeItem('pendingMarketplaceIntent'); } catch {}
+        if (!bot?.id) return;
+        setActiveNav('marketplace');
+        setBotToSubscribe(bot);
+        setSubscribeModalOpen(true);
+      } catch (e) {
+        console.error('Failed to consume pending marketplace intent', e);
+      }
+    })();
+  }, [sessionConnected, welcomeChecked, welcomePopupOpen]);
 
   const handleDisconnect = async () => {
     await disconnect();
@@ -2698,7 +2759,7 @@ export default function AppPage() {
                       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
                         {myPublishedBots.map((bot: PublishedBot) => {
                           const pnlValue = bot.pnlPercentAllTime ? parseFloat(bot.pnlPercentAllTime) : null;
-                          const shareUrl = `https://myquantumvault.com/app?bot=${bot.id}&ref=${walletReferralCode || ''}`;
+                          const shareUrl = `https://myquantumvault.com/marketplace/${bot.id}${walletReferralCode ? `?ref=${walletReferralCode}` : ''}`;
                           
                           return (
                             <div 
@@ -4434,7 +4495,7 @@ export default function AppPage() {
                 <label className="text-xs text-muted-foreground mb-1 block">Share Link</label>
                 <div className="flex gap-2">
                   <Input 
-                    value={`https://myquantumvault.com/app?bot=${sharePopupBot.id}&ref=${walletReferralCode || ''}`}
+                    value={`https://myquantumvault.com/marketplace/${sharePopupBot.id}${walletReferralCode ? `?ref=${walletReferralCode}` : ''}`}
                     readOnly 
                     className="font-mono text-sm bg-muted/30"
                     data-testid="input-share-link"
@@ -4443,7 +4504,7 @@ export default function AppPage() {
                     variant="outline"
                     size="sm"
                     onClick={() => {
-                      const shareUrl = `https://myquantumvault.com/app?bot=${sharePopupBot.id}&ref=${walletReferralCode || ''}`;
+                      const shareUrl = `https://myquantumvault.com/marketplace/${sharePopupBot.id}${walletReferralCode ? `?ref=${walletReferralCode}` : ''}`;
                       navigator.clipboard.writeText(shareUrl);
                       setCopiedField('shareLink');
                       setTimeout(() => setCopiedField(null), 2000);
@@ -4459,7 +4520,7 @@ export default function AppPage() {
               <Button
                 className="w-full bg-gradient-to-r from-primary to-accent hover:opacity-90"
                 onClick={() => {
-                  const shareUrl = `https://myquantumvault.com/app?bot=${sharePopupBot.id}&ref=${walletReferralCode || ''}`;
+                  const shareUrl = `https://myquantumvault.com/marketplace/${sharePopupBot.id}${walletReferralCode ? `?ref=${walletReferralCode}` : ''}`;
                   const tweetText = encodeURIComponent(`Check out my ${sharePopupBot.market} trading bot "${sharePopupBot.name}" on QuantumVault! 🤖📈`);
                   const tweetUrl = encodeURIComponent(shareUrl);
                   window.open(`https://twitter.com/intent/tweet?text=${tweetText}&url=${tweetUrl}`, '_blank');
@@ -4537,6 +4598,7 @@ export default function AppPage() {
             setBotToPublish(null);
           }}
           bot={botToPublish}
+          referralCode={walletReferralCode || referralCode || undefined}
           onPublished={() => {
             refetchBots();
           }}
