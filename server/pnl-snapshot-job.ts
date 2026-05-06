@@ -62,8 +62,12 @@ export async function takePnlSnapshots(): Promise<void> {
         
         const stats = sourceTradingBot.stats as any || {};
         const realizedPnl = stats.totalPnl || 0;
-        const totalTrades = stats.totalTrades || 0;
-        const winningTrades = stats.winningTrades || 0;
+        // Use canonical SQL-derived counts (closed-position events with
+        // realized PnL) rather than the legacy bot.stats counters, which
+        // historically drifted across multiple write paths. See task #67.
+        const canonicalCounts = await storage.getCanonicalBotTradeStats(sourceTradingBot.id);
+        const totalTrades = canonicalCounts.totalTrades;
+        const winningTrades = canonicalCounts.winningTrades;
         const creatorEquity = accountInfo.usdcBalance;
         
         // Get actual net deposited from equity events (same as bot management drawer)

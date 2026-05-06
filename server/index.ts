@@ -596,6 +596,10 @@ app.use((req, res, next) => {
         startPortfolioSnapshotJob();
         log('[Staggered startup] Starting profit share retry job');
         startProfitShareRetryJob();
+        log('[Staggered startup] Starting stats consistency monitor');
+        import('./stats-consistency-monitor').then(({ startStatsConsistencyMonitor }) => {
+          startStatsConsistencyMonitor();
+        });
       }, 45_000);
     },
   );

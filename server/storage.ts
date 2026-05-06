@@ -1,4 +1,5 @@
 import { eq, desc, sql, and, or, ilike, gte, lte } from "drizzle-orm";
+import { createHash, randomBytes } from "crypto";
 import { db } from "./db";
 import Decimal from "decimal.js";
 import {
@@ -115,12 +116,26 @@ export interface IStorage {
   clearTradingBotSubaccount(id: string): Promise<void>;
   deleteTradingBot(id: string): Promise<void>;
   updateTradingBotStats(id: string, stats: TradingBot['stats']): Promise<void>;
+  getCanonicalBotTradeStats(tradingBotId: string): Promise<{ totalTrades: number; winningTrades: number; losingTrades: number }>;
+  getCanonicalBotTradeCount(tradingBotId: string): Promise<number>;
+  recomputeAndMergeBotStats(
+    tradingBotId: string,
+    deltas?: { totalPnlDelta?: number; totalVolumeDelta?: number; lastTradeAt?: string },
+    txArg?: any,
+  ): Promise<void>;
+  recordCloseEventAtomic(opts: {
+    botId: string;
+    insert?: InsertBotTrade;
+    update?: { tradeId: string; fields: Partial<InsertBotTrade> };
+    deltas: { totalPnlDelta?: number; totalVolumeDelta?: number; lastTradeAt?: string };
+  }): Promise<{ trade?: BotTrade; isNew: boolean }>;
 
   getBotTrades(tradingBotId: string, limit?: number): Promise<BotTrade[]>;
   getBotTradeCount(tradingBotId: string): Promise<number>;
   getBotTrade(tradeId: string): Promise<BotTrade | undefined>;
   getWalletBotTrades(walletAddress: string, limit?: number): Promise<BotTrade[]>;
   createBotTrade(trade: InsertBotTrade): Promise<BotTrade>;
+  createBotTradeIdempotent(trade: InsertBotTrade): Promise<{ trade: BotTrade; isNew: boolean }>;
   updateBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<void>;
   getOrphanedPendingTrades(maxAgeMinutes?: number): Promise<BotTrade[]>;
   getBotPerformanceSeries(tradingBotId: string, since?: Date): Promise<{ timestamp: Date; pnl: number; cumulativePnl: number }[]>;
@@ -510,7 +525,284 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateTradingBotStats(id: string, stats: TradingBot['stats']): Promise<void> {
-    await db.update(tradingBots).set({ stats, updatedAt: sql`NOW()` }).where(eq(tradingBots.id, id));
+    // JSON-merge: preserve fields not present in the partial update so concurrent
+    // writes (e.g. recomputed counters vs. PnL/volume deltas) don't blow each
+    // other away. See task #67.
+    await db.transaction(async (tx) => {
+      const rows = await tx.select({ stats: tradingBots.stats }).from(tradingBots).where(eq(tradingBots.id, id)).limit(1);
+      const existing = (rows[0]?.stats as any) ?? {};
+      const merged = { ...existing, ...((stats as any) ?? {}) };
+      await tx.update(tradingBots).set({ stats: merged, updatedAt: sql`NOW()` }).where(eq(tradingBots.id, id));
+    });
+  }
+
+  /**
+   * Canonical "trade" definition: one closed-position lifecycle event with a
+   * realized PnL recorded (breakeven uses '0', never NULL). Opens never count.
+   * SQL-derived single source of truth for stats counters.
+   */
+  async getCanonicalBotTradeStats(tradingBotId: string): Promise<{ totalTrades: number; winningTrades: number; losingTrades: number }> {
+    const result = await db.execute(sql`
+      SELECT
+        COUNT(*)::int AS "totalTrades",
+        SUM(CASE WHEN ${botTrades.pnl}::numeric > 0 THEN 1 ELSE 0 END)::int AS "winningTrades",
+        SUM(CASE WHEN ${botTrades.pnl}::numeric < 0 THEN 1 ELSE 0 END)::int AS "losingTrades"
+      FROM ${botTrades}
+      WHERE ${botTrades.tradingBotId} = ${tradingBotId}
+        AND ${botTrades.pnl} IS NOT NULL
+        AND ${botTrades.status} IN ('executed','liquidated','recovered')
+    `);
+    const row: any = (result as any).rows?.[0] ?? (result as any)[0] ?? {};
+    return {
+      totalTrades: Number(row.totalTrades ?? 0),
+      winningTrades: Number(row.winningTrades ?? 0),
+      losingTrades: Number(row.losingTrades ?? 0),
+    };
+  }
+
+  async getCanonicalBotTradeCount(tradingBotId: string): Promise<number> {
+    return (await this.getCanonicalBotTradeStats(tradingBotId)).totalTrades;
+  }
+
+  /**
+   * Recompute totalTrades / winningTrades / losingTrades from `bot_trades`
+   * and JSON-merge them into `trading_bots.stats`, preserving non-counter
+   * fields (`totalPnl`, `totalVolume`, `lastTradeAt`, etc.). Optional deltas
+   * are added on top — pass when a close fires so PnL/volume accumulate.
+   * DB-only transaction: no RPC.
+   */
+  async recomputeAndMergeBotStats(
+    tradingBotId: string,
+    deltas?: { totalPnlDelta?: number; totalVolumeDelta?: number; lastTradeAt?: string },
+    txArg?: any,
+  ): Promise<void> {
+    const run = async (tx: any) => {
+      const countsRows = await tx
+        .select({
+          totalTrades: sql<number>`COUNT(*)::int`,
+          winningTrades: sql<number>`SUM(CASE WHEN ${botTrades.pnl}::numeric > 0 THEN 1 ELSE 0 END)::int`,
+          losingTrades: sql<number>`SUM(CASE WHEN ${botTrades.pnl}::numeric < 0 THEN 1 ELSE 0 END)::int`,
+        })
+        .from(botTrades)
+        .where(and(
+          eq(botTrades.tradingBotId, tradingBotId),
+          sql`${botTrades.pnl} IS NOT NULL`,
+          sql`${botTrades.status} IN ('executed','liquidated','recovered')`,
+        ));
+      const counts = {
+        totalTrades: Number(countsRows[0]?.totalTrades ?? 0),
+        winningTrades: Number(countsRows[0]?.winningTrades ?? 0),
+        losingTrades: Number(countsRows[0]?.losingTrades ?? 0),
+      };
+      const rows = await tx.select({ stats: tradingBots.stats }).from(tradingBots).where(eq(tradingBots.id, tradingBotId)).limit(1);
+      const existing: any = rows[0]?.stats ?? {};
+      const merged: any = {
+        ...existing,
+        totalTrades: counts.totalTrades,
+        winningTrades: counts.winningTrades,
+        losingTrades: counts.losingTrades,
+      };
+      if (deltas?.totalPnlDelta !== undefined && Number.isFinite(deltas.totalPnlDelta)) {
+        merged.totalPnl = (Number(existing.totalPnl) || 0) + deltas.totalPnlDelta;
+      }
+      if (deltas?.totalVolumeDelta !== undefined && Number.isFinite(deltas.totalVolumeDelta)) {
+        merged.totalVolume = (Number(existing.totalVolume) || 0) + deltas.totalVolumeDelta;
+      }
+      if (deltas?.lastTradeAt) {
+        merged.lastTradeAt = deltas.lastTradeAt;
+      }
+      await tx.update(tradingBots).set({ stats: merged, updatedAt: sql`NOW()` }).where(eq(tradingBots.id, tradingBotId));
+    };
+    if (txArg) return run(txArg);
+    await db.transaction(run);
+  }
+
+  /**
+   * Canonical close-event identity used by EVERY close writer (webhook,
+   * reconciler, retry, manual, pause, flip, subscriber routing). When a
+   * tx signature exists, it IS the cross-path identity: `tx-<sig>`.
+   * Without a signature we fall back to a deterministic
+   * `nosig-<bot>-<side>-<size>` hash so re-runs against identical
+   * economic state still collide on the unique index.
+   *
+   * Treat `protocolFillId` as the single source of truth for "is this
+   * the same on-chain close?" — never use log/request scoped IDs here.
+   */
+  static canonicalCloseFillId(opts: {
+    signature?: string | null;
+    botId: string;
+    side: string;
+    size: string | number;
+    market?: string;
+    fillPrice?: string | number | null;
+    timestampMs?: number;
+  }): string {
+    // Primary: protocol-level fill ID (tx signature or reconciler tradeId).
+    if (opts.signature) return `tx-${opts.signature}`;
+
+    // Fallback: deterministic hash over bot+market+size+price+time-bucket.
+    // Side is excluded so callers using 'long'/'short' vs 'CLOSE' agree.
+    const sizeStr = typeof opts.size === 'number' ? opts.size.toFixed(8) : opts.size;
+    const priceStr = opts.fillPrice == null
+      ? 'na'
+      : (typeof opts.fillPrice === 'number' ? opts.fillPrice.toFixed(6) : opts.fillPrice);
+    const market = opts.market ?? 'na';
+    // Deterministic only when caller passes timestampMs. Otherwise mint
+    // a per-write random ID so distinct closes don't collide; the storage
+    // guard demotes such writes to pending for reconciler canonicalization.
+    if (opts.timestampMs != null) {
+      const FIVE_MIN_MS = 5 * 60 * 1000;
+      const bucket = Math.floor(opts.timestampMs / FIVE_MIN_MS);
+      const raw = `nosig|${opts.botId}|${market}|${sizeStr}|${priceStr}|${bucket}`;
+      const hash = createHash('sha256').update(raw).digest('hex').slice(0, 24);
+      return `nosig-${hash}`;
+    }
+    return `nosig-uniq-${randomBytes(12).toString('hex')}`;
+  }
+
+  /**
+   * Atomic close-event recorder (task #67). Inserts (or updates) the canonical
+   * close-event row AND recomputes stats inside a SINGLE DB transaction so the
+   * `bot_trades` rows and `trading_bots.stats.totalTrades/win/loss` counters
+   * can never disagree, even if a process is killed mid-write.
+   *
+   * Caller passes either:
+   *   - `insert`: a fresh canonical close row keyed on `protocolFillId`. If
+   *     another writer (reconciler / retry / racing webhook) already inserted
+   *     a row with the same fill ID, the existing row is returned and the
+   *     stats recompute still runs (it's idempotent — recompute reads the
+   *     authoritative SQL aggregate).
+   *   - `update`: { tradeId, fields } — used by the create-pending-then-update
+   *     close pattern. Marks the pending row executed with realized PnL and
+   *     recomputes in the same tx.
+   *
+   * RPC must NEVER happen inside this helper (TradingView 5s SLA).
+   */
+  async recordCloseEventAtomic(opts: {
+    botId: string;
+    insert?: InsertBotTrade;
+    update?: { tradeId: string; fields: Partial<InsertBotTrade> };
+    deltas: { totalPnlDelta?: number; totalVolumeDelta?: number; lastTradeAt?: string };
+  }): Promise<{ trade?: BotTrade; isNew: boolean }> {
+    // Defense-in-depth: demote non-deterministic close IDs to pending
+    // so the reconciler canonicalizes them later instead of double-counting.
+    const isNonDeterministic = (fillId: string | null | undefined): boolean =>
+      typeof fillId === 'string' && fillId.startsWith('nosig-uniq-');
+    const demoteFields = (fields: Partial<InsertBotTrade>): Partial<InsertBotTrade> => ({
+      ...fields,
+      status: 'pending',
+      protocolFillId: null,
+      errorMessage: fields.errorMessage
+        ? `${fields.errorMessage} (awaiting reconciler canonicalization)`
+        : 'Awaiting reconciler canonicalization (no signature/timestamp)',
+    });
+    if (opts.insert && isNonDeterministic(opts.insert.protocolFillId)) {
+      opts = { ...opts, insert: demoteFields(opts.insert) as InsertBotTrade, deltas: {} };
+    }
+    if (opts.update && isNonDeterministic(opts.update.fields.protocolFillId)) {
+      opts = {
+        ...opts,
+        update: { tradeId: opts.update.tradeId, fields: demoteFields(opts.update.fields) },
+        deltas: {},
+      };
+    }
+    return await db.transaction(async (tx) => {
+      let trade: BotTrade | undefined;
+      let isNew = true;
+      if (opts.insert) {
+        if (opts.insert.protocolFillId) {
+          const existing = await tx.select().from(botTrades).where(eq(botTrades.protocolFillId, opts.insert.protocolFillId)).limit(1);
+          if (existing[0]) {
+            trade = existing[0];
+            isNew = false;
+          }
+        }
+        if (!trade) {
+          try {
+            const inserted = await tx.insert(botTrades).values(opts.insert).returning();
+            trade = inserted[0];
+          } catch (err: any) {
+            if (err?.code === '23505' && opts.insert.protocolFillId) {
+              const winner = await tx.select().from(botTrades).where(eq(botTrades.protocolFillId, opts.insert.protocolFillId)).limit(1);
+              if (winner[0]) {
+                trade = winner[0];
+                isNew = false;
+              } else throw err;
+            } else throw err;
+          }
+        }
+      } else if (opts.update) {
+        // Lock the pending row first so racing callers serialize on it.
+        // If the row is ALREADY in a canonical-close status, this call is
+        // a replay (retry / double-fire) — return the existing row and
+        // skip both the field update AND the delta merge so totalPnl /
+        // totalVolume can never double-count.
+        const lockedRows = await tx
+          .select()
+          .from(botTrades)
+          .where(eq(botTrades.id, opts.update.tradeId))
+          .for('update')
+          .limit(1);
+        const locked = lockedRows[0];
+        if (!locked) {
+          throw new Error(`recordCloseEventAtomic: trade ${opts.update.tradeId} not found`);
+        }
+        const CANONICAL_STATUSES = new Set(['executed', 'liquidated', 'recovered']);
+        if (CANONICAL_STATUSES.has(locked.status)) {
+          // Already finalized — pure no-op. Counters were merged by the
+          // first writer; replays must not re-apply deltas.
+          return { trade: locked, isNew: false };
+        }
+
+        // Cross-path race: another writer (reconciler / retry) may have
+        // already inserted the canonical close row under this fillId. If
+        // so, the unique-index update would fail with 23505 — handle it
+        // by demoting OUR pending row to 'superseded' (excluded from the
+        // canonical SQL stats filter) and returning the winner without
+        // re-merging deltas (the winner already counted).
+        const wantedFillId = opts.update.fields.protocolFillId;
+        let updateFailedDueToConflict = false;
+        try {
+          await tx.update(botTrades).set(opts.update.fields).where(eq(botTrades.id, opts.update.tradeId));
+        } catch (err: any) {
+          if (err?.code === '23505' && wantedFillId) {
+            updateFailedDueToConflict = true;
+          } else {
+            throw err;
+          }
+        }
+
+        if (updateFailedDueToConflict && wantedFillId) {
+          const winnerRows = await tx
+            .select()
+            .from(botTrades)
+            .where(eq(botTrades.protocolFillId, wantedFillId))
+            .limit(1);
+          const winner = winnerRows[0];
+          // Demote our losing pending row so it never participates in the
+          // canonical stats SQL (status NOT IN executed/liquidated/recovered).
+          await tx
+            .update(botTrades)
+            .set({ status: 'superseded', errorMessage: `Superseded by canonical close ${wantedFillId}` })
+            .where(eq(botTrades.id, opts.update.tradeId));
+          return { trade: winner ?? locked, isNew: false };
+        }
+
+        const found = await tx.select().from(botTrades).where(eq(botTrades.id, opts.update.tradeId)).limit(1);
+        trade = found[0];
+        // Only recompute on update path when the row actually transitioned
+        // INTO a canonical status (locked.status was non-canonical above).
+        await this.recomputeAndMergeBotStats(opts.botId, opts.deltas, tx);
+        return { trade, isNew: true };
+      }
+      // Insert path: recompute only when we actually introduced a new
+      // canonical row. Duplicate inserts (idempotency hits) are no-ops —
+      // the original writer already merged deltas.
+      if (opts.insert && isNew) {
+        await this.recomputeAndMergeBotStats(opts.botId, opts.deltas, tx);
+      }
+      return { trade, isNew };
+    });
   }
 
   async getBotTrades(tradingBotId: string, limit: number = 50): Promise<BotTrade[]> {
@@ -530,7 +822,16 @@ export class DatabaseStorage implements IStorage {
   async getBotPerformanceSeries(tradingBotId: string, since?: Date): Promise<{ timestamp: Date; pnl: number; cumulativePnl: number }[]> {
     const conditions = [
       eq(botTrades.tradingBotId, tradingBotId),
-      or(eq(botTrades.status, 'executed'), eq(botTrades.status, 'liquidated')),
+      // Canonical close-event status set — MUST match
+      // getCanonicalBotTradeStats so the share-card / performance series
+      // tradeCount agrees with overview / leaderboard / balance counts.
+      // Recovered close trades (from the retry flow) carry realized PnL
+      // and are real canonical events, so they're included here too.
+      or(
+        eq(botTrades.status, 'executed'),
+        eq(botTrades.status, 'liquidated'),
+        eq(botTrades.status, 'recovered'),
+      ),
       sql`${botTrades.pnl} IS NOT NULL`,
     ];
     if (since) {
@@ -608,6 +909,44 @@ export class DatabaseStorage implements IStorage {
 
     const result = await db.insert(botTrades).values(trade).returning();
     return result[0];
+  }
+
+  /**
+   * Idempotent insert keyed on `protocolFillId` (canonical close-event ID).
+   * If a row with the same fill ID already exists, return it with isNew=false
+   * — this lets racing close paths (reconciler, webhook, retry) safely call
+   * the same write without producing duplicate rows.
+   */
+  async createBotTradeIdempotent(trade: InsertBotTrade): Promise<{ trade: BotTrade; isNew: boolean }> {
+    if (trade.protocolFillId) {
+      const existing = await db
+        .select()
+        .from(botTrades)
+        .where(eq(botTrades.protocolFillId, trade.protocolFillId))
+        .limit(1);
+      if (existing[0]) {
+        return { trade: existing[0], isNew: false };
+      }
+      try {
+        const inserted = await this.createBotTrade(trade);
+        return { trade: inserted, isNew: true };
+      } catch (err: any) {
+        // 23505 = unique_violation — racing path beat us; fetch the winner.
+        if (err?.code === '23505' || /duplicate key|unique constraint/i.test(err?.message ?? '')) {
+          const winner = await db
+            .select()
+            .from(botTrades)
+            .where(eq(botTrades.protocolFillId, trade.protocolFillId))
+            .limit(1);
+          if (winner[0]) {
+            return { trade: winner[0], isNew: false };
+          }
+        }
+        throw err;
+      }
+    }
+    const inserted = await this.createBotTrade(trade);
+    return { trade: inserted, isNew: true };
   }
 
   async updateBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<void> {
@@ -791,14 +1130,14 @@ export class DatabaseStorage implements IStorage {
       const bots = await db.select().from(tradingBots).where(eq(tradingBots.walletAddress, wallet.address));
       if (bots.length === 0) continue;
 
+      // Canonical SQL-derived counts: closed-position events with realized PnL
+      // (matches the share card / overview / balance endpoints).
       let totalWinningTrades = 0;
       let totalTrades = 0;
       for (const bot of bots) {
-        const stats = bot.stats as { totalTrades?: number; winningTrades?: number } | null;
-        if (stats) {
-          totalTrades += stats.totalTrades || 0;
-          totalWinningTrades += stats.winningTrades || 0;
-        }
+        const counts = await this.getCanonicalBotTradeStats(bot.id);
+        totalTrades += counts.totalTrades;
+        totalWinningTrades += counts.winningTrades;
       }
 
       const botIds = bots.map(b => b.id);
@@ -1850,15 +2189,16 @@ export class DatabaseStorage implements IStorage {
     const bots = await this.getTradingBots(walletAddress);
     let totalTrades = 0;
     let totalVolume = 0;
-    
+
     for (const bot of bots) {
+      const counts = await this.getCanonicalBotTradeStats(bot.id);
+      totalTrades += counts.totalTrades;
       const stats = bot.stats as any;
       if (stats) {
-        totalTrades += stats.totalTrades || 0;
-        totalVolume += stats.totalVolume || 0;
+        totalVolume += Number(stats.totalVolume) || 0;
       }
     }
-    
+
     return { totalTrades, totalVolume };
   }
 

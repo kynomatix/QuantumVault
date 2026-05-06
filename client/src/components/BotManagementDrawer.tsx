@@ -1147,12 +1147,22 @@ export function BotManagementDrawer({
     return new Date(dateString).toLocaleString();
   };
 
-  const getWinRate = () => {
+  // Win rate is undefined (not 0) when no realized trades exist so consumers
+  // can render "—" instead of a misleading "0.0%". Always returns a number
+  // (or undefined), never NaN.
+  const getWinRate = (): number | undefined => {
     const stats = localBot?.stats || bot?.stats;
-    if (!stats) return 0;
-    const realizedTrades = (stats.winningTrades || 0) + (stats.losingTrades || 0);
-    if (realizedTrades === 0) return 0;
-    return ((stats.winningTrades / realizedTrades) * 100).toFixed(1);
+    if (!stats) return undefined;
+    const wins = stats.winningTrades || 0;
+    const losses = stats.losingTrades || 0;
+    const realizedTrades = wins + losses;
+    if (realizedTrades === 0) return undefined;
+    const rate = (wins / realizedTrades) * 100;
+    return isNaN(rate) ? undefined : rate;
+  };
+  const formatWinRate = () => {
+    const r = getWinRate();
+    return r === undefined ? '—' : r.toFixed(1) + '%';
   };
 
   const displayBot = localBot || bot;
@@ -1401,7 +1411,7 @@ export function BotManagementDrawer({
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
                 <p className="text-xs text-muted-foreground">Win Rate</p>
                 <p className="text-lg font-semibold mt-1 text-emerald-500" data-testid="text-win-rate">
-                  {getWinRate()}%
+                  {formatWinRate()}
                 </p>
               </div>
               <div className="p-3 rounded-lg bg-muted/30 border text-center">
@@ -1862,20 +1872,22 @@ export function BotManagementDrawer({
                 </span>
               </div>
               
-              {performanceData.length > 0 && (
-                <div className="mt-3 pt-3 border-t border-border/50">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full h-8 text-xs gap-2"
-                    onClick={() => setShareCardOpen(true)}
-                    data-testid="button-share-performance"
-                  >
-                    <Share2 className="w-3.5 h-3.5" />
-                    Share Performance Card
-                  </Button>
-                </div>
-              )}
+              <div className="mt-3 pt-3 border-t border-border/50">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full h-8 text-xs gap-2"
+                  onClick={() => {
+                    setShareCardOpen(true);
+                    void fetchPerformanceData();
+                    void fetchBotOverview();
+                  }}
+                  data-testid="button-share-performance"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  Share Performance Card
+                </Button>
+              </div>
             </div>
           </TabsContent>
 
@@ -2719,7 +2731,7 @@ export function BotManagementDrawer({
           pnlPercent={netDeposited > 0 ? ((exchangeBalance - netDeposited) / netDeposited) * 100 : 0}
           timeframe={performanceTimeframe}
           tradeCount={performanceTradeCount}
-          winRate={parseFloat(getWinRate() as string)}
+          winRate={getWinRate()}
           chartData={performanceData}
           displayName={displayName}
           xUsername={xUsername}

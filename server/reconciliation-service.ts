@@ -1,4 +1,4 @@
-import { storage } from "./storage";
+import { storage, DatabaseStorage } from "./storage";
 import { normalizeMarket } from "./protocol/symbol-registry";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
 import type { TradeRecord } from "./protocol/protocol-types";
@@ -48,7 +48,17 @@ interface CloseDetectionResult {
   fillPrice?: number;
   pnl?: number;
   fee?: number;
-  protocolTradeId?: string;
+  /** First matched protocol fill ID (single canonical identifier — NOT a
+   * joined string). Used as the canonical close-event signature input
+   * for cross-path dedup with webhook/retry writers. */
+  protocolFillId?: string;
+  /** Comma-joined matched fill IDs, for diagnostics ONLY. Never use as
+   * a dedup key — joined strings are not stable identifiers. */
+  matchedFillIdsForDiagnostics?: string;
+  /** Timestamp of the matched closing fill, used for the deterministic
+   * nosig fallback hash so repeated reconciler runs against the same
+   * close hit the same time bucket. */
+  fillTimestampMs?: number;
 }
 
 async function detectOnChainClose(
@@ -197,7 +207,12 @@ async function detectOnChainClose(
         fillPrice: avgFillPrice,
         pnl,
         fee: totalFee,
-        protocolTradeId: matchedTradeIds.join(','),
+        // Canonical: FIRST matched protocol fill ID is a single stable
+        // identifier suitable as the cross-path dedup key. Joined IDs
+        // are diagnostic-only.
+        protocolFillId: matchedTradeIds[0],
+        matchedFillIdsForDiagnostics: matchedTradeIds.join(','),
+        fillTimestampMs: closingFills[0]?.timestamp,
       };
     }
 
@@ -238,6 +253,11 @@ async function detectOnChainClose(
         return noDetection;
       }
 
+      // Stable timestamp anchor for the canonical close ID across reconciler ticks.
+      const fallbackAnchorMs = dbPosition.lastTradeAt
+        ? new Date(dbPosition.lastTradeAt).getTime()
+        : undefined;
+
       if (accountInfo.equity < 1 && accountInfo.balance < 1) {
         console.log(`[Reconcile] Likely liquidation for bot ${botId} (no closing trades): equity=$${accountInfo.equity.toFixed(2)}, balance=$${accountInfo.balance.toFixed(2)}`);
         return {
@@ -246,6 +266,7 @@ async function detectOnChainClose(
           fillPrice: entryPrice,
           pnl: 0,
           fee: 0,
+          fillTimestampMs: fallbackAnchorMs,
         };
       }
 
@@ -304,6 +325,7 @@ async function detectOnChainClose(
           fillPrice: estimatedFillPrice,
           pnl,
           fee: 0,
+          fillTimestampMs: fallbackAnchorMs,
         };
       }
 
@@ -318,6 +340,7 @@ async function detectOnChainClose(
           fillPrice,
           pnl,
           fee: 0,
+          fillTimestampMs: fallbackAnchorMs,
         };
       }
     } catch { /* non-critical */ }
@@ -617,43 +640,73 @@ export async function reconcileBotPosition(
       );
 
       if (closeDetection.detected) {
-        const dedupKey = closeDetection.protocolTradeId
-          ? `reconcile-close-${closeDetection.protocolTradeId}`
-          : `reconcile-close-${botId}-${market}-${Date.now()}`;
-
-        const existingTrades = await storage.getBotTrades(botId, 5);
-        const alreadyRecorded = closeDetection.protocolTradeId && existingTrades.some(t => {
-          const payload = t.webhookPayload as Record<string, unknown> | null;
-          return payload?.protocolTradeId === closeDetection.protocolTradeId;
+        // Canonical close-event ID. Reconciler-detected closes are keyed on
+        // the protocol's fill ID when available so retries / racing reconciler
+        // runs can never double-write. Falls back to a deterministic synthetic
+        // ID derived from bot+market+price+size when the protocol has no fill
+        // ID (so re-runs against the same on-chain state are still idempotent).
+        const closePnl = closeDetection.pnl ?? 0;
+        const closeFillPrice = closeDetection.fillPrice ?? parseFloat(dbPosition!.avgEntryPrice);
+        const closeNotional = closeFillPrice * Math.abs(dbBaseSize);
+        // Use the SAME canonical identity scheme as every other close
+        // writer. Primary input is the FIRST protocol fill ID (a single
+        // stable identifier), NOT the legacy joined-IDs string. When no
+        // fill ID is available (account-info-derived liquidation), we
+        // fall through to the deterministic nosig hash which includes
+        // market+side+size+price+5min-time-bucket so repeated reconciler
+        // runs against the same close still collide on the unique index.
+        const closeSideForId = dbBaseSize > 0 ? 'short' : 'long';
+        const dedupKey = DatabaseStorage.canonicalCloseFillId({
+          signature: closeDetection.protocolFillId,
+          botId,
+          side: closeSideForId,
+          size: Math.abs(dbBaseSize),
+          market,
+          fillPrice: closeFillPrice,
+          timestampMs: closeDetection.fillTimestampMs,
         });
 
-        if (alreadyRecorded) {
-          console.log(`[Reconcile] Close already recorded for bot ${botId} ${market} (tradeId=${closeDetection.protocolTradeId}), skipping duplicate`);
+        console.log(`[Reconcile] Position closed on-chain for bot ${botId} ${market}: reason=${closeDetection.reason}, fill=$${closeFillPrice.toFixed(4)}, pnl=$${closePnl.toFixed(4)}`);
+
+        // Atomic: insert canonical close row + recompute stats in ONE
+        // DB transaction (task #67 requirement). Idempotency hits skip
+        // the recompute internally so racing reconciler/webhook/retry
+        // writes converge without double-counting deltas.
+        const { isNew } = await storage.recordCloseEventAtomic({
+          botId,
+          insert: {
+            tradingBotId: botId,
+            walletAddress,
+            market,
+            side: dbBaseSize > 0 ? 'short' : 'long',
+            size: String(Math.abs(dbBaseSize)),
+            price: String(closeFillPrice),
+            fee: String(closeDetection.fee ?? 0),
+            // Canonical close: realized PnL is required (breakeven uses '0', never null).
+            pnl: String(closePnl),
+            status: closeDetection.reason === 'liquidation' ? 'liquidated' : 'executed',
+            protocolFillId: dedupKey,
+            webhookPayload: {
+              reconciled: true,
+              closeReason: closeDetection.reason,
+              detectedAt: new Date().toISOString(),
+              protocolFillId: closeDetection.protocolFillId,
+              matchedFillIdsForDiagnostics: closeDetection.matchedFillIdsForDiagnostics,
+            },
+            executionMethod: 'on-chain-detected',
+          },
+          deltas: {
+            totalPnlDelta: closePnl,
+            totalVolumeDelta: closeNotional,
+            lastTradeAt: new Date().toISOString(),
+          },
+        });
+
+        if (!isNew) {
+          console.log(`[Reconcile] Close already recorded for bot ${botId} ${market} (dedupKey=${dedupKey}), skipping duplicate stats update`);
           lastReconcileTime.set(botId, Date.now());
           return { synced: true, discrepancy: false };
         }
-
-        console.log(`[Reconcile] Position closed on-chain for bot ${botId} ${market}: reason=${closeDetection.reason}, fill=$${closeDetection.fillPrice?.toFixed(4) ?? '?'}, pnl=$${closeDetection.pnl?.toFixed(4) ?? '?'}`);
-
-        await storage.createBotTrade({
-          tradingBotId: botId,
-          walletAddress,
-          market,
-          side: dbBaseSize > 0 ? 'short' : 'long',
-          size: String(Math.abs(dbBaseSize)),
-          price: String(closeDetection.fillPrice ?? parseFloat(dbPosition!.avgEntryPrice)),
-          fee: String(closeDetection.fee ?? 0),
-          pnl: String(closeDetection.pnl ?? 0),
-          status: closeDetection.reason === 'liquidation' ? 'liquidated' : 'executed',
-          protocolFillId: dedupKey,
-          webhookPayload: {
-            reconciled: true,
-            closeReason: closeDetection.reason,
-            detectedAt: new Date().toISOString(),
-            protocolTradeId: closeDetection.protocolTradeId,
-          },
-          executionMethod: 'on-chain-detected',
-        });
 
         await storage.upsertBotPosition({
           tradingBotId: botId,
@@ -662,35 +715,11 @@ export async function reconcileBotPosition(
           baseSize: "0",
           avgEntryPrice: dbPosition!.avgEntryPrice,
           costBasis: "0",
-          realizedPnl: String(parseFloat(dbPosition!.realizedPnl || "0") + (closeDetection.pnl ?? 0)),
+          realizedPnl: String(parseFloat(dbPosition!.realizedPnl || "0") + closePnl),
           totalFees: String(parseFloat(dbPosition!.totalFees || "0") + (closeDetection.fee ?? 0)),
           lastTradeId: dbPosition!.lastTradeId,
           lastTradeAt: new Date(),
         });
-
-        // Update bot.stats so totalVolume / totalTrades / win-loss reflect
-        // reconciler-detected closes too (the webhook handler updates these
-        // when WE execute a trade; without this, closes detected via
-        // reconciliation never bump the stats).
-        try {
-          const botForStats = await storage.getTradingBotById(botId);
-          if (botForStats) {
-            const existingStats = (botForStats.stats as any) || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-            const closeNotional = (closeDetection.fillPrice ?? parseFloat(dbPosition!.avgEntryPrice)) * Math.abs(dbBaseSize);
-            const closePnl = closeDetection.pnl ?? 0;
-            await storage.updateTradingBotStats(botId, {
-              ...existingStats,
-              totalTrades: (existingStats.totalTrades || 0) + 1,
-              winningTrades: closePnl > 0 ? (existingStats.winningTrades || 0) + 1 : (existingStats.winningTrades || 0),
-              losingTrades: closePnl < 0 ? (existingStats.losingTrades || 0) + 1 : (existingStats.losingTrades || 0),
-              totalPnl: (existingStats.totalPnl || 0) + closePnl,
-              totalVolume: (existingStats.totalVolume || 0) + closeNotional,
-              lastTradeAt: new Date().toISOString(),
-            });
-          }
-        } catch (statsErr) {
-          console.error(`[Reconcile] Failed to update bot.stats for ${botId}:`, statsErr);
-        }
 
         {
           const botForClear = await storage.getTradingBotById(botId);

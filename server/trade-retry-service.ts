@@ -1,6 +1,6 @@
 import { sendTradeNotification } from "./notification-service";
 import { syncPositionFromOnChain } from "./reconciliation-service";
-import { storage } from "./storage";
+import { storage, DatabaseStorage } from "./storage";
 import { getMarketBySymbol } from "./market-liquidity-service";
 import { transferUsdcToWallet, getAgentKeypair } from "./agent-wallet";
 import { PublicKey } from "@solana/web3.js";
@@ -741,6 +741,18 @@ async function processRetryJob(job: RetryJob): Promise<void> {
           const originalTrade = await storage.getBotTrade(job.originalTradeId);
           const originalError = originalTrade?.errorMessage || 'Unknown error';
           
+          // Canonical close-event ID for cross-path dedup.
+          const recoveredFillId = job.side === 'close'
+            ? DatabaseStorage.canonicalCloseFillId({
+                signature: result.signature,
+                botId: job.botId,
+                side: 'CLOSE',
+                size: job.size,
+                market: job.market,
+                fillPrice,
+                timestampMs: Date.now(),
+              })
+            : undefined;
           const recoveredUpdate: Record<string, any> = {
             status: 'recovered',
             price: fillPrice.toString(),
@@ -751,6 +763,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             retryAttempts: job.attempts,
             executionMethod: result.executionMethod || 'legacy',
             swiftOrderId: result.swiftOrderId || null,
+            ...(recoveredFillId ? { protocolFillId: recoveredFillId } : {}),
           };
           if (job.side === 'close' && job.entryPrice && job.entryPrice > 0 && fillPrice > 0) {
             const positionWasLong = actualCloseSide === 'short';
@@ -763,25 +776,77 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             recoveredUpdate.pnl = closePnl.toFixed(2);
             console.log(`[TradeRetry] Recovered close PnL: entry=$${job.entryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, size=${job.size}, fee=$${fee.toFixed(4)}, pnl=$${closePnl.toFixed(4)}`);
           }
-          await storage.updateBotTrade(job.originalTradeId, recoveredUpdate);
+          // Recover original pending row → executed AND recompute stats in
+          // a single DB tx so canonical counters can never drift from the
+          // newly-realized close PnL/volume.
+          const recoveredVolume = job.side === 'close' ? job.size * fillPrice : 0;
+          const recoveredPnlNum = recoveredUpdate.pnl ? parseFloat(recoveredUpdate.pnl) : 0;
+          await storage.recordCloseEventAtomic({
+            botId: job.botId,
+            update: { tradeId: job.originalTradeId, fields: recoveredUpdate },
+            deltas: job.side === 'close'
+              ? { totalPnlDelta: recoveredPnlNum, totalVolumeDelta: recoveredVolume, lastTradeAt: new Date().toISOString() }
+              : {},
+          });
           tradeId = job.originalTradeId;
           console.log(`[TradeRetry] Updated original trade ${tradeId} to RECOVERED via ${result.executionMethod || 'legacy'} (was: ${originalError.slice(0, 50)}...)`);
         } else {
-          const newTrade = await storage.createBotTrade({
+          // Compute realized PnL for retried close trades so they count as
+          // canonical trades. Breakeven uses '0' (never null) per task #67.
+          let retryClosePnl: string | undefined;
+          let retryClosePnlNum = 0;
+          if (job.side === 'close' && job.entryPrice && job.entryPrice > 0 && fillPrice > 0) {
+            const positionWasLong = actualCloseSide === 'short';
+            const closePnl = positionWasLong
+              ? (fillPrice - job.entryPrice) * job.size - fee
+              : (job.entryPrice - fillPrice) * job.size - fee;
+            retryClosePnl = closePnl.toFixed(6);
+            retryClosePnlNum = closePnl;
+          }
+          // protocolFillId is reserved for CLOSE events only.
+          const protocolFillId = job.side === 'close'
+            ? DatabaseStorage.canonicalCloseFillId({
+                signature: result.signature,
+                botId: job.botId,
+                side: 'CLOSE',
+                size: job.size,
+                market: job.market,
+                fillPrice,
+                timestampMs: Date.now(),
+              })
+            : undefined;
+          const insertRow = {
             tradingBotId: job.botId,
             walletAddress: job.walletAddress,
             market: job.market,
-            side: job.side === 'close' ? 'CLOSE' : job.side.toUpperCase(),
+            side: (job.side === 'close' ? 'CLOSE' : job.side.toUpperCase()) as string,
             size: job.size.toString(),
             price: fillPrice.toString(),
             fee: fee.toString(),
-            status: 'executed',
+            pnl: retryClosePnl,
+            status: 'executed' as const,
             txSignature: result.signature,
+            ...(protocolFillId ? { protocolFillId } : {}),
             webhookPayload: { autoRetry: true, attempts: job.attempts, originalJobId: job.id },
             executionMethod: result.executionMethod || 'legacy',
             swiftOrderId: result.swiftOrderId || null,
-          });
-          tradeId = newTrade.id;
+          };
+          if (job.side === 'close') {
+            const retryNotional = job.size * fillPrice;
+            const { trade: newTrade } = await storage.recordCloseEventAtomic({
+              botId: job.botId,
+              insert: insertRow,
+              deltas: {
+                totalPnlDelta: retryClosePnlNum,
+                totalVolumeDelta: retryNotional,
+                lastTradeAt: new Date().toISOString(),
+              },
+            });
+            tradeId = newTrade!.id;
+          } else {
+            const { trade: newTrade } = await storage.createBotTradeIdempotent(insertRow);
+            tradeId = newTrade.id;
+          }
           console.log(`[TradeRetry] Created new trade ${tradeId}`);
         }
         

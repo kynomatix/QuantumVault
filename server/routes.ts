@@ -5,7 +5,7 @@ import crypto from "crypto";
 import { encrypt as legacyEncrypt, decrypt } from "./crypto";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
-import { storage } from "./storage";
+import { storage, DatabaseStorage } from "./storage";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
 import { db } from "./db";
@@ -1541,7 +1541,6 @@ async function routeSignalToSubscribers(
 
           if (closeResult.success) {
             const fillPrice = parseFloat(signal.price);
-            const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
             
             // Estimate fee from notional (closePerpPosition doesn't return actualFee)
             const closeNotional = Math.abs(position.size) * fillPrice;
@@ -1561,29 +1560,37 @@ async function routeSignalToSubscribers(
               console.log(`[Subscriber Routing] PnL calculated for ${subBot.id}: entry=$${closeEntryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, pnl=$${closeTradePnl.toFixed(4)}`);
             }
             
-            await storage.createBotTrade({
-              tradingBotId: subBot.id,
-              walletAddress: subBot.walletAddress,
-              market: subBot.market,
-              side: "CLOSE",
+            const subRouteFillId = DatabaseStorage.canonicalCloseFillId({
+              signature: closeResult.signature,
+              botId: subBot.id,
+              side: 'CLOSE',
               size: Math.abs(position.size).toFixed(8),
-              price: closeResult.fillPrice?.toString() || fillPrice.toFixed(6),
-              status: 'executed',
-              fee: closeFee.toFixed(6),
-              pnl: closeTradePnl !== 0 ? closeTradePnl.toFixed(6) : null,
-              txSignature: closeResult.signature || null,
-              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
-              executionMethod: closeResult.executionMethod || 'legacy',
+              market: subBot.market,
+              fillPrice,
+              timestampMs: Date.now(),
             });
-            // Update stats with PnL
-            await storage.updateTradingBotStats(subBot.id, {
-              ...stats,
-              totalTrades: (stats.totalTrades || 0) + 1,
-              winningTrades: closeTradePnl > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
-              losingTrades: closeTradePnl < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
-              totalPnl: (stats.totalPnl || 0) + closeTradePnl,
-              totalVolume: (stats.totalVolume || 0) + closeNotional,
-              lastTradeAt: new Date().toISOString(),
+            await storage.recordCloseEventAtomic({
+              botId: subBot.id,
+              insert: {
+                tradingBotId: subBot.id,
+                walletAddress: subBot.walletAddress,
+                market: subBot.market,
+                side: "CLOSE",
+                size: Math.abs(position.size).toFixed(8),
+                price: closeResult.fillPrice?.toString() || fillPrice.toFixed(6),
+                status: 'executed',
+                fee: closeFee.toFixed(6),
+                pnl: closeTradePnl.toFixed(6),
+                txSignature: closeResult.signature || null,
+                protocolFillId: subRouteFillId,
+                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+                executionMethod: closeResult.executionMethod || 'legacy',
+              },
+              deltas: {
+                totalPnlDelta: closeTradePnl,
+                totalVolumeDelta: closeNotional,
+                lastTradeAt: new Date().toISOString(),
+              },
             });
 
             // PROFIT SHARE: Distribute to creator if subscriber closed with profit
@@ -1813,7 +1820,6 @@ async function routeSignalToSubscribers(
 
           if (orderResult.success) {
             let fillPrice = orderResult.fillPrice ?? oraclePrice;
-            const stats = subBot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
 
             const tradeNotional = contractSize * fillPrice;
             const tradeFee = orderResult.actualFee ?? (tradeNotional * getExchangeFeeRate());
@@ -1863,6 +1869,7 @@ async function routeSignalToSubscribers(
             // FLIP PROFIT SHARE: If a flip occurred, calculate realized PnL from closing the old position
             // The closed portion is the minimum of pre-trade position size and new order size
             // (handles both full flips and partial reduces that flip direction)
+            let flipPnl: number = 0;
             if (preTradePosition && preTradePosition.entryPrice > 0) {
               const closedSize = Math.min(preTradePosition.size, contractSize);
               const closedEntryPrice = preTradePosition.entryPrice;
@@ -1870,7 +1877,6 @@ async function routeSignalToSubscribers(
               // Fee on the close leg only (proportional to closed size, not full order)
               const closeFee = closedSize * exitPrice * getExchangeFeeRate();
               
-              let flipPnl = 0;
               if (preTradePosition.side === 'LONG') {
                 flipPnl = (exitPrice - closedEntryPrice) * closedSize - closeFee;
               } else {
@@ -1879,17 +1885,9 @@ async function routeSignalToSubscribers(
               
               console.log(`[Subscriber Routing] Flip PnL for ${subBot.id}: closed ${preTradePosition.side} ${closedSize}/${preTradePosition.size} @ entry=$${closedEntryPrice.toFixed(2)}, exit=$${exitPrice.toFixed(2)}, pnl=$${flipPnl.toFixed(4)}`);
               
-              // Update stats with the realized PnL from the flip
-              if (flipPnl !== 0) {
-                stats.totalPnl = (stats.totalPnl || 0) + flipPnl;
-                if (flipPnl > 0) {
-                  stats.winningTrades = (stats.winningTrades || 0) + 1;
-                } else {
-                  stats.losingTrades = (stats.losingTrades || 0) + 1;
-                }
-              }
-              
-              // Update the trade record with realized PnL from the flip
+              // Update the trade record with realized PnL from the flip (always
+              // record a number — '0' for breakeven, never null — so the
+              // canonical SQL count picks it up).
               await storage.updateBotTrade(subTrade.id, {
                 pnl: flipPnl.toFixed(6),
               });
@@ -1916,10 +1914,10 @@ async function routeSignalToSubscribers(
               }
             }
 
-            await storage.updateTradingBotStats(subBot.id, {
-              ...stats,
-              totalTrades: (stats.totalTrades || 0) + 1,
-              totalVolume: (stats.totalVolume || 0) + contractSize * fillPrice,
+            // Open + (optional) flip-close; counters come from canonical SQL.
+            await storage.recomputeAndMergeBotStats(subBot.id, {
+              totalPnlDelta: flipPnl,
+              totalVolumeDelta: contractSize * fillPrice,
               lastTradeAt: new Date().toISOString(),
             });
 
@@ -4326,6 +4324,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // This ensures we can track and update status whether trade succeeds or needs retry
       const closeSlippageBps = wallet.slippageBps ?? 50;
       const closeEntryPrice = onChainPosition.entryPrice || 0;
+      // Pending row carries no protocolFillId yet — the canonical
+      // `tx-<sig>` identity is set atomically when the close completes
+      // (so it's the SAME key the reconciler / retry would use for the
+      // same on-chain close, achieving cross-path dedup).
       const pendingCloseTrade = await storage.createBotTrade({
         tradingBotId: bot.id,
         walletAddress: bot.walletAddress,
@@ -4568,16 +4570,41 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         console.warn(`[ClosePosition] Could not perform final position verification:`, finalVerifyErr);
       }
 
-      // Update the pending trade record to executed status with PnL
-      await storage.updateBotTrade(pendingCloseTrade.id, {
-        price: String(fillPrice || result.fillPrice || 0),
-        fee: String(closeFee),
-        pnl: tradePnl !== 0 ? String(tradePnl) : null,
-        status: "executed",
-        txSignature: finalTxSignature,
-        webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice, exitPrice: result.fillPrice || fillPrice },
-        errorMessage: verificationWarning,
-        executionMethod: result.executionMethod || 'legacy',
+      // Atomic: mark pending row executed AND recompute stats counters in
+      // one DB transaction. Volume delta = size × fill so totalVolume stays
+      // consistent with on-chain notional even if the deferred sync below
+      // crashes or the process is killed.
+      const manualClosePrice = parseFloat(String(fillPrice || result.fillPrice || 0));
+      const manualCloseNotional = closeSize * (Number.isFinite(manualClosePrice) ? manualClosePrice : 0);
+      await storage.recordCloseEventAtomic({
+        botId: bot.id,
+        update: {
+          tradeId: pendingCloseTrade.id,
+          fields: {
+            price: String(fillPrice || result.fillPrice || 0),
+            fee: String(closeFee),
+            pnl: String(tradePnl),
+            status: "executed",
+            txSignature: finalTxSignature,
+            protocolFillId: DatabaseStorage.canonicalCloseFillId({
+              signature: finalTxSignature,
+              botId: bot.id,
+              side: 'CLOSE',
+              size: closeSize,
+              market: bot.market,
+              fillPrice: fillPrice || result.fillPrice || 0,
+              timestampMs: Date.now(),
+            }),
+            webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice, exitPrice: result.fillPrice || fillPrice },
+            errorMessage: verificationWarning,
+            executionMethod: result.executionMethod || 'legacy',
+          },
+        },
+        deltas: {
+          totalPnlDelta: tradePnl,
+          totalVolumeDelta: manualCloseNotional,
+          lastTradeAt: new Date().toISOString(),
+        },
       });
 
       // Sync position from on-chain (updates database with actual Drift state)
@@ -5035,12 +5062,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         await storage.updateBotTrade(trade.id, tradeUpdate);
       }
 
-      // Update stats
-      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-      await storage.updateTradingBotStats(bot.id, {
-        ...stats,
-        totalTrades: (stats.totalTrades || 0) + 1,
-        totalVolume: (stats.totalVolume || 0) + tradeNotional,
+      // Stats: recompute counters from canonical SQL, merge volume delta.
+      await storage.recomputeAndMergeBotStats(bot.id, {
+        totalVolumeDelta: tradeNotional,
         lastTradeAt: new Date().toISOString(),
       });
 
@@ -5464,7 +5488,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           overviewBotCtx?.botPublicKey
         ),
         storage.getBotNetDeposited(botId),
-        storage.getBotTradeCount(botId),
+        storage.getCanonicalBotTradeCount(botId),
         storage.getBotPosition(botId, bot.market),
         storage.getBotEquityEvents(bot.id, 1000),
         overviewBotCtx ? getExchangeAccountInfoForBot(wallet.agentPublicKey, subAccountId, overviewBotCtx) : Promise.resolve(null),
@@ -5630,7 +5654,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const enrichedBots = await Promise.all(bots.map(async (bot) => {
         const botCtx = getBotSubaccountContext(bot);
         const [tradeCount, position, publishedBot] = await Promise.all([
-          storage.getBotTradeCount(bot.id),
+          storage.getCanonicalBotTradeCount(bot.id),
           storage.getBotPosition(bot.id, bot.market),
           storage.getPublishedBotByTradingBotId(bot.id),
         ]);
@@ -6145,22 +6169,41 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 console.log(`[Bot] Pause close PnL: entry=$${pauseEntryPrice.toFixed(2)}, exit=$${pauseFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${pauseClosePnl.toFixed(4)}`);
               }
               
-              // Create trade record for the close with PnL
-              const closeTrade = await storage.createBotTrade({
-                tradingBotId: bot.id,
-                walletAddress: bot.walletAddress,
+              const pauseFillId = DatabaseStorage.canonicalCloseFillId({
+                signature: result.txSignature,
+                botId: bot.id,
+                side: 'CLOSE',
+                size: closeSize,
                 market: bot.market,
-                side: "CLOSE",
-                size: String(closeSize),
-                price: pauseFillPrice ? String(pauseFillPrice) : "0",
-                fee: String(closeFee),
-                pnl: pauseClosePnl !== 0 ? String(pauseClosePnl) : null,
-                status: "executed",
-                txSignature: result.txSignature,
-                webhookPayload: { action: "pause_close", reason: "Bot paused by user", entryPrice: pauseEntryPrice, exitPrice: pauseFillPrice },
-                executionMethod: result.executionMethod || 'legacy',
-                swiftOrderId: result.swiftOrderId || null,
+                fillPrice: pauseFillPrice,
+                timestampMs: Date.now(),
               });
+              const pauseNotional = closeSize * (pauseFillPrice || 0);
+              const { trade: closeTradeRow } = await storage.recordCloseEventAtomic({
+                botId: bot.id,
+                insert: {
+                  tradingBotId: bot.id,
+                  walletAddress: bot.walletAddress,
+                  market: bot.market,
+                  side: "CLOSE",
+                  size: String(closeSize),
+                  price: pauseFillPrice ? String(pauseFillPrice) : "0",
+                  fee: String(closeFee),
+                  pnl: String(pauseClosePnl),
+                  status: "executed",
+                  txSignature: result.txSignature,
+                  protocolFillId: pauseFillId,
+                  webhookPayload: { action: "pause_close", reason: "Bot paused by user", entryPrice: pauseEntryPrice, exitPrice: pauseFillPrice },
+                  executionMethod: result.executionMethod || 'legacy',
+                  swiftOrderId: result.swiftOrderId || null,
+                },
+                deltas: {
+                  totalPnlDelta: pauseClosePnl,
+                  totalVolumeDelta: pauseNotional,
+                  lastTradeAt: new Date().toISOString(),
+                },
+              });
+              const closeTrade = closeTradeRow!;
               
               // Sync position from on-chain (replaces client-side math with actual Drift state)
               await syncPositionFromOnChain(
@@ -7426,7 +7469,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         // Capture entry price BEFORE trying to close (needed for retry queue if close fails)
         const closeEntryPrice = onChainPosition.entryPrice || 0;
         
-        // Create trade record for the close
+        // Pending row — no protocolFillId yet. The canonical `tx-<sig>`
+        // identity is set atomically when the close completes so it
+        // matches the key the reconciler/retry would use for the same
+        // on-chain close (cross-path dedup via the unique index).
         const closeTrade = await storage.createBotTrade({
           tradingBotId: botId,
           walletAddress: bot.walletAddress,
@@ -7600,7 +7646,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 txSignature: finalTxSignature,
                 price: result.fillPrice ? String(result.fillPrice) : signalPrice,
                 fee: String(closeFee),
-                pnl: closeTradePnl !== 0 ? String(closeTradePnl) : null,
+                pnl: String(closeTradePnl),
                 errorMessage: `WARNING: Position not fully closed after ${maxRetries} attempts. Remaining: ${finalPositionRemaining.side} ${finalPositionRemaining.size}`,
                 executionMethod: result.executionMethod || 'legacy',
               });
@@ -7624,13 +7670,38 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             }
             
             // Update trade record with execution details and PnL (use finalTxSignature which may include retry signatures)
-            await storage.updateBotTrade(closeTrade.id, {
-              status: "executed",
-              txSignature: finalTxSignature,
-              price: result.fillPrice ? String(result.fillPrice) : signalPrice,
-              fee: String(closeFee),
-              pnl: closeTradePnl !== 0 ? String(closeTradePnl) : null,
-              executionMethod: result.executionMethod || 'legacy',
+            // Atomic: mark close row executed + recompute stats counters in
+            // a single DB transaction. PnL/volume deltas are merged here so
+            // the deferred sync only handles position state, not stats.
+            const webhookClosePrice = result.fillPrice ?? parseFloat(signalPrice || "0");
+            const webhookCloseVolume = closeSize * (Number.isFinite(webhookClosePrice) ? webhookClosePrice : 0);
+            await storage.recordCloseEventAtomic({
+              botId,
+              update: {
+                tradeId: closeTrade.id,
+                fields: {
+                  status: "executed",
+                  txSignature: finalTxSignature,
+                  price: result.fillPrice ? String(result.fillPrice) : signalPrice,
+                  fee: String(closeFee),
+                  pnl: String(closeTradePnl),
+                  executionMethod: result.executionMethod || 'legacy',
+                  protocolFillId: DatabaseStorage.canonicalCloseFillId({
+                    signature: finalTxSignature,
+                    botId,
+                    side: 'CLOSE',
+                    size: closeSize,
+                    market: bot.market,
+                    fillPrice: result.fillPrice ?? parseFloat(signalPrice || '0'),
+                    timestampMs: Date.now(),
+                  }),
+                },
+              },
+              deltas: {
+                totalPnlDelta: closeTradePnl,
+                totalVolumeDelta: webhookCloseVolume,
+                lastTradeAt: new Date().toISOString(),
+              },
             });
             
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
@@ -7680,19 +7751,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                   webhookBotCtx?.botPublicKey
                 );
 
-                const closeNotionalVolume = closeSize * closeFillPrice;
-                const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-                await storage.updateTradingBotStats(botId, {
-                  ...stats,
-                  totalTrades: (stats.totalTrades || 0) + 1,
-                  winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
-                  losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
-                  totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
-                  totalVolume: (stats.totalVolume || 0) + closeNotionalVolume,
-                  lastTradeAt: new Date().toISOString(),
-                });
               } catch (err) {
-                console.error(`[Webhook] Deferred post-trade sync/stats failed (non-blocking): ${err}`);
+                console.error(`[Webhook] Deferred post-trade sync failed (non-blocking): ${err}`);
               }
 
               if (closeTradePnl > 0) {
@@ -7976,7 +8036,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         
         console.log(`[Webhook] Step 1: Closing existing ${isCurrentlyLong ? 'LONG' : 'SHORT'} position of ${closeSize} contracts`);
         
-        // Create close trade record
+        // Pending row — canonical `tx-<sig>` is set in the executed
+        // update below, matching the cross-path identity scheme.
         const closeTrade = await storage.createBotTrade({
           tradingBotId: botId,
           walletAddress: bot.walletAddress,
@@ -8039,14 +8100,37 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           // This is unexpected for flip since we verified position exists, but handle gracefully
           if (closeResult.success && !flipTxSignature) {
             console.warn(`[Webhook] Position flip close: success but no signature - position may have been closed by another process`);
-            // Still save the PnL calculation based on the position we queried before
-            await storage.updateBotTrade(closeTrade.id, { 
-              status: "executed",
-              txSignature: null,
-              price: String(closeFillPrice),
-              fee: String(closeFee),
-              pnl: flipClosePnl !== 0 ? String(flipClosePnl) : null,
-              errorMessage: "Position was already closed (no trade executed)"
+            // Still save the PnL + atomically recompute stats so counters
+            // stay correct even when there's no on-chain signature.
+            await storage.recordCloseEventAtomic({
+              botId,
+              update: {
+                tradeId: closeTrade.id,
+                fields: {
+                  status: "executed",
+                  txSignature: null,
+                  price: String(closeFillPrice),
+                  fee: String(closeFee),
+                  pnl: String(flipClosePnl),
+                  protocolFillId: DatabaseStorage.canonicalCloseFillId({
+                    signature: null,
+                    botId,
+                    side: 'CLOSE',
+                    size: closeSize,
+                    market: bot.market,
+                    fillPrice: closeFillPrice,
+                    timestampMs: bot.stats?.lastTradeAt
+                      ? new Date(bot.stats.lastTradeAt).getTime()
+                      : Date.now(),
+                  }),
+                  errorMessage: "Position was already closed (no trade executed)",
+                },
+              },
+              deltas: {
+                totalPnlDelta: flipClosePnl,
+                totalVolumeDelta: closeSize * closeFillPrice,
+                lastTradeAt: new Date().toISOString(),
+              },
             });
             
             // Defer sync for no-signature case (fire-and-forget)
@@ -8061,13 +8145,33 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             // Continue to execute the new position anyway
             console.log(`[Webhook] Proceeding to open ${side.toUpperCase()} position despite no close signature`);
           } else {
-            // Update close trade with execution details
-            await storage.updateBotTrade(closeTrade.id, {
-              status: "executed",
-              txSignature: flipTxSignature,
-              price: String(closeFillPrice),
-              fee: String(closeFee),
-              pnl: flipClosePnl !== 0 ? String(flipClosePnl) : null,
+            // Update close trade with execution details + atomic recompute.
+            await storage.recordCloseEventAtomic({
+              botId,
+              update: {
+                tradeId: closeTrade.id,
+                fields: {
+                  status: "executed",
+                  txSignature: flipTxSignature,
+                  price: String(closeFillPrice),
+                  fee: String(closeFee),
+                  pnl: String(flipClosePnl),
+                  protocolFillId: DatabaseStorage.canonicalCloseFillId({
+                    signature: flipTxSignature,
+                    botId,
+                    side: 'CLOSE',
+                    size: closeSize,
+                    market: bot.market,
+                    fillPrice: closeFillPrice,
+                    timestampMs: Date.now(),
+                  }),
+                },
+              },
+              deltas: {
+                totalPnlDelta: flipClosePnl,
+                totalVolumeDelta: closeSize * closeFillPrice,
+                lastTradeAt: new Date().toISOString(),
+              },
             });
           
             console.log(`[Webhook] Position closed successfully. Now proceeding to open ${side.toUpperCase()} position.`);
@@ -8088,21 +8192,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               }
             }
           
-            // Defer sync and stats for flip close (fire-and-forget, non-blocking)
+            // Defer position sync only — stats already recomputed atomically above.
             (async () => {
               try {
                 await syncPositionFromOnChain(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market, closeTrade.id, closeFee, closeFillPrice, closeSide, closeSize, webhookBotCtx?.botPublicKey);
-                
-                const flipCloseVolume = closeSize * closeFillPrice;
-                const stats1 = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-                await storage.updateTradingBotStats(botId, {
-                  ...stats1,
-                  totalTrades: (stats1.totalTrades || 0) + 1,
-                  totalVolume: (stats1.totalVolume || 0) + flipCloseVolume,
-                  lastTradeAt: new Date().toISOString(),
-                });
               } catch (err) {
-                console.error(`[Webhook] Deferred flip close sync/stats failed (non-blocking): ${err}`);
+                console.error(`[Webhook] Deferred flip close sync failed (non-blocking): ${err}`);
               }
             })();
           }
@@ -8411,14 +8506,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             }
           }
 
-          const stats = bot.stats as any || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-          await storage.updateTradingBotStats(botId, {
-            ...stats,
-            totalTrades: (stats.totalTrades || 0) + 1,
-            winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
-            losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
-            totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
-            totalVolume: (stats.totalVolume || 0) + tradeNotional,
+          await storage.recomputeAndMergeBotStats(botId, {
+            totalPnlDelta: syncResult.tradePnl ?? 0,
+            totalVolumeDelta: tradeNotional,
             lastTradeAt: new Date().toISOString(),
           });
         } catch (err) {
@@ -8802,7 +8892,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const closeSide = onChainPosition.side === 'LONG' ? 'short' : 'long';
           const closeSize = Math.abs(currentPositionSize);
           
-          // Create trade record for close
+          // Pending row — canonical `tx-<sig>` set atomically in the
+          // executed update below for cross-path dedup.
           const closeTrade = await storage.createBotTrade({
             tradingBotId: botId,
             walletAddress: bot.walletAddress,
@@ -8883,12 +8974,33 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               console.log(`[User Webhook] Close PnL: entry=$${closeEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, pnl=$${closeTradePnl.toFixed(4)}`);
             }
             
-            await storage.updateBotTrade(closeTrade.id, {
-              status: "executed",
-              txSignature: result.signature,
-              price: closeFillPrice.toString(),
-              fee: closeFee.toString(),
-              pnl: closeTradePnl.toString(),
+            // Atomic close-event update + stats recompute in a single tx.
+            await storage.recordCloseEventAtomic({
+              botId,
+              update: {
+                tradeId: closeTrade.id,
+                fields: {
+                  status: "executed",
+                  txSignature: result.signature,
+                  price: closeFillPrice.toString(),
+                  fee: closeFee.toString(),
+                  pnl: closeTradePnl.toString(),
+                  protocolFillId: DatabaseStorage.canonicalCloseFillId({
+                    signature: result.signature,
+                    botId,
+                    side: 'CLOSE',
+                    size: closeSize,
+                    market: bot.market,
+                    fillPrice: closeFillPrice,
+                    timestampMs: Date.now(),
+                  }),
+                },
+              },
+              deltas: {
+                totalPnlDelta: closeTradePnl,
+                totalVolumeDelta: closeNotional,
+                lastTradeAt: new Date().toISOString(),
+              },
             });
             
             // Sync position from on-chain (this will clear the position since we just closed it)
@@ -8905,18 +9017,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               closeSize,
               userWebhookBotCtx?.botPublicKey
             );
-            
-            // Update bot stats
-            const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-            await storage.updateTradingBotStats(botId, {
-              ...stats,
-              totalTrades: (stats.totalTrades || 0) + 1,
-              winningTrades: closeTradePnl > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
-              losingTrades: closeTradePnl < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
-              totalPnl: (stats.totalPnl || 0) + closeTradePnl,
-              totalVolume: (stats.totalVolume || 0) + closeNotional,
-              lastTradeAt: new Date().toISOString(),
-            });
             
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
             
@@ -9383,15 +9483,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         await storage.updateBotTrade(trade.id, tradeUpdate);
       }
 
-      // Update bot stats (totals shown in dashboard / leaderboard)
-      const stats = bot.stats as TradingBot['stats'] || { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-      await storage.updateTradingBotStats(botId, {
-        ...stats,
-        totalTrades: (stats.totalTrades || 0) + 1,
-        winningTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) > 0 ? (stats.winningTrades || 0) + 1 : (stats.winningTrades || 0),
-        losingTrades: syncResult.isClosingTrade && (syncResult.tradePnl ?? 0) < 0 ? (stats.losingTrades || 0) + 1 : (stats.losingTrades || 0),
-        totalPnl: (stats.totalPnl || 0) + (syncResult.tradePnl ?? 0),
-        totalVolume: (stats.totalVolume || 0) + userTradeNotional,
+      // Update bot stats (totals shown in dashboard / leaderboard).
+      await storage.recomputeAndMergeBotStats(botId, {
+        totalPnlDelta: syncResult.tradePnl ?? 0,
+        totalVolumeDelta: userTradeNotional,
         lastTradeAt: new Date().toISOString(),
       });
 
@@ -10335,7 +10430,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (balSingularCtx) {
         const [liveInfo, tradeCount] = await Promise.all([
           getExchangeAccountInfoForBot('', 0, balSingularCtx),
-          storage.getBotTradeCount(botId),
+          storage.getCanonicalBotTradeCount(botId),
         ]);
         return res.json({
           driftSubaccountId: 0,
@@ -10349,7 +10444,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const [position, tradeCount, botEvents] = await Promise.all([
         storage.getBotPosition(botId, bot.market),
-        storage.getBotTradeCount(botId),
+        storage.getCanonicalBotTradeCount(botId),
         storage.getBotEquityEvents(bot.id, 1000),
       ]);
 
@@ -10562,10 +10657,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         profitSharePercent: validProfitShare.toString(),
       });
 
-      // Sync initial stats from trading bot to published bot
-      const stats = tradingBot.stats as any || {};
-      const totalTrades = stats.totalTrades || 0;
-      const winningTrades = stats.winningTrades || 0;
+      // Sync initial stats from trading bot to published bot — use canonical
+      // SQL-derived counts so the marketplace card matches the share card.
+      const canonicalCounts = await storage.getCanonicalBotTradeStats(id);
+      const totalTrades = canonicalCounts.totalTrades;
+      const winningTrades = canonicalCounts.winningTrades;
       
       // Get creator's current equity from Drift
       let creatorEquity = 0;
@@ -11900,7 +11996,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             isActive: subscriberBot.isActive,
             driftSubaccountId: subscriberBot.driftSubaccountId,
             sourcePublishedBotId: subscriberBot.sourcePublishedBotId,
-            totalTrades: (subscriberBot.stats as any)?.totalTrades || 0,
+            totalTrades: await storage.getCanonicalBotTradeCount(subscriberBot.id),
           } : null,
           
           // Wallet info
