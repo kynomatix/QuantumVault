@@ -38,47 +38,83 @@ function dmi(
   return { diPlus, diMinus, adx };
 }
 
-// Pine-compatible pivot high detection.
-// At bar i, result[i] = high[i - rightBars] if it is a pivot high, else NaN.
-// Left side: src[j] > src[pivot] disqualifies (equal is OK).
-// Right side: src[j] >= src[pivot] disqualifies (equal kills it). Asymmetric by design.
+// O(n) sliding window maximum using a monotone deque (typed-array indices).
+// result[i] = max(src[i-window+1 .. i]), NaN when fewer than window elements.
+function slidingMax(src: number[], window: number): Float64Array {
+  const n   = src.length;
+  const out = new Float64Array(n).fill(NaN);
+  const dq  = new Int32Array(n);   // indices, monotone decreasing by src value
+  let f = 0, b = 0;
+  for (let i = 0; i < n; i++) {
+    while (f < b && dq[f] < i - window + 1) f++;
+    while (f < b && src[dq[b - 1]] <= src[i]) b--;
+    dq[b++] = i;
+    if (i >= window - 1) out[i] = src[dq[f]];
+  }
+  return out;
+}
+
+// O(n) sliding window minimum using a monotone deque.
+// result[i] = min(src[i-window+1 .. i]), NaN when fewer than window elements.
+function slidingMin(src: number[], window: number): Float64Array {
+  const n   = src.length;
+  const out = new Float64Array(n).fill(NaN);
+  const dq  = new Int32Array(n);
+  let f = 0, b = 0;
+  for (let i = 0; i < n; i++) {
+    while (f < b && dq[f] < i - window + 1) f++;
+    while (f < b && src[dq[b - 1]] >= src[i]) b--;
+    dq[b++] = i;
+    if (i >= window - 1) out[i] = src[dq[f]];
+  }
+  return out;
+}
+
+// Pine-compatible pivot high detection — O(n) via sliding window max.
+// result[i] = src[i-rightBars] if pivot high, else NaN.
+// Left: src[j] > pivot disqualifies (equal OK). Right: src[j] >= pivot disqualifies.
 function pivotHigh(src: number[], leftBars: number, rightBars: number): number[] {
   const n = src.length;
+  // leftMax[i] = max(src[i-leftBars+1 .. i])  → at pi-1 gives max of leftBars bars before pi
+  const leftMax = slidingMax(src, leftBars);
+  // rightMax via reversed array: revMax[n-1-j] = max(src[j .. j+rightBars-1])
+  const rev = new Array(n);
+  for (let k = 0; k < n; k++) rev[k] = src[n - 1 - k];
+  const revMax = slidingMax(rev, rightBars);
+  // revMax[n-1-j] = max(src[j..j+rightBars-1])
+  // right window for pivot pi is src[pi+1..pi+rightBars] → j=pi+1 → revMax[n-pi-2]
   const result = new Array(n).fill(NaN);
   for (let i = leftBars + rightBars; i < n; i++) {
-    const pi = i - rightBars;
-    let ok = true;
-    for (let j = pi - leftBars; j < pi; j++) {
-      if (src[j] > src[pi]) { ok = false; break; }
-    }
-    if (ok) {
-      for (let j = pi + 1; j <= pi + rightBars; j++) {
-        if (src[j] >= src[pi]) { ok = false; break; }
-      }
-    }
-    if (ok) result[i] = src[pi];
+    const pi    = i - rightBars;
+    const pivot = src[pi];
+    const lm    = leftMax[pi - 1];       // max(src[pi-leftBars..pi-1])
+    if (!isNaN(lm) && lm > pivot) continue;
+    const rmIdx = n - pi - 2;
+    const rm    = rmIdx >= 0 ? revMax[rmIdx] : NaN; // max(src[pi+1..pi+rightBars])
+    if (!isNaN(rm) && rm >= pivot) continue;
+    result[i] = pivot;
   }
   return result;
 }
 
-// Pine-compatible pivot low detection.
-// Left side: src[j] < src[pivot] disqualifies (equal is OK).
-// Right side: src[j] <= src[pivot] disqualifies (equal kills it). Asymmetric by design.
+// Pine-compatible pivot low detection — O(n) via sliding window min.
+// Left: src[j] < pivot disqualifies (equal OK). Right: src[j] <= pivot disqualifies.
 function pivotLow(src: number[], leftBars: number, rightBars: number): number[] {
   const n = src.length;
+  const leftMin = slidingMin(src, leftBars);
+  const rev = new Array(n);
+  for (let k = 0; k < n; k++) rev[k] = src[n - 1 - k];
+  const revMin = slidingMin(rev, rightBars);
   const result = new Array(n).fill(NaN);
   for (let i = leftBars + rightBars; i < n; i++) {
-    const pi = i - rightBars;
-    let ok = true;
-    for (let j = pi - leftBars; j < pi; j++) {
-      if (src[j] < src[pi]) { ok = false; break; }
-    }
-    if (ok) {
-      for (let j = pi + 1; j <= pi + rightBars; j++) {
-        if (src[j] <= src[pi]) { ok = false; break; }
-      }
-    }
-    if (ok) result[i] = src[pi];
+    const pi    = i - rightBars;
+    const pivot = src[pi];
+    const lm    = leftMin[pi - 1];
+    if (!isNaN(lm) && lm < pivot) continue;
+    const rmIdx = n - pi - 2;
+    const rm    = rmIdx >= 0 ? revMin[rmIdx] : NaN;
+    if (!isNaN(rm) && rm <= pivot) continue;
+    result[i] = pivot;
   }
   return result;
 }
