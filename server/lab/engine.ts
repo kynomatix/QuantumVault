@@ -24,6 +24,7 @@ export interface EngineConfig {
   processOrdersOnClose?: boolean;
   pinePlan?: PinePlan;
   strategyId?: number;
+  engineType?: string;
 }
 
 function p(params: Record<string, any>, name: string, fallback: string | null, defaultVal: any): any {
@@ -50,11 +51,11 @@ export function runBacktest(
     }, shared, sharedIndicatorCache);
   }
 
-  if (config.strategyId === 3 || config.strategyId === 9) {
+  if (config.engineType === "sbr") {
     return runSbrBacktest(candles, params, ticker, timeframe, config);
   }
 
-  if (config.strategyId === 5 || config.strategyId === 10) {
+  if (config.engineType === "ar38") {
     return runAdaptiveRegimeBacktest(candles, params, ticker, timeframe, config);
   }
 

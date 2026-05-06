@@ -950,6 +950,7 @@ export interface LabOptimizationConfig {
   minAvgBarsHeld: number;
   mode: "smoke" | "sweep";
   strategyId?: number;
+  engineType?: string;
   useInsights?: boolean;
   deepSearch?: boolean;
   coordinateTune?: boolean;
@@ -1145,6 +1146,7 @@ export const labOptimizationConfigSchema = z.object({
   minAvgBarsHeld: z.number().default(1),
   mode: z.enum(["smoke", "sweep"]),
   strategyId: z.number().optional(),
+  engineType: z.string().optional(),
   useInsights: z.boolean().optional(),
   deepSearch: z.boolean().optional(),
   coordinateTune: z.boolean().optional(),

@@ -54,11 +54,12 @@ export function registerLabRoutes(app: Express): void {
   (async () => {
     try {
       const { sql } = await import("drizzle-orm");
-      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true}'::jsonb WHERE id = 1 AND NOT (strategy_settings ? 'nativeEngine')`);
-      // Strategies 3 and 9 (SBR v1) now have a native engine
-      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true}'::jsonb WHERE id IN (3, 9)`);
-      // Strategies 5/10 still use Pine — remove accidental nativeEngine flag
-      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings - 'nativeEngine' WHERE id IN (5, 10)`);
+      // SBR strategies: set nativeEngine + engineType by name (safe across dev/prod where IDs differ)
+      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"nativeEngine": true, "engineType": "sbr"}'::jsonb WHERE name ILIKE '%SBR%'`);
+      // Adaptive Regime strategies: set engineType:"ar38" (nativeEngine already set previously)
+      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings || '{"engineType": "ar38"}'::jsonb WHERE name ILIKE '%Adaptive Regime%' AND NOT (strategy_settings ? 'engineType')`);
+      // Z-Score strategies: no native engine exists — remove nativeEngine flag if wrongly set
+      await db.execute(sql`UPDATE lab_strategies SET strategy_settings = strategy_settings - 'nativeEngine' WHERE name ILIKE '%Z-Score%' AND (strategy_settings ? 'nativeEngine')`);
 
       // Copy Flux Momentum (id=1) from BuhE wallet to AqTT wallet if not already there
       await db.execute(sql`
@@ -1130,6 +1131,7 @@ export function registerLabRoutes(app: Express): void {
           retryPooc = (strat.strategySettings as any).processOrdersOnClose;
           if ((strat.strategySettings as any).nativeEngine) {
             delete config.pineScript;
+            config.engineType = (strat.strategySettings as any).engineType;
           }
         }
         if (!config.pineScript && strat?.pineScript && !(strat.strategySettings as any)?.nativeEngine) {
@@ -1290,6 +1292,7 @@ export function registerLabRoutes(app: Express): void {
         const strat = await labStorage.getStrategy(claimed.strategyId);
         if ((strat?.strategySettings as any)?.nativeEngine) {
           delete config.pineScript;
+          config.engineType = (strat.strategySettings as any).engineType;
         } else if (!config.pineScript && strat?.pineScript) {
           config.pineScript = strat.pineScript;
         }
@@ -1349,7 +1352,8 @@ export function registerLabRoutes(app: Express): void {
           processOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
           if ((strategy.strategySettings as any).nativeEngine) {
             delete config.pineScript;
-            console.log(`[QuantumLab] Strategy ${config.strategyId} has nativeEngine=true, using native engine`);
+            config.engineType = (strategy.strategySettings as any).engineType;
+            console.log(`[QuantumLab] Strategy ${config.strategyId} has nativeEngine=true, engineType=${config.engineType}`);
           }
         }
       }
@@ -1591,6 +1595,7 @@ export function registerLabRoutes(app: Express): void {
           resumeProcessOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
           if ((strategy.strategySettings as any).nativeEngine) {
             delete config.pineScript;
+            config.engineType = (strategy.strategySettings as any).engineType;
           }
         }
         if (!config.pineScript && strategy?.pineScript && !(strategy?.strategySettings as any)?.nativeEngine) {
@@ -1786,6 +1791,7 @@ export function registerLabRoutes(app: Express): void {
       }
 
       const isNative = (strategy.strategySettings as any)?.nativeEngine === true;
+      const nativeEngineType = (strategy.strategySettings as any)?.engineType as string | undefined;
       const config: LabOptimizationConfig = {
         pineScript: isNative ? undefined : strategy.pineScript,
         parsedInputs,
@@ -1801,6 +1807,7 @@ export function registerLabRoutes(app: Express): void {
         minAvgBarsHeld: sourceConfig?.minAvgBarsHeld ?? (run as any).minAvgBarsHeld ?? 1,
         mode: "sweep",
         strategyId,
+        engineType: isNative ? nativeEngineType : undefined,
         useInsights: true,
         coordinateTune: true,
       };
@@ -2587,6 +2594,7 @@ export function registerLabRoutes(app: Express): void {
             retryPooc = (strat.strategySettings as any).processOrdersOnClose;
             if ((strat.strategySettings as any).nativeEngine) {
               delete config.pineScript;
+              config.engineType = (strat.strategySettings as any).engineType;
             }
           }
         }

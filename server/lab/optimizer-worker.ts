@@ -21,6 +21,7 @@ interface WorkerInput {
     coordinateTune?: boolean;
     pineScript?: string;
     strategyId?: number;
+    engineType?: string;
   };
   candlesByCombo: Record<string, OHLCV[]>;
   resumeCheckpoint?: LabCheckpoint;
@@ -952,6 +953,7 @@ async function run() {
       processOrdersOnClose: config.processOrdersOnClose,
       pinePlan,
       strategyId: config.strategyId,
+      engineType: config.engineType,
     };
 
     const sharedArrays = pinePlan ? createSharedArrays(candles) : undefined;
