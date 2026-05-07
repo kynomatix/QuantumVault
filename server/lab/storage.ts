@@ -937,7 +937,23 @@ export class LabDatabaseStorage implements ILabStorage {
           ROW_NUMBER() OVER (
             PARTITION BY ticker, timeframe, strategy_id
             ORDER BY net_profit_percent DESC, result_id DESC
-          ) AS rn
+          ) AS rn,
+          ROW_NUMBER() OVER (
+            PARTITION BY ticker, timeframe, strategy_id
+            ORDER BY sharpe_ratio DESC, result_id DESC
+          ) AS rn_sharpe,
+          ROW_NUMBER() OVER (
+            PARTITION BY ticker, timeframe, strategy_id
+            ORDER BY profit_factor DESC, result_id DESC
+          ) AS rn_pf,
+          ROW_NUMBER() OVER (
+            PARTITION BY ticker, timeframe, strategy_id
+            ORDER BY max_drawdown_percent ASC, result_id DESC
+          ) AS rn_dd,
+          ROW_NUMBER() OVER (
+            PARTITION BY ticker, timeframe, strategy_id
+            ORDER BY (net_profit_percent / NULLIF(max_drawdown_percent, 0)) DESC NULLS LAST, result_id DESC
+          ) AS rn_lev
         FROM deduped
       ),
       cells AS (
@@ -970,7 +986,7 @@ export class LabDatabaseStorage implements ILabStorage {
                 'runId', run_id,
                 'strategyId', strategy_id
               ) ORDER BY net_profit_percent DESC, result_id DESC
-            ) FILTER (WHERE rn <= 10),
+            ) FILTER (WHERE rn <= 10 OR rn_sharpe <= 10 OR rn_pf <= 10 OR rn_dd <= 10 OR rn_lev <= 10),
             '[]'::jsonb
           ) AS top_results
         FROM ranked
