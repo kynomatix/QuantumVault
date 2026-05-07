@@ -23,7 +23,7 @@ import {
   Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
-  History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2, Home,
+  History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2,
   Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair, ListOrdered, GripVertical, RefreshCw,
 } from "lucide-react";
 import {
@@ -1027,16 +1027,18 @@ export default function QuantumLab() {
             <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
               <Link
                 href="/"
-                className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors text-white/50 hover:text-white hover:bg-white/5"
+                className="group flex items-center gap-2 rounded-lg px-1.5 py-1 -ml-1.5 transition-colors hover:bg-white/5"
                 title="Back to Home"
                 data-testid="link-back-home"
               >
-                <Home className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                <span className="hidden sm:inline">Home</span>
+                <img
+                  src="/images/QV_Logo_02.png"
+                  alt="QuantumVault"
+                  className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg shadow-[0_0_18px_-4px_rgba(139,92,246,0.55)] group-hover:shadow-[0_0_22px_-3px_rgba(139,92,246,0.85)] transition-shadow"
+                />
+                <span className="font-display font-extrabold tracking-tight text-white text-base sm:text-lg leading-none">QV</span>
+                <span className="text-white/50 text-xs sm:text-sm font-medium leading-none">Lab</span>
               </Link>
-              <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg" />
-              <span className="font-display font-bold text-white text-sm sm:text-base">QV</span>
-              <span className="text-white/40 text-xs sm:text-sm">Lab</span>
             </div>
 
             <nav className="flex items-center gap-0.5 sm:gap-1" data-testid="nav-tabs">
@@ -1289,7 +1291,7 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
 
   return (
     <div className="space-y-6">
-      <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
+      <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]">
         <div className="flex items-center justify-between gap-1 px-4 py-3 border-b border-white/10">
           <div className="flex items-center gap-2 flex-1 min-w-0">
             <FileCode className="w-4 h-4 text-violet-400 flex-shrink-0" />
@@ -1606,7 +1608,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
 
   return (
     <>
-      <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
+      <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]">
         <div className="px-4 py-3 border-b border-white/10">
           <div className="flex items-center gap-2">
             <Settings2 className="w-4 h-4 text-violet-400" />
@@ -1917,7 +1919,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
           {isRunning ? "Queue Smoke Test" : "Smoke Test"}
         </Button>
-        <Button className="w-full bg-violet-600 hover:bg-violet-500 text-white" onClick={() => handleRun("sweep")} disabled={isSubmitting || !parsedResult} data-testid="button-full-sweep">
+        <Button className="w-full bg-violet-600 hover:bg-violet-500 text-white shadow-[0_0_24px_-6px_rgba(139,92,246,0.85)] hover:shadow-[0_0_30px_-4px_rgba(139,92,246,1)] transition-shadow" onClick={() => handleRun("sweep")} disabled={isSubmitting || !parsedResult} data-testid="button-full-sweep">
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Rocket className="w-4 h-4 mr-2" />}
           {isRunning ? "Queue Full Sweep" : "Full Sweep"}
         </Button>
