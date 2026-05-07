@@ -725,6 +725,7 @@ export function registerLabRoutes(app: Express): void {
           coordinateTune: config.coordinateTune ?? false,
           pineScript: config.pineScript,
           strategyId: config.strategyId,
+          engineType: config.engineType,
         },
         candlesByCombo,
         resumeCheckpoint,
