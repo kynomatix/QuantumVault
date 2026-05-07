@@ -708,6 +708,15 @@ export function runAdaptiveRegimeBacktest(
   }
   const netProfitPercent = ((equity - config.initialCapital) / config.initialCapital) * 100;
 
+  const tradeReturns = trades.map(t => t.pnlPercent);
+  let sharpeRatio = 0;
+  if (tradeReturns.length >= 2) {
+    const mean = tradeReturns.reduce((s, r) => s + r, 0) / tradeReturns.length;
+    const variance = tradeReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / (tradeReturns.length - 1);
+    const stdDev = Math.sqrt(variance);
+    sharpeRatio = stdDev > 0 ? Math.round((mean / stdDev) * 100) / 100 : 0;
+  }
+
   let maxEquity = config.initialCapital;
   let maxDrawdown = 0;
   for (let i = 0; i < n; i++) {
@@ -734,6 +743,7 @@ export function runAdaptiveRegimeBacktest(
     maxDrawdownPercent: Math.round(maxDrawdown * 100) / 100,
     profitFactor: grossLoss > 0 ? Math.round((grossProfit / grossLoss) * 100) / 100 : grossProfit > 0 ? 999 : 0,
     totalTrades: trades.length,
+    sharpeRatio,
     params,
     trades,
     equityCurve,

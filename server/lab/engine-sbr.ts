@@ -441,6 +441,15 @@ export function runSbrBacktest(
 
   const netProfitPercent = ((equity - initCap) / initCap) * 100;
 
+  const tradeReturns = trades.map(t => t.pnlPercent);
+  let sharpeRatio = 0;
+  if (tradeReturns.length >= 2) {
+    const mean = tradeReturns.reduce((s, r) => s + r, 0) / tradeReturns.length;
+    const variance = tradeReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / (tradeReturns.length - 1);
+    const stdDev = Math.sqrt(variance);
+    sharpeRatio = stdDev > 0 ? Math.round((mean / stdDev) * 100) / 100 : 0;
+  }
+
   // Equity curve (sampled)
   const step = Math.max(1, Math.floor(n / 500));
   const equityCurve: { time: string; equity: number }[] = [];
@@ -459,6 +468,7 @@ export function runSbrBacktest(
     maxDrawdownPercent: Math.round(maxDD * 100) / 100,
     profitFactor:      grossLoss > 0 ? Math.round((grossProfit / grossLoss) * 100) / 100 : (grossProfit > 0 ? 999 : 0),
     totalTrades:       trades.length,
+    sharpeRatio,
     params,
     trades,
     equityCurve,
