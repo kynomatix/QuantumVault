@@ -1939,12 +1939,19 @@ export class DatabaseStorage implements IStorage {
   }
 
   async calculatePlatformTVL(): Promise<number> {
-    const result = await db.select({
-      totalAllocated: sql<string>`COALESCE(SUM(CAST(total_investment AS DECIMAL)), 0)`,
-    }).from(tradingBots)
-      .where(eq(tradingBots.isActive, true));
-    
-    return parseFloat(result[0]?.totalAllocated || '0');
+    // Sum the most recent portfolio snapshot balance per wallet.
+    // This captures both deployed capital (exchange accounts) and
+    // uninvested capital sitting in agent wallets, giving a true TVL.
+    const result = await db.execute(sql`
+      SELECT COALESCE(SUM(latest.total_balance), 0) AS tvl
+      FROM (
+        SELECT DISTINCT ON (wallet_address) total_balance
+        FROM portfolio_daily_snapshots
+        ORDER BY wallet_address, created_at DESC
+      ) latest
+    `);
+    const row = (result as any).rows?.[0] ?? (result as any)[0];
+    return parseFloat(row?.tvl ?? '0');
   }
   
   async getAllAgentWalletAddresses(): Promise<string[]> {
