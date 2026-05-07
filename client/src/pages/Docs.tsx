@@ -2091,9 +2091,49 @@ function QuantumLabResultsSection() {
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <h4 className="font-medium text-white mb-2">Result Cards</h4>
           <p className="text-white/60 text-sm">
-            Each result shows the composite score, net profit %, win rate, max drawdown, profit factor, total trades, 
+            Each result shows the composite score, net profit %, win rate, max drawdown, profit factor, Sharpe ratio, total trades, 
             and the full parameter set used. Cards are color-coded by performance quality.
           </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Understanding the Metrics</h4>
+          <div className="space-y-3 mt-2">
+            <div>
+              <span className="text-white/80 text-sm font-medium">Net Profit %</span>
+              <p className="text-white/50 text-xs mt-0.5">Total return over the backtest period at 1x leverage. The headline number — but don't read it in isolation. A 200% return with a 90% drawdown is not usable.</p>
+            </div>
+            <div>
+              <span className="text-white/80 text-sm font-medium">Win Rate</span>
+              <p className="text-white/50 text-xs mt-0.5">Percentage of trades that closed in profit. Higher isn't always better — a strategy with 40% win rate but large winners and small losers can outperform a 70% win-rate strategy with the reverse.</p>
+            </div>
+            <div>
+              <span className="text-white/80 text-sm font-medium">Max Drawdown</span>
+              <p className="text-white/50 text-xs mt-0.5">The largest peak-to-trough loss during the backtest. This is what tells you how much pain the strategy inflicts before recovering. Keep this number in mind before applying leverage.</p>
+            </div>
+            <div>
+              <span className="text-white/80 text-sm font-medium">Profit Factor</span>
+              <p className="text-white/50 text-xs mt-0.5">Total gross profit divided by total gross loss. Above 1.0 means you made more than you lost. Above 1.5 is solid; above 2.0 is strong. Below 1.0 means the strategy lost money overall.</p>
+            </div>
+            <div>
+              <span className="text-violet-300 text-sm font-medium">Sharpe Ratio</span>
+              <p className="text-white/50 text-xs mt-0.5">Measures how much return you're getting <em>per unit of risk</em>. It's calculated as the average trade return divided by how much those returns vary — rewarding consistency, not just size. Think of it as: was the profit worth the volatility it took to get there?</p>
+              <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                <div className="p-2 rounded bg-red-500/10 border border-red-500/20 text-center">
+                  <div className="text-red-400 font-mono font-medium">Below 0</div>
+                  <div className="text-white/40 mt-0.5">Losing on average — avoid</div>
+                </div>
+                <div className="p-2 rounded bg-yellow-500/10 border border-yellow-500/20 text-center">
+                  <div className="text-yellow-400 font-mono font-medium">0 – 1</div>
+                  <div className="text-white/40 mt-0.5">Marginal — not yet reliable</div>
+                </div>
+                <div className="p-2 rounded bg-emerald-500/10 border border-emerald-500/20 text-center">
+                  <div className="text-emerald-400 font-mono font-medium">Above 1</div>
+                  <div className="text-white/40 mt-0.5">Good — 2+ is excellent</div>
+                </div>
+              </div>
+              <p className="text-white/40 text-xs mt-2">A high Sharpe with a modest net profit is often more deployable than a high net profit with a low Sharpe — the consistent strategy survives live conditions better.</p>
+            </div>
+          </div>
         </div>
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <h4 className="font-medium text-white mb-2">Trade Inspector</h4>
