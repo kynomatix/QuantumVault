@@ -1027,12 +1027,12 @@ export default function QuantumLab() {
             <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
               <Link
                 href="/"
-                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-white/60 hover:text-white hover:bg-white/5 border border-transparent hover:border-white/10 transition-colors"
+                className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors text-white/50 hover:text-white hover:bg-white/5"
                 title="Back to Home"
                 data-testid="link-back-home"
               >
-                <Home className="w-4 h-4" />
-                <span className="text-xs font-medium hidden sm:inline">Home</span>
+                <Home className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                <span className="hidden sm:inline">Home</span>
               </Link>
               <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg" />
               <span className="font-display font-bold text-white text-sm sm:text-base">QV</span>
