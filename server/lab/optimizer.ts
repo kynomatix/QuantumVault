@@ -231,6 +231,7 @@ export async function runOptimization(
         winRatePercent: baseline.winRatePercent,
         maxDrawdownPercent: baseline.maxDrawdownPercent,
         profitFactor: baseline.profitFactor,
+        sharpeRatio: baseline.sharpeRatio,
       },
       tickerProgress,
     });
@@ -268,6 +269,7 @@ export async function runOptimization(
             winRatePercent: best.winRatePercent,
             maxDrawdownPercent: best.maxDrawdownPercent,
             profitFactor: best.profitFactor,
+          sharpeRatio: best.sharpeRatio,
           } : undefined,
           tickerProgress,
           eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
@@ -342,6 +344,7 @@ export async function runOptimization(
           winRatePercent: best.winRatePercent,
           maxDrawdownPercent: best.maxDrawdownPercent,
           profitFactor: best.profitFactor,
+          sharpeRatio: best.sharpeRatio,
         } : undefined,
         tickerProgress,
         eta: estimateEta(startTime, globalCurrent, totalSamples * combos.length),
@@ -387,6 +390,7 @@ export async function runOptimization(
       winRatePercent: allResults[0].winRatePercent,
       maxDrawdownPercent: allResults[0].maxDrawdownPercent,
       profitFactor: allResults[0].profitFactor,
+      sharpeRatio: allResults[0].sharpeRatio,
     } : undefined,
     tickerProgress,
   });

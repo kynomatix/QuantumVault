@@ -1068,6 +1068,7 @@ export interface LabJobProgress {
     winRatePercent: number;
     maxDrawdownPercent: number;
     profitFactor: number;
+    sharpeRatio?: number;
   };
   eta?: number;
   elapsed: number;

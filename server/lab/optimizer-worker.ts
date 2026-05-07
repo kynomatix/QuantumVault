@@ -67,6 +67,7 @@ interface LiteBacktestResult {
   totalTrades: number;
   params: Record<string, any>;
   avgBarsHeld: number;
+  sharpeRatio?: number;
   compiledPath?: "compiled" | "interpreter";
 }
 
@@ -86,6 +87,7 @@ function toLiteResult(r: LabBacktestResult | LiteBacktestResult | any): LiteBack
     totalTrades: r.totalTrades,
     params: r.params,
     avgBarsHeld,
+    sharpeRatio: r.sharpeRatio,
     compiledPath: r.compiledPath,
   };
 }
@@ -723,7 +725,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LiteBacktestResu
       elapsed: Date.now() - startTime,
       bestSoFar: best ? {
         netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
-        maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
+        maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor, sharpeRatio: best.sharpeRatio,
       } : undefined,
       tickerProgress,
       eta: estimateEta(startTime, currentTest, grandTotal),
@@ -789,7 +791,7 @@ function coordinateTune(ctx: CoordinateTuneContext): { results: LiteBacktestResu
             elapsed: Date.now() - startTime,
             bestSoFar: best ? {
               netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
-              maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
+              maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor, sharpeRatio: best.sharpeRatio,
             } : undefined,
             tickerProgress,
             eta: estimateEta(startTime, currentTest, grandTotal),
@@ -1108,7 +1110,7 @@ async function run() {
           elapsed: Date.now() - startTime,
           bestSoFar: best ? {
             netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
-            maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
+            maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor, sharpeRatio: best.sharpeRatio,
           } : undefined,
           tickerProgress,
           eta: estimateEta(startTime, globalCurrent, grandTotal),
@@ -1184,7 +1186,7 @@ async function run() {
           elapsed: Date.now() - startTime,
           bestSoFar: best ? {
             netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
-            maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
+            maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor, sharpeRatio: best.sharpeRatio,
           } : undefined,
           tickerProgress,
           eta: estimateEta(startTime, globalCurrent, grandTotal),
@@ -1350,7 +1352,7 @@ async function run() {
             elapsed: Date.now() - startTime,
             bestSoFar: best ? {
               netProfitPercent: best.netProfitPercent, winRatePercent: best.winRatePercent,
-              maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor,
+              maxDrawdownPercent: best.maxDrawdownPercent, profitFactor: best.profitFactor, sharpeRatio: best.sharpeRatio,
             } : undefined,
             tickerProgress,
             eta: estimateEta(startTime, globalCurrent, grandTotal),
@@ -1403,7 +1405,7 @@ async function run() {
     percent: 100, elapsed: Date.now() - startTime,
     bestSoFar: allResults[0] ? {
       netProfitPercent: allResults[0].netProfitPercent, winRatePercent: allResults[0].winRatePercent,
-      maxDrawdownPercent: allResults[0].maxDrawdownPercent, profitFactor: allResults[0].profitFactor,
+      maxDrawdownPercent: allResults[0].maxDrawdownPercent, profitFactor: allResults[0].profitFactor, sharpeRatio: allResults[0].sharpeRatio,
     } : undefined,
     tickerProgress,
   }});

@@ -2255,10 +2255,11 @@ export function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange,
         </div>
 
         {progress.bestSoFar && (
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <RunMetricCard label="Win Rate" value={`${progress.bestSoFar.winRatePercent.toFixed(1)}%`} color={progress.bestSoFar.winRatePercent >= 50 ? "text-sky-400" : "text-indigo-400"} testId="text-best-winrate" />
             <RunMetricCard label="Max Drawdown" value={`${progress.bestSoFar.maxDrawdownPercent.toFixed(1)}%`} color={progress.bestSoFar.maxDrawdownPercent <= 30 ? "text-sky-400" : "text-purple-400"} testId="text-best-drawdown" />
             <RunMetricCard label="Profit Factor" value={progress.bestSoFar.profitFactor.toFixed(2)} color={progress.bestSoFar.profitFactor >= 1.5 ? "text-sky-400" : "text-indigo-400"} testId="text-best-pf" />
+            <RunMetricCard label="Sharpe Ratio" value={typeof progress.bestSoFar.sharpeRatio === "number" ? progress.bestSoFar.sharpeRatio.toFixed(2) : "—"} color={typeof progress.bestSoFar.sharpeRatio !== "number" ? "text-white" : progress.bestSoFar.sharpeRatio >= 1 ? "text-sky-400" : progress.bestSoFar.sharpeRatio >= 0 ? "text-white" : "text-purple-400"} testId="text-best-sharpe" />
           </div>
         )}
 
