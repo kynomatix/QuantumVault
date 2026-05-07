@@ -14,6 +14,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
+import { useConfirm } from "@/hooks/useConfirm";
 
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useWallet } from "@/hooks/useWallet";
@@ -2603,6 +2604,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
   const [deletingIds, setDeletingIds] = useState<Set<number>>(new Set());
   const [refiningCombo, setRefiningCombo] = useState<string | null>(null);
   const { toast } = useToast();
+  const confirm = useConfirm();
 
   const deleteResultMutation = useMutation({
     mutationFn: async (resultId: number) => {
@@ -2879,8 +2881,14 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Button variant="secondary" size="sm" onClick={() => {
-            if (confirm(`Delete entire Run #${runId} and all its results? This cannot be undone.`)) {
+          <Button variant="secondary" size="sm" onClick={async () => {
+            const ok = await confirm({
+              title: `Delete Run #${runId}?`,
+              description: "This will permanently remove the run and all of its results. This cannot be undone.",
+              confirmText: "Delete Run",
+              variant: "destructive",
+            });
+            if (ok) {
               fetch(`/api/lab/runs/${runId}`, { method: "DELETE" }).then(res => {
                 if (res.ok) {
                   queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
@@ -3016,7 +3024,16 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                       </td>
                       <td className="py-2.5 px-2 text-center">
                         <button
-                          onClick={(e) => { e.stopPropagation(); if (confirm("Delete this result?")) deleteResultMutation.mutate(r.id); }}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            const ok = await confirm({
+                              title: "Delete this result?",
+                              description: "This backtest result will be permanently removed from the run.",
+                              confirmText: "Delete",
+                              variant: "destructive",
+                            });
+                            if (ok) deleteResultMutation.mutate(r.id);
+                          }}
                           disabled={deletingIds.has(r.id)}
                           className="text-white/20 hover:text-red-400 transition-colors p-0.5 rounded hover:bg-red-500/10 disabled:opacity-30"
                           title="Delete result"
@@ -3063,7 +3080,16 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           <td></td>
                           <td className="py-2 px-2 text-center">
                             <button
-                              onClick={(e) => { e.stopPropagation(); if (confirm("Delete this result?")) deleteResultMutation.mutate(sr.id); }}
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                const ok = await confirm({
+                                  title: "Delete this result?",
+                                  description: "This backtest result will be permanently removed from the run.",
+                                  confirmText: "Delete",
+                                  variant: "destructive",
+                                });
+                                if (ok) deleteResultMutation.mutate(sr.id);
+                              }}
                               disabled={deletingIds.has(sr.id)}
                               className="text-white/20 hover:text-red-400 transition-colors p-0.5 rounded hover:bg-red-500/10 disabled:opacity-30"
                               title="Delete result"

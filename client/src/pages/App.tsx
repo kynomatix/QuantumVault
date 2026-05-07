@@ -7,6 +7,7 @@ import bs58 from 'bs58';
 import { useWallet } from '@/hooks/useWallet';
 import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, useUnsubscribeFromBot, usePortfolioPerformance, type HealthMetrics, type PublishedBot, type PortfolioPerformanceData } from '@/hooks/useApi';
 import { useToast } from '@/hooks/use-toast';
+import { useConfirm } from '@/hooks/useConfirm';
 import { 
   Wallet, 
   TrendingUp, 
@@ -225,6 +226,7 @@ export default function AppPage() {
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
   const { toast } = useToast();
+  const confirm = useConfirm();
   const [activeNav, setActiveNav] = useState<NavItem>('dashboard');
   const [walletInitialTab, setWalletInitialTab] = useState<'deposit' | 'withdraw' | 'gas'>('deposit');
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -3113,7 +3115,13 @@ export default function AppPage() {
                                 variant="outline"
                                 className="flex-1 hover:bg-destructive/10 hover:text-destructive hover:border-destructive/50"
                                 onClick={async () => {
-                                  if (confirm('Are you sure you want to unsubscribe? This will stop copying trades from this bot. Any funds in your copy bot will remain in your account.')) {
+                                  const ok = await confirm({
+                                    title: 'Unsubscribe from this bot?',
+                                    description: 'This will stop copying trades from this bot. Any funds in your copy bot will remain in your account.',
+                                    confirmText: 'Unsubscribe',
+                                    variant: 'destructive',
+                                  });
+                                  if (ok) {
                                     try {
                                       await unsubscribeMutation.mutateAsync(bot.id);
                                       toast({ title: 'Unsubscribed successfully' });

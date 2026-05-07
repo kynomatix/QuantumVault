@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ArrowUpRight, ArrowDownRight, XCircle, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useToast } from '@/hooks/use-toast';
 
 interface Trade {
   id: string;
@@ -46,6 +47,7 @@ const TRADES_PER_PAGE = 20;
 export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryModalProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState('');
+  const { toast } = useToast();
   
   const filteredTrades = useMemo(() => {
     if (!searchQuery.trim()) return trades || [];
@@ -116,13 +118,20 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
   };
 
   const showErrorMessage = (errorMessage: string) => {
-    alert(`Trade Failed:\n\n${errorMessage}`);
+    toast({
+      title: 'Trade Failed',
+      description: errorMessage,
+      variant: 'destructive',
+    });
   };
 
   const showRecoveryInfo = (trade: Trade) => {
     const attempts = trade.retryAttempts || '?';
     const originalError = trade.recoveredFromError || 'Unknown error';
-    alert(`Trade Recovered!\n\nOriginal error: ${originalError}\n\nRecovered after ${attempts} retry attempt(s).`);
+    toast({
+      title: 'Trade Recovered',
+      description: `Recovered after ${attempts} retry attempt(s). Original error: ${originalError}`,
+    });
   };
 
   const renderMobileTradeCard = (trade: Trade, index: number) => {
