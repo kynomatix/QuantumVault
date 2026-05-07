@@ -906,6 +906,7 @@ export class LabDatabaseStorage implements ILabStorage {
           COALESCE(r.max_drawdown_percent, 0) AS max_drawdown_percent,
           COALESCE(r.profit_factor, 0) AS profit_factor,
           COALESCE(r.total_trades, 0) AS total_trades,
+          COALESCE(r.sharpe_ratio, 0) AS sharpe_ratio,
           r.params
         FROM lab_optimization_results r
         INNER JOIN eligible_runs er ON er.id = r.run_id
@@ -947,11 +948,13 @@ export class LabDatabaseStorage implements ILabStorage {
           MAX(net_profit_percent) AS best_profit,
           MAX(win_rate_percent) AS best_win_rate,
           MAX(profit_factor) AS best_pf,
+          MAX(sharpe_ratio) AS best_sharpe,
           MIN(max_drawdown_percent) AS lowest_drawdown,
           AVG(net_profit_percent) AS avg_profit,
           AVG(win_rate_percent) AS avg_win_rate,
           AVG(max_drawdown_percent) AS avg_drawdown,
           AVG(profit_factor) AS avg_pf,
+          AVG(sharpe_ratio) AS avg_sharpe,
           COUNT(DISTINCT run_id)::int AS runs_count,
           COALESCE(
             jsonb_agg(
@@ -961,6 +964,7 @@ export class LabDatabaseStorage implements ILabStorage {
                 'winRatePercent', win_rate_percent,
                 'maxDrawdownPercent', max_drawdown_percent,
                 'profitFactor', profit_factor,
+                'sharpeRatio', sharpe_ratio,
                 'totalTrades', total_trades,
                 'params', params,
                 'runId', run_id,
@@ -980,8 +984,8 @@ export class LabDatabaseStorage implements ILabStorage {
 
       SELECT
         NULL AS ticker, NULL AS timeframe, 0 AS total_results,
-        0 AS best_profit, 0 AS best_win_rate, 0 AS best_pf, 0 AS lowest_drawdown,
-        0 AS avg_profit, 0 AS avg_win_rate, 0 AS avg_drawdown, 0 AS avg_pf,
+        0 AS best_profit, 0 AS best_win_rate, 0 AS best_pf, 0 AS best_sharpe, 0 AS lowest_drawdown,
+        0 AS avg_profit, 0 AS avg_win_rate, 0 AS avg_drawdown, 0 AS avg_pf, 0 AS avg_sharpe,
         0 AS runs_count, '[]'::jsonb AS top_results,
         rt.cnt AS runs_total
       FROM runs_total rt
@@ -1007,11 +1011,13 @@ export class LabDatabaseStorage implements ILabStorage {
           bestProfit: Number(row.best_profit) || 0,
           bestWinRate: Number(row.best_win_rate) || 0,
           bestPF: Number(row.best_pf) || 0,
+          bestSharpe: Number(row.best_sharpe) || 0,
           lowestDrawdown: Number(row.lowest_drawdown) || 0,
           avgProfit: Number(row.avg_profit) || 0,
           avgWinRate: Number(row.avg_win_rate) || 0,
           avgDrawdown: Number(row.avg_drawdown) || 0,
           avgPF: Number(row.avg_pf) || 0,
+          avgSharpe: Number(row.avg_sharpe) || 0,
           runsCount: Number(row.runs_count) || 0,
           allResults: topResults,
         };

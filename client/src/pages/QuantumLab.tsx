@@ -3353,7 +3353,7 @@ function RiskMetricCard({ label, value, sublabel, icon, color, testId }: { label
   );
 }
 
-type HeatmapMetric = "bestProfit" | "avgProfit" | "bestWinRate" | "avgWinRate" | "lowestDrawdown" | "avgDrawdown" | "bestPF" | "avgPF";
+type HeatmapMetric = "bestProfit" | "avgProfit" | "bestWinRate" | "avgWinRate" | "lowestDrawdown" | "avgDrawdown" | "bestPF" | "avgPF" | "bestSharpe" | "avgSharpe";
 const HEATMAP_METRICS: { value: HeatmapMetric; label: string }[] = [
   { value: "bestProfit", label: "Best Profit %" },
   { value: "avgProfit", label: "Avg Profit %" },
@@ -3363,6 +3363,8 @@ const HEATMAP_METRICS: { value: HeatmapMetric; label: string }[] = [
   { value: "avgDrawdown", label: "Avg Drawdown %" },
   { value: "bestPF", label: "Best Profit Factor" },
   { value: "avgPF", label: "Avg Profit Factor" },
+  { value: "bestSharpe", label: "Best Sharpe Ratio" },
+  { value: "avgSharpe", label: "Avg Sharpe Ratio" },
 ];
 
 function getHeatColor(value: number, min: number, max: number, metric: HeatmapMetric): string {
@@ -3377,7 +3379,7 @@ function getHeatColor(value: number, min: number, max: number, metric: HeatmapMe
 }
 
 function formatHeatVal(value: number, metric: HeatmapMetric): string {
-  if (metric === "bestPF" || metric === "avgPF") return value.toFixed(2);
+  if (metric === "bestPF" || metric === "avgPF" || metric === "bestSharpe" || metric === "avgSharpe") return value.toFixed(2);
   return `${value.toFixed(1)}%`;
 }
 
@@ -3517,6 +3519,10 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
       case "bestPF":
       case "avgPF":
         results.sort((a: any, b: any) => b.profitFactor - a.profitFactor);
+        break;
+      case "bestSharpe":
+      case "avgSharpe":
+        results.sort((a: any, b: any) => (b.sharpeRatio ?? 0) - (a.sharpeRatio ?? 0));
         break;
     }
     return results.slice(0, 5);
