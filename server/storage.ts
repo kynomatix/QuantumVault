@@ -1,4 +1,4 @@
-import { eq, desc, sql, and, or, ilike, gte, lte } from "drizzle-orm";
+import { eq, desc, sql, and, or, ilike, gte, lte, inArray } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
 import { db } from "./db";
 import Decimal from "decimal.js";
@@ -78,6 +78,12 @@ import {
   type InsertPortfolioDailySnapshot,
   platformCumulativeStats,
   type PlatformCumulativeStats,
+  referralLinks,
+  referralRewardEvents,
+  type ReferralLink,
+  type InsertReferralLink,
+  type ReferralRewardEvent,
+  type InsertReferralRewardEvent,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -302,6 +308,20 @@ export interface IStorage {
   getPublishedBotEarnings(publishedBotId: string): Promise<number>;
   getWalletsWithTradingBots(): Promise<string[]>;
   getWalletFirstDepositDate(walletAddress: string): Promise<Date | null>;
+
+  // MLM Referral chain & rewards
+  getReferralChain(descendantWallet: string): Promise<ReferralLink[]>;
+  createReferralLinks(links: InsertReferralLink[]): Promise<void>;
+  getReferralDescendantsByLevel(ancestorWallet: string, level: number): Promise<{ descendantWallet: string; createdAt: Date }[]>;
+  insertReferralRewardEvent(event: InsertReferralRewardEvent): Promise<ReferralRewardEvent | null>;
+  upsertReferralRewardEventPending(event: InsertReferralRewardEvent): Promise<ReferralRewardEvent>;
+  updateReferralRewardEventStatus(id: string, patch: { status?: string; transferSignature?: string | null; lastError?: string | null; retryCount?: number; lastAttemptAt?: Date | null }): Promise<void>;
+  claimReferralRewardEventForProcessing(id: string, expectedStatus: string[]): Promise<boolean>;
+  getPendingReferralRewardEvents(): Promise<ReferralRewardEvent[]>;
+  getProcessingReferralRewardEvents(): Promise<ReferralRewardEvent[]>;
+  getReferralEarnings(earnerWallet: string): Promise<{ l1: number; l2: number; l3: number; total: number }>;
+  getReferralEarningsForReferee(earnerWallet: string, refereeWallet: string): Promise<number>;
+  getReferralEarningsByReferee(earnerWallet: string, refereeWallets: string[]): Promise<Map<string, number>>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -2249,6 +2269,145 @@ export class DatabaseStorage implements IStorage {
       .limit(1);
     
     return result[0]?.createdAt || null;
+  }
+
+  // MLM Referral chain & rewards
+  async getReferralChain(descendantWallet: string): Promise<ReferralLink[]> {
+    return db.select().from(referralLinks)
+      .where(eq(referralLinks.descendantWallet, descendantWallet))
+      .orderBy(referralLinks.level);
+  }
+
+  async createReferralLinks(links: InsertReferralLink[]): Promise<void> {
+    if (links.length === 0) return;
+    await db.insert(referralLinks).values(links).onConflictDoNothing();
+  }
+
+  async getReferralDescendantsByLevel(ancestorWallet: string, level: number): Promise<{ descendantWallet: string; createdAt: Date }[]> {
+    const rows = await db.select({
+      descendantWallet: referralLinks.descendantWallet,
+      createdAt: referralLinks.createdAt,
+    }).from(referralLinks)
+      .where(and(eq(referralLinks.ancestorWallet, ancestorWallet), eq(referralLinks.level, level)))
+      .orderBy(desc(referralLinks.createdAt));
+    return rows;
+  }
+
+  async insertReferralRewardEvent(event: InsertReferralRewardEvent): Promise<ReferralRewardEvent | null> {
+    const result = await db.insert(referralRewardEvents).values(event).onConflictDoNothing().returning();
+    return result[0] ?? null;
+  }
+
+  async upsertReferralRewardEventPending(event: InsertReferralRewardEvent): Promise<ReferralRewardEvent> {
+    const inserted = await db.insert(referralRewardEvents).values(event).onConflictDoNothing().returning();
+    if (inserted[0]) return inserted[0];
+    const existing = await db.select().from(referralRewardEvents)
+      .where(and(
+        eq(referralRewardEvents.sourceType, event.sourceType),
+        eq(referralRewardEvents.sourceId, event.sourceId),
+        eq(referralRewardEvents.earnerWallet, event.earnerWallet),
+        eq(referralRewardEvents.level, event.level),
+      ))
+      .limit(1);
+    if (!existing[0]) {
+      throw new Error(`upsertReferralRewardEventPending: row vanished after conflict for source=${event.sourceType}:${event.sourceId} earner=${event.earnerWallet} L${event.level}`);
+    }
+    return existing[0];
+  }
+
+  async updateReferralRewardEventStatus(
+    id: string,
+    patch: { status?: string; transferSignature?: string | null; lastError?: string | null; retryCount?: number; lastAttemptAt?: Date | null }
+  ): Promise<void> {
+    const update: Record<string, any> = {};
+    if (patch.status !== undefined) update.status = patch.status;
+    if (patch.transferSignature !== undefined) update.transferSignature = patch.transferSignature;
+    if (patch.lastError !== undefined) update.lastError = patch.lastError;
+    if (patch.retryCount !== undefined) update.retryCount = patch.retryCount;
+    if (patch.lastAttemptAt !== undefined) update.lastAttemptAt = patch.lastAttemptAt;
+    if (Object.keys(update).length === 0) return;
+    await db.update(referralRewardEvents).set(update).where(eq(referralRewardEvents.id, id));
+  }
+
+  async claimReferralRewardEventForProcessing(id: string, expectedStatus: string[]): Promise<boolean> {
+    // Atomic compare-and-set: only one worker can transition a row from
+    // pending/failed -> processing. Returns true if this caller won the claim.
+    const result = await db.update(referralRewardEvents)
+      .set({ status: 'processing', lastAttemptAt: new Date() })
+      .where(and(
+        eq(referralRewardEvents.id, id),
+        inArray(referralRewardEvents.status, expectedStatus),
+      ))
+      .returning({ id: referralRewardEvents.id });
+    return result.length > 0;
+  }
+
+  async getPendingReferralRewardEvents(): Promise<ReferralRewardEvent[]> {
+    return db.select().from(referralRewardEvents)
+      .where(or(
+        eq(referralRewardEvents.status, 'pending'),
+        eq(referralRewardEvents.status, 'failed'),
+      ))
+      .orderBy(referralRewardEvents.createdAt);
+  }
+
+  async getProcessingReferralRewardEvents(): Promise<ReferralRewardEvent[]> {
+    return db.select().from(referralRewardEvents)
+      .where(eq(referralRewardEvents.status, 'processing'))
+      .orderBy(referralRewardEvents.createdAt);
+  }
+
+  async getReferralEarnings(earnerWallet: string): Promise<{ l1: number; l2: number; l3: number; total: number }> {
+    const rows = await db.select({
+      level: referralRewardEvents.level,
+      sum: sql<string>`COALESCE(SUM(${referralRewardEvents.amountUsdc}), 0)`,
+    }).from(referralRewardEvents)
+      .where(and(
+        eq(referralRewardEvents.earnerWallet, earnerWallet),
+        inArray(referralRewardEvents.status, ['paid', 'confirmed']),
+      ))
+      .groupBy(referralRewardEvents.level);
+
+    const out = { l1: 0, l2: 0, l3: 0, total: 0 };
+    for (const r of rows) {
+      const v = parseFloat(r.sum) || 0;
+      if (r.level === 1) out.l1 = v;
+      else if (r.level === 2) out.l2 = v;
+      else if (r.level === 3) out.l3 = v;
+      out.total += v;
+    }
+    return out;
+  }
+
+  async getReferralEarningsForReferee(earnerWallet: string, refereeWallet: string): Promise<number> {
+    const rows = await db.select({
+      sum: sql<string>`COALESCE(SUM(${referralRewardEvents.amountUsdc}), 0)`,
+    }).from(referralRewardEvents)
+      .where(and(
+        eq(referralRewardEvents.earnerWallet, earnerWallet),
+        eq(referralRewardEvents.refereeWallet, refereeWallet),
+        inArray(referralRewardEvents.status, ['paid', 'confirmed']),
+      ));
+    return parseFloat(rows[0]?.sum ?? '0') || 0;
+  }
+
+  async getReferralEarningsByReferee(earnerWallet: string, refereeWallets: string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (refereeWallets.length === 0) return out;
+    const rows = await db.select({
+      referee: referralRewardEvents.refereeWallet,
+      sum: sql<string>`COALESCE(SUM(${referralRewardEvents.amountUsdc}), 0)`,
+    }).from(referralRewardEvents)
+      .where(and(
+        eq(referralRewardEvents.earnerWallet, earnerWallet),
+        inArray(referralRewardEvents.refereeWallet, refereeWallets),
+        inArray(referralRewardEvents.status, ['paid', 'confirmed']),
+      ))
+      .groupBy(referralRewardEvents.refereeWallet);
+    for (const r of rows) {
+      out.set(r.referee, parseFloat(r.sum) || 0);
+    }
+    return out;
   }
 }
 

@@ -94,6 +94,82 @@ export async function ensureSchema() {
       // inputs, groups, and strategy_settings (including nativeEngine=true),
       // so the AqTT copies route through the same native engine path as
       // the originals.
+      // --- MLM referral chain & rewards (Task 70) ---
+      `CREATE TABLE IF NOT EXISTS referral_links (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        descendant_wallet text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        ancestor_wallet text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        level integer NOT NULL,
+        created_at timestamp NOT NULL DEFAULT now(),
+        CONSTRAINT referral_links_descendant_level_unique UNIQUE (descendant_wallet, level),
+        CONSTRAINT referral_links_no_self CHECK (descendant_wallet <> ancestor_wallet),
+        CONSTRAINT referral_links_level_range CHECK (level BETWEEN 1 AND 3)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_referral_links_ancestor ON referral_links (ancestor_wallet)`,
+      `CREATE INDEX IF NOT EXISTS idx_referral_links_descendant ON referral_links (descendant_wallet)`,
+      `CREATE TABLE IF NOT EXISTS referral_reward_events (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        source_type text NOT NULL,
+        source_id text NOT NULL,
+        earner_wallet text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        referee_wallet text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        level integer NOT NULL,
+        amount_usdc numeric(20, 6) NOT NULL,
+        status text NOT NULL DEFAULT 'pending',
+        created_at timestamp NOT NULL DEFAULT now(),
+        CONSTRAINT referral_reward_events_unique UNIQUE (source_type, source_id, earner_wallet, level),
+        CONSTRAINT referral_reward_events_level_range CHECK (level BETWEEN 1 AND 3),
+        CONSTRAINT referral_reward_events_status_valid CHECK (status IN ('pending','confirmed','paid','failed'))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_referral_reward_events_earner ON referral_reward_events (earner_wallet)`,
+      `DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'referral_reward_events_status_valid'
+        ) THEN
+          ALTER TABLE referral_reward_events
+            ADD CONSTRAINT referral_reward_events_status_valid
+            CHECK (status IN ('pending','confirmed','paid','failed','processing','voided'));
+        ELSE
+          ALTER TABLE referral_reward_events
+            DROP CONSTRAINT referral_reward_events_status_valid;
+          ALTER TABLE referral_reward_events
+            ADD CONSTRAINT referral_reward_events_status_valid
+            CHECK (status IN ('pending','confirmed','paid','failed','processing','voided'));
+        END IF;
+      END $$;`,
+      `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS funding_wallet text`,
+      `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS transfer_signature text`,
+      `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS retry_count integer NOT NULL DEFAULT 0`,
+      `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS last_error text`,
+      `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS last_attempt_at timestamp`,
+      `CREATE INDEX IF NOT EXISTS idx_referral_reward_events_status_created ON referral_reward_events (status, created_at)`,
+      // Backfill: existing wallets.referred_by -> referral_links level 1 (and L2/L3 if resolvable),
+      // skipping rows that already exist. Idempotent.
+      `INSERT INTO referral_links (descendant_wallet, ancestor_wallet, level)
+       SELECT w.address, w.referred_by, 1
+         FROM wallets w
+        WHERE w.referred_by IS NOT NULL
+          AND w.referred_by <> w.address
+          AND EXISTS (SELECT 1 FROM wallets a WHERE a.address = w.referred_by)
+       ON CONFLICT (descendant_wallet, level) DO NOTHING`,
+      `INSERT INTO referral_links (descendant_wallet, ancestor_wallet, level)
+       SELECT w.address, w2.referred_by, 2
+         FROM wallets w
+         JOIN wallets w2 ON w2.address = w.referred_by
+        WHERE w2.referred_by IS NOT NULL
+          AND w2.referred_by <> w.address
+          AND EXISTS (SELECT 1 FROM wallets a WHERE a.address = w2.referred_by)
+       ON CONFLICT (descendant_wallet, level) DO NOTHING`,
+      `INSERT INTO referral_links (descendant_wallet, ancestor_wallet, level)
+       SELECT w.address, w3.referred_by, 3
+         FROM wallets w
+         JOIN wallets w2 ON w2.address = w.referred_by
+         JOIN wallets w3 ON w3.address = w2.referred_by
+        WHERE w3.referred_by IS NOT NULL
+          AND w3.referred_by <> w.address
+          AND EXISTS (SELECT 1 FROM wallets a WHERE a.address = w3.referred_by)
+       ON CONFLICT (descendant_wallet, level) DO NOTHING`,
+
       `INSERT INTO lab_strategies (user_id, name, description, pine_script, parsed_inputs, groups, strategy_settings)
        SELECT 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
               src.name, src.description, src.pine_script, src.parsed_inputs, src.groups, src.strategy_settings

@@ -6,7 +6,7 @@ import { encrypt as legacyEncrypt, decrypt } from "./crypto";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import { storage, DatabaseStorage } from "./storage";
-import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets } from "@shared/schema";
+import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
 import { db } from "./db";
 import { desc, eq, sql } from "drizzle-orm";
@@ -1345,40 +1345,314 @@ async function distributeCreatorProfitShare(params: {
     }
   }
 
-  // Step 3: Transfer USDC from agent wallet to creator's main wallet
-  const transferResult = await transferUsdcToWallet(
+  console.log(`[ProfitShare] Drift withdrawal succeeded for trade ${tradeId}; routing through payCreatorAndReferrals (Model A)`);
+
+  // MLM Model A: net referral cuts out of the creator transfer. The helper pays
+  // the creator their NET amount, then distributes the reserved cut to up to 3
+  // upline ancestors. All transfers come out of the subscriber's agent wallet,
+  // which already holds the full `profitShareAmount` post-Drift-withdrawal.
+  const payoutResult = await payCreatorAndReferrals({
     subscriberAgentPublicKey,
     subscriberEncryptedPrivateKey,
     creatorWalletAddress,
-    profitShareAmount
-  );
+    profitShareAmount,
+    sourceType: 'profit_share_paid',
+    sourceId: tradeId,
+    fundingWallet: subscriberWalletAddress,
+  });
 
-  if (!transferResult.success) {
-    const errorMsg = transferResult.error || 'Unknown transfer error';
-    console.error(`[ProfitShare] Transfer to creator failed: ${errorMsg}`);
-    
-    // Create IOU for failed transfers (SOL starvation, RPC errors, etc.)
+  if (!payoutResult.success) {
+    const errorMsg = payoutResult.error || 'Unknown payout error';
+    console.error(`[ProfitShare] payCreatorAndReferrals failed for trade ${tradeId}: ${errorMsg}`);
     await createIouOnFailure(errorMsg);
-    
-    // SOL starvation is a specific condition to surface in error message
     if (errorMsg.includes('Insufficient SOL')) {
-      return { 
-        success: false, 
-        error: `Transfer failed - agent wallet needs SOL for gas (balance: ${transferResult.solBalance?.toFixed(6) || '0'} SOL)`, 
-        amount: profitShareAmount 
+      return {
+        success: false,
+        error: `Transfer failed - agent wallet needs SOL for gas`,
+        amount: profitShareAmount,
       };
     }
-    
     return { success: false, error: `Transfer failed: ${errorMsg}`, amount: profitShareAmount };
   }
 
-  console.log(`[ProfitShare] SUCCESS: $${profitShareAmount.toFixed(4)} sent to ${creatorWalletAddress}, signature: ${transferResult.signature}`);
-  
-  return { 
-    success: true, 
-    amount: profitShareAmount, 
-    signature: transferResult.signature 
+  console.log(`[ProfitShare] SUCCESS: trade=${tradeId}, creator $${(payoutResult.creatorAmount ?? 0).toFixed(4)} (signature: ${payoutResult.creatorSignature}), referrals: ${payoutResult.referralSummary}`);
+
+  return {
+    success: true,
+    amount: payoutResult.creatorAmount,
+    signature: payoutResult.creatorSignature,
   };
+}
+
+// MLM referral reward percentages per level, applied to the creator's profit-share amount.
+// L1 = direct referrer of the creator, L2 = L1's referrer, L3 = L2's referrer.
+const REFERRAL_LEVEL_PERCENTS: Record<1 | 2 | 3, number> = { 1: 5, 2: 2, 3: 1 };
+const MIN_PAYABLE_MICRO_USDC = 10_000; // $0.01
+
+type ReferralLeg = {
+  level: 1 | 2 | 3;
+  earnerWallet: string;
+  amountMicro: number;
+};
+
+/**
+ * Compute the per-ancestor referral cuts for a given gross profit-share amount.
+ * Operates in integer micro-USDC to avoid floating-point drift. Skips dust legs
+ * (< $0.01) and de-duplicates ancestors so the same wallet can't double-claim
+ * across levels in a single source event.
+ */
+function computeReferralLegs(
+  chain: { ancestorWallet: string; level: number }[],
+  refereeWallet: string,
+  profitShareAmount: number,
+): { legs: ReferralLeg[]; totalCutMicro: number } {
+  const grossMicro = Math.round(profitShareAmount * 1_000_000);
+  if (grossMicro <= 0) return { legs: [], totalCutMicro: 0 };
+  const seenEarners = new Set<string>([refereeWallet]);
+  const legs: ReferralLeg[] = [];
+  let totalCutMicro = 0;
+  for (const link of chain) {
+    const lvl = link.level as 1 | 2 | 3;
+    const pct = REFERRAL_LEVEL_PERCENTS[lvl];
+    if (!pct) continue;
+    if (seenEarners.has(link.ancestorWallet)) {
+      console.warn(`[ReferralRewards] Skipping duplicate ancestor ${link.ancestorWallet} at L${lvl} (referee=${refereeWallet})`);
+      continue;
+    }
+    const cutMicro = Math.floor((grossMicro * pct) / 100);
+    if (cutMicro < MIN_PAYABLE_MICRO_USDC) continue;
+    seenEarners.add(link.ancestorWallet);
+    legs.push({ level: lvl, earnerWallet: link.ancestorWallet, amountMicro: cutMicro });
+    totalCutMicro += cutMicro;
+  }
+  return { legs, totalCutMicro };
+}
+
+/**
+ * Pay a single referral leg: upsert the pending event, then attempt the on-chain
+ * transfer. Idempotent — if the row already exists with status='paid', this is a
+ * no-op. Updates row status based on outcome and returns the final status.
+ */
+async function payOneReferralLeg(params: {
+  sourceType: string;
+  sourceId: string;
+  refereeWallet: string;
+  fundingWallet: string;
+  subscriberAgentPublicKey: string;
+  subscriberEncryptedPrivateKey: string;
+  leg: ReferralLeg;
+}): Promise<{ status: 'paid' | 'pending' | 'skipped'; signature?: string; error?: string }> {
+  const { sourceType, sourceId, refereeWallet, fundingWallet, subscriberAgentPublicKey, subscriberEncryptedPrivateKey, leg } = params;
+  const amountUsdc = leg.amountMicro / 1_000_000;
+
+  const event = await storage.upsertReferralRewardEventPending({
+    sourceType,
+    sourceId,
+    earnerWallet: leg.earnerWallet,
+    refereeWallet,
+    fundingWallet,
+    level: leg.level,
+    amountUsdc: amountUsdc.toFixed(6),
+    status: 'pending',
+  });
+
+  if (event.status === 'paid') {
+    return { status: 'paid', signature: event.transferSignature ?? undefined };
+  }
+
+  const transferResult = await transferUsdcToWallet(
+    subscriberAgentPublicKey,
+    subscriberEncryptedPrivateKey,
+    leg.earnerWallet,
+    amountUsdc,
+  );
+
+  if (transferResult.success) {
+    await storage.updateReferralRewardEventStatus(event.id, {
+      status: 'paid',
+      transferSignature: transferResult.signature ?? null,
+      lastError: null,
+      lastAttemptAt: new Date(),
+    });
+    console.log(`[ReferralRewards] PAID L${leg.level} +$${amountUsdc.toFixed(4)} to ${leg.earnerWallet} (referee=${refereeWallet}, source=${sourceType}:${sourceId}, sig=${transferResult.signature})`);
+    return { status: 'paid', signature: transferResult.signature };
+  }
+
+  const errMsg = transferResult.error || 'Unknown transfer error';
+  await storage.updateReferralRewardEventStatus(event.id, {
+    status: 'pending',
+    retryCount: (event.retryCount ?? 0) + 1,
+    lastError: errMsg,
+    lastAttemptAt: new Date(),
+  });
+  console.warn(`[ReferralRewards] PENDING (will retry) L${leg.level} $${amountUsdc.toFixed(4)} earner=${leg.earnerWallet}: ${errMsg}`);
+  return { status: 'pending', error: errMsg };
+}
+
+/**
+ * Shared payout pipeline (Model A). Splits a gross profit-share amount into a
+ * net creator payment and per-level referral payments, then transfers each from
+ * the subscriber's agent wallet sequentially. Returns success based on the
+ * creator transfer; referral leg failures are tracked on referral_reward_events
+ * and retried by the referral-rewards-retry-job worker.
+ *
+ * Called from both the live profit-share path and the IOU retry job, so it is
+ * fully idempotent on (sourceType, sourceId).
+ */
+async function payCreatorAndReferrals(params: {
+  subscriberAgentPublicKey: string;
+  subscriberEncryptedPrivateKey: string;
+  creatorWalletAddress: string;
+  profitShareAmount: number;
+  sourceType: string;
+  sourceId: string;
+  fundingWallet: string;
+}): Promise<{
+  success: boolean;
+  creatorAmount?: number;
+  creatorSignature?: string;
+  referralSummary?: string;
+  error?: string;
+}> {
+  const {
+    subscriberAgentPublicKey,
+    subscriberEncryptedPrivateKey,
+    creatorWalletAddress,
+    profitShareAmount,
+    sourceType,
+    sourceId,
+    fundingWallet,
+  } = params;
+
+  if (!(profitShareAmount > 0)) {
+    return { success: false, error: 'Non-positive profit share amount' };
+  }
+
+  // Validate creator wallet
+  try {
+    new PublicKey(creatorWalletAddress);
+  } catch {
+    return { success: false, error: `Invalid creator wallet address: ${creatorWalletAddress}` };
+  }
+
+  const grossMicro = Math.round(profitShareAmount * 1_000_000);
+
+  // Compute referral split. Self-referrals against the creator are excluded by
+  // computeReferralLegs (creator is added to seenEarners up front).
+  const chain = await storage.getReferralChain(creatorWalletAddress);
+  const { legs, totalCutMicro } = computeReferralLegs(chain, creatorWalletAddress, profitShareAmount);
+
+  let creatorMicro = grossMicro - totalCutMicro;
+  let payableLegs = legs;
+
+  // Edge case: if netting referrals would leave the creator with dust (<$0.01),
+  // pay creator the full gross and skip referrals entirely. This mostly applies
+  // when profit share itself is tiny (e.g. <$0.10).
+  if (creatorMicro < MIN_PAYABLE_MICRO_USDC) {
+    console.warn(`[Payout] Creator net would be dust ($${(creatorMicro / 1_000_000).toFixed(6)}); paying full gross and skipping ${legs.length} referral legs (source=${sourceType}:${sourceId})`);
+    creatorMicro = grossMicro;
+    payableLegs = [];
+  }
+
+  const creatorAmount = creatorMicro / 1_000_000;
+
+  // Step 1: pay the creator (sequential — must succeed before we touch referrals).
+  const creatorTransfer = await transferUsdcToWallet(
+    subscriberAgentPublicKey,
+    subscriberEncryptedPrivateKey,
+    creatorWalletAddress,
+    creatorAmount,
+  );
+
+  if (!creatorTransfer.success) {
+    return {
+      success: false,
+      error: creatorTransfer.error || 'Creator transfer failed',
+      creatorAmount,
+    };
+  }
+
+  // Step 2: pay referral legs sequentially. Failures here do NOT roll back the
+  // creator payment — they're tracked on referral_reward_events and retried by
+  // the dedicated worker. Sequential is required: parallel transfers from the
+  // same agent wallet would collide on blockhash/nonce.
+  let paidLegs = 0;
+  let pendingLegs = 0;
+  for (const leg of payableLegs) {
+    try {
+      const r = await payOneReferralLeg({
+        sourceType,
+        sourceId,
+        refereeWallet: creatorWalletAddress,
+        fundingWallet,
+        subscriberAgentPublicKey,
+        subscriberEncryptedPrivateKey,
+        leg,
+      });
+      if (r.status === 'paid') paidLegs++;
+      else if (r.status === 'pending') pendingLegs++;
+    } catch (err: any) {
+      pendingLegs++;
+      console.error(`[ReferralRewards] payOneReferralLeg threw L${leg.level} earner=${leg.earnerWallet}: ${err?.message || err}`);
+    }
+  }
+
+  return {
+    success: true,
+    creatorAmount,
+    creatorSignature: creatorTransfer.signature,
+    referralSummary: `${paidLegs} paid, ${pendingLegs} pending (of ${payableLegs.length})`,
+  };
+}
+
+export { payCreatorAndReferrals };
+
+/**
+ * Write the referral chain (up to 3 levels) for a newly-referred descendant.
+ * Performs a cycle check: refuses to write if the referrer is itself a descendant
+ * of the new wallet (would form a cycle). Idempotent via the unique
+ * (descendant_wallet, level) constraint.
+ *
+ * Returns true if any links were written (or already existed), false if the
+ * relationship was rejected as cyclic / self-referential.
+ */
+async function writeReferralChain(descendantWallet: string, referrerWallet: string): Promise<boolean> {
+  if (!descendantWallet || !referrerWallet) return false;
+  if (descendantWallet === referrerWallet) {
+    console.warn(`[Referral] Refusing self-referral for ${descendantWallet}`);
+    return false;
+  }
+
+  // Cycle check: walk the referrer's ancestor chain; if the new descendant
+  // appears anywhere in it, this would create a cycle.
+  const referrerChain = await storage.getReferralChain(referrerWallet);
+  for (const link of referrerChain) {
+    if (link.ancestorWallet === descendantWallet) {
+      console.warn(`[Referral] Refusing cyclic referral: ${referrerWallet} -> ${descendantWallet} (cycle via L${link.level})`);
+      return false;
+    }
+  }
+
+  const links: { descendantWallet: string; ancestorWallet: string; level: number }[] = [
+    { descendantWallet, ancestorWallet: referrerWallet, level: 1 },
+  ];
+  const l1OfReferrer = referrerChain.find(l => l.level === 1);
+  if (l1OfReferrer && l1OfReferrer.ancestorWallet !== descendantWallet) {
+    links.push({ descendantWallet, ancestorWallet: l1OfReferrer.ancestorWallet, level: 2 });
+  }
+  const l2OfReferrer = referrerChain.find(l => l.level === 2);
+  if (l2OfReferrer && l2OfReferrer.ancestorWallet !== descendantWallet) {
+    links.push({ descendantWallet, ancestorWallet: l2OfReferrer.ancestorWallet, level: 3 });
+  }
+
+  try {
+    await storage.createReferralLinks(links);
+    console.log(`[Referral] Wrote chain for ${descendantWallet}: ${links.map(l => `L${l.level}=${l.ancestorWallet.slice(0, 6)}`).join(', ')}`);
+    return true;
+  } catch (err: any) {
+    console.error(`[Referral] Failed to write chain for ${descendantWallet}: ${err?.message || err}`);
+    return false;
+  }
 }
 
 function parseSignalForRouting(body: any): { action: string | null; contracts: string; isCloseSignal: boolean; price: string; strategyPositionSize: string | null } {
@@ -2655,9 +2929,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (isNewWallet && referredByCode && !wallet.referredBy) {
         const referrer = await storage.getWalletByReferralCode(referredByCode);
         if (referrer && referrer.address !== walletAddress) {
-          await storage.updateWallet(walletAddress, { referredBy: referrer.address });
-          wallet = (await storage.getWallet(walletAddress))!;
-          console.log(`[Referral] ${walletAddress} was referred by ${referrer.address} (code: ${referredByCode})`);
+          const written = await writeReferralChain(walletAddress, referrer.address);
+          if (written) {
+            await storage.updateWallet(walletAddress, { referredBy: referrer.address });
+            wallet = (await storage.getWallet(walletAddress))!;
+            console.log(`[Referral] ${walletAddress} was referred by ${referrer.address} (code: ${referredByCode})`);
+          }
         }
       }
       
@@ -2672,6 +2949,54 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       });
     } catch (error) {
       console.error("Wallet connect error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // MLM Referrals: overview for the authenticated wallet
+  app.get("/api/referrals/overview", requireWallet, async (req, res) => {
+    try {
+      const walletAddress = req.walletAddress!;
+      const wallet = await storage.getWallet(walletAddress);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+
+      const [earnings, l1Descendants] = await Promise.all([
+        storage.getReferralEarnings(walletAddress),
+        storage.getReferralDescendantsByLevel(walletAddress, 1),
+      ]);
+
+      // Per-referee earnings (sum across all levels for this earner & referee) — single grouped query
+      const earningsByReferee = await storage.getReferralEarningsByReferee(
+        walletAddress,
+        l1Descendants.map((d) => d.descendantWallet),
+      );
+      const directReferrals = l1Descendants.map((d) => ({
+        wallet: d.descendantWallet,
+        joinedAt: d.createdAt.toISOString(),
+        totalEarned: earningsByReferee.get(d.descendantWallet) ?? 0,
+      }));
+
+      let referredBy: { wallet: string; joinedAt: string } | null = null;
+      if (wallet.referredBy) {
+        const ownChain = await storage.getReferralChain(walletAddress);
+        const l1 = ownChain.find(l => l.level === 1);
+        referredBy = {
+          wallet: wallet.referredBy,
+          joinedAt: (l1?.createdAt ?? wallet.createdAt).toISOString(),
+        };
+      }
+
+      res.json({
+        myReferralCode: wallet.referralCode ?? null,
+        referredBy,
+        directReferrals,
+        earningsByLevel: earnings,
+        levelPercents: REFERRAL_LEVEL_PERCENTS,
+      });
+    } catch (error) {
+      console.error("Get referrals overview error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -10768,9 +11093,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // AUTO-REFERRAL: Attribute referral to the bot creator if subscriber doesn't already have a referrer
       // This ensures creators get credit for users who subscribe via marketplace URLs
       if (!wallet.referredBy && publishedBot.creatorWalletAddress !== req.walletAddress) {
-        await storage.updateWallet(req.walletAddress!, { referredBy: publishedBot.creatorWalletAddress });
-        wallet = (await storage.getWallet(req.walletAddress!))!;
-        console.log(`[Referral] Auto-attributed: ${req.walletAddress} referred by ${publishedBot.creatorWalletAddress} (via marketplace subscription)`);
+        const written = await writeReferralChain(req.walletAddress!, publishedBot.creatorWalletAddress);
+        if (written) {
+          await storage.updateWallet(req.walletAddress!, { referredBy: publishedBot.creatorWalletAddress });
+          wallet = (await storage.getWallet(req.walletAddress!))!;
+          console.log(`[Referral] Auto-attributed: ${req.walletAddress} referred by ${publishedBot.creatorWalletAddress} (via marketplace subscription)`);
+        }
       }
       
       // Check available balance in agent wallet (SPL USDC token account, not Drift subaccount)

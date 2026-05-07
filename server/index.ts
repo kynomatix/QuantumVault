@@ -9,6 +9,7 @@ import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
 import { startRetryWorker, queueTradeRetry } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
+import { startReferralRewardsRetryJob } from "./referral-rewards-retry-job";
 import { initLeverageCache, setOnCacheRefreshed } from "./leverage-cache-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 
@@ -596,6 +597,8 @@ app.use((req, res, next) => {
         startPortfolioSnapshotJob();
         log('[Staggered startup] Starting profit share retry job');
         startProfitShareRetryJob();
+        log('[Staggered startup] Starting referral rewards retry job');
+        startReferralRewardsRetryJob();
         log('[Staggered startup] Starting stats consistency monitor');
         import('./stats-consistency-monitor').then(({ startStatsConsistencyMonitor }) => {
           startStatsConsistencyMonitor();

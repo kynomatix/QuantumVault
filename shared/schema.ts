@@ -665,6 +665,58 @@ export const insertPendingProfitShareSchema = createInsertSchema(pendingProfitSh
 export type InsertPendingProfitShare = z.infer<typeof insertPendingProfitShareSchema>;
 export type PendingProfitShare = typeof pendingProfitShares.$inferSelect;
 
+// MLM Referral Chain: up to 3 levels of ancestor wallets per descendant
+export const referralLinks = pgTable("referral_links", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  descendantWallet: text("descendant_wallet").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  ancestorWallet: text("ancestor_wallet").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  level: integer("level").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ([
+  unique("referral_links_descendant_level_unique").on(table.descendantWallet, table.level),
+  index("idx_referral_links_ancestor").on(table.ancestorWallet),
+  index("idx_referral_links_descendant").on(table.descendantWallet),
+  check("referral_links_no_self", sql`${table.descendantWallet} <> ${table.ancestorWallet}`),
+  check("referral_links_level_range", sql`${table.level} BETWEEN 1 AND 3`),
+]));
+
+export const insertReferralLinkSchema = createInsertSchema(referralLinks).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertReferralLink = z.infer<typeof insertReferralLinkSchema>;
+export type ReferralLink = typeof referralLinks.$inferSelect;
+
+// MLM Referral Rewards: ledger of reward events tied to revenue events (e.g. profit_share_paid)
+export const referralRewardEvents = pgTable("referral_reward_events", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  sourceType: text("source_type").notNull(),
+  sourceId: text("source_id").notNull(),
+  earnerWallet: text("earner_wallet").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  refereeWallet: text("referee_wallet").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  fundingWallet: text("funding_wallet"),
+  level: integer("level").notNull(),
+  amountUsdc: decimal("amount_usdc", { precision: 20, scale: 6 }).notNull(),
+  status: text("status").notNull().default("pending"),
+  transferSignature: text("transfer_signature"),
+  retryCount: integer("retry_count").notNull().default(0),
+  lastError: text("last_error"),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ([
+  unique("referral_reward_events_unique").on(table.sourceType, table.sourceId, table.earnerWallet, table.level),
+  index("idx_referral_reward_events_earner").on(table.earnerWallet),
+  index("idx_referral_reward_events_status_created").on(table.status, table.createdAt),
+  check("referral_reward_events_level_range", sql`${table.level} BETWEEN 1 AND 3`),
+]));
+
+export const insertReferralRewardEventSchema = createInsertSchema(referralRewardEvents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertReferralRewardEvent = z.infer<typeof insertReferralRewardEventSchema>;
+export type ReferralRewardEvent = typeof referralRewardEvents.$inferSelect;
+
 export const protocolOrderEvents = pgTable("protocol_order_events", {
   id: serial("id").primaryKey(),
   botTradeId: varchar("bot_trade_id").references(() => botTrades.id, { onDelete: "cascade" }),

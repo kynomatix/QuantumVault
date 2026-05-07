@@ -128,6 +128,97 @@ import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 type NavItem = 'dashboard' | 'bots' | 'portfolio' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet';
 type MarketplaceSortBy = 'pnl7d' | 'pnl30d' | 'pnl90d' | 'pnlAllTime' | 'subscribers';
 
+interface ReferralOverviewResponse {
+  myReferralCode: string | null;
+  referredBy: { wallet: string; joinedAt: string } | null;
+  directReferrals: { wallet: string; joinedAt: string; totalEarned: number }[];
+  earningsByLevel: { l1: number; l2: number; l3: number; total: number };
+  levelPercents: Record<string, number>;
+}
+
+function ReferralOverviewPanel() {
+  const { data, isLoading } = useQuery<ReferralOverviewResponse>({
+    queryKey: ["/api/referrals/overview"],
+    queryFn: async () => {
+      const res = await fetch("/api/referrals/overview", { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to load referrals overview");
+      return res.json();
+    },
+    refetchInterval: 60000,
+  });
+
+  const fmtAddr = (addr: string) => `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+  const fmtUsd = (n: number) => `$${(n || 0).toFixed(2)}`;
+  const fmtDate = (iso: string) => new Date(iso).toLocaleDateString();
+
+  if (isLoading) {
+    return <div className="pt-4 border-t border-border/30 text-xs text-muted-foreground">Loading referral stats…</div>;
+  }
+  if (!data) return null;
+
+  const { directReferrals, earningsByLevel, levelPercents } = data;
+  const l1Pct = levelPercents?.['1'] ?? 0;
+  const l2Pct = levelPercents?.['2'] ?? 0;
+  const l3Pct = levelPercents?.['3'] ?? 0;
+
+  return (
+    <div className="pt-4 border-t border-border/30 space-y-4">
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <h5 className="text-sm font-semibold">Total Referral Earnings</h5>
+          <span className="text-base font-display font-semibold text-primary" data-testid="text-referral-total-earnings">
+            {fmtUsd(earningsByLevel?.total ?? 0)}
+          </span>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <div className="bg-muted/30 rounded-lg p-2 border border-border/50" data-testid="card-referral-l1">
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wider">L1 ({l1Pct}%)</div>
+            <div className="text-sm font-mono">{fmtUsd(earningsByLevel?.l1 ?? 0)}</div>
+          </div>
+          <div className="bg-muted/30 rounded-lg p-2 border border-border/50" data-testid="card-referral-l2">
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wider">L2 ({l2Pct}%)</div>
+            <div className="text-sm font-mono">{fmtUsd(earningsByLevel?.l2 ?? 0)}</div>
+          </div>
+          <div className="bg-muted/30 rounded-lg p-2 border border-border/50" data-testid="card-referral-l3">
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wider">L3 ({l3Pct}%)</div>
+            <div className="text-sm font-mono">{fmtUsd(earningsByLevel?.l3 ?? 0)}</div>
+          </div>
+        </div>
+        <p className="text-[11px] text-muted-foreground mt-2">
+          You earn a cut of every profit-share payout from people you refer (and their referrals, up to 3 levels deep).
+        </p>
+      </div>
+
+      <div>
+        <h5 className="text-sm font-semibold mb-2">Your Direct Referrals ({directReferrals.length})</h5>
+        {directReferrals.length === 0 ? (
+          <p className="text-xs text-muted-foreground" data-testid="text-no-referrals">
+            Share your referral link to start earning. People you refer will show up here.
+          </p>
+        ) : (
+          <div className="space-y-1.5 max-h-48 overflow-y-auto">
+            {directReferrals.map((r) => (
+              <div
+                key={r.wallet}
+                className="flex items-center justify-between bg-muted/30 rounded-lg px-3 py-2 border border-border/50"
+                data-testid={`row-referral-${r.wallet}`}
+              >
+                <div className="flex flex-col">
+                  <span className="font-mono text-xs" data-testid={`text-referral-wallet-${r.wallet}`}>{fmtAddr(r.wallet)}</span>
+                  <span className="text-[10px] text-muted-foreground">Joined {fmtDate(r.joinedAt)}</span>
+                </div>
+                <span className="text-xs font-mono text-primary" data-testid={`text-referral-earned-${r.wallet}`}>
+                  {fmtUsd(r.totalEarned)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function AppPage() {
   const [, navigate] = useLocation();
   const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected, referralCode: walletReferralCode, authenticateWallet } = useWallet();
@@ -3317,11 +3408,12 @@ export default function AppPage() {
                                       </div>
                                     </div>
                                     {referredBy && (
-                                      <p className="text-xs text-muted-foreground">
+                                      <p className="text-xs text-muted-foreground" data-testid="text-referred-by">
                                         You were referred by: <span className="font-mono">{referredBy.slice(0, 6)}...{referredBy.slice(-4)}</span>
                                       </p>
                                     )}
                                   </div>
+                                  <ReferralOverviewPanel />
                                 </div>
                               )}
                               

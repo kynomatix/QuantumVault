@@ -497,11 +497,20 @@ export async function transferUsdcToWallet(
       { skipPreflight: false, preflightCommitment: 'confirmed' }
     );
     
-    await connection.confirmTransaction({
+    const confirmation = await connection.confirmTransaction({
       signature,
       blockhash,
       lastValidBlockHeight,
     }, 'confirmed');
+    
+    if (confirmation.value.err) {
+      return {
+        success: false,
+        error: `Transaction failed on-chain: ${JSON.stringify(confirmation.value.err)}`,
+        signature,
+        solBalance,
+      };
+    }
     
     return { success: true, signature, solBalance };
   } catch (error: any) {

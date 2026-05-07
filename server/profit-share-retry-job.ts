@@ -1,5 +1,5 @@
 import { storage } from "./storage";
-import { transferUsdcToWallet } from "./agent-wallet";
+import { payCreatorAndReferrals } from "./routes";
 
 const RETRY_INTERVAL_MS = 5 * 60 * 1000; // Every 5 minutes
 const MAX_IOU_RETRIES = 50;
@@ -64,29 +64,34 @@ export async function retryPendingProfitShares(): Promise<{ processed: number; p
     }
     
     const amount = parseFloat(iou.amount);
-    console.log(`[ProfitShare Retry] Attempting transfer: $${amount.toFixed(4)} to ${iou.creatorWalletAddress}`);
+    console.log(`[ProfitShare Retry] Attempting payout via shared helper: gross $${amount.toFixed(4)} for trade ${iou.tradeId} (creator ${iou.creatorWalletAddress})`);
     
-    // Attempt the transfer
-    const transferResult = await transferUsdcToWallet(
-      wallet.agentPublicKey,
-      wallet.agentPrivateKeyEncrypted,
-      iou.creatorWalletAddress,
-      amount
-    );
+    // Route through the shared payout helper so referral cuts are netted out
+    // exactly the same way as the live path (Model A). The helper is idempotent
+    // on (sourceType, sourceId), so this is safe to retry.
+    const payoutResult = await payCreatorAndReferrals({
+      subscriberAgentPublicKey: wallet.agentPublicKey,
+      subscriberEncryptedPrivateKey: wallet.agentPrivateKeyEncrypted,
+      creatorWalletAddress: iou.creatorWalletAddress,
+      profitShareAmount: amount,
+      sourceType: 'profit_share_paid',
+      sourceId: iou.tradeId,
+      fundingWallet: iou.subscriberWalletAddress,
+    });
     
-    if (transferResult.success) {
-      console.log(`[ProfitShare Retry] SUCCESS: IOU ${iou.id} paid, signature: ${transferResult.signature}`);
+    if (payoutResult.success) {
+      console.log(`[ProfitShare Retry] SUCCESS: IOU ${iou.id} paid (creator $${(payoutResult.creatorAmount ?? 0).toFixed(4)}, sig=${payoutResult.creatorSignature}, referrals: ${payoutResult.referralSummary})`);
       await storage.updatePendingProfitShareStatus(iou.id, { 
         status: 'paid',
         lastAttemptAt: new Date()
       });
       results.paid++;
     } else {
-      console.error(`[ProfitShare Retry] Failed: ${transferResult.error}`);
+      console.error(`[ProfitShare Retry] Failed: ${payoutResult.error}`);
       await storage.updatePendingProfitShareStatus(iou.id, { 
         status: 'pending',
         retryCount: iou.retryCount + 1,
-        lastError: transferResult.error || 'Transfer failed'
+        lastError: payoutResult.error || 'Transfer failed'
       });
       results.failed++;
     }
