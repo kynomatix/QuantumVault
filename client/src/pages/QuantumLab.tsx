@@ -23,7 +23,7 @@ import {
   Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
-  History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2,
+  History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2, Home,
   Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair, ListOrdered, GripVertical, RefreshCw,
 } from "lucide-react";
 import {
@@ -1025,8 +1025,14 @@ export default function QuantumLab() {
         <div className="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-12 sm:h-16">
             <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
-              <Link href="/" className="flex items-center gap-2 text-white/60 hover:text-white transition-colors" data-testid="link-back-home">
-                <ArrowLeft className="w-4 h-4" />
+              <Link
+                href="/"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-white/60 hover:text-white hover:bg-white/5 border border-transparent hover:border-white/10 transition-colors"
+                title="Back to Home"
+                data-testid="link-back-home"
+              >
+                <Home className="w-4 h-4" />
+                <span className="text-xs font-medium hidden sm:inline">Home</span>
               </Link>
               <img src="/images/QV_Logo_02.png" alt="QuantumVault" className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg" />
               <span className="font-display font-bold text-white text-sm sm:text-base">QV</span>
