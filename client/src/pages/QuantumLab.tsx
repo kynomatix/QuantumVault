@@ -424,6 +424,24 @@ export default function QuantumLab() {
   const [selectedStrategy, setSelectedStrategy] = useState<LabStrategy | null>(null);
   const { toast } = useToast();
   const { getMaxLeverage } = useLeverageLimits();
+  const { publicKeyString: walletAddress } = useWallet();
+  const lastWalletRef = useRef<string | null>(walletAddress);
+  useEffect(() => {
+    if (lastWalletRef.current === walletAddress) return;
+    lastWalletRef.current = walletAddress;
+    setActiveJobId(null);
+    setActiveRunId(null);
+    setActiveHistoryRunId(null);
+    setTargetCombo(null);
+    setSelectedStrategy(null);
+    autoReconnectingRef.current = false;
+    lastReconnectRunIdRef.current = null;
+    reconnectTokenRef.current++;
+    queryClient.removeQueries({ predicate: (q) => {
+      const k = q.queryKey?.[0];
+      return typeof k === "string" && k.startsWith("/api/lab");
+    }});
+  }, [walletAddress]);
 
   const [queueOpen, setQueueOpen] = useState(false);
   const activeJobIdRef = useRef<string | null>(null);
@@ -710,7 +728,7 @@ export default function QuantumLab() {
   }, [activeJobId, toast]);
 
   const { data: queueBadgeData } = useQuery<{ items: any[]; activeRun: any | null }>({
-    queryKey: ["/api/lab/queue"],
+    queryKey: ["/api/lab/queue", walletAddress],
     queryFn: async () => {
       const res = await fetch("/api/lab/queue", { credentials: "include" });
       if (!res.ok) return { items: [], activeRun: null };
@@ -718,6 +736,7 @@ export default function QuantumLab() {
       if (Array.isArray(data)) return { items: data, activeRun: null };
       return data as { items: any[]; activeRun: any | null };
     },
+    enabled: !!walletAddress,
     refetchInterval: queueOpen ? 5000 : 15000,
   });
 
