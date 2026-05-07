@@ -3892,7 +3892,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
             <div>
               <h4 className="text-sm font-medium text-white/60 mb-2">Top 5 Configurations</h4>
               <div className="space-y-1">
-                <div className="grid gap-2 text-[10px] text-white/40 px-3 py-1" style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 0.8fr 5rem" }}>
+                <div className="grid gap-2 text-[10px] text-white/40 px-3 py-1" style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 1fr 0.8fr 5rem" }}>
                   <span>#</span>
                   <span>Strategy</span>
                   <span>Profit (1x)</span>
@@ -3900,6 +3900,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                   <span>Win Rate</span>
                   <span>Drawdown</span>
                   <span>PF</span>
+                  <span>Sharpe</span>
                   <span>Trades</span>
                   <span></span>
                 </div>
@@ -3916,7 +3917,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                       key={idx}
                       onClick={() => setSelectedTopIdx(idx)}
                       className={`grid gap-2 text-xs px-3 py-2 rounded-lg cursor-pointer transition-colors items-center ${isActive ? "bg-violet-500/10 ring-1 ring-violet-500/30" : "bg-white/[0.03] hover:bg-white/[0.06]"}`}
-                      style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 0.8fr 5rem" }}
+                      style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 1fr 0.8fr 5rem" }}
                       data-testid={`heatmap-top-${idx}`}
                     >
                       <span className={`font-mono ${isActive ? "text-violet-400" : "text-white/50"}`}>{idx + 1}</span>
@@ -3930,6 +3931,9 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                       <span className="font-mono text-sky-400">{cfg.winRatePercent.toFixed(1)}%</span>
                       <span className="font-mono text-indigo-400">{cfg.maxDrawdownPercent.toFixed(1)}%</span>
                       <span className="font-mono text-violet-400">{cfg.profitFactor.toFixed(2)}</span>
+                      <span className={`font-mono ${typeof cfg.sharpeRatio === "number" ? (cfg.sharpeRatio >= 1 ? "text-sky-400" : cfg.sharpeRatio >= 0 ? "text-white/70" : "text-purple-400") : "text-white/30"}`}>
+                        {typeof cfg.sharpeRatio === "number" ? cfg.sharpeRatio.toFixed(2) : "—"}
+                      </span>
                       <span className="font-mono text-white/60">{cfg.totalTrades}</span>
                       <span className="flex items-center justify-end gap-0.5">
                         {cfg.id && selectedCell && (
