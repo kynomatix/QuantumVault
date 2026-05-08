@@ -401,7 +401,7 @@ function ProductFeaturesSlide() {
 
 function HowItWorksSlide() {
   const steps = [
-    { num: "01", title: "Connect", desc: "Link Phantom wallet", icon: <Wallet className="w-6 h-6" /> },
+    { num: "01", title: "Connect", desc: "Link Solana wallet", icon: <Wallet className="w-6 h-6" /> },
     { num: "02", title: "Fund", desc: "Deposit USDC", icon: <Coins className="w-6 h-6" /> },
     { num: "03", title: "Create", desc: "Build bot or subscribe", icon: <Bot className="w-6 h-6" /> },
     { num: "04", title: "Configure", desc: "Set webhook URL", icon: <Zap className="w-6 h-6" /> },

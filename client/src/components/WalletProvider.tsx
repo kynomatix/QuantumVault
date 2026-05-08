@@ -2,6 +2,7 @@ import { useMemo, ReactNode, useState, useEffect } from 'react';
 import { ConnectionProvider, WalletProvider as SolanaWalletProvider } from '@solana/wallet-adapter-react';
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui';
 import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom';
+import { SolanaMobileWalletAdapter, createDefaultAddressSelector, createDefaultAuthorizationResultCache, createDefaultWalletNotFoundHandler } from '@solana-mobile/wallet-adapter-mobile';
 
 import '@solana/wallet-adapter-react-ui/styles.css';
 
@@ -20,7 +21,20 @@ export function WalletProvider({ children }: WalletProviderProps) {
   }, []);
 
   const wallets = useMemo(
-    () => [new PhantomWalletAdapter()],
+    () => [
+      new SolanaMobileWalletAdapter({
+        addressSelector: createDefaultAddressSelector(),
+        appIdentity: {
+          name: 'QuantumVault',
+          uri: typeof window !== 'undefined' ? window.location.origin : 'https://quantumvault.app',
+          icon: '/logo.png',
+        },
+        authorizationResultCache: createDefaultAuthorizationResultCache(),
+        chain: 'mainnet-beta',
+        onWalletNotFound: createDefaultWalletNotFoundHandler(),
+      }),
+      new PhantomWalletAdapter(),
+    ],
     []
   );
 

@@ -650,7 +650,7 @@ export default function Landing() {
 
             <div className="grid md:grid-cols-3 gap-8">
               {[
-                { step: '01', title: 'Connect Wallet', description: 'Connect your Phantom wallet securely. No signup, no email, just pure crypto.' },
+                { step: '01', title: 'Connect Wallet', description: 'Connect your Solana wallet securely. No signup, no email, just pure crypto.' },
                 { step: '02', title: 'Fund Your Agent', description: 'Transfer USDC to your agent wallet for trading, plus SOL for gas fees.' },
                 { step: '03', title: 'Deploy Bots', description: 'Create signal bots connected to TradingView alerts. Start automating 24/7.' },
               ].map((item, i) => (
@@ -694,7 +694,7 @@ export default function Landing() {
                   Ready to Trade Smarter?
                 </h2>
                 <p className="text-muted-foreground max-w-lg mx-auto mb-10 text-lg">
-                  Connect your Phantom wallet and start deploying bots in minutes. 
+                  Connect your Solana wallet and start deploying bots in minutes. 
                   No signup required, just pure trading.
                 </p>
                 <Button 

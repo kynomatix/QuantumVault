@@ -168,7 +168,7 @@ function GettingStartedSection() {
             </div>
             <h4 className="font-medium text-white">Connect Wallet</h4>
           </div>
-          <p className="text-white/60 text-sm ml-11">Connect your Phantom wallet to create your account and agent wallet.</p>
+          <p className="text-white/60 text-sm ml-11">Connect your Solana wallet (Phantom, Jupiter, or any compatible wallet) to create your account and agent wallet.</p>
         </div>
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <div className="flex items-center gap-3 mb-2">
@@ -212,11 +212,11 @@ function WalletSetupSection() {
     <div>
       <SectionHeading>Wallet Setup</SectionHeading>
       <Paragraph>
-        QuantumVault uses a two-wallet system for security and automation: your personal Phantom wallet 
+        QuantumVault uses a two-wallet system for security and automation: your personal Solana wallet 
         for deposits/withdrawals, and a platform-managed agent wallet for executing trades.
       </Paragraph>
       
-      <SubHeading>Your Phantom Wallet</SubHeading>
+      <SubHeading>Your Solana Wallet</SubHeading>
       <Paragraph>
         This is your personal Solana wallet that you connect to the platform. You use it to:
       </Paragraph>
@@ -239,15 +239,15 @@ function WalletSetupSection() {
       
       <Alert type="warning">
         Never share your agent wallet's address publicly. While funds can only be withdrawn to your connected 
-        Phantom wallet, keeping your setup private adds an extra layer of security.
+        Solana wallet, keeping your setup private adds an extra layer of security.
       </Alert>
       
       <SubHeading>Connecting Your Wallet</SubHeading>
       <StepList steps={[
-        'Install the Phantom wallet browser extension from phantom.app',
-        'Create or import a Solana wallet in Phantom',
+        'Install a Solana wallet — Phantom (phantom.app), Jupiter, or any Wallet Standard-compatible wallet',
+        'On Solana Seeker, your on-device wallet is detected automatically via Mobile Wallet Adapter',
         'Visit QuantumVault and click "Connect Wallet"',
-        'Approve the connection in the Phantom popup',
+        'Approve the connection in your wallet',
         'Complete the welcome flow to fund your agent wallet',
       ]} />
     </div>
@@ -939,7 +939,7 @@ function SettingsSection() {
         <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/30">
           <h4 className="font-medium text-red-200 mb-1">Reset Agent Wallet</h4>
           <p className="text-red-200/70 text-sm">
-            Withdraws all funds to your Phantom wallet and creates a completely new agent wallet.
+            Withdraws all funds to your Solana wallet and creates a completely new agent wallet.
           </p>
         </div>
       </div>
@@ -971,11 +971,11 @@ function SecuritySection() {
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <div className="flex items-center gap-3 mb-2">
             <Wallet className="w-5 h-5 text-primary" />
-            <h4 className="font-medium text-white">Phantom Keys Never Shared</h4>
+            <h4 className="font-medium text-white">Your Wallet Keys Stay Yours</h4>
           </div>
           <p className="text-white/60 text-sm">
-            Your main Phantom wallet keys are never stored or transmitted. We only ask you to sign 
-            messages to verify your identity - never transactions that could drain your wallet.
+            Your connected wallet's keys are never stored or transmitted. We only ask you to sign 
+            messages to verify your identity — never transactions that could drain your wallet.
           </p>
         </div>
       </div>
@@ -1012,7 +1012,7 @@ function SecuritySection() {
         <li>Is derived from your wallet signature (only you can generate it)</li>
         <li>Encrypts all your sensitive data</li>
         <li>Is never stored in plain text</li>
-        <li>Cannot be accessed without your Phantom wallet</li>
+        <li>Cannot be accessed without your connected Solana wallet</li>
       </ul>
       
       <SubHeading>Trade Execution Security</SubHeading>
@@ -1024,7 +1024,7 @@ function SecuritySection() {
           </div>
           <p className="text-white/60 text-sm">
             Before any bot can trade, you must explicitly enable execution by signing a message 
-            with your Phantom wallet. You can revoke this at any time.
+            with your Solana wallet. You can revoke this at any time.
           </p>
         </div>
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
@@ -1053,7 +1053,7 @@ function SecuritySection() {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">
         <div className="flex items-center gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
           <X className="w-5 h-5 text-red-400 flex-shrink-0" />
-          <span className="text-red-200/80 text-sm">Store your Phantom private keys</span>
+          <span className="text-red-200/80 text-sm">Store your wallet's private keys</span>
         </div>
         <div className="flex items-center gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
           <X className="w-5 h-5 text-red-400 flex-shrink-0" />
@@ -1103,10 +1103,10 @@ function SecuritySection() {
           </ul>
         </div>
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
-          <h4 className="font-medium text-white mb-2">Secure Your Phantom Wallet</h4>
+          <h4 className="font-medium text-white mb-2">Secure Your Solana Wallet</h4>
           <ul className="list-disc list-inside text-white/60 text-sm space-y-1 ml-2">
-            <li>Consider using a hardware wallet (Ledger via Phantom)</li>
-            <li>Enable Phantom's auto-lock feature</li>
+            <li>Consider using a hardware wallet (Ledger via Phantom or Solflare)</li>
+            <li>Enable your wallet's auto-lock feature</li>
             <li>Never sign unknown messages</li>
           </ul>
         </div>
