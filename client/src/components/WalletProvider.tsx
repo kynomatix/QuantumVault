@@ -27,7 +27,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
         appIdentity: {
           name: 'QuantumVault',
           uri: typeof window !== 'undefined' ? window.location.origin : 'https://quantumvault.app',
-          icon: '/logo.png',
+          icon: '/favicon.png',
         },
         authorizationResultCache: createDefaultAuthorizationResultCache(),
         chain: 'mainnet-beta',
