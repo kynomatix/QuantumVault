@@ -11064,6 +11064,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Capital investment amount required" });
       }
 
+      const MIN_SUBSCRIPTION_USDC = 10;
+      if (capitalInvested < MIN_SUBSCRIPTION_USDC) {
+        return res.status(400).json({
+          error: `Minimum subscription is $${MIN_SUBSCRIPTION_USDC.toFixed(2)} USDC. You entered $${Number(capitalInvested).toFixed(2)}.`
+        });
+      }
+
       const publishedBot = await storage.getPublishedBotById(req.params.id);
       if (!publishedBot) {
         return res.status(404).json({ error: "Published bot not found" });

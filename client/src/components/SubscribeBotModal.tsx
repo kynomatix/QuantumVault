@@ -168,6 +168,16 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       toast({ title: 'Please enter a valid investment amount', variant: 'destructive' });
       return;
     }
+
+    const MIN_SUBSCRIPTION_USDC = 10;
+    if (capital < MIN_SUBSCRIPTION_USDC) {
+      toast({
+        title: 'Minimum subscription is $10',
+        description: `Pacifica enforces a $10 USDC minimum. You entered $${capital.toFixed(2)}.`,
+        variant: 'destructive',
+      });
+      return;
+    }
     
     if (!riskAccepted) {
       toast({ title: 'Please accept the risk disclaimer', variant: 'destructive' });
@@ -342,17 +352,17 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
               <Input
                 id="capital"
                 type="number"
-                min="1"
+                min="10"
                 step="0.01"
                 value={capitalInvested}
                 onChange={(e) => setCapitalInvested(e.target.value)}
-                placeholder="Enter amount"
+                placeholder="Min $10"
                 className="pl-9"
                 data-testid="input-capital"
               />
             </div>
             <p className="text-xs text-muted-foreground">
-              This is the amount that will be used for copy trading
+              Minimum $10 USDC. This is the amount used for copy trading.
             </p>
           </div>
 
