@@ -4535,19 +4535,24 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                         </TooltipContent>
                       </Tooltip>
                     ) : (
-                      <Button
-                        size="sm"
-                        className="w-full h-7 text-[10px] bg-violet-600 hover:bg-violet-500 text-white"
-                        onClick={handleCreateBot}
-                        disabled={isCreating}
-                        data-testid={`create-bot-btn-${leverage}x`}
-                      >
-                        {isCreating ? (
-                          <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Creating...</>
-                        ) : (
-                          <><Rocket className="w-3 h-3 mr-1" /> Create Bot — {generateBotName()}</>
+                      <>
+                        {!isCreating && (
+                          <p className="text-[9px] text-white/50 text-center truncate mb-1.5">{generateBotName()}</p>
                         )}
-                      </Button>
+                        <Button
+                          size="sm"
+                          className="w-full h-7 text-[10px] bg-violet-600 hover:bg-violet-500 text-white"
+                          onClick={handleCreateBot}
+                          disabled={isCreating}
+                          data-testid={`create-bot-btn-${leverage}x`}
+                        >
+                          {isCreating ? (
+                            <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Creating...</>
+                          ) : (
+                            <><Rocket className="w-3 h-3 mr-1" /> Create Bot</>
+                          )}
+                        </Button>
+                      </>
                     )}
                     {balanceChecked && isAuthenticated && hasAgentWallet && (
                       <div className="flex justify-between text-[9px] text-white/30 mt-2">
