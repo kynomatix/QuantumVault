@@ -72,7 +72,7 @@ export function BotPerformanceBreakdown({ range = 'all' }: Props) {
     );
   }
 
-  if (isError || data === null) {
+  if (isError || !data) {
     return (
       <div className="gradient-border p-6 noise" data-testid="bot-performance-breakdown">
         <div className="flex items-center gap-3 mb-5">
