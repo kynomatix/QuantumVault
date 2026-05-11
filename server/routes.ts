@@ -11067,9 +11067,19 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const baseDrawdownPct1x = maxDrawdownPct / creatorLeverage;
 
       // At Nx leverage, effective drawdown = N × baseDD. Keep that ≤ 50%.
-      const suggestedLeverage = baseDrawdownPct1x > 0
+      // Two bounds, take the more conservative:
+      // 1. Normalised bound: derived from baseDrawdownPct1x (creator-leverage-agnostic,
+      //    lets a subscriber survive what a high-leverage creator got wrecked by).
+      // 2. Observed bound: derived from the raw observed DD. A real-world catastrophic
+      //    drawdown is a meaningful signal — normalising it away entirely would let
+      //    a 91%-drawdown bot suggest 5x if the creator just happened to be at 10x.
+      const suggestedFromNormalized = baseDrawdownPct1x > 0
         ? Math.max(1, Math.min(10, Math.floor(0.5 / baseDrawdownPct1x)))
         : 1;
+      const suggestedFromObserved = maxDrawdownPct > 0
+        ? Math.max(1, Math.min(10, Math.floor(0.5 / maxDrawdownPct)))
+        : 1;
+      const suggestedLeverage = Math.min(suggestedFromNormalized, suggestedFromObserved);
 
       // Invest this fraction of balance so worst-case loss ≤ 20% of total balance.
       const worstCasePct = baseDrawdownPct1x * suggestedLeverage;
