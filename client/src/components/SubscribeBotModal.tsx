@@ -945,7 +945,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
           ) : (
             <Button
               onClick={handleSubscribe}
-              disabled={!riskAccepted || !capitalInvested || subscribe.isPending || balanceLoading || (enteredCapital > 0 && availableBalance === null)}
+              disabled={!riskAccepted || !capitalInvested || enteredCapital < 10 || subscribe.isPending || balanceLoading || (enteredCapital > 0 && availableBalance === null)}
               className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
               data-testid="button-confirm-subscribe"
             >
