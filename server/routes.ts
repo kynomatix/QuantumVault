@@ -11950,10 +11950,32 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Get creator earnings from profit sharing
       const creatorEarnings = await storage.getWalletCreatorEarnings(walletAddress);
       
-      // Get historical snapshots for chart (last 90 days)
-      const ninetyDaysAgo = new Date();
-      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-      const snapshots = await storage.getPortfolioDailySnapshots(walletAddress, ninetyDaysAgo);
+      // Determine lookback window from `range` query param
+      const validRanges = ['7d', '1m', '3m', '12m', 'all'] as const;
+      type RangeParam = typeof validRanges[number];
+      const rawRange = (req.query.range as string | undefined)?.toLowerCase();
+      const rangeParam: RangeParam = (validRanges as readonly string[]).includes(rawRange ?? '') ? (rawRange as RangeParam) : '3m';
+      let sinceDate: Date | undefined;
+      const now = new Date();
+      if (rangeParam === '7d') {
+        sinceDate = new Date(now);
+        sinceDate.setDate(sinceDate.getDate() - 7);
+      } else if (rangeParam === '1m') {
+        sinceDate = new Date(now);
+        sinceDate.setDate(sinceDate.getDate() - 30);
+      } else if (rangeParam === '3m') {
+        sinceDate = new Date(now);
+        sinceDate.setDate(sinceDate.getDate() - 90);
+      } else if (rangeParam === '12m') {
+        sinceDate = new Date(now);
+        sinceDate.setDate(sinceDate.getDate() - 365);
+      } else {
+        // 'all' — no floor
+        sinceDate = undefined;
+      }
+
+      // Get historical snapshots for chart
+      const snapshots = await storage.getPortfolioDailySnapshots(walletAddress, sinceDate);
       
       // Build chart data from snapshots with pnlPercent for % view
       const chartData: { date: Date; netPnl: number; pnlPercent: number; balance: number }[] = [];
@@ -11961,17 +11983,22 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Add a zero-point anchor one calendar day before the first snapshot so the
       // chart starts where real data begins (avoids a long flat $0 line going back
       // to the wallet's first-deposit date when activity is much more recent).
+      // Only add the anchor when it would fall within the selected range window —
+      // for tight ranges (e.g. 7D) the anchor must not precede sinceDate.
       if (snapshots.length > 0) {
         const firstSnapDate = new Date(snapshots[0].snapshotDate);
         firstSnapDate.setHours(0, 0, 0, 0);
         const dayBeforeFirst = new Date(firstSnapDate);
         dayBeforeFirst.setDate(dayBeforeFirst.getDate() - 1);
-        chartData.push({
-          date: dayBeforeFirst,
-          netPnl: 0,
-          pnlPercent: 0,
-          balance: 0,
-        });
+        const anchorIsInWindow = !sinceDate || dayBeforeFirst >= sinceDate;
+        if (anchorIsInWindow) {
+          chartData.push({
+            date: dayBeforeFirst,
+            netPnl: 0,
+            pnlPercent: 0,
+            balance: 0,
+          });
+        }
       }
       
       // Add snapshots with pnlPercent calculated from cumulative deposits

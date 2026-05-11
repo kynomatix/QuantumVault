@@ -562,9 +562,9 @@ export interface PortfolioPerformanceData {
   chartData: Array<{ date: string; netPnl: number; pnlPercent: number; balance: number }>;
 }
 
-async function fetchPortfolioPerformance(): Promise<PortfolioPerformanceData | null> {
+async function fetchPortfolioPerformance(range: string): Promise<PortfolioPerformanceData | null> {
   try {
-    const res = await fetch("/api/portfolio-performance", { credentials: "include" });
+    const res = await fetch(`/api/portfolio-performance?range=${encodeURIComponent(range)}`, { credentials: "include" });
     if (!res.ok) return null;
     return safeResponseJson(res);
   } catch {
@@ -572,11 +572,11 @@ async function fetchPortfolioPerformance(): Promise<PortfolioPerformanceData | n
   }
 }
 
-export function usePortfolioPerformance() {
+export function usePortfolioPerformance(range: string = '3m') {
   const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
-    queryKey: ["portfolioPerformance", publicKeyString],
-    queryFn: fetchPortfolioPerformance,
+    queryKey: ["portfolioPerformance", publicKeyString, range],
+    queryFn: () => fetchPortfolioPerformance(range),
     enabled: !!publicKeyString && sessionConnected,
     refetchInterval: 30000,
     staleTime: 20000,

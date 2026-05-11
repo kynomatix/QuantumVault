@@ -60,15 +60,16 @@ export function PerformanceHeatmap() {
 
   return (
     <div className="gradient-border p-6 noise space-y-6" data-testid="performance-heatmap">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <BarChart3 className="w-5 h-5 text-muted-foreground" />
-          <div>
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <BarChart3 className="w-5 h-5 text-muted-foreground mt-0.5" />
+          <div className="space-y-1">
             <h2 className="font-display font-semibold">Performance Heatmap</h2>
-            <p className="text-xs text-muted-foreground">{data.totalTrades} executed trades · P&L by day & hour (UTC)</p>
+            <p className="text-xs text-muted-foreground">Your most and least profitable time slots — across all trades, ever</p>
+            <p className="text-[11px] text-muted-foreground/70">Each cell = total P&L for all trades at that day/hour (UTC). Darker = larger P&L impact. · {data.totalTrades} trades all-time</p>
           </div>
         </div>
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+        <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0">
           <div className="flex items-center gap-1.5">
             <div className="w-3 h-3 rounded-sm" style={{ background: 'rgba(239, 68, 68, 0.7)' }} />
             <span>Loss</span>
@@ -87,7 +88,7 @@ export function PerformanceHeatmap() {
       <div className="overflow-x-auto">
         <div className="min-w-[600px]">
           <div className="grid gap-[2px]" style={{ gridTemplateColumns: '48px repeat(24, 1fr)' }}>
-            <div />
+            <div className="text-[10px] text-muted-foreground flex items-end pb-1 justify-end pr-2 font-medium leading-tight text-right">Day of<br/>week</div>
             {Array.from({ length: 24 }, (_, h) => (
               <div key={h} className="text-center text-[10px] text-muted-foreground pb-1">
                 {displayHours.includes(h) ? `${h.toString().padStart(2, '0')}` : ''}
@@ -128,6 +129,10 @@ export function PerformanceHeatmap() {
                 })}
               </React.Fragment>
             ))}
+          </div>
+          <div className="grid gap-[2px] mt-1" style={{ gridTemplateColumns: '48px 1fr' }}>
+            <div />
+            <p className="text-[10px] text-muted-foreground text-center font-medium">Hour (UTC)</p>
           </div>
         </div>
       </div>

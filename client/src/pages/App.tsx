@@ -244,6 +244,7 @@ export default function AppPage() {
   const [createBotOpen, setCreateBotOpen] = useState(false);
   const [tradeHistoryOpen, setTradeHistoryOpen] = useState(false);
   const [portfolioChartView, setPortfolioChartView] = useState<'dollar' | 'percent'>('dollar');
+  const [portfolioChartRange, setPortfolioChartRange] = useState<string>('3m');
   const [welcomePopupOpen, setWelcomePopupOpen] = useState(false);
   const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
   const welcomeCheckedRef = useRef(false);
@@ -365,7 +366,7 @@ export default function AppPage() {
   const unsubscribeMutation = useUnsubscribeFromBot();
   
   // Portfolio performance data
-  const { data: portfolioPerformanceData, isLoading: portfolioPerformanceLoading } = usePortfolioPerformance();
+  const { data: portfolioPerformanceData, isLoading: portfolioPerformanceLoading } = usePortfolioPerformance(portfolioChartRange);
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [exchangeBalance, setExchangeBalance] = useState<number | null>(null);
@@ -2686,9 +2687,22 @@ export default function AppPage() {
                             </Button>
                           </div>
                         </div>
-                        <p className="text-sm text-muted-foreground">
-                          {portfolioChartView === 'dollar' ? 'Net P&L in USD' : 'P&L as % of deposits'}
-                        </p>
+                        <div className="flex items-center gap-2">
+                          <div className="flex gap-1" data-testid="toggle-portfolio-chart-range">
+                            {(['7d', '1m', '3m', '12m', 'all'] as const).map((r) => (
+                              <Button
+                                key={r}
+                                variant={portfolioChartRange === r ? 'default' : 'outline'}
+                                size="sm"
+                                className="h-6 px-2 text-xs"
+                                onClick={() => setPortfolioChartRange(r)}
+                                data-testid={`button-range-${r}`}
+                              >
+                                {r.toUpperCase()}
+                              </Button>
+                            ))}
+                          </div>
+                        </div>
                       </div>
                       {portfolioPerformanceData.chartData && portfolioPerformanceData.chartData.length > 0 ? (
                         <div className="h-[300px]" data-testid="portfolio-pnl-chart">
