@@ -93,6 +93,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
     canCreate: boolean;
   } | null>(null);
   const [isDepositingSol, setIsDepositingSol] = useState(false);
+  const [isDepositingUsdc, setIsDepositingUsdc] = useState(false);
 
   const [riskOpen, setRiskOpen] = useState(false);
   const [riskData, setRiskData] = useState<RiskAnalysis | null>(null);
@@ -143,6 +144,14 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const enteredCapital = parseFloat(capitalInvested);
   const baseAmount = enteredCapital > 0 ? enteredCapital : (availableBalance ?? 0);
   const baseLabel = enteredCapital > 0 ? 'entered capital' : 'available balance';
+
+  // USDC capital top-up: when user enters more capital than their agent wallet has,
+  // surface the shortfall so they can deposit it in one click instead of failing on
+  // submit. Mirrors the SOL gas top-up flow above.
+  const usdcDeficit = enteredCapital > 0 && availableBalance !== null
+    ? Math.max(0, enteredCapital - availableBalance)
+    : 0;
+  const needsUsdcDeposit = usdcDeficit > 0 && enteredCapital >= 10;
 
   // QuantumLab-style two-part allocation: split Capital into Investment + Equity Buffer.
   // worstCase = max(observedDD, baseDD × subscriberLev). The max() guard means we never
@@ -256,6 +265,76 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
     }
   };
   
+  const handleUsdcDeposit = async () => {
+    if (usdcDeficit <= 0) return;
+
+    if (!wallet.publicKey || !wallet.signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    // Round to 2 decimals to keep the on-chain transfer amount in sync with what
+    // the button label shows ("Deposit $X.XX USDC"). USDC supports 6 decimals, so
+    // this is well within precision and avoids float-drift mismatches.
+    const amount = Math.ceil(usdcDeficit * 100) / 100;
+
+    setIsDepositingUsdc(true);
+    try {
+      const response = await fetch('/api/agent/deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await safeResponseJson(response);
+        throw new Error(error.error || 'USDC deposit failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await safeResponseJson(response);
+
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      const signedTx = await wallet.signTransaction(transaction);
+
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+
+      await confirmTransactionWithFallback(connection, {
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ title: `Deposited $${amount.toFixed(2)} USDC successfully` });
+
+      // Refresh both balance sources in parallel so SOL gating and USDC gating
+      // stay coherent (the user's main wallet just paid SOL fees for this tx).
+      const [equityRes, balanceRes] = await Promise.all([
+        fetch('/api/total-equity', { credentials: 'include' }),
+        fetch('/api/agent/balance', { credentials: 'include' }),
+      ]);
+      if (equityRes.ok) {
+        const data = await safeResponseJson(equityRes);
+        setAvailableBalance(data.agentBalance ?? 0);
+      }
+      if (balanceRes.ok) {
+        const data = await safeResponseJson(balanceRes);
+        if (data.botCreationSolRequirement) {
+          setSolRequirement(data.botCreationSolRequirement);
+        }
+      }
+    } catch (error: any) {
+      console.error('USDC deposit failed:', error);
+      toast({
+        title: 'USDC Deposit Failed',
+        description: error.message || 'Please try again',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsDepositingUsdc(false);
+    }
+  };
+
   const handleMax = () => {
     if (availableBalance !== null && availableBalance > 0) {
       setCapitalInvested(availableBalance.toFixed(2));
@@ -375,6 +454,27 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                 </p>
                 <p className="text-xs text-yellow-400/80">
                   Please deposit at least <span className="font-semibold">{solRequirement.deficit.toFixed(3)} SOL</span> to your agent wallet.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* USDC Capital Shortfall Warning */}
+        {needsUsdcDeposit && (!solRequirement || solRequirement.canCreate) && (
+          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mt-2" data-testid="warning-usdc-insufficient-subscribe">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-yellow-400">
+                  Insufficient USDC for Capital
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  This subscription needs ${enteredCapital.toFixed(2)} USDC.
+                  Your agent wallet has ${(availableBalance ?? 0).toFixed(2)} USDC.
+                </p>
+                <p className="text-xs text-yellow-400/80" data-testid="text-usdc-deficit">
+                  Please deposit at least <span className="font-semibold">${usdcDeficit.toFixed(2)} USDC</span> to your agent wallet.
                 </p>
               </div>
             </div>
@@ -801,7 +901,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={handleClose} disabled={isDepositingSol} data-testid="button-cancel-subscribe">
+          <Button variant="outline" onClick={handleClose} disabled={isDepositingSol || isDepositingUsdc} data-testid="button-cancel-subscribe">
             Cancel
           </Button>
           {solRequirement && !solRequirement.canCreate ? (
@@ -823,10 +923,29 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                 </>
               )}
             </Button>
+          ) : needsUsdcDeposit ? (
+            <Button
+              onClick={handleUsdcDeposit}
+              disabled={isDepositingUsdc}
+              className="bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600"
+              data-testid="button-deposit-usdc-for-subscribe"
+            >
+              {isDepositingUsdc ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Depositing...
+                </>
+              ) : (
+                <>
+                  <DollarSign className="w-4 h-4 mr-2" />
+                  Deposit ${usdcDeficit.toFixed(2)} USDC
+                </>
+              )}
+            </Button>
           ) : (
             <Button
               onClick={handleSubscribe}
-              disabled={!riskAccepted || !capitalInvested || subscribe.isPending}
+              disabled={!riskAccepted || !capitalInvested || subscribe.isPending || balanceLoading || (enteredCapital > 0 && availableBalance === null)}
               className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
               data-testid="button-confirm-subscribe"
             >
