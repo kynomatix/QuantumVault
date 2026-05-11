@@ -389,49 +389,41 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             )}
           </div>
 
-          {/* Capital input */}
+          {/* Investment Amount (mirrors Create Bot terminology) */}
           <div className="space-y-2">
-            <div className="flex justify-between items-center">
-              <Label htmlFor="capital">Capital Investment (USDC)</Label>
-              <div className="flex items-center gap-2 text-xs">
-                <Wallet className="w-3 h-3 text-muted-foreground" />
-                <span className="text-muted-foreground">Available:</span>
-                {balanceLoading ? (
-                  <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
-                ) : (
-                  <span className="font-mono text-primary">
-                    ${availableBalance?.toFixed(2) ?? '0.00'}
-                  </span>
-                )}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-5 px-2 text-xs"
-                  onClick={handleMax}
-                  disabled={!availableBalance || availableBalance <= 0}
-                  data-testid="button-max"
-                >
-                  MAX
-                </Button>
+            <Label htmlFor="capital">Investment Amount (USDC)</Label>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <Input
+                  id="capital"
+                  type="number"
+                  min="10"
+                  step="0.01"
+                  value={capitalInvested}
+                  onChange={(e) => setCapitalInvested(e.target.value)}
+                  placeholder="Min $10"
+                  className="pl-9 font-mono"
+                  data-testid="input-capital"
+                />
               </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleMax}
+                disabled={!availableBalance || availableBalance <= 0}
+                className="px-3"
+                data-testid="button-max"
+              >
+                Max
+              </Button>
             </div>
-            <div className="relative">
-              <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-              <Input
-                id="capital"
-                type="number"
-                min="10"
-                step="0.01"
-                value={capitalInvested}
-                onChange={(e) => setCapitalInvested(e.target.value)}
-                placeholder="Min $10"
-                className="pl-9"
-                data-testid="input-capital"
-              />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Minimum $10 USDC. This is the amount used for copy trading.
+            <p className="text-xs text-muted-foreground flex items-center gap-1">
+              <Wallet className="w-3 h-3" />
+              {balanceLoading ? 'Loading balance...' : (
+                <>Available in agent wallet: <span className="font-medium">${availableBalance?.toFixed(2) ?? '0.00'}</span></>
+              )}
             </p>
           </div>
 
@@ -482,6 +474,22 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             )}
           </div>
 
+          {/* Max Position Size preview — mirrors Create Bot modal */}
+          {enteredCapital > 0 && (
+            <div className="p-3 rounded-lg bg-gradient-to-r from-primary/10 to-accent/10 border border-primary/20" data-testid="display-max-position-size">
+              <div className="flex items-center gap-2 text-sm">
+                <TrendingUp className="w-4 h-4 text-primary" />
+                <span className="text-muted-foreground">Max Position Size:</span>
+                <span className="font-bold text-lg text-primary font-mono">
+                  ${(enteredCapital * Math.min(leverage, maxLeverage)).toFixed(2)}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                ${enteredCapital.toFixed(2)} investment × {Math.min(leverage, maxLeverage)}x leverage
+              </p>
+            </div>
+          )}
+
           {/* Risk analysis panel */}
           {riskOpen && (
             <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 space-y-3" data-testid="risk-analysis-panel">
@@ -531,29 +539,39 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                     </div>
                   </div>
 
-                  <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-3 space-y-1.5">
-                    <p className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
-                      <Shield className="w-3 h-3" />
-                      Conservative suggestion
-                    </p>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Leverage</span>
-                      <span className="font-mono font-medium">{riskData.suggestedLeverage}x</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Allocation</span>
-                      <span className="font-mono font-medium">{Math.round(riskData.suggestedEquityPct * 100)}%
-                        {baseAmount > 0 && (
-                          <span className="text-muted-foreground ml-1">
-                            (≈ ${(baseAmount * riskData.suggestedEquityPct).toFixed(2)})
+                  {(() => {
+                    const suggestedLev = Math.min(riskData.suggestedLeverage, maxLeverage);
+                    const suggestedInvestment = baseAmount * riskData.suggestedEquityPct;
+                    const suggestedMaxPos = suggestedInvestment * suggestedLev;
+                    return (
+                      <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-3 space-y-1.5">
+                        <p className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
+                          <Shield className="w-3 h-3" />
+                          Conservative suggestion
+                        </p>
+                        <div className="flex justify-between text-xs">
+                          <span className="text-muted-foreground">Investment Amount</span>
+                          <span className="font-mono font-medium">
+                            {baseAmount > 0 ? `$${suggestedInvestment.toFixed(2)}` : '—'}
+                            <span className="text-muted-foreground ml-1">({Math.round(riskData.suggestedEquityPct * 100)}%)</span>
                           </span>
-                        )}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-muted-foreground pt-0.5">
-                      Based on your {baseLabel}. A repeat of the worst observed drawdown would cost roughly 20% of this amount.
-                    </p>
-                  </div>
+                        </div>
+                        <div className="flex justify-between text-xs">
+                          <span className="text-muted-foreground">Leverage</span>
+                          <span className="font-mono font-medium">{suggestedLev}x</span>
+                        </div>
+                        <div className="flex justify-between text-xs pt-1 border-t border-emerald-500/20">
+                          <span className="text-muted-foreground">Resulting Max Position</span>
+                          <span className="font-mono font-semibold text-emerald-400">
+                            {baseAmount > 0 ? `$${suggestedMaxPos.toFixed(2)}` : '—'}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-muted-foreground pt-1">
+                          Based on your {baseLabel}. A repeat of the worst observed drawdown would cost roughly 20% of this investment amount.
+                        </p>
+                      </div>
+                    );
+                  })()}
 
                   <Button
                     type="button"
