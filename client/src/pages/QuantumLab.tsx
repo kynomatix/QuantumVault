@@ -1,5 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useCallback, useEffect, useRef, useMemo, Fragment, memo } from "react";
+import { createPortal } from "react-dom";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -3177,7 +3178,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
           </TabsContent>
 
           <TabsContent value="risk">
-            {riskAnalysis && <RiskManagementPanel analysis={riskAnalysis} ticker={selectedResult.ticker} timeframe={selectedResult.timeframe} backtestProfit={selectedResult.netProfitPercent} backtestDrawdown={selectedResult.maxDrawdownPercent} strategyName={strategy?.name} />}
+            {riskAnalysis && <RiskManagementPanel analysis={riskAnalysis} ticker={selectedResult.ticker} timeframe={selectedResult.timeframe} backtestProfit={selectedResult.netProfitPercent} backtestDrawdown={selectedResult.maxDrawdownPercent} strategyName={strategy?.name} pineScript={strategy?.pineScript} params={selectedResult.params as Record<string, any>} />}
           </TabsContent>
 
           <TabsContent value="params">
@@ -3253,7 +3254,7 @@ function HistStatCard({ label, value, color, icon, sublabel }: { label: string; 
 }
 
 
-function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, backtestDrawdown, strategyName }: { analysis: LabRiskAnalysis; ticker?: string; timeframe?: string; backtestProfit: number; backtestDrawdown: number; strategyName?: string }) {
+function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, backtestDrawdown, strategyName, pineScript, params }: { analysis: LabRiskAnalysis; ticker?: string; timeframe?: string; backtestProfit: number; backtestDrawdown: number; strategyName?: string; pineScript?: string; params?: Record<string, any> }) {
   const [showLeverageView, setShowLeverageView] = useState(false);
   const { getMaxLeverage } = useLeverageLimits();
   const ratingColors: Record<LabRiskAnalysis["riskRating"], { text: string; bg: string; border: string }> = {
@@ -3316,7 +3317,7 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
                   )}
                   data-testid={`leverage-card-${l.lev}x`}
                 >
-                  <BotSetupAdvisor leverage={l.lev} drawdownPercent={backtestDrawdown} streakDrawdownPercent={analysis.streakDrawdownPercent} profitPercent={backtestProfit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} />
+                  <BotSetupAdvisor leverage={l.lev} drawdownPercent={backtestDrawdown} streakDrawdownPercent={analysis.streakDrawdownPercent} profitPercent={backtestProfit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} pineScript={pineScript} params={params} />
                   <p className={cn("text-[10px] font-medium mb-1.5", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
                   <p className={cn("text-lg font-bold tabular-nums", adjProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
                     {adjProfit >= 0 ? "+" : ""}{adjProfit.toFixed(1)}%
@@ -4033,7 +4034,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
             </div>
           )}
 
-          {activeConfig && <HeatmapRiskSummary config={activeConfig} idx={selectedTopIdx} ticker={selectedCell?.ticker} timeframe={selectedCell?.timeframe} strategyName={activeConfig.strategyId ? strategyMap.get(activeConfig.strategyId)?.name : undefined} />}
+          {activeConfig && <HeatmapRiskSummary config={activeConfig} idx={selectedTopIdx} ticker={selectedCell?.ticker} timeframe={selectedCell?.timeframe} strategyName={activeConfig.strategyId ? strategyMap.get(activeConfig.strategyId)?.name : undefined} pineScript={activeConfig.strategyId ? strategyMap.get(activeConfig.strategyId)?.pineScript : undefined} params={activeConfig.params as Record<string, any>} />}
 
           {activeConfig?.params && (
             <Collapsible>
@@ -4059,13 +4060,14 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
   );
 }
 
-function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended, ticker, timeframe, strategyName }: { leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean; ticker?: string; timeframe?: string; strategyName?: string }) {
+function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended, ticker, timeframe, strategyName, pineScript, params }: { leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean; ticker?: string; timeframe?: string; strategyName?: string; pineScript?: string; params?: Record<string, any> }) {
   const [capital, setCapital] = useState("1000");
   const capitalNum = parseFloat(capital) || 0;
   const { toast } = useToast();
   const { publicKeyString: walletAddress, sessionConnected, signMessage, publicKey } = useWallet();
   const bindAgentWallet = useBindAgentWallet({ signMessage, publicKey });
 
+  const [isOpen, setIsOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [createdBot, setCreatedBot] = useState<any>(null);
   const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
@@ -4291,7 +4293,12 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const disabledReason = getDisabledReason();
 
   return (
-    <Popover onOpenChange={(open) => { if (open && isAuthenticated && !balanceChecked) fetchBalanceAndAgent(); }}>
+    <>
+      {isOpen && createPortal(
+        <div className="fixed inset-0 bg-black/50 z-40 pointer-events-none" />,
+        document.body
+      )}
+    <Popover onOpenChange={(open) => { setIsOpen(open); if (open && isAuthenticated && !balanceChecked) fetchBalanceAndAgent(); }}>
       <PopoverTrigger asChild>
         <button
           className={cn(
@@ -4303,9 +4310,9 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
           <Settings2 className="w-3 h-3" />
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-72 bg-slate-900 border-white/10 p-0" align="center" side="top" sideOffset={8}>
+      <PopoverContent className="w-80 bg-slate-900 border-white/10 p-0" align="center" side="top" sideOffset={8}>
         {createdBot ? (
-          <div className="p-3 space-y-2.5">
+          <div className="p-4 space-y-3">
             <div className="flex items-center gap-2">
               {createError ? (
                 <AlertTriangle className="w-4 h-4 text-yellow-400" />
@@ -4315,24 +4322,42 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
               <h4 className="text-xs font-semibold text-white">{createError ? 'Bot Created (Unfunded)' : 'Bot Created!'}</h4>
             </div>
             {createError && (
-              <div className="flex items-start gap-1.5 p-2 rounded bg-yellow-500/10 border border-yellow-500/20">
+              <div className="flex items-start gap-2 p-3 rounded bg-yellow-500/10 border border-yellow-500/20">
                 <AlertTriangle className="w-3 h-3 text-yellow-400 shrink-0 mt-0.5" />
                 <p className="text-[10px] text-yellow-300 leading-relaxed">{createError}</p>
               </div>
             )}
-            <div className={cn("p-2 rounded", createError ? "bg-yellow-500/10 border border-yellow-500/20" : "bg-sky-500/10 border border-sky-500/20")}>
+            <div className={cn("p-3 rounded", createError ? "bg-yellow-500/10 border border-yellow-500/20" : "bg-sky-500/10 border border-sky-500/20")}>
               <p className={cn("text-[10px] font-medium", createError ? "text-yellow-300" : "text-sky-300")}>{createdBot.name}</p>
-              <p className="text-[9px] text-white/40 mt-0.5">ID: {createdBot.id}</p>
+              <p className="text-[9px] text-white/40 mt-1">ID: {createdBot.id}</p>
             </div>
 
-            <div className="space-y-1.5">
+            {pineScript && params && (
+              <div className="border border-white/10 rounded p-3 space-y-2.5">
+                <div className="flex items-center gap-2">
+                  <FileCode className="w-3.5 h-3.5 text-violet-400" />
+                  <p className="text-[10px] font-semibold text-white uppercase tracking-wider">Step 1 (if not done yet) — Export Pine Script</p>
+                </div>
+                <Button
+                  size="sm"
+                  className="w-full h-7 text-[10px] bg-white/10 hover:bg-white/20 text-white/80"
+                  onClick={() => exportPineWithParams(pineScript, params, ticker || "SYMBOL", timeframe || "1h", strategyName)}
+                  data-testid={`export-pine-post-${leverage}x`}
+                >
+                  <Download className="w-3 h-3 mr-1" />
+                  Export .pine
+                </Button>
+              </div>
+            )}
+
+            <div className="space-y-2">
               <p className="text-[10px] text-white/50 font-medium">Alert Message</p>
-              <div className="p-1.5 rounded bg-white/5 border border-white/10">
+              <div className="p-2 rounded bg-white/5 border border-white/10">
                 <pre className="text-[9px] text-white/70 font-mono whitespace-pre-wrap break-all leading-relaxed">{getMessageTemplate(createdBot.id)}</pre>
               </div>
               <Button
                 size="sm"
-                className="w-full h-6 text-[10px] bg-violet-600 hover:bg-violet-500"
+                className="w-full h-7 text-[10px] bg-violet-600 hover:bg-violet-500"
                 onClick={() => copyToClipboard(getMessageTemplate(createdBot.id), 'Message')}
                 data-testid={`copy-alert-msg-${leverage}x`}
               >
@@ -4341,14 +4366,14 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
               </Button>
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               <p className="text-[10px] text-white/50 font-medium">Webhook URL</p>
-              <div className="p-1.5 rounded bg-white/5 border border-white/10">
+              <div className="p-2 rounded bg-white/5 border border-white/10">
                 <p className="text-[9px] text-white/70 font-mono break-all">{webhookUrl || 'Loading...'}</p>
               </div>
               <Button
                 size="sm"
-                className="w-full h-6 text-[10px] bg-violet-600 hover:bg-violet-500"
+                className="w-full h-7 text-[10px] bg-violet-600 hover:bg-violet-500"
                 onClick={() => webhookUrl && copyToClipboard(webhookUrl, 'Webhook URL')}
                 disabled={!webhookUrl}
                 data-testid={`copy-webhook-${leverage}x`}
@@ -4362,10 +4387,28 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
           </div>
         ) : (
           <>
-            <div className="p-3 border-b border-white/10">
-              <div className="flex items-center gap-2 mb-2">
+            {pineScript && params && (
+              <div className="p-4 border-b border-white/10 space-y-2.5">
+                <div className="flex items-center gap-2">
+                  <FileCode className="w-3.5 h-3.5 text-violet-400" />
+                  <p className="text-[10px] font-semibold text-white uppercase tracking-wider">Step 1 — Export Pine Script</p>
+                </div>
+                <p className="text-[9px] text-white/40 leading-relaxed">Load this strategy into TradingView before setting up the alert.</p>
+                <Button
+                  size="sm"
+                  className="w-full h-7 text-[10px] bg-white/10 hover:bg-white/20 text-white/80"
+                  onClick={() => exportPineWithParams(pineScript, params, ticker || "SYMBOL", timeframe || "1h", strategyName)}
+                  data-testid={`export-pine-${leverage}x`}
+                >
+                  <Download className="w-3 h-3 mr-1" />
+                  Export .pine
+                </Button>
+              </div>
+            )}
+            <div className="p-4 border-b border-white/10">
+              <div className="flex items-center gap-2 mb-3">
                 <Wallet className="w-3.5 h-3.5 text-violet-400" />
-                <h4 className="text-xs font-semibold text-white">Bot Setup at {leverage}x</h4>
+                <h4 className="text-[10px] font-semibold text-white uppercase tracking-wider">{pineScript && params ? `Step 2 — Create Bot & Get Webhook` : `Bot Setup at ${leverage}x`}</h4>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-[10px] text-white/40 shrink-0">Capital $</span>
@@ -4373,15 +4416,32 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                   type="number"
                   value={capital}
                   onChange={(e) => { setCapital(e.target.value); setBalanceChecked(false); }}
-                  className="h-6 text-xs bg-white/5 border-white/10 text-white px-2"
+                  className="h-7 text-xs bg-white/5 border-white/10 text-white px-2"
                   min="1"
                   data-testid={`setup-capital-${leverage}x`}
                 />
+                {agentBalance !== null && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => { setCapital(String(Math.floor(parseFloat(agentBalance)))); setBalanceChecked(false); }}
+                    className="h-7 px-2.5 text-[9px] bg-white/10 hover:bg-white/20 text-white/80 shrink-0"
+                    data-testid={`setup-capital-max-${leverage}x`}
+                  >
+                    Max
+                  </Button>
+                )}
               </div>
+              {agentBalance !== null && (
+                <p className="text-[9px] text-white/40 mt-2">Available in agent wallet: ${parseFloat(agentBalance).toFixed(2)} USDC</p>
+              )}
+              {balanceLoading && (
+                <p className="text-[9px] text-white/30 mt-2">Checking wallet balance…</p>
+              )}
             </div>
             {capitalNum > 0 && (
-              <div className="p-3 space-y-2.5">
-                <div className="space-y-1.5">
+              <div className="p-4 space-y-3">
+                <div className="space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="text-[10px] text-white/40">Investment Amount</span>
                     <span className="text-xs font-bold text-white tabular-nums">${effectiveTradeSize.toLocaleString()}</span>
@@ -4399,7 +4459,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                   </div>
                 </div>
 
-                <div className="border-t border-white/5 pt-2 space-y-1.5">
+                <div className="border-t border-white/5 pt-3 space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="text-[10px] text-white/40">Set Leverage</span>
                     <span className="text-xs font-semibold text-violet-400">{leverage}x</span>
@@ -4416,8 +4476,8 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                   </div>
                 </div>
 
-                <div className="border-t border-white/5 pt-2 space-y-1">
-                  <p className="text-[10px] text-white/50 font-medium mb-1">Recommended Settings</p>
+                <div className="border-t border-white/5 pt-3 space-y-1.5">
+                  <p className="text-[10px] text-white/50 font-medium mb-1.5">Recommended Settings</p>
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] text-white/40">Auto Top-Up</span>
                     <Badge className={cn("text-[9px] h-4", enableTopUp ? "bg-sky-500/10 text-sky-400 border-sky-500/30" : "bg-white/5 text-white/40 border-white/10")}>{enableTopUp ? "ON" : "OFF"}</Badge>
@@ -4429,28 +4489,28 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                 </div>
 
                 {!survivable && (
-                  <div className="flex items-start gap-1.5 p-2 rounded bg-purple-500/10 border border-purple-500/20">
+                  <div className="flex items-start gap-2 p-2.5 rounded bg-purple-500/10 border border-purple-500/20">
                     <AlertTriangle className="w-3 h-3 text-purple-400 shrink-0 mt-0.5" />
                     <p className="text-[10px] text-purple-300 leading-relaxed">Drawdown at {leverage}x exceeds 80%. High liquidation risk — consider lower leverage.</p>
                   </div>
                 )}
                 {survivable && enableTopUp && (
-                  <div className="flex items-start gap-1.5 p-2 rounded bg-indigo-500/10 border border-indigo-500/20">
+                  <div className="flex items-start gap-2 p-2.5 rounded bg-indigo-500/10 border border-indigo-500/20">
                     <Info className="w-3 h-3 text-indigo-400 shrink-0 mt-0.5" />
                     <p className="text-[10px] text-indigo-300 leading-relaxed">Keep ${equityBuffer.toLocaleString()} as buffer in your agent wallet with Auto Top-Up enabled to survive drawdown periods.</p>
                   </div>
                 )}
                 {survivable && !enableTopUp && equityBuffer > 0 && (
-                  <div className="flex items-start gap-1.5 p-2 rounded bg-sky-500/10 border border-sky-500/20">
+                  <div className="flex items-start gap-2 p-2.5 rounded bg-sky-500/10 border border-sky-500/20">
                     <Info className="w-3 h-3 text-sky-400 shrink-0 mt-0.5" />
                     <p className="text-[10px] text-sky-300 leading-relaxed">Deposit full ${capitalNum.toLocaleString()} into the bot. The ${equityBuffer.toLocaleString()} buffer absorbs drawdowns before recovery.</p>
                   </div>
                 )}
 
                 {canShowCreateButton && (
-                  <div className="border-t border-white/5 pt-2">
+                  <div className="border-t border-white/5 pt-3">
                     {createError && (
-                      <div className="flex items-start gap-1.5 p-2 rounded bg-purple-500/10 border border-purple-500/20 mb-2">
+                      <div className="flex items-start gap-2 p-2.5 rounded bg-purple-500/10 border border-purple-500/20 mb-3">
                         <AlertTriangle className="w-3 h-3 text-purple-400 shrink-0 mt-0.5" />
                         <p className="text-[10px] text-purple-300 leading-relaxed">{createError}</p>
                       </div>
@@ -4490,7 +4550,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                       </Button>
                     )}
                     {balanceChecked && isAuthenticated && hasAgentWallet && (
-                      <div className="flex justify-between text-[9px] text-white/30 mt-1">
+                      <div className="flex justify-between text-[9px] text-white/30 mt-2">
                         <span>Wallet: ${usdcBal.toFixed(2)} USDC</span>
                         <span>{(agentSolBalance ?? 0).toFixed(4)} SOL</span>
                       </div>
@@ -4503,10 +4563,11 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         )}
       </PopoverContent>
     </Popover>
+    </>
   );
 }
 
-function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName }: { config: any; idx: number; ticker?: string; timeframe?: string; strategyName?: string }) {
+function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName, pineScript, params }: { config: any; idx: number; ticker?: string; timeframe?: string; strategyName?: string; pineScript?: string; params?: Record<string, any> }) {
   const [showProjection, setShowProjection] = useState(true);
   const { getMaxLeverage } = useLeverageLimits();
   const dd = config.maxDrawdownPercent || 0;
@@ -4602,7 +4663,7 @@ function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName }: { 
               )}
               data-testid={`heatmap-lev-${l.lev}x-${idx}`}
             >
-              <BotSetupAdvisor leverage={l.lev} drawdownPercent={dd} profitPercent={profit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} />
+              <BotSetupAdvisor leverage={l.lev} drawdownPercent={dd} profitPercent={profit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} pineScript={pineScript} params={params} />
               <p className={cn("text-[10px] font-medium mb-1", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
               <p className={cn("text-sm font-bold tabular-nums", profit * l.lev >= 0 ? "text-sky-400" : "text-purple-400")}>
                 {profit * l.lev >= 0 ? "+" : ""}{(profit * l.lev).toFixed(1)}%
