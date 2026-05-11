@@ -145,12 +145,15 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const baseLabel = enteredCapital > 0 ? 'entered capital' : 'available balance';
 
   // QuantumLab-style two-part allocation: split Capital into Investment + Equity Buffer.
-  // worstCaseLoss = baseDrawdownPct × leverage. tradeSize = capital / (1 + worstCase × 1.5).
-  // baseDrawdownPct comes from the risk-analysis endpoint (treated as 1x equivalent,
-  // matching the endpoint's own suggestedLeverage formula). Default 15% when no data.
+  // worstCase = max(observedDD, baseDD × subscriberLev). The max() guard means we never
+  // promise a subscriber LESS risk than the bot has historically shown, even if they pick
+  // lower leverage than the creator — a 100% drawdown bot stays a 100% drawdown bot.
+  // tradeSize = capital / (1 + worstCase × 1.5), matching QuantumLab's bufferMultiplier.
   const effLeverage = Math.min(leverage, maxLeverage);
   const baseDrawdownPct = riskData?.maxDrawdownPct ?? 15;
-  const worstCaseLossPct = baseDrawdownPct * effLeverage;
+  const observedDD = riskData?.observedDrawdownPct ?? 0;
+  const scaledDD = baseDrawdownPct * effLeverage;
+  const worstCaseLossPct = Math.max(scaledDD, observedDD);
   const bufferMultiplier = 1.5;
   const tradeSizeRaw = enteredCapital > 0
     ? enteredCapital / (1 + (worstCaseLossPct / 100) * bufferMultiplier)
@@ -161,7 +164,25 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const bufferPercent = enteredCapital > 0 ? (equityBuffer / enteredCapital) * 100 : 0;
   const projectedLoss = (worstCaseLossPct / 100) * investmentAmount;
   const survivable = worstCaseLossPct < 80;
-  const recommendAutoTopUp = bufferPercent > 30;
+
+  // Auto Top-Up should only be recommended for *high-confidence* bots. A bot with
+  // 90% drawdown should NEVER auto-replenish — it'd just chew through the user's
+  // agent wallet. Gate by quality: known + low DD AND positive risk-adjusted perf.
+  const sharpeForGate = riskData?.sharpeRatio ?? null;
+  const winRateForGate = riskData?.winRate ?? null;
+  // Bucket DD into unknown / healthy / tooHigh so the UI copy can be honest about
+  // each case (instead of conflating "no data" with "very risky").
+  const ddBucket: 'unknown' | 'healthy' | 'tooHigh' =
+    !riskData || !riskData.hasEnoughData || observedDD <= 0
+      ? 'unknown'
+      : observedDD < 30
+      ? 'healthy'
+      : 'tooHigh';
+  const performanceIsHealthy =
+    (sharpeForGate !== null && sharpeForGate >= 0.5) ||
+    (winRateForGate !== null && winRateForGate >= 55);
+  const recommendAutoTopUp =
+    bufferPercent > 30 && ddBucket === 'healthy' && performanceIsHealthy;
 
   const handleApplySuggestions = () => {
     if (!riskData) return;
@@ -323,7 +344,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && handleClose()}>
-      <DialogContent className="sm:max-w-[500px] bg-card border-border">
+      <DialogContent className="sm:max-w-[500px] bg-card border-border max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 font-display">
             <Bot className="w-5 h-5 text-primary" />
@@ -356,7 +377,8 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         )}
 
         <div className="space-y-4 py-4">
-          {/* Bot info card */}
+          {/* Bot info card — collapses to a compact header when the risk panel is open
+              so the form fits the viewport without aggressive scrolling. */}
           <div className="p-4 rounded-xl bg-muted/30 border border-border/50">
             <div className="flex items-center gap-3 mb-3">
               <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
@@ -367,7 +389,8 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                 <p className="text-sm text-muted-foreground">{bot.market}</p>
               </div>
             </div>
-            
+
+            {!riskOpen && (
             <div className="grid grid-cols-3 gap-3 text-center">
               <div className="p-2 rounded-lg bg-background/50">
                 <div className="flex items-center justify-center gap-1 text-sm font-semibold">
@@ -394,8 +417,9 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                 <p className="text-xs text-muted-foreground">All-Time</p>
               </div>
             </div>
-            
-            {bot.creator.displayName && (
+            )}
+
+            {!riskOpen && bot.creator.displayName && (
               <div className="mt-3 pt-3 border-t border-border/50 flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">Created by</span>
                 <span className="font-medium">
@@ -413,8 +437,8 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                 </span>
               </div>
             )}
-            
-            {bot.description && (
+
+            {!riskOpen && bot.description && (
               <div className="mt-3 pt-3 border-t border-border/50">
                 <p className="text-sm text-muted-foreground">{bot.description}</p>
               </div>
@@ -561,7 +585,27 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                     {recommendAutoTopUp ? 'ON' : 'OFF'}
                   </span>
                 </div>
+                {!recommendAutoTopUp && riskData && (
+                  <p className="text-[10px] text-muted-foreground leading-relaxed">
+                    {ddBucket === 'tooHigh'
+                      ? `Off — historic drawdown is ${observedDD.toFixed(1)}%. Auto top-up on a high-risk bot would chew through your agent wallet on every loss streak.`
+                      : ddBucket === 'unknown'
+                      ? 'Off — not enough trading history to confirm this bot is safe to auto-replenish. Enable manually only if you trust the strategy.'
+                      : !performanceIsHealthy
+                      ? 'Off — risk-adjusted performance (Sharpe / win rate) is too weak to justify replenishing automatically.'
+                      : 'Off — buffer is already sized to absorb the projected drawdown.'}
+                  </p>
+                )}
               </div>
+
+              {/* Explain WHY the buffer ended up where it did so users don't have to guess. */}
+              {enteredCapital > 0 && riskData && (
+                <p className="text-[10px] text-muted-foreground leading-relaxed pt-1">
+                  Buffer = capital × worst-case loss × 1.5 safety factor.
+                  Worst-case at {effLeverage}x ≈ {worstCaseLossPct.toFixed(1)}%
+                  {observedDD > 0 && ` (historic max: ${observedDD.toFixed(1)}% at ${riskData.creatorLeverage ?? 1}x)`}.
+                </p>
+              )}
 
               {!survivable && (
                 <div className="flex items-start gap-2 p-2.5 rounded bg-red-500/10 border border-red-500/20">
