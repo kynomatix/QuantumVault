@@ -50,7 +50,9 @@ interface SubscribeBotModalProps {
 interface RiskAnalysis {
   winRate: number | null;
   totalTrades: number;
-  maxDrawdownPct: number;
+  maxDrawdownPct: number;        // 1x-equivalent baseline (% units)
+  observedDrawdownPct?: number;  // actual observed DD at creator's leverage (% units)
+  creatorLeverage?: number;
   sharpeRatio: number | null;
   dataPoints: number;
   suggestedLeverage: number;
@@ -140,14 +142,34 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
 
   const enteredCapital = parseFloat(capitalInvested);
   const baseAmount = enteredCapital > 0 ? enteredCapital : (availableBalance ?? 0);
-  const baseLabel = enteredCapital > 0 ? 'entered amount' : 'available balance';
+  const baseLabel = enteredCapital > 0 ? 'entered capital' : 'available balance';
+
+  // QuantumLab-style two-part allocation: split Capital into Investment + Equity Buffer.
+  // worstCaseLoss = baseDrawdownPct × leverage. tradeSize = capital / (1 + worstCase × 1.5).
+  // baseDrawdownPct comes from the risk-analysis endpoint (treated as 1x equivalent,
+  // matching the endpoint's own suggestedLeverage formula). Default 15% when no data.
+  const effLeverage = Math.min(leverage, maxLeverage);
+  const baseDrawdownPct = riskData?.maxDrawdownPct ?? 15;
+  const worstCaseLossPct = baseDrawdownPct * effLeverage;
+  const bufferMultiplier = 1.5;
+  const tradeSizeRaw = enteredCapital > 0
+    ? enteredCapital / (1 + (worstCaseLossPct / 100) * bufferMultiplier)
+    : 0;
+  const investmentAmount = Math.floor(tradeSizeRaw);
+  const equityBuffer = enteredCapital > 0 ? Math.ceil(enteredCapital - tradeSizeRaw) : 0;
+  const tradingPercent = enteredCapital > 0 ? (investmentAmount / enteredCapital) * 100 : 0;
+  const bufferPercent = enteredCapital > 0 ? (equityBuffer / enteredCapital) * 100 : 0;
+  const projectedLoss = (worstCaseLossPct / 100) * investmentAmount;
+  const survivable = worstCaseLossPct < 80;
+  const recommendAutoTopUp = bufferPercent > 30;
 
   const handleApplySuggestions = () => {
     if (!riskData) return;
-    const suggested = baseAmount * riskData.suggestedEquityPct;
-    if (suggested >= 10) {
-      setCapitalInvested(suggested.toFixed(2));
-    } else if (suggested > 0) {
+    // Suggestion sets Capital to the FULL base amount (so the buffer absorbs DD)
+    // and applies the suggested leverage. The split is then derived automatically.
+    if (baseAmount >= 10) {
+      setCapitalInvested(baseAmount.toFixed(2));
+    } else {
       setCapitalInvested('10');
     }
     setLeverage(Math.min(riskData.suggestedLeverage, maxLeverage));
@@ -251,12 +273,22 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       return;
     }
 
+    if (investmentAmount < 10) {
+      toast({
+        title: 'Investment amount too small',
+        description: `After reserving the equity buffer, only $${investmentAmount} would trade. Increase capital or lower leverage.`,
+        variant: 'destructive',
+      });
+      return;
+    }
+
     try {
       await subscribe.mutateAsync({
         publishedBotId: bot.id,
         data: {
           capitalInvested: capital,
           leverage: leverage,
+          investmentAmount: investmentAmount,
         },
       });
       
@@ -389,9 +421,9 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             )}
           </div>
 
-          {/* Investment Amount (mirrors Create Bot terminology) */}
+          {/* Capital — total deposit. Splits into Investment + Equity Buffer below (matches QuantumLab). */}
           <div className="space-y-2">
-            <Label htmlFor="capital">Investment Amount (USDC)</Label>
+            <Label htmlFor="capital">Capital (USDC)</Label>
             <div className="flex gap-2">
               <div className="relative flex-1">
                 <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -474,19 +506,84 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             )}
           </div>
 
-          {/* Max Position Size preview — mirrors Create Bot modal */}
+          {/* Two-part allocation — mirrors QuantumLab "Create Bot from Backtest" UX */}
           {enteredCapital > 0 && (
-            <div className="p-3 rounded-lg bg-gradient-to-r from-primary/10 to-accent/10 border border-primary/20" data-testid="display-max-position-size">
-              <div className="flex items-center gap-2 text-sm">
-                <TrendingUp className="w-4 h-4 text-primary" />
-                <span className="text-muted-foreground">Max Position Size:</span>
-                <span className="font-bold text-lg text-primary font-mono">
-                  ${(enteredCapital * Math.min(leverage, maxLeverage)).toFixed(2)}
-                </span>
+            <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 space-y-3" data-testid="allocation-panel">
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Investment Amount</span>
+                  <span className="text-sm font-bold tabular-nums" data-testid="text-investment-amount">
+                    ${investmentAmount.toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Equity Buffer</span>
+                  <span className="text-sm font-bold text-indigo-400 tabular-nums" data-testid="text-equity-buffer">
+                    +${equityBuffer.toLocaleString()}
+                  </span>
+                </div>
+                <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-primary rounded-full transition-all"
+                    style={{ width: `${Math.min(100, tradingPercent)}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-[10px] text-muted-foreground">
+                  <span>{tradingPercent.toFixed(0)}% trading</span>
+                  <span>{bufferPercent.toFixed(0)}% buffer</span>
+                </div>
               </div>
-              <p className="text-xs text-muted-foreground mt-1">
-                ${enteredCapital.toFixed(2)} investment × {Math.min(leverage, maxLeverage)}x leverage
-              </p>
+
+              <div className="border-t border-border/50 pt-3 space-y-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Set Leverage</span>
+                  <span className="text-sm font-semibold text-primary">{effLeverage}x</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Max Position Size</span>
+                  <span className="text-sm font-semibold text-primary tabular-nums" data-testid="text-max-position-size">
+                    ${(investmentAmount * effLeverage).toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Worst-Case Loss</span>
+                  <span className="text-sm font-semibold text-red-400 tabular-nums" data-testid="text-worst-case-loss">
+                    -${projectedLoss.toFixed(2)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="border-t border-border/50 pt-3 space-y-1.5">
+                <p className="text-[10px] text-muted-foreground font-medium mb-1.5">Recommended Settings</p>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground">Auto Top-Up</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded border ${recommendAutoTopUp ? 'bg-sky-500/10 text-sky-400 border-sky-500/30' : 'bg-muted text-muted-foreground border-border'}`}>
+                    {recommendAutoTopUp ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+              </div>
+
+              {!survivable && (
+                <div className="flex items-start gap-2 p-2.5 rounded bg-red-500/10 border border-red-500/20">
+                  <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-red-300 leading-relaxed">
+                    Drawdown at {effLeverage}x exceeds 80%. High liquidation risk — consider lower leverage.
+                  </p>
+                </div>
+              )}
+              {survivable && equityBuffer > 0 && (
+                <div className="flex items-start gap-2 p-2.5 rounded bg-indigo-500/10 border border-indigo-500/20">
+                  <Info className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-indigo-300 leading-relaxed">
+                    Deposit full ${enteredCapital.toLocaleString()} into the bot. The ${equityBuffer.toLocaleString()} buffer absorbs drawdowns before recovery.
+                  </p>
+                </div>
+              )}
+              {!riskData && (
+                <p className="text-[10px] text-muted-foreground italic">
+                  Allocation uses a default 15% drawdown estimate. Tap "Suggest safe settings" above to load this bot's actual risk profile.
+                </p>
+              )}
             </div>
           )}
 
@@ -515,9 +612,14 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
 
                   <div className="grid grid-cols-2 gap-2">
                     <div className="rounded-lg bg-background/60 p-2.5 space-y-0.5">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Max Drawdown</p>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                        Max Drawdown
+                        {riskData.creatorLeverage && riskData.creatorLeverage > 1 && (
+                          <span className="ml-1 normal-case opacity-60">(at {riskData.creatorLeverage}x)</span>
+                        )}
+                      </p>
                       <p className="text-sm font-mono font-medium">
-                        <DrawdownTag value={riskData.maxDrawdownPct} />
+                        <DrawdownTag value={riskData.observedDrawdownPct ?? riskData.maxDrawdownPct} />
                       </p>
                     </div>
                     <div className="rounded-lg bg-background/60 p-2.5 space-y-0.5">
@@ -541,8 +643,13 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
 
                   {(() => {
                     const suggestedLev = Math.min(riskData.suggestedLeverage, maxLeverage);
-                    const suggestedInvestment = baseAmount * riskData.suggestedEquityPct;
-                    const suggestedMaxPos = suggestedInvestment * suggestedLev;
+                    const suggestedCapital = baseAmount;
+                    const suggestedWorstCasePct = riskData.maxDrawdownPct * suggestedLev;
+                    const suggestedTradeRaw = suggestedCapital > 0
+                      ? suggestedCapital / (1 + (suggestedWorstCasePct / 100) * 1.5)
+                      : 0;
+                    const suggestedInv = Math.floor(suggestedTradeRaw);
+                    const suggestedBuf = suggestedCapital > 0 ? Math.ceil(suggestedCapital - suggestedTradeRaw) : 0;
                     return (
                       <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-3 space-y-1.5">
                         <p className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
@@ -550,10 +657,22 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                           Conservative suggestion
                         </p>
                         <div className="flex justify-between text-xs">
-                          <span className="text-muted-foreground">Investment Amount</span>
+                          <span className="text-muted-foreground">Capital</span>
                           <span className="font-mono font-medium">
-                            {baseAmount > 0 ? `$${suggestedInvestment.toFixed(2)}` : '—'}
-                            <span className="text-muted-foreground ml-1">({Math.round(riskData.suggestedEquityPct * 100)}%)</span>
+                            {suggestedCapital > 0 ? `$${suggestedCapital.toFixed(2)}` : '—'}
+                            <span className="text-muted-foreground ml-1">(your {baseLabel})</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-xs">
+                          <span className="text-muted-foreground">→ Investment</span>
+                          <span className="font-mono font-medium">
+                            {suggestedCapital > 0 ? `$${suggestedInv.toLocaleString()}` : '—'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-xs">
+                          <span className="text-muted-foreground">→ Equity Buffer</span>
+                          <span className="font-mono font-medium text-indigo-400">
+                            {suggestedCapital > 0 ? `+$${suggestedBuf.toLocaleString()}` : '—'}
                           </span>
                         </div>
                         <div className="flex justify-between text-xs">
@@ -563,11 +682,11 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                         <div className="flex justify-between text-xs pt-1 border-t border-emerald-500/20">
                           <span className="text-muted-foreground">Resulting Max Position</span>
                           <span className="font-mono font-semibold text-emerald-400">
-                            {baseAmount > 0 ? `$${suggestedMaxPos.toFixed(2)}` : '—'}
+                            {suggestedCapital > 0 ? `$${(suggestedInv * suggestedLev).toLocaleString()}` : '—'}
                           </span>
                         </div>
                         <p className="text-[10px] text-muted-foreground pt-1">
-                          Based on your {baseLabel}. A repeat of the worst observed drawdown would cost roughly 20% of this investment amount.
+                          The buffer stays in your bot's account untraded — it absorbs drawdowns so the strategy can recover before liquidation.
                         </p>
                       </div>
                     );

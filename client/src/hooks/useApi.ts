@@ -386,7 +386,7 @@ async function unpublishBot(publishedBotId: string): Promise<void> {
   }
 }
 
-async function subscribeToPublishedBot(publishedBotId: string, data: { capitalInvested: number; leverage: number }): Promise<any> {
+async function subscribeToPublishedBot(publishedBotId: string, data: { capitalInvested: number; leverage: number; investmentAmount?: number }): Promise<any> {
   const res = await fetch(`/api/marketplace/${publishedBotId}/subscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -476,7 +476,7 @@ export function useUnpublishBot() {
 export function useSubscribeToPublishedBot() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ publishedBotId, data }: { publishedBotId: string; data: { capitalInvested: number; leverage: number } }) =>
+    mutationFn: ({ publishedBotId, data }: { publishedBotId: string; data: { capitalInvested: number; leverage: number; investmentAmount?: number } }) =>
       subscribeToPublishedBot(publishedBotId, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["marketplace"] });

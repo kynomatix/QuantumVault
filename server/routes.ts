@@ -11001,6 +11001,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const bot = await storage.getPublishedBotById(req.params.id);
       if (!bot) return res.status(404).json({ error: "Bot not found" });
 
+      // Fetch the underlying trading bot to know what leverage the equity series was
+      // recorded at, so we can normalize observed drawdown to a 1x baseline.
+      const sourceBot = await storage.getTradingBotById(bot.tradingBotId);
+      const creatorLeverage = Math.max(1, Number(sourceBot?.leverage) || 1);
+
       const rawSnapshots = await db
         .select()
         .from(marketplaceEquitySnapshots)
@@ -11054,13 +11059,20 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         ? Math.round((bot.winningTrades / bot.totalTrades) * 1000) / 10
         : null;
 
-      // At Nx leverage, effective drawdown = N × maxDD. Keep that ≤ 50%.
-      const suggestedLeverage = maxDrawdownPct > 0
-        ? Math.max(1, Math.min(10, Math.floor(0.5 / maxDrawdownPct)))
+      // Normalize observed drawdown to a 1x baseline. The equity series is
+      // recorded at the creator's leverage; dividing by creatorLeverage gives the
+      // approximate underlying-strategy DD that subscribers can rescale to their
+      // own chosen leverage. (Linear scaling is a first-order approximation that
+      // matches QuantumLab's `levDD = baseDD × leverage` model.)
+      const baseDrawdownPct1x = maxDrawdownPct / creatorLeverage;
+
+      // At Nx leverage, effective drawdown = N × baseDD. Keep that ≤ 50%.
+      const suggestedLeverage = baseDrawdownPct1x > 0
+        ? Math.max(1, Math.min(10, Math.floor(0.5 / baseDrawdownPct1x)))
         : 1;
 
       // Invest this fraction of balance so worst-case loss ≤ 20% of total balance.
-      const worstCasePct = maxDrawdownPct * suggestedLeverage;
+      const worstCasePct = baseDrawdownPct1x * suggestedLeverage;
       const suggestedEquityPct = worstCasePct > 0
         ? Math.min(1, Math.round((0.2 / worstCasePct) * 100) / 100)
         : 0.5;
@@ -11068,7 +11080,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       res.json({
         winRate,
         totalTrades: bot.totalTrades,
-        maxDrawdownPct: Math.round(maxDrawdownPct * 10000) / 100,
+        // maxDrawdownPct is the 1x-equivalent baseline (observed DD / creator leverage),
+        // returned in % units (0-100). Clients scale by their chosen leverage.
+        maxDrawdownPct: Math.round(baseDrawdownPct1x * 10000) / 100,
+        observedDrawdownPct: Math.round(maxDrawdownPct * 10000) / 100,
+        creatorLeverage,
         sharpeRatio,
         dataPoints: snapshots.length,
         suggestedLeverage,
@@ -11210,16 +11226,48 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   // Subscribe to a published bot (creates a new trading bot that mirrors signals)
   app.post("/api/marketplace/:id/subscribe", requireWallet, async (req, res) => {
     try {
-      const { capitalInvested, leverage } = req.body;
-      
-      if (!capitalInvested || capitalInvested <= 0) {
-        return res.status(400).json({ error: "Capital investment amount required" });
+      // Strict numeric validation — reject NaN/Infinity/negative/oversized inputs.
+      const capitalInvestedNum = Number(req.body?.capitalInvested);
+      const leverageNum = Number(req.body?.leverage);
+      const investmentAmountRaw = req.body?.investmentAmount;
+
+      if (!Number.isFinite(capitalInvestedNum) || capitalInvestedNum <= 0) {
+        return res.status(400).json({ error: "Valid capital amount required" });
+      }
+      if (capitalInvestedNum > 10_000_000) {
+        return res.status(400).json({ error: "Capital exceeds maximum allowed ($10M)" });
       }
 
       const MIN_SUBSCRIPTION_USDC = 10;
-      if (capitalInvested < MIN_SUBSCRIPTION_USDC) {
+      if (capitalInvestedNum < MIN_SUBSCRIPTION_USDC) {
         return res.status(400).json({
-          error: `Minimum subscription is $${MIN_SUBSCRIPTION_USDC.toFixed(2)} USDC. You entered $${Number(capitalInvested).toFixed(2)}.`
+          error: `Minimum subscription is $${MIN_SUBSCRIPTION_USDC.toFixed(2)} USDC. You entered $${capitalInvestedNum.toFixed(2)}.`
+        });
+      }
+
+      // Bound leverage to [1, 50] (exchange enforces per-market max on order placement).
+      if (!Number.isFinite(leverageNum) || leverageNum < 1 || leverageNum > 50) {
+        return res.status(400).json({ error: "Leverage must be between 1x and 50x" });
+      }
+      const leverage = Math.floor(leverageNum);
+      const capitalInvested = capitalInvestedNum;
+
+      // investmentAmount is the position-sizing baseline (capital - equityBuffer).
+      // When omitted, fall back to depositing the full capital as the investment
+      // (preserves backward compatibility with older clients).
+      let sizingInvestment: number;
+      if (investmentAmountRaw !== undefined && investmentAmountRaw !== null) {
+        const investmentNum = Number(investmentAmountRaw);
+        if (!Number.isFinite(investmentNum) || investmentNum <= 0) {
+          return res.status(400).json({ error: "Invalid investment amount" });
+        }
+        sizingInvestment = Math.min(investmentNum, capitalInvested);
+      } else {
+        sizingInvestment = capitalInvested;
+      }
+      if (sizingInvestment < MIN_SUBSCRIPTION_USDC) {
+        return res.status(400).json({
+          error: `Investment amount must be at least $${MIN_SUBSCRIPTION_USDC.toFixed(2)} USDC. Reduce equity buffer or increase capital.`
         });
       }
 
@@ -11374,7 +11422,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Create subscriber's bot with same settings but their own capital (with subaccount ID already set)
       // maxPositionSize = investment × leverage (same as normal bot creation)
       const effectiveLeverage = leverage || originalBot.leverage || 1;
-      const maxPositionSize = capitalInvested * effectiveLeverage;
+      const maxPositionSize = sizingInvestment * effectiveLeverage;
+      // Persist the deposit (capital) and sizing (investment) split so the bot's
+      // position-sizing reflects the equity-buffer model consumed by the UI.
+      void capitalInvested;
       
       const subscriberBot = await storage.createTradingBot({
         name: `${publishedBot.name} (Copy)`,
