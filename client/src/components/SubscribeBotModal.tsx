@@ -138,11 +138,13 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
     }
   };
 
+  const enteredCapital = parseFloat(capitalInvested);
+  const baseAmount = enteredCapital > 0 ? enteredCapital : (availableBalance ?? 0);
+  const baseLabel = enteredCapital > 0 ? 'entered amount' : 'available balance';
+
   const handleApplySuggestions = () => {
     if (!riskData) return;
-    const suggested = availableBalance !== null
-      ? availableBalance * riskData.suggestedEquityPct
-      : 0;
+    const suggested = baseAmount * riskData.suggestedEquityPct;
     if (suggested >= 10) {
       setCapitalInvested(suggested.toFixed(2));
     } else if (suggested > 0) {
@@ -539,17 +541,17 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                       <span className="font-mono font-medium">{riskData.suggestedLeverage}x</span>
                     </div>
                     <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Allocation of balance</span>
+                      <span className="text-muted-foreground">Allocation</span>
                       <span className="font-mono font-medium">{Math.round(riskData.suggestedEquityPct * 100)}%
-                        {availableBalance !== null && (
+                        {baseAmount > 0 && (
                           <span className="text-muted-foreground ml-1">
-                            (≈ ${(availableBalance * riskData.suggestedEquityPct).toFixed(2)})
+                            (≈ ${(baseAmount * riskData.suggestedEquityPct).toFixed(2)})
                           </span>
                         )}
                       </span>
                     </div>
                     <p className="text-[10px] text-muted-foreground pt-0.5">
-                      At these settings, a repeat of the worst observed drawdown would cost roughly 20% of your total balance.
+                      Based on your {baseLabel}. A repeat of the worst observed drawdown would cost roughly 20% of this amount.
                     </p>
                   </div>
 
