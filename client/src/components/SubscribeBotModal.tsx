@@ -294,7 +294,10 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       return;
     }
 
-    if (investmentAmount < 10) {
+    // The Investment + Buffer split only applies when the user opted into the
+    // suggest-safe-settings flow. In the default flow the full capital is the
+    // sizing baseline — no buffer carve-out, no extra validation.
+    if (riskOpen && investmentAmount < 10) {
       toast({
         title: 'Investment amount too small',
         description: `After reserving the equity buffer, only $${investmentAmount} would trade. Increase capital or lower leverage.`,
@@ -309,7 +312,9 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         data: {
           capitalInvested: capital,
           leverage: leverage,
-          investmentAmount: investmentAmount,
+          // Only send the carve-out when the user actively used the safe-settings
+          // panel; otherwise let the server use the full capital as sizing.
+          ...(riskOpen ? { investmentAmount } : {}),
         },
       });
       
@@ -530,8 +535,10 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             )}
           </div>
 
-          {/* Two-part allocation — mirrors QuantumLab "Create Bot from Backtest" UX */}
-          {enteredCapital > 0 && (
+          {/* Two-part allocation — mirrors QuantumLab "Create Bot from Backtest" UX.
+              Only shown when the user has explicitly opted into safe-settings,
+              so the default flow stays a simple Capital + Leverage form. */}
+          {riskOpen && enteredCapital > 0 && (
             <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 space-y-3" data-testid="allocation-panel">
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
