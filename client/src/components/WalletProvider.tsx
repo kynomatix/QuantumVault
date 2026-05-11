@@ -1,4 +1,4 @@
-import { useMemo, ReactNode, useState, useEffect } from 'react';
+import { useMemo, ReactNode, useState, useEffect, useCallback } from 'react';
 import { ConnectionProvider, WalletProvider as SolanaWalletProvider } from '@solana/wallet-adapter-react';
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui';
 import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom';
@@ -21,22 +21,38 @@ export function WalletProvider({ children }: WalletProviderProps) {
   }, []);
 
   const wallets = useMemo(
-    () => [
-      new SolanaMobileWalletAdapter({
-        addressSelector: createDefaultAddressSelector(),
-        appIdentity: {
-          name: 'QuantumVault',
-          uri: typeof window !== 'undefined' ? window.location.origin : 'https://quantumvault.app',
-          icon: '/favicon.png',
-        },
-        authorizationResultCache: createDefaultAuthorizationResultCache(),
-        chain: 'mainnet-beta',
-        onWalletNotFound: createDefaultWalletNotFoundHandler(),
-      }),
-      new PhantomWalletAdapter(),
-    ],
+    () => {
+      const origin = typeof window !== 'undefined' ? window.location.origin : 'https://quantumvault.app';
+      return [
+        new SolanaMobileWalletAdapter({
+          addressSelector: createDefaultAddressSelector(),
+          appIdentity: {
+            name: 'QuantumVault',
+            uri: origin,
+            // Absolute URL — relative paths can be rejected by some MWA wallets
+            // (notably Seeker's Seed Vault) during the association handshake.
+            icon: `${origin}/favicon.png`,
+          },
+          authorizationResultCache: createDefaultAuthorizationResultCache(),
+          // CAIP-2 chain identifier — required by MWA 2.x compatible wallets
+          // (Seeker / newer Seed Vault). The legacy 'mainnet-beta' value is
+          // accepted by older wallets but silently fails on newer ones, which
+          // looks exactly like the "modal closes, never connects" symptom.
+          chain: 'solana:mainnet',
+          onWalletNotFound: createDefaultWalletNotFoundHandler(),
+        }),
+        new PhantomWalletAdapter(),
+      ];
+    },
     []
   );
+
+  // Surface adapter errors to the console so MWA association failures
+  // (cancellation, secure-context issues, etc.) are visible instead of
+  // silently dropping the user back to the disconnected state.
+  const onWalletError = useCallback((error: Error) => {
+    console.error('[WalletAdapter]', error.name, error.message, error);
+  }, []);
 
   // Wait for endpoint to be available before rendering providers
   if (!endpoint) {
@@ -45,7 +61,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
 
   return (
     <ConnectionProvider endpoint={endpoint}>
-      <SolanaWalletProvider wallets={wallets} autoConnect>
+      <SolanaWalletProvider wallets={wallets} autoConnect onError={onWalletError}>
         <WalletModalProvider>
           {children}
         </WalletModalProvider>
