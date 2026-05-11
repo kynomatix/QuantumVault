@@ -11950,9 +11950,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Get creator earnings from profit sharing
       const creatorEarnings = await storage.getWalletCreatorEarnings(walletAddress);
       
-      // Get first deposit date for initial zero point
-      const firstDepositDate = await storage.getWalletFirstDepositDate(walletAddress);
-      
       // Get historical snapshots for chart (last 90 days)
       const ninetyDaysAgo = new Date();
       ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
@@ -11961,26 +11958,20 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Build chart data from snapshots with pnlPercent for % view
       const chartData: { date: Date; netPnl: number; pnlPercent: number; balance: number }[] = [];
       
-      // Add initial zero point at first deposit date if it exists and is within range
-      if (firstDepositDate) {
-        const firstDepositDay = new Date(firstDepositDate);
-        firstDepositDay.setHours(0, 0, 0, 0);
-        
-        // Check if first deposit is before our earliest snapshot (or no snapshots yet)
-        const hasSnapshotOnFirstDeposit = snapshots.some(s => {
-          const snapDate = new Date(s.snapshotDate);
-          snapDate.setHours(0, 0, 0, 0);
-          return snapDate.getTime() === firstDepositDay.getTime();
+      // Add a zero-point anchor one calendar day before the first snapshot so the
+      // chart starts where real data begins (avoids a long flat $0 line going back
+      // to the wallet's first-deposit date when activity is much more recent).
+      if (snapshots.length > 0) {
+        const firstSnapDate = new Date(snapshots[0].snapshotDate);
+        firstSnapDate.setHours(0, 0, 0, 0);
+        const dayBeforeFirst = new Date(firstSnapDate);
+        dayBeforeFirst.setDate(dayBeforeFirst.getDate() - 1);
+        chartData.push({
+          date: dayBeforeFirst,
+          netPnl: 0,
+          pnlPercent: 0,
+          balance: 0,
         });
-        
-        if (!hasSnapshotOnFirstDeposit && firstDepositDay >= ninetyDaysAgo) {
-          chartData.push({
-            date: firstDepositDay,
-            netPnl: 0,
-            pnlPercent: 0,
-            balance: 0,
-          });
-        }
       }
       
       // Add snapshots with pnlPercent calculated from cumulative deposits
