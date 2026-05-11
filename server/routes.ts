@@ -7253,40 +7253,106 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  app.get("/api/performance-heatmap", requireWallet, async (req, res) => {
+  app.get("/api/portfolio/bot-performance", requireWallet, async (req, res) => {
     try {
-      const trades = await storage.getWalletBotTrades(req.walletAddress!, 10000);
-      const executed = trades.filter(t => t.status === "executed" && t.pnl !== null && t.executedAt);
+      const bots = await storage.getTradingBots(req.walletAddress!);
 
-      const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-      const hourLabels = Array.from({ length: 24 }, (_, i) => `${i.toString().padStart(2, "0")}:00`);
+      // Range filtering — mirrors the portfolio-performance endpoint convention
+      const validRanges = ['7d', '1m', '3m', '12m', 'all'] as const;
+      type RangeParam = typeof validRanges[number];
+      const rawRange = (req.query.range as string | undefined)?.toLowerCase();
+      const rangeParam: RangeParam = (validRanges as readonly string[]).includes(rawRange ?? '') ? (rawRange as RangeParam) : 'all';
 
-      const grid: { day: number; hour: number; pnl: number; count: number }[][] = Array.from(
-        { length: 7 },
-        (_, d) => Array.from({ length: 24 }, (_, h) => ({ day: d, hour: h, pnl: 0, count: 0 }))
-      );
-
-      const marketPnl: Record<string, { pnl: number; count: number; wins: number }> = {};
-
-      for (const trade of executed) {
-        const dt = new Date(trade.executedAt!);
-        const dayIdx = dt.getUTCDay();
-        const hourIdx = dt.getUTCHours();
-        const grossPnl = parseFloat(trade.pnl as string || "0");
-        const fee = parseFloat(trade.fee as string || "0");
-        const netPnl = grossPnl - fee;
-
-        grid[dayIdx][hourIdx].pnl += netPnl;
-        grid[dayIdx][hourIdx].count += 1;
-
-        const market = trade.market || "Unknown";
-        if (!marketPnl[market]) marketPnl[market] = { pnl: 0, count: 0, wins: 0 };
-        marketPnl[market].pnl += netPnl;
-        marketPnl[market].count += 1;
-        if (netPnl > 0) marketPnl[market].wins += 1;
+      let sinceDate: Date | undefined;
+      const now = new Date();
+      if (rangeParam === '7d') {
+        sinceDate = new Date(now); sinceDate.setDate(sinceDate.getDate() - 7);
+      } else if (rangeParam === '1m') {
+        sinceDate = new Date(now); sinceDate.setDate(sinceDate.getDate() - 30);
+      } else if (rangeParam === '3m') {
+        sinceDate = new Date(now); sinceDate.setDate(sinceDate.getDate() - 90);
+      } else if (rangeParam === '12m') {
+        sinceDate = new Date(now); sinceDate.setDate(sinceDate.getDate() - 365);
       }
 
-      const cells = grid.flat();
+      // One query for all trades, then filter by range
+      const allTrades = await storage.getWalletBotTrades(req.walletAddress!, 10000);
+      const executed = allTrades.filter(t => {
+        if (t.status !== "executed" || t.pnl === null || !t.executedAt) return false;
+        if (sinceDate && new Date(t.executedAt) < sinceDate) return false;
+        return true;
+      });
+
+      // Group trades by bot ID
+      const tradesByBot: Record<string, typeof executed> = {};
+      for (const bot of bots) tradesByBot[bot.id] = [];
+      for (const trade of executed) {
+        if (trade.tradingBotId && tradesByBot[trade.tradingBotId] !== undefined) {
+          tradesByBot[trade.tradingBotId].push(trade);
+        }
+      }
+
+      // Annualised Sharpe ratio from daily net P&L returns (uses trading-day factor √252)
+      function computeSharpe(botTradeList: typeof executed): number | null {
+        if (botTradeList.length < 2) return null;
+        const dailyPnl: Record<string, number> = {};
+        for (const t of botTradeList) {
+          const day = new Date(t.executedAt!).toISOString().slice(0, 10);
+          const net = parseFloat(t.pnl as string || "0") - parseFloat(t.fee as string || "0");
+          dailyPnl[day] = (dailyPnl[day] ?? 0) + net;
+        }
+        const returns = Object.values(dailyPnl);
+        if (returns.length < 2) return null;
+        const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+        const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / returns.length;
+        const std = Math.sqrt(variance);
+        if (std === 0) return null;
+        return Math.round((mean / std) * Math.sqrt(252) * 100) / 100;
+      }
+
+      const botPerformance = bots.map((bot) => {
+        const botTradeList = (tradesByBot[bot.id] || []).sort(
+          (a, b) => new Date(a.executedAt!).getTime() - new Date(b.executedAt!).getTime()
+        );
+
+        let cumPnl = 0;
+        let wins = 0;
+        const sparkline: { t: string; v: number }[] = [];
+
+        for (const t of botTradeList) {
+          const net = parseFloat(t.pnl as string || "0") - parseFloat(t.fee as string || "0");
+          cumPnl += net;
+          sparkline.push({ t: new Date(t.executedAt!).toISOString().slice(0, 10), v: Math.round(cumPnl * 100) / 100 });
+          if (net > 0) wins++;
+        }
+
+        const totalTrades = botTradeList.length;
+        return {
+          id: bot.id,
+          name: bot.name,
+          market: bot.market,
+          isActive: bot.isActive,
+          netPnl: Math.round(cumPnl * 100) / 100,
+          totalTrades,
+          winRate: totalTrades > 0 ? Math.round((wins / totalTrades) * 100) : 0,
+          sharpe: computeSharpe(botTradeList),
+          sparkline,
+        };
+      });
+
+      botPerformance.sort((a, b) => b.netPnl - a.netPnl);
+
+      // Market-level P&L breakdown for the same range
+      const marketPnl: Record<string, { pnl: number; count: number; wins: number }> = {};
+      for (const trade of executed) {
+        const net = parseFloat(trade.pnl as string || "0") - parseFloat(trade.fee as string || "0");
+        const market = trade.market || "Unknown";
+        if (!marketPnl[market]) marketPnl[market] = { pnl: 0, count: 0, wins: 0 };
+        marketPnl[market].pnl += net;
+        marketPnl[market].count += 1;
+        if (net > 0) marketPnl[market].wins += 1;
+      }
+
       const markets = Object.entries(marketPnl)
         .map(([market, data]) => ({
           market,
@@ -7296,9 +7362,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }))
         .sort((a, b) => b.pnl - a.pnl);
 
-      res.json({ days, hours: hourLabels, cells, markets, totalTrades: executed.length });
+      res.json({ bots: botPerformance, markets, range: rangeParam });
     } catch (error) {
-      console.error("Performance heatmap error:", error);
+      console.error("Bot performance error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

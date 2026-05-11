@@ -583,31 +583,34 @@ export function usePortfolioPerformance(range: string = '3m') {
   });
 }
 
-export interface HeatmapCell {
-  day: number;
-  hour: number;
-  pnl: number;
-  count: number;
+export interface PortfolioBotEntry {
+  id: string;
+  name: string;
+  market: string;
+  isActive: boolean;
+  netPnl: number;
+  totalTrades: number;
+  winRate: number;
+  sharpe: number | null;
+  sparkline: { t: string; v: number }[];
 }
 
-export interface HeatmapMarket {
+export interface PortfolioMarketEntry {
   market: string;
   pnl: number;
   count: number;
   winRate: number;
 }
 
-export interface HeatmapData {
-  days: string[];
-  hours: string[];
-  cells: HeatmapCell[];
-  markets: HeatmapMarket[];
-  totalTrades: number;
+export interface PortfolioBotPerformanceData {
+  bots: PortfolioBotEntry[];
+  markets: PortfolioMarketEntry[];
+  range: string;
 }
 
-async function fetchPerformanceHeatmap(): Promise<HeatmapData | null> {
+async function fetchPortfolioBotPerformance(range: string): Promise<PortfolioBotPerformanceData | null> {
   try {
-    const res = await fetch("/api/performance-heatmap", { credentials: "include" });
+    const res = await fetch(`/api/portfolio/bot-performance?range=${encodeURIComponent(range)}`, { credentials: "include" });
     if (!res.ok) return null;
     return safeResponseJson(res);
   } catch {
@@ -615,11 +618,11 @@ async function fetchPerformanceHeatmap(): Promise<HeatmapData | null> {
   }
 }
 
-export function usePerformanceHeatmap() {
+export function usePortfolioBotPerformance(range: string = 'all') {
   const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
-    queryKey: ["performanceHeatmap", publicKeyString],
-    queryFn: fetchPerformanceHeatmap,
+    queryKey: ["portfolioBotPerformance", publicKeyString, range],
+    queryFn: () => fetchPortfolioBotPerformance(range),
     enabled: !!publicKeyString && sessionConnected,
     refetchInterval: 60000,
     staleTime: 30000,
