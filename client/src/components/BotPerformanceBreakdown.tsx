@@ -1,5 +1,5 @@
 import { usePortfolioBotPerformance } from '@/hooks/useApi';
-import { Bot, TrendingUp, TrendingDown } from 'lucide-react';
+import { Bot, TrendingUp, TrendingDown, AlertCircle, RefreshCw } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
 
 interface Props {
@@ -54,7 +54,7 @@ function SharpeLabel({ value }: { value: number | null }) {
 }
 
 export function BotPerformanceBreakdown({ range = 'all' }: Props) {
-  const { data, isLoading } = usePortfolioBotPerformance(range);
+  const { data, isLoading, isError, refetch } = usePortfolioBotPerformance(range);
 
   if (isLoading) {
     return (
@@ -72,8 +72,32 @@ export function BotPerformanceBreakdown({ range = 'all' }: Props) {
     );
   }
 
-  const bots = data?.bots ?? [];
-  const markets = data?.markets ?? [];
+  if (isError || data === null) {
+    return (
+      <div className="gradient-border p-6 noise" data-testid="bot-performance-breakdown">
+        <div className="flex items-center gap-3 mb-5">
+          <Bot className="w-5 h-5 text-muted-foreground" />
+          <h2 className="font-display font-semibold">Bot Performance</h2>
+        </div>
+        <div className="flex items-center justify-center py-10 text-muted-foreground">
+          <div className="text-center space-y-3">
+            <AlertCircle className="w-10 h-10 mx-auto opacity-40" />
+            <p className="text-sm">Could not load performance data</p>
+            <button
+              onClick={() => refetch()}
+              className="flex items-center gap-1.5 mx-auto text-xs text-primary hover:underline"
+            >
+              <RefreshCw className="w-3 h-3" />
+              Retry
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const bots = data.bots ?? [];
+  const markets = data.markets ?? [];
 
   if (bots.length === 0) {
     return (
