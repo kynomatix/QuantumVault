@@ -11005,10 +11005,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         .select()
         .from(marketplaceEquitySnapshots)
         .where(eq(marketplaceEquitySnapshots.publishedBotId, req.params.id))
-        .orderBy(asc(marketplaceEquitySnapshots.snapshotDate))
-        .limit(365);
+        .orderBy(asc(marketplaceEquitySnapshots.snapshotDate));
 
-      const snapshots = rawSnapshots.filter(s => parseFloat(s.equity as any) > 0);
+      // Dedupe to one snapshot per UTC day (keep last equity of the day).
+      // Snapshots are taken every 6 hours plus on server restarts, so raw
+      // counts overstate "days" and break the daily-Sharpe annualisation.
+      const byDay = new Map<string, typeof rawSnapshots[number]>();
+      for (const s of rawSnapshots) {
+        if (parseFloat(s.equity as any) <= 0) continue;
+        const day = new Date(s.snapshotDate as any).toISOString().slice(0, 10);
+        byDay.set(day, s);
+      }
+      const snapshots = Array.from(byDay.values()).slice(-365);
 
       let maxDrawdownPct = 0;
       let sharpeRatio: number | null = null;
