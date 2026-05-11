@@ -25,7 +25,10 @@ import {
   Info,
   Wallet,
   ChevronDown,
-  Fuel
+  Fuel,
+  Shield,
+  CheckCircle2,
+  BarChart3,
 } from 'lucide-react';
 import {
   Collapsible,
@@ -42,6 +45,30 @@ interface SubscribeBotModalProps {
   onClose: () => void;
   bot: PublishedBot;
   onSubscribed?: () => void;
+}
+
+interface RiskAnalysis {
+  winRate: number | null;
+  totalTrades: number;
+  maxDrawdownPct: number;
+  sharpeRatio: number | null;
+  dataPoints: number;
+  suggestedLeverage: number;
+  suggestedEquityPct: number;
+  hasEnoughData: boolean;
+}
+
+function SharpeTag({ value }: { value: number | null }) {
+  if (value === null) return <span className="text-muted-foreground">—</span>;
+  const color = value >= 1 ? 'text-emerald-400' : value >= 0 ? 'text-yellow-400' : 'text-red-400';
+  const label = value >= 2 ? 'Excellent' : value >= 1 ? 'Good' : value >= 0 ? 'Marginal' : 'Poor';
+  return <span className={color}>{value.toFixed(2)} <span className="text-xs opacity-70">({label})</span></span>;
+}
+
+function DrawdownTag({ value }: { value: number }) {
+  const color = value <= 10 ? 'text-emerald-400' : value <= 25 ? 'text-yellow-400' : 'text-red-400';
+  const label = value <= 10 ? 'Low' : value <= 25 ? 'Medium' : 'High';
+  return <span className={color}>{value.toFixed(1)}% <span className="text-xs opacity-70">({label})</span></span>;
 }
 
 export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: SubscribeBotModalProps) {
@@ -65,6 +92,10 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   } | null>(null);
   const [isDepositingSol, setIsDepositingSol] = useState(false);
 
+  const [riskOpen, setRiskOpen] = useState(false);
+  const [riskData, setRiskData] = useState<RiskAnalysis | null>(null);
+  const [riskLoading, setRiskLoading] = useState(false);
+
   const maxLeverage = getMaxLeverage(bot.market);
   
   useEffect(() => {
@@ -87,6 +118,39 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         .finally(() => setBalanceLoading(false));
     }
   }, [isOpen]);
+
+  const handleRiskToggle = async () => {
+    if (riskOpen) {
+      setRiskOpen(false);
+      return;
+    }
+    setRiskOpen(true);
+    if (riskData) return;
+    setRiskLoading(true);
+    try {
+      const res = await fetch(`/api/marketplace/${bot.id}/risk-analysis`, { credentials: 'include' });
+      if (res.ok) {
+        setRiskData(await safeResponseJson(res));
+      }
+    } catch {
+    } finally {
+      setRiskLoading(false);
+    }
+  };
+
+  const handleApplySuggestions = () => {
+    if (!riskData) return;
+    const suggested = availableBalance !== null
+      ? availableBalance * riskData.suggestedEquityPct
+      : 0;
+    if (suggested >= 10) {
+      setCapitalInvested(suggested.toFixed(2));
+    } else if (suggested > 0) {
+      setCapitalInvested('10');
+    }
+    setLeverage(Math.min(riskData.suggestedLeverage, maxLeverage));
+    toast({ title: 'Risk settings applied', description: 'Capital and leverage updated to conservative suggestions.' });
+  };
 
   const handleSolDeposit = async () => {
     if (!solRequirement || solRequirement.canCreate) return;
@@ -127,7 +191,6 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
 
       toast({ title: 'SOL deposited successfully!' });
       
-      // Refresh SOL balance
       const balanceRes = await fetch('/api/agent/balance', { credentials: 'include' });
       if (balanceRes.ok) {
         const data = await safeResponseJson(balanceRes);
@@ -158,6 +221,8 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
     setCapitalInvested('');
     setLeverage(1);
     setRiskAccepted(false);
+    setRiskOpen(false);
+    setRiskData(null);
     onClose();
   };
 
@@ -257,6 +322,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         )}
 
         <div className="space-y-4 py-4">
+          {/* Bot info card */}
           <div className="p-4 rounded-xl bg-muted/30 border border-border/50">
             <div className="flex items-center gap-3 mb-3">
               <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
@@ -321,6 +387,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             )}
           </div>
 
+          {/* Capital input */}
           <div className="space-y-2">
             <div className="flex justify-between items-center">
               <Label htmlFor="capital">Capital Investment (USDC)</Label>
@@ -366,8 +433,9 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             </p>
           </div>
 
+          {/* Leverage */}
           <div className="space-y-3">
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <Label className="flex items-center gap-1.5">
                 Leverage
                 {maxLeverage < 10 && (
@@ -376,7 +444,18 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                   </span>
                 )}
               </Label>
-              <span className="text-sm font-medium text-primary">{leverage}x</span>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleRiskToggle}
+                  className="flex items-center gap-1 text-xs text-primary/70 hover:text-primary transition-colors"
+                  data-testid="button-risk-analysis"
+                >
+                  <Shield className="w-3 h-3" />
+                  {riskOpen ? 'Hide' : 'Suggest safe settings'}
+                </button>
+                <span className="text-sm font-medium text-primary">{leverage}x</span>
+              </div>
             </div>
             <Slider
               value={[Math.min(leverage, maxLeverage)]}
@@ -401,6 +480,98 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             )}
           </div>
 
+          {/* Risk analysis panel */}
+          {riskOpen && (
+            <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 space-y-3" data-testid="risk-analysis-panel">
+              <div className="flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-primary" />
+                <span className="text-sm font-semibold">Risk Analysis</span>
+                <span className="text-xs text-muted-foreground ml-auto">Based on live trading history</span>
+              </div>
+
+              {riskLoading ? (
+                <div className="flex items-center justify-center py-4 gap-2 text-muted-foreground">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span className="text-sm">Analysing strategy...</span>
+                </div>
+              ) : riskData ? (
+                <>
+                  {!riskData.hasEnoughData && (
+                    <div className="flex items-start gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-400">
+                      <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                      <span>Limited data ({riskData.dataPoints} days). Suggestions are estimates — treat with caution.</span>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-lg bg-background/60 p-2.5 space-y-0.5">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Max Drawdown</p>
+                      <p className="text-sm font-mono font-medium">
+                        <DrawdownTag value={riskData.maxDrawdownPct} />
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-background/60 p-2.5 space-y-0.5">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Sharpe Ratio</p>
+                      <p className="text-sm font-mono font-medium">
+                        <SharpeTag value={riskData.sharpeRatio} />
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-background/60 p-2.5 space-y-0.5">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Win Rate</p>
+                      <p className="text-sm font-mono font-medium">
+                        {riskData.winRate !== null ? `${riskData.winRate.toFixed(1)}%` : '—'}
+                        <span className="text-[10px] text-muted-foreground ml-1">({riskData.totalTrades} trades)</span>
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-background/60 p-2.5 space-y-0.5">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Data Points</p>
+                      <p className="text-sm font-mono font-medium text-muted-foreground">{riskData.dataPoints} days</p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-3 space-y-1.5">
+                    <p className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
+                      <Shield className="w-3 h-3" />
+                      Conservative suggestion
+                    </p>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">Leverage</span>
+                      <span className="font-mono font-medium">{riskData.suggestedLeverage}x</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">Allocation of balance</span>
+                      <span className="font-mono font-medium">{Math.round(riskData.suggestedEquityPct * 100)}%
+                        {availableBalance !== null && (
+                          <span className="text-muted-foreground ml-1">
+                            (≈ ${(availableBalance * riskData.suggestedEquityPct).toFixed(2)})
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground pt-0.5">
+                      At these settings, a repeat of the worst observed drawdown would cost roughly 20% of your total balance.
+                    </p>
+                  </div>
+
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="w-full gap-2 border-primary/30 text-primary hover:bg-primary/10"
+                    onClick={handleApplySuggestions}
+                    data-testid="button-apply-risk-suggestions"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    Apply suggestions
+                  </Button>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-2">Could not load risk data for this bot.</p>
+              )}
+            </div>
+          )}
+
+          {/* Risk disclaimer */}
           <Collapsible open={disclaimerOpen} onOpenChange={setDisclaimerOpen}>
             <CollapsibleTrigger asChild>
               <button className="w-full p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 hover:bg-amber-500/15 transition-colors">

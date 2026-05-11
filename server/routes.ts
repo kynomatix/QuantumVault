@@ -6,10 +6,10 @@ import { encrypt as legacyEncrypt, decrypt } from "./crypto";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import { storage, DatabaseStorage } from "./storage";
-import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents } from "@shared/schema";
+import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
 import { db } from "./db";
-import { desc, eq, sql } from "drizzle-orm";
+import { desc, eq, sql, asc } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
@@ -10992,6 +10992,84 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     } catch (error) {
       console.error("Get bot performance error:", error);
       res.status(500).json({ error: "Failed to fetch performance data" });
+    }
+  });
+
+  // Risk analysis for a published bot — computes drawdown, Sharpe, and safe-sizing suggestions
+  app.get("/api/marketplace/:id/risk-analysis", async (req, res) => {
+    try {
+      const bot = await storage.getPublishedBotById(req.params.id);
+      if (!bot) return res.status(404).json({ error: "Bot not found" });
+
+      const rawSnapshots = await db
+        .select()
+        .from(marketplaceEquitySnapshots)
+        .where(eq(marketplaceEquitySnapshots.publishedBotId, req.params.id))
+        .orderBy(asc(marketplaceEquitySnapshots.snapshotDate))
+        .limit(365);
+
+      const snapshots = rawSnapshots.filter(s => parseFloat(s.equity as any) > 0);
+
+      let maxDrawdownPct = 0;
+      let sharpeRatio: number | null = null;
+
+      if (snapshots.length >= 2) {
+        let peak = parseFloat(snapshots[0].equity as any);
+        for (const snap of snapshots) {
+          const eq = parseFloat(snap.equity as any);
+          if (eq > peak) peak = eq;
+          if (peak > 0) {
+            const dd = (peak - eq) / peak;
+            if (dd > maxDrawdownPct) maxDrawdownPct = dd;
+          }
+        }
+
+        if (snapshots.length >= 10) {
+          const returns: number[] = [];
+          for (let i = 1; i < snapshots.length; i++) {
+            const prev = parseFloat(snapshots[i - 1].equity as any);
+            const curr = parseFloat(snapshots[i].equity as any);
+            if (prev > 0) returns.push((curr - prev) / prev);
+          }
+          if (returns.length >= 5) {
+            const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / returns.length;
+            const stdDev = Math.sqrt(variance);
+            if (stdDev > 0) {
+              sharpeRatio = Math.round((mean / stdDev) * Math.sqrt(252) * 100) / 100;
+            }
+          }
+        }
+      }
+
+      const winRate = bot.totalTrades > 0
+        ? Math.round((bot.winningTrades / bot.totalTrades) * 1000) / 10
+        : null;
+
+      // At Nx leverage, effective drawdown = N × maxDD. Keep that ≤ 50%.
+      const suggestedLeverage = maxDrawdownPct > 0
+        ? Math.max(1, Math.min(10, Math.floor(0.5 / maxDrawdownPct)))
+        : 1;
+
+      // Invest this fraction of balance so worst-case loss ≤ 20% of total balance.
+      const worstCasePct = maxDrawdownPct * suggestedLeverage;
+      const suggestedEquityPct = worstCasePct > 0
+        ? Math.min(1, Math.round((0.2 / worstCasePct) * 100) / 100)
+        : 0.5;
+
+      res.json({
+        winRate,
+        totalTrades: bot.totalTrades,
+        maxDrawdownPct: Math.round(maxDrawdownPct * 10000) / 100,
+        sharpeRatio,
+        dataPoints: snapshots.length,
+        suggestedLeverage,
+        suggestedEquityPct,
+        hasEnoughData: snapshots.length >= 10,
+      });
+    } catch (error: any) {
+      console.error("[risk-analysis]", error);
+      res.status(500).json({ error: "Failed to compute risk analysis" });
     }
   });
 
