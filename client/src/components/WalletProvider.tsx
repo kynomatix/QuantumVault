@@ -2,11 +2,11 @@ import { useMemo, ReactNode, useState, useEffect, useCallback } from 'react';
 import { ConnectionProvider, WalletProvider as SolanaWalletProvider } from '@solana/wallet-adapter-react';
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui';
 import {
-  SolanaMobileWalletAdapter,
-  SolanaMobileWalletAdapterWalletName,
-  createDefaultAddressSelector,
+  registerMwa,
+  createDefaultAuthorizationCache,
+  createDefaultChainSelector,
   createDefaultWalletNotFoundHandler,
-} from '@solana-mobile/wallet-adapter-mobile';
+} from '@solana-mobile/wallet-standard-mobile';
 
 import '@solana/wallet-adapter-react-ui/styles.css';
 
@@ -14,22 +14,41 @@ interface WalletProviderProps {
   children: ReactNode;
 }
 
-// In-memory only. We deliberately do NOT persist authorization between page
-// loads or between attempts. Persisting causes the Seeker / Seed Vault "three
-// dots forever" hang when a previous attempt left a stale entry whose
-// appIdentity (e.g. icon URL) no longer matches the current config — the
-// wallet silently rejects the cached auth and the adapter never recovers.
-const inMemoryAuthCache = (() => {
-  let cached: any = null;
-  return {
-    get: async () => cached,
-    set: async (auth: any) => { cached = auth; },
-    clear: async () => { cached = null; },
-  };
-})();
+// Module-level guard so registerMwa is invoked exactly once per page load,
+// even across React strict-mode double mounts and HMR.
+let mwaRegistered = false;
+
+function registerMwaOnce() {
+  if (mwaRegistered) return;
+  if (typeof window === 'undefined') return;
+  if (!window.isSecureContext) {
+    console.warn('[MWA] Skipping registration: page is not in a secure context (https required)');
+    return;
+  }
+  try {
+    registerMwa({
+      appIdentity: {
+        name: 'QuantumVault',
+        uri: window.location.origin,
+        // MUST be a relative path. Seed Vault rejects absolute URLs with
+        // "identity.icon must be a relative URI".
+        icon: 'favicon.png',
+      },
+      authorizationCache: createDefaultAuthorizationCache(),
+      chains: ['solana:mainnet'],
+      chainSelector: createDefaultChainSelector(),
+      onWalletNotFound: createDefaultWalletNotFoundHandler(),
+      // remoteHostAuthority would enable desktop QR connection via reflector.
+      // Leaving unset for now — only mobile (local association) is needed.
+    });
+    mwaRegistered = true;
+    console.log('[MWA] Registered via wallet-standard-mobile');
+  } catch (e) {
+    console.error('[MWA] registerMwa failed:', e);
+  }
+}
 
 export function WalletProvider({ children }: WalletProviderProps) {
-  // Use our server's RPC proxy to avoid exposing API keys
   const [endpoint, setEndpoint] = useState<string | null>(null);
 
   useEffect(() => {
@@ -38,9 +57,9 @@ export function WalletProvider({ children }: WalletProviderProps) {
     }
   }, []);
 
-  // One-time cleanup of any stale MWA authorization left in localStorage by
-  // previous versions of this provider. Keeps the Seeker out of the bad
-  // half-authorized state on first load after this fix ships.
+  // One-time cleanup of stale MWA authorization left in localStorage by the
+  // previous (legacy) WalletProvider implementation. Prevents the "three dots
+  // forever" hang on Seeker caused by mismatched cached appIdentity.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
@@ -50,89 +69,44 @@ export function WalletProvider({ children }: WalletProviderProps) {
         if (!k) continue;
         if (
           k.includes('mobile-wallet-adapter') ||
-          k.includes('SolanaMobileWalletAdapterDefaultAuthorizationCache') ||
-          k === 'walletName'
+          k.includes('SolanaMobileWalletAdapterDefaultAuthorizationCache')
         ) {
           keysToWipe.push(k);
         }
       }
       for (const k of keysToWipe) window.localStorage.removeItem(k);
       if (keysToWipe.length > 0) {
-        console.log('[WalletProvider] Cleared stale wallet adapter keys:', keysToWipe);
+        console.log('[WalletProvider] Cleared legacy MWA cache keys:', keysToWipe);
       }
     } catch (e) {
       console.warn('[WalletProvider] localStorage cleanup failed:', e);
     }
   }, []);
 
-  const wallets = useMemo(() => {
-    const origin = typeof window !== 'undefined' ? window.location.origin : 'https://quantumvault.app';
-    const mwa = new SolanaMobileWalletAdapter({
-      addressSelector: createDefaultAddressSelector(),
-      appIdentity: {
-        name: 'QuantumVault',
-        uri: origin,
-        // MUST be relative — Seed Vault throws "identity.icon must be a
-        // relative URI" if absolute. The wallet resolves it against `uri`.
-        icon: '/favicon.png',
-      },
-      authorizationResultCache: inMemoryAuthCache,
-      // 'mainnet-beta' and 'solana:mainnet' are normalized to the same value
-      // internally by chainOrClusterToChainId — either works.
-      chain: 'solana:mainnet',
-      onWalletNotFound: createDefaultWalletNotFoundHandler(),
-    });
-
-    // Diagnostic logging on the MWA lifecycle so we can see exactly where
-    // things stall on the Seeker if there's still a problem.
-    const mwaAny = mwa as any;
-    mwaAny.on?.('connect', (pk: any) => {
-      console.log('[MWA] connect event, publicKey:', pk?.toBase58?.());
-    });
-    mwaAny.on?.('disconnect', () => {
-      console.log('[MWA] disconnect event');
-    });
-    mwaAny.on?.('error', (err: any) => {
-      console.error('[MWA] error event:', err?.name, err?.message, err);
-    });
-    mwaAny.on?.('readyStateChange', (state: any) => {
-      console.log('[MWA] readyStateChange:', state);
-    });
-
-    // Phantom registers itself as a Standard Wallet automatically, so the
-    // explicit PhantomWalletAdapter was redundant and was producing the
-    // duplicate-wallet warning in the console. Removed.
-    return [mwa];
+  // Register MWA via the modern wallet-standard pathway. This makes MWA
+  // discoverable through the Wallet Standard, so wallet-adapter-react picks
+  // it up automatically alongside Phantom, Jupiter, Solflare, Backpack, etc.
+  useEffect(() => {
+    registerMwaOnce();
   }, []);
+
+  // Empty wallets array — every wallet (Phantom, Jupiter, Solflare, Backpack,
+  // MWA) self-registers via the Wallet Standard and is auto-discovered by
+  // useStandardWalletAdapters inside SolanaWalletProvider. Listing wallets
+  // explicitly here would just create duplicates.
+  const wallets = useMemo(() => [], []);
 
   const onWalletError = useCallback((error: Error) => {
     console.error('[WalletAdapter]', error.name, error.message, error);
   }, []);
 
-  // Conditional autoConnect: ONLY auto-resume the session if the user
-  // previously selected MWA on this device — never trigger a fresh
-  // auto-association on first visit, which is what was leaving the Seeker
-  // adapter in a half-connecting state and causing the "three dots" hang.
-  const autoConnect = useCallback(async (adapter: any): Promise<boolean> => {
-    if (typeof window === 'undefined') return false;
-    const lastWallet = window.localStorage.getItem('walletName');
-    if (adapter?.name === SolanaMobileWalletAdapterWalletName) {
-      // Only auto-reconnect MWA if the user explicitly chose it before AND
-      // we still have an in-memory authorization (which we never do on a
-      // fresh page load, since the cache is in-memory only).
-      return false;
-    }
-    return lastWallet === adapter?.name;
-  }, []);
-
-  // Wait for endpoint to be available before rendering providers
   if (!endpoint) {
     return null;
   }
 
   return (
     <ConnectionProvider endpoint={endpoint}>
-      <SolanaWalletProvider wallets={wallets} autoConnect={autoConnect} onError={onWalletError}>
+      <SolanaWalletProvider wallets={wallets} autoConnect={false} onError={onWalletError}>
         <WalletModalProvider>
           {children}
         </WalletModalProvider>
