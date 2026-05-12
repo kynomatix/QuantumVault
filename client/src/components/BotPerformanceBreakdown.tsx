@@ -4,6 +4,7 @@ import { LineChart, Line, ResponsiveContainer, Tooltip as RechartsTooltip } from
 
 interface Props {
   range?: string;
+  onBotClick?: (botId: string) => void;
 }
 
 function Sparkline({ data, positive }: { data: { t: string; v: number }[]; positive: boolean }) {
@@ -53,7 +54,7 @@ function SharpeLabel({ value }: { value: number | null }) {
   return <span className={color}>{value.toFixed(2)}</span>;
 }
 
-export function BotPerformanceBreakdown({ range = 'all' }: Props) {
+export function BotPerformanceBreakdown({ range = 'all', onBotClick }: Props) {
   const { data, isLoading, isError, refetch } = usePortfolioBotPerformance(range);
 
   if (isLoading) {
@@ -140,12 +141,13 @@ export function BotPerformanceBreakdown({ range = 'all' }: Props) {
           return (
             <div
               key={bot.id}
-              className={`flex items-center gap-3 px-4 py-3 rounded-lg border transition-opacity ${
+              className={`flex items-center gap-3 px-4 py-3 rounded-lg border transition-all ${
                 bot.isActive
                   ? 'bg-white/[0.03] border-white/[0.06]'
                   : 'bg-white/[0.015] border-white/[0.04] opacity-55'
-              }`}
+              } ${onBotClick ? 'cursor-pointer hover:bg-white/[0.06] hover:border-white/[0.12]' : ''}`}
               data-testid={`bot-performance-row-${bot.id}`}
+              onClick={onBotClick ? () => onBotClick(bot.id) : undefined}
             >
               {/* Name + market + badge */}
               <div className="flex-1 min-w-0">

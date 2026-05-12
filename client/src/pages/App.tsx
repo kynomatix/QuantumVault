@@ -2773,7 +2773,21 @@ export default function AppPage() {
                       )}
                     </div>
 
-                    <BotPerformanceBreakdown range={portfolioChartRange} />
+                    <BotPerformanceBreakdown
+                      range={portfolioChartRange}
+                      onBotClick={(botId) => {
+                        const pub = myPublishedBots?.find((b: PublishedBot) => b.tradingBotId === botId);
+                        if (pub) {
+                          setViewDetailBot(pub);
+                        } else {
+                          const tradingBot = botsData?.find((b: TradingBot) => b.id === botId);
+                          if (tradingBot) {
+                            setSelectedManagedBot(tradingBot);
+                            setManageBotDrawerOpen(true);
+                          }
+                        }
+                      }}
+                    />
                   </>
                 ) : (
                   <div className="gradient-border p-8 noise text-center">
