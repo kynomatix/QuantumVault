@@ -29,9 +29,10 @@ export function WalletProvider({ children }: WalletProviderProps) {
           appIdentity: {
             name: 'QuantumVault',
             uri: origin,
-            // Absolute URL — relative paths can be rejected by some MWA wallets
-            // (notably Seeker's Seed Vault) during the association handshake.
-            icon: `${origin}/favicon.png`,
+            // Seed Vault on Seeker enforces that icon is a relative path — it
+            // resolves it against the appIdentity uri itself. An absolute URL
+            // throws "identity.icon must be a relative URL".
+            icon: '/favicon.png',
           },
           authorizationResultCache: createDefaultAuthorizationResultCache(),
           // CAIP-2 chain identifier — required by MWA 2.x compatible wallets
