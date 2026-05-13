@@ -1,6 +1,6 @@
 import { usePortfolioBotPerformance } from '@/hooks/useApi';
 import { Bot, TrendingUp, TrendingDown, AlertCircle, RefreshCw } from 'lucide-react';
-import { LineChart, Line, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
+import { LineChart, Line, ResponsiveContainer, Tooltip as RechartsTooltip, ReferenceLine, YAxis } from 'recharts';
 
 interface Props {
   range?: string;
@@ -8,18 +8,32 @@ interface Props {
 }
 
 function Sparkline({ data, positive }: { data: { t: string; v: number }[]; positive: boolean }) {
-  if (data.length < 2) {
+  if (data.length === 0) {
     return (
       <div className="w-24 h-10 flex items-center justify-center">
         <span className="text-[10px] text-muted-foreground/50">no data</span>
       </div>
     );
   }
+  // Prepend a zero baseline if the first point isn't already zero, so a single
+  // trade still renders as a visible line moving up from / down to zero rather
+  // than a flat line floating in space.
+  const chartData = data[0].v !== 0
+    ? [{ t: 'start', v: 0 }, ...data]
+    : data;
   const color = positive ? '#10b981' : '#ef4444';
   return (
     <div className="w-24 h-10" data-testid="bot-sparkline">
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data}>
+        <LineChart data={chartData}>
+          {/* Hidden Y axis that always includes 0 so the zero line stays in view */}
+          <YAxis
+            hide
+            domain={[
+              (dataMin: number) => Math.min(0, dataMin),
+              (dataMax: number) => Math.max(0, dataMax),
+            ]}
+          />
           <RechartsTooltip
             contentStyle={{
               backgroundColor: 'rgba(23,23,23,0.95)',
@@ -31,6 +45,7 @@ function Sparkline({ data, positive }: { data: { t: string; v: number }[]; posit
             formatter={(value: number) => [`$${value.toFixed(2)}`, 'Cum. P&L']}
             labelFormatter={(label: string) => label}
           />
+          <ReferenceLine y={0} stroke="#6b7280" strokeDasharray="2 2" strokeOpacity={0.5} />
           <Line
             type="monotone"
             dataKey="v"
