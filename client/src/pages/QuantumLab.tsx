@@ -1318,6 +1318,8 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
   const [editorExpanded, setEditorExpanded] = useState<boolean | null>(null);
   const isEditorOpen = editorExpanded ?? !isMobile;
   const codeLineCount = code ? code.split("\n").length : 0;
+  const [paramsExpanded, setParamsExpanded] = useState<boolean | null>(null);
+  const isParamsOpen = paramsExpanded ?? !isMobile;
 
   return (
     <div className="space-y-6">
@@ -1402,17 +1404,22 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
 
       {parsedResult && parsedResult.inputs.length > 0 && (
         <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
-          <div className="flex items-center justify-between gap-1 px-4 py-3 border-b border-white/10">
-            <div className="flex items-center gap-2">
-              <Settings2 className="w-4 h-4 text-violet-400" />
-              <span className="text-sm font-medium text-white">Parsed Parameters</span>
+          <button
+            type="button"
+            onClick={() => setParamsExpanded(!isParamsOpen)}
+            className="w-full flex items-center justify-between gap-1 px-4 py-3 border-b border-white/10 hover:bg-white/5 transition-colors text-left"
+            data-testid="button-toggle-params"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <Settings2 className="w-4 h-4 text-violet-400 flex-shrink-0" />
+              <span className="text-sm font-medium text-white truncate">Parsed Parameters</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-shrink-0">
               <Badge className="bg-violet-500/20 text-violet-300 border-violet-500/30" data-testid="badge-optimizable-count">
                 {optimizableCount} optimizable
               </Badge>
               {fixedCount > 0 && (
-                <Badge variant="outline" className="border-white/20 text-white/60" data-testid="badge-fixed-count">
+                <Badge variant="outline" className="border-white/20 text-white/60 hidden sm:inline-flex" data-testid="badge-fixed-count">
                   <Lock className="w-3 h-3 mr-1" />
                   {fixedCount} fixed
                 </Badge>
@@ -1423,8 +1430,10 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
                   {formatCombinations(paramCombinations)} combos
                 </Badge>
               )}
+              {isParamsOpen ? <ChevronUp className="w-3 h-3 text-white/50" /> : <ChevronDown className="w-3 h-3 text-white/50" />}
             </div>
-          </div>
+          </button>
+          {isParamsOpen && (
           <div className="p-4 space-y-4 max-h-[400px] overflow-auto">
             {Object.entries(groupedInputs).map(([group, inputs]) => (
               <div key={group}>
@@ -1466,6 +1475,7 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
               </div>
             ))}
           </div>
+          )}
         </Card>
       )}
     </div>
