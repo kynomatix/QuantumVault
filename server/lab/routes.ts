@@ -2395,12 +2395,32 @@ export function registerLabRoutes(app: Express): void {
 
   app.post("/api/lab/queue/kick", requireLabAuth, async (_req: Request, res: Response) => {
     console.log(`[QuantumLab] Manual queue kick requested (pumpRunning=${pumpQueueRunning})`);
-    if (pumpQueueRunning) {
-      res.json({ success: true, message: "Queue pump already in progress" });
-    } else {
-      pumpQueue();
-      res.json({ success: true, message: "Queue pump triggered" });
+
+    const runningInDb = await db.select({ id: labOptimizationRuns.id })
+      .from(labOptimizationRuns)
+      .where(eq(labOptimizationRuns.status, "running"));
+    const runningIds = new Set(runningInDb.map(r => r.id));
+    const allJobs = (labStorage as any).jobs as Map<string, any> | undefined;
+    if (allJobs) {
+      for (const [, job] of Array.from(allJobs.entries())) {
+        if (job.progress?.status !== "complete" && job.progress?.status !== "error") {
+          const runId: number | undefined = job.runId;
+          if (!runId || !runningIds.has(runId)) {
+            job.progress.status = "error";
+            job.progress.stage = "Evicted: stale job cleared by unstick";
+            console.log(`[QuantumLab] Kick: evicted stale in-memory job ${job.id} (runId=${runId ?? "none"}, not in DB running set)`);
+          }
+        }
+      }
     }
+
+    if (pumpQueueRunning) {
+      pumpQueueRunning = false;
+      console.log(`[QuantumLab] Kick: reset stuck pumpQueueRunning flag`);
+    }
+
+    pumpQueue();
+    res.json({ success: true, message: "Queue unstuck and pump triggered" });
   });
 
   let schedulerRunning = false;
@@ -2436,6 +2456,12 @@ export function registerLabRoutes(app: Express): void {
         } else {
           await labStorage.failRun(run.id);
           console.log(`[QuantumLab] Scheduler: orphaned run ${run.id} → failed (no progress, no heartbeat)`);
+        }
+        const orphanedJob = labStorage.getJobByRunId(run.id);
+        if (orphanedJob && orphanedJob.progress.status !== "complete" && orphanedJob.progress.status !== "error") {
+          orphanedJob.progress.status = "error";
+          orphanedJob.progress.stage = "Evicted: orphaned by scheduler";
+          console.log(`[QuantumLab] Scheduler: evicted in-memory job ${orphanedJob.id} for orphaned run ${run.id}`);
         }
       }
 
