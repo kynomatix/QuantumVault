@@ -2081,36 +2081,57 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
                 {totalCount === 0 ? "No runs queued" : `${activeRun ? 1 : 0} active · ${queueItems.length} queued`}
               </p>
             </div>
-            {!activeRun && queueItems.length > 0 && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 px-3 text-xs border-violet-500/30 text-violet-300 hover:bg-violet-500/10"
-                onClick={() => kickQueueMutation.mutate(false)}
-                disabled={kickQueueMutation.isPending}
-                data-testid="queue-kick-btn"
-              >
-                {kickQueueMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 mr-1" />}
-                Unstick
-              </Button>
-            )}
-            {activeRun && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 px-3 text-xs border-red-500/40 text-red-300 hover:bg-red-500/10"
-                onClick={() => {
-                  if (window.confirm(`Force-stop the active run "${activeRun.strategyName ?? `run ${activeRun.id}`}" and start the next queued run? The current run will be paused and can be resumed later.`)) {
-                    kickQueueMutation.mutate(true);
-                  }
-                }}
-                disabled={kickQueueMutation.isPending}
-                data-testid="queue-force-stop-btn"
-              >
-                {kickQueueMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3 mr-1" />}
-                Force stop
-              </Button>
-            )}
+            {(() => {
+              const now = Date.now();
+              const oldestQueuedAge = queueItems.length > 0
+                ? Math.max(...queueItems.map((i: any) => i.createdAt ? now - new Date(i.createdAt).getTime() : 0))
+                : 0;
+              const queueStuck = !activeRun && queueItems.length > 0 && oldestQueuedAge > 60_000;
+
+              const heartbeatAge = activeRun?.lastHeartbeat ? now - activeRun.lastHeartbeat : null;
+              const runAge = activeRun?.createdAtMs ? now - activeRun.createdAtMs : 0;
+              const activeStuck = !!activeRun && (
+                (heartbeatAge !== null && heartbeatAge > 240_000) ||
+                (heartbeatAge === null && runAge > 300_000)
+              );
+
+              if (queueStuck) {
+                return (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-3 text-xs border-violet-500/30 text-violet-300 hover:bg-violet-500/10"
+                    onClick={() => kickQueueMutation.mutate(false)}
+                    disabled={kickQueueMutation.isPending}
+                    data-testid="queue-kick-btn"
+                  >
+                    {kickQueueMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 mr-1" />}
+                    Unstick
+                  </Button>
+                );
+              }
+              if (activeStuck) {
+                const staleMin = heartbeatAge !== null ? Math.round(heartbeatAge / 60_000) : Math.round(runAge / 60_000);
+                return (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-3 text-xs border-red-500/40 text-red-300 hover:bg-red-500/10"
+                    onClick={() => {
+                      if (window.confirm(`The active run "${activeRun.strategyName ?? `run ${activeRun.id}`}" has been unresponsive for ~${staleMin} min. Force-stop it and start the next queued run? The current run will be paused and can be resumed later.`)) {
+                        kickQueueMutation.mutate(true);
+                      }
+                    }}
+                    disabled={kickQueueMutation.isPending}
+                    data-testid="queue-force-stop-btn"
+                  >
+                    {kickQueueMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3 mr-1" />}
+                    Force stop
+                  </Button>
+                );
+              }
+              return null;
+            })()}
           </div>
         </SheetHeader>
 

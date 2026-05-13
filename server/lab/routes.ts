@@ -2057,6 +2057,9 @@ export function registerLabRoutes(app: Express): void {
         const strat = await labStorage.getStrategy(ar.strategyId);
         if (strat) strategyNames[ar.strategyId] = strat.name;
       }
+      const cp = ar.checkpoint && typeof ar.checkpoint === "object" ? ar.checkpoint as any : null;
+      const lastHeartbeat = (cp?.lastHeartbeat as number | undefined) ?? null;
+      const createdAtMs = ar.createdAt instanceof Date ? ar.createdAt.getTime() : (ar.createdAt ? new Date(ar.createdAt as any).getTime() : null);
       activeRun = {
         id: ar.id,
         strategyId: ar.strategyId,
@@ -2065,6 +2068,8 @@ export function registerLabRoutes(app: Express): void {
         status: ar.status,
         mode: ar.mode,
         strategyName: strategyNames[ar.strategyId] || null,
+        lastHeartbeat,
+        createdAtMs,
       };
     }
     return { items, activeRun };
