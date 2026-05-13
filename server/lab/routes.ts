@@ -689,6 +689,17 @@ export function registerLabRoutes(app: Express): void {
     let checkpointWriteInFlight = false;
 
     const doStart = async () => {
+      // Write an initial heartbeat IMMEDIATELY so the orphan scheduler doesn't kill
+      // the run while we're fetching candles (which can take 30-60s for cold caches).
+      // This is also what protects a resumed run whose checkpoint heartbeat is stale.
+      if (runId) {
+        try {
+          checkpointState.lastHeartbeat = Date.now();
+          const initHb: LabCheckpoint = { completedCombos: [...completedCombos], configSnapshot: config, ...checkpointState } as LabCheckpoint;
+          await labStorage.saveCheckpoint(runId, initHb);
+        } catch {}
+      }
+
       let candlesByCombo: Record<string, OHLCV[]>;
       if (prefetchedCandles) {
         candlesByCombo = prefetchedCandles;
@@ -2479,6 +2490,18 @@ export function registerLabRoutes(app: Express): void {
       const RUN_STARTUP_GRACE_MS = 120_000;
       const now = Date.now();
 
+      // CRITICAL: skip the DB orphan sweep entirely whenever a worker is alive
+      // in this process. Only one worker runs at a time, so any "running" DB row
+      // belongs to it. Sweeping here would race the worker (e.g. kill a run that's
+      // still fetching candles before its first heartbeat).
+      if (activeWorker) {
+        const silenceMs = lastWorkerMessageTime ? now - lastWorkerMessageTime : 0;
+        if (silenceMs > HEARTBEAT_STALE_MS) {
+          console.log(`[QuantumLab] Scheduler: active worker silent for ${Math.round(silenceMs / 1000)}s, watchdog should handle — skipping`);
+        }
+        return;
+      }
+
       const runningInDb = await db.select().from(labOptimizationRuns).where(
         eq(labOptimizationRuns.status, "running")
       );
@@ -2488,7 +2511,15 @@ export function registerLabRoutes(app: Express): void {
         if (lastHb && (now - lastHb) < HEARTBEAT_STALE_MS) {
           continue;
         }
-        if (!lastHb && lastRunStartedAt && (now - lastRunStartedAt) < RUN_STARTUP_GRACE_MS) {
+        // Grace baseline survives server restarts: prefer heartbeat, then in-memory
+        // dispatch time, then the run's DB createdAt. Without the createdAt fallback,
+        // a freshly dispatched run that gets caught by a restart (lastRunStartedAt=0)
+        // is killed within seconds even though it just started.
+        const createdAtMs = run.createdAt instanceof Date
+          ? run.createdAt.getTime()
+          : (run.createdAt ? new Date(run.createdAt as any).getTime() : 0);
+        const graceBaseline = lastHb ?? Math.max(lastRunStartedAt, createdAtMs);
+        if (graceBaseline && (now - graceBaseline) < RUN_STARTUP_GRACE_MS) {
           continue;
         }
         const hasResults = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
@@ -2508,13 +2539,6 @@ export function registerLabRoutes(app: Express): void {
           orphanedJob.progress.stage = "Evicted: orphaned by scheduler";
           console.log(`[QuantumLab] Scheduler: evicted in-memory job ${orphanedJob.id} for orphaned run ${run.id}`);
         }
-      }
-
-      if (activeWorker) {
-        const silenceMs = lastWorkerMessageTime ? now - lastWorkerMessageTime : 0;
-        if (silenceMs <= HEARTBEAT_STALE_MS) return;
-        console.log(`[QuantumLab] Scheduler: active worker silent for ${Math.round(silenceMs / 1000)}s, watchdog should handle — skipping`);
-        return;
       }
 
       if (lastWorkerMessageTime && (now - lastWorkerMessageTime) < HEARTBEAT_STALE_MS) {
