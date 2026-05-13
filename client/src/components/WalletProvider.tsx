@@ -7,6 +7,7 @@ import {
   createDefaultChainSelector,
   createDefaultWalletNotFoundHandler,
 } from '@solana-mobile/wallet-standard-mobile';
+import { SolanaMobileWalletAdapterWalletName } from '@solana-mobile/wallet-adapter-mobile';
 
 import '@solana/wallet-adapter-react-ui/styles.css';
 
@@ -100,13 +101,25 @@ export function WalletProvider({ children }: WalletProviderProps) {
     console.error('[WalletAdapter]', error.name, error.message, error);
   }, []);
 
+  // Auto-reconnect every wallet EXCEPT MWA. Jupiter/Phantom/Solflare/Backpack
+  // mobile injectors expect autoConnect to remember the previous session, and
+  // turning it off globally made the app appear "broken" on reload (user has
+  // to manually reconnect every time). MWA on Seeker is the only one where
+  // autoConnect=true caused the half-connected race ("three dots") hang, so
+  // we exclude only that one.
+  const autoConnect = useCallback(async (adapter: any): Promise<boolean> => {
+    if (!adapter) return false;
+    if (adapter.name === SolanaMobileWalletAdapterWalletName) return false;
+    return true;
+  }, []);
+
   if (!endpoint) {
     return null;
   }
 
   return (
     <ConnectionProvider endpoint={endpoint}>
-      <SolanaWalletProvider wallets={wallets} autoConnect={false} onError={onWalletError}>
+      <SolanaWalletProvider wallets={wallets} autoConnect={autoConnect} onError={onWalletError}>
         <WalletModalProvider>
           {children}
         </WalletModalProvider>
