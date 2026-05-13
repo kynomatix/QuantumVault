@@ -934,6 +934,27 @@ export const labInsightsReports = pgTable("lab_insights_reports", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// Personal access tokens used by AI agents (Claude/MCP/etc.) and external
+// automation to call lab/backtest endpoints on behalf of the wallet owner.
+// Only the SHA-256 hash of the token is stored; the plaintext is shown to the
+// user once at creation time and never again.
+export const userApiTokens = pgTable("user_api_tokens", {
+  id: serial("id").primaryKey(),
+  walletAddress: text("wallet_address").notNull(),
+  name: text("name").notNull(),
+  tokenPrefix: text("token_prefix").notNull(),
+  tokenHash: text("token_hash").notNull().unique(),
+  scopes: jsonb("scopes").$type<string[]>().default(sql`'["lab:read","lab:write"]'::jsonb`),
+  lastUsedAt: timestamp("last_used_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("user_api_tokens_wallet_idx").on(table.walletAddress),
+]);
+
+export const insertUserApiTokenSchema = createInsertSchema(userApiTokens).omit({ id: true, createdAt: true, lastUsedAt: true });
+export type UserApiToken = typeof userApiTokens.$inferSelect;
+export type InsertUserApiToken = z.infer<typeof insertUserApiTokenSchema>;
+
 export const insertLabStrategySchema = createInsertSchema(labStrategies).omit({ id: true, createdAt: true });
 export const insertLabRunSchema = createInsertSchema(labOptimizationRuns).omit({ id: true, createdAt: true, completedAt: true });
 export const insertLabResultSchema = createInsertSchema(labOptimizationResults).omit({ id: true });

@@ -59,7 +59,9 @@ import {
   DollarSign,
   ArrowUpDown,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  Cpu,
+  Code2
 } from 'lucide-react';
 import {
   AlertDialog,
@@ -263,7 +265,14 @@ export default function AppPage() {
   const [notifyTradeFailed, setNotifyTradeFailed] = useState(true);
   const [notifyPositionClosed, setNotifyPositionClosed] = useState(true);
   const [telegramConnected, setTelegramConnected] = useState(false);
-  const [expandedSection, setExpandedSection] = useState<'account' | 'trading' | 'notifications' | 'security' | 'danger' | null>(null);
+  const [expandedSection, setExpandedSection] = useState<'account' | 'trading' | 'notifications' | 'security' | 'api' | 'danger' | null>(null);
+  // API tokens (for AI agents like Claude/MCP, n8n, scripts).
+  const [apiTokens, setApiTokens] = useState<Array<{ id: number; name: string; tokenPrefix: string; lastUsedAt: string | null; createdAt: string }>>([]);
+  const [apiTokensLoading, setApiTokensLoading] = useState(false);
+  const [newTokenName, setNewTokenName] = useState('');
+  const [generatingToken, setGeneratingToken] = useState(false);
+  const [revealedToken, setRevealedToken] = useState<{ token: string; name: string } | null>(null);
+  const [copiedToken, setCopiedToken] = useState(false);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
   const [resetTradingDialogOpen, setResetTradingDialogOpen] = useState(false);
@@ -453,6 +462,66 @@ export default function AppPage() {
     
     loadSettings();
   }, [connected]);
+
+  // Load API tokens when API section is expanded.
+  useEffect(() => {
+    if (expandedSection !== 'api') return;
+    let cancelled = false;
+    (async () => {
+      setApiTokensLoading(true);
+      try {
+        const res = await fetch('/api/agent-tokens', { credentials: 'include' });
+        if (res.ok && !cancelled) {
+          const data = await safeResponseJson(res);
+          setApiTokens(Array.isArray(data) ? data : []);
+        }
+      } catch (err) {
+        console.error('Load API tokens error:', err);
+      } finally {
+        if (!cancelled) setApiTokensLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [expandedSection]);
+
+  const handleGenerateApiToken = async () => {
+    setGeneratingToken(true);
+    try {
+      const res = await fetch('/api/agent-tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ name: newTokenName.trim() || 'API Token' }),
+      });
+      if (!res.ok) {
+        const err = await safeResponseJson(res);
+        throw new Error(err.error || 'Failed to generate token');
+      }
+      const data = await safeResponseJson(res);
+      // Show the full token to the user once — it can never be retrieved again.
+      setRevealedToken({ token: data.token, name: data.name });
+      setNewTokenName('');
+      // Refresh the list (sans the secret).
+      const listRes = await fetch('/api/agent-tokens', { credentials: 'include' });
+      if (listRes.ok) setApiTokens(await safeResponseJson(listRes));
+    } catch (err: any) {
+      toast({ title: 'Token generation failed', description: err.message, variant: 'destructive' });
+    } finally {
+      setGeneratingToken(false);
+    }
+  };
+
+  const handleRevokeApiToken = async (id: number) => {
+    if (!confirm('Revoke this token? Any agent or script using it will stop working immediately.')) return;
+    try {
+      const res = await fetch(`/api/agent-tokens/${id}`, { method: 'DELETE', credentials: 'include' });
+      if (!res.ok) throw new Error('Failed to revoke');
+      setApiTokens(prev => prev.filter(t => t.id !== id));
+      toast({ title: 'Token revoked' });
+    } catch (err: any) {
+      toast({ title: 'Revoke failed', description: err.message, variant: 'destructive' });
+    }
+  };
 
   // Fetch RPC status when trading section is expanded
   useEffect(() => {
@@ -3947,6 +4016,162 @@ export default function AppPage() {
                                     )}
                                   </div>
                                 </div>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
+                    {/* API Access Section — for AI agents (Claude/MCP), n8n, scripts */}
+                    <div className="gradient-border p-0 noise">
+                      <button
+                        onClick={() => setExpandedSection(expandedSection === 'api' ? null : 'api')}
+                        className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
+                        data-testid="button-toggle-api"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-full bg-primary/20">
+                            <Cpu className="w-5 h-5 text-primary" />
+                          </div>
+                          <div className="text-left">
+                            <h3 className="font-display font-semibold">API Access</h3>
+                            <p className="text-xs text-muted-foreground">For AI agents and external automation</p>
+                          </div>
+                        </div>
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedSection === 'api' ? 'rotate-180' : ''}`} />
+                      </button>
+                      <AnimatePresence>
+                        {expandedSection === 'api' && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-4 pb-4 space-y-4">
+                              <div className="text-sm text-muted-foreground space-y-1.5">
+                                <p>Generate personal API tokens to let AI agents (Claude via MCP, custom scripts, n8n workflows, etc.) submit Pine Script strategies to QuantumLab on your behalf and read backtest results.</p>
+                                <p className="text-xs flex items-start gap-1.5 text-amber-300/80">
+                                  <Shield className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                                  <span>Tokens grant access to QuantumLab only. They <strong>cannot</strong> place trades, move funds, or touch your wallet keys — those still require an active session in this app.</span>
+                                </p>
+                              </div>
+
+                              {/* Newly generated token reveal */}
+                              {revealedToken && (
+                                <div className="p-3 rounded-lg bg-violet-500/10 border border-violet-500/30 space-y-2">
+                                  <div className="flex items-center gap-2">
+                                    <CheckCircle2 className="w-4 h-4 text-violet-400" />
+                                    <p className="text-sm font-medium text-violet-200">Token created — copy it now</p>
+                                  </div>
+                                  <p className="text-xs text-violet-200/80">This is the only time you'll see this token. Store it somewhere safe (a password manager).</p>
+                                  <div className="flex items-center gap-2">
+                                    <Input
+                                      readOnly
+                                      value={revealedToken.token}
+                                      className="bg-black/40 border-white/10 font-mono text-xs"
+                                      data-testid="input-revealed-token"
+                                    />
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        navigator.clipboard.writeText(revealedToken.token);
+                                        setCopiedToken(true);
+                                        setTimeout(() => setCopiedToken(false), 2000);
+                                      }}
+                                      data-testid="button-copy-token"
+                                    >
+                                      {copiedToken ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                                    </Button>
+                                  </div>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => setRevealedToken(null)}
+                                    className="w-full"
+                                    data-testid="button-dismiss-token"
+                                  >
+                                    I've saved it — dismiss
+                                  </Button>
+                                </div>
+                              )}
+
+                              {/* Generate new token */}
+                              <div className="space-y-2 pb-4 border-b border-border/30">
+                                <label className="text-sm text-muted-foreground">Token name (e.g. "Claude MCP", "n8n workflow")</label>
+                                <div className="flex gap-2">
+                                  <Input
+                                    value={newTokenName}
+                                    onChange={(e) => setNewTokenName(e.target.value)}
+                                    placeholder="API Token"
+                                    maxLength={60}
+                                    className="bg-muted/30 border-border/50"
+                                    data-testid="input-new-token-name"
+                                  />
+                                  <Button
+                                    onClick={handleGenerateApiToken}
+                                    disabled={generatingToken}
+                                    data-testid="button-generate-token"
+                                  >
+                                    {generatingToken ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Generate'}
+                                  </Button>
+                                </div>
+                              </div>
+
+                              {/* Existing tokens list */}
+                              <div>
+                                <h4 className="text-sm font-medium mb-2">Active Tokens</h4>
+                                {apiTokensLoading ? (
+                                  <div className="flex items-center gap-2 text-sm text-muted-foreground py-3">
+                                    <Loader2 className="w-3 h-3 animate-spin" /> Loading…
+                                  </div>
+                                ) : apiTokens.length === 0 ? (
+                                  <p className="text-sm text-muted-foreground py-3">No tokens yet. Generate one above to get started.</p>
+                                ) : (
+                                  <div className="space-y-2">
+                                    {apiTokens.map(t => (
+                                      <div
+                                        key={t.id}
+                                        className="flex items-center justify-between gap-3 p-3 rounded-lg bg-muted/20 border border-border/40"
+                                        data-testid={`row-token-${t.id}`}
+                                      >
+                                        <div className="min-w-0 flex-1">
+                                          <p className="text-sm font-medium truncate" data-testid={`text-token-name-${t.id}`}>{t.name}</p>
+                                          <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground">
+                                            <code className="font-mono">{t.tokenPrefix}…</code>
+                                            <span>Created {new Date(t.createdAt).toLocaleDateString()}</span>
+                                            {t.lastUsedAt && <span>· Last used {new Date(t.lastUsedAt).toLocaleDateString()}</span>}
+                                          </div>
+                                        </div>
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          onClick={() => handleRevokeApiToken(t.id)}
+                                          className="border-red-500/40 text-red-400 hover:bg-red-500/10"
+                                          data-testid={`button-revoke-token-${t.id}`}
+                                        >
+                                          Revoke
+                                        </Button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="pt-2 border-t border-border/30">
+                                <a
+                                  href="/docs#ai-agents"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 text-sm text-violet-400 hover:text-violet-300"
+                                  data-testid="link-api-docs"
+                                >
+                                  <Code2 className="w-3.5 h-3.5" />
+                                  View API documentation →
+                                </a>
                               </div>
                             </div>
                           </motion.div>

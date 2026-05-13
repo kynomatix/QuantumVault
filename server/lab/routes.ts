@@ -10,6 +10,8 @@ import { resolve, dirname } from "path";
 import type { OHLCV } from "./engine";
 import { db } from "../db";
 import { eq, or, and, inArray, desc, sql } from "drizzle-orm";
+import { createHash, timingSafeEqual } from "crypto";
+import { userApiTokens } from "@shared/schema";
 
 let labCleanup: ((reason: string) => Promise<void>) | null = null;
 
@@ -160,7 +162,7 @@ export function registerLabRoutes(app: Express): void {
     } catch (e) {}
   })();
 
-  const requireLabAuth = (req: any, res: any, next: any) => {
+  const requireLabAuth = async (req: any, res: any, next: any) => {
     const labSecret = process.env.LAB_AUTH_SECRET;
     if (labSecret) {
       const inboundSecret = req.headers["x-lab-auth"];
@@ -174,6 +176,41 @@ export function registerLabRoutes(app: Express): void {
       req.walletAddress = walletAddress;
       return next();
     }
+
+    // Bearer token auth — for AI agents (Claude/MCP) and external automation.
+    // Header: `Authorization: Bearer qv_<token>`. Token is matched by SHA-256
+    // hash against user_api_tokens. The token's wallet becomes the request's
+    // wallet for the rest of the lab pipeline (per-user scoping is preserved).
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+    if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.slice(7).trim();
+      if (token) {
+        try {
+          const tokenHash = createHash("sha256").update(token).digest("hex");
+          const [row] = await db.select().from(userApiTokens).where(eq(userApiTokens.tokenHash, tokenHash)).limit(1);
+          // Even though the DB lookup is by hash equality, re-verify the
+          // candidate's stored hash with a constant-time compare. This makes
+          // the validation step explicitly resistant to timing attacks on the
+          // secret material.
+          const candidateHash = row?.tokenHash || "";
+          const a = Buffer.from(tokenHash, "hex");
+          const b = Buffer.from(candidateHash.padEnd(tokenHash.length, "0").slice(0, tokenHash.length), "hex");
+          const equal = a.length === b.length && timingSafeEqual(a, b);
+          if (!row || !equal) {
+            return res.status(401).json({ error: "Invalid API token" });
+          }
+          // Update lastUsedAt asynchronously (don't block the request).
+          db.update(userApiTokens).set({ lastUsedAt: new Date() }).where(eq(userApiTokens.id, row.id)).catch(() => {});
+          req.walletAddress = row.walletAddress;
+          (req as any).apiTokenId = row.id;
+          return next();
+        } catch (err: any) {
+          console.log(`[QuantumLab] Bearer auth error: ${err.message}`);
+          return res.status(500).json({ error: "Auth lookup failed" });
+        }
+      }
+    }
+
     const walletAddress = req.session?.walletAddress;
     if (!walletAddress) {
       return res.status(401).json({ error: "Wallet not connected" });

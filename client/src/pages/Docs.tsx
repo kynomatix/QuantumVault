@@ -1486,6 +1486,135 @@ POST {{QUANTUMVAULT_URL}}/api/webhook/{{BOT_ID}}
         </div>
       </div>
       
+      <SubHeading>QuantumLab API — Backtest Strategies via AI Agent</SubHeading>
+      <Paragraph>
+        Let an AI agent (Claude via MCP, OpenAI function-calling, custom scripts) generate Pine Script strategies, submit them to QuantumLab, and read backtest results — all without a wallet session. Useful for autonomous strategy research while you're away from the app.
+      </Paragraph>
+
+      <Alert type="success">
+        <strong>Security model:</strong> API tokens grant access to <em>QuantumLab only</em> — they cannot place trades, sign transactions, or move funds. Live trading still requires you to be signed in with your wallet. The AI does the research, you approve deployment.
+      </Alert>
+
+      <SubHeading>1. Generate an API Token</SubHeading>
+      <StepList steps={[
+        'Open Settings → API Access in the QuantumVault app',
+        'Enter a name (e.g. "Claude MCP", "Research Bot") and click Generate',
+        'Copy the token immediately — it\'s shown only once and starts with "qv_"',
+        'Store it in a password manager or secure env var (never commit to git)',
+      ]} />
+
+      <SubHeading>2. Authenticate</SubHeading>
+      <Paragraph>
+        Send the token in the <code className="text-violet-400">Authorization</code> header on every QuantumLab API request:
+      </Paragraph>
+      <CodeBlock code={`Authorization: Bearer qv_YOUR_TOKEN_HERE`} language="http" />
+
+      <SubHeading>3. Submit a Backtest</SubHeading>
+      <Paragraph>
+        Save your Pine Script as a strategy, then run an optimization across one or more tickers and timeframes:
+      </Paragraph>
+      <CodeBlock code={`# Step 1 — Save the Pine Script as a strategy
+POST /api/lab/strategies
+{
+  "name": "My RSI Strategy",
+  "pineScript": "//@version=5\\nstrategy('RSI', ...)",
+  "parsedInputs": [...],
+  "groups": {},
+  "strategySettings": {}
+}
+# → returns { id: 123, ... }
+
+# Step 2 — Queue a backtest run
+POST /api/lab/run-optimization
+{
+  "strategyId": 123,
+  "tickers": ["SOL", "BTC"],
+  "timeframes": ["1h", "4h"],
+  "startDate": "2024-01-01",
+  "endDate": "2025-01-01",
+  "randomSamples": 200,
+  "topK": 10,
+  "refinementsPerSeed": 5,
+  "minTrades": 20,
+  "maxDrawdownCap": 50,
+  "mode": "random_search"
+}
+# → returns { queued: true, runId: 456, queueOrder: 1 }`} language="http" />
+
+      <SubHeading>4. Poll for Results</SubHeading>
+      <CodeBlock code={`# Check run status
+GET /api/lab/runs/456
+# → { id: 456, status: "completed" | "running" | "queued", ... }
+
+# Fetch ranked results
+GET /api/lab/runs/456/results
+# → [
+#     {
+#       rank: 1, ticker: "SOL", timeframe: "1h",
+#       netProfitPercent: 142.5, winRatePercent: 58.3,
+#       maxDrawdownPercent: 18.2, profitFactor: 2.1,
+#       totalTrades: 87, sharpeRatio: 1.8,
+#       params: { rsiLength: 14, ... }
+#     },
+#     ...
+#   ]`} language="http" />
+
+      <SubHeading>Available Endpoints</SubHeading>
+      <div className="mb-6 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-white/10">
+              <th className="text-left py-2 text-white/60 font-medium">Method</th>
+              <th className="text-left py-2 text-white/60 font-medium">Path</th>
+              <th className="text-left py-2 text-white/60 font-medium">Purpose</th>
+            </tr>
+          </thead>
+          <tbody className="text-white/70 font-mono text-xs">
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/strategies</td><td className="font-sans">List your saved strategies</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">POST</td><td>/api/lab/strategies</td><td className="font-sans">Save a new strategy</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">POST</td><td>/api/lab/parse-pine</td><td className="font-sans">Parse Pine Script to extract inputs</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">POST</td><td>/api/lab/run-optimization</td><td className="font-sans">Queue a new backtest run</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/runs</td><td className="font-sans">List your backtest runs</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/runs/:id</td><td className="font-sans">Run status (queued/running/completed)</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/runs/:id/results</td><td className="font-sans">Ranked backtest results</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/queue</td><td className="font-sans">Current queue status</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <SubHeading>Connecting Claude (MCP)</SubHeading>
+      <Paragraph>
+        For Claude Desktop, expose a small MCP server that wraps these endpoints as tools. Once connected, Claude can autonomously generate strategies, submit them, wait for results, analyse them, and iterate — all in a single conversation.
+      </Paragraph>
+      <CodeBlock code={`# Example: minimal Node MCP server (pseudo-code)
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+
+const QV_TOKEN = process.env.QUANTUMVAULT_TOKEN;
+const QV_BASE  = 'https://your-quantumvault.app';
+
+server.tool('submit_backtest', {
+  description: 'Submit a Pine Script strategy to QuantumLab for backtesting',
+  inputSchema: { strategyId, tickers, timeframes, startDate, endDate, ... },
+}, async (args) => {
+  const r = await fetch(QV_BASE + '/api/lab/run-optimization', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + QV_TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify(args),
+  });
+  return r.json();
+});
+
+server.tool('get_results', { ... }, async ({ runId }) => {
+  const r = await fetch(QV_BASE + '/api/lab/runs/' + runId + '/results', {
+    headers: { Authorization: 'Bearer ' + QV_TOKEN },
+  });
+  return r.json();
+});`} language="javascript" />
+
+      <Alert type="warning">
+        Treat your API token like a password. Anyone with it can read your strategies, results, and queue backtests on your account (which costs RPC credits and queue time). If a token leaks, revoke it immediately from <strong>Settings → API Access</strong>. You can have up to 10 active tokens per wallet.
+      </Alert>
+
       <SubHeading>Supported Markets</SubHeading>
       <Paragraph>
         QuantumVault supports a wide range of perpetual markets including:

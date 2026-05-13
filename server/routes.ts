@@ -6,10 +6,10 @@ import { encrypt as legacyEncrypt, decrypt } from "./crypto";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import { storage, DatabaseStorage } from "./storage";
-import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots } from "@shared/schema";
+import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
 import { db } from "./db";
-import { desc, eq, sql, asc } from "drizzle-orm";
+import { desc, eq, sql, asc, and } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
@@ -3086,6 +3086,87 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       });
     } catch (error) {
       console.error("Update wallet settings error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // Personal API tokens (for AI agents like Claude/MCP, n8n, scripts).
+  // Tokens grant access only to the QuantumLab endpoints (read + create
+  // backtests, list strategies/results). They never authorize on-chain
+  // trading or wallet key operations — those still require an active
+  // user session.
+  // ──────────────────────────────────────────────────────────────────
+  app.get("/api/agent-tokens", requireWallet, async (req, res) => {
+    try {
+      const rows = await db.select({
+        id: userApiTokens.id,
+        name: userApiTokens.name,
+        tokenPrefix: userApiTokens.tokenPrefix,
+        scopes: userApiTokens.scopes,
+        lastUsedAt: userApiTokens.lastUsedAt,
+        createdAt: userApiTokens.createdAt,
+      }).from(userApiTokens).where(eq(userApiTokens.walletAddress, req.walletAddress!)).orderBy(desc(userApiTokens.createdAt));
+      res.json(rows);
+    } catch (error) {
+      console.error("List agent tokens error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/agent-tokens", requireWallet, async (req, res) => {
+    try {
+      const name = String(req.body?.name || "").trim().slice(0, 60) || "API Token";
+      // Generate token: qv_<32 bytes base64url> = ~46 chars total.
+      const raw = crypto.randomBytes(32).toString("base64url");
+      const token = `qv_${raw}`;
+      const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+      const tokenPrefix = token.slice(0, 11); // "qv_" + 8 chars
+      const wallet = req.walletAddress!;
+      // Atomically enforce the 10-tokens-per-wallet cap. Use a per-wallet
+      // advisory lock inside a transaction so concurrent POSTs from the same
+      // wallet serialize and cannot race past the cap.
+      const created = await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${wallet}))`);
+        const existing = await tx.select({ id: userApiTokens.id }).from(userApiTokens).where(eq(userApiTokens.walletAddress, wallet));
+        if (existing.length >= 10) {
+          const err: any = new Error("TOKEN_LIMIT");
+          err.code = "TOKEN_LIMIT";
+          throw err;
+        }
+        const [row] = await tx.insert(userApiTokens).values({
+          walletAddress: wallet,
+          name,
+          tokenPrefix,
+          tokenHash,
+        }).returning({
+          id: userApiTokens.id,
+          name: userApiTokens.name,
+          tokenPrefix: userApiTokens.tokenPrefix,
+          createdAt: userApiTokens.createdAt,
+        });
+        return row;
+      });
+      // Return the full token ONCE — never retrievable again.
+      res.json({ ...created, token });
+    } catch (error: any) {
+      if (error?.code === "TOKEN_LIMIT") {
+        return res.status(400).json({ error: "Token limit reached (10). Revoke an unused token first." });
+      }
+      console.error("Create agent token error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.delete("/api/agent-tokens/:id", requireWallet, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid token id" });
+      const result = await db.delete(userApiTokens).where(and(eq(userApiTokens.id, id), eq(userApiTokens.walletAddress, req.walletAddress!))).returning({ id: userApiTokens.id });
+      if (result.length === 0) return res.status(404).json({ error: "Token not found" });
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete agent token error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
