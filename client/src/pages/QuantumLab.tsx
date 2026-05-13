@@ -18,8 +18,10 @@ import { useToast } from "@/hooks/use-toast";
 import { useConfirm } from "@/hooks/useConfirm";
 
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { useWallet } from "@/hooks/useWallet";
+import { useWallet, useConnection } from "@/hooks/useWallet";
 import { useBindAgentWallet } from "@/hooks/useBindAgentWallet";
+import { Transaction } from "@solana/web3.js";
+import { confirmTransactionWithFallback } from "@/lib/solana-utils";
 import {
   Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
@@ -4108,11 +4110,13 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const [capital, setCapital] = useState("1000");
   const capitalNum = parseFloat(capital) || 0;
   const { toast } = useToast();
-  const { publicKeyString: walletAddress, sessionConnected, signMessage, publicKey } = useWallet();
+  const { publicKeyString: walletAddress, sessionConnected, signMessage, publicKey, signTransaction } = useWallet();
+  const { connection } = useConnection();
   const bindAgentWallet = useBindAgentWallet({ signMessage, publicKey });
 
   const [isOpen, setIsOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
+  const [isDepositingUsdc, setIsDepositingUsdc] = useState(false);
   const [createdBot, setCreatedBot] = useState<any>(null);
   const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -4169,6 +4173,48 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
     const tf = (timeframe || "").toUpperCase();
     const sName = (strategyName || "STRATEGY").replace(/_/g, " ").toUpperCase();
     return `${base} ${tf} ${sName}`;
+  };
+
+  // One-click USDC top-up to the agent wallet — same flow as SubscribeBotModal.
+  // Lets the user fund their agent wallet without leaving the lab popover.
+  const handleUsdcDeposit = async (amount: number) => {
+    if (amount <= 0) return;
+    if (!publicKey || !signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+    const rounded = Math.ceil(amount * 100) / 100;
+    setIsDepositingUsdc(true);
+    try {
+      const response = await fetch('/api/agent/deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: rounded }),
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        const error = await safeResponseJson(response);
+        throw new Error(error.error || 'USDC deposit failed');
+      }
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await safeResponseJson(response);
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      const signedTx = await signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      await confirmTransactionWithFallback(connection, { signature, blockhash, lastValidBlockHeight });
+      toast({ title: `Deposited $${rounded.toFixed(2)} USDC successfully` });
+      // Refresh wallet balance so the warning clears and Create Bot becomes enabled.
+      setBalanceChecked(false);
+      await fetchBalanceAndAgent();
+    } catch (error: any) {
+      console.error('USDC deposit failed:', error);
+      toast({
+        title: 'USDC Deposit Failed',
+        description: error.message || 'Please try again',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsDepositingUsdc(false);
+    }
   };
 
   const copyToClipboard = async (text: string, field: string) => {
@@ -4482,6 +4528,40 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
               {balanceLoading && (
                 <p className="text-[9px] text-white/30 mt-2">Checking wallet balance…</p>
               )}
+              {(() => {
+                if (!balanceChecked || agentBalance === null) return null;
+                const totalNeeded = effectiveTradeSize + equityBuffer;
+                const deficit = totalNeeded - usdcBal;
+                if (capitalNum < PACIFICA_MIN_DEPOSIT) return null;
+                if (deficit < 0.01) return null;
+                const depositAmount = Math.ceil(deficit * 100) / 100;
+                return (
+                  <div className="mt-3 p-2.5 rounded bg-yellow-500/10 border border-yellow-500/20 space-y-2" data-testid={`warning-usdc-insufficient-${leverage}x`}>
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-3 h-3 text-yellow-400 shrink-0 mt-0.5" />
+                      <div className="space-y-0.5">
+                        <p className="text-[10px] font-semibold text-yellow-400">Insufficient USDC for Capital</p>
+                        <p className="text-[9px] text-white/60 leading-relaxed">
+                          This bot needs ${totalNeeded.toLocaleString()} USDC (${effectiveTradeSize.toLocaleString()} trade + ${equityBuffer.toLocaleString()} buffer). Your agent wallet has ${usdcBal.toFixed(2)}.
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      onClick={() => handleUsdcDeposit(depositAmount)}
+                      disabled={isDepositingUsdc}
+                      className="w-full h-7 text-[10px] bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-200 border border-yellow-500/30"
+                      data-testid={`button-deposit-usdc-${leverage}x`}
+                    >
+                      {isDepositingUsdc ? (
+                        <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Depositing…</>
+                      ) : (
+                        <>Deposit ${depositAmount.toFixed(2)} USDC to agent wallet</>
+                      )}
+                    </Button>
+                  </div>
+                );
+              })()}
             </div>
             {capitalNum > 0 && (
               <div className="p-4 space-y-3">
