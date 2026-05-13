@@ -15,6 +15,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { useConfirm } from "@/hooks/useConfirm";
 
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -1311,6 +1312,13 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
   const groupedInputs = parsedResult ? groupByCategory(parsedResult.inputs) : {};
   const paramCombinations = parsedResult ? calcParamCombinations(parsedResult.inputs) : 0;
 
+  // Collapse the script editor by default on mobile so users don't get scroll-trapped
+  // inside a 400px textarea. Desktop keeps the editor expanded as before.
+  const isMobile = useIsMobile();
+  const [editorExpanded, setEditorExpanded] = useState<boolean | null>(null);
+  const isEditorOpen = editorExpanded ?? !isMobile;
+  const codeLineCount = code ? code.split("\n").length : 0;
+
   return (
     <div className="space-y-6">
       <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]">
@@ -1345,18 +1353,42 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
               {isParsing ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <CheckCircle2 className="w-3 h-3 mr-1" />}
               {isParsing ? "Parsing..." : "Parse Script"}
             </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setEditorExpanded(!isEditorOpen)}
+              data-testid="button-toggle-editor"
+              className="bg-white/5 hover:bg-white/10 text-white/70 px-2"
+              title={isEditorOpen ? "Collapse editor" : "Expand editor"}
+            >
+              {isEditorOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </Button>
           </div>
         </div>
-        <div className="h-[400px]">
-          <textarea
-            className="w-full h-full bg-black/40 text-white/80 font-mono text-[13px] p-3 resize-none focus:outline-none focus:ring-1 focus:ring-violet-500 leading-relaxed border-none"
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-            spellCheck={false}
-            data-testid="editor-pine-script"
-            placeholder="Paste your Pine Script strategy code here..."
-          />
-        </div>
+        {isEditorOpen ? (
+          <div className="h-[400px]">
+            <textarea
+              className="w-full h-full bg-black/40 text-white/80 font-mono text-[13px] p-3 resize-none focus:outline-none focus:ring-1 focus:ring-violet-500 leading-relaxed border-none"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              spellCheck={false}
+              data-testid="editor-pine-script"
+              placeholder="Paste your Pine Script strategy code here..."
+            />
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setEditorExpanded(true)}
+            className="w-full px-4 py-3 bg-black/40 text-left text-[12px] text-white/50 hover:text-white/80 hover:bg-black/50 transition-colors flex items-center justify-between gap-2"
+            data-testid="button-expand-editor"
+          >
+            <span className="truncate">
+              {code ? `Pine Script hidden (${codeLineCount} lines) — tap to edit` : "Pine Script editor hidden — tap to edit"}
+            </span>
+            <ChevronDown className="w-3 h-3 flex-shrink-0" />
+          </button>
+        )}
       </Card>
 
       {parseError && (
