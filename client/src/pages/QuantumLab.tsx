@@ -1985,15 +1985,21 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
   });
 
   const kickQueueMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/lab/queue/kick", { method: "POST", credentials: "include" });
+    mutationFn: async (force: boolean = false) => {
+      const res = await fetch("/api/lab/queue/kick", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force }),
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Kick failed");
       return data;
     },
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
-      toast({ title: "Queue unstuck — processing will resume" });
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
+      toast({ title: data.force ? "Active run stopped — queue resumed" : "Queue unstuck — processing will resume" });
     },
     onError: (err: any) => {
       toast({ title: "Failed to kick queue", description: err.message, variant: "destructive" });
@@ -2080,12 +2086,29 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
                 variant="outline"
                 size="sm"
                 className="h-7 px-3 text-xs border-violet-500/30 text-violet-300 hover:bg-violet-500/10"
-                onClick={() => kickQueueMutation.mutate()}
+                onClick={() => kickQueueMutation.mutate(false)}
                 disabled={kickQueueMutation.isPending}
                 data-testid="queue-kick-btn"
               >
                 {kickQueueMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 mr-1" />}
                 Unstick
+              </Button>
+            )}
+            {activeRun && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-3 text-xs border-red-500/40 text-red-300 hover:bg-red-500/10"
+                onClick={() => {
+                  if (window.confirm(`Force-stop the active run "${activeRun.strategyName ?? `run ${activeRun.id}`}" and start the next queued run? The current run will be paused and can be resumed later.`)) {
+                    kickQueueMutation.mutate(true);
+                  }
+                }}
+                disabled={kickQueueMutation.isPending}
+                data-testid="queue-force-stop-btn"
+              >
+                {kickQueueMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3 mr-1" />}
+                Force stop
               </Button>
             )}
           </div>

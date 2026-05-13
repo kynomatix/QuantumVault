@@ -2393,34 +2393,74 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.post("/api/lab/queue/kick", requireLabAuth, async (_req: Request, res: Response) => {
-    console.log(`[QuantumLab] Manual queue kick requested (pumpRunning=${pumpQueueRunning})`);
+  app.post("/api/lab/queue/kick", requireLabAuth, async (req: Request, res: Response) => {
+    const force = req.body?.force === true;
+    console.log(`[QuantumLab] Manual queue kick requested (pumpRunning=${pumpQueueRunning}, force=${force}, activeWorker=${!!activeWorker})`);
 
-    const runningInDb = await db.select({ id: labOptimizationRuns.id })
-      .from(labOptimizationRuns)
-      .where(eq(labOptimizationRuns.status, "running"));
-    const runningIds = new Set(runningInDb.map(r => r.id));
     const allJobs = (labStorage as any).jobs as Map<string, any> | undefined;
-    if (allJobs) {
-      for (const [, job] of Array.from(allJobs.entries())) {
-        if (job.progress?.status !== "complete" && job.progress?.status !== "error") {
-          const runId: number | undefined = job.runId;
-          if (!runId || !runningIds.has(runId)) {
-            job.progress.status = "error";
-            job.progress.stage = "Evicted: stale job cleared by unstick";
-            console.log(`[QuantumLab] Kick: evicted stale in-memory job ${job.id} (runId=${runId ?? "none"}, not in DB running set)`);
+
+    try {
+      if (force) {
+        const pausedRunIds: number[] = [];
+        if (allJobs) {
+          for (const [, job] of Array.from(allJobs.entries())) {
+            if (job.runId && job.progress?.status !== "complete" && job.progress?.status !== "error") {
+              pausedRunIds.push(job.runId);
+            }
+          }
+        }
+
+        if (activeWorker) {
+          console.log(`[QuantumLab] Kick(force): terminating active worker`);
+          try { activeWorker.postMessage({ type: "abort" }); } catch {}
+          const workerRef = activeWorker;
+          await Promise.race([
+            new Promise<void>((resolve) => { workerRef.once("exit", () => resolve()); }),
+            new Promise<void>(resolve => setTimeout(resolve, 2000)),
+          ]);
+          try { workerRef.terminate(); } catch {}
+          clearActiveWorker();
+        }
+
+        for (const runId of pausedRunIds) {
+          try {
+            await labStorage.pauseRun(runId);
+            console.log(`[QuantumLab] Kick(force): paused run ${runId}`);
+          } catch (err: any) {
+            console.log(`[QuantumLab] Kick(force): failed to pause run ${runId}: ${err.message}`);
+          }
+        }
+
+        const evicted = labStorage.forceEvictAllJobs();
+        console.log(`[QuantumLab] Kick(force): evicted ${evicted} in-memory job(s)`);
+      } else {
+        if (!activeWorker && !workerStarting && allJobs) {
+          const dbRuns = await db.select({ id: labOptimizationRuns.id, status: labOptimizationRuns.status })
+            .from(labOptimizationRuns);
+          const liveStatusByRun = new Map(dbRuns.map(r => [r.id, r.status]));
+          const liveStatuses = new Set(["running", "paused", "queued"]);
+          for (const [, job] of Array.from(allJobs.entries())) {
+            if (job.progress?.status !== "complete" && job.progress?.status !== "error") {
+              const runId: number | undefined = job.runId;
+              const dbStatus = runId ? liveStatusByRun.get(runId) : undefined;
+              if (!runId || !dbStatus || !liveStatuses.has(dbStatus)) {
+                job.progress.status = "error";
+                job.progress.stage = "Evicted: orphaned job cleared by unstick";
+                console.log(`[QuantumLab] Kick: evicted orphaned in-memory job ${job.id} (runId=${runId ?? "none"}, dbStatus=${dbStatus ?? "missing"})`);
+              }
+            }
           }
         }
       }
+    } finally {
+      if (pumpQueueRunning) {
+        pumpQueueRunning = false;
+        console.log(`[QuantumLab] Kick: reset stuck pumpQueueRunning flag`);
+      }
+      pumpQueue();
     }
 
-    if (pumpQueueRunning) {
-      pumpQueueRunning = false;
-      console.log(`[QuantumLab] Kick: reset stuck pumpQueueRunning flag`);
-    }
-
-    pumpQueue();
-    res.json({ success: true, message: "Queue unstuck and pump triggered" });
+    res.json({ success: true, force, message: force ? "Force-stopped active run; queue unstuck and pump triggered" : "Queue unstuck and pump triggered" });
   });
 
   let schedulerRunning = false;
