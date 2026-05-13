@@ -4547,7 +4547,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                 <Input
                   type="number"
                   value={capital}
-                  onChange={(e) => { setCapital(e.target.value); setBalanceChecked(false); }}
+                  onChange={(e) => setCapital(e.target.value)}
                   className="h-7 text-xs bg-white/5 border-white/10 text-white px-2"
                   min="1"
                   data-testid={`setup-capital-${leverage}x`}
@@ -4556,7 +4556,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                   <Button
                     type="button"
                     size="sm"
-                    onClick={() => { setCapital(String(Math.floor(parseFloat(agentBalance)))); setBalanceChecked(false); }}
+                    onClick={() => setCapital(String(Math.floor(parseFloat(agentBalance))))}
                     className="h-7 px-2.5 text-[9px] bg-white/10 hover:bg-white/20 text-white/80 shrink-0"
                     data-testid={`setup-capital-max-${leverage}x`}
                   >
@@ -4570,40 +4570,6 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
               {balanceLoading && (
                 <p className="text-[9px] text-white/30 mt-2">Checking wallet balance…</p>
               )}
-              {(() => {
-                if (!balanceChecked || agentBalance === null) return null;
-                const totalNeeded = effectiveTradeSize + equityBuffer;
-                const deficit = totalNeeded - usdcBal;
-                if (capitalNum < PACIFICA_MIN_DEPOSIT) return null;
-                if (deficit < 0.01) return null;
-                const depositAmount = Math.ceil(deficit * 100) / 100;
-                return (
-                  <div className="mt-3 p-2.5 rounded bg-yellow-500/10 border border-yellow-500/20 space-y-2" data-testid={`warning-usdc-insufficient-${leverage}x`}>
-                    <div className="flex items-start gap-2">
-                      <AlertTriangle className="w-3 h-3 text-yellow-400 shrink-0 mt-0.5" />
-                      <div className="space-y-0.5">
-                        <p className="text-[10px] font-semibold text-yellow-400">Insufficient USDC for Capital</p>
-                        <p className="text-[9px] text-white/60 leading-relaxed">
-                          This bot needs ${totalNeeded.toLocaleString()} USDC (${effectiveTradeSize.toLocaleString()} trade + ${equityBuffer.toLocaleString()} buffer). Your agent wallet has ${usdcBal.toFixed(2)}.
-                        </p>
-                      </div>
-                    </div>
-                    <Button
-                      size="sm"
-                      onClick={() => handleUsdcDeposit(depositAmount)}
-                      disabled={isDepositingUsdc}
-                      className="w-full h-7 text-[10px] bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-200 border border-yellow-500/30"
-                      data-testid={`button-deposit-usdc-${leverage}x`}
-                    >
-                      {isDepositingUsdc ? (
-                        <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Depositing…</>
-                      ) : (
-                        <>Deposit ${depositAmount.toFixed(2)} USDC to agent wallet</>
-                      )}
-                    </Button>
-                  </div>
-                );
-              })()}
             </div>
             {capitalNum > 0 && (
               <div className="p-4 space-y-3">
@@ -4681,45 +4647,78 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                         <p className="text-[10px] text-purple-300 leading-relaxed">{createError}</p>
                       </div>
                     )}
-                    {disabledReason ? (
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <div>
-                            <Button
-                              size="sm"
-                              className="w-full h-7 text-[10px] bg-violet-600/50 text-white/50 cursor-not-allowed"
-                              disabled
-                              data-testid={`create-bot-btn-${leverage}x`}
-                            >
-                              <Rocket className="w-3 h-3 mr-1" />
-                              Create Bot
-                            </Button>
-                          </div>
-                        </TooltipTrigger>
-                        <TooltipContent side="bottom" className="text-xs max-w-[200px]">
-                          {disabledReason}
-                        </TooltipContent>
-                      </Tooltip>
-                    ) : (
-                      <>
-                        {!isCreating && (
-                          <p className="text-[9px] text-white/50 text-center truncate mb-1.5">{generateBotName()}</p>
-                        )}
-                        <Button
-                          size="sm"
-                          className="w-full h-7 text-[10px] bg-violet-600 hover:bg-violet-500 text-white"
-                          onClick={handleCreateBot}
-                          disabled={isCreating}
-                          data-testid={`create-bot-btn-${leverage}x`}
-                        >
-                          {isCreating ? (
-                            <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Creating...</>
-                          ) : (
-                            <><Rocket className="w-3 h-3 mr-1" /> Create Bot</>
+                    {(() => {
+                      // USDC shortfall — replace Create Bot with a Deposit button (same
+                      // pattern as SubscribeBotModal). Only kicks in once we have a real
+                      // balance reading and the entered capital is at least the protocol
+                      // minimum, otherwise the deficit number is meaningless.
+                      const hasBalance = agentBalance !== null && isAuthenticated && hasAgentWallet;
+                      const totalNeeded = effectiveTradeSize + equityBuffer;
+                      const usdcDeficit = hasBalance && capitalNum >= PACIFICA_MIN_DEPOSIT
+                        ? Math.max(0, totalNeeded - usdcBal)
+                        : 0;
+                      const showDeposit = usdcDeficit >= 0.01;
+                      const depositAmount = Math.ceil(usdcDeficit * 100) / 100;
+                      if (showDeposit) {
+                        return (
+                          <Button
+                            size="sm"
+                            onClick={() => handleUsdcDeposit(depositAmount)}
+                            disabled={isDepositingUsdc}
+                            className="w-full h-7 text-[10px] bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-white"
+                            data-testid={`button-deposit-usdc-${leverage}x`}
+                          >
+                            {isDepositingUsdc ? (
+                              <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Depositing…</>
+                            ) : (
+                              <><DollarSign className="w-3 h-3 mr-1" /> Deposit ${depositAmount.toFixed(2)} USDC</>
+                            )}
+                          </Button>
+                        );
+                      }
+                      if (disabledReason) {
+                        return (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <div>
+                                <Button
+                                  size="sm"
+                                  className="w-full h-7 text-[10px] bg-violet-600/50 text-white/50 cursor-not-allowed"
+                                  disabled
+                                  data-testid={`create-bot-btn-${leverage}x`}
+                                >
+                                  <Rocket className="w-3 h-3 mr-1" />
+                                  Create Bot
+                                </Button>
+                              </div>
+                            </TooltipTrigger>
+                            <TooltipContent side="bottom" className="text-xs max-w-[200px]">
+                              {disabledReason}
+                            </TooltipContent>
+                          </Tooltip>
+                        );
+                      }
+                      return (
+                        <>
+                          {!isCreating && (
+                            <p className="text-[9px] text-white/50 text-center truncate mb-1.5">{generateBotName()}</p>
                           )}
-                        </Button>
-                      </>
-                    )}
+                          <Button
+                            size="sm"
+                            className="w-full h-7 text-[10px] bg-violet-600 hover:bg-violet-500 text-white"
+                            onClick={handleCreateBot}
+                            disabled={isCreating}
+                            data-testid={`create-bot-btn-${leverage}x`}
+                          >
+                            {isCreating ? (
+                              <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Creating...</>
+                            ) : (
+                              <><Rocket className="w-3 h-3 mr-1" /> Create Bot</>
+                            )}
+                          </Button>
+                        </>
+                      );
+                    })()}
                     {balanceChecked && isAuthenticated && hasAgentWallet && (
                       <div className="flex justify-between text-[9px] text-white/30 mt-2">
                         <span>Wallet: ${usdcBal.toFixed(2)} USDC</span>
