@@ -151,7 +151,9 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const usdcDeficit = enteredCapital > 0 && availableBalance !== null
     ? Math.max(0, enteredCapital - availableBalance)
     : 0;
-  const needsUsdcDeposit = usdcDeficit > 0 && enteredCapital >= 10;
+  // Require deficit >= 1 cent so floating-point dust (e.g. balance 12.3449 vs entered
+  // 12.34) doesn't surface a useless "deposit $0.00" warning.
+  const needsUsdcDeposit = usdcDeficit >= 0.01 && enteredCapital >= 10;
 
   // QuantumLab-style two-part allocation: split Capital into Investment + Equity Buffer.
   // worstCase = max(observedDD, baseDD × subscriberLev). The max() guard means we never
@@ -337,7 +339,10 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
 
   const handleMax = () => {
     if (availableBalance !== null && availableBalance > 0) {
-      setCapitalInvested(availableBalance.toFixed(2));
+      // Floor to 2 decimals (never round up) so the entered amount can't exceed the
+      // actual balance by a sub-cent and trigger a phantom "$0.00 deposit needed" warning.
+      const floored = Math.floor(availableBalance * 100) / 100;
+      setCapitalInvested(floored.toFixed(2));
     }
   };
 
