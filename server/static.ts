@@ -79,6 +79,13 @@ export function serveStatic(app: Express) {
       `<meta property="og:url" content="${requestUrl}" />`
     );
     res.setHeader("Content-Type", "text/html");
+    // Explicitly tell crawlers this page is indexable. Some upstream proxies
+    // (e.g. Replit preview infrastructure on *.replit.dev) inject an
+    // X-Robots-Tag: noindex header that overrides the <meta name="robots">
+    // tag, which is what Lighthouse flags as "blocked from indexing". Setting
+    // an explicit allow-all header here ensures the public deployment is
+    // crawlable regardless of what the platform layer adds.
+    res.setHeader("X-Robots-Tag", "index, follow");
     res.send(html);
   });
 }
