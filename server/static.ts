@@ -51,6 +51,11 @@ export function serveStatic(app: Express) {
   });
 
   app.use(express.static(distPath, {
+    // Disable directory-index serving so requests for "/" fall through to
+    // the catch-all handler below. Otherwise express.static serves
+    // index.html directly and skips the X-Robots-Tag header that Lighthouse
+    // requires (without it the page reports as "blocked from indexing").
+    index: false,
     setHeaders: (res, filePath) => {
       const ext = path.extname(filePath).toLowerCase();
       const isHashedBundle = filePath.includes(`${path.sep}assets${path.sep}`);
