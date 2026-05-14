@@ -4,10 +4,11 @@ import { LineChart, Line, ResponsiveContainer, Tooltip as RechartsTooltip, Refer
 
 interface Props {
   range?: string;
+  view?: 'dollar' | 'percent';
   onBotClick?: (botId: string) => void;
 }
 
-function Sparkline({ data, positive }: { data: { t: string; v: number }[]; positive: boolean }) {
+function Sparkline({ data, positive, view, netDeposited }: { data: { t: string; v: number }[]; positive: boolean; view: 'dollar' | 'percent'; netDeposited: number }) {
   if (data.length === 0) {
     return (
       <div className="w-24 h-10 flex items-center justify-center">
@@ -42,7 +43,12 @@ function Sparkline({ data, positive }: { data: { t: string; v: number }[]; posit
               padding: '4px 8px',
               fontSize: '11px',
             }}
-            formatter={(value: number) => [`$${value.toFixed(2)}`, 'Cum. P&L']}
+            formatter={(value: number) => [
+            view === 'percent' && netDeposited > 0
+              ? `${value >= 0 ? '+' : ''}${((value / netDeposited) * 100).toFixed(2)}%`
+              : `${value >= 0 ? '+' : ''}$${value.toFixed(2)}`,
+            'Cum. P&L',
+          ]}
             labelFormatter={(label: string) => label}
           />
           <ReferenceLine y={0} stroke="#6b7280" strokeDasharray="2 2" strokeOpacity={0.5} />
@@ -69,7 +75,7 @@ function SharpeLabel({ value }: { value: number | null }) {
   return <span className={color}>{value.toFixed(2)}</span>;
 }
 
-export function BotPerformanceBreakdown({ range = 'all', onBotClick }: Props) {
+export function BotPerformanceBreakdown({ range = 'all', view = 'dollar', onBotClick }: Props) {
   const { data, isLoading, isError, refetch } = usePortfolioBotPerformance(range);
 
   if (isLoading) {
@@ -186,7 +192,7 @@ export function BotPerformanceBreakdown({ range = 'all', onBotClick }: Props) {
 
               {/* Sparkline */}
               <div className="shrink-0 hidden sm:block">
-                <Sparkline data={bot.sparkline} positive={isProfit} />
+                <Sparkline data={bot.sparkline} positive={isProfit} view={view} netDeposited={bot.netDeposited} />
               </div>
 
               {/* Stats */}
@@ -227,7 +233,11 @@ export function BotPerformanceBreakdown({ range = 'all', onBotClick }: Props) {
                       }`}
                       data-testid={`bot-pnl-${bot.id}`}
                     >
-                      {bot.totalTrades === 0 ? '—' : `${isProfit ? '+' : ''}$${bot.netPnl.toFixed(2)}`}
+                      {bot.totalTrades === 0
+                        ? '—'
+                        : view === 'percent'
+                          ? `${bot.pnlPercent >= 0 ? '+' : ''}${bot.pnlPercent.toFixed(2)}%`
+                          : `${isProfit ? '+' : ''}$${bot.netPnl.toFixed(2)}`}
                     </span>
                   </div>
                 </div>
@@ -258,7 +268,9 @@ export function BotPerformanceBreakdown({ range = 'all', onBotClick }: Props) {
                     <TrendingDown className="w-3 h-3 text-red-400" />
                   )}
                   <span className={`text-xs font-mono font-medium ${m.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {m.pnl >= 0 ? '+' : ''}${m.pnl.toFixed(2)}
+                    {view === 'percent'
+                      ? `${m.pnlPercent >= 0 ? '+' : ''}${m.pnlPercent.toFixed(2)}%`
+                      : `${m.pnl >= 0 ? '+' : ''}$${m.pnl.toFixed(2)}`}
                   </span>
                 </div>
               </div>

@@ -589,6 +589,8 @@ export interface PortfolioBotEntry {
   market: string;
   isActive: boolean;
   netPnl: number;
+  pnlPercent: number;
+  netDeposited: number;
   totalTrades: number;
   winRate: number;
   sharpe: number | null;
@@ -598,6 +600,7 @@ export interface PortfolioBotEntry {
 export interface PortfolioMarketEntry {
   market: string;
   pnl: number;
+  pnlPercent: number;
   count: number;
   winRate: number;
 }

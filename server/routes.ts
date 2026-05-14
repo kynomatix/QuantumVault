@@ -7391,6 +7391,19 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return Math.round((mean / std) * Math.sqrt(252) * 100) / 100;
       }
 
+      // Per-bot net deposits (for pnlPercent). Sequential is fine — bots/wallet
+      // is a small set and this route refetches every 60s.
+      const netDepositedByBot: Record<string, number> = {};
+      for (const bot of bots) {
+        try {
+          const events = await storage.getBotEquityEvents(bot.id, 1000);
+          netDepositedByBot[bot.id] = events.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+        } catch {
+          netDepositedByBot[bot.id] = 0;
+        }
+      }
+      const totalNetDeposited = Object.values(netDepositedByBot).reduce((a, b) => a + b, 0);
+
       const botPerformance = bots.map((bot) => {
         const botTradeList = (tradesByBot[bot.id] || []).sort(
           (a, b) => new Date(a.executedAt!).getTime() - new Date(b.executedAt!).getTime()
@@ -7408,12 +7421,16 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
 
         const totalTrades = botTradeList.length;
+        const deposited = netDepositedByBot[bot.id] ?? 0;
+        const pnlPercent = deposited > 0 ? Math.round((cumPnl / deposited) * 10000) / 100 : 0;
         return {
           id: bot.id,
           name: bot.name,
           market: bot.market,
           isActive: bot.isActive,
           netPnl: Math.round(cumPnl * 100) / 100,
+          pnlPercent,
+          netDeposited: Math.round(deposited * 100) / 100,
           totalTrades,
           winRate: totalTrades > 0 ? Math.round((wins / totalTrades) * 100) : 0,
           sharpe: computeSharpe(botTradeList),
@@ -7423,7 +7440,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       botPerformance.sort((a, b) => b.netPnl - a.netPnl);
 
-      // Market-level P&L breakdown for the same range
+      // Market-level P&L breakdown for the same range. We don't have per-market
+      // deposits, so percent is taken vs the wallet's total net deposited so the
+      // numbers stay comparable across markets.
       const marketPnl: Record<string, { pnl: number; count: number; wins: number }> = {};
       for (const trade of executed) {
         const net = parseFloat(trade.pnl as string || "0") - parseFloat(trade.fee as string || "0");
@@ -7438,6 +7457,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         .map(([market, data]) => ({
           market,
           pnl: Math.round(data.pnl * 100) / 100,
+          pnlPercent: totalNetDeposited > 0
+            ? Math.round((data.pnl / totalNetDeposited) * 10000) / 100
+            : 0,
           count: data.count,
           winRate: data.count > 0 ? Math.round((data.wins / data.count) * 100) : 0,
         }))

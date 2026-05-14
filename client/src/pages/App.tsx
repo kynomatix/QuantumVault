@@ -2654,7 +2654,9 @@ export default function AppPage() {
                           </TooltipProvider>
                         </div>
                         <p className={`text-2xl font-bold font-mono ${portfolioPerformanceData.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`} data-testid="text-portfolio-pnl">
-                          {portfolioPerformanceData.netPnl >= 0 ? '+' : ''}${portfolioPerformanceData.netPnl.toFixed(2)}
+                          {portfolioChartView === 'percent'
+                            ? `${portfolioPerformanceData.pnlPercent >= 0 ? '+' : ''}${portfolioPerformanceData.pnlPercent.toFixed(2)}%`
+                            : `${portfolioPerformanceData.netPnl >= 0 ? '+' : ''}$${portfolioPerformanceData.netPnl.toFixed(2)}`}
                         </p>
                         <p className="text-xs text-muted-foreground mt-1">True trading performance</p>
                       </div>
@@ -2844,6 +2846,7 @@ export default function AppPage() {
 
                     <BotPerformanceBreakdown
                       range={portfolioChartRange}
+                      view={portfolioChartView}
                       onBotClick={(botId) => {
                         const pub = myPublishedBots?.find((b: PublishedBot) => b.tradingBotId === botId);
                         if (pub) {
