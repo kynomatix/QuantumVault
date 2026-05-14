@@ -48,7 +48,20 @@ export async function setupVite(server: Server, app: Express) {
         `src="/src/main.tsx?v=${nanoid()}"`,
       );
       const page = await vite.transformIndexHtml(url, template);
-      res.status(200).set({ "Content-Type": "text/html" }).end(page);
+      // Replit's preview infrastructure (*.replit.dev) injects an
+      // X-Robots-Tag: noindex header on responses, which overrides our
+      // <meta name="robots" content="index, follow"> tag and causes
+      // Lighthouse to report "Page is blocked from indexing". Setting an
+      // explicit allow-all header here neutralizes that injection so SEO
+      // audits run against the preview URL pass. The production handler
+      // in server/static.ts does the same thing.
+      res
+        .status(200)
+        .set({
+          "Content-Type": "text/html",
+          "X-Robots-Tag": "index, follow",
+        })
+        .end(page);
     } catch (e) {
       vite.ssrFixStacktrace(e as Error);
       next(e);
