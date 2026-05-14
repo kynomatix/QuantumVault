@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Slider } from "@/components/ui/slider";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -4169,14 +4170,21 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const [balanceChecked, setBalanceChecked] = useState(false);
   const [solRequired, setSolRequired] = useState(0.005);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  // null = use auto-recommended buffer; number = user override (in whole dollars).
+  const [bufferOverride, setBufferOverride] = useState<number | null>(null);
 
   const levDD = drawdownPercent * leverage;
   const levStreakDD = (streakDrawdownPercent || drawdownPercent) * leverage;
   const worstCaseLoss = Math.max(levDD, levStreakDD);
   const bufferMultiplier = 1.5;
-  const tradeSize = capitalNum > 0 ? capitalNum / (1 + (worstCaseLoss / 100) * bufferMultiplier) : 0;
-  const effectiveTradeSize = Math.floor(tradeSize);
-  const equityBuffer = capitalNum > 0 ? Math.ceil(capitalNum - tradeSize) : 0;
+  const autoTradeSize = capitalNum > 0 ? capitalNum / (1 + (worstCaseLoss / 100) * bufferMultiplier) : 0;
+  const autoBuffer = capitalNum > 0 ? Math.ceil(capitalNum - autoTradeSize) : 0;
+  // Apply override if set, but clamp it to [0, capitalNum] so the user can't
+  // push trade size negative or above capital.
+  const equityBuffer = bufferOverride !== null
+    ? Math.max(0, Math.min(Math.floor(capitalNum), bufferOverride))
+    : autoBuffer;
+  const effectiveTradeSize = Math.max(0, Math.floor(capitalNum) - equityBuffer);
   const bufferPercent = capitalNum > 0 ? (equityBuffer / capitalNum) * 100 : 0;
   const projectedProfit = capitalNum > 0 ? (profitPercent * leverage / 100) * effectiveTradeSize : 0;
   const projectedLoss = capitalNum > 0 ? (worstCaseLoss / 100) * effectiveTradeSize : 0;
@@ -4564,7 +4572,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                 <Input
                   type="number"
                   value={capital}
-                  onChange={(e) => setCapital(e.target.value)}
+                  onChange={(e) => { setCapital(e.target.value); setBufferOverride(null); }}
                   className="h-7 text-xs bg-white/5 border-white/10 text-white px-2"
                   min="1"
                   data-testid={`setup-capital-${leverage}x`}
@@ -4573,7 +4581,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                   <Button
                     type="button"
                     size="sm"
-                    onClick={() => setCapital(String(Math.floor(parseFloat(agentBalance))))}
+                    onClick={() => { setCapital(String(Math.floor(parseFloat(agentBalance!)))); setBufferOverride(null); }}
                     className="h-7 px-2.5 text-[9px] bg-white/10 hover:bg-white/20 text-white/80 shrink-0"
                     data-testid={`setup-capital-max-${leverage}x`}
                   >
@@ -4596,15 +4604,36 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                     <span className="text-xs font-bold text-white tabular-nums">${effectiveTradeSize.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between items-center">
-                    <span className="text-[10px] text-white/40">Equity Buffer</span>
-                    <span className="text-xs font-bold text-indigo-400 tabular-nums">+${equityBuffer.toLocaleString()}</span>
+                    <span className="text-[10px] text-white/40 flex items-center gap-1.5">
+                      Equity Buffer
+                      {bufferOverride !== null && (
+                        <button
+                          type="button"
+                          onClick={() => setBufferOverride(null)}
+                          className="text-[9px] text-violet-400 hover:text-violet-300 underline underline-offset-2"
+                          data-testid="button-reset-buffer"
+                        >
+                          reset
+                        </button>
+                      )}
+                    </span>
+                    <span className="text-xs font-bold text-indigo-400 tabular-nums" data-testid="text-equity-buffer">+${equityBuffer.toLocaleString()}</span>
                   </div>
-                  <div className="w-full h-1.5 bg-white/5 rounded-full overflow-hidden">
-                    <div className="h-full bg-violet-500 rounded-full" style={{ width: `${Math.min(100, ((effectiveTradeSize / capitalNum) * 100))}%` }} />
-                  </div>
+                  <Slider
+                    value={[equityBuffer]}
+                    min={0}
+                    max={Math.max(1, Math.floor(capitalNum))}
+                    step={1}
+                    onValueChange={(v) => setBufferOverride(v[0] ?? 0)}
+                    className="py-1"
+                    data-testid="slider-equity-buffer"
+                  />
                   <div className="flex justify-between text-[9px] text-white/30">
                     <span>{((effectiveTradeSize / capitalNum) * 100).toFixed(0)}% trading</span>
-                    <span>{bufferPercent.toFixed(0)}% buffer</span>
+                    <span>
+                      {bufferPercent.toFixed(0)}% buffer
+                      {bufferOverride === null && <span className="text-white/20"> (auto)</span>}
+                    </span>
                   </div>
                 </div>
 
