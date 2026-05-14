@@ -4187,8 +4187,12 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const PACIFICA_MIN_DEPOSIT = 10;
   const canShowCreateButton = capitalNum > 0 && survivable && ticker && timeframe;
 
-  const fetchBalanceAndAgent = useCallback(async () => {
-    if (!walletAddress || balanceChecked) return;
+  // `force` bypasses the balanceChecked guard — used after a deposit so the
+  // freshly-funded wallet balance gets re-fetched without waiting for the
+  // popover to be reopened.
+  const fetchBalanceAndAgent = useCallback(async (force = false) => {
+    if (!walletAddress) return;
+    if (!force && balanceChecked) return;
     setBalanceLoading(true);
     try {
       const balRes = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
@@ -4244,9 +4248,22 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       const signature = await connection.sendRawTransaction(signedTx.serialize());
       await confirmTransactionWithFallback(connection, { signature, blockhash, lastValidBlockHeight });
       toast({ title: `Deposited $${rounded.toFixed(2)} USDC successfully` });
-      // Refresh wallet balance so the warning clears and Create Bot becomes enabled.
-      setBalanceChecked(false);
-      await fetchBalanceAndAgent();
+      // Re-fetch wallet balance so the form sees the new funds and the
+      // Deposit button flips back to Create Bot — no need to close & reopen
+      // the popover. Small settle delay because the balance API can lag the
+      // on-chain confirmation by a beat. We also retry once if the new
+      // balance still looks short, since indexers occasionally return stale
+      // reads right after a deposit.
+      const expectedMin = (parseFloat(agentBalance || '0')) + rounded - 0.01;
+      const refresh = async () => { await fetchBalanceAndAgent(true); };
+      await new Promise(r => setTimeout(r, 1500));
+      await refresh();
+      // If still under-reported, give it one more shot.
+      const after = parseFloat(agentBalance || '0');
+      if (after < expectedMin) {
+        await new Promise(r => setTimeout(r, 2500));
+        await refresh();
+      }
     } catch (error: any) {
       console.error('USDC deposit failed:', error);
       toast({
