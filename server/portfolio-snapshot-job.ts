@@ -1,6 +1,7 @@
 import { storage } from "./storage";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
 import { getAgentUsdcBalance } from "./agent-wallet";
+import { reconcileWalletDeposits } from "./deposit-reconciler";
 import type { TradingBot, Wallet } from "@shared/schema";
 
 function _subIdStr(subAccountId: number): string | undefined {
@@ -99,6 +100,8 @@ async function processWalletSnapshot(walletAddress: string): Promise<void> {
     }
   }
   
+  // Backfill any deposits the client-side confirmation missed before reading totals.
+  await reconcileWalletDeposits(walletAddress);
   const { deposits, withdrawals } = await storage.getWalletCumulativeDepositsWithdrawals(walletAddress);
   const { totalTrades, totalVolume } = await storage.getWalletTradeStats(walletAddress);
   const creatorEarnings = await storage.getWalletCreatorEarnings(walletAddress);

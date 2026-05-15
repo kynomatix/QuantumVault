@@ -14,6 +14,7 @@ import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { getAgentKeypair } from './agent-wallet';
+import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
 
 function _subIdStr(subAccountId: number): string | undefined {
@@ -12259,6 +12260,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
       }
       
+      // Backfill any deposits the client-side confirmation missed before reading totals.
+      // Cached per-wallet for 5 minutes inside the reconciler so this stays cheap.
+      await reconcileWalletDeposits(walletAddress);
+
       // Get cumulative deposits and withdrawals
       const { deposits, withdrawals } = await storage.getWalletCumulativeDepositsWithdrawals(walletAddress);
       
