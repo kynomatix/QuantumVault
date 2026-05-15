@@ -14,6 +14,7 @@ import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { getAgentKeypair } from './agent-wallet';
+import { publicPortfolioHandler } from './public-portfolio';
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -2411,6 +2412,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     res.setHeader("Content-Type", "text/markdown; charset=utf-8");
     res.send(DOCS_MARKDOWN);
   });
+
+  // Public API: Portfolio aggregation (no auth required) - powers SonarWatch
+  // QuantumVault plugin for jup.ag/portfolio. Returns portfolio-safe fields
+  // only; rate-limited per IP and per wallet, with a 30s response cache.
+  app.get("/api/public/portfolio", publicPortfolioHandler);
 
   // Public API: Platform metrics (no auth required) - for landing page
   app.get("/api/metrics", async (req, res) => {
