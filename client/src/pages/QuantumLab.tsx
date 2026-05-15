@@ -4193,7 +4193,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const enableReinvest = leverage <= 5 && drawdownPercent < 15;
 
   const PACIFICA_MIN_DEPOSIT = 10;
-  const canShowCreateButton = capitalNum > 0 && survivable && ticker && timeframe;
+  const canShowCreateButton = capitalNum > 0 && ticker && timeframe;
 
   // `force` bypasses the balanceChecked guard — used after a deposit so the
   // freshly-funded wallet balance gets re-fetched without waiting for the
@@ -4669,7 +4669,11 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                 {!survivable && (
                   <div className="flex items-start gap-2 p-2.5 rounded bg-purple-500/10 border border-purple-500/20">
                     <AlertTriangle className="w-3 h-3 text-purple-400 shrink-0 mt-0.5" />
-                    <p className="text-[10px] text-purple-300 leading-relaxed">Drawdown at {leverage}x exceeds 80%. High liquidation risk — consider lower leverage.</p>
+                    <p className="text-[10px] text-purple-300 leading-relaxed">
+                      {levStreakDD > levDD
+                        ? `Worst-case leveraged drawdown at ${leverage}x is ~${levStreakDD.toFixed(0)}% (based on losing-streak DD). High liquidation risk — consider lower leverage.`
+                        : `Drawdown at ${leverage}x is ~${levDD.toFixed(0)}%, exceeding 80%. High liquidation risk — consider lower leverage.`}
+                    </p>
                   </div>
                 )}
                 {survivable && enableTopUp && (
