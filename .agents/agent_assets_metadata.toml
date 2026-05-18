@@ -12,9 +12,3 @@ id = "B_lrcQPSAqvPMdhv-ahkS"
 uri = "file://docs/pacifica-open-questions-email.md"
 type = "text"
 title = "Pacifica Open Questions Email"
-
-[[outputs]]
-id = "OLpzSsHlRiRClQBxym6Me"
-uri = "file://.local/quantumvault-pre-migration-backup.csv"
-type = "table"
-title = "QuantumVault pre-migration sealed backup (13 wallets)"
