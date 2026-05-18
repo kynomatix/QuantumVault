@@ -245,6 +245,11 @@ export interface IStorage {
     policyHmac?: string;
   }): Promise<Wallet | undefined>;
 
+  // V3 Phase 0: monitor UMK-at-rest re-keying progress.
+  getUmkVersionDistribution(): Promise<Array<{ umkVersion: number; count: number }>>;
+  // V3 Phase 0: startup health check - returns true if any wallet row has umk_version >= 3.
+  hasAnyUmkV3OrAbove(): Promise<boolean>;
+
   // Security v3: Execution authorization
   updateWalletExecution(address: string, updates: {
     executionEnabled: boolean;
@@ -1720,6 +1725,29 @@ export class DatabaseStorage implements IStorage {
   }): Promise<Wallet | undefined> {
     const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
     return result[0];
+  }
+
+  // V3 Phase 0: UMK-at-rest re-keying progress monitor.
+  // Group by umk_version so operators can confirm every initialized wallet
+  // reaches v3 after the Phase 0 backfill window closes.
+  async getUmkVersionDistribution(): Promise<Array<{ umkVersion: number; count: number }>> {
+    const rows = await db.execute<{ umk_version: number; count: string }>(sql`
+      SELECT umk_version, COUNT(*)::text AS count
+        FROM wallets
+       GROUP BY umk_version
+       ORDER BY umk_version
+    `);
+    return rows.rows.map(r => ({ umkVersion: Number(r.umk_version), count: Number(r.count) }));
+  }
+
+  // V3 Phase 0: startup health-check input.
+  // Returns true if at least one wallet row has umk_version >= 3. Once that's
+  // true, UMK_STORAGE_SECRET MUST be configured or those users lose UMK access.
+  async hasAnyUmkV3OrAbove(): Promise<boolean> {
+    const rows = await db.execute<{ exists: boolean }>(sql`
+      SELECT EXISTS (SELECT 1 FROM wallets WHERE umk_version >= 3) AS exists
+    `);
+    return Boolean(rows.rows[0]?.exists);
   }
 
   // Security v3: Execution authorization

@@ -78,6 +78,103 @@ function generateSessionId(): string {
   return generateNonce();
 }
 
+// UMK-at-rest storage key derivation.
+//
+// Two versions exist on disk concurrently during the V3 legacy retirement
+// migration (see docs/V3_LEGACY_RETIREMENT_PLAN.md Phase 0):
+//
+//   v2 (legacy at-rest):  SHA-256(address || salt || AGENT_ENCRYPTION_KEY)
+//   v3 (current at-rest): SHA-256("UMK_V3" || address || salt || UMK_STORAGE_SECRET)
+//
+// v2 is kept ONLY for backward read on first sign-in. After a successful v2
+// decrypt we atomically re-encrypt as v3 in a single SQL UPDATE (the row's
+// `umk_version` flips from 2 to 3 in the same write that swaps the ciphertext).
+//
+// Reasoning for the v3 derivation:
+//   - The "UMK_V3" domain-separation prefix prevents any chance of v2/v3
+//     ciphertext confusion if the two env vars were ever equal.
+//   - The signature is used for authentication only, never for the key.
+//   - This call is on the login hot path; SHA-256 is intentional.
+
+const UMK_V3_DOMAIN = Buffer.from('UMK_V3', 'utf8');
+
+function getStorageKeyV2(address: string, salt: Buffer): Buffer {
+  const serverSecret = process.env.AGENT_ENCRYPTION_KEY;
+  if (!serverSecret) {
+    throw new Error('AGENT_ENCRYPTION_KEY is required to read v2 UMK');
+  }
+  const keyMaterial = Buffer.concat([
+    Buffer.from(address, 'utf8'),
+    salt,
+    Buffer.from(serverSecret, 'hex'),
+  ]);
+  return nodeCrypto.createHash('sha256').update(keyMaterial).digest();
+}
+
+const UMK_STORAGE_SECRET_HEX_RE = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * Strict validator for UMK_STORAGE_SECRET. Used by both the v3 storage-key
+ * derivation and the startup health check so they cannot disagree about what
+ * "configured" means. Returns the decoded 32-byte buffer or throws loudly.
+ *
+ * Why strict: a non-hex 64-char string would silently decode to a short or
+ * empty buffer in Node, producing low-entropy / undefined v3 key material.
+ * That would violate the domain-separation invariant and could brick UMK
+ * access. Belt-and-braces: regex match, hex decode, and 32-byte length check.
+ */
+function decodeUmkStorageSecretOrThrow(): Buffer {
+  const storageSecret = process.env.UMK_STORAGE_SECRET;
+  if (!storageSecret || !UMK_STORAGE_SECRET_HEX_RE.test(storageSecret)) {
+    throw new Error(
+      'UMK_STORAGE_SECRET must be set to exactly 64 hex chars (32 bytes) ' +
+      'before any wallet reaches umk_version >= 3. See V3_MIGRATION.md Phase 0.'
+    );
+  }
+  const decoded = Buffer.from(storageSecret, 'hex');
+  if (decoded.length !== 32) {
+    throw new Error(
+      'UMK_STORAGE_SECRET decoded to ' + decoded.length + ' bytes, expected 32. ' +
+      'Refusing to derive v3 storage key with malformed secret.'
+    );
+  }
+  return decoded;
+}
+
+function getStorageKeyV3(address: string, salt: Buffer): Buffer {
+  const storageSecret = decodeUmkStorageSecretOrThrow();
+  const keyMaterial = Buffer.concat([
+    UMK_V3_DOMAIN,
+    Buffer.from(address, 'utf8'),
+    salt,
+    storageSecret,
+  ]);
+  return nodeCrypto.createHash('sha256').update(keyMaterial).digest();
+}
+
+/**
+ * Exported for the startup health check in server/db.ts so it uses the
+ * exact same strict-validation logic as the runtime derivation. Returns
+ * true only if the secret decodes to a clean 32-byte buffer.
+ */
+export function isUmkStorageSecretValid(): boolean {
+  try {
+    decodeUmkStorageSecretOrThrow();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Backfill-progress monitor: returns the distribution of `umk_version` across
+ * the wallets table. Phase 0 acceptance gate: every initialized wallet ends up
+ * at v3. Shell wallets (no UMK) stay at v0 and are excluded from the count.
+ */
+export async function getUmkVersionDistribution(): Promise<Array<{ umkVersion: number; count: number }>> {
+  return storage.getUmkVersionDistribution();
+}
+
 export async function initializeWalletSecurity(
   walletAddress: string,
   signature: Uint8Array
@@ -88,93 +185,116 @@ export async function initializeWalletSecurity(
   let userSalt: Buffer;
   let umk: Buffer;
   
-  // The UMK is encrypted with a stable key derived from (wallet + salt + server secret)
-  // This allows decryption on any valid session after signature verification
-  // The signature is used for AUTHENTICATION only, not for the encryption key
-  const getStorageKey = (address: string, salt: Buffer): Buffer => {
-    const serverSecret = process.env.AGENT_ENCRYPTION_KEY;
-    if (!serverSecret) {
-      throw new Error('AGENT_ENCRYPTION_KEY is required');
-    }
-    const keyMaterial = Buffer.concat([
-      Buffer.from(address, 'utf8'),
-      salt,
-      Buffer.from(serverSecret, 'hex'),
-    ]);
-    return nodeCrypto.createHash('sha256').update(keyMaterial).digest();
-  };
-  
   if (isNewWallet) {
+    // New wallet: generate a fresh UMK and write it as v3 directly. We never
+    // create a new v2 row again, so no wallet created after Phase 0 needs the
+    // v2->v3 backfill.
     userSalt = generateUserSalt();
     umk = generateUMK();
-    
-    const storageKey = getStorageKey(walletAddress, userSalt);
+
+    const storageKey = getStorageKeyV3(walletAddress, userSalt);
     const aad = buildAAD(walletAddress, 'UMK');
     const encryptedUmk = encryptToBase64(umk, storageKey, aad);
-    
+
     await storage.updateWalletSecurityV3(walletAddress, {
       userSalt: userSalt.toString('hex'),
       encryptedUserMasterKey: encryptedUmk,
-      umkVersion: 2, // Version 2 uses stable storage key
+      umkVersion: 3,
     });
-    
+
     zeroizeBuffer(storageKey);
   } else {
     userSalt = Buffer.from(wallet!.userSalt!, 'hex');
-    
-    // Check UMK version - version 1 used signature-derived key (broken), version 2 uses stable key
     const umkVersion = wallet!.umkVersion || 1;
-    
+    const aad = buildAAD(walletAddress, 'UMK');
+
     if (umkVersion === 1) {
-      // Legacy v1: Re-generate UMK with new stable key (migration)
-      // This is a one-time migration for wallets created with the broken v1 approach
-      console.log(`[Security v3] Migrating wallet ${walletAddress.slice(0, 8)}... from UMK v1 to v2`);
+      // Legacy v1 used a broken signature-derived key. The historical migration
+      // re-generated the UMK (no v1 ciphertext is decryptable). Same logic
+      // applies here, except we now jump straight to v3 and skip the v2 hop.
+      console.log(`[Security v3] Migrating wallet ${walletAddress.slice(0, 8)}... from UMK v1 directly to v3`);
       umk = generateUMK();
-      
-      const storageKey = getStorageKey(walletAddress, userSalt);
-      const aad = buildAAD(walletAddress, 'UMK');
+
+      const storageKey = getStorageKeyV3(walletAddress, userSalt);
       const encryptedUmk = encryptToBase64(umk, storageKey, aad);
-      
+
       await storage.updateWalletSecurityV3(walletAddress, {
         encryptedUserMasterKey: encryptedUmk,
-        umkVersion: 2,
+        umkVersion: 3,
       });
-      
+
       zeroizeBuffer(storageKey);
-    } else {
-      // Version 2: Use stable storage key
-      const storageKey = getStorageKey(walletAddress, userSalt);
-      const aad = buildAAD(walletAddress, 'UMK');
-      
+    } else if (umkVersion === 2) {
+      // v2 -> v3 atomic re-key. Decrypt the existing UMK with the v2 storage
+      // key, re-encrypt with the v3 storage key, and persist the new ciphertext
+      // and version in a SINGLE SQL UPDATE so a crash mid-flight cannot leave
+      // the row in a half-migrated state. The UMK value itself does NOT change,
+      // so umkEncryptedForExecution (wrapped with SERVER_EXECUTION_KEY, not
+      // affected by this re-key) continues to round-trip.
+      const v2StorageKey = getStorageKeyV2(walletAddress, userSalt);
       try {
-        umk = decryptFromBase64(wallet!.encryptedUserMasterKey!, storageKey, aad);
+        umk = decryptFromBase64(wallet!.encryptedUserMasterKey!, v2StorageKey, aad);
       } catch (err) {
-        zeroizeBuffer(storageKey);
+        zeroizeBuffer(v2StorageKey);
+        // CRITICAL: never silently regenerate the UMK here - that would orphan
+        // umkEncryptedForExecution and break every downstream encrypted field.
+        // Surface the existing user-facing message and log loudly.
+        console.error(`[Security v3] v2 UMK decrypt FAILED for ${walletAddress.slice(0, 8)}... - cannot re-key. UMK regeneration is intentionally disabled.`);
         throw new Error('Unable to decrypt user master key - please contact support');
       }
-      
-      zeroizeBuffer(storageKey);
+      zeroizeBuffer(v2StorageKey);
+
+      const v3StorageKey = getStorageKeyV3(walletAddress, userSalt);
+      try {
+        const encryptedUmkV3 = encryptToBase64(umk, v3StorageKey, aad);
+
+        await storage.updateWalletSecurityV3(walletAddress, {
+          encryptedUserMasterKey: encryptedUmkV3,
+          umkVersion: 3,
+        });
+        console.log(`[Security v3] Re-keyed UMK from v2 to v3 for ${walletAddress.slice(0, 8)}...`);
+      } catch (err) {
+        zeroizeBuffer(v3StorageKey);
+        // The in-memory `umk` is still valid; only the on-disk re-key failed.
+        // We continue with the session (user can use the app) and will retry
+        // the re-key on the next sign-in. Log loudly so operators see it.
+        console.error(`[Security v3] v2->v3 re-key UPDATE failed for ${walletAddress.slice(0, 8)}...; continuing session with v2 ciphertext:`, err);
+        return finishLogin();
+      }
+      zeroizeBuffer(v3StorageKey);
+    } else if (umkVersion === 3) {
+      // v3 steady state.
+      const v3StorageKey = getStorageKeyV3(walletAddress, userSalt);
+      try {
+        umk = decryptFromBase64(wallet!.encryptedUserMasterKey!, v3StorageKey, aad);
+      } catch (err) {
+        zeroizeBuffer(v3StorageKey);
+        console.error(`[Security v3] v3 UMK decrypt FAILED for ${walletAddress.slice(0, 8)}... - check UMK_STORAGE_SECRET configuration.`);
+        throw new Error('Unable to decrypt user master key - please contact support');
+      }
+      zeroizeBuffer(v3StorageKey);
+    } else {
+      throw new Error(`Unsupported umk_version ${umkVersion} for ${walletAddress.slice(0, 8)}...`);
     }
   }
-  
-  const sessionId = generateSessionId();
-  const now = Date.now();
-  
-  sessions.set(sessionId, {
-    walletAddress,
-    umk,
-    createdAt: now,
-    expiresAt: now + SESSION_TTL_MS,
-  });
-  
-  // Migration: If legacy agent key exists but v3 is missing, migrate to v3
-  // Do this asynchronously to not block session creation
-  if (!isNewWallet && wallet?.agentPrivateKeyEncrypted && !wallet?.agentPrivateKeyEncryptedV3) {
-    migrateAgentKeyToV3(walletAddress, umk, wallet.agentPrivateKeyEncrypted)
-      .catch(err => console.error('[Security] Agent key migration failed (non-blocking):', err));
+
+  function finishLogin(): { sessionId: string; isNewWallet: boolean } {
+    const sessionId = generateSessionId();
+    const now = Date.now();
+    sessions.set(sessionId, {
+      walletAddress,
+      umk,
+      createdAt: now,
+      expiresAt: now + SESSION_TTL_MS,
+    });
+    if (!isNewWallet && wallet?.agentPrivateKeyEncrypted && !wallet?.agentPrivateKeyEncryptedV3) {
+      migrateAgentKeyToV3(walletAddress, umk, wallet.agentPrivateKeyEncrypted)
+        .catch(err => console.error('[Security] Agent key migration failed (non-blocking):', err));
+    }
+    return { sessionId, isNewWallet };
   }
-  
-  return { sessionId, isNewWallet };
+
+  return finishLogin();
 }
 
 export function getSession(sessionId: string): SessionData | null {

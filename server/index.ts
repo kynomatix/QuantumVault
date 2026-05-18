@@ -3,7 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { storage } from "./storage";
-import { ensureSchema } from "./db";
+import { ensureSchema, checkUmkStorageSecretHealth } from "./db";
 import { startPeriodicReconciliation } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
@@ -384,6 +384,7 @@ app.use((req, res, next) => {
 
 (async () => {
   await ensureSchema();
+  await checkUmkStorageSecretHealth();
 
   try {
     const { db: appDb } = await import("./db");

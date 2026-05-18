@@ -11,7 +11,7 @@
 | Phase | Title | Status | Date |
 |-------|-------|--------|------|
 | -1 | Sealed pre-migration key backup | **COMPLETE** | May 18, 2026 |
-| 0  | UMK-at-rest re-keying | not started | — |
+| 0  | UMK-at-rest re-keying | **COMPLETE** | May 18, 2026 |
 | 1  | Audit, env health & legacy-use logging | not started | — |
 | 2  | Backfill the legacy-only holdout | not started | — |
 | 2.5 | `decryptAgentKeyStrict` helper | not started | — |
@@ -119,3 +119,102 @@ not touched in Phase -1.
 ### Next phase
 
 Strict-serial successor: **Phase 0 — UMK-at-rest re-keying**.
+
+---
+
+## Phase 0 — UMK-at-rest re-keying — COMPLETE (May 18, 2026)
+
+This is the committable evidence-of-execution for Phase 0. No secret
+material, no encrypted blobs, and no key values appear in this file.
+
+### What was done
+
+1. **New env secret `UMK_STORAGE_SECRET`** (64 hex chars) added to the
+   workspace via the Replit secrets store. Value is also paper-recorded
+   alongside `AGENT_ENCRYPTION_KEY` per the sealed-backup convention.
+   Length is validated at startup; format errors are loud.
+
+2. **Re-key path implemented in `server/session-v3.ts`.** The login flow
+   `initializeWalletSecurity` now branches:
+   - **v1 → v3:** legacy single-wallet path regenerates the UMK and
+     writes it sealed under the v3 storage key. Unchanged user-visible
+     behavior; `umk_version` flips from 1 to 3.
+   - **v2 → v3 (the migration core):** the existing UMK is decrypted
+     with the v2 storage key (derived from `SESSION_SECRET` +
+     wallet-specific salt) and **immediately** re-sealed under the v3
+     storage key (derived with the new domain prefix `"UMK_V3"` +
+     `UMK_STORAGE_SECRET` + wallet-specific salt). The re-key and the
+     `umk_version = 3` flag are written in a **single SQL UPDATE** so
+     no partial state can be observed by a concurrent reader. If v2
+     decrypt fails the request errors loudly — the code never silently
+     regenerates a UMK on a v2 wallet, which would orphan
+     `umk_encrypted_for_execution` (sealed under
+     `SERVER_EXECUTION_KEY`, which is independent of UMK storage).
+   - **v3 steady state:** noop re-derivation under the v3 key.
+   - **Brand-new (shell) wallets:** the `isNewWallet` branch writes
+     `umk_version = 3` directly. No v1/v2 row is ever created going
+     forward from this code path.
+
+3. **Storage-key domain separation.** `getStorageKeyV2` retains the
+   pre-existing derivation. `getStorageKeyV3` introduces a fresh
+   domain prefix (`"UMK_V3"`) and concatenates `UMK_STORAGE_SECRET`
+   before the wallet salt, so v3-sealed blobs are cryptographically
+   distinct from v2-sealed blobs even if `SESSION_SECRET` were ever
+   exposed. The two functions never share a code path.
+
+4. **Storage interface methods added** in `server/storage.ts`:
+   - `getUmkVersionDistribution()` — operator-facing histogram over
+     `wallets.umk_version`, used to confirm the v2-tail drains as
+     active users sign in.
+   - `hasAnyUmkV3OrAbove()` — boolean input to the startup health
+     check below.
+
+5. **Startup health check** added in `server/db.ts`
+   (`checkUmkStorageSecretHealth`) and wired into `server/index.ts`
+   immediately after `ensureSchema()`. Behavior:
+   - If at least one row has `umk_version >= 3` **and**
+     `UMK_STORAGE_SECRET` is missing/malformed → **process refuses to
+     boot.** This prevents a deploy without the v3 secret from silently
+     locking re-keyed users out of their UMK.
+   - On a fresh DB with no v3 rows yet, the check is a no-op so the
+     first Phase 0 deploy can boot before any user has signed in.
+   - Length validation is a fixed 64 hex chars to match the documented
+     secret format.
+
+### What was NOT done (out of scope, deferred to later phases)
+
+- `agent_private_key_encrypted` (legacy AES-GCM path) is **untouched**.
+  Phase 0 only re-keys the UMK at rest; legacy agent-key reads and
+  writes continue exactly as before. Phase 1 begins audit logging on
+  the legacy path; Phases 3–4 migrate readers; Phase 6 deletes it.
+- `umk_encrypted_for_execution` (sealed under `SERVER_EXECUTION_KEY`)
+  is **not** re-keyed in this phase — it's already independent of the
+  UMK-storage secret and lives on its own rotation timeline.
+- No backfill job was added. The v2-tail drains naturally as active
+  users sign in; cold/inactive wallets stay at `umk_version = 2` until
+  Phase 2 (legacy-only holdout backfill) addresses them.
+
+### Verification
+
+- `npx tsc --noEmit` — all new/changed files (`server/session-v3.ts`,
+  `server/db.ts`, `server/storage.ts`, `server/index.ts`) are
+  typeclean. Pre-existing typecheck errors in unrelated files
+  (`server/routes.ts`, `server/protocol/pacifica/*`) are unchanged.
+- Workflow restart succeeded; startup log shows
+  `[Startup] UMK_STORAGE_SECRET configured (v3 rows present: no)`
+  confirming the health check ran with the secret set on a fresh
+  Phase-0 deploy.
+- No exception path leaks plaintext UMK bytes; all in-memory buffers
+  go through the existing v3-key utilities that already follow the
+  zeroize-after-use convention from the v3 module.
+
+### Architect review
+
+A phase-specific architect review was run via the `code_review` skill
+before this task was marked complete; verdict and reviewer alias
+recorded in the merged PR notes.
+
+### Next phase
+
+Strict-serial successor: **Phase 1 — Audit, env health & legacy-use
+logging**.

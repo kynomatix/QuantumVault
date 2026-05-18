@@ -192,3 +192,56 @@ export async function ensureSchema() {
     client.release();
   }
 }
+
+/**
+ * V3 Phase 0 startup health-check.
+ *
+ * Once any wallet row has been re-keyed to umk_version >= 3, the server MUST
+ * have a valid UMK_STORAGE_SECRET configured or those users will be unable to
+ * decrypt their UMK at all. Fail fast at startup rather than at first login.
+ *
+ * On a fresh DB (no v3 rows yet) the check is a no-op so the very first deploy
+ * of Phase 0 doesn't refuse to boot before any user has signed in.
+ */
+export async function checkUmkStorageSecretHealth(): Promise<void> {
+  // Strict, shared validator — matches the runtime v3 storage-key derivation
+  // exactly (regex + hex decode + 32-byte length check). Never accept a
+  // weaker definition of "configured" here than the crypto code uses.
+  const { isUmkStorageSecretValid } = await import('./session-v3');
+  const secretOk = isUmkStorageSecretValid();
+
+  // Fail-CLOSED. If the DB lookup can't be completed we cannot prove the
+  // safety invariant (no v3 rows without a valid secret), so we refuse to
+  // boot rather than risk silently locking re-keyed users out of their UMK.
+  // The previous fail-open path was a high-severity gap flagged in review.
+  const client = await pool.connect();
+  let hasV3: boolean;
+  try {
+    const result = await client.query<{ exists: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM wallets WHERE umk_version >= 3) AS exists`
+    );
+    hasV3 = Boolean(result.rows[0]?.exists);
+  } catch (err: any) {
+    throw new Error(
+      '[Startup] FATAL: UMK health check could not query wallets table: ' +
+      (err?.message ?? String(err)) +
+      '. Refusing to boot - cannot prove UMK_STORAGE_SECRET safety invariant.'
+    );
+  } finally {
+    client.release();
+  }
+
+  if (hasV3 && !secretOk) {
+    throw new Error(
+      '[Startup] FATAL: UMK_STORAGE_SECRET is missing or malformed but at least one wallet ' +
+      'has umk_version >= 3. Refusing to boot - users would lose UMK access. ' +
+      'Set UMK_STORAGE_SECRET to the original 64-hex value used at re-keying.'
+    );
+  }
+
+  if (secretOk) {
+    console.log(`[Startup] UMK_STORAGE_SECRET configured (v3 rows present: ${hasV3 ? 'yes' : 'no'})`);
+  } else {
+    console.warn('[Startup] UMK_STORAGE_SECRET not configured. Safe for now (no v3 rows), but Phase 0 will require it once any wallet signs in.');
+  }
+}
