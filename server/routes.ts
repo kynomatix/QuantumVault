@@ -6958,6 +6958,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         let withdrawTxSignature: string | undefined;
         
         const botCtx = getBotSubaccountContext(bot);
+        let exists = false;
 
         if (botCtx && bot.protocolSubaccountId) {
           if (!wallet.agentPrivateKeyEncrypted) {
@@ -7026,7 +7027,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             decryptedBotKey?.cleanup();
           }
         } else {
-          const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
+          exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
 
           if (exists) {
             const balance = await getExchangeBalance(agentAddress, bot.driftSubaccountId);
