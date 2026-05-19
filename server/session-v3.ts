@@ -190,20 +190,47 @@ export async function initializeWalletSecurity(
     // New wallet: generate a fresh UMK and write it as v3 directly. We never
     // create a new v2 row again, so no wallet created after Phase 0 needs the
     // v2->v3 backfill.
+    //
+    // RACE GUARD: two concurrent unlock_umk verify calls (e.g. frontend
+    // re-authenticates because it saw agentPublicKey:null before the first
+    // call finished) can both see isNewWallet=true and generate different UMKs.
+    // If the second call overwrites the first call's UMK in the DB, the agent
+    // key (encrypted with the first UMK) becomes permanently undecryptable.
+    // We use an atomic conditional UPDATE (WHERE user_salt IS NULL) so that
+    // only the first writer wins. Losers discard their generated UMK and
+    // re-derive the winner's UMK from the DB.
     userSalt = generateUserSalt();
     umk = generateUMK();
 
     const storageKey = getStorageKeyV3(walletAddress, userSalt);
     const aad = buildAAD(walletAddress, 'UMK');
     const encryptedUmk = encryptToBase64(umk, storageKey, aad);
-
-    await storage.updateWalletSecurityV3(walletAddress, {
-      userSalt: userSalt.toString('hex'),
-      encryptedUserMasterKey: encryptedUmk,
-      umkVersion: 3,
-    });
-
     zeroizeBuffer(storageKey);
+
+    const won = await storage.initWalletUmkIfAbsent(
+      walletAddress,
+      userSalt.toString('hex'),
+      encryptedUmk,
+    );
+
+    if (!won) {
+      // Lost the race: another concurrent request already wrote the UMK.
+      // Discard our generated UMK and re-derive from DB so the session we
+      // create carries the same UMK that encrypted the agent key.
+      zeroizeBuffer(umk);
+      wallet = await storage.getWallet(walletAddress);
+      if (!wallet?.userSalt || !wallet.encryptedUserMasterKey) {
+        throw new Error('Race condition: concurrent UMK init lost but DB has no UMK');
+      }
+      userSalt = Buffer.from(wallet.userSalt, 'hex');
+      const winnerStorageKey = getStorageKeyV3(walletAddress, userSalt);
+      try {
+        umk = decryptFromBase64(wallet.encryptedUserMasterKey, winnerStorageKey, buildAAD(walletAddress, 'UMK'));
+      } finally {
+        zeroizeBuffer(winnerStorageKey);
+      }
+      console.log(`[Security v3] UMK init race resolved for ${walletAddress.slice(0, 8)}... (re-derived winner UMK)`);
+    }
   } else {
     userSalt = Buffer.from(wallet!.userSalt!, 'hex');
     const umkVersion = wallet!.umkVersion || 1;
@@ -291,6 +318,22 @@ export async function initializeWalletSecurity(
     if (!isNewWallet && wallet?.agentPrivateKeyEncrypted && !wallet?.agentPrivateKeyEncryptedV3) {
       migrateAgentKeyToV3(walletAddress, umk, wallet.agentPrivateKeyEncrypted)
         .catch(err => console.error('[Security] Agent key migration failed (non-blocking):', err));
+    }
+    // Detect and repair broken V3 keys caused by the UMK race condition on
+    // initial registration (two concurrent unlock_umk calls both saw
+    // isNewWallet=true and generated different UMKs; the second call's UMK
+    // overwrote the first in the DB, but the agent key was encrypted with the
+    // first call's UMK). If both legacy and V3 exist but V3 won't decrypt with
+    // the current UMK, re-migrate from legacy. Non-blocking; safe to retry.
+    if (!isNewWallet && wallet?.agentPrivateKeyEncrypted && wallet?.agentPrivateKeyEncryptedV3) {
+      try {
+        const probe = decryptAgentKeyV3(umk, wallet.agentPrivateKeyEncryptedV3, walletAddress);
+        zeroizeBuffer(probe);
+      } catch {
+        console.warn(`[Security v3] Stale V3 key detected for ${walletAddress.slice(0, 8)}... (UMK race). Re-migrating from legacy.`);
+        migrateAgentKeyToV3(walletAddress, umk, wallet.agentPrivateKeyEncrypted)
+          .catch(err => console.error('[Security] Agent key re-migration failed (non-blocking):', err));
+      }
     }
     // Phase 4b: opportunistically backfill any bot subaccount keys that are
     // still legacy-only. Background, non-blocking; logs failures.

@@ -252,6 +252,16 @@ export interface IStorage {
     policyHmac?: string;
   }): Promise<Wallet | undefined>;
 
+  /**
+   * Atomic "first-writer-wins" UMK initialiser.
+   * Writes userSalt + encryptedUserMasterKey + umkVersion=3 only when the row
+   * currently has user_salt IS NULL. Returns true if this call wrote the row
+   * (won the race), false if another call had already written (lost the race).
+   * Callers that lose the race must discard their generated UMK and re-derive
+   * the winner's UMK from the DB.
+   */
+  initWalletUmkIfAbsent(address: string, userSalt: string, encryptedUserMasterKey: string): Promise<boolean>;
+
   // V3 Phase 0: monitor UMK-at-rest re-keying progress.
   getUmkVersionDistribution(): Promise<Array<{ umkVersion: number; count: number }>>;
   // V3 Phase 0: startup health check - returns true if any wallet row has umk_version >= 3.
@@ -1763,6 +1773,18 @@ export class DatabaseStorage implements IStorage {
   }): Promise<Wallet | undefined> {
     const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
     return result[0];
+  }
+
+  async initWalletUmkIfAbsent(address: string, userSalt: string, encryptedUserMasterKey: string): Promise<boolean> {
+    const result = await db.execute(sql`
+      UPDATE wallets
+         SET user_salt = ${userSalt},
+             encrypted_user_master_key = ${encryptedUserMasterKey},
+             umk_version = 3
+       WHERE address = ${address}
+         AND user_salt IS NULL
+    `);
+    return (result.rowCount ?? 0) > 0;
   }
 
   // V3 Phase 0: UMK-at-rest re-keying progress monitor.
