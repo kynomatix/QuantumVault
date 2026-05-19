@@ -208,27 +208,25 @@ export async function checkUmkStorageSecretHealth(): Promise<void> {
   // exactly (regex + hex decode + 32-byte length check). Never accept a
   // weaker definition of "configured" here than the crypto code uses.
   const { isUmkStorageSecretValid } = await import('./session-v3');
+  const { storage } = await import('./storage');
   const secretOk = isUmkStorageSecretValid();
 
   // Fail-CLOSED. If the DB lookup can't be completed we cannot prove the
   // safety invariant (no v3 rows without a valid secret), so we refuse to
   // boot rather than risk silently locking re-keyed users out of their UMK.
   // The previous fail-open path was a high-severity gap flagged in review.
-  const client = await pool.connect();
+  // Delegated to the IStorage method so the check and any future
+  // operator-facing surface (e.g. /admin/umk-status) cannot drift apart.
   let hasV3: boolean;
   try {
-    const result = await client.query<{ exists: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM wallets WHERE umk_version >= 3) AS exists`
-    );
-    hasV3 = Boolean(result.rows[0]?.exists);
-  } catch (err: any) {
+    hasV3 = await storage.hasAnyUmkV3OrAbove();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
       '[Startup] FATAL: UMK health check could not query wallets table: ' +
-      (err?.message ?? String(err)) +
+      msg +
       '. Refusing to boot - cannot prove UMK_STORAGE_SECRET safety invariant.'
     );
-  } finally {
-    client.release();
   }
 
   if (hasV3 && !secretOk) {
