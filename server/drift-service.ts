@@ -2849,8 +2849,14 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
       console.log(`[Executor] ${text.trim()}`);
       if (!keyReceivedAcked && text.includes('[Executor] KEY_RECEIVED')) {
         keyReceivedAcked = true;
-        // Child has the secret in its address space — safe to release ours.
+        // Child has the secret in its address space — release every parent-
+        // side reference we control: the serialized stdin payload AND the
+        // plaintext field on the original command object. Caller locals
+        // (`tradeKeyBase58`, `closeKeyBase58`, etc.) go out of scope when
+        // their enclosing function returns. JS strings are immutable, so we
+        // can only drop references (eligible for GC), not zero them in place.
         pendingPayload = null;
+        try { (command as Record<string, unknown>).privateKeyBase58 = ''; } catch {}
       }
     });
     
