@@ -562,25 +562,17 @@ async function notifyRetryResult(job: RetryJob, success: boolean, error?: string
 }
 
 async function processRetryJob(job: RetryJob): Promise<void> {
-  job.attempts++;
-  console.log(`[TradeRetry] Processing ${job.priority} job ${job.id}: ${job.side} ${job.market} (attempt ${job.attempts}/${job.maxAttempts})`);
-  
-  // CRITICAL: Persist attempts to database to prevent infinite retries across server restarts
-  try {
-    await storage.updateTradeRetryJob(job.id, { attempts: job.attempts });
-  } catch (dbErr) {
-    console.warn(`[TradeRetry] Failed to persist attempts count:`, dbErr);
-  }
-
   // V3 Phase 4: strict-decrypt the agent key on each run via UMK +
   // wallet.agentPrivateKeyEncryptedV3. Never use the legacy encrypted blob.
   // If execution is disabled (revoked / emergency-stopped) or V3 envelope
-  // is missing, keep the job pending and retry next cycle.
+  // is missing, keep the job pending and retry next cycle WITHOUT burning
+  // an attempt — auth-unavailable is not a trade-execution failure, and
+  // the user must be able to re-enable execution and have the trade fire.
   const wallet = await storage.getWallet(job.walletAddress);
   if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
-    console.error(`[TradeRetry] Job ${job.id}: wallet missing V3 envelope or public key; deferring`);
+    console.error(`[TradeRetry] Job ${job.id}: wallet missing V3 envelope or public key; deferring (attempt budget preserved)`);
     job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
-    job.lastError = 'Agent wallet missing V3 envelope or public key';
+    job.lastError = 'Agent wallet missing V3 envelope or public key (paused, attempt budget preserved)';
     try {
       await storage.updateTradeRetryJob(job.id, {
         nextRetryAt: new Date(job.nextRetryAt),
@@ -592,9 +584,9 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   const umkResult = await getUmkForWebhook(job.walletAddress);
   if (!umkResult) {
     const reason = wallet.emergencyStopTriggered ? 'emergency_stopped' : 'execution_disabled';
-    console.warn(`[TradeRetry] Job ${job.id}: ${reason}; keeping pending`);
+    console.warn(`[TradeRetry] Job ${job.id}: ${reason}; keeping pending (attempt budget preserved)`);
     job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
-    job.lastError = `Execution authorization unavailable (${reason})`;
+    job.lastError = `Execution authorization unavailable (${reason}); paused, attempt budget preserved`;
     try {
       await storage.updateTradeRetryJob(job.id, {
         nextRetryAt: new Date(job.nextRetryAt),
@@ -611,9 +603,9 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   );
   if (!agentKeyResult) {
     umkResult.cleanup();
-    console.error(`[TradeRetry] Job ${job.id}: V3 strict decrypt failed; deferring`);
+    console.error(`[TradeRetry] Job ${job.id}: V3 strict decrypt failed; deferring (attempt budget preserved)`);
     job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
-    job.lastError = 'V3 strict decrypt failed for agent key';
+    job.lastError = 'V3 strict decrypt failed for agent key (paused, attempt budget preserved)';
     try {
       await storage.updateTradeRetryJob(job.id, {
         nextRetryAt: new Date(job.nextRetryAt),
@@ -623,6 +615,18 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     return;
   }
   const agentSecretKey = agentKeyResult.secretKey;
+
+  // V3 Phase 4: only increment attempts AFTER V3 authorization succeeds.
+  // Auth-unavailable returns above never burn the retry budget so a user
+  // who temporarily disabled execution can re-enable and have the trade
+  // execute. Persist immediately so a crash mid-retry survives restart.
+  job.attempts++;
+  console.log(`[TradeRetry] Processing ${job.priority} job ${job.id}: ${job.side} ${job.market} (attempt ${job.attempts}/${job.maxAttempts})`);
+  try {
+    await storage.updateTradeRetryJob(job.id, { attempts: job.attempts });
+  } catch (dbErr) {
+    console.warn(`[TradeRetry] Failed to persist attempts count:`, dbErr);
+  }
 
   try {
     let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string };

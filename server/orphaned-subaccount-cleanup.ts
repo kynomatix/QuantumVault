@@ -62,20 +62,21 @@ export async function cleanupOrphanedSubaccounts(): Promise<void> {
       
       try {
         // V3 Phase 4: strict-decrypt the agent key via UMK + the wallet's v3
-        // envelope. If execution is disabled (revoked / emergency-stopped) or
-        // V3 envelope is missing, defer to the next cleanup cycle.
+        // envelope. Auth-unavailable states (missing V3 envelope, execution
+        // disabled / emergency-stopped, strict decrypt failure) DO NOT burn
+        // the 5-attempt retry budget — bumping retry_count for an auth-paused
+        // wallet would permanently max out cleanup before the user can
+        // re-enable execution. Defer to the next cleanup cycle instead.
         const wallet = await storage.getWallet(entry.walletAddress);
         if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
-          console.warn(`[OrphanedCleanup] Wallet ${entry.walletAddress.slice(0,8)}... missing V3 envelope or public key; deferring`);
-          await storage.updateOrphanedSubaccountRetry(entry.id);
+          console.warn(`[OrphanedCleanup] Wallet ${entry.walletAddress.slice(0,8)}... missing V3 envelope or public key; deferring (retry budget preserved)`);
           await new Promise(resolve => setTimeout(resolve, 2000));
           continue;
         }
         const umkResult = await getUmkForWebhook(entry.walletAddress);
         if (!umkResult) {
           const reason = wallet.emergencyStopTriggered ? 'emergency_stopped' : 'execution_disabled';
-          console.warn(`[OrphanedCleanup] Wallet ${entry.walletAddress.slice(0,8)}...: ${reason}; deferring`);
-          await storage.updateOrphanedSubaccountRetry(entry.id);
+          console.warn(`[OrphanedCleanup] Wallet ${entry.walletAddress.slice(0,8)}...: ${reason}; deferring (retry budget preserved)`);
           await new Promise(resolve => setTimeout(resolve, 2000));
           continue;
         }
@@ -87,8 +88,7 @@ export async function cleanupOrphanedSubaccounts(): Promise<void> {
         );
         if (!agentKeyResult) {
           umkResult.cleanup();
-          console.error(`[OrphanedCleanup] V3 strict decrypt failed for ${entry.walletAddress.slice(0,8)}...; deferring`);
-          await storage.updateOrphanedSubaccountRetry(entry.id);
+          console.error(`[OrphanedCleanup] V3 strict decrypt failed for ${entry.walletAddress.slice(0,8)}...; deferring (retry budget preserved)`);
           await new Promise(resolve => setTimeout(resolve, 2000));
           continue;
         }
