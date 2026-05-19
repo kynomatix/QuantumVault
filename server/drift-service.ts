@@ -2838,6 +2838,9 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     // discipline required by Phase 4c.
     let pendingPayload: string | null = null;
     let keyReceivedAcked = false;
+    // Line-buffer the stderr stream so the `KEY_RECEIVED` ACK match cannot
+    // be defeated by an OS-level chunk split landing mid-token.
+    let stderrLineBuf = '';
 
     child.stdout.on('data', (data) => {
       stdout += data.toString();
@@ -2847,16 +2850,27 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
       const text = data.toString();
       stderr += text;
       console.log(`[Executor] ${text.trim()}`);
-      if (!keyReceivedAcked && text.includes('[Executor] KEY_RECEIVED')) {
-        keyReceivedAcked = true;
-        // Child has the secret in its address space — release every parent-
-        // side reference we control: the serialized stdin payload AND the
-        // plaintext field on the original command object. Caller locals
-        // (`tradeKeyBase58`, `closeKeyBase58`, etc.) go out of scope when
-        // their enclosing function returns. JS strings are immutable, so we
-        // can only drop references (eligible for GC), not zero them in place.
-        pendingPayload = null;
-        try { (command as Record<string, unknown>).privateKeyBase58 = ''; } catch {}
+      if (!keyReceivedAcked) {
+        stderrLineBuf += text;
+        let nl: number;
+        while ((nl = stderrLineBuf.indexOf('\n')) !== -1) {
+          const line = stderrLineBuf.slice(0, nl);
+          stderrLineBuf = stderrLineBuf.slice(nl + 1);
+          if (line.includes('[Executor] KEY_RECEIVED')) {
+            keyReceivedAcked = true;
+            // Child has the secret in its address space — release every
+            // parent-side reference we control: the serialized stdin payload
+            // AND the plaintext field on the original command object. Caller
+            // locals (`tradeKeyBase58`, `closeKeyBase58`, etc.) go out of
+            // scope when their enclosing function returns. JS strings are
+            // immutable, so we can only drop references (eligible for GC),
+            // not zero them in place.
+            pendingPayload = null;
+            stderrLineBuf = '';
+            try { (command as Record<string, unknown>).privateKeyBase58 = ''; } catch {}
+            break;
+          }
+        }
       }
     });
     
