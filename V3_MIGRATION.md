@@ -314,15 +314,34 @@ holdout** (passive; no code change).
 1. **Re-read Phase 2 of the master plan** (`docs/V3_LEGACY_RETIREMENT_PLAN.md`).
 2. **Identified the legacy-only holdout** via:
    `SELECT address, umk_version, user_salt IS NOT NULL AS has_salt,
-     encrypted_user_master_key IS NOT NULL AS has_umk
+     encrypted_user_master_key IS NOT NULL AS has_umk,
+     agent_public_key IS NOT NULL AS has_agent_pubkey, execution_enabled
      FROM wallets
     WHERE agent_private_key_encrypted IS NOT NULL
       AND agent_private_key_encrypted_v3 IS NULL;`
 
-   Result (dev DB at execution time):
+   **Production query result, 2026-05-19T00:08:11.943Z** (read-only
+   replica, via `executeSql({ environment: "production" })`):
+
+   | metric | value |
+   |---|---|
+   | legacy_only | **1** |
+   | dual (legacy + V3) | 13 |
+   | v3_only | 0 |
+   | total wallet rows | 21 |
+
+   The single legacy-only row:
    - `HKFTntqTcNGPFQ4tL7kouZRp7bZJscM1x1iFEFEKWq43` — umk_version=0,
-     has_salt=false, has_umk=false. Legacy agent key only; predates V3
-     entirely (matches the "1 legacy-only holdout" cohort in the plan).
+     has_salt=false, has_umk=false, has_agent_pubkey=true,
+     execution_enabled=false. Legacy agent key only; predates V3
+     entirely. Matches the "1 legacy-only holdout" cohort in the
+     master plan exactly. The dual cohort has grown from 11 to 13
+     since the plan was drafted (two new sign-ups, both correctly
+     dual-encrypted by the unchanged routes.ts:2533 path).
+
+   Same query was also run against the dev DB at execution time
+   and returned an identical single-row result (the dev mirror has
+   a copy of this wallet), so dev and prod agree.
 
 3. **Auto-backfill path verified against current code** (read-only):
    `initializeWalletSecurity` (`server/session-v3.ts:178-298`) treats
