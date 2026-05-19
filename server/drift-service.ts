@@ -512,7 +512,6 @@ async function getAgentDriftClient(
   encryptedPrivateKeyRaw: string | Uint8Array,
   subAccountId: number = 0
 ): Promise<{ driftClient: any; cleanup: () => Promise<void> }> {
-  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   // Use cached SDK for static components
   const sdk = await getDriftSDK();
   const { Wallet, initialize } = sdk;
@@ -2635,7 +2634,6 @@ export async function executeAgentTransferBetweenSubaccounts(
   toSubAccountId: number,
   amountUsdc: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
-  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   try {
     const connection = getConnection();
     const agentPubkey = new PublicKey(agentPublicKey);
