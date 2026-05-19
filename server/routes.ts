@@ -2659,18 +2659,19 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           if (session) {
             const generatedWallet = generateAgentWalletWithMnemonic();
             const agentPublicKey = generatedWallet.keypair.publicKey.toString();
-
-            // V3 Phase 5b: new wallets are V3-only. Do NOT dual-write the
-            // legacy `agent_private_key_encrypted` column. Phase 5 confirmed
-            // zero `[Security][LegacyKeyUsed]` reads for the soak period, so
-            // there is no remaining caller that needs the legacy ciphertext.
+            
+            // Encrypt private key with legacy method for backward compatibility
+            const privateKeyBase58 = bs58.encode(generatedWallet.secretKeyBuffer);
+            const encryptedPrivateKey = legacyEncrypt(privateKeyBase58);
+            
+            // Encrypt the private key with v3 encryption (UMK-based)
             const encryptedV3 = encryptAgentKeyV3(session.umk, generatedWallet.secretKeyBuffer, walletAddress);
-
+            
             // Store the mnemonic encrypted with UMK
             await encryptAndStoreMnemonic(walletAddress, generatedWallet.mnemonicBuffer, session.umk);
-
-            // Persist agent pubkey and V3 ciphertext only; legacy column stays NULL.
-            await storage.updateWalletAgentPublicKey(walletAddress, agentPublicKey);
+            
+            // Store both legacy and v3 encrypted keys (same keypair, different encryption methods)
+            await storage.updateWalletAgentKeys(walletAddress, agentPublicKey, encryptedPrivateKey);
             await storage.updateWalletAgentKeyV3(walletAddress, encryptedV3);
             
             console.log(`[Agent] Generated new agent wallet with mnemonic for ${walletAddress}: ${agentPublicKey}`);
@@ -3773,17 +3774,19 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const generatedWallet = generateAgentWalletWithMnemonic();
       const newAgentPublicKey = generatedWallet.keypair.publicKey.toString();
-
-      // V3 Phase 5b: agent-wallet reset path is V3-only. Do NOT dual-write
-      // the legacy `agent_private_key_encrypted` column. Phase 5 confirmed
-      // zero `[Security][LegacyKeyUsed]` reads for the soak period.
+      
+      // Encrypt private key with legacy method for backward compatibility
+      const privateKeyBase58 = bs58.encode(generatedWallet.secretKeyBuffer);
+      const encryptedPrivateKey = legacyEncrypt(privateKeyBase58);
+      
+      // Encrypt with v3 encryption (UMK-based)
       const encryptedV3 = encryptAgentKeyV3(session.umk, generatedWallet.secretKeyBuffer, userWallet);
-
+      
       // Store mnemonic encrypted with UMK
       await encryptAndStoreMnemonic(userWallet, generatedWallet.mnemonicBuffer, session.umk);
-
-      // Update database with new agent wallet (pubkey + V3 ciphertext only; legacy column stays NULL).
-      await storage.updateWalletAgentPublicKey(userWallet, newAgentPublicKey);
+      
+      // Update database with new agent wallet
+      await storage.updateWalletAgentKeys(userWallet, newAgentPublicKey, encryptedPrivateKey);
       await storage.updateWalletAgentKeyV3(userWallet, encryptedV3);
       
       log(`New agent wallet generated: ${newAgentPublicKey.slice(0, 8)}...`);
