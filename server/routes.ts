@@ -658,7 +658,7 @@ import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransactio
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3 } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
@@ -4179,12 +4179,25 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           error: "Execution not enabled. Please enable execution authorization in Settings first." 
         });
       }
-      
+
+      // Self-heal step (separate from strict decrypt to preserve the strict
+      // helper's "V3 only, never legacy" contract): probe the stored V3
+      // ciphertext; if it was encrypted under a different UMK (the UMK-init
+      // race damage mode), re-migrate from the legacy ciphertext using the
+      // current UMK before the strict decrypt below. Emits a dedicated
+      // [StaleV3SelfHeal] telemetry log that audits can count separately.
+      const repairResult = await repairStaleV3AgentKeyFromLegacy(req.walletAddress!, umkResult.umk);
+      let walletForDecrypt = wallet;
+      if (repairResult === 'repaired') {
+        const refreshed = await storage.getWallet(req.walletAddress!);
+        if (refreshed) walletForDecrypt = refreshed;
+      }
+
       const agentKeyResult = await decryptAgentKeyStrict(
         req.walletAddress!,
         umkResult.umk,
-        wallet,
-        wallet.agentPublicKey
+        walletForDecrypt,
+        walletForDecrypt.agentPublicKey
       );
       
       umkResult.cleanup();

@@ -1359,6 +1359,53 @@ export async function decryptAgentKeyWithFallback(
  * telemetry that `decryptAgentKeyWithFallback` does, so the Phase 5
  * deprecation-log audit accurately counts only true legacy reads.
  */
+/**
+ * Explicit, opt-in repair for the UMK-init-race-condition damage mode:
+ * the V3 agent-key ciphertext on the wallet row was encrypted under a
+ * different UMK than the one currently stored (two concurrent unlock_umk
+ * verify calls both took the "new wallet" branch; one overwrote the other's
+ * UMK in the DB after the agent key was already encrypted with the first
+ * UMK). Detect by probing V3 decrypt; if it throws and a legacy ciphertext
+ * is still present on the row, re-migrate from legacy using the current UMK.
+ *
+ * This is a strictly-separate code path from `decryptAgentKeyStrict` on
+ * purpose: the strict helper's contract is "V3 only, never legacy" and is
+ * the boundary Phase 5 deprecation audits measure. This helper emits a
+ * distinct `[Security][StaleV3SelfHeal]` telemetry so audits can count
+ * race-repair events separately from genuine legacy reads, and it can be
+ * removed once Phase 5 retires the legacy column entirely.
+ *
+ * Returns:
+ *   - 'repaired' if the V3 ciphertext was stale and successfully re-migrated.
+ *   - 'ok' if the existing V3 ciphertext decrypts cleanly (no repair needed).
+ *   - 'unrepairable' if V3 fails and no legacy is available (caller should
+ *     surface the original strict-decrypt failure to the user).
+ */
+export async function repairStaleV3AgentKeyFromLegacy(
+  walletAddress: string,
+  umk: Buffer,
+): Promise<'ok' | 'repaired' | 'unrepairable'> {
+  const wallet = await storage.getWallet(walletAddress);
+  if (!wallet?.agentPrivateKeyEncryptedV3) {
+    return 'unrepairable';
+  }
+  try {
+    const probe = decryptAgentKeyV3(umk, wallet.agentPrivateKeyEncryptedV3, walletAddress);
+    zeroizeBuffer(probe);
+    return 'ok';
+  } catch {
+    if (!wallet.agentPrivateKeyEncrypted) {
+      return 'unrepairable';
+    }
+    const migrated = await migrateAgentKeyToV3(walletAddress, umk, wallet.agentPrivateKeyEncrypted);
+    if (!migrated) {
+      return 'unrepairable';
+    }
+    console.warn(`[Security][StaleV3SelfHeal] Re-migrated agent key from legacy for ${walletAddress.slice(0, 8)}... (UMK race repair)`);
+    return 'repaired';
+  }
+}
+
 export async function decryptAgentKeyStrict(
   walletAddress: string,
   umk: Buffer | null,
