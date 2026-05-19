@@ -300,3 +300,61 @@ logging**.
 
 Strict-serial successor: **Phase 2 — Backfill the legacy-only
 holdout** (passive; no code change).
+
+---
+
+## Phase 2 — Backfill the legacy-only holdout (COMPLETE — DEFERRED)
+
+**Date:** May 19, 2026
+**Risk:** LOW (passive — no code changes)
+**Status:** ✅ Holdout identified and documented; auto-backfill deferred to user's next sign-in.
+
+### What was done
+
+1. **Re-read Phase 2 of the master plan** (`docs/V3_LEGACY_RETIREMENT_PLAN.md`).
+2. **Identified the legacy-only holdout** via:
+   `SELECT address, umk_version, user_salt IS NOT NULL AS has_salt,
+     encrypted_user_master_key IS NOT NULL AS has_umk
+     FROM wallets
+    WHERE agent_private_key_encrypted IS NOT NULL
+      AND agent_private_key_encrypted_v3 IS NULL;`
+
+   Result (dev DB at execution time):
+   - `HKFTntqTcNGPFQ4tL7kouZRp7bZJscM1x1iFEFEKWq43` — umk_version=0,
+     has_salt=false, has_umk=false. Legacy agent key only; predates V3
+     entirely (matches the "1 legacy-only holdout" cohort in the plan).
+
+3. **Auto-backfill path verified against current code** (read-only):
+   `initializeWalletSecurity` (`server/session-v3.ts:178-298`) treats
+   `user_salt IS NULL` as `isNewWallet = true`, generates a fresh UMK,
+   and writes user_salt + encrypted_user_master_key + umk_version=3 in
+   one request. The post-login `migrateAgentKeyToV3` hook
+   (`server/session-v3.ts:290-293`) then re-encrypts the existing
+   legacy agent key as V3 using that fresh UMK and writes
+   `agent_private_key_encrypted_v3`. Two writes, same request, no
+   manual intervention — preserves the `agentPublicKey` (CRITICAL
+   rule 1: never regenerate the keypair, funds are tied to it).
+
+### What was NOT done (out of scope per Phase 2 anti-drift rules)
+
+- **No code changes.** Phase 2 is passive verification only.
+- **No manual backfill script.** The `initializeWalletSecurity` +
+  `migrateAgentKeyToV3` flow is the canonical path.
+
+### Outcome / disposition
+
+- The holdout is **deferred** until they next sign in. The Phase 1
+  `[Security][LegacyKeyUsed]` deprecation log will surface them
+  automatically if they hit any code path that uses the fallback
+  helper. If they remain dormant through the Phase 5 deprecation
+  window, the operator runbook will surface them again as part of
+  the Phase 5 acceptance gate.
+- Outreach to ask this user to sign in once is a manual operator
+  action (their wallet address, not their identity, is what the
+  system has). Recorded here for tracking; outcome to be updated
+  in the operator log if/when contact is made.
+
+### Next phase
+
+Strict-serial successor: **Phase 2.5 — Strict-mode decrypt helper**
+(`decryptAgentKeyStrict`, add-only, in `server/session-v3.ts` only).
