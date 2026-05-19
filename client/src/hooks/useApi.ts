@@ -319,6 +319,21 @@ export interface PublishedBot {
   };
 }
 
+// V3 Phase 3b: typed error thrown by `subscribeToPublishedBot` when the
+// backend returns 412 because the subscriber has not yet authorized
+// server-side execution. The subscribe UI catches this specific class to
+// route the user through `enableExecution()` instead of just showing a
+// generic toast. Using a real subclass (vs. an `any`-tagged Error) lets
+// `error instanceof SubscribeAuthorizationRequiredError` stay type-safe.
+export class SubscribeAuthorizationRequiredError extends Error {
+  readonly action = 'enable_execution' as const;
+  readonly status = 412 as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'SubscribeAuthorizationRequiredError';
+  }
+}
+
 export interface MarketplaceSubscription {
   id: string;
   publishedBotId: string;
@@ -412,10 +427,9 @@ async function subscribeToPublishedBot(publishedBotId: string, data: { capitalIn
     // each subscriber's agent key per signal. Throw an enriched error that
     // the subscribe UI surfaces with an "Enable Execution" prompt.
     if (res.status === 412 && error?.action === 'enable_execution') {
-      const err: any = new Error(error.error || 'Execution authorization required before subscribing.');
-      err.action = 'enable_execution';
-      err.status = 412;
-      throw err;
+      throw new SubscribeAuthorizationRequiredError(
+        error.error || 'Execution authorization required before subscribing.',
+      );
     }
     throw new Error(error.error || "Failed to subscribe");
   }

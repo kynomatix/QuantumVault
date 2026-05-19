@@ -1,7 +1,7 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { useSubscribeToPublishedBot, type PublishedBot } from '@/hooks/useApi';
+import { useSubscribeToPublishedBot, SubscribeAuthorizationRequiredError, type PublishedBot } from '@/hooks/useApi';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -40,16 +40,6 @@ import { Transaction } from '@solana/web3.js';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 import { useLeverageLimits } from '@/hooks/useLeverageLimits';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
-
-// V3 Phase 3b: shape of the JSON error returned by /api/marketplace/:id/subscribe
-// when the subscriber has not yet authorized execution. The server uses a 412
-// with `{ error, action: 'enable_execution' }`; client routes that through
-// `enableExecution()` instead of just surfacing a generic toast.
-interface SubscribeApiError {
-  message?: string;
-  error?: string;
-  action?: 'enable_execution' | string;
-}
 
 interface SubscribeBotModalProps {
   isOpen: boolean;
@@ -422,8 +412,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       // the subscriber has not yet authorized server-side execution. Route
       // the user straight into the enable-execution flow instead of just
       // showing a toast.
-      const apiErr = error as SubscribeApiError;
-      if (apiErr?.action === 'enable_execution') {
+      if (error instanceof SubscribeAuthorizationRequiredError) {
         toast({
           title: 'Authorize execution to subscribe',
           description: 'Subscribing means trades will be signed on your behalf when the bot fires. Approve the authorization to continue.',
@@ -442,18 +431,19 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
           onSubscribed?.();
           handleClose();
         } catch (innerErr: unknown) {
-          const innerApiErr = innerErr as SubscribeApiError;
+          const innerMsg = innerErr instanceof Error ? innerErr.message : 'Please try again.';
           toast({
             title: 'Could not enable execution',
-            description: innerApiErr?.message || 'Please try again.',
+            description: innerMsg,
             variant: 'destructive',
           });
         }
         return;
       }
+      const msg = error instanceof Error ? error.message : 'Unknown error';
       toast({
         title: 'Failed to subscribe',
-        description: apiErr?.message || 'Unknown error',
+        description: msg,
         variant: 'destructive'
       });
     }
