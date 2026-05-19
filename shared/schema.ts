@@ -315,6 +315,10 @@ export const subscriptions = pgTable("subscriptions", {
   userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   botId: text("bot_id").notNull().references(() => bots.id, { onDelete: "cascade" }),
   status: text("status").notNull().default("active"),
+  // V3 Phase 3b: reason a subscription was paused/disabled by fan-out
+  // (e.g. "execution_disabled", "emergency_stopped", "v3_decrypt_failed").
+  // NULL when status is 'active'.
+  subscriptionStatusReason: text("subscription_status_reason"),
   subscribedAt: timestamp("subscribed_at").defaultNow().notNull(),
 });
 
@@ -464,6 +468,10 @@ export const botSubscriptions = pgTable("bot_subscriptions", {
   subscriberBotId: varchar("subscriber_bot_id").references(() => tradingBots.id, { onDelete: "set null" }),
   capitalInvested: decimal("capital_invested", { precision: 20, scale: 2 }).notNull(),
   status: text("status").notNull().default("active"),
+  // V3 Phase 3b: reason a subscription was paused/disabled by fan-out
+  // (e.g. "execution_disabled", "emergency_stopped", "v3_decrypt_failed").
+  // NULL when status is 'active'.
+  subscriptionStatusReason: text("subscription_status_reason"),
   subscribedAt: timestamp("subscribed_at").defaultNow().notNull(),
   unsubscribedAt: timestamp("unsubscribed_at"),
 }, (table) => ({

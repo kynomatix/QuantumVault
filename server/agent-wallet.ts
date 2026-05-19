@@ -73,7 +73,7 @@ export function getAgentKeypair(encryptedPrivateKey: string): Keypair {
  * pass it here. Out-of-scope subscriber-fanout / background callers keep
  * passing the string until their phase migrates them.
  */
-function resolveAgentKeypair(input: string | Uint8Array): Keypair {
+export function resolveAgentKeypair(input: string | Uint8Array): Keypair {
   if (input instanceof Uint8Array) {
     return Keypair.fromSecretKey(input);
   }

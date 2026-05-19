@@ -395,6 +395,17 @@ async function subscribeToPublishedBot(publishedBotId: string, data: { capitalIn
   });
   if (!res.ok) {
     const error = await safeResponseJson(res);
+    // V3 Phase 3b: 412 = execution authorization required. The subscribe
+    // endpoint refuses to enroll wallets that have not enabled execution (or
+    // are emergency-stopped) because subscriber fan-out now strict-decrypts
+    // each subscriber's agent key per signal. Throw an enriched error that
+    // the subscribe UI surfaces with an "Enable Execution" prompt.
+    if (res.status === 412 && error?.action === 'enable_execution') {
+      const err: any = new Error(error.error || 'Execution authorization required before subscribing.');
+      err.action = 'enable_execution';
+      err.status = 412;
+      throw err;
+    }
     throw new Error(error.error || "Failed to subscribe");
   }
   return safeResponseJson(res);

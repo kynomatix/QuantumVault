@@ -327,7 +327,11 @@ export class PositionService {
     agentPublicKey: string,
     subAccountId: number,
     market: string,
-    agentPrivateKeyEncrypted?: string,
+    // V3 Phase 3b: subscriber fan-out passes a Uint8Array from
+    // decryptAgentKeyStrict; legacy callers still pass the encrypted string.
+    // The parameter is currently unused inside this method but is kept on the
+    // signature for symmetry with the executor entry points.
+    agentPrivateKeyEncrypted?: string | Uint8Array,
     botSubaccountPublicKey?: string
   ): Promise<{ 
     size: number; 

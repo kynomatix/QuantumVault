@@ -224,6 +224,11 @@ export interface IStorage {
   createBotSubscription(subscription: InsertBotSubscription): Promise<BotSubscription>;
   updateBotSubscription(id: string, updates: Partial<InsertBotSubscription>): Promise<BotSubscription | undefined>;
   cancelBotSubscription(id: string): Promise<void>;
+  // V3 Phase 3b: mark a subscription paused with a reason. Used when fan-out
+  // discovers a subscriber whose execution authorization has been revoked or
+  // emergency-stopped, so the UI can surface "Your subscription is paused
+  // because execution authorization was revoked".
+  markBotSubscriptionPausedBySubscriberBotId(subscriberBotId: string, reason: string): Promise<void>;
 
   // Marketplace: PnL Snapshots
   createPnlSnapshot(snapshot: InsertPnlSnapshot): Promise<PnlSnapshot>;
@@ -1653,6 +1658,23 @@ export class DatabaseStorage implements IStorage {
       status: 'cancelled',
       unsubscribedAt: sql`NOW()`,
     }).where(eq(botSubscriptions.id, id));
+  }
+
+  async markBotSubscriptionPausedBySubscriberBotId(
+    subscriberBotId: string,
+    reason: string,
+  ): Promise<void> {
+    // Look up subscription by subscriberBotId. Only flip 'active' rows so we
+    // don't clobber already-cancelled subscriptions.
+    await db
+      .update(botSubscriptions)
+      .set({ status: 'paused', subscriptionStatusReason: reason })
+      .where(
+        and(
+          eq(botSubscriptions.subscriberBotId, subscriberBotId),
+          eq(botSubscriptions.status, 'active'),
+        ),
+      );
   }
 
   // Marketplace: PnL Snapshots

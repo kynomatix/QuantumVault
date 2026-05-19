@@ -13,7 +13,7 @@ import { desc, eq, sql, asc, and } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
-import { getAgentKeypair } from './agent-wallet';
+import { getAgentKeypair, resolveAgentKeypair } from './agent-wallet';
 import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
 
@@ -771,7 +771,11 @@ function parseDriftError(error: string | undefined): string {
 // Used by all trade execution paths for consistent behavior
 interface TradeSizingParams {
   agentPublicKey: string;
-  agentPrivateKeyEncrypted: string;
+  // V3 Phase 3b: accept either legacy encrypted blob (string) or an
+  // already-decrypted secret key (Uint8Array) from decryptAgentKeyStrict.
+  // Subscriber fan-out always passes Uint8Array; remaining string callers
+  // are out-of-scope until their phase migrates.
+  agentPrivateKeyEncrypted: string | Uint8Array;
   subAccountId: number;
   botId: string;
   walletAddress: string;
@@ -886,7 +890,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
       try {
         if (botCtx) {
           const adapter = getDefaultAdapter();
-          const agentKeypair = getAgentKeypair(agentPrivateKeyEncrypted);
+          const agentKeypair = resolveAgentKeypair(agentPrivateKeyEncrypted);
           const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
 
           const agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0);
@@ -1058,7 +1062,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
         try {
           if (botCtx) {
             const adapter = getDefaultAdapter();
-            const agentKeypair = getAgentKeypair(agentPrivateKeyEncrypted);
+            const agentKeypair = resolveAgentKeypair(agentPrivateKeyEncrypted);
             const depositAmount = Math.ceil(shortfall * 100) / 100;
 
             const agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0);
@@ -1222,7 +1226,11 @@ async function distributeCreatorProfitShare(params: {
   subscriberBotId: string;
   subscriberWalletAddress: string;
   subscriberAgentPublicKey: string;
-  subscriberEncryptedPrivateKey: string;
+  // V3 Phase 3b: live subscriber fan-out passes a Uint8Array secret key from
+  // decryptAgentKeyStrict; legacy IOU-retry callers still pass the encrypted
+  // string blob. Downstream helpers (settleAllPnl, executeAgentDriftWithdraw,
+  // payCreatorAndReferrals → transferUsdcToWallet) already accept both.
+  subscriberEncryptedPrivateKey: string | Uint8Array;
   driftSubaccountId: number;
   realizedPnl: number;
   tradeId: string;
@@ -1456,7 +1464,9 @@ async function payOneReferralLeg(params: {
   refereeWallet: string;
   fundingWallet: string;
   subscriberAgentPublicKey: string;
-  subscriberEncryptedPrivateKey: string;
+  // V3 Phase 3b: string for legacy callers, Uint8Array for live subscriber
+  // fan-out (post-decryptAgentKeyStrict). transferUsdcToWallet handles both.
+  subscriberEncryptedPrivateKey: string | Uint8Array;
   leg: ReferralLeg;
 }): Promise<{ status: 'paid' | 'pending' | 'skipped'; signature?: string; error?: string }> {
   const { sourceType, sourceId, refereeWallet, fundingWallet, subscriberAgentPublicKey, subscriberEncryptedPrivateKey, leg } = params;
@@ -1518,7 +1528,9 @@ async function payOneReferralLeg(params: {
  */
 async function payCreatorAndReferrals(params: {
   subscriberAgentPublicKey: string;
-  subscriberEncryptedPrivateKey: string;
+  // V3 Phase 3b: string for legacy/IOU-retry callers, Uint8Array for live
+  // subscriber fan-out (post-decryptAgentKeyStrict).
+  subscriberEncryptedPrivateKey: string | Uint8Array;
   creatorWalletAddress: string;
   profitShareAmount: number;
   sourceType: string;
@@ -1707,12 +1719,15 @@ function parseSignalForRouting(body: any): { action: string | null; contracts: s
   return { action, contracts, isCloseSignal, price, strategyPositionSize };
 }
 
-// PHASE 6.2 SECURITY NOTE: Subscriber Routing uses LEGACY encrypted key path
-// This is INTENTIONAL because subscriber wallets belong to DIFFERENT users who do not have
-// active sessions during webhook processing. The source bot's owner has an active session,
-// but subscriber bot owners are different users whose UMK is not available.
-// Subscriber wallets must use the encrypted agent key stored in the database.
-// Future enhancement: Subscribers could enable their own execution authorization for v3 path.
+// V3 Phase 3b: Subscriber fan-out now uses the V3 strict-decrypt path on a
+// per-subscriber basis. Each subscriber wallet must have executionEnabled and
+// a valid stored UMK_STORAGE_SECRET-wrapped UMK (see getUmkForWebhook +
+// decryptAgentKeyStrict in session-v3.ts). Subscribers whose execution
+// authorization has been revoked, emergency-stopped, or whose strict decrypt
+// fails are paused for that signal with a `subscriptionStatusReason` so the UI
+// can prompt them to re-enable execution. The subscribe endpoint enforces
+// executionEnabled up-front (412), so the steady-state expectation is that
+// every active subscriber has a usable V3 key.
 async function routeSignalToSubscribers(
   sourceBotId: string,
   signal: {
@@ -1797,6 +1812,60 @@ async function routeSignalToSubscribers(
           return 'tradeFailed';
         }
 
+        // V3 Phase 3b: strict-decrypt the subscriber's agent key for this
+        // signal. If the subscriber has revoked execution / emergency-stopped
+        // or no longer has a usable V3 key, pause the subscription with a
+        // reason and skip — never fall back to legacy AGENT_ENCRYPTION_KEY.
+        const umkResult = await getUmkForWebhook(subBot.walletAddress);
+        if (!umkResult) {
+          const pauseReason = subWallet.emergencyStopTriggered
+            ? 'emergency_stopped'
+            : 'execution_disabled';
+          await storage.markBotSubscriptionPausedBySubscriberBotId(subBot.id, pauseReason);
+          console.warn(`[Subscriber Routing] Subscriber ${subBot.walletAddress.slice(0,8)}... has no UMK (${pauseReason}); subscription paused, signal skipped for bot ${subBot.id}`);
+          await storage.createBotTrade({
+            tradingBotId: subBot.id,
+            walletAddress: subBot.walletAddress,
+            market: subBot.market,
+            side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+            size: '0',
+            price: signal.price,
+            status: 'failed',
+            fee: '0',
+            errorMessage: `Subscriber execution authorization unavailable (${pauseReason}). Subscription paused — re-enable execution to resume.`,
+            webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: pauseReason },
+            executionMethod: 'v3_strict',
+          });
+          return 'tradeFailed';
+        }
+        const agentKeyResult = await decryptAgentKeyStrict(
+          subBot.walletAddress,
+          umkResult.umk,
+          subWallet,
+          subWallet.agentPublicKey,
+        );
+        if (!agentKeyResult) {
+          umkResult.cleanup();
+          await storage.markBotSubscriptionPausedBySubscriberBotId(subBot.id, 'v3_decrypt_failed');
+          console.error(`[Subscriber Routing] V3 strict decrypt failed for subscriber ${subBot.walletAddress.slice(0,8)}...; subscription paused, signal skipped for bot ${subBot.id}`);
+          await storage.createBotTrade({
+            tradingBotId: subBot.id,
+            walletAddress: subBot.walletAddress,
+            market: subBot.market,
+            side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+            size: '0',
+            price: signal.price,
+            status: 'failed',
+            fee: '0',
+            errorMessage: 'V3 strict decrypt failed for subscriber agent key. Subscription paused.',
+            webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'v3_decrypt_failed' },
+            executionMethod: 'v3_strict',
+          });
+          return 'tradeFailed';
+        }
+
+        try {
+        const subAgentSecretKey = agentKeyResult.secretKey;
         const subAccountId = subBot.driftSubaccountId ?? 0;
         const subCloseCtx = getBotSubaccountContext(subBot);
 
@@ -1808,7 +1877,7 @@ async function routeSignalToSubscribers(
             subCloseQueryAccount,
             subCloseQuerySubId,
             subBot.market,
-            subWallet.agentPrivateKeyEncrypted,
+            subAgentSecretKey,
             subCloseCtx?.botPublicKey
           );
 
@@ -1818,7 +1887,7 @@ async function routeSignalToSubscribers(
           
           const subCloseSlippageBps = subWallet.slippageBps ?? 50;
           const closeResult = await closePerpPosition(
-            subWallet.agentPrivateKeyEncrypted,
+            subAgentSecretKey,
             subBot.market,
             subCloseQuerySubId,
             Math.abs(position.size),
@@ -1892,7 +1961,7 @@ async function routeSignalToSubscribers(
                 subscriberBotId: subBot.id,
                 subscriberWalletAddress: subBot.walletAddress,
                 subscriberAgentPublicKey: subWallet.agentPublicKey!,
-                subscriberEncryptedPrivateKey: subWallet.agentPrivateKeyEncrypted,
+                subscriberEncryptedPrivateKey: subAgentSecretKey,
                 driftSubaccountId: subAccountId,
                 realizedPnl: closeTradePnl,
                 tradeId,
@@ -1931,35 +2000,18 @@ async function routeSignalToSubscribers(
               executionMethod: 'legacy',
             });
 
+            // V3 Phase 3b: subscriber-fanout transient retries are intentionally
+            // DISABLED in this phase. queueTradeRetry persists the agent key in
+            // the in-memory retry queue, which today only accepts the legacy
+            // encrypted string. Storing another user's plaintext secret in a
+            // shared retry queue would defeat V3's per-signal strict-decrypt
+            // contract, and the queued job would outlive `agentKeyResult.cleanup`.
+            // The transient failure is recorded on the failed_trade row; the
+            // retry queue migration is tracked in Phase 4 of the V3 plan.
             if (isTransientError(closeErrorMsg)) {
-              try {
-                const closeSide = position.side === 'LONG' ? 'short' : 'long';
-                const retryJobId = await queueTradeRetry({
-                  botId: subBot.id,
-                  walletAddress: subBot.walletAddress,
-                  agentPrivateKeyEncrypted: subWallet.agentPrivateKeyEncrypted,
-                  agentPublicKey: subWallet.agentPublicKey!,
-                  market: subBot.market,
-                  side: 'close',
-                  size: Math.abs(position.size),
-                  subAccountId: subAccountId,
-                  reduceOnly: true,
-                  slippageBps: subCloseSlippageBps,
-                  priority: 'critical',
-                  lastError: closeErrorMsg,
-                  originalTradeId: failedCloseTrade.id,
-                  entryPrice: position.entryPrice || 0,
-                });
-                console.log(`[Subscriber Routing] Queued CRITICAL close retry for ${subBot.id}: job=${retryJobId}`);
-                await storage.updateBotTrade(failedCloseTrade.id, {
-                  status: 'pending',
-                  errorMessage: `Transient error - CRITICAL auto-retry queued (job: ${retryJobId}): ${closeErrorMsg}`,
-                });
-              } catch (retryErr) {
-                console.error(`[Subscriber Routing] Failed to queue close retry for ${subBot.id}:`, retryErr);
-              }
+              console.warn(`[Subscriber Routing] Transient close error for ${subBot.id} NOT auto-retried (subscriber fan-out retry deferred to V3 Phase 4): ${closeErrorMsg}`);
             }
-            
+
             return 'closeFailed';
           }
         } else {
@@ -1998,7 +2050,7 @@ async function routeSignalToSubscribers(
           const subBotCtx = getBotSubaccountContext(subBot);
           const sizingResult = await computeTradeSizingAndTopUp({
             agentPublicKey: subWallet.agentPublicKey!,
-            agentPrivateKeyEncrypted: subWallet.agentPrivateKeyEncrypted,
+            agentPrivateKeyEncrypted: subAgentSecretKey,
             subAccountId: subBotCtx ? 0 : subAccountId,
             botId: subBot.id,
             walletAddress: subBot.walletAddress,
@@ -2059,7 +2111,8 @@ async function routeSignalToSubscribers(
           }
 
 
-          // NOTE: Uses legacy encrypted key - subscriber wallet's UMK not available (see function header comment)
+          // V3 Phase 3b: subscriber agent key is the Uint8Array secret produced
+          // by decryptAgentKeyStrict above; the encrypted blob is never used.
           const side = signal.action === 'buy' ? 'long' : 'short';
           const subSlippageBps = subWallet.slippageBps ?? 50;
 
@@ -2075,7 +2128,7 @@ async function routeSignalToSubscribers(
               subQueryAccount,
               subQuerySubId,
               subBot.market,
-              subWallet.agentPrivateKeyEncrypted,
+              subAgentSecretKey,
               subBotCtx?.botPublicKey
             );
             if (existingPos.side !== 'FLAT' && Math.abs(existingPos.size) >= 0.0001) {
@@ -2095,7 +2148,7 @@ async function routeSignalToSubscribers(
           }
 
           const orderResult = await executePerpOrder(
-            subWallet.agentPrivateKeyEncrypted,
+            subAgentSecretKey,
             subBot.market,
             side,
             contractSize,
@@ -2191,7 +2244,7 @@ async function routeSignalToSubscribers(
                   subscriberBotId: subBot.id,
                   subscriberWalletAddress: subBot.walletAddress,
                   subscriberAgentPublicKey: subWallet.agentPublicKey!,
-                  subscriberEncryptedPrivateKey: subWallet.agentPrivateKeyEncrypted,
+                  subscriberEncryptedPrivateKey: subAgentSecretKey,
                   driftSubaccountId: subAccountId,
                   realizedPnl: flipPnl,
                   tradeId: flipTradeId,
@@ -2240,31 +2293,11 @@ async function routeSignalToSubscribers(
               executionMethod: 'legacy',
             });
 
+            // V3 Phase 3b: subscriber-fanout transient retries are intentionally
+            // DISABLED in this phase. See close-path note above; the retry
+            // queue migration is tracked in Phase 4 of the V3 plan.
             if (isTransientError(errorMsg)) {
-              try {
-                const retryJobId = await queueTradeRetry({
-                  botId: subBot.id,
-                  walletAddress: subBot.walletAddress,
-                  agentPrivateKeyEncrypted: subWallet.agentPrivateKeyEncrypted,
-                  agentPublicKey: subWallet.agentPublicKey!,
-                  market: subBot.market,
-                  side,
-                  size: contractSize,
-                  subAccountId: subAccountId,
-                  reduceOnly: false,
-                  slippageBps: subSlippageBps,
-                  priority: 'normal',
-                  lastError: errorMsg,
-                  originalTradeId: failedTrade.id,
-                });
-                console.log(`[Subscriber Routing] Queued retry for failed subscriber trade ${subBot.id}: job=${retryJobId}`);
-                await storage.updateBotTrade(failedTrade.id, {
-                  status: 'pending',
-                  errorMessage: `Transient error - auto-retry queued (job: ${retryJobId}): ${errorMsg}`,
-                });
-              } catch (retryErr) {
-                console.error(`[Subscriber Routing] Failed to queue retry for ${subBot.id}:`, retryErr);
-              }
+              console.warn(`[Subscriber Routing] Transient order error for ${subBot.id} NOT auto-retried (subscriber fan-out retry deferred to V3 Phase 4): ${errorMsg}`);
             }
 
             sendTradeNotification(subWallet.address, {
@@ -2282,6 +2315,12 @@ async function routeSignalToSubscribers(
         }
         // Should never reach here, but return error just in case
         return 'error';
+        } finally {
+          // V3 Phase 3b: always zero out the per-signal subscriber agent key
+          // and the UMK regardless of trade outcome.
+          agentKeyResult.cleanup();
+          umkResult.cleanup();
+        }
       } catch (subError) {
         console.error(`[Subscriber Routing] Error processing subscriber bot ${subBot.id}:`, subError);
         return 'error';
@@ -11434,7 +11473,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncrypted) {
         return res.status(400).json({ error: "Agent wallet not set up. Please set up your agent wallet first." });
       }
-      
+
+      // V3 Phase 3b: subscribing means consenting to have YOUR keys signed
+      // for trades fired by another user's webhook. Require executionEnabled
+      // up-front so fan-out has a UMK to derive the V3 key from. The frontend
+      // routes the user through the enable-execution flow on `action`.
+      if (!wallet.executionEnabled || wallet.emergencyStopTriggered) {
+        return res.status(412).json({
+          error: "Execution authorization required before subscribing.",
+          action: "enable_execution",
+        });
+      }
+
       // AUTO-REFERRAL: Attribute referral to the bot creator if subscriber doesn't already have a referrer
       // This ensures creators get credit for users who subscribe via marketplace URLs
       if (!wallet.referredBy && publishedBot.creatorWalletAddress !== req.walletAddress) {
@@ -12771,8 +12821,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           isActive: subBot.isActive,
           market: subBot.market,
           walletFound: !!subWallet,
-          hasAgentKey: subWallet ? !!(subWallet.agentPublicKey && subWallet.agentPrivateKeyEncrypted) : false,
-          wouldExecute: subBot.isActive && !!subWallet?.agentPublicKey && !!subWallet?.agentPrivateKeyEncrypted,
+          // V3 Phase 3b: routing readiness is determined by V3 envelope +
+          // executionEnabled, not the legacy AGENT_ENCRYPTION_KEY blob.
+          hasAgentPublicKey: !!subWallet?.agentPublicKey,
+          executionEnabled: !!subWallet?.executionEnabled,
+          emergencyStopTriggered: !!subWallet?.emergencyStopTriggered,
+          hasV3KeyEnvelope: !!subWallet?.agentPrivateKeyEncryptedV3,
+          wouldExecute:
+            subBot.isActive &&
+            !!subWallet?.agentPublicKey &&
+            !!subWallet?.executionEnabled &&
+            !subWallet?.emergencyStopTriggered &&
+            !!subWallet?.agentPrivateKeyEncryptedV3,
         };
       }));
       
@@ -12852,10 +12912,24 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const subWallet = await storage.getWallet(subBot.walletAddress);
           subResult.walletFound = !!subWallet;
           subResult.hasAgentPublicKey = !!subWallet?.agentPublicKey;
-          subResult.hasAgentPrivateKey = !!subWallet?.agentPrivateKeyEncrypted;
-          
-          if (!subWallet?.agentPublicKey || !subWallet?.agentPrivateKeyEncrypted) {
-            subResult.error = "Missing agent wallet keys";
+          // V3 Phase 3b: surface the V3 readiness shape (executionEnabled +
+          // wrapped UMK envelope) rather than the legacy encrypted blob, which
+          // fan-out no longer consults.
+          subResult.executionEnabled = !!subWallet?.executionEnabled;
+          subResult.emergencyStopTriggered = !!subWallet?.emergencyStopTriggered;
+          subResult.hasV3KeyEnvelope = !!subWallet?.agentPrivateKeyEncryptedV3;
+
+          if (!subWallet?.agentPublicKey) {
+            subResult.error = "Missing agent public key";
+            results.push(subResult);
+            continue;
+          }
+          if (!subWallet.executionEnabled || subWallet.emergencyStopTriggered || !subWallet.agentPrivateKeyEncryptedV3) {
+            subResult.error = subWallet.emergencyStopTriggered
+              ? "Subscriber is emergency-stopped"
+              : !subWallet.executionEnabled
+                ? "Subscriber has not enabled execution"
+                : "Subscriber has no V3 agent key envelope";
             results.push(subResult);
             continue;
           }
@@ -12885,12 +12959,34 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const signalPercent = 50;
           
           log(`[Debug Routing] Calling computeTradeSizingAndTopUp for ${subBot.id}`);
-          
+
+          // V3 Phase 3b: strict-decrypt the subscriber's agent key via UMK so
+          // the debug path mirrors live fan-out and never touches the legacy
+          // blob. Cleanup happens in the surrounding finally.
+          const debugUmk = await getUmkForWebhook(subBot.walletAddress);
+          if (!debugUmk) {
+            subResult.error = "Subscriber UMK unavailable (execution disabled or emergency-stopped)";
+            results.push(subResult);
+            continue;
+          }
+          const debugAgentKey = await decryptAgentKeyStrict(
+            subBot.walletAddress,
+            debugUmk.umk,
+            subWallet,
+            subWallet.agentPublicKey,
+          );
+          if (!debugAgentKey) {
+            debugUmk.cleanup();
+            subResult.error = "V3 strict decrypt failed for subscriber agent key";
+            results.push(subResult);
+            continue;
+          }
+
           try {
             const debugSubBotCtx = getBotSubaccountContext(subBot);
             const sizingResult = await computeTradeSizingAndTopUp({
               agentPublicKey: subWallet.agentPublicKey!,
-              agentPrivateKeyEncrypted: subWallet.agentPrivateKeyEncrypted,
+              agentPrivateKeyEncrypted: debugAgentKey.secretKey,
               subAccountId: debugSubBotCtx ? 0 : subAccountId,
               botId: subBot.id,
               walletAddress: subBot.walletAddress,
@@ -12937,6 +13033,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           } catch (sizingError: any) {
             subResult.error = `Sizing exception: ${sizingError.message}`;
             subResult.sizingStack = sizingError.stack?.split('\n').slice(0, 3);
+          } finally {
+            // V3 Phase 3b: zero out the per-debug subscriber agent key + UMK.
+            debugAgentKey.cleanup();
+            debugUmk.cleanup();
           }
           
         } catch (subError: any) {

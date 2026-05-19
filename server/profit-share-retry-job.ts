@@ -1,5 +1,6 @@
 import { storage } from "./storage";
 import { payCreatorAndReferrals } from "./routes";
+import { getUmkForWebhook, decryptAgentKeyStrict } from "./session-v3";
 
 const RETRY_INTERVAL_MS = 5 * 60 * 1000; // Every 5 minutes
 const MAX_IOU_RETRIES = 50;
@@ -52,12 +53,16 @@ export async function retryPendingProfitShares(): Promise<{ processed: number; p
     }
     
     const wallet = await storage.getWallet(subscriberBot.walletAddress);
-    if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncrypted) {
-      console.error(`[ProfitShare Retry] Agent wallet not configured for bot ${subscriberBot.id}`);
-      await storage.updatePendingProfitShareStatus(iou.id, { 
+    // V3 Phase 3b: readiness check is V3-only. We require an agent public key
+    // and a V3 envelope; the legacy encrypted blob is intentionally NOT part
+    // of the gate so wallets that have already retired their legacy key still
+    // qualify for retry. The strict decrypt below is the source of truth.
+    if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
+      console.error(`[ProfitShare Retry] Agent wallet not V3-configured for bot ${subscriberBot.id}`);
+      await storage.updatePendingProfitShareStatus(iou.id, {
         status: 'pending',
         retryCount: iou.retryCount + 1,
-        lastError: 'Agent wallet not configured'
+        lastError: 'Agent wallet missing V3 envelope or public key'
       });
       results.failed++;
       continue;
@@ -65,20 +70,63 @@ export async function retryPendingProfitShares(): Promise<{ processed: number; p
     
     const amount = parseFloat(iou.amount);
     console.log(`[ProfitShare Retry] Attempting payout via shared helper: gross $${amount.toFixed(4)} for trade ${iou.tradeId} (creator ${iou.creatorWalletAddress})`);
-    
-    // Route through the shared payout helper so referral cuts are netted out
-    // exactly the same way as the live path (Model A). The helper is idempotent
-    // on (sourceType, sourceId), so this is safe to retry.
-    const payoutResult = await payCreatorAndReferrals({
-      subscriberAgentPublicKey: wallet.agentPublicKey,
-      subscriberEncryptedPrivateKey: wallet.agentPrivateKeyEncrypted,
-      creatorWalletAddress: iou.creatorWalletAddress,
-      profitShareAmount: amount,
-      sourceType: 'profit_share_paid',
-      sourceId: iou.tradeId,
-      fundingWallet: iou.subscriberWalletAddress,
-    });
-    
+
+    // V3 Phase 3b: never touch the legacy encrypted blob. The retry worker
+    // must strict-decrypt the subscriber's agent key via UMK_STORAGE_SECRET +
+    // the wallet's stored v3 envelope, just like the live fan-out. If the
+    // subscriber has revoked execution / emergency-stopped, keep the IOU
+    // pending so it retries again once execution is re-enabled.
+    const umkResult = await getUmkForWebhook(subscriberBot.walletAddress);
+    if (!umkResult) {
+      const reason = wallet.emergencyStopTriggered
+        ? 'subscriber_emergency_stopped'
+        : 'subscriber_execution_disabled';
+      console.warn(`[ProfitShare Retry] IOU ${iou.id}: ${reason}; keeping pending`);
+      await storage.updatePendingProfitShareStatus(iou.id, {
+        status: 'pending',
+        retryCount: iou.retryCount + 1,
+        lastError: `Subscriber execution authorization unavailable (${reason})`,
+      });
+      results.failed++;
+      continue;
+    }
+    const agentKeyResult = await decryptAgentKeyStrict(
+      subscriberBot.walletAddress,
+      umkResult.umk,
+      wallet,
+      wallet.agentPublicKey,
+    );
+    if (!agentKeyResult) {
+      umkResult.cleanup();
+      console.error(`[ProfitShare Retry] IOU ${iou.id}: V3 strict decrypt failed for subscriber ${subscriberBot.walletAddress.slice(0,8)}...; keeping pending`);
+      await storage.updatePendingProfitShareStatus(iou.id, {
+        status: 'pending',
+        retryCount: iou.retryCount + 1,
+        lastError: 'V3 strict decrypt failed for subscriber agent key',
+      });
+      results.failed++;
+      continue;
+    }
+
+    let payoutResult;
+    try {
+      // Route through the shared payout helper so referral cuts are netted out
+      // exactly the same way as the live path (Model A). The helper is idempotent
+      // on (sourceType, sourceId), so this is safe to retry.
+      payoutResult = await payCreatorAndReferrals({
+        subscriberAgentPublicKey: wallet.agentPublicKey,
+        subscriberEncryptedPrivateKey: agentKeyResult.secretKey,
+        creatorWalletAddress: iou.creatorWalletAddress,
+        profitShareAmount: amount,
+        sourceType: 'profit_share_paid',
+        sourceId: iou.tradeId,
+        fundingWallet: iou.subscriberWalletAddress,
+      });
+    } finally {
+      agentKeyResult.cleanup();
+      umkResult.cleanup();
+    }
+
     if (payoutResult.success) {
       console.log(`[ProfitShare Retry] SUCCESS: IOU ${iou.id} paid (creator $${(payoutResult.creatorAmount ?? 0).toFixed(4)}, sig=${payoutResult.creatorSignature}, referrals: ${payoutResult.referralSummary})`);
       await storage.updatePendingProfitShareStatus(iou.id, { 
