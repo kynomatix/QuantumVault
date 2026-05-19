@@ -1,6 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useCallback, useEffect, useRef, useMemo, Fragment, memo } from "react";
-import { createPortal } from "react-dom";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -14,6 +13,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Slider } from "@/components/ui/slider";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -3396,27 +3396,29 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
               const adjProfit = backtestProfit * l.lev;
               const adjDrawdown = backtestDrawdown * l.lev;
               return (
-                <div
-                  key={l.label}
-                  className={cn(
-                    "rounded-lg border p-3 text-center transition-colors relative",
-                    l.isCurrent ? "bg-white/5 border-white/10" :
-                    l.isRecommended ? "bg-violet-500/10 border-violet-500/30" :
-                    "bg-white/[0.03] border-white/10"
-                  )}
-                  data-testid={`leverage-card-${l.lev}x`}
-                >
-                  <BotSetupAdvisor leverage={l.lev} drawdownPercent={backtestDrawdown} streakDrawdownPercent={analysis.streakDrawdownPercent} profitPercent={backtestProfit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} pineScript={pineScript} params={params} />
-                  <p className={cn("text-[10px] font-medium mb-1.5", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
-                  <p className={cn("text-lg font-bold tabular-nums", adjProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
-                    {adjProfit >= 0 ? "+" : ""}{adjProfit.toFixed(1)}%
-                  </p>
-                  <p className="text-[10px] text-white/30 mt-0.5">profit</p>
-                  <div className="mt-2 pt-2 border-t border-white/5">
-                    <p className="text-sm font-semibold text-purple-400 tabular-nums">{adjDrawdown.toFixed(1)}%</p>
-                    <p className="text-[10px] text-white/30">max drawdown</p>
-                  </div>
-                </div>
+                <BotSetupAdvisor key={l.label} leverage={l.lev} drawdownPercent={backtestDrawdown} streakDrawdownPercent={analysis.streakDrawdownPercent} profitPercent={backtestProfit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} pineScript={pineScript} params={params}>
+                  <button
+                    type="button"
+                    className={cn(
+                      "group rounded-lg border p-3 text-center transition-all duration-200 ease-out relative w-full cursor-pointer hover:-translate-y-0.5 hover:scale-[1.03] focus-visible:-translate-y-0.5 focus-visible:scale-[1.03] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/70",
+                      l.isCurrent && "bg-white/5 border-white/10 hover:bg-white/10 hover:border-violet-400/50 hover:ring-1 hover:ring-violet-500/50 hover:shadow-[0_0_18px_-2px_rgba(139,92,246,0.55)] active:bg-violet-500/20 active:border-violet-300 active:shadow-[0_0_20px_-2px_rgba(139,92,246,0.75)]",
+                      l.isRecommended && "bg-violet-500/10 border-violet-500/30 hover:bg-violet-500/25 hover:border-violet-300 hover:ring-2 hover:ring-violet-400/70 hover:shadow-[0_0_26px_-2px_rgba(139,92,246,0.8)] active:bg-violet-500/30 active:border-violet-200 active:shadow-[0_0_28px_-2px_rgba(139,92,246,0.95)]",
+                      !l.isCurrent && !l.isRecommended && "bg-white/[0.03] border-white/10 hover:bg-white/[0.1] hover:border-violet-400/50 hover:ring-1 hover:ring-violet-500/50 hover:shadow-[0_0_18px_-2px_rgba(139,92,246,0.55)] active:bg-violet-500/20 active:border-violet-300 active:shadow-[0_0_20px_-2px_rgba(139,92,246,0.75)]"
+                    )}
+                    data-testid={`leverage-card-${l.lev}x`}
+                  >
+                    <Rocket className="w-3.5 h-3.5 text-violet-300 absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 group-active:opacity-100 transition-opacity duration-200" />
+                    <p className={cn("text-[10px] font-medium mb-1.5", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
+                    <p className={cn("text-lg font-bold tabular-nums", adjProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
+                      {adjProfit >= 0 ? "+" : ""}{adjProfit.toFixed(1)}%
+                    </p>
+                    <p className="text-[10px] text-white/30 mt-0.5">profit</p>
+                    <div className="mt-2 pt-2 border-t border-white/5">
+                      <p className="text-sm font-semibold text-purple-400 tabular-nums">{adjDrawdown.toFixed(1)}%</p>
+                      <p className="text-[10px] text-white/30">max drawdown</p>
+                    </div>
+                  </button>
+                </BotSetupAdvisor>
               );
             })}
           </div>
@@ -4149,7 +4151,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
   );
 }
 
-function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended, ticker, timeframe, strategyName, pineScript, params }: { leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean; ticker?: string; timeframe?: string; strategyName?: string; pineScript?: string; params?: Record<string, any> }) {
+function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended, ticker, timeframe, strategyName, pineScript, params, children }: { leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean; ticker?: string; timeframe?: string; strategyName?: string; pineScript?: string; params?: Record<string, any>; children: React.ReactNode }) {
   const [capital, setCapital] = useState("1000");
   const capitalNum = parseFloat(capital) || 0;
   const { toast } = useToast();
@@ -4450,24 +4452,11 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const disabledReason = getDisabledReason();
 
   return (
-    <>
-      {isOpen && createPortal(
-        <div className="fixed inset-0 bg-black/50 z-40 pointer-events-none" />,
-        document.body
-      )}
-    <Popover onOpenChange={(open) => { setIsOpen(open); if (open && isAuthenticated && !balanceChecked) fetchBalanceAndAgent(); }}>
-      <PopoverTrigger asChild>
-        <button
-          className={cn(
-            "absolute top-1 right-1 p-0.5 rounded transition-colors",
-            isRecommended ? "text-violet-300 hover:text-violet-200 hover:bg-violet-500/20" : "text-white/30 hover:text-white/60 hover:bg-white/10"
-          )}
-          data-testid={`bot-setup-btn-${leverage}x`}
-        >
-          <Settings2 className="w-3 h-3" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80 bg-slate-900 border-white/10 p-0" align="center" side="top" sideOffset={8}>
+    <Dialog open={isOpen} onOpenChange={(open) => { setIsOpen(open); if (open && isAuthenticated && !balanceChecked) fetchBalanceAndAgent(); }}>
+      <DialogTrigger asChild>
+        {children}
+      </DialogTrigger>
+      <DialogContent className="w-80 max-w-[90vw] bg-slate-900 border-white/10 p-0 gap-0 sm:rounded-lg">
         {createdBot ? (
           <div className="p-4 space-y-3">
             <div className="flex items-center gap-2">
@@ -4781,9 +4770,8 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
             )}
           </>
         )}
-      </PopoverContent>
-    </Popover>
-    </>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -4873,27 +4861,29 @@ function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName, pine
       {showProjection && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {leverageLevels.map((l) => (
-            <div
-              key={l.label}
-              className={cn(
-                "rounded-lg border p-2.5 text-center relative",
-                l.isCurrent ? "bg-white/5 border-white/10" :
-                l.isRecommended ? "bg-violet-500/10 border-violet-500/30" :
-                "bg-white/[0.03] border-white/10"
-              )}
-              data-testid={`heatmap-lev-${l.lev}x-${idx}`}
-            >
-              <BotSetupAdvisor leverage={l.lev} drawdownPercent={dd} profitPercent={profit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} pineScript={pineScript} params={params} />
-              <p className={cn("text-[10px] font-medium mb-1", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
-              <p className={cn("text-sm font-bold tabular-nums", profit * l.lev >= 0 ? "text-sky-400" : "text-purple-400")}>
-                {profit * l.lev >= 0 ? "+" : ""}{(profit * l.lev).toFixed(1)}%
-              </p>
-              <p className="text-[9px] text-white/30">profit</p>
-              <div className="mt-1.5 pt-1.5 border-t border-white/5">
-                <p className="text-xs font-semibold text-purple-400 tabular-nums">{(dd * l.lev).toFixed(1)}%</p>
-                <p className="text-[9px] text-white/30">drawdown</p>
-              </div>
-            </div>
+            <BotSetupAdvisor key={l.label} leverage={l.lev} drawdownPercent={dd} profitPercent={profit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} pineScript={pineScript} params={params}>
+              <button
+                type="button"
+                className={cn(
+                  "group rounded-lg border p-2.5 text-center relative w-full cursor-pointer transition-all duration-200 ease-out hover:-translate-y-0.5 hover:scale-[1.03] focus-visible:-translate-y-0.5 focus-visible:scale-[1.03] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/70",
+                  l.isCurrent && "bg-white/5 border-white/10 hover:bg-white/10 hover:border-violet-400/50 hover:ring-1 hover:ring-violet-500/50 hover:shadow-[0_0_16px_-2px_rgba(139,92,246,0.5)] active:bg-violet-500/20 active:border-violet-300 active:shadow-[0_0_18px_-2px_rgba(139,92,246,0.7)]",
+                  l.isRecommended && "bg-violet-500/10 border-violet-500/30 hover:bg-violet-500/25 hover:border-violet-300 hover:ring-2 hover:ring-violet-400/70 hover:shadow-[0_0_24px_-2px_rgba(139,92,246,0.75)] active:bg-violet-500/30 active:border-violet-200 active:shadow-[0_0_26px_-2px_rgba(139,92,246,0.9)]",
+                  !l.isCurrent && !l.isRecommended && "bg-white/[0.03] border-white/10 hover:bg-white/[0.1] hover:border-violet-400/50 hover:ring-1 hover:ring-violet-500/50 hover:shadow-[0_0_16px_-2px_rgba(139,92,246,0.5)] active:bg-violet-500/20 active:border-violet-300 active:shadow-[0_0_18px_-2px_rgba(139,92,246,0.7)]"
+                )}
+                data-testid={`heatmap-lev-${l.lev}x-${idx}`}
+              >
+                <Rocket className="w-3 h-3 text-violet-300 absolute top-1 right-1 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 group-active:opacity-100 transition-opacity duration-200" />
+                <p className={cn("text-[10px] font-medium mb-1", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
+                <p className={cn("text-sm font-bold tabular-nums", profit * l.lev >= 0 ? "text-sky-400" : "text-purple-400")}>
+                  {profit * l.lev >= 0 ? "+" : ""}{(profit * l.lev).toFixed(1)}%
+                </p>
+                <p className="text-[9px] text-white/30">profit</p>
+                <div className="mt-1.5 pt-1.5 border-t border-white/5">
+                  <p className="text-xs font-semibold text-purple-400 tabular-nums">{(dd * l.lev).toFixed(1)}%</p>
+                  <p className="text-[9px] text-white/30">drawdown</p>
+                </div>
+              </button>
+            </BotSetupAdvisor>
           ))}
         </div>
       )}
