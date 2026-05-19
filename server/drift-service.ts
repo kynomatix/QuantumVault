@@ -2828,14 +2828,30 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     
     let stdout = '';
     let stderr = '';
-    
+
+    // V3 Phase 4c: hold the serialized command (which contains plaintext
+    // privateKeyBase58) in a mutable local so we can prove the child has
+    // received it before releasing our reference. The child emits a
+    // `[Executor] KEY_RECEIVED` ACK on stderr immediately after parsing
+    // stdin; on observing it we drop our reference, making it eligible for
+    // GC. This is the parent-side hold-until-child-confirms-receipt
+    // discipline required by Phase 4c.
+    let pendingPayload: string | null = null;
+    let keyReceivedAcked = false;
+
     child.stdout.on('data', (data) => {
       stdout += data.toString();
     });
-    
+
     child.stderr.on('data', (data) => {
-      stderr += data.toString();
-      console.log(`[Executor] ${data.toString().trim()}`);
+      const text = data.toString();
+      stderr += text;
+      console.log(`[Executor] ${text.trim()}`);
+      if (!keyReceivedAcked && text.includes('[Executor] KEY_RECEIVED')) {
+        keyReceivedAcked = true;
+        // Child has the secret in its address space — safe to release ours.
+        pendingPayload = null;
+      }
     });
     
     child.on('close', (code) => {
@@ -2917,12 +2933,14 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
     } else {
       console.log(`[Drift] Subprocess command ${command.action}: WARNING - no privateKeyBase58 provided!`);
     }
-    // Send key via stdin (NOT argv — argv is visible in `ps`). Parent must
-    // hold the decrypted base58 string alive until after the child has
-    // received it; JS strings are immutable and GC-managed, and the write
-    // here is synchronous from the parent's perspective, so we are safe to
-    // let it drop out of scope after `stdin.end()`.
-    child.stdin.write(JSON.stringify(command));
+    // Send key via stdin (NOT argv — argv is visible in `ps`). The serialized
+    // payload (which contains the plaintext privateKeyBase58) is held by the
+    // parent in `pendingPayload` until the child writes its `KEY_RECEIVED`
+    // ACK on stderr, at which point the stderr handler clears the reference
+    // (see above). JS strings are immutable so we cannot zero them, but
+    // releasing the only live reference makes the secret eligible for GC.
+    pendingPayload = JSON.stringify(command);
+    child.stdin.write(pendingPayload);
     child.stdin.end();
     
     // CLOSE orders get 60s timeout (subscribe + position check + referrer + order + confirmation)

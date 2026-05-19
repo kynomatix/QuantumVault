@@ -2188,7 +2188,17 @@ process.stdin.on('data', (chunk) => { inputData += chunk; });
 process.stdin.on('end', async () => {
   try {
     const command = JSON.parse(inputData);
-    
+    // V3 Phase 4c: immediately emit a deterministic receipt-ACK on stderr so
+    // the parent can prove the child has the secret in its address space
+    // before releasing its own reference. Must precede any work that could
+    // throw (including the failover-config log) so the ACK is unconditional
+    // once stdin is parsed.
+    process.stderr.write('[Executor] KEY_RECEIVED\n');
+    // SECURITY: drop the buffered stdin payload now that it has been parsed,
+    // so the encoded JSON (which contains privateKeyBase58) is eligible for
+    // GC and no longer reachable from the stdin closure.
+    inputData = '';
+
     // Log failover configuration at startup
     console.error(`[Executor] RPC Failover: ${ENABLE_FAILOVER ? 'ENABLED' : 'DISABLED'} (set DISABLE_RPC_FAILOVER=true to disable)`);
     
