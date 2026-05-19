@@ -1960,11 +1960,16 @@ async function routeSignalToSubscribers(
             if (closeTradePnl > 0) {
               const tradeId = `${subBot.id}-${Date.now()}`;
               console.log(`[Subscriber Routing] Initiating profit share for ${subBot.id}: pnl=$${closeTradePnl.toFixed(4)}`);
+              // V3 Phase 3b fund-safety: this is fire-and-forget, but the
+              // outer try/finally zeros `subAgentSecretKey` as soon as the
+              // trade call returns. Hand the profit-share path an isolated
+              // copy that it owns and zeros itself in its own finally.
+              const profitShareKeyCopy = new Uint8Array(subAgentSecretKey);
               distributeCreatorProfitShare({
                 subscriberBotId: subBot.id,
                 subscriberWalletAddress: subBot.walletAddress,
                 subscriberAgentPublicKey: subWallet.agentPublicKey!,
-                subscriberEncryptedPrivateKey: subAgentSecretKey,
+                subscriberEncryptedPrivateKey: profitShareKeyCopy,
                 driftSubaccountId: subAccountId,
                 realizedPnl: closeTradePnl,
                 tradeId,
@@ -1974,7 +1979,8 @@ async function routeSignalToSubscribers(
                 } else if (!result.success && result.error) {
                   console.error(`[Subscriber Routing] Profit share failed for ${subBot.id}: ${result.error}`);
                 }
-              }).catch(err => console.error(`[Subscriber Routing] Profit share error for ${subBot.id}:`, err));
+              }).catch(err => console.error(`[Subscriber Routing] Profit share error for ${subBot.id}:`, err))
+                .finally(() => { profitShareKeyCopy.fill(0); });
             }
 
             sendTradeNotification(subWallet.address, {
@@ -2243,11 +2249,15 @@ async function routeSignalToSubscribers(
               if (flipPnl > 0) {
                 const flipTradeId = `${subBot.id}-flip-${Date.now()}`;
                 console.log(`[Subscriber Routing] Initiating profit share for FLIP on ${subBot.id}: pnl=$${flipPnl.toFixed(4)}`);
+                // V3 Phase 3b fund-safety: see close-path note above — hand
+                // the profit-share an isolated key copy so the outer finally
+                // doesn't zeroize the buffer mid-settlement.
+                const flipProfitShareKeyCopy = new Uint8Array(subAgentSecretKey);
                 distributeCreatorProfitShare({
                   subscriberBotId: subBot.id,
                   subscriberWalletAddress: subBot.walletAddress,
                   subscriberAgentPublicKey: subWallet.agentPublicKey!,
-                  subscriberEncryptedPrivateKey: subAgentSecretKey,
+                  subscriberEncryptedPrivateKey: flipProfitShareKeyCopy,
                   driftSubaccountId: subAccountId,
                   realizedPnl: flipPnl,
                   tradeId: flipTradeId,
@@ -2257,7 +2267,8 @@ async function routeSignalToSubscribers(
                   } else if (!result.success && result.error) {
                     console.error(`[Subscriber Routing] Flip profit share failed for ${subBot.id}: ${result.error}`);
                   }
-                }).catch(err => console.error(`[Subscriber Routing] Flip profit share error for ${subBot.id}:`, err));
+                }).catch(err => console.error(`[Subscriber Routing] Flip profit share error for ${subBot.id}:`, err))
+                  .finally(() => { flipProfitShareKeyCopy.fill(0); });
               }
             }
 
