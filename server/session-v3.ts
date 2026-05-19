@@ -1131,12 +1131,13 @@ export async function decryptAgentKeyStrict(
         secretKey.fill(0);
         return null;
       }
-    } catch (verifyErr: any) {
+    } catch (verifyErr: unknown) {
       // Verifier modules failed to load or threw. Treat as a hard
       // failure under strict mode (the fallback helper warns and
       // continues here, but strict cannot afford that — an
       // unverified key would let a corrupt V3 blob slip through).
-      console.error(`[Security] V3 strict pubkey verify failed for ${walletAddress.slice(0, 8)}...: ${verifyErr.message}`);
+      const message = verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
+      console.error(`[Security] V3 strict pubkey verify failed for ${walletAddress.slice(0, 8)}...: ${message}`);
       secretKey.fill(0);
       return null;
     }
