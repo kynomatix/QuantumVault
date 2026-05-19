@@ -934,12 +934,45 @@ export async function migrateAgentKeyToV3(
   }
 }
 
+/**
+ * @deprecated For V3 migration use only.
+ *
+ * This helper exists for the auto-backfill path inside `migrateAgentKeyToV3`,
+ * where falling back to legacy is legitimate (we have to read the legacy blob
+ * exactly once in order to re-encrypt it as V3).
+ *
+ * **Every other caller MUST use the strict variant** added in Phase 2.5
+ * (`decryptAgentKeyStrict`). Silently falling back to legacy in any other
+ * path perpetuates the consent-model bug this migration exists to fix:
+ * a user who revoked `executionEnabled` would still be transparently traded
+ * on if the server can decrypt their legacy key from `AGENT_ENCRYPTION_KEY`
+ * alone. The deprecation WARN log below (`[Security][LegacyKeyUsed]`)
+ * captures every call site so we can verify zero unintended callers remain
+ * before Phase 6 deletes the legacy column.
+ */
 export async function decryptAgentKeyWithFallback(
   walletAddress: string,
   umk: Buffer | null,
   wallet: { agentPrivateKeyEncrypted?: string | null; agentPrivateKeyEncryptedV3?: string | null; agentPublicKey?: string | null },
   expectedAgentPubkey?: string | null
 ): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> {
+  // V3 Phase 1 deprecation telemetry. Fires on EVERY invocation of this
+  // fallback helper - the goal is to enumerate caller sites in production
+  // logs so Phases 3, 3b, 4, 4b, 4c can migrate them one at a time and
+  // Phase 5 can confirm the count has dropped to zero before Phase 6
+  // deletes the legacy column. The stack trace identifies the caller
+  // without us having to thread a label parameter through every call site.
+  // Logged at warn level (operationally noisy but cheap; we want to see it).
+  const callerStack = (new Error('[Security][LegacyKeyUsed]').stack || '')
+    .split('\n')
+    .slice(2, 7)
+    .join('\n');
+  console.warn(
+    `[Security][LegacyKeyUsed] decryptAgentKeyWithFallback called for ${walletAddress.slice(0, 8)}... ` +
+    `(hasV3=${Boolean(wallet.agentPrivateKeyEncryptedV3)}, hasLegacy=${Boolean(wallet.agentPrivateKeyEncrypted)}, hasUmk=${Boolean(umk)}). ` +
+    `Caller:\n${callerStack}`
+  );
+
   // Try v3 first if available and UMK is present
   if (wallet.agentPrivateKeyEncryptedV3 && umk) {
     try {

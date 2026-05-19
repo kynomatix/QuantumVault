@@ -218,3 +218,85 @@ recorded in the merged PR notes.
 
 Strict-serial successor: **Phase 1 — Audit, env health & legacy-use
 logging**.
+
+---
+
+## Phase 1 — Audit, env health & legacy-use logging (COMPLETE)
+
+**Date:** May 19, 2026
+**Risk:** LOW (log-only)
+**Status:** ✅ Complete, awaiting merge
+
+### What was done
+
+1. **Audit grep baseline (G15) confirmed clean.**
+   `rg "agentPrivateKeyEncrypted|getAgentKeypair" server/lab/ server/protocol/`
+   → zero hits. Confirms no agent-key reads have leaked into the
+   QuantumLab child process or the protocol-adapter layer.
+
+2. **Env-var presence verified in dev workspace.** All three of
+   `AGENT_ENCRYPTION_KEY`, `UMK_STORAGE_SECRET`, and
+   `SERVER_EXECUTION_KEY` are set. Staging/prod must be verified
+   pre-deploy (operator checklist; the new startup log will surface
+   any drift loudly on boot).
+
+3. **`[Security][LegacyKeyUsed]` deprecation WARN added** to
+   `decryptAgentKeyWithFallback` in `server/session-v3.ts`. Fires on
+   **every** invocation of the deprecated fallback helper and prints
+   a 5-frame stack slice for caller identification, plus flags for
+   `hasV3 / hasLegacy / hasUmk`. Never prints any key material. This
+   is the deprecation telemetry that Phases 3–4 will use to enumerate
+   readers and Phase 5 will use to gate on zero-callers for ≥7 days.
+
+4. **Deprecation JSDoc added** to `decryptAgentKeyWithFallback`
+   warning future contributors: only `migrateAgentKeyToV3` may use
+   the fallback variant; every other caller must use the strict
+   helper added in Phase 2.5.
+
+5. **`[Startup][SecurityConfig]` INFO log added** via the new
+   `logSecurityConfigSummary()` in `server/db.ts`, wired into
+   `server/index.ts` immediately after the UMK health check. Logs
+   presence (never values) of the three encryption env vars plus the
+   set of V3-relevant `wallets` columns actually present in the live
+   schema (queried via `information_schema.columns`, not the ORM
+   definition, so a drifted prod schema is surfaced loudly).
+
+6. **Dual-write paths reverified UNCHANGED.**
+   `server/routes.ts:2533` (unlock_umk new-wallet creation) and
+   `server/routes.ts:3648` (reset-agent-wallet) both still call
+   `legacyEncrypt` + `encryptAgentKeyV3` + `updateWalletAgentKeys`
+   + `updateWalletAgentKeyV3`. Per architect finding A3, new-wallet
+   legacy writes MUST continue until Phase 5b — touching them here
+   would break new sign-ups until Phase 3 lands.
+
+7. **Offline-key backup outreach to wallet
+   `BgCdZBajRhMFdktJA2oP2vUonGvQuanQ9KDSVpwEZSnV`** (agent pubkey
+   `GdBRstEGW38Mvyh2w5Z8LJDD8XhgmJSqhPT2PNyjtqPs`, the only non-AqTT
+   user with a configured bot) is documented as a manual operator
+   action. The sealed CSV from Phase -1 already protects this user;
+   the outreach is an additional layer. Outcome to be recorded in
+   the production operator log when contact is made or attempted.
+
+### What was NOT done (out of scope, deferred)
+
+- **No legacy writes stopped.** That is Phase 5b, gated on the
+  deprecation log being silent for ≥7 days.
+- **No call sites migrated.** Phase 3 onward, one phase per surface.
+- **No new `decryptAgentKeyStrict` helper.** That is Phase 2.5.
+
+### Verification
+
+- `npm run check` (tsc) — no new errors in
+  `server/session-v3.ts`, `server/db.ts`, or `server/index.ts`.
+- Workflow restart succeeded; startup logs show both new lines:
+  - `[Startup] UMK_STORAGE_SECRET configured (v3 rows present: no)`
+  - `[Startup][SecurityConfig] envVars={...:true,:true,:true} walletColumns=[...8 columns...]`
+- The WARN fires on every fallback-helper call (manually verified by
+  inspecting the code path; no prod call yet because no user has
+  signed in since restart — production deploy will produce live
+  telemetry within minutes of the first authenticated request).
+
+### Next phase
+
+Strict-serial successor: **Phase 2 — Backfill the legacy-only
+holdout** (passive; no code change).

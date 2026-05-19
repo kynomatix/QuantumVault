@@ -243,3 +243,57 @@ export async function checkUmkStorageSecretHealth(): Promise<void> {
     console.warn('[Startup] UMK_STORAGE_SECRET not configured. Safe for now (no v3 rows), but Phase 0 will require it once any wallet signs in.');
   }
 }
+
+/**
+ * V3 Phase 1 startup config summary.
+ *
+ * One-shot INFO log summarizing the encryption-key configuration surface so
+ * operators can spot config drift between dev / staging / prod at a glance.
+ * Reports presence (never values) of the three security env vars and the
+ * presence of every V3-related wallet column. Prints once per boot, right
+ * after the UMK health check.
+ *
+ * Intentionally read-only and side-effect-free beyond the log line.
+ */
+export async function logSecurityConfigSummary(): Promise<void> {
+  const envPresence = {
+    AGENT_ENCRYPTION_KEY: Boolean(process.env.AGENT_ENCRYPTION_KEY),
+    UMK_STORAGE_SECRET: Boolean(process.env.UMK_STORAGE_SECRET),
+    SERVER_EXECUTION_KEY: Boolean(process.env.SERVER_EXECUTION_KEY),
+  };
+
+  // Inspect the live `wallets` schema rather than trusting the ORM definition,
+  // so a column that was dropped/renamed in production but still referenced
+  // in code is surfaced loudly here at boot.
+  const client = await pool.connect();
+  let columns: string[] = [];
+  try {
+    const result = await client.query<{ column_name: string }>(`
+      SELECT column_name
+        FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = 'wallets'
+         AND column_name IN (
+           'agent_private_key_encrypted',
+           'agent_private_key_encrypted_v3',
+           'encrypted_user_master_key',
+           'encrypted_mnemonic_words',
+           'umk_encrypted_for_execution',
+           'umk_version',
+           'user_salt',
+           'execution_enabled'
+         )
+    `);
+    columns = result.rows.map(r => r.column_name).sort();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('[Startup][SecurityConfig] Could not inspect wallets schema: ' + msg);
+  } finally {
+    client.release();
+  }
+
+  console.log(
+    '[Startup][SecurityConfig] envVars=' + JSON.stringify(envPresence) +
+    ' walletColumns=' + JSON.stringify(columns)
+  );
+}
