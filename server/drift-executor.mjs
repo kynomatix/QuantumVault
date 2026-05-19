@@ -1053,7 +1053,13 @@ function loadPerpMarketIndices() {
 
 const PERP_MARKET_INDICES = loadPerpMarketIndices();
 
-// Must match server/crypto.ts encryption exactly
+// V3 Phase 4c: legacy decryption has been moved into the parent process
+// (server/drift-service.ts). The executor now only ever receives plaintext
+// base58 via `privateKeyBase58` over stdin, and `decryptPrivateKey` is a
+// pass-through. The legacy helpers below are intentionally LEFT IN PLACE
+// but UNREACHABLE so Phase 4c can be reverted with a single `git revert`
+// without re-introducing the legacy code path inadvertently. Phase 6
+// deletes them along with `process.env.AGENT_ENCRYPTION_KEY`.
 function getEncryptionKey() {
   const key = process.env.AGENT_ENCRYPTION_KEY;
   if (!key) {
@@ -1072,24 +1078,27 @@ function getLegacyEncryptionKey() {
   return ENCRYPTION_KEY;
 }
 
-function decryptPrivateKey(encryptedKey) {
+// V3 Phase 4c: dead-but-present. New spawn contract never reaches this
+// function. Kept here verbatim so Phase 6 (full legacy deletion) is a
+// single, mechanical removal and Phase 4c is single-`git revert` reversible.
+function _legacyDecryptPrivateKey_DEAD(encryptedKey) { // eslint-disable-line no-unused-vars
   const parts = encryptedKey.split(':');
   const key = Buffer.from(getLegacyEncryptionKey(), 'hex');
-  
+
   console.error(`[Executor] Attempting decryption: ${parts.length} parts, key length: ${key.length} bytes`);
-  
+
   // New format: iv:authTag:encrypted (3 parts) - AES-256-GCM
   if (parts.length === 3) {
     try {
       const iv = Buffer.from(parts[0], 'hex');
       const authTag = Buffer.from(parts[1], 'hex');
       const encrypted = parts[2];
-      
+
       console.error(`[Executor] GCM params: iv=${iv.length}bytes, authTag=${authTag.length}bytes, encrypted=${encrypted.length}chars`);
-      
+
       const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
       decipher.setAuthTag(authTag);
-      
+
       let decrypted = decipher.update(encrypted, 'hex', 'utf8');
       decrypted += decipher.final('utf8');
       console.error(`[Executor] GCM decryption successful, result length: ${decrypted.length}`);
@@ -1100,15 +1109,15 @@ function decryptPrivateKey(encryptedKey) {
       throw new Error(`GCM decryption failed: ${e.message}. Check AGENT_ENCRYPTION_KEY matches the key used during encryption.`);
     }
   }
-  
+
   // Legacy format: iv:encrypted (2 parts) - AES-256-CBC
   if (parts.length === 2) {
     try {
       const iv = Buffer.from(parts[0], 'hex');
       const encrypted = parts[1];
-      
+
       const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-      
+
       let decrypted = decipher.update(encrypted, 'hex', 'utf8');
       decrypted += decipher.final('utf8');
       console.error('[Executor] Successfully decrypted using legacy CBC format');
@@ -1118,10 +1127,26 @@ function decryptPrivateKey(encryptedKey) {
       throw new Error(`CBC decryption failed: ${e.message}. Check AGENT_ENCRYPTION_KEY matches the key used during encryption.`);
     }
   }
-  
+
   // Unknown format - could be already base58
   console.error(`[Executor] Unknown format (${parts.length} parts), assuming unencrypted base58`);
   return encryptedKey;
+}
+
+// V3 Phase 4c: pass-through. The parent process is now solely responsible
+// for decryption (see _toBase58Plaintext in server/drift-service.ts). If
+// anything ever calls this with what looks like a legacy encrypted blob
+// (contains ':'), throw loudly — that indicates a spawn site that was
+// missed during the Phase 4c migration and must not be silently legacy-
+// decrypted in the child.
+function decryptPrivateKey(input) {
+  if (typeof input === 'string' && input.includes(':')) {
+    throw new Error(
+      '[Executor] Phase 4c: legacy encrypted blob received by child — ' +
+      'spawn site must pre-decrypt and send privateKeyBase58 (parent-side decryption only).'
+    );
+  }
+  return input;
 }
 
 // Creates a DriftClient with keypair

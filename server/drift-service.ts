@@ -35,6 +35,18 @@ function _toAgentKeypair(input: string | Uint8Array): Keypair {
   }
   return Keypair.fromSecretKey(bs58.decode(decrypt(input)));
 }
+
+// V3 Phase 4c: produce plaintext base58 of the agent secret key for handoff
+// to the drift-executor.mjs subprocess. Phase 4c moves ALL legacy decryption
+// out of the child process — the parent is now solely responsible. Accepts
+// either a raw Uint8Array (V3 strict-decrypt path) or a legacy encrypted
+// string blob (decrypted here in the parent, never in the child).
+function _toBase58Plaintext(input: string | Uint8Array): string {
+  if (input instanceof Uint8Array) {
+    return bs58.encode(input);
+  }
+  return decrypt(input);
+}
 import { getMarketPrice } from './drift-price';
 import { buildPerpMarketNames, buildPerpMarketIndices, syncFromSdk, writeExecutorJson, CANONICAL_PERP_MARKETS, PERP_ALIASES } from './market-registry';
 
@@ -2480,24 +2492,19 @@ export async function executeAgentDriftDeposit(
     
     // Use subprocess executor to avoid ESM/CJS DriftClient loading issues
     // The drift-executor.mjs runs in pure ESM mode where DriftClient loads correctly
-    // v3 path: pass pre-decrypted base58 key directly
-    // Legacy path: pass encrypted key for executor to decrypt
-    const command = isPreDecrypted 
-      ? {
-          action: 'deposit',
-          privateKeyBase58: privateKeyOrEncrypted,
-          amountUsdc,
-          subAccountId,
-          agentPublicKey,
-        }
-      : {
-          action: 'deposit',
-          encryptedPrivateKey: privateKeyOrEncrypted,
-          amountUsdc,
-          subAccountId,
-          agentPublicKey,
-        };
-    
+    // V3 Phase 4c: the parent is now solely responsible for decryption — the
+    // child only ever receives plaintext base58 (legacy path decrypts here).
+    const privateKeyBase58 = isPreDecrypted
+      ? privateKeyOrEncrypted
+      : decrypt(privateKeyOrEncrypted);
+    const command = {
+      action: 'deposit',
+      privateKeyBase58,
+      amountUsdc,
+      subAccountId,
+      agentPublicKey,
+    };
+
     const result = await executeDriftCommandViaSubprocess(command);
     
     if (result.success) {
@@ -2894,22 +2901,27 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
       });
     });
     
-    // Log command details for debugging (but not actual key values)
+    // Log command details for debugging (but not actual key values).
+    // V3 Phase 4c: child only ever receives plaintext base58 — there is no
+    // longer a legacy `encryptedPrivateKey` branch on this spawn contract.
     if (command.privateKeyBase58) {
       const keyLen = command.privateKeyBase58.length;
       console.log(`[Drift] Subprocess command ${command.action}: keyLen=${keyLen}, firstChars=${command.privateKeyBase58.slice(0, 4)}...`);
-      
+
       // VALIDATION: A base58-encoded 64-byte key should be approximately 87-88 characters
       if (keyLen < 80 || keyLen > 95) {
         console.error(`[Drift] CRITICAL: Invalid key length ${keyLen} - key may be corrupted or empty`);
         resolve({ success: false, error: `Invalid key length: ${keyLen} (expected 87-88 chars)` });
         return;
       }
-    } else if (command.encryptedPrivateKey) {
-      console.log(`[Drift] Subprocess command ${command.action}: using encrypted key (legacy path)`);
     } else {
-      console.log(`[Drift] Subprocess command ${command.action}: WARNING - no key provided!`);
+      console.log(`[Drift] Subprocess command ${command.action}: WARNING - no privateKeyBase58 provided!`);
     }
+    // Send key via stdin (NOT argv — argv is visible in `ps`). Parent must
+    // hold the decrypted base58 string alive until after the child has
+    // received it; JS strings are immutable and GC-managed, and the write
+    // here is synchronous from the parent's perspective, so we are safe to
+    // let it drop out of scope after `stdin.end()`.
     child.stdin.write(JSON.stringify(command));
     child.stdin.end();
     
@@ -3268,10 +3280,13 @@ export async function executePerpOrder(
   console.log('[Drift] Using subprocess executor for trade');
   
   try {
+    // V3 Phase 4c: child only ever receives plaintext base58. If the caller
+    // did not pre-supply a decrypted key, decrypt the legacy blob here in
+    // the parent (never in the child).
+    const tradeKeyBase58 = privateKeyBase58 || decrypt(encryptedPrivateKey);
     const result = await executeDriftCommandViaSubprocess({
       action: 'trade',
-      encryptedPrivateKey,
-      privateKeyBase58,
+      privateKeyBase58: tradeKeyBase58,
       expectedAgentPubkey,
       market,
       side,
@@ -3600,10 +3615,13 @@ export async function closePerpPosition(
   console.log('[Drift] Using subprocess executor for close');
   
   try {
+    // V3 Phase 4c: child only ever receives plaintext base58. If the caller
+    // did not pre-supply a decrypted key, decrypt the legacy blob here in
+    // the parent (never in the child).
+    const closeKeyBase58 = privateKeyBase58 || decrypt(encryptedPrivateKey);
     const result = await executeDriftCommandViaSubprocess({
       action: 'close',
-      encryptedPrivateKey,
-      privateKeyBase58,
+      privateKeyBase58: closeKeyBase58,
       expectedAgentPubkey,
       market,
       subAccountId,
@@ -3687,13 +3705,14 @@ export async function closeDriftSubaccount(
   encryptedPrivateKeyRaw: string | Uint8Array,
   subAccountId: number
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
-  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   console.log(`[Drift] Closing subaccount ${subAccountId} to reclaim rent`);
   
   try {
+    // V3 Phase 4c: parent decrypts; child only receives plaintext base58.
+    const privateKeyBase58 = _toBase58Plaintext(encryptedPrivateKeyRaw);
     const result = await executeDriftCommandViaSubprocess({
       action: 'deleteSubaccount',
-      encryptedPrivateKey,
+      privateKeyBase58,
       subAccountId,
     });
     
@@ -3725,13 +3744,14 @@ export async function settleAllPnl(
   encryptedPrivateKeyRaw: string | Uint8Array,
   subAccountId: number
 ): Promise<{ success: boolean; settledMarkets?: any[]; error?: string }> {
-  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   console.log(`[Drift] Settling all PnL for subaccount ${subAccountId}`);
   
   try {
+    // V3 Phase 4c: parent decrypts; child only receives plaintext base58.
+    const privateKeyBase58 = _toBase58Plaintext(encryptedPrivateKeyRaw);
     const result = await executeDriftCommandViaSubprocess({
       action: 'settlePnl',
-      encryptedPrivateKey,
+      privateKeyBase58,
       subAccountId,
     });
     
