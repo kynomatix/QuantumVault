@@ -3125,7 +3125,27 @@ export default function AppPage() {
                                  bot.pnlPercentAllTime;
                       const pnlValue = pnl ? parseFloat(pnl) : null;
                       const totalCapital = parseFloat(bot.totalCapitalInvested || '0');
-                      const isSubscribed = mySubscriptions?.some((sub) => sub.publishedBotId === bot.id);
+                      const mySub = mySubscriptions?.find((sub) => sub.publishedBotId === bot.id);
+                      const isSubscribed = !!mySub;
+                      // V3 Phase 3b: when fan-out can't sign for the subscriber
+                      // (execution revoked, emergency stopped, or no V3 key)
+                      // the subscription is paused with a machine-readable
+                      // reason. Surface it on the marketplace card so users can
+                      // see why their copy bot stopped following trades.
+                      const isPaused = mySub?.status === 'paused';
+                      const pauseReasonLabel = (() => {
+                        if (!isPaused) return null;
+                        switch (mySub?.subscriptionStatusReason) {
+                          case 'execution_disabled':
+                            return 'Execution authorization disabled — re-enable execution to resume copying trades.';
+                          case 'emergency_stopped':
+                            return 'Emergency stop is active — clear it to resume copying trades.';
+                          case 'v3_decrypt_failed':
+                            return 'Your agent key could not be unlocked — sign in again to resume copying trades.';
+                          default:
+                            return 'Subscription paused — see your account settings.';
+                        }
+                      })();
                       
                       return (
                         <div 
@@ -3199,6 +3219,16 @@ export default function AppPage() {
                               <span>${totalCapital.toLocaleString()} TVL</span>
                             </div>
                           </div>
+
+                          {isPaused && (
+                            <div
+                              className="mb-3 flex items-start gap-2 rounded-md border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-300"
+                              data-testid={`status-subscription-paused-${bot.id}`}
+                            >
+                              <span className="font-semibold">Paused:</span>
+                              <span>{pauseReasonLabel}</span>
+                            </div>
+                          )}
 
                           <div className="flex gap-2">
                             <Button 

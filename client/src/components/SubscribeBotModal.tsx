@@ -41,6 +41,16 @@ import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 import { useLeverageLimits } from '@/hooks/useLeverageLimits';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
 
+// V3 Phase 3b: shape of the JSON error returned by /api/marketplace/:id/subscribe
+// when the subscriber has not yet authorized execution. The server uses a 412
+// with `{ error, action: 'enable_execution' }`; client routes that through
+// `enableExecution()` instead of just surfacing a generic toast.
+interface SubscribeApiError {
+  message?: string;
+  error?: string;
+  action?: 'enable_execution' | string;
+}
+
 interface SubscribeBotModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -407,12 +417,13 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       toast({ title: 'Successfully subscribed to bot!' });
       onSubscribed?.();
       handleClose();
-    } catch (error: any) {
+    } catch (error: unknown) {
       // V3 Phase 3b: server returns 412 with action:'enable_execution' when
       // the subscriber has not yet authorized server-side execution. Route
       // the user straight into the enable-execution flow instead of just
       // showing a toast.
-      if (error?.action === 'enable_execution') {
+      const apiErr = error as SubscribeApiError;
+      if (apiErr?.action === 'enable_execution') {
         toast({
           title: 'Authorize execution to subscribe',
           description: 'Subscribing means trades will be signed on your behalf when the bot fires. Approve the authorization to continue.',
@@ -430,10 +441,11 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
           toast({ title: 'Successfully subscribed to bot!' });
           onSubscribed?.();
           handleClose();
-        } catch (innerErr: any) {
+        } catch (innerErr: unknown) {
+          const innerApiErr = innerErr as SubscribeApiError;
           toast({
             title: 'Could not enable execution',
-            description: innerErr?.message || 'Please try again.',
+            description: innerApiErr?.message || 'Please try again.',
             variant: 'destructive',
           });
         }
@@ -441,7 +453,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       }
       toast({
         title: 'Failed to subscribe',
-        description: error.message,
+        description: apiErr?.message || 'Unknown error',
         variant: 'destructive'
       });
     }

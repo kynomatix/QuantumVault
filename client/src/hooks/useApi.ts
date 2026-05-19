@@ -327,6 +327,17 @@ export interface MarketplaceSubscription {
   isActive: boolean;
   subscribedAt: string;
   publishedBot: PublishedBot;
+  // V3 Phase 3b: when fan-out can't decrypt the subscriber's agent key (e.g.
+  // execution revoked, emergency-stopped, or no V3 key), the subscription is
+  // paused with a machine-readable reason so the UI can tell the subscriber
+  // exactly why their copy bot stopped trading.
+  status?: 'active' | 'paused' | 'cancelled' | string;
+  subscriptionStatusReason?:
+    | 'execution_disabled'
+    | 'emergency_stopped'
+    | 'v3_decrypt_failed'
+    | string
+    | null;
 }
 
 // Marketplace API functions
