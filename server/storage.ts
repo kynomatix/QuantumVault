@@ -98,6 +98,13 @@ export interface IStorage {
   updateWalletLastSeen(address: string): Promise<void>;
   getOrCreateWallet(address: string): Promise<Wallet>;
   updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void>;
+  /**
+   * V3 Phase 5b: update the agent public key WITHOUT writing the legacy
+   * `agent_private_key_encrypted` column. Used by new-wallet creation paths
+   * that have stopped dual-writing the legacy column. Pair with
+   * `updateWalletAgentKeyV3` to persist the V3 ciphertext.
+   */
+  updateWalletAgentPublicKey(address: string, agentPublicKey: string): Promise<void>;
   updateWalletAgentKeyV3(address: string, agentPrivateKeyEncryptedV3: string): Promise<void>;
   updateWalletWebhookSecret(address: string, userWebhookSecret: string): Promise<void>;
   updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined>;
@@ -396,6 +403,14 @@ export class DatabaseStorage implements IStorage {
     await db.update(wallets).set({ 
       agentPublicKey, 
       agentPrivateKeyEncrypted 
+    }).where(eq(wallets.address, address));
+  }
+
+  // V3 Phase 5b: agent-public-key-only write; leaves `agent_private_key_encrypted`
+  // untouched (NULL for brand-new wallets). Pair with `updateWalletAgentKeyV3`.
+  async updateWalletAgentPublicKey(address: string, agentPublicKey: string): Promise<void> {
+    await db.update(wallets).set({
+      agentPublicKey,
     }).where(eq(wallets.address, address));
   }
 
