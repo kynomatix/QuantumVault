@@ -15,6 +15,13 @@
       "when": 1779153404579,
       "tag": "0001_add_subscription_status_reason",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1779999999999,
+      "tag": "0002_phase4_orphaned_subaccount_nullable",
+      "breakpoints": true
     }
   ]
 }
