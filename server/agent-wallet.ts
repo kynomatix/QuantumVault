@@ -66,6 +66,20 @@ export function getAgentKeypair(encryptedPrivateKey: string): Keypair {
   return Keypair.fromSecretKey(secretKey);
 }
 
+/**
+ * Phase 3 (V3 retirement): build a Keypair from either a legacy-encrypted
+ * string blob OR an already-decrypted Uint8Array secret key. User-online
+ * callers obtain the Uint8Array via decryptAgentKeyStrict in session-v3 and
+ * pass it here. Out-of-scope subscriber-fanout / background callers keep
+ * passing the string until their phase migrates them.
+ */
+function resolveAgentKeypair(input: string | Uint8Array): Keypair {
+  if (input instanceof Uint8Array) {
+    return Keypair.fromSecretKey(input);
+  }
+  return getAgentKeypair(input);
+}
+
 export async function getAgentUsdcBalance(agentPublicKey: string): Promise<number> {
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
@@ -204,13 +218,13 @@ export async function buildTransferToAgentTransaction(
 export async function buildWithdrawFromAgentTransaction(
   userWalletAddress: string,
   agentPublicKey: string,
-  encryptedPrivateKey: string,
+  encryptedPrivateKey: string | Uint8Array,
   amountUsdc: number,
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
   const connection = getConnection();
   const userPubkey = new PublicKey(userWalletAddress);
   const agentPubkey = new PublicKey(agentPublicKey);
-  const agentKeypair = getAgentKeypair(encryptedPrivateKey);
+  const agentKeypair = resolveAgentKeypair(encryptedPrivateKey);
   const usdcMint = new PublicKey(USDC_MINT);
   
   const userAta = getAssociatedTokenAddressSync(usdcMint, userPubkey);
@@ -305,13 +319,13 @@ function createTransferInstruction(
 export async function buildWithdrawSolFromAgentTransaction(
   agentPublicKey: string,
   userWalletAddress: string,
-  encryptedPrivateKey: string,
+  encryptedPrivateKey: string | Uint8Array,
   amountSol: number,
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
   const userPubkey = new PublicKey(userWalletAddress);
-  const agentKeypair = getAgentKeypair(encryptedPrivateKey);
+  const agentKeypair = resolveAgentKeypair(encryptedPrivateKey);
   
   const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
   if (lamports <= 0) {
@@ -348,7 +362,7 @@ export async function buildWithdrawSolFromAgentTransaction(
 // Execute agent USDC withdrawal (server-side, no user signature needed)
 export async function executeAgentWithdraw(
   agentPublicKey: string,
-  encryptedPrivateKey: string,
+  encryptedPrivateKey: string | Uint8Array,
   userWalletAddress: string,
   amountUsdc: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
@@ -388,7 +402,7 @@ export async function executeAgentWithdraw(
 // Execute agent SOL withdrawal (server-side, no user signature needed)
 export async function executeAgentSolWithdraw(
   agentPublicKey: string,
-  encryptedPrivateKey: string,
+  encryptedPrivateKey: string | Uint8Array,
   userWalletAddress: string,
   amountSol: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
@@ -428,13 +442,13 @@ export async function executeAgentSolWithdraw(
 // Transfer USDC from agent wallet to any Solana wallet (for profit sharing)
 export async function transferUsdcToWallet(
   fromAgentPublicKey: string,
-  fromEncryptedPrivateKey: string,
+  fromEncryptedPrivateKey: string | Uint8Array,
   toWalletAddress: string,
   amountUsdc: number,
 ): Promise<{ success: boolean; signature?: string; error?: string; solBalance?: number }> {
   try {
     const connection = getConnection();
-    const fromKeypair = getAgentKeypair(fromEncryptedPrivateKey);
+    const fromKeypair = resolveAgentKeypair(fromEncryptedPrivateKey);
     const fromPubkey = new PublicKey(fromAgentPublicKey);
     const toPubkey = new PublicKey(toWalletAddress);
     const usdcMint = new PublicKey(USDC_MINT);

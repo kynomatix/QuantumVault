@@ -21,8 +21,20 @@ function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
 }
 
-function _decryptToSecretKey(encryptedPrivateKey: string): { secretKey: Uint8Array; publicKey: string } {
-  const keypair = getAgentKeypair(encryptedPrivateKey);
+/**
+ * Resolve a Uint8Array secret key from either a legacy-encrypted string blob
+ * OR an already-decrypted Uint8Array. Phase 3 (V3 retirement) migrated user-
+ * online callers to pass Uint8Array (obtained via decryptAgentKeyStrict). The
+ * remaining string callers are out-of-scope (Phase 3b subscriber fan-out and
+ * Phase 4 background services) and continue using the legacy decrypt until
+ * their phase migrates them.
+ */
+function _decryptToSecretKey(input: string | Uint8Array): { secretKey: Uint8Array; publicKey: string } {
+  if (input instanceof Uint8Array) {
+    const keypair = Keypair.fromSecretKey(input);
+    return { secretKey: input, publicKey: keypair.publicKey.toBase58() };
+  }
+  const keypair = getAgentKeypair(input);
   return { secretKey: keypair.secretKey, publicKey: keypair.publicKey.toBase58() };
 }
 
@@ -117,7 +129,7 @@ async function sweepPacificaSubaccount(
 }
 
 function _resolveSigningContext(
-  agentEncryptedKey: string,
+  agentEncryptedKey: string | Uint8Array,
   subAccountId: number,
   botCtx: BotSubaccountContext | null,
 ): { secretKey: Uint8Array; publicKey: string; subaccountId: string | undefined } {
@@ -237,14 +249,17 @@ async function buildAgentDriftWithdrawTransaction(_a: string, _b: string, _c: nu
 
 async function executeAgentDeposit(
   agentPublicKey: string,
-  privateKeyOrEncrypted: string,
+  privateKeyOrEncrypted: string | Uint8Array,
   amountUsdc: number,
   subAccountId: number = 0,
   isPreDecrypted: boolean = false,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     let secretKey: Uint8Array;
-    if (isPreDecrypted) {
+    if (privateKeyOrEncrypted instanceof Uint8Array) {
+      // Phase 3: V3-strict callers pass a pre-decrypted Uint8Array directly.
+      secretKey = privateKeyOrEncrypted;
+    } else if (isPreDecrypted) {
       const bs58Mod = await import('bs58');
       const bs58Default = bs58Mod.default || bs58Mod;
       secretKey = bs58Default.decode(privateKeyOrEncrypted);
@@ -265,7 +280,7 @@ async function executeAgentDeposit(
 
 async function executeAgentDriftWithdraw(
   agentPublicKey: string,
-  encryptedPrivateKey: string,
+  encryptedPrivateKey: string | Uint8Array,
   amountUsdc: number,
   subAccountId: number = 0,
   feeContext?: { tradingBotId?: string | null; context?: string },
@@ -326,7 +341,7 @@ async function recordPacificaWithdrawFeeIfApplicable(args: {
 
 async function executeAgentTransferBetweenSubaccounts(
   agentPublicKey: string,
-  encryptedPrivateKey: string,
+  encryptedPrivateKey: string | Uint8Array,
   fromSubAccountId: number,
   toSubAccountId: number,
   amountUsdc: number,
@@ -390,7 +405,7 @@ async function getBatchPerpPositions(walletAddress: string, subAccountIds: numbe
 }
 
 async function executePerpOrder(
-  encryptedPrivateKey: string,
+  encryptedPrivateKey: string | Uint8Array,
   market: string,
   side: 'long' | 'short',
   sizeInBase: number,
@@ -461,7 +476,7 @@ async function getExchangeAccountInfoForBot(agentPublicKey: string, subAccountId
 }
 
 async function closePerpPosition(
-  encryptedPrivateKey: string,
+  encryptedPrivateKey: string | Uint8Array,
   market: string,
   subAccountId: number = 0,
   positionSizeBase?: number,
@@ -536,7 +551,7 @@ async function discoverOnChainSubaccounts(walletAddress: string): Promise<number
 }
 
 async function closeDriftSubaccount(
-  encryptedPrivateKey: string,
+  encryptedPrivateKey: string | Uint8Array,
   subAccountId: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
@@ -552,7 +567,7 @@ async function closeDriftSubaccount(
 }
 
 async function settleAllPnl(
-  encryptedPrivateKey: string,
+  encryptedPrivateKey: string | Uint8Array,
   subAccountId: number,
 ): Promise<{ success: boolean; settledMarkets?: any[]; error?: string }> {
   try {
@@ -577,7 +592,7 @@ import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransactio
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, decryptAgentKeyStrict, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
@@ -4047,16 +4062,17 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         });
       }
       
-      const agentKeyResult = await decryptAgentKeyWithFallback(
+      const agentKeyResult = await decryptAgentKeyStrict(
         req.walletAddress!,
         umkResult.umk,
-        wallet
+        wallet,
+        wallet.agentPublicKey
       );
       
       umkResult.cleanup();
       
       if (!agentKeyResult) {
-        return res.status(500).json({ error: "Agent key decryption failed. Please reconfigure your agent wallet." });
+        return res.status(500).json({ error: "Agent key decryption failed. Please reconfigure your agent wallet or sign in again." });
       }
       
       // CRITICAL: Copy secret key bytes immediately to prevent buffer zeroization issues
@@ -7720,11 +7736,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
       }
       
-      // Security v3: Decrypt agent key via v3 path (Phase 6.2 - use pre-decrypted key)
-      const agentKeyResult = await decryptAgentKeyWithFallback(
+      // Security v3 (Phase 3 strict): V3-only — fail explicitly if owner has not migrated to v3.
+      const agentKeyResult = await decryptAgentKeyStrict(
         bot.walletAddress,
         umkResult.umk,
-        ownerWallet
+        ownerWallet,
+        ownerWallet.agentPublicKey
       );
       
       // Cleanup the unwrapped UMK immediately after deriving agent key
@@ -9150,11 +9167,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
       }
       
-      // Security v3: Decrypt agent key via v3 path (Phase 6.2 - use pre-decrypted key)
-      const agentKeyResult = await decryptAgentKeyWithFallback(
+      // Security v3 (Phase 3 strict): V3-only — fail explicitly if user has not migrated to v3.
+      const agentKeyResult = await decryptAgentKeyStrict(
         walletAddress,
         umkResult.umk,
-        wallet
+        wallet,
+        wallet.agentPublicKey
       );
       
       // Cleanup the unwrapped UMK immediately after deriving agent key
@@ -10629,10 +10647,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!umkResult) {
         return res.status(403).json({ error: "Execution not enabled. Please enable execution authorization first." });
       }
-      const agentKeyResult = await decryptAgentKeyWithFallback(req.walletAddress!, umkResult.umk, wallet);
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
       umkResult.cleanup();
       if (!agentKeyResult) {
-        return res.status(500).json({ error: "Agent key decryption failed" });
+        return res.status(500).json({ error: "Agent key decryption failed. Please sign in again." });
       }
       const agentKeypair = Keypair.fromSecretKey(Buffer.from(agentKeyResult.secretKey));
       agentKeyResult.cleanup();
@@ -10705,10 +10723,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!umkResult) {
         return res.status(403).json({ error: "Execution not enabled. Please enable execution authorization first." });
       }
-      const agentKeyResult = await decryptAgentKeyWithFallback(req.walletAddress!, umkResult.umk, wallet);
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
       umkResult.cleanup();
       if (!agentKeyResult) {
-        return res.status(500).json({ error: "Agent key decryption failed" });
+        return res.status(500).json({ error: "Agent key decryption failed. Please sign in again." });
       }
       const agentKeypair = Keypair.fromSecretKey(Buffer.from(agentKeyResult.secretKey));
       agentKeyResult.cleanup();
