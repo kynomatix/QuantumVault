@@ -119,6 +119,8 @@ export interface IStorage {
   findBotByProtocolSubaccount(walletAddress: string, protocolSubaccountId: string, protocol?: string): Promise<TradingBot | undefined>;
   createTradingBot(bot: InsertTradingBot): Promise<TradingBot>;
   updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined>;
+  // Phase 4b: write V3 ciphertext for per-bot subaccount key.
+  updateBotSubaccountKeyV3(id: string, encryptedV3: string): Promise<void>;
   clearTradingBotSubaccount(id: string): Promise<void>;
   deleteTradingBot(id: string): Promise<void>;
   updateTradingBotStats(id: string, stats: TradingBot['stats']): Promise<void>;
@@ -261,6 +263,13 @@ export interface IStorage {
     umkEncryptedForExecution: string | null;
     executionExpiresAt: Date | null;
   }): Promise<Wallet | undefined>;
+
+  // Phase 4b: atomically revoke execution AND pause all owned active bots.
+  // Returns the bots that were paused (id + name) so the caller can notify.
+  atomicRevokeExecutionAndPauseBots(
+    walletAddress: string,
+    pauseReason: string,
+  ): Promise<{ id: string; name: string }[]>;
 
   // Security v3: Emergency stop
   updateWalletEmergencyStop(address: string, updates: {
@@ -543,6 +552,13 @@ export class DatabaseStorage implements IStorage {
   async updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined> {
     const result = await db.update(tradingBots).set({ ...updates, updatedAt: sql`NOW()` } as any).where(eq(tradingBots.id, id)).returning();
     return result[0];
+  }
+
+  async updateBotSubaccountKeyV3(id: string, encryptedV3: string): Promise<void> {
+    await db
+      .update(tradingBots)
+      .set({ botSubaccountKeyEncryptedV3: encryptedV3, updatedAt: sql`NOW()` })
+      .where(eq(tradingBots.id, id));
   }
 
   async clearTradingBotSubaccount(id: string): Promise<void> {
@@ -1780,6 +1796,43 @@ export class DatabaseStorage implements IStorage {
   }): Promise<Wallet | undefined> {
     const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
     return result[0];
+  }
+
+  // Phase 4b: atomically clear the wallet's execution authorization AND pause
+  // every active trading bot the wallet owns. Wrapped in a single transaction
+  // so we cannot end up in a state where execution is cleared but bots are
+  // still marked active (which would cause webhook failures the user can't see).
+  async atomicRevokeExecutionAndPauseBots(
+    walletAddress: string,
+    pauseReason: string,
+  ): Promise<{ id: string; name: string }[]> {
+    return await db.transaction(async (tx) => {
+      await tx
+        .update(wallets)
+        .set({
+          executionEnabled: false,
+          umkEncryptedForExecution: null,
+          executionExpiresAt: null,
+        })
+        .where(eq(wallets.address, walletAddress));
+
+      const paused = await tx
+        .update(tradingBots)
+        .set({
+          isActive: false,
+          pauseReason,
+          updatedAt: sql`NOW()`,
+        })
+        .where(
+          and(
+            eq(tradingBots.walletAddress, walletAddress),
+            eq(tradingBots.isActive, true),
+          ),
+        )
+        .returning({ id: tradingBots.id, name: tradingBots.name });
+
+      return paused;
+    });
   }
 
   // Security v3: Emergency stop

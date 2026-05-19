@@ -162,6 +162,9 @@ export const tradingBots = pgTable("trading_bots", {
   // the SQL CHECK is the actual enforcement.
   activeProtocol: text("active_protocol").$type<'pacifica' | 'drift'>().notNull(),
   botSubaccountKeyEncrypted: text("bot_subaccount_key_encrypted"),
+  // Phase 4b: V3-encrypted bot subaccount key (subkey derived from owner UMK
+  // with per-bot AAD). Legacy column remains during the Phase 5b/6 drop window.
+  botSubaccountKeyEncryptedV3: text("bot_subaccount_key_encrypted_v3"),
   subaccountStatus: text("subaccount_status").default("none"),
   subaccountAuthMode: text("subaccount_auth_mode").$type<'external_key' | 'main_plus_id'>().notNull(),
   
@@ -175,7 +178,7 @@ export const tradingBots = pgTable("trading_bots", {
   ),
   check(
     "trading_bots_external_key_invariant",
-    sql`NOT (${table.subaccountAuthMode} = 'external_key' AND ${table.subaccountStatus} = 'active') OR (${table.protocolSubaccountId} IS NOT NULL AND ${table.botSubaccountKeyEncrypted} IS NOT NULL)`,
+    sql`NOT (${table.subaccountAuthMode} = 'external_key' AND ${table.subaccountStatus} = 'active') OR (${table.protocolSubaccountId} IS NOT NULL AND (${table.botSubaccountKeyEncrypted} IS NOT NULL OR ${table.botSubaccountKeyEncryptedV3} IS NOT NULL))`,
   ),
   check(
     "trading_bots_active_protocol_check",

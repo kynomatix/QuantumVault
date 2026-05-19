@@ -5,6 +5,7 @@ import {
   deriveSessionKey,
   deriveSubkey,
   buildAAD,
+  buildBotSubaccountAAD,
   encryptToBase64,
   decryptFromBase64,
   encryptBuffer,
@@ -290,6 +291,12 @@ export async function initializeWalletSecurity(
     if (!isNewWallet && wallet?.agentPrivateKeyEncrypted && !wallet?.agentPrivateKeyEncryptedV3) {
       migrateAgentKeyToV3(walletAddress, umk, wallet.agentPrivateKeyEncrypted)
         .catch(err => console.error('[Security] Agent key migration failed (non-blocking):', err));
+    }
+    // Phase 4b: opportunistically backfill any bot subaccount keys that are
+    // still legacy-only. Background, non-blocking; logs failures.
+    if (!isNewWallet) {
+      backfillBotSubaccountKeysToV3(walletAddress, umk)
+        .catch(err => console.error('[Security] Bot subaccount backfill failed (non-blocking):', err));
     }
     return { sessionId, isNewWallet };
   }
@@ -731,22 +738,67 @@ export async function enableExecution(
 export async function revokeExecution(
   sessionId: string,
   walletAddress: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; pausedBots?: { id: string; name: string }[] }> {
   const session = getSession(sessionId);
   if (!session || session.walletAddress !== walletAddress) {
     return { success: false, error: 'Invalid session' };
   }
-  
+
   try {
-    await storage.updateWalletExecution(walletAddress, {
-      executionEnabled: false,
-      umkEncryptedForExecution: null,
-      executionExpiresAt: null,
-    });
-    
-    console.log(`[Security] Execution revoked for ${walletAddress.slice(0, 8)}...`);
-    
-    return { success: true };
+    // Phase 4b: revoking execution must atomically pause every active bot the
+    // user owns. Otherwise an orphaned active bot would still hold a
+    // V3-encrypted subaccount key that the server can no longer decrypt (no
+    // UMK after revoke) — webhook execution would fail with confusing errors
+    // and the user might assume their bots are still trading.
+    const pauseReason = 'Execution authorization revoked';
+    const pausedBots = await storage.atomicRevokeExecutionAndPauseBots(
+      walletAddress,
+      pauseReason,
+    );
+
+    console.log(
+      `[Security] Execution revoked for ${walletAddress.slice(0, 8)}... ` +
+      `(paused ${pausedBots.length} active bot(s))`,
+    );
+
+    // Fire-and-forget Telegram notification (best effort; does not block the
+    // revoke response). We import lazily to avoid a circular dependency with
+    // notification-service → storage.
+    if (pausedBots.length > 0) {
+      (async () => {
+        try {
+          const { db } = await import('./db');
+          const { wallets } = await import('@shared/schema');
+          const { eq } = await import('drizzle-orm');
+          const [wallet] = await db
+            .select()
+            .from(wallets)
+            .where(eq(wallets.address, walletAddress))
+            .limit(1);
+          if (!wallet?.telegramChatId || !wallet.notificationsEnabled) return;
+          const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+          if (!TELEGRAM_BOT_TOKEN) return;
+          const names = pausedBots.map((b) => b.name).join(', ');
+          const text =
+            `<b>🛑 Execution Revoked</b>\n` +
+            `Your trading authorization was revoked. ${pausedBots.length} active bot(s) ` +
+            `were paused: ${names}.\nRe-enable execution in Settings to resume trading.`;
+          await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: wallet.telegramChatId,
+              text,
+              parse_mode: 'HTML',
+            }),
+          });
+        } catch (notifyErr) {
+          console.error('[Security] revokeExecution Telegram notify failed:', notifyErr);
+        }
+      })();
+    }
+
+    return { success: true, pausedBots };
   } catch (err) {
     console.error('[Security] Failed to revoke execution:', err);
     return { success: false, error: 'Failed to revoke execution' };
@@ -931,6 +983,177 @@ export async function migrateAgentKeyToV3(
   } catch (err) {
     console.error(`[Security] Failed to migrate agent key to v3 for ${walletAddress.slice(0, 8)}...:`, err);
     return null;
+  }
+}
+
+// ============================================================================
+// Phase 4b: Per-bot subaccount key V3 encryption
+// ============================================================================
+//
+// Each trading bot has its own protocol-level subaccount keypair (used for
+// Pacifica `external_key` mode). V3 encrypts these with a subkey derived from
+// the owner's UMK, with AAD that includes both the owner wallet address and
+// the bot id — so a ciphertext is bound to a specific (owner, bot) pair.
+
+export function encryptBotSubaccountKeyV3(
+  umk: Buffer,
+  botSecretKey: Buffer,
+  walletAddress: string,
+  botId: string,
+): string {
+  const subkey = deriveSubkey(umk, SUBKEY_PURPOSES.BOT_SUBACCOUNT_PRIVKEY);
+  try {
+    const aad = buildBotSubaccountAAD(walletAddress, botId);
+    const ciphertext = encryptBuffer(botSecretKey, subkey, aad);
+    return ciphertext.toString('base64');
+  } finally {
+    zeroizeBuffer(subkey);
+  }
+}
+
+export function decryptBotSubaccountKeyV3(
+  umk: Buffer,
+  encryptedV3: string,
+  walletAddress: string,
+  botId: string,
+): Buffer {
+  const subkey = deriveSubkey(umk, SUBKEY_PURPOSES.BOT_SUBACCOUNT_PRIVKEY);
+  try {
+    const aad = buildBotSubaccountAAD(walletAddress, botId);
+    const ciphertext = Buffer.from(encryptedV3, 'base64');
+    return decryptBuffer(ciphertext, subkey, aad);
+  } finally {
+    zeroizeBuffer(subkey);
+  }
+}
+
+/**
+ * One-shot legacy→V3 migration for a single bot's subaccount key. Persists the
+ * V3 ciphertext to `bot_subaccount_key_encrypted_v3`. The legacy column is left
+ * intact until Phase 6 drops it.
+ */
+export async function migrateBotSubaccountKeyToV3(
+  botId: string,
+  walletAddress: string,
+  umk: Buffer,
+  legacyEncryptedKey: string,
+): Promise<{ encryptedV3: string } | null> {
+  try {
+    const legacyKeyPlaintext = legacyDecrypt(legacyEncryptedKey);
+    // Bot subaccount keys are always base58-encoded 64-byte ed25519 secret keys.
+    const legacyKeyBytes = bs58.decode(legacyKeyPlaintext.trim());
+    if (legacyKeyBytes.length !== 64) {
+      throw new Error(`Invalid bot subaccount key length: expected 64 bytes, got ${legacyKeyBytes.length}`);
+    }
+    const legacyKeyBuffer = Buffer.from(legacyKeyBytes);
+    try {
+      const encryptedV3 = encryptBotSubaccountKeyV3(umk, legacyKeyBuffer, walletAddress, botId);
+      await storage.updateBotSubaccountKeyV3(botId, encryptedV3);
+      console.log(`[Security] Migrated bot subaccount key to v3 for bot ${botId} (owner ${walletAddress.slice(0, 8)}...)`);
+      return { encryptedV3 };
+    } finally {
+      zeroizeBuffer(legacyKeyBuffer);
+    }
+  } catch (err) {
+    console.error(`[Security] Failed to migrate bot ${botId} subaccount key to v3:`, err);
+    return null;
+  }
+}
+
+/**
+ * Strict V3 read of a bot's subaccount key. Performs JIT legacy→V3 migration
+ * when V3 is missing but legacy exists. Verifies the derived public key matches
+ * the bot's `protocolSubaccountId`. Returns `null` if no usable ciphertext is
+ * available (e.g. legacy-only with no UMK).
+ *
+ * The returned `secretKey` is a 64-byte Uint8Array (ed25519 secret key). Caller
+ * MUST invoke `cleanup()` after use to zeroize the buffer.
+ */
+export async function decryptBotSubaccountKey(
+  bot: {
+    id: string;
+    walletAddress: string;
+    protocolSubaccountId: string | null;
+    botSubaccountKeyEncrypted: string | null;
+    botSubaccountKeyEncryptedV3: string | null;
+  },
+  umk: Buffer,
+): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> {
+  let v3Ciphertext = bot.botSubaccountKeyEncryptedV3;
+
+  // JIT migration: if V3 is missing but legacy exists, migrate now while we
+  // hold a UMK. This keeps webhook execution unbroken for pre-backfill bots.
+  if (!v3Ciphertext && bot.botSubaccountKeyEncrypted) {
+    const migrated = await migrateBotSubaccountKeyToV3(
+      bot.id,
+      bot.walletAddress,
+      umk,
+      bot.botSubaccountKeyEncrypted,
+    );
+    if (!migrated) return null;
+    v3Ciphertext = migrated.encryptedV3;
+  }
+
+  if (!v3Ciphertext) return null;
+
+  let keyBuffer: Buffer;
+  try {
+    keyBuffer = decryptBotSubaccountKeyV3(umk, v3Ciphertext, bot.walletAddress, bot.id);
+  } catch (err) {
+    console.error(`[Security] V3 decrypt failed for bot ${bot.id}:`, err);
+    return null;
+  }
+
+  if (keyBuffer.length !== 64) {
+    zeroizeBuffer(keyBuffer);
+    console.error(`[Security] Bot ${bot.id} subaccount key has wrong length: ${keyBuffer.length}`);
+    return null;
+  }
+
+  // Verify derived pubkey matches stored subaccount id.
+  try {
+    const derived = Keypair.fromSecretKey(keyBuffer).publicKey.toBase58();
+    if (bot.protocolSubaccountId && derived !== bot.protocolSubaccountId) {
+      zeroizeBuffer(keyBuffer);
+      console.error(`[Security] Bot ${bot.id} keypair mismatch: derived ${derived} != stored ${bot.protocolSubaccountId}`);
+      return null;
+    }
+  } catch (err) {
+    zeroizeBuffer(keyBuffer);
+    console.error(`[Security] Bot ${bot.id} keypair validation failed:`, err);
+    return null;
+  }
+
+  const secretKey = new Uint8Array(keyBuffer);
+  return {
+    secretKey,
+    cleanup: () => {
+      zeroizeBuffer(keyBuffer);
+      try { secretKey.fill(0); } catch { /* noop */ }
+    },
+  };
+}
+
+/**
+ * Backfill all of an owner's bots whose subaccount keys are still legacy-only.
+ * Called from `finishLogin` (background, non-blocking).
+ */
+async function backfillBotSubaccountKeysToV3(
+  walletAddress: string,
+  umk: Buffer,
+): Promise<void> {
+  try {
+    const bots = await storage.getTradingBots(walletAddress);
+    const pending = bots.filter(
+      (b) => b.botSubaccountKeyEncrypted && !b.botSubaccountKeyEncryptedV3,
+    );
+    if (pending.length === 0) return;
+    console.log(`[Security] Backfilling ${pending.length} bot subaccount key(s) to v3 for ${walletAddress.slice(0, 8)}...`);
+    for (const bot of pending) {
+      await migrateBotSubaccountKeyToV3(bot.id, walletAddress, umk, bot.botSubaccountKeyEncrypted!);
+    }
+  } catch (err) {
+    console.error(`[Security] Bot subaccount key backfill failed for ${walletAddress.slice(0, 8)}...:`, err);
   }
 }
 

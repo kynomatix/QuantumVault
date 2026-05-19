@@ -73,7 +73,32 @@ export const SUBKEY_PURPOSES = {
   MNEMONIC: 'mnemonic',
   AGENT_PRIVKEY: 'agent_privkey',
   POLICY_HMAC: 'policy_hmac',
+  BOT_SUBACCOUNT_PRIVKEY: 'bot_subaccount_privkey',
 } as const;
+
+/**
+ * Phase 4b: AAD for per-bot subaccount keys.
+ *
+ * Format: [version(4 LE)][record_type(1) = 0x05][wallet bytes(32)][botId utf8].
+ * Including the bot id in the AAD binds the ciphertext to the specific bot, so
+ * a ciphertext from bot A cannot be decrypted as bot B's key (even with the
+ * same owner UMK). The wallet address binds it to the owner.
+ */
+export function buildBotSubaccountAAD(
+  walletAddress: string,
+  botId: string,
+  version: number = 1,
+): Buffer {
+  const walletBytes = bs58.decode(walletAddress);
+  if (walletBytes.length !== 32) {
+    throw new Error(`Invalid wallet address length: expected 32 bytes, got ${walletBytes.length}`);
+  }
+  const botIdBytes = Buffer.from(botId, 'utf8');
+  const header = Buffer.alloc(5);
+  header.writeUInt32LE(version, 0);
+  header.writeUInt8(0x05, 4); // BOT_SUBACCOUNT record type
+  return Buffer.concat([header, Buffer.from(walletBytes), botIdBytes]);
+}
 
 export function encryptBuffer(
   plaintext: Buffer,

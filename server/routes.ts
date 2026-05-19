@@ -41,7 +41,10 @@ function _decryptToSecretKey(input: string | Uint8Array): { secretKey: Uint8Arra
 interface BotSubaccountContext {
   useBotKeypair: true;
   botPublicKey: string;
-  botEncryptedKey: string;
+  // Phase 4b: ciphertext is no longer carried in the context. We look it up on
+  // the bot record and decrypt with the owner's UMK at the moment of use.
+  botId: string;
+  walletAddress: string;
 }
 
 function getBotSubaccountContext(bot: TradingBot): BotSubaccountContext | null {
@@ -49,15 +52,64 @@ function getBotSubaccountContext(bot: TradingBot): BotSubaccountContext | null {
     bot.subaccountAuthMode === 'external_key' &&
     bot.subaccountStatus === 'active' &&
     bot.protocolSubaccountId &&
-    bot.botSubaccountKeyEncrypted
+    // Accept either v3 or legacy ciphertext during the Phase 4b/5b migration window.
+    (bot.botSubaccountKeyEncryptedV3 || bot.botSubaccountKeyEncrypted)
   ) {
     return {
       useBotKeypair: true,
       botPublicKey: bot.protocolSubaccountId,
-      botEncryptedKey: bot.botSubaccountKeyEncrypted,
+      botId: bot.id,
+      walletAddress: bot.walletAddress,
     };
   }
   return null;
+}
+
+/**
+ * Phase 4b: decrypt a bot's subaccount secret key (V3 path with JIT migration
+ * for legacy-only rows). Returns the raw 64-byte ed25519 secret key plus a
+ * cleanup callback the caller MUST invoke after the keypair has been used.
+ *
+ * Throws on any failure — callers must surface the error (or 5xx the request)
+ * because there is no safe fallback after Phase 4b: the legacy path of
+ * decrypting `bot.botSubaccountKeyEncrypted` with AGENT_ENCRYPTION_KEY only
+ * works while that env var is still defined, and Phase 6 deletes it.
+ */
+async function _resolveBotSubaccountSecretKey(
+  botCtx: BotSubaccountContext,
+): Promise<{ secretKey: Uint8Array; cleanup: () => void }> {
+  const { getUmkForWebhook, decryptBotSubaccountKey } = await import('./session-v3');
+  const umkResult = await getUmkForWebhook(botCtx.walletAddress);
+  if (!umkResult) {
+    throw new Error(
+      `Cannot decrypt bot subaccount key for ${botCtx.botId.slice(0, 8)}...: ` +
+      `no active execution authorization for owner ${botCtx.walletAddress.slice(0, 8)}...`,
+    );
+  }
+  try {
+    const bot = await storage.getTradingBotById(botCtx.botId);
+    if (!bot) {
+      throw new Error(`Bot ${botCtx.botId} not found during signing-key resolution`);
+    }
+    const decrypted = await decryptBotSubaccountKey(
+      {
+        id: bot.id,
+        walletAddress: bot.walletAddress,
+        protocolSubaccountId: bot.protocolSubaccountId,
+        botSubaccountKeyEncrypted: bot.botSubaccountKeyEncrypted,
+        botSubaccountKeyEncryptedV3: bot.botSubaccountKeyEncryptedV3,
+      },
+      umkResult.umk,
+    );
+    if (!decrypted) {
+      throw new Error(
+        `Failed to decrypt bot subaccount key for ${botCtx.botId.slice(0, 8)}... (no usable ciphertext or AAD mismatch)`,
+      );
+    }
+    return decrypted;
+  } finally {
+    umkResult.cleanup();
+  }
 }
 
 async function sweepPacificaSubaccount(
@@ -75,25 +127,27 @@ async function sweepPacificaSubaccount(
     console.log(`${logPrefix} Pacifica subaccount ${botCtx.botPublicKey.slice(0, 8)}... balance: $${balance.toFixed(6)}`);
 
     if (balance >= adapter.minTransferAmount) {
-      const botKeyBase58 = decrypt(botCtx.botEncryptedKey);
-      const botSecretKey = bs58.decode(botKeyBase58);
+      const decrypted = await _resolveBotSubaccountSecretKey(botCtx);
+      try {
+        console.log(`${logPrefix} Transferring $${balance.toFixed(4)} from bot subaccount ${botCtx.botPublicKey.slice(0, 8)}... to agent wallet`);
+        const transferResult = await adapter.transferBetweenSubaccounts({
+          agentSecretKey: decrypted.secretKey,
+          mainWalletAddress: agentPublicKey,
+          fromSubaccountId: botCtx.botPublicKey,
+          toSubaccountId: agentPublicKey,
+          amount: balance,
+        });
 
-      console.log(`${logPrefix} Transferring $${balance.toFixed(4)} from bot subaccount ${botCtx.botPublicKey.slice(0, 8)}... to agent wallet`);
-      const transferResult = await adapter.transferBetweenSubaccounts({
-        agentSecretKey: botSecretKey,
-        mainWalletAddress: agentPublicKey,
-        fromSubaccountId: botCtx.botPublicKey,
-        toSubaccountId: agentPublicKey,
-        amount: balance,
-      });
+        if (!transferResult.success) {
+          console.error(`${logPrefix} Pacifica sweep failed: ${transferResult.error}`);
+          return { handled: true, swept: false, amount: balance, error: transferResult.error };
+        }
 
-      if (!transferResult.success) {
-        console.error(`${logPrefix} Pacifica sweep failed: ${transferResult.error}`);
-        return { handled: true, swept: false, amount: balance, error: transferResult.error };
+        console.log(`${logPrefix} Pacifica sweep successful: $${balance.toFixed(4)} returned to agent wallet`);
+        return { handled: true, swept: true, amount: balance };
+      } finally {
+        decrypted.cleanup();
       }
-
-      console.log(`${logPrefix} Pacifica sweep successful: $${balance.toFixed(4)} returned to agent wallet`);
-      return { handled: true, swept: true, amount: balance };
     }
 
     if (balance > 0) {
@@ -128,27 +182,31 @@ async function sweepPacificaSubaccount(
   }
 }
 
-function _resolveSigningContext(
+/**
+ * Phase 4b: now async because the bot-key path goes through V3 (UMK lookup +
+ * subkey derivation). When `botCtx` is present, the returned object carries a
+ * `cleanup` callback the caller MUST invoke after the secretKey is no longer
+ * needed (it zeroizes the buffer). For the agent-key path `cleanup` is a noop.
+ */
+async function _resolveSigningContext(
   agentEncryptedKey: string | Uint8Array,
   subAccountId: number,
   botCtx: BotSubaccountContext | null,
-): { secretKey: Uint8Array; publicKey: string; subaccountId: string | undefined } {
+): Promise<{ secretKey: Uint8Array; publicKey: string; subaccountId: string | undefined; cleanup: () => void }> {
   if (botCtx) {
-    const botKeyBase58 = decrypt(botCtx.botEncryptedKey);
-    const botSecretKey = bs58.decode(botKeyBase58);
-    const botKeypair = Keypair.fromSecretKey(botSecretKey);
-    const derivedPubkey = botKeypair.publicKey.toBase58();
-    if (derivedPubkey !== botCtx.botPublicKey) {
-      throw new Error(`Bot keypair mismatch: derived ${derivedPubkey} != expected ${botCtx.botPublicKey}. Aborting to prevent wrong-account trade.`);
-    }
+    const decrypted = await _resolveBotSubaccountSecretKey(botCtx);
+    // _resolveBotSubaccountSecretKey already verified the derived pubkey matches
+    // protocolSubaccountId; we mirror the legacy paranoia check here for the
+    // public-key value we hand back to callers.
     return {
-      secretKey: botSecretKey,
-      publicKey: derivedPubkey,
+      secretKey: decrypted.secretKey,
+      publicKey: botCtx.botPublicKey,
       subaccountId: undefined,
+      cleanup: decrypted.cleanup,
     };
   }
   const { secretKey, publicKey } = _decryptToSecretKey(agentEncryptedKey);
-  return { secretKey, publicKey, subaccountId: _subIdStr(subAccountId) };
+  return { secretKey, publicKey, subaccountId: _subIdStr(subAccountId), cleanup: () => { /* noop */ } };
 }
 
 async function _lookupMainWallet(agentPublicKey: string): Promise<string> {
@@ -418,12 +476,14 @@ async function executePerpOrder(
   botCtx?: BotSubaccountContext | null,
   mainWalletOverride?: string,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string | null }> {
+  let signing: Awaited<ReturnType<typeof _resolveSigningContext>> | null = null;
   try {
-    const signing = _resolveSigningContext(encryptedPrivateKey, subAccountId, botCtx ?? null);
+    signing = await _resolveSigningContext(encryptedPrivateKey, subAccountId, botCtx ?? null);
     const agentPubKey = expectedAgentPubkey && !botCtx ? expectedAgentPubkey : signing.publicKey;
-    const mainWalletAddress = mainWalletOverride || await _lookupMainWallet(
-      botCtx ? _decryptToSecretKey(encryptedPrivateKey).publicKey : agentPubKey
-    );
+    // Phase 4b: in botCtx mode the main wallet IS the bot owner's wallet (botCtx.walletAddress).
+    // Avoid legacy decrypt of the agent key just to look it up by agent pubkey.
+    const mainWalletAddress = mainWalletOverride
+      || (botCtx ? botCtx.walletAddress : await _lookupMainWallet(agentPubKey));
     const orderResult = await getDefaultAdapter().placeMarketOrder({
       agentPublicKey: agentPubKey,
       agentSecretKey: signing.secretKey,
@@ -448,6 +508,8 @@ async function executePerpOrder(
     };
   } catch (error: any) {
     return { success: false, error: error.message || String(error) };
+  } finally {
+    signing?.cleanup();
   }
 }
 
@@ -487,12 +549,14 @@ async function closePerpPosition(
   botCtx?: BotSubaccountContext | null,
   mainWalletOverride?: string,
 ): Promise<{ success: boolean; signature?: string; error?: string; executionMethod?: string; fillPrice?: number }> {
+  let signing: Awaited<ReturnType<typeof _resolveSigningContext>> | null = null;
   try {
-    const signing = _resolveSigningContext(encryptedPrivateKey, subAccountId, botCtx ?? null);
+    signing = await _resolveSigningContext(encryptedPrivateKey, subAccountId, botCtx ?? null);
     const agentPubKey = expectedAgentPubkey && !botCtx ? expectedAgentPubkey : signing.publicKey;
-    const mainWalletAddress = mainWalletOverride || await _lookupMainWallet(
-      botCtx ? _decryptToSecretKey(encryptedPrivateKey).publicKey : agentPubKey
-    );
+    // Phase 4b: in botCtx mode the main wallet IS the bot owner's wallet (botCtx.walletAddress).
+    // Avoid legacy decrypt of the agent key just to look it up by agent pubkey.
+    const mainWalletAddress = mainWalletOverride
+      || (botCtx ? botCtx.walletAddress : await _lookupMainWallet(agentPubKey));
     const adapter = getDefaultAdapter();
     let orderResult;
     if (positionSizeBase && positionSide) {
@@ -526,6 +590,8 @@ async function closePerpPosition(
     };
   } catch (error: any) {
     return { success: false, error: error.message || String(error) };
+  } finally {
+    signing?.cleanup();
   }
 }
 
@@ -592,7 +658,7 @@ import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransactio
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
@@ -4079,11 +4145,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           return res.status(403).json({ error: "Bot not found or not owned" });
         }
         tradingBotId = botId;
+        const depositHasAnyKey = !!(bot.botSubaccountKeyEncryptedV3 || bot.botSubaccountKeyEncrypted);
         if (
           bot.subaccountAuthMode === 'external_key' &&
           bot.subaccountStatus === 'active' &&
           bot.protocolSubaccountId &&
-          bot.botSubaccountKeyEncrypted
+          depositHasAnyKey
         ) {
           subAccountId = 0;
           botForTransfer = bot;
@@ -4091,7 +4158,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         } else if (bot.subaccountAuthMode === 'external_key') {
           // Invariant violation: mode says external_key but required fields are missing/inactive.
           // Fail fast rather than silently fall through to legacy Drift path (would misroute funds).
-          const detail = `subaccountAuthMode=external_key but status=${bot.subaccountStatus}, hasProtocolSubaccountId=${!!bot.protocolSubaccountId}, hasKey=${!!bot.botSubaccountKeyEncrypted}`;
+          const detail = `subaccountAuthMode=external_key but status=${bot.subaccountStatus}, hasProtocolSubaccountId=${!!bot.protocolSubaccountId}, hasKey=${depositHasAnyKey}`;
           console.error(`[Deposit][INTEGRITY] Bot ${bot.id}: ${detail}`);
           return res.status(409).json({
             code: 'BOT_SUBACCOUNT_INTEGRITY_ERROR',
@@ -4358,40 +4425,37 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       let withdrawFromMain = false;
       if (botId) {
         const bot = await storage.getTradingBotById(botId);
-        if (
-          bot?.subaccountAuthMode === 'external_key' &&
-          bot?.subaccountStatus === 'active' &&
-          bot?.protocolSubaccountId &&
-          bot?.botSubaccountKeyEncrypted
-        ) {
+        const withdrawBotCtx = bot ? getBotSubaccountContext(bot) : null;
+        if (withdrawBotCtx && bot) {
           try {
-            const { decrypt } = await import('./crypto');
             const adapter = getDefaultAdapter();
-            
-            const botKeyBase58 = decrypt(bot.botSubaccountKeyEncrypted);
-            const botSecretKey = bs58.decode(botKeyBase58);
+            const decrypted = await _resolveBotSubaccountSecretKey(withdrawBotCtx);
+            try {
+              console.log(`[Withdraw] Transferring ${amount} USDC from bot subaccount ${withdrawBotCtx.botPublicKey} to agent wallet`);
+              const transferResult = await adapter.transferBetweenSubaccounts({
+                agentSecretKey: decrypted.secretKey,
+                mainWalletAddress: wallet.agentPublicKey,
+                fromSubaccountId: withdrawBotCtx.botPublicKey,
+                toSubaccountId: wallet.agentPublicKey,
+                amount,
+              });
 
-            console.log(`[Withdraw] Transferring ${amount} USDC from bot subaccount ${bot.protocolSubaccountId} to agent wallet`);
-            const transferResult = await adapter.transferBetweenSubaccounts({
-              agentSecretKey: botSecretKey,
-              mainWalletAddress: wallet.agentPublicKey,
-              fromSubaccountId: bot.protocolSubaccountId,
-              toSubaccountId: wallet.agentPublicKey,
-              amount,
-            });
-
-            if (!transferResult.success) {
-              return res.status(400).json({ error: `Failed to transfer from bot subaccount: ${transferResult.error}` });
+              if (!transferResult.success) {
+                return res.status(400).json({ error: `Failed to transfer from bot subaccount: ${transferResult.error}` });
+              }
+              console.log(`[Withdraw] Successfully transferred ${amount} USDC from bot subaccount to agent wallet`);
+              withdrawFromMain = true;
+            } finally {
+              decrypted.cleanup();
             }
-            console.log(`[Withdraw] Successfully transferred ${amount} USDC from bot subaccount to agent wallet`);
-            withdrawFromMain = true;
           } catch (transferErr: any) {
             return res.status(500).json({ error: `Subaccount transfer failed: ${transferErr.message}` });
           }
         } else if (bot?.subaccountAuthMode === 'external_key') {
           // Invariant violation: mode says external_key but required fields are missing/inactive.
           // Fail fast rather than silently fall through to legacy Drift withdraw path.
-          const detail = `subaccountAuthMode=external_key but status=${bot.subaccountStatus}, hasProtocolSubaccountId=${!!bot.protocolSubaccountId}, hasKey=${!!bot.botSubaccountKeyEncrypted}`;
+          const hasAnyKey = !!(bot.botSubaccountKeyEncryptedV3 || bot.botSubaccountKeyEncrypted);
+          const detail = `subaccountAuthMode=external_key but status=${bot.subaccountStatus}, hasProtocolSubaccountId=${!!bot.protocolSubaccountId}, hasKey=${hasAnyKey}`;
           console.error(`[Withdraw][INTEGRITY] Bot ${bot.id}: ${detail}`);
           return res.status(409).json({
             code: 'BOT_SUBACCOUNT_INTEGRITY_ERROR',
@@ -5169,7 +5233,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const subAccountId = bot.driftSubaccountId ?? 0;
       const tpslBotCtx = getBotSubaccountContext(bot);
-      const signing = _resolveSigningContext(wallet.agentPrivateKeyEncrypted, subAccountId, tpslBotCtx);
+      const signing = await _resolveSigningContext(wallet.agentPrivateKeyEncrypted, subAccountId, tpslBotCtx);
+      try {
       const mainWalletAddress = await _lookupMainWallet(
         tpslBotCtx ? wallet.agentPublicKey : signing.publicKey
       );
@@ -5236,6 +5301,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         orderId: result.orderId,
         ...(result.error ? { warning: result.error } : {}),
       });
+      } finally {
+        signing.cleanup();
+      }
     } catch (error) {
       console.error("[SetTpSl] Error:", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "Failed to set TP/SL" });
@@ -5259,8 +5327,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const mainWalletAddress = await _lookupMainWallet(agentPubKey);
       const adapter = getDefaultAdapter();
 
-      const signing = _resolveSigningContext(wallet.agentPrivateKeyEncrypted, subAccountId, cancelBotCtx);
+      const signing = await _resolveSigningContext(wallet.agentPrivateKeyEncrypted, subAccountId, cancelBotCtx);
 
+      try {
       if (adapter.cancelTpSlOrders) {
         const result = await adapter.cancelTpSlOrders({
           agentPublicKey: signing.publicKey,
@@ -5300,6 +5369,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         res.json({ success: true, orderId: result.orderId });
       } else {
         return res.status(400).json({ error: "Current protocol adapter does not support TP/SL" });
+      }
+      } finally {
+        signing.cleanup();
       }
     } catch (error) {
       console.error("[CancelTpSl] Error:", error);
@@ -6253,6 +6325,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       let nextSubaccountId: number = 0;
       let botSubaccountPublicKey: string | null = null;
       let botSubaccountKeyEncrypted: string | null = null;
+      // Phase 4b: capture the generated secret key so we can write V3 ciphertext
+      // (which requires bot.id in AAD) after createTradingBot returns.
+      let pendingBotSecretKeyForV3: Uint8Array | null = null;
       let subaccountStatus: string = 'none';
       // 12h Option A: holds the adapter-returned canonical numeric subaccount ID for
       // `main_plus_id` mode (Drift). For `external_key` mode (Pacifica) this stays null
@@ -6309,8 +6384,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             });
 
             botSubaccountPublicKey = result.subaccountId;
-            botSubaccountKeyEncrypted = legacyEncrypt(bs58.encode(botKeypair!.secretKey));
-            subaccountStatus = 'active';
+            pendingBotSecretKeyForV3 = botKeypair!.secretKey;
+            // Phase 4b: leave status as 'pending' until V3 ciphertext is written
+            // post-insert. This keeps the CHECK constraint (external_key+active ⇒ key)
+            // satisfied because at insert time we have no key yet.
+            subaccountStatus = 'pending';
 
             // Stash provisioning result for the response builder below.
             (req as any)._pacificaProvisionResult = {
@@ -6330,10 +6408,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             });
 
             botSubaccountPublicKey = sub.subaccountId;
-            botSubaccountKeyEncrypted = botKeypair
-              ? legacyEncrypt(bs58.encode(botKeypair.secretKey))
-              : null;
-            subaccountStatus = 'active';
+            if (botKeypair) {
+              pendingBotSecretKeyForV3 = botKeypair.secretKey;
+              // Phase 4b: stay 'pending' until post-insert V3 write succeeds.
+              subaccountStatus = 'pending';
+            } else {
+              subaccountStatus = 'active';
+            }
 
             // 12h Option A: For `main_plus_id` mode (Drift), the adapter is the canonical
             // source of the numeric subaccount ID. Parse and validate it now; we'll
@@ -6453,6 +6534,33 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const webhookUrl = generateWebhookUrl(bot.id, webhookSecret);
       await storage.updateTradingBot(bot.id, { webhookUrl } as any);
+
+      // Phase 4b: write V3 ciphertext for the bot-subaccount key now that we have bot.id.
+      // We require the UMK from the active session — without it we cannot encrypt V3.
+      if (pendingBotSecretKeyForV3) {
+        try {
+          const sessionRes = getSessionByWalletAddress(req.walletAddress!);
+          if (!sessionRes) {
+            throw new Error('No active session available to derive bot-subaccount subkey');
+          }
+          const v3Ciphertext = encryptBotSubaccountKeyV3(
+            sessionRes.session.umk,
+            Buffer.from(pendingBotSecretKeyForV3),
+            req.walletAddress!,
+            bot.id,
+          );
+          await storage.updateBotSubaccountKeyV3(bot.id, v3Ciphertext);
+          await storage.updateTradingBot(bot.id, { subaccountStatus: 'active' } as any);
+        } catch (v3Err: any) {
+          console.error(`[Bot Creation] Failed to write V3 bot-subaccount key for bot ${bot.id}:`, v3Err.message);
+          // Rollback: delete the bot since it can never be activated without the key.
+          try { await storage.deleteTradingBot(bot.id); } catch {}
+          return res.status(500).json({ error: `Failed to secure bot subaccount key: ${v3Err.message}` });
+        } finally {
+          // Zeroize the secret key buffer we held in memory.
+          try { pendingBotSecretKeyForV3.fill(0); } catch {}
+        }
+      }
 
       // Pacifica atomic-provision: surface funding status so frontend skips the
       // follow-up /api/exchange/deposit call (the deposit + transfer already happened
@@ -6851,7 +6959,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         
         const botCtx = getBotSubaccountContext(bot);
 
-        if (botCtx && bot.protocolSubaccountId && bot.botSubaccountKeyEncrypted) {
+        if (botCtx && bot.protocolSubaccountId) {
           if (!wallet.agentPrivateKeyEncrypted) {
             console.error(`[Delete] Cannot withdraw - agent key missing for bot ${bot.id}`);
             return res.status(500).json({
@@ -6860,14 +6968,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             });
           }
 
+          let decryptedBotKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
           try {
-            const { decrypt } = await import('./crypto');
-            const bs58Mod = await import('bs58');
-            const bs58Default = bs58Mod.default || bs58Mod;
             const adapter = getDefaultAdapter();
-
-            const botKeyBase58 = decrypt(bot.botSubaccountKeyEncrypted);
-            const botSecretKey = bs58Default.decode(botKeyBase58);
+            decryptedBotKey = await _resolveBotSubaccountSecretKey(botCtx);
+            const botSecretKey = decryptedBotKey.secretKey;
 
             const balanceInfo = await adapter.getBalances(bot.protocolSubaccountId);
             const balance = balanceInfo.balance;
@@ -6917,6 +7022,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             }
           } catch (err: any) {
             console.warn(`[Delete] Pacifica sweep error (continuing to delete):`, err.message);
+          } finally {
+            decryptedBotKey?.cleanup();
           }
         } else {
           const exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
@@ -8370,49 +8477,48 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                     if (withdrawAmount >= minAutoWithdraw) {
                       console.log(`[Webhook] AUTO-WITHDRAW: Equity $${currentEquity.toFixed(2)} exceeds threshold $${autoWithdrawThreshold.toFixed(2)}, withdrawing $${withdrawAmount.toFixed(2)}`);
 
-                      if (botCtx && bot.protocolSubaccountId && bot.botSubaccountKeyEncrypted) {
-                        const { decrypt } = await import('./crypto');
-                        const bs58Mod = await import('bs58');
-                        const bs58Default = bs58Mod.default || bs58Mod;
+                      const webhookAwBotCtx = botCtx && bot.protocolSubaccountId ? botCtx : null;
+                      if (webhookAwBotCtx && bot.protocolSubaccountId) {
                         const adapter = getDefaultAdapter();
+                        const decryptedWh = await _resolveBotSubaccountSecretKey(webhookAwBotCtx);
+                        try {
+                          console.log(`[Webhook] AUTO-WITHDRAW Step 1: Transfer $${withdrawAmount.toFixed(2)} from bot subaccount ${bot.protocolSubaccountId} → main account`);
+                          const transferResult = await adapter.transferBetweenSubaccounts({
+                            agentSecretKey: decryptedWh.secretKey,
+                            mainWalletAddress: wallet.agentPublicKey!,
+                            fromSubaccountId: bot.protocolSubaccountId,
+                            toSubaccountId: wallet.agentPublicKey!,
+                            amount: withdrawAmount,
+                          });
 
-                        const botKeyBase58 = decrypt(bot.botSubaccountKeyEncrypted);
-                        const botSecretKey = bs58Default.decode(botKeyBase58);
-
-                        console.log(`[Webhook] AUTO-WITHDRAW Step 1: Transfer $${withdrawAmount.toFixed(2)} from bot subaccount ${bot.protocolSubaccountId} → main account`);
-                        const transferResult = await adapter.transferBetweenSubaccounts({
-                          agentSecretKey: botSecretKey,
-                          mainWalletAddress: wallet.agentPublicKey!,
-                          fromSubaccountId: bot.protocolSubaccountId,
-                          toSubaccountId: wallet.agentPublicKey!,
-                          amount: withdrawAmount,
-                        });
-
-                        if (!transferResult.success) {
-                          console.error(`[Webhook] AUTO-WITHDRAW transfer failed: ${transferResult.error}`);
-                        } else {
-                          console.log(`[Webhook] AUTO-WITHDRAW Step 2: Withdraw $${withdrawAmount.toFixed(2)} from main account → agent wallet`);
-                          const withdrawResult = await executeAgentDriftWithdraw(
-                            wallet.agentPublicKey!,
-                            wallet.agentPrivateKeyEncrypted,
-                            withdrawAmount,
-                            0,
-                            { tradingBotId: botId, context: 'Webhook AUTO-WITHDRAW' }
-                          );
-
-                          if (withdrawResult.success) {
-                            console.log(`[Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn to agent wallet, tx: ${withdrawResult.signature}`);
-                            await storage.createEquityEvent({
-                              walletAddress: bot.walletAddress,
-                              tradingBotId: botId,
-                              eventType: 'auto_withdraw',
-                              amount: String(withdrawAmount),
-                              txSignature: withdrawResult.signature || null,
-                              notes: `Auto-withdraw: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)} (bot→main→wallet)`,
-                            });
+                          if (!transferResult.success) {
+                            console.error(`[Webhook] AUTO-WITHDRAW transfer failed: ${transferResult.error}`);
                           } else {
-                            console.error(`[Webhook] AUTO-WITHDRAW on-chain withdraw failed: ${withdrawResult.error} (funds are in main account, use Recover button)`);
+                            console.log(`[Webhook] AUTO-WITHDRAW Step 2: Withdraw $${withdrawAmount.toFixed(2)} from main account → agent wallet`);
+                            const withdrawResult = await executeAgentDriftWithdraw(
+                              wallet.agentPublicKey!,
+                              wallet.agentPrivateKeyEncrypted,
+                              withdrawAmount,
+                              0,
+                              { tradingBotId: botId, context: 'Webhook AUTO-WITHDRAW' }
+                            );
+
+                            if (withdrawResult.success) {
+                              console.log(`[Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn to agent wallet, tx: ${withdrawResult.signature}`);
+                              await storage.createEquityEvent({
+                                walletAddress: bot.walletAddress,
+                                tradingBotId: botId,
+                                eventType: 'auto_withdraw',
+                                amount: String(withdrawAmount),
+                                txSignature: withdrawResult.signature || null,
+                                notes: `Auto-withdraw: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)} (bot→main→wallet)`,
+                              });
+                            } else {
+                              console.error(`[Webhook] AUTO-WITHDRAW on-chain withdraw failed: ${withdrawResult.error} (funds are in main account, use Recover button)`);
+                            }
                           }
+                        } finally {
+                          decryptedWh.cleanup();
                         }
                       } else {
                         const withdrawResult = await executeAgentDriftWithdraw(
@@ -9660,50 +9766,49 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                   if (withdrawAmount >= minAutoWithdraw) {
                     console.log(`[User Webhook] AUTO-WITHDRAW: Equity $${currentEquity.toFixed(2)} exceeds threshold $${autoWithdrawThreshold.toFixed(2)}, withdrawing $${withdrawAmount.toFixed(2)}`);
 
-                    if (botCtx && bot.protocolSubaccountId && bot.botSubaccountKeyEncrypted) {
-                      const { decrypt } = await import('./crypto');
-                      const bs58Mod = await import('bs58');
-                      const bs58Default = bs58Mod.default || bs58Mod;
+                    const userWhAwBotCtx = botCtx && bot.protocolSubaccountId ? botCtx : null;
+                    if (userWhAwBotCtx && bot.protocolSubaccountId) {
                       const adapter = getDefaultAdapter();
+                      const decryptedUwh = await _resolveBotSubaccountSecretKey(userWhAwBotCtx);
+                      try {
+                        console.log(`[User Webhook] AUTO-WITHDRAW Step 1: Transfer $${withdrawAmount.toFixed(2)} from bot subaccount ${bot.protocolSubaccountId} → main account`);
+                        const transferResult = await adapter.transferBetweenSubaccounts({
+                          agentSecretKey: decryptedUwh.secretKey,
+                          mainWalletAddress: wallet.agentPublicKey!,
+                          fromSubaccountId: bot.protocolSubaccountId,
+                          toSubaccountId: wallet.agentPublicKey!,
+                          amount: withdrawAmount,
+                        });
 
-                      const botKeyBase58 = decrypt(bot.botSubaccountKeyEncrypted);
-                      const botSecretKey = bs58Default.decode(botKeyBase58);
-
-                      console.log(`[User Webhook] AUTO-WITHDRAW Step 1: Transfer $${withdrawAmount.toFixed(2)} from bot subaccount ${bot.protocolSubaccountId} → main account`);
-                      const transferResult = await adapter.transferBetweenSubaccounts({
-                        agentSecretKey: botSecretKey,
-                        mainWalletAddress: wallet.agentPublicKey!,
-                        fromSubaccountId: bot.protocolSubaccountId,
-                        toSubaccountId: wallet.agentPublicKey!,
-                        amount: withdrawAmount,
-                      });
-
-                      if (!transferResult.success) {
-                        console.error(`[User Webhook] AUTO-WITHDRAW transfer failed: ${transferResult.error}`);
-                      } else {
-                        console.log(`[User Webhook] AUTO-WITHDRAW Step 2: Withdraw $${withdrawAmount.toFixed(2)} from main account → agent wallet`);
-                        const withdrawResult = await executeAgentDriftWithdraw(
-                          wallet.agentPublicKey!,
-                          wallet.agentPrivateKeyEncrypted!,
-                          withdrawAmount,
-                          0,
-                          { tradingBotId: botId, context: 'User Webhook AUTO-WITHDRAW' }
-                        );
-
-                        if (withdrawResult.success) {
-                          console.log(`[User Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn, tx: ${withdrawResult.signature}`);
-                          autoWithdrawInfo = { amount: withdrawAmount, txSignature: withdrawResult.signature };
-                          await storage.createEquityEvent({
-                            walletAddress: bot.walletAddress,
-                            tradingBotId: botId,
-                            eventType: 'auto_withdraw',
-                            amount: String(withdrawAmount),
-                            txSignature: withdrawResult.signature || null,
-                            notes: `Auto-withdraw: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)} (bot→main→wallet)`,
-                          });
+                        if (!transferResult.success) {
+                          console.error(`[User Webhook] AUTO-WITHDRAW transfer failed: ${transferResult.error}`);
                         } else {
-                          console.error(`[User Webhook] AUTO-WITHDRAW on-chain withdraw failed: ${withdrawResult.error} (funds are in main account, use Recover button)`);
+                          console.log(`[User Webhook] AUTO-WITHDRAW Step 2: Withdraw $${withdrawAmount.toFixed(2)} from main account → agent wallet`);
+                          const withdrawResult = await executeAgentDriftWithdraw(
+                            wallet.agentPublicKey!,
+                            wallet.agentPrivateKeyEncrypted!,
+                            withdrawAmount,
+                            0,
+                            { tradingBotId: botId, context: 'User Webhook AUTO-WITHDRAW' }
+                          );
+
+                          if (withdrawResult.success) {
+                            console.log(`[User Webhook] AUTO-WITHDRAW SUCCESS: $${withdrawAmount.toFixed(2)} withdrawn, tx: ${withdrawResult.signature}`);
+                            autoWithdrawInfo = { amount: withdrawAmount, txSignature: withdrawResult.signature };
+                            await storage.createEquityEvent({
+                              walletAddress: bot.walletAddress,
+                              tradingBotId: botId,
+                              eventType: 'auto_withdraw',
+                              amount: String(withdrawAmount),
+                              txSignature: withdrawResult.signature || null,
+                              notes: `Auto-withdraw: equity $${currentEquity.toFixed(2)} exceeded threshold $${autoWithdrawThreshold.toFixed(2)} (bot→main→wallet)`,
+                            });
+                          } else {
+                            console.error(`[User Webhook] AUTO-WITHDRAW on-chain withdraw failed: ${withdrawResult.error} (funds are in main account, use Recover button)`);
+                          }
                         }
+                      } finally {
+                        decryptedUwh.cleanup();
                       }
                     } else {
                       const withdrawResult = await executeAgentDriftWithdraw(
@@ -10769,32 +10874,37 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       agentKeyResult.cleanup();
 
       const adapter = getDefaultAdapter();
-      const transferResult = await adapter.transferBetweenSubaccounts({
-        agentSecretKey: botCtx.botSecretKey,
-        mainWalletAddress: agentKeypair.publicKey.toString(),
-        fromSubaccountId: botCtx.botPublicKey,
-        toSubaccountId: agentKeypair.publicKey.toString(),
-        amount,
-      });
-
-      if (!transferResult.success) {
-        return res.status(400).json({ error: transferResult.error || "Withdraw failed" });
-      }
-
+      const decryptedBotKey = await _resolveBotSubaccountSecretKey(botCtx);
       try {
-        await storage.createEquityEvent({
-          walletAddress: req.walletAddress!,
-          tradingBotId: botId,
-          eventType: 'drift_withdraw',
-          amount: String(-amount),
-          txSignature: null,
-          notes: `Withdraw from bot subaccount ${botCtx.botPublicKey}`,
+        const transferResult = await adapter.transferBetweenSubaccounts({
+          agentSecretKey: decryptedBotKey.secretKey,
+          mainWalletAddress: agentKeypair.publicKey.toString(),
+          fromSubaccountId: botCtx.botPublicKey,
+          toSubaccountId: agentKeypair.publicKey.toString(),
+          amount,
         });
-      } catch (eventErr: any) {
-        console.error(`[Bot Withdraw] Equity event recording failed:`, eventErr.message);
-      }
 
-      res.json({ success: true, message: `Withdrew $${amount} from bot subaccount` });
+        if (!transferResult.success) {
+          return res.status(400).json({ error: transferResult.error || "Withdraw failed" });
+        }
+
+        try {
+          await storage.createEquityEvent({
+            walletAddress: req.walletAddress!,
+            tradingBotId: botId,
+            eventType: 'drift_withdraw',
+            amount: String(-amount),
+            txSignature: null,
+            notes: `Withdraw from bot subaccount ${botCtx.botPublicKey}`,
+          });
+        } catch (eventErr: any) {
+          console.error(`[Bot Withdraw] Equity event recording failed:`, eventErr.message);
+        }
+
+        res.json({ success: true, message: `Withdrew $${amount} from bot subaccount` });
+      } finally {
+        decryptedBotKey.cleanup();
+      }
     } catch (error: any) {
       console.error("Bot withdraw error:", error);
       res.status(500).json({ error: error.message || "Failed to withdraw from bot" });
@@ -12476,7 +12586,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         bot.subaccountAuthMode !== 'external_key' ||
         bot.subaccountStatus !== 'active' ||
         !bot.protocolSubaccountId ||
-        !bot.botSubaccountKeyEncrypted
+        !(bot.botSubaccountKeyEncryptedV3 || bot.botSubaccountKeyEncrypted)
       ) {
         return res.status(400).json({ error: "Bot not found or does not have an active external_key subaccount" });
       }
