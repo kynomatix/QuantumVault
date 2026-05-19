@@ -3316,11 +3316,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const agentKey = wallet.agentPrivateKeyEncrypted;
+      const umkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
+      const agentKey = agentKeyResult.secretKey;
       const agentPubKey = wallet.agentPublicKey;
       const log = (msg: string) => console.log(`[Reset Account] ${msg}`);
       const progress: string[] = [];
@@ -3578,6 +3588,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         totalSwept
       });
 
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error: any) {
       console.error("Reset Drift account error:", error);
       res.status(500).json({ error: error.message || "Failed to reset trading account" });
@@ -3660,7 +3674,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
@@ -3677,8 +3691,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
       }
 
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, session.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
       const agentPubKey = wallet.agentPublicKey;
-      const agentKey = wallet.agentPrivateKeyEncrypted;
+      const agentKey = agentKeyResult.secretKey;
       const userWallet = req.walletAddress!;
       const log = (msg: string) => console.log(`[Reset Agent] ${msg}`);
       const progress: string[] = [];
@@ -3814,6 +3833,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         withdrawnSol: solToWithdraw > 0.001 ? solToWithdraw : 0
       });
 
+      } finally {
+        agentKeyResult.cleanup();
+      }
     } catch (error: any) {
       console.error("Reset agent wallet error:", error);
       res.status(500).json({ error: error.message || "Failed to reset agent wallet" });
@@ -3826,9 +3848,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
+
+      const umkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
+      const agentSecret = agentKeyResult.secretKey;
 
       const bots = await storage.getTradingBots(req.walletAddress!);
       const activeBots = bots.filter(b => b.isActive);
@@ -3855,7 +3889,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
           const closeAllSlippageBps = wallet.slippageBps ?? 50;
           const result = await closePerpPosition(
-            wallet.agentPrivateKeyEncrypted,
+            agentSecret,
             bot.market,
             subAccountId,
             Math.abs(position.baseAssetAmount),
@@ -3899,6 +3933,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         positionsClosed: results.filter(r => r.success).length,
         results,
       });
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error) {
       console.error("Close all positions error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -4103,18 +4141,32 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const txData = await buildWithdrawFromAgentTransaction(
-        req.walletAddress!,
-        wallet.agentPublicKey,
-        wallet.agentPrivateKeyEncrypted,
-        amount
-      );
+      const umkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
+        const txData = await buildWithdrawFromAgentTransaction(
+          req.walletAddress!,
+          wallet.agentPublicKey,
+          agentKeyResult.secretKey,
+          amount
+        );
 
-      res.json(txData);
+        res.json(txData);
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error) {
       console.error("Build agent withdraw error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -4132,7 +4184,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
@@ -4235,7 +4287,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         console.error(`  Stored agentPublicKey: ${wallet.agentPublicKey}`);
         console.error(`  Derived from decrypted key: ${derivedPubkey}`);
         console.error(`  Wallet has v3 key: ${!!wallet.agentPrivateKeyEncryptedV3}`);
-        console.error(`  Wallet has legacy key: ${!!wallet.agentPrivateKeyEncrypted}`);
         agentKeyResult.cleanup();
         return res.status(500).json({ 
           error: "Agent key mismatch detected. Your agent wallet security may be corrupted. Please reconfigure your agent wallet in Settings." 
@@ -4365,9 +4416,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
+
+      const umkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
+      const agentSecret = agentKeyResult.secretKey;
 
       // Each exchange enforces its own minimum on money movements. Reject up-front
       // so the user gets a clear message instead of a cryptic protocol failure.
@@ -4402,7 +4465,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             const iouAmount = parseFloat(iou.amount);
             const transferResult = await transferUsdcToWallet(
               wallet.agentPublicKey,
-              wallet.agentPrivateKeyEncrypted,
+              agentSecret,
               iou.creatorWalletAddress,
               iouAmount
             );
@@ -4479,7 +4542,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const result = await executeAgentDriftWithdraw(
         wallet.agentPublicKey,
-        wallet.agentPrivateKeyEncrypted,
+        agentSecret,
         amount,
         withdrawFromMain ? 0 : subAccountId,
         { tradingBotId, context: 'Withdraw' }
@@ -4524,6 +4587,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       res.json(result);
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error) {
       console.error("Agent drift withdraw error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -4833,9 +4900,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const wallet = await storage.getWallet(bot.walletAddress);
-      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+      if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
+
+      const umkResult = await getUmkForWebhook(bot.walletAddress);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
+      const agentSecret = agentKeyResult.secretKey;
 
       const subAccountId = bot.driftSubaccountId ?? 0;
       const closeBotCtx = getBotSubaccountContext(bot);
@@ -4901,7 +4980,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Execute close order using closePerpPosition for exact BN precision
       // Pass positionSizeBase and positionSide so Swift can be used for closes
       const result = await closePerpPosition(
-        wallet.agentPrivateKeyEncrypted,
+        agentSecret,
         bot.market,
         closeBotCtx ? 0 : subAccountId,
         closeSize,
@@ -5079,7 +5158,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           // Retry closePerpPosition to clean up the dust
           const dustSlippageBps = wallet.slippageBps ?? 50;
           const retryResult = await closePerpPosition(
-            wallet.agentPrivateKeyEncrypted,
+            agentSecret,
             bot.market,
             subAccountId,
             Math.abs(postClosePosition.size),
@@ -5183,7 +5262,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           subscriberBotId: bot.id,
           subscriberWalletAddress: wallet.address,
           subscriberAgentPublicKey: wallet.agentPublicKey!,
-          subscriberEncryptedPrivateKey: wallet.agentPrivateKeyEncrypted,
+          subscriberEncryptedPrivateKey: agentSecret,
           driftSubaccountId: subAccountId,
           realizedPnl: tradePnl,
           tradeId,
@@ -5211,6 +5290,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         txSignature: finalTxSignature,
         tradeId: pendingCloseTrade.id
       });
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error) {
       console.error("Close position error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -5224,9 +5307,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
 
       const wallet = await storage.getWallet(bot.walletAddress);
-      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+      if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
+
+      const umkResult = await getUmkForWebhook(bot.walletAddress);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
+      const agentSecret = agentKeyResult.secretKey;
 
       const { takeProfitPrice, stopLossPrice } = req.body;
       if (takeProfitPrice === undefined && stopLossPrice === undefined) {
@@ -5246,7 +5341,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const subAccountId = bot.driftSubaccountId ?? 0;
       const tpslBotCtx = getBotSubaccountContext(bot);
-      const signing = await _resolveSigningContext(wallet.agentPrivateKeyEncrypted, subAccountId, tpslBotCtx);
+      const signing = await _resolveSigningContext(agentSecret, subAccountId, tpslBotCtx);
       try {
       const mainWalletAddress = await _lookupMainWallet(
         tpslBotCtx ? wallet.agentPublicKey : signing.publicKey
@@ -5317,6 +5412,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       } finally {
         signing.cleanup();
       }
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error) {
       console.error("[SetTpSl] Error:", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "Failed to set TP/SL" });
@@ -5330,9 +5429,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
 
       const wallet = await storage.getWallet(bot.walletAddress);
-      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+      if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
+
+      const umkResult = await getUmkForWebhook(bot.walletAddress);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
+      const agentSecret = agentKeyResult.secretKey;
 
       const subAccountId = bot.driftSubaccountId ?? 0;
       const cancelBotCtx = getBotSubaccountContext(bot);
@@ -5340,7 +5451,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const mainWalletAddress = await _lookupMainWallet(agentPubKey);
       const adapter = getDefaultAdapter();
 
-      const signing = await _resolveSigningContext(wallet.agentPrivateKeyEncrypted, subAccountId, cancelBotCtx);
+      const signing = await _resolveSigningContext(agentSecret, subAccountId, cancelBotCtx);
 
       try {
       if (adapter.cancelTpSlOrders) {
@@ -5386,6 +5497,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       } finally {
         signing.cleanup();
       }
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error) {
       console.error("[CancelTpSl] Error:", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "Failed to cancel TP/SL" });
@@ -5410,9 +5525,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const wallet = await storage.getWallet(bot.walletAddress);
-      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+      if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
+
+      const umkResult = await getUmkForWebhook(bot.walletAddress);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
+      const agentSecret = agentKeyResult.secretKey;
 
       const subAccountId = bot.driftSubaccountId ?? 0;
       const closeMarketBotCtx = getBotSubaccountContext(bot);
@@ -5439,7 +5566,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const marketCloseSlippageBps = wallet.slippageBps ?? 50;
       const result = await closePerpPosition(
-        wallet.agentPrivateKeyEncrypted,
+        agentSecret,
         market,
         subAccountId,
         marketPositionSize,
@@ -5472,6 +5599,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         market,
         txSignature: result.signature,
       });
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error) {
       console.error("Close market position error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -5499,9 +5630,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const wallet = await storage.getWallet(bot.walletAddress);
-      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+      if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
+
+      const umkResult = await getUmkForWebhook(bot.walletAddress);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
+      const agentSecret = agentKeyResult.secretKey;
 
       const subAccountId = bot.driftSubaccountId ?? 0;
       const manualBotCtx = getBotSubaccountContext(bot);
@@ -5514,7 +5657,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const sizingResult = await computeTradeSizingAndTopUp({
         agentPublicKey: wallet.agentPublicKey,
-        agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
+        agentPrivateKeyEncrypted: agentSecret,
         subAccountId: manualBotCtx ? 0 : subAccountId,
         botId: bot.id,
         walletAddress: bot.walletAddress,
@@ -5554,7 +5697,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const userSlippageBps = wallet.slippageBps ?? 50;
       const orderResult = await executePerpOrder(
-        wallet.agentPrivateKeyEncrypted,
+        agentSecret,
         bot.market,
         side,
         contractSize,
@@ -5643,6 +5786,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         txSignature: orderResult.txSignature || orderResult.signature,
         tradeId: trade.id,
       });
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error) {
       console.error("Manual trade error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -5806,7 +5953,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
@@ -5817,14 +5964,28 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Insufficient SOL balance (must keep 0.005 SOL reserve for gas)" });
       }
 
-      const txData = await buildWithdrawSolFromAgentTransaction(
-        wallet.agentPublicKey,
-        req.walletAddress!,
-        wallet.agentPrivateKeyEncrypted,
-        amount
-      );
+      const umkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      try {
+        const txData = await buildWithdrawSolFromAgentTransaction(
+          wallet.agentPublicKey,
+          req.walletAddress!,
+          agentKeyResult.secretKey,
+          amount
+        );
 
-      res.json(txData);
+        res.json(txData);
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error) {
       console.error("Build agent SOL withdraw error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -5937,7 +6098,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
       
       const wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet?.agentPrivateKeyEncrypted) {
+      if (!wallet?.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
@@ -6354,10 +6515,19 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const subaccountAuthMode: 'external_key' | 'main_plus_id' =
         defaultCaps.requiresExternalSubaccountKey ? 'external_key' : 'main_plus_id';
 
-      if (wallet.agentPublicKey && wallet.agentPrivateKeyEncrypted) {
+      if (wallet.agentPublicKey && wallet.agentPrivateKeyEncryptedV3) {
         const { Keypair } = await import('@solana/web3.js');
 
-        const agentKeypair = resolveAgentKeypair(wallet.agentPrivateKeyEncrypted);
+        const _botCreateUmk = await getUmkForWebhook(req.walletAddress!);
+        if (!_botCreateUmk) {
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        const _botCreateAgentKey = await decryptAgentKeyStrict(req.walletAddress!, _botCreateUmk.umk, wallet, wallet.agentPublicKey);
+        if (!_botCreateAgentKey) {
+          _botCreateUmk.cleanup();
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        const agentKeypair = resolveAgentKeypair(_botCreateAgentKey.secretKey);
         const adapter = defaultAdapter;
         const caps = defaultCaps;
 
@@ -6443,6 +6613,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 );
               } catch (validationErr: any) {
                 console.error(`[Bot Creation] ${validationErr.message}`);
+                _botCreateAgentKey.cleanup();
+                _botCreateUmk.cleanup();
                 return res.status(500).json({
                   error: `Failed to create trading subaccount: adapter returned invalid subaccount ID format`,
                 });
@@ -6453,8 +6625,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           console.log(`[Bot Creation] ${adapter.protocolName} subaccount created: ${botSubaccountPublicKey}`);
         } catch (subErr: any) {
           console.error(`[Bot Creation] ${adapter.protocolName} subaccount creation failed:`, subErr.message);
+          _botCreateAgentKey.cleanup();
+          _botCreateUmk.cleanup();
           return res.status(500).json({ error: `Failed to create trading subaccount: ${subErr.message}` });
         }
+        _botCreateAgentKey.cleanup();
+        _botCreateUmk.cleanup();
       }
 
       try {
@@ -6653,7 +6829,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         
         // Get wallet for execution
         const wallet = await storage.getWallet(bot.walletAddress);
-        if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+        if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
           // No agent wallet - check if there's a DB position we can't close
           const dbPosition = await storage.getBotPosition(bot.id, bot.market);
           if (dbPosition && parseFloat(dbPosition.baseSize) !== 0) {
@@ -6692,16 +6868,25 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           });
         }
         
-        if (Math.abs(actualPositionSize) > 0.0001 && wallet?.agentPrivateKeyEncrypted) {
+        if (Math.abs(actualPositionSize) > 0.0001 && wallet?.agentPrivateKeyEncryptedV3) {
           console.log(`[Bot] Found open position: ${actualPositionSize} ${bot.market} - closing before pause`);
           
+          const _pauseUmk = await getUmkForWebhook(bot.walletAddress);
+          if (!_pauseUmk) {
+            return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+          }
+          const _pauseAgentKey = await decryptAgentKeyStrict(bot.walletAddress, _pauseUmk.umk, wallet!, wallet!.agentPublicKey!);
+          if (!_pauseAgentKey) {
+            _pauseUmk.cleanup();
+            return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+          }
           try {
             // Determine close side (opposite of current position)
             const closeSide: 'long' | 'short' = actualPositionSize > 0 ? 'short' : 'long';
             const closeSize = Math.abs(actualPositionSize);
             
             const result = await executePerpOrder(
-              wallet.agentPrivateKeyEncrypted,
+              _pauseAgentKey.secretKey,
               bot.market,
               closeSide,
               closeSize,
@@ -6822,6 +7007,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           } catch (err: any) {
             console.error(`[Bot] Failed to close position on pause:`, err);
             closeError = err.message || "Failed to close position";
+            _pauseAgentKey.cleanup();
+            _pauseUmk.cleanup();
             // DON'T pause the bot if close failed - position is still open!
             return res.status(500).json({ 
               error: "Cannot pause: Failed to close open position on Drift",
@@ -6829,6 +7016,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               hasPosition: true,
               positionSize: actualPositionSize
             });
+          } finally {
+            _pauseAgentKey.cleanup();
+            _pauseUmk.cleanup();
           }
         }
       }
@@ -6867,6 +7057,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   });
 
   app.delete("/api/trading-bots/:id", requireWallet, async (req, res) => {
+    let _deleteAgentKeyCleanup: (() => void) | null = null;
     try {
       const bot = await storage.getTradingBotById(req.params.id);
       if (!bot) {
@@ -6879,6 +7070,22 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Get the wallet's agent public key - Drift accounts are under the AGENT wallet
       const wallet = await storage.getWallet(req.walletAddress!);
       const agentAddress = wallet?.agentPublicKey;
+
+      // V3 strict-decrypt: hoist once for the whole delete flow.
+      let agentSecret: Uint8Array | null = null;
+      if (wallet?.agentPrivateKeyEncryptedV3 && wallet?.agentPublicKey) {
+        const _delUmk = await getUmkForWebhook(req.walletAddress!);
+        if (!_delUmk) {
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        const _delKey = await decryptAgentKeyStrict(req.walletAddress!, _delUmk.umk, wallet, wallet.agentPublicKey);
+        if (!_delKey) {
+          _delUmk.cleanup();
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        agentSecret = _delKey.secretKey;
+        _deleteAgentKeyCleanup = () => { _delKey.cleanup(); _delUmk.cleanup(); };
+      }
       
       // Check for pending profit share IOUs before allowing deletion
       const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(req.params.id);
@@ -6887,13 +7094,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         console.log(`[Delete] Bot ${req.params.id} has ${pendingIOUs.length} pending IOUs totaling $${totalOwed.toFixed(4)}`);
         
         // Try to pay IOUs first if we have wallet access
-        if (wallet?.agentPublicKey && wallet?.agentPrivateKeyEncrypted) {
+        if (wallet?.agentPublicKey && agentSecret) {
           let allPaid = true;
           for (const iou of pendingIOUs) {
             const iouAmount = parseFloat(iou.amount);
             const transferResult = await transferUsdcToWallet(
               wallet.agentPublicKey,
-              wallet.agentPrivateKeyEncrypted,
+              agentSecret,
               iou.creatorWalletAddress,
               iouAmount
             );
@@ -6974,7 +7181,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         let exists = false;
 
         if (botCtx && bot.protocolSubaccountId) {
-          if (!wallet.agentPrivateKeyEncrypted) {
+          if (!agentSecret) {
             console.error(`[Delete] Cannot withdraw - agent key missing for bot ${bot.id}`);
             return res.status(500).json({
               error: "Cannot withdraw funds - wallet key missing",
@@ -7014,7 +7221,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                     console.log(`[Delete] Step 2: Withdraw $${sweepAmount.toFixed(2)} from main account → agent wallet`);
                     const withdrawResult = await executeAgentDriftWithdraw(
                       agentAddress,
-                      wallet.agentPrivateKeyEncrypted,
+                      agentSecret,
                       sweepAmount,
                       0
                     );
@@ -7046,7 +7253,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             const balance = await getExchangeBalance(agentAddress, bot.driftSubaccountId);
 
             if (bot.driftSubaccountId > 0 && balance > 0.01) {
-              if (!wallet.agentPrivateKeyEncrypted) {
+              if (!agentSecret) {
                 console.error(`[Delete] Cannot withdraw - agent key missing for bot ${bot.id}`);
                 return res.status(500).json({
                   error: "Cannot withdraw funds - wallet key missing",
@@ -7060,13 +7267,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 const sweepAmount = Math.max(balance, 0.000001);
                 const transferResult = await executeAgentTransferBetweenSubaccounts(
                   agentAddress,
-                  wallet.agentPrivateKeyEncrypted,
+                  agentSecret,
                   bot.driftSubaccountId,
                   0,
                   sweepAmount
                 );
                 if (transferResult.success && balance > 0.01) {
-                  const withdrawResult = await executeAgentDriftWithdraw(agentAddress, wallet.agentPrivateKeyEncrypted, balance, 0);
+                  const withdrawResult = await executeAgentDriftWithdraw(agentAddress, agentSecret, balance, 0);
                   if (withdrawResult.success) {
                     withdrawnAmount = balance;
                     withdrawTxSignature = withdrawResult.signature;
@@ -7086,17 +7293,17 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         let rentReclaimError: string | undefined;
         
         // Edge case: subaccount exists but agent keys are missing (data corruption)
-        if (exists && !wallet.agentPrivateKeyEncrypted && bot.driftSubaccountId > 0) {
+        if (exists && !agentSecret && bot.driftSubaccountId > 0) {
           console.error(`[Delete] CRITICAL: Subaccount ${bot.driftSubaccountId} exists but agent keys missing - cannot auto-recover!`);
           console.error(`[Delete] User must use "Reset Trading Account" in Settings or manually close positions`);
           rentReclaimError = "Agent keys missing - manual recovery required";
         }
         
-        if (exists && wallet.agentPrivateKeyEncrypted && bot.driftSubaccountId > 0) {
+        if (exists && agentSecret && bot.driftSubaccountId > 0) {
           console.log(`[Delete] Attempting to close subaccount ${bot.driftSubaccountId} to reclaim rent...`);
           try {
             const closeResult = await closeDriftSubaccount(
-              wallet.agentPrivateKeyEncrypted,
+              agentSecret,
               bot.driftSubaccountId
             );
             if (closeResult.success) {
@@ -7178,11 +7385,14 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     } catch (error) {
       console.error("Delete trading bot error:", error);
       res.status(500).json({ error: "Internal server error" });
+    } finally {
+      _deleteAgentKeyCleanup?.();
     }
   });
 
   // Force delete with sweep - auto-withdraws funds before deletion
   app.delete("/api/trading-bots/:id/force", requireWallet, async (req, res) => {
+    let _forceDeleteCleanup: (() => void) | null = null;
     try {
       const bot = await storage.getTradingBotById(req.params.id);
       if (!bot) {
@@ -7195,6 +7405,22 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Get the wallet's agent public key - Drift accounts are under the AGENT wallet
       const wallet = await storage.getWallet(req.walletAddress!);
       const agentAddress = wallet?.agentPublicKey;
+
+      // V3 strict-decrypt: hoist once for the whole force-delete flow.
+      let agentSecret: Uint8Array | null = null;
+      if (wallet?.agentPrivateKeyEncryptedV3 && wallet?.agentPublicKey) {
+        const _fdUmk = await getUmkForWebhook(req.walletAddress!);
+        if (!_fdUmk) {
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        const _fdKey = await decryptAgentKeyStrict(req.walletAddress!, _fdUmk.umk, wallet, wallet.agentPublicKey);
+        if (!_fdKey) {
+          _fdUmk.cleanup();
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        agentSecret = _fdKey.secretKey;
+        _forceDeleteCleanup = () => { _fdKey.cleanup(); _fdUmk.cleanup(); };
+      }
       
       // Check for pending profit share IOUs before allowing deletion
       const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(req.params.id);
@@ -7203,13 +7429,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         console.log(`[ForceDelete] Bot ${req.params.id} has ${pendingIOUs.length} pending IOUs totaling $${totalOwed.toFixed(4)}`);
         
         // Try to pay IOUs first if we have wallet access
-        if (wallet?.agentPublicKey && wallet?.agentPrivateKeyEncrypted) {
+        if (wallet?.agentPublicKey && agentSecret) {
           let allPaid = true;
           for (const iou of pendingIOUs) {
             const iouAmount = parseFloat(iou.amount);
             const transferResult = await transferUsdcToWallet(
               wallet.agentPublicKey,
-              wallet.agentPrivateKeyEncrypted,
+              agentSecret,
               iou.creatorWalletAddress,
               iouAmount
             );
@@ -7264,7 +7490,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       // CRITICAL: If bot has a subaccount but wallet/agent is missing, refuse to delete
       if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
-        if (!wallet || !agentAddress || !wallet.agentPrivateKeyEncrypted) {
+        if (!wallet || !agentAddress || !agentSecret) {
           console.error(`[ForceDelete] CRITICAL: Bot ${bot.id} has subaccount ${bot.driftSubaccountId} but wallet/agent keys are missing`);
           return res.status(500).json({
             error: "Cannot sweep bot funds - wallet data missing",
@@ -7293,10 +7519,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (balance <= 0.01) {
         // No meaningful balance, try to close subaccount to reclaim rent
         let rentReclaimed = false;
-        if (wallet.agentPrivateKeyEncrypted) {
+        if (agentSecret) {
           try {
             const closeResult = await closeDriftSubaccount(
-              wallet.agentPrivateKeyEncrypted,
+              agentSecret,
               bot.driftSubaccountId
             );
             if (closeResult.success) {
@@ -7313,12 +7539,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       // Auto-sweep: Transfer funds from bot's subaccount to main account (subaccount 0)
       // This is done server-side using the agent wallet
-      if (wallet.agentPrivateKeyEncrypted && bot.driftSubaccountId !== 0) {
+      if (agentSecret && bot.driftSubaccountId !== 0) {
         try {
           console.log(`[Delete] Auto-sweeping $${balance.toFixed(2)} from subaccount ${bot.driftSubaccountId} to main account`);
           const sweepResult = await executeAgentTransferBetweenSubaccounts(
             agentAddress,
-            wallet.agentPrivateKeyEncrypted,
+            agentSecret,
             bot.driftSubaccountId,
             0, // to main account
             balance
@@ -7331,7 +7557,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             let rentReclaimed = false;
             try {
               const closeResult = await closeDriftSubaccount(
-                wallet.agentPrivateKeyEncrypted,
+                agentSecret,
                 bot.driftSubaccountId
               );
               if (closeResult.success) {
@@ -7382,6 +7608,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     } catch (error) {
       console.error("Force delete trading bot error:", error);
       res.status(500).json({ error: "Internal server error" });
+    } finally {
+      _forceDeleteCleanup?.();
     }
   });
 
@@ -7409,10 +7637,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       // Try to close the subaccount to reclaim rent (~0.035 SOL)
       let rentReclaimed = false;
-      if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined && wallet?.agentPrivateKeyEncrypted) {
+      let _confirmDeleteCleanup: (() => void) | null = null;
+      if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined && wallet?.agentPrivateKeyEncryptedV3 && wallet?.agentPublicKey) {
+        const _cdUmk = await getUmkForWebhook(req.walletAddress!);
+        if (!_cdUmk) {
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        const _cdKey = await decryptAgentKeyStrict(req.walletAddress!, _cdUmk.umk, wallet, wallet.agentPublicKey);
+        if (!_cdKey) {
+          _cdUmk.cleanup();
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        _confirmDeleteCleanup = () => { _cdKey.cleanup(); _cdUmk.cleanup(); };
         try {
           const closeResult = await closeDriftSubaccount(
-            wallet.agentPrivateKeyEncrypted,
+            _cdKey.secretKey,
             bot.driftSubaccountId
           );
           if (closeResult.success) {
@@ -7428,6 +7667,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       await storage.deleteTradingBot(req.params.id);
       res.json({ success: true, txSignature, rentReclaimed });
+      _confirmDeleteCleanup?.();
     } catch (error) {
       console.error("Confirm delete trading bot error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -8086,7 +8326,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         
         // Get wallet for execution
         const wallet = await storage.getWallet(bot.walletAddress);
-        if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+        if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
           await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured for close", processed: true });
           return res.status(400).json({ error: "Agent wallet not configured" });
         }
@@ -8177,7 +8417,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const execStartTime = Date.now();
           console.log(`[Webhook] ⏱️ CLOSE EXEC START at +${execStartTime - webhookStartTime}ms, closeSize=${closeSize}, slippage=${closeSlippageBps2}bps`);
           const result = await closePerpPosition(
-            wallet.agentPrivateKeyEncrypted,
+            agentKeyResult.secretKey,
             bot.market,
             closeSubAccountId,
             closeSize,
@@ -8275,7 +8515,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 // Retry closePerpPosition to clean up the dust
                 const webhookDustSlippageBps = wallet.slippageBps ?? 50;
                 const retryResult = await closePerpPosition(
-                  wallet.agentPrivateKeyEncrypted,
+                  agentKeyResult.secretKey,
                   bot.market,
                   subAccountId,
                   Math.abs(postClosePosition.size),
@@ -8443,7 +8683,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                   subscriberBotId: botId,
                   subscriberWalletAddress: wallet.address,
                   subscriberAgentPublicKey: wallet.agentPublicKey!,
-                  subscriberEncryptedPrivateKey: wallet.agentPrivateKeyEncrypted,
+                  subscriberEncryptedPrivateKey: agentKeyResult.secretKey,
                   driftSubaccountId: subAccountId,
                   realizedPnl: closeTradePnl,
                   tradeId,
@@ -8511,7 +8751,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                             console.log(`[Webhook] AUTO-WITHDRAW Step 2: Withdraw $${withdrawAmount.toFixed(2)} from main account → agent wallet`);
                             const withdrawResult = await executeAgentDriftWithdraw(
                               wallet.agentPublicKey!,
-                              wallet.agentPrivateKeyEncrypted,
+                              agentKeyResult.secretKey,
                               withdrawAmount,
                               0,
                               { tradingBotId: botId, context: 'Webhook AUTO-WITHDRAW' }
@@ -8537,7 +8777,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                       } else {
                         const withdrawResult = await executeAgentDriftWithdraw(
                           wallet.agentPublicKey!,
-                          wallet.agentPrivateKeyEncrypted,
+                          agentKeyResult.secretKey,
                           withdrawAmount,
                           subAccountId,
                           { tradingBotId: botId, context: 'Webhook AUTO-WITHDRAW' }
@@ -8670,7 +8910,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       // Get wallet for execution (needed for on-chain position check)
       const wallet = await storage.getWallet(bot.walletAddress);
-      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+      if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured", processed: true });
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
@@ -8734,7 +8974,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const flipSlippageBps = wallet.slippageBps ?? 50;
           console.log(`[Webhook] Using closePerpPosition (exact BN) for position flip close, slippage=${flipSlippageBps}bps`);
           const closeResult = await closePerpPosition(
-            wallet.agentPrivateKeyEncrypted,
+            agentKeyResult.secretKey,
             bot.market,
             webhookBotCtx ? 0 : subAccountId,
             closeSize,
@@ -8957,7 +9197,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const sizingResult = await computeTradeSizingAndTopUp({
         agentPublicKey: wallet.agentPublicKey!,
-        agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
+        agentPrivateKeyEncrypted: agentKeyResult.secretKey,
         subAccountId: webhookBotCtx ? 0 : subAccountId,
         botId: bot.id,
         walletAddress: bot.walletAddress,
@@ -8992,7 +9232,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const openExecStartTime = Date.now();
       console.log(`[Webhook] ⏱️ OPEN EXEC START at +${openExecStartTime - webhookStartTime}ms, ${side} ${finalContractSize} ${bot.market}`);
       const orderResult = await executePerpOrder(
-        wallet.agentPrivateKeyEncrypted,
+        agentKeyResult.secretKey,
         bot.market,
         side,
         finalContractSize,
@@ -9367,7 +9607,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           console.error(`  Derived pubkey: ${derivedPubkey}`);
           console.error(`  Expected pubkey: ${wallet.agentPublicKey}`);
           console.error(`  Wallet has v3 key: ${!!wallet.agentPrivateKeyEncryptedV3}`);
-          console.error(`  Wallet has legacy key: ${!!wallet.agentPrivateKeyEncrypted}`);
+          console.error(`  Wallet has legacy key (v3 field): ${!!wallet.agentPrivateKeyEncryptedV3}`);
           agentKeyResult.cleanup();
           await storage.updateWebhookLog(log.id, { errorMessage: "Agent key mismatch - security error" });
           return res.status(500).json({ error: "Agent key verification failed. Please reconfigure your agent wallet in Settings." });
@@ -9507,7 +9747,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         try {
           // Get wallet for execution
           const wallet = await storage.getWallet(walletAddress);
-          if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+          if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
             await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured for close", processed: true });
             return res.status(400).json({ error: "Agent wallet not configured" });
           }
@@ -9588,7 +9828,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const userCloseSlippageBps = wallet.slippageBps ?? 50;
           const uwCloseSubId = userWebhookBotCtx ? 0 : subAccountId;
           const result = await closePerpPosition(
-            wallet.agentPrivateKeyEncrypted,
+            agentKeyResult.secretKey,
             bot.market,
             uwCloseSubId,
             closeSize,
@@ -9730,7 +9970,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 subscriberBotId: botId,
                 subscriberWalletAddress: walletAddress,
                 subscriberAgentPublicKey: wallet.agentPublicKey,
-                subscriberEncryptedPrivateKey: wallet.agentPrivateKeyEncrypted,
+                subscriberEncryptedPrivateKey: agentKeyResult.secretKey,
                 driftSubaccountId: subAccountId,
                 realizedPnl: closeTradePnl,
                 tradeId,
@@ -9800,7 +10040,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                           console.log(`[User Webhook] AUTO-WITHDRAW Step 2: Withdraw $${withdrawAmount.toFixed(2)} from main account → agent wallet`);
                           const withdrawResult = await executeAgentDriftWithdraw(
                             wallet.agentPublicKey!,
-                            wallet.agentPrivateKeyEncrypted!,
+                            agentKeyResult.secretKey,
                             withdrawAmount,
                             0,
                             { tradingBotId: botId, context: 'User Webhook AUTO-WITHDRAW' }
@@ -9827,7 +10067,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                     } else {
                       const withdrawResult = await executeAgentDriftWithdraw(
                         wallet.agentPublicKey,
-                        wallet.agentPrivateKeyEncrypted!,
+                        agentKeyResult.secretKey,
                         withdrawAmount,
                         subAccountId,
                         { tradingBotId: botId, context: 'User Webhook AUTO-WITHDRAW' }
@@ -9957,7 +10197,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Execute trade on Drift Protocol
       // Get wallet's agent private key for signing
       const userWallet = await storage.getWallet(walletAddress);
-      if (!userWallet?.agentPrivateKeyEncrypted) {
+      if (!userWallet?.agentPrivateKeyEncryptedV3) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
@@ -10006,7 +10246,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const uwOpenSubAccountId = userWebhookBotCtx ? 0 : subAccountId;
       const sizingResult = await computeTradeSizingAndTopUp({
         agentPublicKey: userWallet.agentPublicKey!,
-        agentPrivateKeyEncrypted: userWallet.agentPrivateKeyEncrypted,
+        agentPrivateKeyEncrypted: agentKeyResult.secretKey,
         subAccountId: uwOpenSubAccountId,
         botId: bot.id,
         walletAddress: userWallet.address,
@@ -10036,7 +10276,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Execute on Drift (subAccountId already declared above for collateral check)
       const userSlippageBps2 = userWallet.slippageBps ?? 50;
       const orderResult = await executePerpOrder(
-        userWallet.agentPrivateKeyEncrypted,
+        agentKeyResult.secretKey,
         bot.market,
         side,
         contractSize,
@@ -10795,7 +11035,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet?.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet?.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
@@ -10871,7 +11111,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet?.agentPublicKey || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet?.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
@@ -11710,27 +11950,43 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // does not pass updatedDbAllocatedIds through. Same gap exists at the main
       // creation site today. Tracked for a separate cleanup; not introduced here.
       let persistedSubaccountId: number = nextSubaccountId;
+      const marketplaceUmkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!marketplaceUmkResult) {
+        return res.status(403).json({ error: "Execution not enabled. Please enable execution authorization first." });
+      }
+      const marketplaceAgentKeyResult = await decryptAgentKeyStrict(
+        req.walletAddress!,
+        marketplaceUmkResult.umk,
+        wallet,
+        wallet.agentPublicKey
+      );
+      marketplaceUmkResult.cleanup();
+      if (!marketplaceAgentKeyResult) {
+        return res.status(500).json({ error: "Agent key decryption failed. Please sign in again." });
+      }
       try {
-        const { getAdapter } = await import("./protocol/adapter-registry");
-        const marketplaceAdapter = getAdapter('drift');
-        const marketplaceAgentKeypair = resolveAgentKeypair(wallet.agentPrivateKeyEncrypted);
-        const sub = await marketplaceAdapter.createSubaccount({
-          mainSecretKey: marketplaceAgentKeypair.secretKey,
-          agentPublicKey: marketplaceAgentKeypair.publicKey.toString(),
-        });
-        const parsed = parseAndValidateAdapterSubaccountId(sub.subaccountId, marketplaceAdapter.protocolName);
-        if (parsed !== nextSubaccountId) {
-          console.warn(
-            `[Marketplace] Subaccount ID divergence: pre-allocated=${nextSubaccountId}, ` +
-            `adapter-returned=${parsed}. Persisting adapter value as canonical (driftSubaccountId=${parsed}).`
+        const marketplaceAgentSecret = marketplaceAgentKeyResult.secretKey;
+        try {
+          const { getAdapter } = await import("./protocol/adapter-registry");
+          const marketplaceAdapter = getAdapter('drift');
+          const marketplaceAgentKeypair = Keypair.fromSecretKey(marketplaceAgentSecret);
+          const sub = await marketplaceAdapter.createSubaccount({
+            mainSecretKey: marketplaceAgentKeypair.secretKey,
+            agentPublicKey: marketplaceAgentKeypair.publicKey.toString(),
+          });
+          const parsed = parseAndValidateAdapterSubaccountId(sub.subaccountId, marketplaceAdapter.protocolName);
+          if (parsed !== nextSubaccountId) {
+            console.warn(
+              `[Marketplace] Subaccount ID divergence: pre-allocated=${nextSubaccountId}, ` +
+              `adapter-returned=${parsed}. Persisting adapter value as canonical (driftSubaccountId=${parsed}).`
+            );
+          }
+          persistedSubaccountId = parsed;
+        } catch (subErr: any) {
+          console.error(
+            `[Marketplace] adapter.createSubaccount failed; falling back to pre-allocated ID ${nextSubaccountId}: ${subErr.message}`
           );
         }
-        persistedSubaccountId = parsed;
-      } catch (subErr: any) {
-        console.error(
-          `[Marketplace] adapter.createSubaccount failed; falling back to pre-allocated ID ${nextSubaccountId}: ${subErr.message}`
-        );
-      }
 
       // Create subscriber's bot with same settings but their own capital (with subaccount ID already set)
       // maxPositionSize = investment × leverage (same as normal bot creation)
@@ -11763,7 +12019,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       console.log(`[Marketplace] Depositing $${capitalInvested} from agent wallet to subaccount ${persistedSubaccountId} for subscriber bot`);
       const depositResult = await executeAgentDeposit(
         wallet.agentPublicKey,
-        wallet.agentPrivateKeyEncrypted,
+        marketplaceAgentSecret,
         capitalInvested,
         persistedSubaccountId
       );
@@ -11808,6 +12064,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         webhookUrl: generateWebhookUrl(subscriberBot.id, webhookSecret),
         depositTxSignature: depositResult.signature,
       });
+      } finally {
+        marketplaceAgentKeyResult.cleanup();
+      }
     } catch (error) {
       console.error("Subscribe error:", error);
       res.status(500).json({ error: "Failed to subscribe" });
@@ -12129,7 +12388,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
       
       const wallet = await storage.getWallet(walletAddress);
-      if (!wallet || !wallet.agentPrivateKeyEncrypted) {
+      if (!wallet || !wallet.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
       
@@ -12137,6 +12396,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (!wallet.executionEnabled || wallet.emergencyStopTriggered) {
         return res.status(403).json({ error: "Execution not authorized. Please enable execution first." });
       }
+
+      const retryUmkResult = await getUmkForWebhook(walletAddress);
+      if (!retryUmkResult) {
+        return res.status(403).json({ error: "Execution not enabled. Please enable execution authorization first." });
+      }
+      const retryAgentKeyResult = await decryptAgentKeyStrict(walletAddress, retryUmkResult.umk, wallet, wallet.agentPublicKey);
+      retryUmkResult.cleanup();
+      if (!retryAgentKeyResult) {
+        return res.status(500).json({ error: "Agent key decryption failed. Please sign in again." });
+      }
+      try {
+      const retryAgentSecret = retryAgentKeyResult.secretKey;
       
       // Determine the side from the original trade
       const side = trade.side?.toUpperCase();
@@ -12174,7 +12445,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           if (topUpNeeded > 0) {
             if (retryBotCtxForTopUp) {
               const adapter = getDefaultAdapter();
-              const agentKeypairForTopUp = resolveAgentKeypair(wallet.agentPrivateKeyEncrypted);
+              const agentKeypairForTopUp = Keypair.fromSecretKey(retryAgentSecret);
               const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
               if (depositAmount < adapter.minTransferAmount) {
                 console.log(`[Retry Trade] Auto top-up skipped: $${depositAmount.toFixed(2)} below ${adapter.protocolName} $${adapter.minTransferAmount} minimum transfer`);
@@ -12213,7 +12484,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
               const depositResult = await executeAgentDeposit(
                 wallet.agentPublicKey!,
-                wallet.agentPrivateKeyEncrypted,
+                retryAgentSecret,
                 depositAmount,
                 subAccountId,
                 false
@@ -12244,12 +12515,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
       
       const retryBotCtx = getBotSubaccountContext(bot);
-      const agentKeypair = resolveAgentKeypair(wallet.agentPrivateKeyEncrypted);
+      const agentKeypair = Keypair.fromSecretKey(retryAgentSecret);
       const bs58 = await import('bs58');
       const privateKeyBase58 = bs58.default.encode(agentKeypair.secretKey);
       
       const result = await executePerpOrder(
-        wallet.agentPrivateKeyEncrypted,
+        retryAgentSecret,
         market,
         isLong ? 'long' : 'short',
         size,
@@ -12324,6 +12595,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           error: result.error || "Trade execution failed",
         });
       }
+      } finally {
+        retryAgentKeyResult.cleanup();
+      }
     } catch (error) {
       console.error("[Retry Trade] Error:", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "Failed to retry trade" });
@@ -12366,21 +12640,35 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
       
       const wallet = await storage.getWallet(req.walletAddress);
-      if (!wallet?.agentPrivateKeyEncrypted || !wallet?.agentPublicKey) {
+      if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
       
       console.log(`[Debug] Closing position on ${market} in subaccount ${subAccountId} for wallet ${wallet.agentPublicKey}`);
       
       const slippageBps = wallet.slippageBps ?? 100;
-      
-      const result = await closePerpPosition(
-        wallet.agentPrivateKeyEncrypted,
-        market,
-        subAccountId,
-        undefined,
-        slippageBps
-      );
+
+      const debugUmkResult = await getUmkForWebhook(req.walletAddress);
+      if (!debugUmkResult) {
+        return res.status(403).json({ error: "Execution not enabled. Please enable execution authorization first." });
+      }
+      const debugAgentKeyResult = await decryptAgentKeyStrict(req.walletAddress, debugUmkResult.umk, wallet, wallet.agentPublicKey);
+      debugUmkResult.cleanup();
+      if (!debugAgentKeyResult) {
+        return res.status(500).json({ error: "Agent key decryption failed. Please sign in again." });
+      }
+      let result;
+      try {
+        result = await closePerpPosition(
+          debugAgentKeyResult.secretKey,
+          market,
+          subAccountId,
+          undefined,
+          slippageBps
+        );
+      } finally {
+        debugAgentKeyResult.cleanup();
+      }
       
       console.log(`[Debug] Close result:`, result);
       
@@ -12605,29 +12893,42 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Bot not found or does not have an active external_key subaccount" });
       }
       const wallet = await storage.getWallet(bot.walletAddress);
-      if (!wallet?.agentPrivateKeyEncrypted) {
+      if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "No agent wallet" });
       }
-      const adapter = getDefaultAdapter();
-      const agentKeypair = resolveAgentKeypair(wallet.agentPrivateKeyEncrypted);
-      const transferResult = await adapter.transferBetweenSubaccounts({
-        agentSecretKey: agentKeypair.secretKey,
-        mainWalletAddress: agentKeypair.publicKey.toString(),
-        fromSubaccountId: agentKeypair.publicKey.toString(),
-        toSubaccountId: bot.protocolSubaccountId,
-        amount,
-      });
-      if (transferResult.success) {
-        await storage.createEquityEvent({
-          walletAddress: bot.walletAddress,
-          tradingBotId: bot.id,
-          eventType: 'drift_deposit',
-          amount: String(amount),
-          txSignature: null,
-          notes: `Rescue transfer: agent→${bot.protocolSubaccountId.slice(0,8)}... $${amount}`,
-        });
+      const rescueUmkResult = await getUmkForWebhook(bot.walletAddress);
+      if (!rescueUmkResult) {
+        return res.status(403).json({ error: "Execution not enabled for owner; cannot rescue-transfer" });
       }
-      res.json(transferResult);
+      const rescueAgentKeyResult = await decryptAgentKeyStrict(bot.walletAddress, rescueUmkResult.umk, wallet, wallet.agentPublicKey);
+      rescueUmkResult.cleanup();
+      if (!rescueAgentKeyResult) {
+        return res.status(500).json({ error: "Agent key decryption failed" });
+      }
+      try {
+        const adapter = getDefaultAdapter();
+        const agentKeypair = Keypair.fromSecretKey(rescueAgentKeyResult.secretKey);
+        const transferResult = await adapter.transferBetweenSubaccounts({
+          agentSecretKey: agentKeypair.secretKey,
+          mainWalletAddress: agentKeypair.publicKey.toString(),
+          fromSubaccountId: agentKeypair.publicKey.toString(),
+          toSubaccountId: bot.protocolSubaccountId,
+          amount,
+        });
+        if (transferResult.success) {
+          await storage.createEquityEvent({
+            walletAddress: bot.walletAddress,
+            tradingBotId: bot.id,
+            eventType: 'drift_deposit',
+            amount: String(amount),
+            txSignature: null,
+            notes: `Rescue transfer: agent→${bot.protocolSubaccountId.slice(0,8)}... $${amount}`,
+          });
+        }
+        res.json(transferResult);
+      } finally {
+        rescueAgentKeyResult.cleanup();
+      }
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
