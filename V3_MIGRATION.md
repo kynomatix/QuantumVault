@@ -12,8 +12,8 @@
 |-------|-------|--------|------|
 | -1 | Sealed pre-migration key backup | **COMPLETE** | May 18, 2026 |
 | 0  | UMK-at-rest re-keying | **COMPLETE** | May 18, 2026 |
-| 1  | Audit, env health & legacy-use logging | not started | — |
-| 2  | Backfill the legacy-only holdout | not started | — |
+| 1  | Audit, env health & legacy-use logging | **COMPLETE** | May 19, 2026 |
+| 2  | Backfill the legacy-only holdout | **COMPLETE — DEFERRED** | May 19, 2026 |
 | 2.5 | `decryptAgentKeyStrict` helper | not started | — |
 | 3  | Migrate user-initiated reads | not started | — |
 | 3b | Subscriber fan-out + executionEnabled gate | not started | — |
