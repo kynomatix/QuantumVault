@@ -61,11 +61,13 @@ export async function retryPendingReferralRewards(): Promise<{ processed: number
     // below is the source of truth — legacy blob is intentionally NOT part of
     // the gate so retired-legacy wallets still qualify.
     if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
-      console.error(`[ReferralRetry] Agent wallet not V3-configured for funding wallet ${event.fundingWallet} (event ${event.id})`);
+      // V3 Phase 4: auth-unavailable states do NOT burn the retry budget —
+      // pause until the funding wallet is re-configured. Matches
+      // trade-retry / orphan-cleanup / profit-share-retry semantics.
+      console.error(`[ReferralRetry] Agent wallet not V3-configured for funding wallet ${event.fundingWallet} (event ${event.id}); deferring (retry budget preserved)`);
       await storage.updateReferralRewardEventStatus(event.id, {
         status: 'pending',
-        retryCount: (event.retryCount ?? 0) + 1,
-        lastError: 'Agent wallet missing V3 envelope or public key',
+        lastError: 'Agent wallet missing V3 envelope or public key (paused, retry budget preserved)',
       });
       results.failed++;
       continue;
@@ -79,11 +81,13 @@ export async function retryPendingReferralRewards(): Promise<{ processed: number
       const reason = wallet.emergencyStopTriggered
         ? 'funding_wallet_emergency_stopped'
         : 'funding_wallet_execution_disabled';
-      console.warn(`[ReferralRetry] Event ${event.id}: ${reason}; keeping pending`);
+      // V3 Phase 4: execution-disabled / emergency-stop pauses the event
+      // without burning the retry budget so it can fire once execution
+      // is re-enabled.
+      console.warn(`[ReferralRetry] Event ${event.id}: ${reason}; keeping pending (retry budget preserved)`);
       await storage.updateReferralRewardEventStatus(event.id, {
         status: 'pending',
-        retryCount: (event.retryCount ?? 0) + 1,
-        lastError: `Funding wallet execution authorization unavailable (${reason})`,
+        lastError: `Funding wallet execution authorization unavailable (${reason}); paused, retry budget preserved`,
       });
       results.failed++;
       continue;
@@ -96,11 +100,12 @@ export async function retryPendingReferralRewards(): Promise<{ processed: number
     );
     if (!agentKeyResult) {
       umkResult.cleanup();
-      console.error(`[ReferralRetry] Event ${event.id}: V3 strict decrypt failed for funding wallet ${event.fundingWallet.slice(0,8)}...; keeping pending`);
+      // V3 Phase 4: strict-decrypt failure is auth-unavailable — preserve
+      // retry budget so the event can fire once decryption recovers.
+      console.error(`[ReferralRetry] Event ${event.id}: V3 strict decrypt failed for funding wallet ${event.fundingWallet.slice(0,8)}...; keeping pending (retry budget preserved)`);
       await storage.updateReferralRewardEventStatus(event.id, {
         status: 'pending',
-        retryCount: (event.retryCount ?? 0) + 1,
-        lastError: 'V3 strict decrypt failed for funding wallet agent key',
+        lastError: 'V3 strict decrypt failed for funding wallet agent key (paused, retry budget preserved)',
       });
       results.failed++;
       continue;

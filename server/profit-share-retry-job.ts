@@ -58,11 +58,13 @@ export async function retryPendingProfitShares(): Promise<{ processed: number; p
     // of the gate so wallets that have already retired their legacy key still
     // qualify for retry. The strict decrypt below is the source of truth.
     if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
-      console.error(`[ProfitShare Retry] Agent wallet not V3-configured for bot ${subscriberBot.id}`);
+      // V3 Phase 4: auth-unavailable states (missing V3 envelope) DO NOT
+      // burn the IOU's retry budget — pause until the subscriber's wallet
+      // is re-configured. Matches trade-retry / orphan-cleanup semantics.
+      console.error(`[ProfitShare Retry] Agent wallet not V3-configured for bot ${subscriberBot.id}; deferring (retry budget preserved)`);
       await storage.updatePendingProfitShareStatus(iou.id, {
         status: 'pending',
-        retryCount: iou.retryCount + 1,
-        lastError: 'Agent wallet missing V3 envelope or public key'
+        lastError: 'Agent wallet missing V3 envelope or public key (paused, retry budget preserved)'
       });
       results.failed++;
       continue;
@@ -81,11 +83,13 @@ export async function retryPendingProfitShares(): Promise<{ processed: number; p
       const reason = wallet.emergencyStopTriggered
         ? 'subscriber_emergency_stopped'
         : 'subscriber_execution_disabled';
-      console.warn(`[ProfitShare Retry] IOU ${iou.id}: ${reason}; keeping pending`);
+      // V3 Phase 4: do not burn the retry budget while the subscriber has
+      // execution disabled / emergency-stopped — the IOU should fire as
+      // soon as execution is re-enabled.
+      console.warn(`[ProfitShare Retry] IOU ${iou.id}: ${reason}; keeping pending (retry budget preserved)`);
       await storage.updatePendingProfitShareStatus(iou.id, {
         status: 'pending',
-        retryCount: iou.retryCount + 1,
-        lastError: `Subscriber execution authorization unavailable (${reason})`,
+        lastError: `Subscriber execution authorization unavailable (${reason}); paused, retry budget preserved`,
       });
       results.failed++;
       continue;
@@ -98,11 +102,12 @@ export async function retryPendingProfitShares(): Promise<{ processed: number; p
     );
     if (!agentKeyResult) {
       umkResult.cleanup();
-      console.error(`[ProfitShare Retry] IOU ${iou.id}: V3 strict decrypt failed for subscriber ${subscriberBot.walletAddress.slice(0,8)}...; keeping pending`);
+      // V3 Phase 4: strict-decrypt failure is an auth-unavailable state;
+      // preserve retry budget so the IOU can fire once decryption recovers.
+      console.error(`[ProfitShare Retry] IOU ${iou.id}: V3 strict decrypt failed for subscriber ${subscriberBot.walletAddress.slice(0,8)}...; keeping pending (retry budget preserved)`);
       await storage.updatePendingProfitShareStatus(iou.id, {
         status: 'pending',
-        retryCount: iou.retryCount + 1,
-        lastError: 'V3 strict decrypt failed for subscriber agent key',
+        lastError: 'V3 strict decrypt failed for subscriber agent key (paused, retry budget preserved)',
       });
       results.failed++;
       continue;
