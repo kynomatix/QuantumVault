@@ -2961,7 +2961,6 @@ async function swiftLateOpenRecovery(
       pubkey,
       subAccountId,
       market,
-      encryptedPrivateKey
     );
     const recoverySize = Math.abs(recoveryPos.size);
     const positionChanged = (baselineSide === 'FLAT' && recoveryPos.side !== 'FLAT' && recoverySize > 0.0001) ||
@@ -3082,7 +3081,6 @@ export async function executePerpOrder(
               verifyPubkey,
               subAccountId,
               market,
-              encryptedPrivateKey
             );
             preSwiftPositionSize = Math.abs(postSwiftPos.size);
             preSwiftPositionSide = postSwiftPos.side;
@@ -3149,7 +3147,6 @@ export async function executePerpOrder(
           guardPubkey,
           subAccountId,
           market,
-          encryptedPrivateKey
         );
         const guardSize = Math.abs(guardPos.size);
         const positionChanged = (preSwiftPositionSide === 'FLAT' && guardPos.side !== 'FLAT' && guardSize > 0.0001) ||
@@ -3435,7 +3432,6 @@ export async function closePerpPosition(
             verifyPubkey,
             subAccountId,
             market,
-            encryptedPrivateKey
           );
           console.log(`[Drift] Swift close verification result: side=${postSwiftPos.side}, size=${postSwiftPos.size}`);
           if (postSwiftPos.side === 'FLAT' || Math.abs(postSwiftPos.size) < 0.0001) {
@@ -3485,7 +3481,6 @@ export async function closePerpPosition(
           closeGuardPubkey,
           subAccountId,
           market,
-          encryptedPrivateKey
         );
         const closeGuardSize = Math.abs(closeGuardPos.size);
         const closeWasFilled = (closeGuardPos.side === 'FLAT' || closeGuardSize < 0.0001) ||

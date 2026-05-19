@@ -1880,7 +1880,6 @@ async function routeSignalToSubscribers(
             subCloseQueryAccount,
             subCloseQuerySubId,
             subBot.market,
-            subAgentSecretKey,
             subCloseCtx?.botPublicKey
           );
 
@@ -2137,7 +2136,6 @@ async function routeSignalToSubscribers(
               subQueryAccount,
               subQuerySubId,
               subBot.market,
-              subAgentSecretKey,
               subBotCtx?.botPublicKey
             );
             if (existingPos.side !== 'FLAT' && Math.abs(existingPos.size) >= 0.0001) {
@@ -4774,7 +4772,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           closeQueryAccount,
           closeQuerySubId,
           bot.market,
-          wallet.agentPrivateKeyEncrypted,
           closeBotCtx?.botPublicKey
         );
         console.log(`[ClosePosition] On-chain position for ${bot.market}: ${onChainPosition.side} ${onChainPosition.size}`);
@@ -4990,7 +4987,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             wallet.agentPublicKey,
             subAccountId,
             bot.market,
-            wallet.agentPrivateKeyEncrypted,
             closeBotCtx?.botPublicKey
           );
           
@@ -5040,7 +5036,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           wallet.agentPublicKey,
           subAccountId,
           bot.market,
-          wallet.agentPrivateKeyEncrypted,
           closeBotCtx?.botPublicKey
         );
         if (finalCheck.side !== 'FLAT' && Math.abs(finalCheck.size) > 0.0001) {
@@ -5347,7 +5342,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           wallet.agentPublicKey,
           subAccountId,
           market,
-          wallet.agentPrivateKeyEncrypted,
           closeMarketBotCtx?.botPublicKey
         );
         if (marketPos.side !== 'FLAT' && Math.abs(marketPos.size) > 0) {
@@ -5965,7 +5959,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           overviewQueryAccount,
           overviewQuerySubId,
           bot.market,
-          wallet.agentPrivateKeyEncrypted ?? undefined,
           overviewBotCtx?.botPublicKey
         ),
         storage.getBotNetDeposited(botId),
@@ -7577,7 +7570,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         posQueryAccount,
         posQuerySubId,
         bot.market,
-        wallet.agentPrivateKeyEncrypted ?? undefined,
         posBotCtx?.botPublicKey
       );
 
@@ -7990,7 +7982,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             queryAccount,
             querySubId,
             bot.market,
-            wallet.agentPrivateKeyEncrypted,
             webhookBotCtx?.botPublicKey
           );
           console.log(`[Webhook] On-chain position query result: size=${onChainPosition.size}, side=${onChainPosition.side}, entryPrice=${onChainPosition.entryPrice}`);
@@ -8148,7 +8139,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                   wallet.agentPublicKey,
                   subAccountId,
                   bot.market,
-                  wallet.agentPrivateKeyEncrypted,
                   webhookBotCtx?.botPublicKey
                 );
                 
@@ -8199,7 +8189,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 wallet.agentPublicKey,
                 subAccountId,
                 bot.market,
-                wallet.agentPrivateKeyEncrypted,
                 webhookBotCtx?.botPublicKey
               );
               if (finalCheck.side !== 'FLAT' && Math.abs(finalCheck.size) > 0.0001) {
@@ -8576,7 +8565,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           openQueryAccount,
           openQuerySubId,
           bot.market,
-          wallet.agentPrivateKeyEncrypted,
           webhookBotCtx?.botPublicKey
         );
         console.log(`[Webhook] Position flip check: on-chain position is ${onChainPosition.side} ${Math.abs(onChainPosition.size).toFixed(6)} on ${bot.market}`);
@@ -9416,7 +9404,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               uwCloseQueryAccount,
               uwCloseQuerySubId,
               bot.market,
-              wallet.agentPrivateKeyEncrypted,
               userWebhookBotCtx?.botPublicKey
             );
             console.log(`[User Webhook] On-chain position query result: size=${onChainPosition.size}, side=${onChainPosition.side}, entryPrice=${onChainPosition.entryPrice}`);

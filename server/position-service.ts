@@ -102,7 +102,6 @@ export class PositionService {
     agentPublicKey: string,
     subAccountId: number,
     market: string,
-    agentPrivateKeyEncrypted?: string,
     botSubaccountPublicKey?: string
   ): Promise<PositionData> {
     const timestamp = new Date();
@@ -327,11 +326,9 @@ export class PositionService {
     agentPublicKey: string,
     subAccountId: number,
     market: string,
-    // V3 Phase 3b: subscriber fan-out passes a Uint8Array from
-    // decryptAgentKeyStrict; legacy callers still pass the encrypted string.
-    // The parameter is currently unused inside this method but is kept on the
-    // signature for symmetry with the executor entry points.
-    agentPrivateKeyEncrypted?: string | Uint8Array,
+    // V3 Phase 4: no agent-key parameter accepted. Reads are done via the
+    // protocol adapter (bot subaccount public key) or byte-parsing of the
+    // on-chain User account — neither requires a private key.
     botSubaccountPublicKey?: string
   ): Promise<{ 
     size: number; 
