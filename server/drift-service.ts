@@ -5,12 +5,26 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import BN from 'bn.js';
+import bs58 from 'bs58';
 import { getAgentKeypair } from './agent-wallet';
 import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 import { shouldUseSwift } from './swift-config';
 import { executeSwiftOrder, type SwiftOrderResult } from './swift-executor';
 import { AdapterHealthTracker } from './protocol/adapter-health';
-import { decrypt } from './crypto';
+import { decrypt, encrypt } from './crypto';
+
+// V3 Phase 4: All public Drift-service entry points accept either a legacy
+// encrypted-string blob OR a freshly decrypted raw secret key (Uint8Array).
+// Background paths (trade retry, profit-share retry, referral retry, orphan
+// cleanup) now strict-decrypt via V3 and pass Uint8Array — they MUST never
+// fall back to the legacy DB blob. This helper normalizes Uint8Array input
+// back to encrypted-string form so the existing downstream code paths
+// (getAgentKeypair + subprocess executor, which is out-of-scope until 4c)
+// continue to work without further refactor.
+function _normalizeAgentKey(input: string | Uint8Array): string {
+  if (typeof input === 'string') return input;
+  return encrypt(bs58.encode(input));
+}
 import { getMarketPrice } from './drift-price';
 import { buildPerpMarketNames, buildPerpMarketIndices, syncFromSdk, writeExecutorJson, CANONICAL_PERP_MARKETS, PERP_ALIASES } from './market-registry';
 
@@ -485,9 +499,10 @@ async function ensureAgentHasSolForFees(agentPubkey: PublicKey): Promise<{ succe
 }
 
 async function getAgentDriftClient(
-  encryptedPrivateKey: string,
+  encryptedPrivateKeyRaw: string | Uint8Array,
   subAccountId: number = 0
 ): Promise<{ driftClient: any; cleanup: () => Promise<void> }> {
+  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   // Use cached SDK for static components
   const sdk = await getDriftSDK();
   const { Wallet, initialize } = sdk;
@@ -2251,9 +2266,10 @@ async function initializeDriftAccountsIfNeeded(
 
 export async function buildAgentDriftDepositTransaction(
   agentPublicKey: string,
-  encryptedPrivateKey: string,
+  encryptedPrivateKeyRaw: string | Uint8Array,
   amountUsdc: number,
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
   const agentKeypair = getAgentKeypair(encryptedPrivateKey);
@@ -2332,9 +2348,10 @@ export async function buildAgentDriftDepositTransaction(
 
 export async function buildAgentDriftWithdrawTransaction(
   agentPublicKey: string,
-  encryptedPrivateKey: string,
+  encryptedPrivateKeyRaw: string | Uint8Array,
   amountUsdc: number,
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
   const agentKeypair = getAgentKeypair(encryptedPrivateKey);
@@ -2528,10 +2545,11 @@ export async function executeAgentDriftDeposit(
 
 export async function executeAgentDriftWithdraw(
   agentPublicKey: string,
-  encryptedPrivateKey: string,
+  encryptedPrivateKeyRaw: string | Uint8Array,
   amountUsdc: number,
   subAccountId: number = 0,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
+  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   try {
     const connection = getConnection();
     const agentPubkey = new PublicKey(agentPublicKey);
@@ -2602,11 +2620,12 @@ export async function executeAgentDriftWithdraw(
 
 export async function executeAgentTransferBetweenSubaccounts(
   agentPublicKey: string,
-  encryptedPrivateKey: string,
+  encryptedPrivateKeyRaw: string | Uint8Array,
   fromSubAccountId: number,
   toSubAccountId: number,
   amountUsdc: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
+  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   try {
     const connection = getConnection();
     const agentPubkey = new PublicKey(agentPublicKey);
@@ -2904,7 +2923,7 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
 }
 
 async function swiftLateOpenRecovery(
-  encryptedPrivateKey: string,
+  encryptedPrivateKeyRaw: string | Uint8Array,
   expectedAgentPubkey: string | undefined,
   subAccountId: number,
   market: string,
@@ -2914,6 +2933,7 @@ async function swiftLateOpenRecovery(
   swiftOrderId: string | undefined,
   legacyError: string,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; fillPrice?: number; actualFee?: number; executionMethod?: 'swift' | 'legacy'; swiftOrderId?: string } | null> {
+  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   try {
     let pubkey = expectedAgentPubkey;
     if (!pubkey) {
@@ -2958,7 +2978,7 @@ async function swiftLateOpenRecovery(
 }
 
 export async function executePerpOrder(
-  encryptedPrivateKey: string,
+  encryptedPrivateKeyRaw: string | Uint8Array,
   market: string,
   side: 'long' | 'short',
   sizeInBase: number,
@@ -2968,6 +2988,7 @@ export async function executePerpOrder(
   privateKeyBase58?: string,
   expectedAgentPubkey?: string,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: 'swift' | 'legacy'; swiftOrderId?: string }> {
+  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
   
@@ -3326,7 +3347,7 @@ export async function executePerpOrder(
 }
 
 export async function closePerpPosition(
-  encryptedPrivateKey: string,
+  encryptedPrivateKeyRaw: string | Uint8Array,
   market: string,
   subAccountId: number = 0,
   positionSizeBase?: number,
@@ -3335,6 +3356,7 @@ export async function closePerpPosition(
   expectedAgentPubkey?: string,
   positionSide?: 'long' | 'short',
 ): Promise<{ success: boolean; signature?: string; error?: string; executionMethod?: 'swift' | 'legacy'; fillPrice?: number }> {
+  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
   
@@ -3659,9 +3681,10 @@ export interface HealthMetrics {
  * @returns Result with success status and transaction signature
  */
 export async function closeDriftSubaccount(
-  encryptedPrivateKey: string,
+  encryptedPrivateKeyRaw: string | Uint8Array,
   subAccountId: number
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
+  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   console.log(`[Drift] Closing subaccount ${subAccountId} to reclaim rent`);
   
   try {
@@ -3696,9 +3719,10 @@ export async function closeDriftSubaccount(
  * @returns Result with success status and settled markets info
  */
 export async function settleAllPnl(
-  encryptedPrivateKey: string,
+  encryptedPrivateKeyRaw: string | Uint8Array,
   subAccountId: number
 ): Promise<{ success: boolean; settledMarkets?: any[]; error?: string }> {
+  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   console.log(`[Drift] Settling all PnL for subaccount ${subAccountId}`);
   
   try {

@@ -2,12 +2,13 @@ import { sendTradeNotification } from "./notification-service";
 import { syncPositionFromOnChain } from "./reconciliation-service";
 import { storage, DatabaseStorage } from "./storage";
 import { getMarketBySymbol } from "./market-liquidity-service";
-import { transferUsdcToWallet, getAgentKeypair } from "./agent-wallet";
+import { transferUsdcToWallet, resolveAgentKeypair } from "./agent-wallet";
 import { PublicKey } from "@solana/web3.js";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
 import { db } from "./db";
 import { wallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
+import { getUmkForWebhook, decryptAgentKeyStrict } from "./session-v3";
 
 const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;
 
@@ -47,11 +48,11 @@ function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entr
 }
 
 async function driftExecutePerpOrder(
-  encryptedKey: string, market: string, side: 'long' | 'short', size: number,
+  encryptedKey: string | Uint8Array, market: string, side: 'long' | 'short', size: number,
   subAccountId: number, reduceOnly: boolean, _slippageBps: number,
   _privateKeyBase58?: string, agentPublicKey?: string
 ): Promise<any> {
-  const keypair = getAgentKeypair(encryptedKey);
+  const keypair = resolveAgentKeypair(encryptedKey);
   const pubKey = agentPublicKey || keypair.publicKey.toBase58();
   const mainWalletAddress = await _lookupMainWallet(pubKey);
   const orderResult = await getDefaultAdapter().placeMarketOrder({
@@ -77,11 +78,11 @@ async function driftExecutePerpOrder(
 }
 
 async function driftClosePerpPosition(
-  encryptedKey: string, market: string, subAccountId: number,
+  encryptedKey: string | Uint8Array, market: string, subAccountId: number,
   size?: number, _slippageBps?: number, _privateKeyBase58?: string,
   agentPublicKey?: string, side?: 'long' | 'short'
 ): Promise<any> {
-  const keypair = getAgentKeypair(encryptedKey);
+  const keypair = resolveAgentKeypair(encryptedKey);
   const pubKey = agentPublicKey || keypair.publicKey.toBase58();
   const mainWalletAddress = await _lookupMainWallet(pubKey);
   const adapter = getDefaultAdapter();
@@ -134,13 +135,13 @@ async function driftGetPerpPositions(agentPublicKey: string, subAccountId: numbe
   }
 }
 
-async function driftSettleAllPnl(encryptedKey: string, subAccountId: number): Promise<any> {
+async function driftSettleAllPnl(encryptedKey: string | Uint8Array, subAccountId: number): Promise<any> {
   try {
     const adapter = getDefaultAdapter();
     if (!adapter.getCapabilities().supportsSettlePnl) {
       return { success: true, settledMarkets: [] };
     }
-    const keypair = getAgentKeypair(encryptedKey);
+    const keypair = resolveAgentKeypair(encryptedKey);
     const result = await adapter.settlePnl({
       agentPublicKey: keypair.publicKey.toBase58(),
       agentSecretKey: keypair.secretKey,
@@ -153,11 +154,11 @@ async function driftSettleAllPnl(encryptedKey: string, subAccountId: number): Pr
 }
 
 async function driftExecuteAgentWithdraw(
-  agentPublicKey: string, encryptedKey: string, amount: number, subAccountId: number,
+  agentPublicKey: string, encryptedKey: string | Uint8Array, amount: number, subAccountId: number,
   feeContext?: { tradingBotId?: string | null; context?: string },
 ): Promise<any> {
   try {
-    const keypair = getAgentKeypair(encryptedKey);
+    const keypair = resolveAgentKeypair(encryptedKey);
     const mainWalletAddress = await _lookupMainWallet(agentPublicKey);
     const adapter = getDefaultAdapter();
     const result = await adapter.executeWithdraw({
@@ -200,7 +201,9 @@ export interface RetryJob {
   id: string;
   botId: string;
   walletAddress: string;
-  agentPrivateKeyEncrypted: string;
+  // V3 Phase 4: agentPrivateKeyEncrypted field removed. The retry worker
+  // now strict-decrypts the agent key via UMK on each processRetryJob run
+  // (never carries the secret in memory across the queue lifetime).
   agentPublicKey: string;
   market: string;
   side: 'long' | 'short' | 'close';
@@ -568,7 +571,59 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   } catch (dbErr) {
     console.warn(`[TradeRetry] Failed to persist attempts count:`, dbErr);
   }
-  
+
+  // V3 Phase 4: strict-decrypt the agent key on each run via UMK +
+  // wallet.agentPrivateKeyEncryptedV3. Never use the legacy encrypted blob.
+  // If execution is disabled (revoked / emergency-stopped) or V3 envelope
+  // is missing, keep the job pending and retry next cycle.
+  const wallet = await storage.getWallet(job.walletAddress);
+  if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
+    console.error(`[TradeRetry] Job ${job.id}: wallet missing V3 envelope or public key; deferring`);
+    job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
+    job.lastError = 'Agent wallet missing V3 envelope or public key';
+    try {
+      await storage.updateTradeRetryJob(job.id, {
+        nextRetryAt: new Date(job.nextRetryAt),
+        lastError: job.lastError,
+      });
+    } catch {}
+    return;
+  }
+  const umkResult = await getUmkForWebhook(job.walletAddress);
+  if (!umkResult) {
+    const reason = wallet.emergencyStopTriggered ? 'emergency_stopped' : 'execution_disabled';
+    console.warn(`[TradeRetry] Job ${job.id}: ${reason}; keeping pending`);
+    job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
+    job.lastError = `Execution authorization unavailable (${reason})`;
+    try {
+      await storage.updateTradeRetryJob(job.id, {
+        nextRetryAt: new Date(job.nextRetryAt),
+        lastError: job.lastError,
+      });
+    } catch {}
+    return;
+  }
+  const agentKeyResult = await decryptAgentKeyStrict(
+    job.walletAddress,
+    umkResult.umk,
+    wallet,
+    wallet.agentPublicKey,
+  );
+  if (!agentKeyResult) {
+    umkResult.cleanup();
+    console.error(`[TradeRetry] Job ${job.id}: V3 strict decrypt failed; deferring`);
+    job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
+    job.lastError = 'V3 strict decrypt failed for agent key';
+    try {
+      await storage.updateTradeRetryJob(job.id, {
+        nextRetryAt: new Date(job.nextRetryAt),
+        lastError: job.lastError,
+      });
+    } catch {}
+    return;
+  }
+  const agentSecretKey = agentKeyResult.secretKey;
+
   try {
     let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string };
     let actualCloseSide: 'long' | 'short' = 'short';
@@ -641,7 +696,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       }
       
       result = await driftClosePerpPosition(
-        job.agentPrivateKeyEncrypted,
+        agentSecretKey,
         job.market,
         job.subAccountId,
         undefined,
@@ -704,7 +759,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       }
       
       result = await driftExecutePerpOrder(
-        job.agentPrivateKeyEncrypted,
+        agentSecretKey,
         job.market,
         job.side,
         job.size,
@@ -963,14 +1018,14 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                     };
                     
                     // Step 1: Settle PnL
-                    const settleResult = await driftSettleAllPnl(job.agentPrivateKeyEncrypted, job.subAccountId);
+                    const settleResult = await driftSettleAllPnl(agentSecretKey, job.subAccountId);
                     if (!settleResult.success) {
                       console.error(`[TradeRetry] Settle PnL failed: ${settleResult.error}`);
                       await createIouOnFailure(`Settle PnL failed: ${settleResult.error}`);
                     } else {
                       const withdrawResult = await driftExecuteAgentWithdraw(
                         job.agentPublicKey,
-                        job.agentPrivateKeyEncrypted,
+                        agentSecretKey,
                         profitShareAmount,
                         job.subAccountId
                       );
@@ -982,7 +1037,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                         // Step 3: Transfer to creator
                         const transferResult = await transferUsdcToWallet(
                           job.agentPublicKey,
-                          job.agentPrivateKeyEncrypted,
+                          agentSecretKey,
                           creatorWallet,
                           profitShareAmount
                         );
@@ -1132,6 +1187,10 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       const backoff = calculateBackoff(job.attempts, job.priority);
       job.nextRetryAt = Date.now() + backoff;
     }
+  } finally {
+    // V3 Phase 4: always wipe in-memory agent secret material before returning.
+    agentKeyResult.cleanup();
+    umkResult.cleanup();
   }
 }
 
@@ -1253,7 +1312,6 @@ export async function startRetryWorker(): Promise<void> {
           id: dbJob.id,
           botId: dbJob.botId,
           walletAddress: dbJob.walletAddress,
-          agentPrivateKeyEncrypted: bot.agentPrivateKeyEncrypted || '',
           agentPublicKey: bot.agentPublicKey || wallet.agentPublicKey || '',
           market: dbJob.market,
           side: dbJob.side as 'long' | 'short' | 'close',

@@ -1,5 +1,6 @@
 import { storage } from "./storage";
 import { transferUsdcToWallet } from "./agent-wallet";
+import { getUmkForWebhook, decryptAgentKeyStrict } from "./session-v3";
 
 const RETRY_INTERVAL_MS = 5 * 60 * 1000; // Every 5 minutes
 const MAX_RETRIES = 50;
@@ -11,6 +12,9 @@ const PROCESSING_STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
  * encodes the funding wallet (subscriber whose agent wallet pays) and the
  * amount/recipient, so retries are self-contained. Mirrors the IOU retry
  * worker's TTL/processing semantics for parity.
+ *
+ * V3 Phase 4: agent key is strict-decrypted via UMK + the wallet's stored
+ * v3 envelope on each attempt. Legacy encrypted blob is never used.
  */
 export async function retryPendingReferralRewards(): Promise<{ processed: number; paid: number; voided: number; failed: number }> {
   const pending = await storage.getPendingReferralRewardEvents();
@@ -53,12 +57,50 @@ export async function retryPendingReferralRewards(): Promise<{ processed: number
     }
 
     const wallet = await storage.getWallet(event.fundingWallet);
-    if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncrypted) {
-      console.error(`[ReferralRetry] Agent wallet not configured for funding wallet ${event.fundingWallet} (event ${event.id})`);
+    // V3 readiness gate: only check public key + v3 envelope. The strict decrypt
+    // below is the source of truth — legacy blob is intentionally NOT part of
+    // the gate so retired-legacy wallets still qualify.
+    if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
+      console.error(`[ReferralRetry] Agent wallet not V3-configured for funding wallet ${event.fundingWallet} (event ${event.id})`);
       await storage.updateReferralRewardEventStatus(event.id, {
         status: 'pending',
         retryCount: (event.retryCount ?? 0) + 1,
-        lastError: 'Agent wallet not configured for funding wallet',
+        lastError: 'Agent wallet missing V3 envelope or public key',
+      });
+      results.failed++;
+      continue;
+    }
+
+    // V3 Phase 4: never touch the legacy encrypted blob. Strict-decrypt via UMK.
+    // If execution is disabled / emergency-stopped, keep the event pending so it
+    // retries once execution is re-enabled.
+    const umkResult = await getUmkForWebhook(event.fundingWallet);
+    if (!umkResult) {
+      const reason = wallet.emergencyStopTriggered
+        ? 'funding_wallet_emergency_stopped'
+        : 'funding_wallet_execution_disabled';
+      console.warn(`[ReferralRetry] Event ${event.id}: ${reason}; keeping pending`);
+      await storage.updateReferralRewardEventStatus(event.id, {
+        status: 'pending',
+        retryCount: (event.retryCount ?? 0) + 1,
+        lastError: `Funding wallet execution authorization unavailable (${reason})`,
+      });
+      results.failed++;
+      continue;
+    }
+    const agentKeyResult = await decryptAgentKeyStrict(
+      event.fundingWallet,
+      umkResult.umk,
+      wallet,
+      wallet.agentPublicKey,
+    );
+    if (!agentKeyResult) {
+      umkResult.cleanup();
+      console.error(`[ReferralRetry] Event ${event.id}: V3 strict decrypt failed for funding wallet ${event.fundingWallet.slice(0,8)}...; keeping pending`);
+      await storage.updateReferralRewardEventStatus(event.id, {
+        status: 'pending',
+        retryCount: (event.retryCount ?? 0) + 1,
+        lastError: 'V3 strict decrypt failed for funding wallet agent key',
       });
       results.failed++;
       continue;
@@ -67,12 +109,18 @@ export async function retryPendingReferralRewards(): Promise<{ processed: number
     const amountUsdc = parseFloat(event.amountUsdc);
     console.log(`[ReferralRetry] Attempting L${event.level} $${amountUsdc.toFixed(4)} → ${event.earnerWallet} from ${event.fundingWallet} (event ${event.id})`);
 
-    const transferResult = await transferUsdcToWallet(
-      wallet.agentPublicKey,
-      wallet.agentPrivateKeyEncrypted,
-      event.earnerWallet,
-      amountUsdc,
-    );
+    let transferResult;
+    try {
+      transferResult = await transferUsdcToWallet(
+        wallet.agentPublicKey,
+        agentKeyResult.secretKey,
+        event.earnerWallet,
+        amountUsdc,
+      );
+    } finally {
+      agentKeyResult.cleanup();
+      umkResult.cleanup();
+    }
 
     if (transferResult.success) {
       await storage.updateReferralRewardEventStatus(event.id, {

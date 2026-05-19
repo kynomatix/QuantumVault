@@ -1,11 +1,17 @@
 import { storage } from "./storage";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
-import { getAgentKeypair } from "./agent-wallet";
+import { getUmkForWebhook, decryptAgentKeyStrict } from "./session-v3";
+import { Keypair } from "@solana/web3.js";
 
-async function tryCloseDriftSubaccount(encryptedKey: string, subaccountId: number): Promise<{ success: boolean; signature?: string; error?: string }> {
+/**
+ * V3 Phase 4: close an orphaned Drift subaccount using a strict-decrypted
+ * agent key (Uint8Array). The legacy encrypted blob stored on the orphaned
+ * row is intentionally ignored — we always go through UMK + the wallet's
+ * v3 envelope so a single source of truth covers all background paths.
+ */
+async function tryCloseDriftSubaccount(agentSecretKey: Uint8Array, subaccountId: number): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
-    const keypair = getAgentKeypair(encryptedKey);
-    const agentPubKey = keypair.publicKey.toBase58();
+    const agentPubKey = Keypair.fromSecretKey(agentSecretKey).publicKey.toBase58();
     const adapter = getDefaultAdapter();
     if (adapter.closeSubaccount) {
       await adapter.closeSubaccount(agentPubKey, String(subaccountId));
@@ -55,10 +61,48 @@ export async function cleanupOrphanedSubaccounts(): Promise<void> {
       console.log(`[OrphanedCleanup] Attempting to close subaccount ${entry.driftSubaccountId} (retry ${entry.retryCount + 1}/5)`);
       
       try {
-        const result = await tryCloseDriftSubaccount(
-          entry.agentPrivateKeyEncrypted,
-          entry.driftSubaccountId
+        // V3 Phase 4: strict-decrypt the agent key via UMK + the wallet's v3
+        // envelope. If execution is disabled (revoked / emergency-stopped) or
+        // V3 envelope is missing, defer to the next cleanup cycle.
+        const wallet = await storage.getWallet(entry.walletAddress);
+        if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
+          console.warn(`[OrphanedCleanup] Wallet ${entry.walletAddress.slice(0,8)}... missing V3 envelope or public key; deferring`);
+          await storage.updateOrphanedSubaccountRetry(entry.id);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+        const umkResult = await getUmkForWebhook(entry.walletAddress);
+        if (!umkResult) {
+          const reason = wallet.emergencyStopTriggered ? 'emergency_stopped' : 'execution_disabled';
+          console.warn(`[OrphanedCleanup] Wallet ${entry.walletAddress.slice(0,8)}...: ${reason}; deferring`);
+          await storage.updateOrphanedSubaccountRetry(entry.id);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+        const agentKeyResult = await decryptAgentKeyStrict(
+          entry.walletAddress,
+          umkResult.umk,
+          wallet,
+          wallet.agentPublicKey,
         );
+        if (!agentKeyResult) {
+          umkResult.cleanup();
+          console.error(`[OrphanedCleanup] V3 strict decrypt failed for ${entry.walletAddress.slice(0,8)}...; deferring`);
+          await storage.updateOrphanedSubaccountRetry(entry.id);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+
+        let result;
+        try {
+          result = await tryCloseDriftSubaccount(
+            agentKeyResult.secretKey,
+            entry.driftSubaccountId
+          );
+        } finally {
+          agentKeyResult.cleanup();
+          umkResult.cleanup();
+        }
         
         if (result.success) {
           console.log(`[OrphanedCleanup] Successfully closed subaccount ${entry.driftSubaccountId}, rent reclaimed: ${result.signature}`);

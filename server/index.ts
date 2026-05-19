@@ -528,7 +528,6 @@ app.use((req, res, next) => {
               const retryJobId = await queueTradeRetry({
                 botId: trade.tradingBotId,
                 walletAddress: trade.walletAddress,
-                agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted || "",
                 agentPublicKey: bot.agentPublicKey || wallet.agentPublicKey || "",
                 market: trade.market,
                 side: normalizedSide,

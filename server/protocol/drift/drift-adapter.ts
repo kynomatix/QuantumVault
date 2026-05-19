@@ -33,7 +33,6 @@ import type {
   AdapterCapabilities,
 } from '../protocol-types.js';
 
-import { encrypt } from '../../crypto.js';
 import { CANONICAL_PERP_MARKETS, PERP_ALIASES } from '../../market-registry.js';
 import { getMarketPrice, getAllPrices as getDriftAllPrices } from '../../drift-price.js';
 import {
@@ -344,10 +343,11 @@ export class DriftAdapter implements ProtocolAdapter {
       ? Math.round(params.maxSlippagePct * 100)
       : DEFAULT_SLIPPAGE_BPS;
     const privateKeyBase58 = bs58.encode(params.agentSecretKey);
-    const encryptedPrivateKey = encrypt(privateKeyBase58);
 
+    // V3 Phase 4: drift-service now accepts Uint8Array directly; no need
+    // to re-encrypt. The legacy round-trip (encrypt → decrypt) is gone.
     const result = await executePerpOrder(
-      encryptedPrivateKey,
+      params.agentSecretKey,
       params.internalSymbol,
       params.side,
       params.sizeBase,
@@ -389,10 +389,10 @@ export class DriftAdapter implements ProtocolAdapter {
   async closePosition(params: ClosePositionParams): Promise<OrderResult> {
     const numericSubId = this.parseSubaccountId(params.subaccountId);
     const privateKeyBase58 = bs58.encode(params.agentSecretKey);
-    const encryptedPrivateKey = encrypt(privateKeyBase58);
 
+    // V3 Phase 4: pass raw secret key directly to drift-service.
     const result = await closePerpPosition(
-      encryptedPrivateKey,
+      params.agentSecretKey,
       params.internalSymbol,
       numericSubId,
       undefined,
@@ -458,11 +458,11 @@ export class DriftAdapter implements ProtocolAdapter {
 
   async executeWithdraw(params: AgentWithdrawParams): Promise<WithdrawResult> {
     const numericSubId = this.parseSubaccountId(params.subaccountId);
-    const encryptedPrivateKey = encrypt(bs58.encode(params.agentSecretKey));
 
+    // V3 Phase 4: pass raw secret key directly to drift-service.
     const result = await executeAgentDriftWithdraw(
       params.agentPublicKey,
-      encryptedPrivateKey,
+      params.agentSecretKey,
       params.amount,
       numericSubId,
     );
@@ -477,7 +477,6 @@ export class DriftAdapter implements ProtocolAdapter {
   async transferBetweenSubaccounts(params: TransferParams): Promise<TransferResult> {
     const fromSubId = this.parseSubaccountId(params.fromSubaccountId);
     const toSubId = this.parseSubaccountId(params.toSubaccountId);
-    const encryptedPrivateKey = encrypt(bs58.encode(params.agentSecretKey));
 
     // Group D item 17a: TransferParams.agentPublicKey was dropped because it
     // was never read by Pacifica and the routes.ts call sites passed the bot
@@ -486,9 +485,10 @@ export class DriftAdapter implements ProtocolAdapter {
     // source for any agent-signed write). This is the only signer involved.
     const agentPublicKey = Keypair.fromSecretKey(params.agentSecretKey).publicKey.toString();
 
+    // V3 Phase 4: pass raw secret key directly to drift-service.
     const result = await executeAgentTransferBetweenSubaccounts(
       agentPublicKey,
-      encryptedPrivateKey,
+      params.agentSecretKey,
       fromSubId,
       toSubId,
       params.amount,
@@ -573,9 +573,9 @@ export class DriftAdapter implements ProtocolAdapter {
 
   async settlePnl(params: SettlePnlParams): Promise<SettleResult> {
     const numericSubId = this.parseSubaccountId(params.subaccountId);
-    const encryptedPrivateKey = encrypt(bs58.encode(params.agentSecretKey));
 
-    const result = await settleAllPnl(encryptedPrivateKey, numericSubId);
+    // V3 Phase 4: pass raw secret key directly to drift-service.
+    const result = await settleAllPnl(params.agentSecretKey, numericSubId);
 
     return {
       success: result.success,

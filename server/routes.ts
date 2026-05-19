@@ -4851,7 +4851,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const retryJobId = await queueTradeRetry({
             botId: bot.id,
             walletAddress: wallet.address,
-            agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
             agentPublicKey: wallet.agentPublicKey!,
             market: bot.market,
             side: 'close',
@@ -8478,7 +8477,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             const retryJobId = await queueTradeRetry({
               botId: bot.id,
               walletAddress: wallet.address,
-              agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
               agentPublicKey: wallet.agentPublicKey!,
               market: bot.market,
               side: 'close',
@@ -8918,7 +8916,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const retryJobId = await queueTradeRetry({
             botId: bot.id,
             walletAddress: wallet.address,
-            agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
             agentPublicKey: wallet.agentPublicKey!,
             market: bot.market,
             side: side,
@@ -9773,7 +9770,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             const retryJobId = await queueTradeRetry({
               botId: bot.id,
               walletAddress: wallet.address,
-              agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
               agentPublicKey: wallet.agentPublicKey!,
               market: bot.market,
               side: 'close',
@@ -9962,7 +9958,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           const retryJobId = await queueTradeRetry({
             botId: bot.id,
             walletAddress: userWallet.address,
-            agentPrivateKeyEncrypted: userWallet.agentPrivateKeyEncrypted,
             agentPublicKey: userWallet.agentPublicKey!,
             market: bot.market,
             side: side,
