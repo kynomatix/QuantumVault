@@ -13,7 +13,7 @@ import { desc, eq, sql, asc, and } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
-import { getAgentKeypair, resolveAgentKeypair } from './agent-wallet';
+import { resolveAgentKeypair } from './agent-wallet';
 import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
 
@@ -34,7 +34,7 @@ function _decryptToSecretKey(input: string | Uint8Array): { secretKey: Uint8Arra
     const keypair = Keypair.fromSecretKey(input);
     return { secretKey: input, publicKey: keypair.publicKey.toBase58() };
   }
-  const keypair = getAgentKeypair(input);
+  const keypair = resolveAgentKeypair(input);
   return { secretKey: keypair.secretKey, publicKey: keypair.publicKey.toBase58() };
 }
 
@@ -264,7 +264,7 @@ async function executeAgentDeposit(
       const bs58Default = bs58Mod.default || bs58Mod;
       secretKey = bs58Default.decode(privateKeyOrEncrypted);
     } else {
-      secretKey = getAgentKeypair(privateKeyOrEncrypted).secretKey;
+      secretKey = resolveAgentKeypair(privateKeyOrEncrypted).secretKey;
     }
     const result = await getDefaultAdapter().executeDeposit({
       agentPublicKey,
@@ -6276,7 +6276,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (wallet.agentPublicKey && wallet.agentPrivateKeyEncrypted) {
         const { Keypair } = await import('@solana/web3.js');
 
-        const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+        const agentKeypair = resolveAgentKeypair(wallet.agentPrivateKeyEncrypted);
         const adapter = defaultAdapter;
         const caps = defaultCaps;
 
@@ -6998,13 +6998,15 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           }
           
           // Track orphaned subaccount if rent could not be reclaimed
-          if (!rentReclaimed && wallet.agentPrivateKeyEncrypted) {
+          if (!rentReclaimed) {
             console.warn(`[Delete] Tracking orphaned subaccount ${bot.driftSubaccountId} for later cleanup`);
             try {
+              // V3 Phase 4: do NOT write the legacy encrypted key column. The
+              // cleanup job resolves the agent key from the wallet's V3
+              // envelope at execution time (strict-decrypt via UMK).
               await storage.createOrphanedSubaccount({
                 walletAddress: req.walletAddress!,
                 agentPublicKey: agentAddress,
-                agentPrivateKeyEncrypted: wallet.agentPrivateKeyEncrypted,
                 driftSubaccountId: bot.driftSubaccountId,
                 reason: rentReclaimError,
               });
@@ -11600,7 +11602,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       try {
         const { getAdapter } = await import("./protocol/adapter-registry");
         const marketplaceAdapter = getAdapter('drift');
-        const marketplaceAgentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+        const marketplaceAgentKeypair = resolveAgentKeypair(wallet.agentPrivateKeyEncrypted);
         const sub = await marketplaceAdapter.createSubaccount({
           mainSecretKey: marketplaceAgentKeypair.secretKey,
           agentPublicKey: marketplaceAgentKeypair.publicKey.toString(),
@@ -12061,7 +12063,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           if (topUpNeeded > 0) {
             if (retryBotCtxForTopUp) {
               const adapter = getDefaultAdapter();
-              const agentKeypairForTopUp = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+              const agentKeypairForTopUp = resolveAgentKeypair(wallet.agentPrivateKeyEncrypted);
               const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
               if (depositAmount < adapter.minTransferAmount) {
                 console.log(`[Retry Trade] Auto top-up skipped: $${depositAmount.toFixed(2)} below ${adapter.protocolName} $${adapter.minTransferAmount} minimum transfer`);
@@ -12131,7 +12133,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
       
       const retryBotCtx = getBotSubaccountContext(bot);
-      const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+      const agentKeypair = resolveAgentKeypair(wallet.agentPrivateKeyEncrypted);
       const bs58 = await import('bs58');
       const privateKeyBase58 = bs58.default.encode(agentKeypair.secretKey);
       
@@ -12496,7 +12498,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "No agent wallet" });
       }
       const adapter = getDefaultAdapter();
-      const agentKeypair = getAgentKeypair(wallet.agentPrivateKeyEncrypted);
+      const agentKeypair = resolveAgentKeypair(wallet.agentPrivateKeyEncrypted);
       const transferResult = await adapter.transferBetweenSubaccounts({
         agentSecretKey: agentKeypair.secretKey,
         mainWalletAddress: agentKeypair.publicKey.toString(),

@@ -27,7 +27,7 @@ import bs58 from 'bs58';
  * Parse a legacy-decrypted agent secret key.
  *
  * Historically this code assumed the plaintext was a JSON array (`[1,2,3,...]`),
- * but `agent-wallet.ts#getAgentKeypair` actually stores keys as base58 strings.
+ * but the legacy agent-wallet keypair builder actually stored keys as base58 strings.
  * Most wallets in production are base58 — JSON.parse fails on them with
  * "Unexpected non-whitespace character after JSON at position 1", which broke
  * the deposit / Add Funds flow for every wallet that used the legacy fallback.

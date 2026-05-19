@@ -399,7 +399,10 @@ export const orphanedSubaccounts = pgTable("orphaned_subaccounts", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
   agentPublicKey: text("agent_public_key").notNull(),
-  agentPrivateKeyEncrypted: text("agent_private_key_encrypted").notNull(),
+  // V3 Phase 4: column kept for read-compat with rows written before the
+  // migration; cleanup now resolves the agent key via wallet V3 envelope at
+  // run time. New inserts leave this null. Phase 6 will drop the column.
+  agentPrivateKeyEncrypted: text("agent_private_key_encrypted"),
   driftSubaccountId: integer("drift_subaccount_id").notNull(),
   protocolSubaccountId: text("protocol_subaccount_id"),
   reason: text("reason"),
