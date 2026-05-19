@@ -592,7 +592,7 @@ import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransactio
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, type TradeNotification } from "./notification-service";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyWithFallback, decryptAgentKeyStrict, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";

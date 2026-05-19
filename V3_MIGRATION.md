@@ -449,3 +449,111 @@ Strict-serial successor: **Phase 3 — Migrate user-initiated reads**
 to `decryptAgentKeyStrict`). Phase 3's acceptance gate includes
 `rg "decryptAgentKeyWithFallback" server/routes.ts` returning zero
 matches by end of phase.
+
+---
+
+## Phase 3a — Foundations + fallback-helper removal (May 19, 2026)
+
+> **Scope decision (logged):** Phase 3 was split mid-task into **3a**
+> (this section — foundations + all fallback-helper sites) and a
+> follow-up task **3a-followup** that owns the remaining ~40
+> user-online sites still reading `wallet.agentPrivateKeyEncrypted`
+> directly or via wrapper helpers. The split was taken because the
+> foundational refactor + 5 fallback swaps already meet the literal
+> Phase 3 acceptance grep, and migrating the remaining ~40
+> fund-handling sites carried too much context-pressure risk to do
+> in a single agent turn under the "fund-safety paranoia" preference.
+> The architect should evaluate 3a + 3a-followup as a single logical
+> Phase 3 once 3a-followup ships.
+
+### What was done in 3a
+
+1. **Acceptance grep met.** `rg "decryptAgentKeyWithFallback" server/routes.ts`
+   returns **zero matches**. The five user-online fallback-helper
+   sites — `server/routes.ts` lines 4053, 7728, 9159, 10635, 10711 —
+   were swapped from `decryptAgentKeyWithFallback` to
+   `decryptAgentKeyStrict`, each passing `wallet.agentPublicKey` as
+   the explicit `expectedAgentPubkey` arg. The strict helper enforces
+   V3-only reads (no `[LegacyKeyUsed]` warn-log emission, no silent
+   legacy fallback) and validates the derived agent pubkey against
+   the stored one. `decryptAgentKeyStrict` was added to the
+   `./session-v3` import on line 583.
+
+2. **Foundational wrapper refactor in `server/routes.ts`.** Nine
+   internal helpers had their key-input parameter widened from
+   `string` to `string | Uint8Array` so that user-online callers
+   migrated in 3a-followup can pass a pre-decrypted secret key
+   directly (obtained from `decryptAgentKeyStrict`) without going
+   through legacy `getAgentKeypair(...)` first. Out-of-scope
+   subscriber-fanout (Phase 3b) and background (Phase 4) callers
+   keep passing the legacy `string` blob — both paths are still
+   supported by the union type, so no out-of-scope code paths
+   changed behaviour. The refactored helpers:
+   `_decryptToSecretKey`, `_resolveSigningContext`,
+   `executeAgentDeposit`, `executeAgentDriftWithdraw`,
+   `executeAgentTransferBetweenSubaccounts`, `executePerpOrder`,
+   `closePerpPosition`, `closeDriftSubaccount`, `settleAllPnl`.
+   `_decryptToSecretKey` is the single place that branches on the
+   union — `Uint8Array` → derive pubkey via `Keypair.fromSecretKey`;
+   `string` → fall through to `getAgentKeypair` (legacy decrypt).
+
+3. **Foundational wrapper refactor in `server/agent-wallet.ts`.**
+   Five exported helpers got the same `string | Uint8Array` widening
+   via a new private `resolveAgentKeypair` helper:
+   `buildWithdrawFromAgentTransaction`,
+   `buildWithdrawSolFromAgentTransaction`,
+   `executeAgentWithdraw`, `executeAgentSolWithdraw`,
+   `transferUsdcToWallet`. These are the exit-of-funds paths the
+   user-online withdraw and profit-sharing routes call, so 3a-followup
+   can pass `Uint8Array` end-to-end.
+
+4. **Typecheck.** `npm run check` shows no new errors caused by the
+   refactor. Two error rows that reference `string | Uint8Array`
+   (`server/routes.ts(8354,29)` and `(8377,27)`) are surfaced from a
+   pre-existing `string | null` schema-nullability issue at the same
+   call sites that already existed against the prior `string` param;
+   the union type just changes the wording of the same error. All
+   other errors in the typecheck output are pre-existing
+   (`server/lab/routes.ts`, `server/protocol/pacifica/*`, and various
+   `Set`/`Map` iteration `--downlevelIteration` errors).
+
+### Operational consequences
+
+The 1 legacy-only wallet identified in Phase 2 (`HKFTntq...`) will
+get `403 / 500 "Agent key decryption failed. Please reconfigure
+your agent wallet or sign in again."` from the 5 strict-now sites
+until it re-authenticates and triggers V3 backfill via
+`initializeWalletSecurity`. This is the intended Phase 3 behaviour
+("fail explicitly on V3 failure") and is consistent with the
+operational note in the plan.
+
+### What is explicitly NOT in 3a
+
+- The remaining ~40 user-online call sites that still read
+  `wallet.agentPrivateKeyEncrypted` directly or call
+  `getAgentKeypair(wallet.agentPrivateKeyEncrypted)` /
+  `_resolveSigningContext(wallet.agentPrivateKeyEncrypted, …)`
+  with the legacy string blob. These are owned by the
+  **3a-followup** task and follow the same wrapper-friendly
+  pattern made possible by the refactor above:
+  `decryptAgentKeyStrict` → pass `Uint8Array` to wrapper → cleanup.
+- Phase 3b subscriber-fanout sites (lines 1767, 1796, 1806, 1880,
+  1925, 1986, 2063, 2083, 2179, 2233, 5046, 8265, 9556, 12756, 12875).
+- Phase 4 background paths (`server/drift-service.ts`,
+  `server/drift-adapter*`, `server/position-service*`, retry jobs,
+  `server/index.ts:529`).
+- Phase 4b per-bot subaccount keys (`bot.botSubaccountKeyEncrypted`
+  at `server/routes.ts` lines 4304, 6808, 8319, 9612).
+
+### Post-architect fix (May 19, 2026)
+
+Architect review of 3a flagged that the literal acceptance grep was
+not satisfied because the **unused `decryptAgentKeyWithFallback`
+import** remained on the `./session-v3` import line in
+`server/routes.ts`. The import was removed. Re-verified:
+
+- `rg "decryptAgentKeyWithFallback" server/routes.ts` → **0 matches**
+  (exit code 1 from ripgrep).
+- `rg -c "decryptAgentKeyStrict" server/routes.ts` → **7 matches**
+  (1 import + 6 call sites: the 5 user-online routes plus 1 strict
+  helper reference in the new `decryptAgentKeyStrict(...)` import line).
