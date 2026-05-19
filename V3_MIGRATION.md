@@ -14,7 +14,7 @@
 | 0  | UMK-at-rest re-keying | **COMPLETE** | May 18, 2026 |
 | 1  | Audit, env health & legacy-use logging | **COMPLETE** | May 19, 2026 |
 | 2  | Backfill the legacy-only holdout | **COMPLETE — DEFERRED** | May 19, 2026 |
-| 2.5 | `decryptAgentKeyStrict` helper | not started | — |
+| 2.5 | `decryptAgentKeyStrict` helper | **COMPLETE** | May 19, 2026 |
 | 3  | Migrate user-initiated reads | not started | — |
 | 3b | Subscriber fan-out + executionEnabled gate | not started | — |
 | 4  | Migrate background execution paths | not started | — |
@@ -377,3 +377,75 @@ holdout** (passive; no code change).
 
 Strict-serial successor: **Phase 2.5 — Strict-mode decrypt helper**
 (`decryptAgentKeyStrict`, add-only, in `server/session-v3.ts` only).
+
+---
+
+## Phase 2.5 — Strict-mode decrypt helper (COMPLETE)
+
+**Status:** ✅ Complete, awaiting merge
+**Date:** May 19, 2026
+**Risk:** Low (add-only; no call site migrated)
+
+### What was done
+
+1. **Re-read Phase 2.5 of the master plan** in full
+   (`docs/V3_LEGACY_RETIREMENT_PLAN.md` § Phase 2.5).
+2. **Added `decryptAgentKeyStrict`** at the bottom of
+   `server/session-v3.ts` (lines ~1071-1149), immediately before
+   `export { SUBKEY_PURPOSES };`. The helper:
+   - Reads `agentPrivateKeyEncryptedV3` only. The `wallet` parameter
+     type intentionally excludes `agentPrivateKeyEncrypted`, so
+     reading the legacy column through this helper is a compile
+     error, not a runtime check.
+   - Returns `null` (with no fallback, no `[Security][LegacyKeyUsed]`
+     warn log) when V3 cannot satisfy the request: no V3 ciphertext,
+     no UMK supplied, V3 decryption throws, derived pubkey does not
+     match `wallet.agentPublicKey` / the explicit override, or the
+     verifier modules fail to load.
+   - Returns `{ secretKey, cleanup }` with the same shape as
+     `decryptAgentKeyWithFallback` so it is a drop-in replacement
+     for Phases 3 / 3b / 4 / 4b / 4c.
+   - Mirrors the fallback helper's secret-buffer discipline: copies
+     the decrypted bytes into a fresh `Uint8Array` it owns, zeroes
+     the source buffer immediately, and zeroes the returned key
+     before every `null` return on the failure branches.
+3. **JSDoc warning on `decryptAgentKeyWithFallback`** already landed
+   in Phase 1 (lines ~940-952). Confirmed unchanged.
+
+### What was NOT done (out of scope per Phase 2.5 anti-drift rules)
+
+- No call site migrated. Phases 3 / 3b / 4 / 4b / 4c each migrate a
+  specific subset, one site at a time, with their own architect
+  review of which helper is used at each site.
+- `decryptAgentKeyWithFallback` behaviour is unchanged. Only its
+  existing docstring references the new helper.
+- No files outside `server/session-v3.ts` were touched.
+
+### Acceptance evidence
+
+- `npm run check 2>&1 | grep -i "session-v3"` returns zero matches.
+  Pre-existing TypeScript errors in `server/routes.ts` and
+  `server/protocol/pacifica/pacifica-cache.ts` are unrelated to
+  this change.
+- Sanity-traced: a wallet with `agentPrivateKeyEncryptedV3 = null`
+  hits the `if (!wallet.agentPrivateKeyEncryptedV3 || !umk) return null;`
+  guard at line 1100 immediately, with no warn log and no fallback.
+- Architect review: APPROVED. Confirmed (1) scope is ADD-ONLY, (2)
+  the helper truly cannot read legacy (type-level guarantee), (3)
+  no `[LegacyKeyUsed]` telemetry pollution, (4) secret-buffer
+  hygiene is correct on every branch, (5) pubkey verification is
+  strict (verifier load failure = hard null), (6) signature shape
+  matches the fallback helper for drop-in Phase 3 migration.
+
+### Reversibility
+
+Trivial. Single git revert removes the new function. No call sites
+depend on it yet.
+
+### Next phase
+
+Strict-serial successor: **Phase 3 — Migrate user-initiated reads**
+(every user-online call site moves from `decryptAgentKeyWithFallback`
+to `decryptAgentKeyStrict`). Phase 3's acceptance gate includes
+`rg "decryptAgentKeyWithFallback" server/routes.ts` returning zero
+matches by end of phase.

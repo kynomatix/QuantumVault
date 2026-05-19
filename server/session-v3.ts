@@ -1065,4 +1065,89 @@ export async function decryptAgentKeyWithFallback(
   return null;
 }
 
+/**
+ * Strict V3-only agent-key decrypt helper. **This is the helper every
+ * non-backfill caller MUST use** (Phases 3, 3b, 4, 4b, 4c migrate call
+ * sites to this one at a time).
+ *
+ * Contract:
+ *   - Reads `agentPrivateKeyEncryptedV3` only. NEVER touches
+ *     `agentPrivateKeyEncrypted` (the legacy column).
+ *   - Returns `null` (with no fallback, no `[LegacyKeyUsed]` warn log)
+ *     when V3 cannot satisfy the request: no V3 ciphertext on the row,
+ *     no UMK supplied, V3 decryption throws, or the derived agent
+ *     pubkey does not match `wallet.agentPublicKey` (or the explicit
+ *     `expectedAgentPubkey` if provided).
+ *   - On success returns `{ secretKey, cleanup }` with the same shape
+ *     as `decryptAgentKeyWithFallback`. Callers MUST invoke `cleanup()`
+ *     in a `finally` to zeroize the buffer.
+ *
+ * Why null instead of throw: callers compose their own user-facing
+ * error messages (the critical rule is "fail with a clear error
+ * message instructing the user how to unblock"). A null return lets
+ * each call site choose the wording — webhook handlers say "enable
+ * execution", interactive UI routes say "sign in again", etc. — and
+ * keeps the helper free of HTTP/transport assumptions.
+ *
+ * Crucially, this helper does NOT emit the `[Security][LegacyKeyUsed]`
+ * telemetry that `decryptAgentKeyWithFallback` does, so the Phase 5
+ * deprecation-log audit accurately counts only true legacy reads.
+ */
+export async function decryptAgentKeyStrict(
+  walletAddress: string,
+  umk: Buffer | null,
+  wallet: { agentPrivateKeyEncryptedV3?: string | null; agentPublicKey?: string | null },
+  expectedAgentPubkey?: string | null
+): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> {
+  if (!wallet.agentPrivateKeyEncryptedV3 || !umk) {
+    return null;
+  }
+
+  let secretKey: Uint8Array;
+  try {
+    const keyBuffer = decryptAgentKeyV3(umk, wallet.agentPrivateKeyEncryptedV3, walletAddress);
+    // CRITICAL: copy into a fresh Uint8Array we own, then immediately
+    // zero the source buffer. Mirrors the discipline in the fallback
+    // helper so cleanup() cannot corrupt the caller's view if it is
+    // (incorrectly) used after cleanup.
+    secretKey = Uint8Array.from(keyBuffer);
+    zeroizeBuffer(keyBuffer);
+  } catch (err) {
+    console.warn(`[Security] V3 strict decrypt failed for ${walletAddress.slice(0, 8)}...`);
+    return null;
+  }
+
+  const storedPubkey = expectedAgentPubkey || wallet.agentPublicKey;
+  if (storedPubkey) {
+    try {
+      const naclModule = await import('tweetnacl');
+      const nacl = naclModule.default || naclModule;
+      const bs58Module = await import('bs58');
+      const bs58 = bs58Module.default || bs58Module;
+      const keypair = nacl.sign.keyPair.fromSecretKey(secretKey);
+      const derivedPubkey = bs58.encode(keypair.publicKey);
+      if (derivedPubkey !== storedPubkey) {
+        console.error(`[Security] CRITICAL: V3 strict decryption produced wrong key! Derived=${derivedPubkey.slice(0,12)}... Expected=${storedPubkey.slice(0,12)}...`);
+        secretKey.fill(0);
+        return null;
+      }
+    } catch (verifyErr: any) {
+      // Verifier modules failed to load or threw. Treat as a hard
+      // failure under strict mode (the fallback helper warns and
+      // continues here, but strict cannot afford that — an
+      // unverified key would let a corrupt V3 blob slip through).
+      console.error(`[Security] V3 strict pubkey verify failed for ${walletAddress.slice(0, 8)}...: ${verifyErr.message}`);
+      secretKey.fill(0);
+      return null;
+    }
+  }
+
+  return {
+    secretKey,
+    cleanup: () => {
+      secretKey.fill(0);
+    },
+  };
+}
+
 export { SUBKEY_PURPOSES };
