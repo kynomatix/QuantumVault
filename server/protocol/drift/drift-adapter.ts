@@ -431,10 +431,10 @@ export class DriftAdapter implements ProtocolAdapter {
   // ------------------------------------------------------------------
   // Deposits / withdrawals / transfers
   //
-  // The adapter interface passes agentSecretKey as Uint8Array; drift-service
-  // accepts an encrypted base58 string. We bridge by base58-encoding the raw
-  // bytes and re-encrypting with the server's encryption key. Round-trip cost
-  // is negligible for a code path that ultimately hits a subprocess.
+  // V3 Phase 4: the adapter interface passes agentSecretKey as Uint8Array;
+  // drift-service entrypoints now accept `string | Uint8Array` directly, so
+  // we forward the raw bytes (base58-encoded only for the subprocess bridge
+  // marked with isPreDecrypted=true). No re-encryption round-trip remains.
   // ------------------------------------------------------------------
 
   async executeDeposit(params: AgentDepositParams): Promise<DepositResult> {
