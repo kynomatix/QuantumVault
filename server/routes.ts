@@ -1794,8 +1794,11 @@ async function routeSignalToSubscribers(
           });
           return 'tradeFailed';
         }
-        if (!subWallet.agentPrivateKeyEncrypted || !subWallet.agentPublicKey) {
-          // Create failed trade record for visibility
+        // V3 Phase 3b: readiness check is V3-only. We need an agent public key
+        // and a V3 envelope; the legacy AGENT_ENCRYPTION_KEY blob is no longer
+        // consulted on the fan-out path, so V3-only subscribers must NOT be
+        // rejected here. The strict decrypt below is the source of truth.
+        if (!subWallet.agentPublicKey || !subWallet.agentPrivateKeyEncryptedV3) {
           await storage.createBotTrade({
             tradingBotId: subBot.id,
             walletAddress: subBot.walletAddress,
@@ -1805,8 +1808,8 @@ async function routeSignalToSubscribers(
             price: signal.price,
             status: 'failed',
             fee: '0',
-            errorMessage: 'No agent wallet configured for trading',
-            webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'no_agent_keys' },
+            errorMessage: 'No V3 agent wallet configured for trading',
+            webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'no_v3_agent_keys' },
             executionMethod: 'legacy',
           });
           return 'tradeFailed';
@@ -11468,9 +11471,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(404).json({ error: "Original bot not found" });
       }
       
-      // Get wallet to check for agent wallet and available balance
+      // Get wallet to check for agent wallet and available balance.
+      // V3 Phase 3b: readiness is V3-only — agent public key + V3 envelope.
+      // The legacy AGENT_ENCRYPTION_KEY blob is intentionally NOT required so
+      // wallets that have already retired their legacy key can still subscribe.
       let wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncrypted) {
+      if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
         return res.status(400).json({ error: "Agent wallet not set up. Please set up your agent wallet first." });
       }
 

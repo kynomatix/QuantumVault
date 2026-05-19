@@ -39,6 +39,7 @@ import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction } from '@solana/web3.js';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 import { useLeverageLimits } from '@/hooks/useLeverageLimits';
+import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
 
 interface SubscribeBotModalProps {
   isOpen: boolean;
@@ -79,6 +80,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const wallet = useWallet();
   const { connection } = useConnection();
   const { getMaxLeverage } = useLeverageLimits();
+  const { enableExecution } = useExecutionAuthorization();
   
   const [capitalInvested, setCapitalInvested] = useState('');
   const [leverage, setLeverage] = useState(1);
@@ -406,10 +408,41 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       onSubscribed?.();
       handleClose();
     } catch (error: any) {
-      toast({ 
-        title: 'Failed to subscribe', 
+      // V3 Phase 3b: server returns 412 with action:'enable_execution' when
+      // the subscriber has not yet authorized server-side execution. Route
+      // the user straight into the enable-execution flow instead of just
+      // showing a toast.
+      if (error?.action === 'enable_execution') {
+        toast({
+          title: 'Authorize execution to subscribe',
+          description: 'Subscribing means trades will be signed on your behalf when the bot fires. Approve the authorization to continue.',
+        });
+        try {
+          await enableExecution();
+          await subscribe.mutateAsync({
+            publishedBotId: bot.id,
+            data: {
+              capitalInvested: capital,
+              leverage: leverage,
+              ...(riskOpen ? { investmentAmount } : {}),
+            },
+          });
+          toast({ title: 'Successfully subscribed to bot!' });
+          onSubscribed?.();
+          handleClose();
+        } catch (innerErr: any) {
+          toast({
+            title: 'Could not enable execution',
+            description: innerErr?.message || 'Please try again.',
+            variant: 'destructive',
+          });
+        }
+        return;
+      }
+      toast({
+        title: 'Failed to subscribe',
         description: error.message,
-        variant: 'destructive' 
+        variant: 'destructive'
       });
     }
   };
