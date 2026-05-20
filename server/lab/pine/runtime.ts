@@ -328,7 +328,7 @@ class Broker {
   }
 }
 
-type Series = number[];
+type Series = Float64Array | number[];
 interface PrecomputedSeries { [name: string]: Series }
 
 export interface PineSharedArrays {
@@ -341,9 +341,9 @@ export interface PineSharedArrays {
   hl2Arr: Float64Array;
   hlc3Arr: Float64Array;
   ohlc4Arr: Float64Array;
-  numHighArr: number[];
-  numLowArr: number[];
-  numCloseArr: number[];
+  numHighArr: Float64Array | number[];
+  numLowArr: Float64Array | number[];
+  numCloseArr: Float64Array | number[];
 }
 
 export function createSharedArrays(candles: OHLCV[]): PineSharedArrays {
@@ -366,9 +366,9 @@ export function createSharedArrays(candles: OHLCV[]): PineSharedArrays {
   }
   return {
     n, openArr, highArr, lowArr, closeArr, volArr, hl2Arr, hlc3Arr, ohlc4Arr,
-    numHighArr: Array.from(highArr) as number[],
-    numLowArr: Array.from(lowArr) as number[],
-    numCloseArr: Array.from(closeArr) as number[],
+    numHighArr: highArr,
+    numLowArr: lowArr,
+    numCloseArr: closeArr,
   };
 }
 
@@ -427,9 +427,9 @@ export function executePine(
     volume: volArr, hl2: hl2Arr, hlc3: hlc3Arr, ohlc4: ohlc4Arr,
   };
 
-  const numHighArr = shared?.numHighArr ?? Array.from(highArr) as number[];
-  const numLowArr = shared?.numLowArr ?? Array.from(lowArr) as number[];
-  const numCloseArr = shared?.numCloseArr ?? Array.from(closeArr) as number[];
+  const numHighArr: Float64Array | number[] = shared?.numHighArr ?? highArr;
+  const numLowArr: Float64Array | number[] = shared?.numLowArr ?? lowArr;
+  const numCloseArr: Float64Array | number[] = shared?.numCloseArr ?? closeArr;
 
   const broker = new Broker(config);
   const vars: Record<string, any[]> = {};
@@ -449,14 +449,14 @@ export function executePine(
   const allSeries: Map<string, ArrayLike<any>> = new Map();
   for (const [k, v] of Object.entries(builtinSeries)) allSeries.set(k, v);
 
-  const numSeriesCache: Map<string, number[]> = new Map([
+  const numSeriesCache: Map<string, Float64Array | number[]> = new Map<string, Float64Array | number[]>([
     ["high", numHighArr], ["low", numLowArr], ["close", numCloseArr],
   ]);
-  function toNumArr(name: string): number[] {
+  function toNumArr(name: string): Float64Array | number[] {
     let cached = numSeriesCache.get(name);
     if (cached) return cached;
     const src = builtinSeries[name];
-    if (src) { cached = Array.from(src) as number[]; numSeriesCache.set(name, cached); return cached; }
+    if (src) { numSeriesCache.set(name, src); return src; }
     const pc = precomputed[name];
     if (pc) return pc;
     return [];
@@ -560,7 +560,7 @@ export function executePine(
     callArgs: Expr[],
     callKw: [string, Expr][],
   ): { locals: string[]; success: boolean } {
-    const saved: Map<string, { b?: number[] | Float64Array | typeof UNSET; p?: number[] | typeof UNSET; d?: any }> = new Map();
+    const saved: Map<string, { b?: Series | typeof UNSET; p?: Series | typeof UNSET; d?: any }> = new Map();
     const locals: string[] = [];
     const cacheKeysBefore = new Set(indicatorCache.keys());
 
@@ -651,7 +651,7 @@ export function executePine(
     const fn = userFunctions[funcName];
     if (!fn) return false;
     const cacheKeysBefore = new Set(indicatorCache.keys());
-    const originals = new Map<string, { b: number[] | Float64Array | undefined; p: number[] | undefined; d: any }>();
+    const originals = new Map<string, { b: Series | undefined; p: Series | undefined; d: any }>();
     for (const p of fn.params) {
       originals.set(p, { b: builtinSeries[p], p: precomputed[p], d: inputDefaults[p] });
     }
@@ -661,7 +661,7 @@ export function executePine(
 
     const { success } = scopedPrecompute(fn, callArgs, callKw);
 
-    let resultSeries: number[] | null = null;
+    let resultSeries: Series | null = null;
     if (success) {
       const lastStmt = fn.body.length > 0 ? fn.body[fn.body.length - 1] : null;
       if (lastStmt) {
@@ -689,11 +689,11 @@ export function executePine(
     return false;
   }
 
-  function tryPrecomputeUserFuncMulti(funcName: string, callArgs: Expr[], callKw: [string, Expr][], outputNames: string[]): (number[] | null)[] | null {
+  function tryPrecomputeUserFuncMulti(funcName: string, callArgs: Expr[], callKw: [string, Expr][], outputNames: string[]): (Series | null)[] | null {
     const fn = userFunctions[funcName];
     if (!fn) return null;
     const cacheKeysBefore = new Set(indicatorCache.keys());
-    const originals = new Map<string, { b: number[] | Float64Array | undefined; p: number[] | undefined; d: any }>();
+    const originals = new Map<string, { b: Series | undefined; p: Series | undefined; d: any }>();
     for (const p of fn.params) {
       originals.set(p, { b: builtinSeries[p], p: precomputed[p], d: inputDefaults[p] });
     }
@@ -703,7 +703,7 @@ export function executePine(
 
     const { success } = scopedPrecompute(fn, callArgs, callKw);
 
-    let results: (number[] | null)[] | null = null;
+    let results: (Series | null)[] | null = null;
     if (success) {
       const lastStmt = fn.body.length > 0 ? fn.body[fn.body.length - 1] : null;
       if (lastStmt && lastStmt.k === "expr" && lastStmt.e.k === "call" && lastStmt.e.fn.k === "id" && lastStmt.e.fn.name === "__array_literal") {
@@ -1039,8 +1039,8 @@ export function executePine(
     const h = numHighArr;
     const l = numLowArr;
     const cl = numCloseArr;
-    const op = Array.from(openArr) as number[];
-    const numVol = (): number[] => Array.from(volArr) as number[];
+    const op: Series = openArr;
+    const numVol = (): Series => volArr;
 
     function getSource(idx: number): Series | null {
       const arg = args[idx];
@@ -1277,7 +1277,7 @@ export function executePine(
         const srcArr = getSource(0) || cl;
         const len = getLen(1, 14);
         if (!srcArr) return false;
-        const vol = shared?.numVolArr ?? Array.from(volArr) as number[];
+        const vol: Float64Array | number[] = volArr;
         const result = new Array(n).fill(NaN);
         for (let i = len; i < n; i++) {
           let posFlow = 0, negFlow = 0;
@@ -1343,8 +1343,7 @@ export function executePine(
       case "vwma": {
         const src = getSource(0); const len = getLen(1);
         if (!src) return false;
-        const vol = Array.from(volArr) as number[];
-        precomputed[name] = ind.vwma(src, vol, len); return true;
+        precomputed[name] = ind.vwma(src, volArr, len); return true;
       }
       case "hma": {
         const src = getSource(0); const len = getLen(1);
@@ -1859,7 +1858,7 @@ export function executePine(
       if (userFunctions[name]) {
         const fn = userFunctions[name];
         const savedVars: Record<string, any> = {};
-        const savedAliases: { name: string; origB?: number[] | Float64Array; origP?: number[] }[] = [];
+        const savedAliases: { name: string; origB?: Series; origP?: Series }[] = [];
         for (let i = 0; i < fn.params.length; i++) {
           const paramName = fn.params[i];
           savedVars[paramName] = vars[paramName] ? vars[paramName][currentBar] : undefined;
@@ -1959,9 +1958,9 @@ export function executePine(
     }
   }
 
-  function resolveExprSeries(e: Expr): number[] | null {
+  function resolveExprSeries(e: Expr): Series | null {
     if (e.k === "id") {
-      if (builtinSeries[e.name]) return toNumArr(e.name) as number[];
+      if (builtinSeries[e.name]) return toNumArr(e.name);
       if (precomputed[e.name]) return precomputed[e.name];
       if (inputDefaults[e.name] !== undefined && typeof inputDefaults[e.name] === "string" && builtinSeries[inputDefaults[e.name]]) {
         return toNumArr(inputDefaults[e.name]);
@@ -2025,14 +2024,14 @@ export function executePine(
     return null;
   }
 
-  function resolveNestedTaSeries(fn: string, innerArgs: Expr[], innerKw: [string, Expr][]): number[] | null {
+  function resolveNestedTaSeries(fn: string, innerArgs: Expr[], innerKw: [string, Expr][]): Series | null {
     if (fn === "ad") fn = "accdist";
     if (fn === "pearsonr") fn = "correlation";
-    const h = numHighArr;
-    const l = numLowArr;
-    const cl = numCloseArr;
-    const op = Array.from(openArr) as number[];
-    const numVol = (): number[] => Array.from(volArr) as number[];
+    const h: Series = numHighArr;
+    const l: Series = numLowArr;
+    const cl: Series = numCloseArr;
+    const op: Series = openArr;
+    const numVol = (): Series => volArr;
     const cacheKey = `nested_${fn}_${innerArgs.map(a => {
       if (a.k === "id") {
         if (inputDefaults[a.name] !== undefined) return `@${a.name}=${inputDefaults[a.name]}`;
@@ -2043,7 +2042,7 @@ export function executePine(
     }).join("_")}`;
     if (indicatorCache.has(cacheKey)) return indicatorCache.get(cacheKey);
 
-    function nSrc(idx: number): number[] | null {
+    function nSrc(idx: number): Series | null {
       if (idx >= innerArgs.length) return cl;
       return resolveExprSeries(innerArgs[idx]);
     }
@@ -2130,7 +2129,7 @@ export function executePine(
       }
       case "vwma": {
         const src = nSrc(0); const len = nLen(1);
-        if (src) { const vol = Array.from(volArr) as number[]; result = ind.vwma(src, vol, len); }
+        if (src) { result = ind.vwma(src, volArr, len); }
         break;
       }
       case "hma": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.hma(src, len); break; }
@@ -2286,13 +2285,13 @@ export function executePine(
     if (fn === "pearsonr") fn = "correlation";
     let isDynamic = false;
 
-    function getH(): number[] { return numHighArr; }
-    function getL_arr(): number[] { return numLowArr; }
-    function getCl(): number[] { return numCloseArr; }
-    function getOp(): number[] { return Array.from(openArr) as number[]; }
-    function getVol(): number[] { return Array.from(volArr) as number[]; }
+    function getH(): Float64Array | number[] { return numHighArr; }
+    function getL_arr(): Float64Array | number[] { return numLowArr; }
+    function getCl(): Float64Array | number[] { return numCloseArr; }
+    function getOp(): Float64Array | number[] { return openArr; }
+    function getVol(): Float64Array | number[] { return volArr; }
 
-    function getSrc(idx: number): number[] | null {
+    function getSrc(idx: number): Series | null {
       if (idx >= args.length) return getCl();
       const a = args[idx];
       if (a.k === "id") {
@@ -2370,7 +2369,7 @@ export function executePine(
       return currentBar < cached.length ? (isNaN(cached[currentBar]) ? NA : cached[currentBar]) : NA;
     }
 
-    function evalSrcFallback(idx: number): number[] | null {
+    function evalSrcFallback(idx: number): Series | null {
       const src = getSrc(idx);
       if (src) return src;
       if (idx < args.length) {
@@ -2514,7 +2513,7 @@ export function executePine(
       }
       case "vwma": {
         const src = getSrc(0); const len = getL(1);
-        if (src) { const vol = Array.from(volArr) as number[]; result = ind.vwma(src, vol, len); }
+        if (src) { result = ind.vwma(src, volArr, len); }
         break;
       }
       case "hma": { const src = getSrc(0); const len = getL(1); if (src) result = ind.hma(src, len); break; }
@@ -2644,7 +2643,7 @@ export function executePine(
   const rmaState: Map<string, number> = new Map();
   const rsiState: Map<string, { avgGain: number; avgLoss: number }> = new Map();
 
-  function incrementalSma(src: number[], len: number, bar: number): number {
+  function incrementalSma(src: Series, len: number, bar: number): number {
     let sum = 0, count = 0;
     const start = Math.max(0, bar - len + 1);
     for (let i = start; i <= bar; i++) {
@@ -2654,7 +2653,7 @@ export function executePine(
     return count > 0 ? sum / count : NA;
   }
 
-  function incrementalWma(src: number[], len: number, bar: number): number {
+  function incrementalWma(src: Series, len: number, bar: number): number {
     if (bar < len - 1) return NA;
     const start = bar - len + 1;
     let weightedSum = 0;
@@ -2668,7 +2667,7 @@ export function executePine(
     return weightedSum / denom;
   }
 
-  function incrementalEma(key: string, src: number[], len: number, bar: number): number {
+  function incrementalEma(key: string, src: Series, len: number, bar: number): number {
     const alpha = 2 / (len + 1);
     const stateKey = `ema_${key}`;
     const v = src[bar];
@@ -2685,7 +2684,7 @@ export function executePine(
     return isNaN(result) ? NA : result;
   }
 
-  function incrementalRma(key: string, src: number[], len: number, bar: number): number {
+  function incrementalRma(key: string, src: Series, len: number, bar: number): number {
     const alpha = 1 / len;
     const stateKey = `rma_${key}`;
     const prev = rmaState.get(stateKey);
@@ -2711,7 +2710,7 @@ export function executePine(
     return isNaN(result) ? NA : result;
   }
 
-  function incrementalRsi(key: string, src: number[], len: number, bar: number): number {
+  function incrementalRsi(key: string, src: Series, len: number, bar: number): number {
     const stateKey = `rsi_${key}`;
     if (bar < 1) return NA;
     const change = src[bar] - src[bar - 1];
@@ -2743,7 +2742,7 @@ export function executePine(
     return avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
   }
 
-  function incrementalStdev(src: number[], len: number, bar: number): number {
+  function incrementalStdev(src: Series, len: number, bar: number): number {
     const start = Math.max(0, bar - len + 1);
     let sum = 0, sumSq = 0, count = 0;
     for (let i = start; i <= bar; i++) {
@@ -2755,7 +2754,7 @@ export function executePine(
     return Math.sqrt(Math.max(0, sumSq / count - mean * mean));
   }
 
-  function incrementalHighest(src: number[], len: number, bar: number): number {
+  function incrementalHighest(src: Series, len: number, bar: number): number {
     const start = Math.max(0, bar - len + 1);
     let max = -Infinity;
     for (let i = start; i <= bar; i++) {
@@ -2764,7 +2763,7 @@ export function executePine(
     return max === -Infinity ? NA : max;
   }
 
-  function incrementalLowest(src: number[], len: number, bar: number): number {
+  function incrementalLowest(src: Series, len: number, bar: number): number {
     const start = Math.max(0, bar - len + 1);
     let min = Infinity;
     for (let i = start; i <= bar; i++) {
@@ -2773,7 +2772,7 @@ export function executePine(
     return min === Infinity ? NA : min;
   }
 
-  function getSrcForBb(e: Expr): number[] | null {
+  function getSrcForBb(e: Expr): Series | null {
     if (e.k === "id") {
       if (builtinSeries[e.name]) return toNumArr(e.name);
       if (precomputed[e.name]) return precomputed[e.name];
@@ -3367,7 +3366,8 @@ export function executePine(
             const tempResults = tryPrecomputeUserFuncMulti(stmt.e.fn.name, stmt.e.args, stmt.e.kw, stmt.names);
             if (tempResults) {
               for (let i = 0; i < stmt.names.length; i++) {
-                if (tempResults[i]) { precomputed[stmt.names[i]] = tempResults[i]; newlyPrecomputed++; }
+                const tr = tempResults[i];
+                if (tr) { precomputed[stmt.names[i]] = tr; newlyPrecomputed++; }
               }
             }
           }

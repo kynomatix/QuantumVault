@@ -1,4 +1,6 @@
-export function sma(data: number[], period: number): number[] {
+type NumSeries = ArrayLike<number>;
+
+export function sma(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   if (period <= 0 || data.length < period) return result;
   let firstValid = -1;
@@ -32,7 +34,7 @@ export function sma(data: number[], period: number): number[] {
   return result;
 }
 
-export function ema(data: number[], period: number): number[] {
+export function ema(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   const k = 2 / (period + 1);
   const k1 = 1 - k;
@@ -53,7 +55,7 @@ export function ema(data: number[], period: number): number[] {
   return result;
 }
 
-export function pineEma(data: number[], period: number): number[] {
+export function pineEma(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   const k = 2 / (period + 1);
   const k1 = 1 - k;
@@ -72,7 +74,7 @@ export function pineEma(data: number[], period: number): number[] {
   return result;
 }
 
-export function rma(data: number[], period: number): number[] {
+export function rma(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   const k = 1 / period;
   const k1 = 1 - k;
@@ -99,7 +101,7 @@ export function rma(data: number[], period: number): number[] {
   return result;
 }
 
-export function wma(data: number[], period: number): number[] {
+export function wma(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   const denom = (period * (period + 1)) / 2;
   for (let i = period - 1; i < data.length; i++) {
@@ -115,7 +117,7 @@ export function wma(data: number[], period: number): number[] {
   return result;
 }
 
-export function hullMa(data: number[], period: number): number[] {
+export function hullMa(data: NumSeries, period: number): number[] {
   const halfPeriod = Math.floor(period / 2);
   const sqrtPeriod = Math.floor(Math.sqrt(period));
   const wma1 = wma(data, halfPeriod);
@@ -127,7 +129,7 @@ export function hullMa(data: number[], period: number): number[] {
   return wma(diff, sqrtPeriod);
 }
 
-export function stdev(data: number[], period: number): number[] {
+export function stdev(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   if (period <= 0 || data.length < period) return result;
   let firstValid = -1;
@@ -166,7 +168,7 @@ export function stdev(data: number[], period: number): number[] {
   return result;
 }
 
-export function bollingerBands(data: number[], period: number, mult: number): { upper: number[]; basis: number[]; lower: number[] } {
+export function bollingerBands(data: NumSeries, period: number, mult: number): { upper: number[]; basis: number[]; lower: number[] } {
   const basis = sma(data, period);
   const sd = stdev(data, period);
   const n = data.length;
@@ -185,7 +187,7 @@ export function bollingerBands(data: number[], period: number, mult: number): { 
   return { upper, basis, lower };
 }
 
-export function trueRange(high: number[], low: number[], close: number[]): number[] {
+export function trueRange(high: NumSeries, low: NumSeries, close: NumSeries): number[] {
   const result: number[] = [high[0] - low[0]];
   for (let i = 1; i < high.length; i++) {
     const hl = high[i] - low[i];
@@ -196,12 +198,12 @@ export function trueRange(high: number[], low: number[], close: number[]): numbe
   return result;
 }
 
-export function atr(high: number[], low: number[], close: number[], period: number): number[] {
+export function atr(high: NumSeries, low: NumSeries, close: NumSeries, period: number): number[] {
   const tr = trueRange(high, low, close);
   return rma(tr, period);
 }
 
-export function keltnerChannel(close: number[], high: number[], low: number[], smaLen: number, atrLen: number, mult: number): { upper: number[]; basis: number[]; lower: number[] } {
+export function keltnerChannel(close: NumSeries, high: NumSeries, low: NumSeries, smaLen: number, atrLen: number, mult: number): { upper: number[]; basis: number[]; lower: number[] } {
   const basis = sma(close, smaLen);
   const atrVals = atr(high, low, close, atrLen);
   const n = close.length;
@@ -219,7 +221,7 @@ export function keltnerChannel(close: number[], high: number[], low: number[], s
   return { upper, basis, lower };
 }
 
-export function rsi(data: number[], period: number): number[] {
+export function rsi(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   if (data.length < period + 1) return result;
   let avgGain = 0;
@@ -247,7 +249,7 @@ export function rsi(data: number[], period: number): number[] {
   return result;
 }
 
-export function adx(high: number[], low: number[], close: number[], period: number): number[] {
+export function adx(high: NumSeries, low: NumSeries, close: NumSeries, period: number): number[] {
   const result: number[] = new Array(high.length).fill(NaN);
   if (high.length < period * 2) return result;
   const plusDM: number[] = [0];
@@ -279,7 +281,7 @@ export function adx(high: number[], low: number[], close: number[], period: numb
   return result;
 }
 
-export function linreg(data: number[], period: number): number[] {
+export function linreg(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   if (data.length < period) return result;
   const sumXConst = (period * (period - 1)) / 2;
@@ -303,11 +305,11 @@ export function linreg(data: number[], period: number): number[] {
   return result;
 }
 
-export function volumeSma(volume: number[], period: number): number[] {
+export function volumeSma(volume: NumSeries, period: number): number[] {
   return sma(volume, period);
 }
 
-export function squeeze(bbUpper: number[], bbLower: number[], kcUpper: number[], kcLower: number[]): boolean[] {
+export function squeeze(bbUpper: NumSeries, bbLower: NumSeries, kcUpper: NumSeries, kcLower: NumSeries): boolean[] {
   const n = bbUpper.length;
   const result: boolean[] = new Array(n);
   for (let i = 0; i < n; i++) {
@@ -320,7 +322,7 @@ export function squeeze(bbUpper: number[], bbLower: number[], kcUpper: number[],
   return result;
 }
 
-export function highest(data: number[], period: number): number[] {
+export function highest(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   for (let i = period - 1; i < data.length; i++) {
     let max = -Infinity;
@@ -332,7 +334,7 @@ export function highest(data: number[], period: number): number[] {
   return result;
 }
 
-export function lowest(data: number[], period: number): number[] {
+export function lowest(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   for (let i = period - 1; i < data.length; i++) {
     let min = Infinity;
@@ -344,7 +346,7 @@ export function lowest(data: number[], period: number): number[] {
   return result;
 }
 
-export function percentRank(data: number[], period: number): number[] {
+export function percentRank(data: NumSeries, period: number): number[] {
   const result: number[] = new Array(data.length).fill(NaN);
   for (let i = period; i < data.length; i++) {
     let count = 0;
@@ -356,7 +358,7 @@ export function percentRank(data: number[], period: number): number[] {
   return result;
 }
 
-export function bbWidth(bbUpper: number[], bbLower: number[], bbBasis: number[]): number[] {
+export function bbWidth(bbUpper: NumSeries, bbLower: NumSeries, bbBasis: NumSeries): number[] {
   const n = bbUpper.length;
   const result: number[] = new Array(n).fill(NaN);
   for (let i = 0; i < n; i++) {
@@ -367,7 +369,7 @@ export function bbWidth(bbUpper: number[], bbLower: number[], bbBasis: number[])
   return result;
 }
 
-export function vwma(src: number[], volume: number[], period: number): number[] {
+export function vwma(src: NumSeries, volume: NumSeries, period: number): number[] {
   const n = src.length;
   const result: number[] = new Array(n).fill(NaN);
   if (period <= 0 || n < period) return result;
@@ -381,11 +383,11 @@ export function vwma(src: number[], volume: number[], period: number): number[] 
   return result;
 }
 
-export function hma(src: number[], period: number): number[] {
+export function hma(src: NumSeries, period: number): number[] {
   return hullMa(src, period);
 }
 
-export function dema(src: number[], period: number): number[] {
+export function dema(src: NumSeries, period: number): number[] {
   const e1 = pineEma(src, period);
   const e2 = pineEma(e1, period);
   const n = src.length;
@@ -396,7 +398,7 @@ export function dema(src: number[], period: number): number[] {
   return result;
 }
 
-export function tema(src: number[], period: number): number[] {
+export function tema(src: NumSeries, period: number): number[] {
   const e1 = pineEma(src, period);
   const e2 = pineEma(e1, period);
   const e3 = pineEma(e2, period);
@@ -408,7 +410,7 @@ export function tema(src: number[], period: number): number[] {
   return result;
 }
 
-export function alma(src: number[], period: number, offset: number, sigma: number): number[] {
+export function alma(src: NumSeries, period: number, offset: number, sigma: number): number[] {
   const n = src.length;
   const result: number[] = new Array(n).fill(NaN);
   if (period <= 0 || n < period) return result;
@@ -434,7 +436,7 @@ export function alma(src: number[], period: number, offset: number, sigma: numbe
   return result;
 }
 
-export function swma(src: number[]): number[] {
+export function swma(src: NumSeries): number[] {
   const n = src.length;
   const result: number[] = new Array(n).fill(NaN);
   for (let i = 3; i < n; i++) {
@@ -446,7 +448,7 @@ export function swma(src: number[]): number[] {
   return result;
 }
 
-export function cci(src: number[], period: number): number[] {
+export function cci(src: NumSeries, period: number): number[] {
   const n = src.length;
   const result: number[] = new Array(n).fill(NaN);
   const basis = sma(src, period);
@@ -460,7 +462,7 @@ export function cci(src: number[], period: number): number[] {
   return result;
 }
 
-export function macd(src: number[], fast: number, slow: number, signalPeriod: number): { macd: number[]; signal: number[]; hist: number[] } {
+export function macd(src: NumSeries, fast: number, slow: number, signalPeriod: number): { macd: number[]; signal: number[]; hist: number[] } {
   const ef = pineEma(src, fast);
   const es = pineEma(src, slow);
   const n = src.length;
@@ -476,7 +478,7 @@ export function macd(src: number[], fast: number, slow: number, signalPeriod: nu
   return { macd: macdLine, signal, hist };
 }
 
-export function supertrend(high: number[], low: number[], close: number[], factor: number, atrPeriod: number): { supertrend: number[]; direction: number[] } {
+export function supertrend(high: NumSeries, low: NumSeries, close: NumSeries, factor: number, atrPeriod: number): { supertrend: number[]; direction: number[] } {
   const n = close.length;
   const atrVals = atr(high, low, close, atrPeriod);
   const st: number[] = new Array(n).fill(NaN);
@@ -509,7 +511,7 @@ export function supertrend(high: number[], low: number[], close: number[], facto
   return { supertrend: st, direction: dir };
 }
 
-export function percentileNearestRank(data: number[], period: number, percentage: number): number[] {
+export function percentileNearestRank(data: NumSeries, period: number, percentage: number): number[] {
   const n = data.length;
   const result: number[] = new Array(n).fill(NaN);
   if (period <= 0 || percentage < 0 || percentage > 100) return result;
@@ -529,7 +531,7 @@ export function percentileNearestRank(data: number[], period: number, percentage
   return result;
 }
 
-export function percentileLinearInterpolation(data: number[], period: number, percentage: number): number[] {
+export function percentileLinearInterpolation(data: NumSeries, period: number, percentage: number): number[] {
   const n = data.length;
   const result: number[] = new Array(n).fill(NaN);
   if (period <= 0 || percentage < 0 || percentage > 100) return result;
@@ -569,7 +571,7 @@ export function percentileLinearInterpolation(data: number[], period: number, pe
 // ============================================================================
 
 // ta.obv — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.obv
-export function obv(close: number[], volume: number[]): number[] {
+export function obv(close: NumSeries, volume: NumSeries): number[] {
   const n = close.length;
   const r: number[] = new Array(n).fill(NaN);
   if (n === 0) return r;
@@ -584,7 +586,7 @@ export function obv(close: number[], volume: number[]): number[] {
 }
 
 // ta.accdist (alias ta.ad) — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.accdist
-export function accdist(high: number[], low: number[], close: number[], volume: number[]): number[] {
+export function accdist(high: NumSeries, low: NumSeries, close: NumSeries, volume: NumSeries): number[] {
   const n = close.length;
   const r: number[] = new Array(n).fill(NaN);
   let cum = 0;
@@ -599,7 +601,7 @@ export function accdist(high: number[], low: number[], close: number[], volume: 
 }
 
 // ta.pvt — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.pvt
-export function pvt(close: number[], volume: number[]): number[] {
+export function pvt(close: NumSeries, volume: NumSeries): number[] {
   const n = close.length;
   const r: number[] = new Array(n).fill(NaN);
   if (n === 0) return r;
@@ -613,7 +615,7 @@ export function pvt(close: number[], volume: number[]): number[] {
 }
 
 // ta.nvi — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.nvi
-export function nvi(close: number[], volume: number[]): number[] {
+export function nvi(close: NumSeries, volume: NumSeries): number[] {
   const n = close.length;
   const r: number[] = new Array(n).fill(NaN);
   if (n === 0) return r;
@@ -631,7 +633,7 @@ export function nvi(close: number[], volume: number[]): number[] {
 }
 
 // ta.pvi — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.pvi
-export function pvi(close: number[], volume: number[]): number[] {
+export function pvi(close: NumSeries, volume: NumSeries): number[] {
   const n = close.length;
   const r: number[] = new Array(n).fill(NaN);
   if (n === 0) return r;
@@ -649,7 +651,7 @@ export function pvi(close: number[], volume: number[]): number[] {
 }
 
 // ta.iii — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.iii
-export function iii(high: number[], low: number[], close: number[], volume: number[]): number[] {
+export function iii(high: NumSeries, low: NumSeries, close: NumSeries, volume: NumSeries): number[] {
   const n = close.length;
   const r: number[] = new Array(n).fill(NaN);
   for (let i = 0; i < n; i++) {
@@ -661,7 +663,7 @@ export function iii(high: number[], low: number[], close: number[], volume: numb
 }
 
 // ta.wad — Williams Acc/Dist — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.wad
-export function wad(high: number[], low: number[], close: number[]): number[] {
+export function wad(high: NumSeries, low: NumSeries, close: NumSeries): number[] {
   const n = close.length;
   const r: number[] = new Array(n).fill(NaN);
   if (n === 0) return r;
@@ -676,7 +678,7 @@ export function wad(high: number[], low: number[], close: number[]): number[] {
 }
 
 // ta.bop — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.bop
-export function bop(open: number[], high: number[], low: number[], close: number[]): number[] {
+export function bop(open: NumSeries, high: NumSeries, low: NumSeries, close: NumSeries): number[] {
   const n = close.length;
   const r: number[] = new Array(n).fill(NaN);
   for (let i = 0; i < n; i++) {
@@ -687,7 +689,7 @@ export function bop(open: number[], high: number[], low: number[], close: number
 }
 
 // ta.mom — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.mom
-export function mom(src: number[], length: number): number[] {
+export function mom(src: NumSeries, length: number): number[] {
   const n = src.length;
   const r: number[] = new Array(n).fill(NaN);
   for (let i = length; i < n; i++) {
@@ -697,7 +699,7 @@ export function mom(src: number[], length: number): number[] {
 }
 
 // ta.wpr — Williams %R — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.wpr
-export function wpr(high: number[], low: number[], close: number[], length: number): number[] {
+export function wpr(high: NumSeries, low: NumSeries, close: NumSeries, length: number): number[] {
   const n = close.length;
   const r: number[] = new Array(n).fill(NaN);
   const hh = highest(high, length);
@@ -711,7 +713,7 @@ export function wpr(high: number[], low: number[], close: number[], length: numb
 }
 
 // ta.cmo — Chande Momentum Oscillator — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.cmo
-export function cmo(src: number[], length: number): number[] {
+export function cmo(src: NumSeries, length: number): number[] {
   const n = src.length;
   const r: number[] = new Array(n).fill(NaN);
   if (n < length + 1) return r;
@@ -731,7 +733,7 @@ export function cmo(src: number[], length: number): number[] {
 }
 
 // ta.bbw — Bollinger Band Width — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.bbw
-export function bbw(src: number[], length: number, mult: number): number[] {
+export function bbw(src: NumSeries, length: number, mult: number): number[] {
   const b = bollingerBands(src, length, mult);
   const n = src.length;
   const r: number[] = new Array(n).fill(NaN);
@@ -742,7 +744,7 @@ export function bbw(src: number[], length: number, mult: number): number[] {
 }
 
 // ta.kcw — Keltner Channel Width — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.kcw
-export function kcw(src: number[], high: number[], low: number[], length: number, mult: number): number[] {
+export function kcw(src: NumSeries, high: NumSeries, low: NumSeries, length: number, mult: number): number[] {
   const b = keltnerChannel(src, high, low, length, length, mult);
   const n = src.length;
   const r: number[] = new Array(n).fill(NaN);
@@ -753,7 +755,7 @@ export function kcw(src: number[], high: number[], low: number[], length: number
 }
 
 // ta.highestbars — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.highestbars
-export function highestBars(src: number[], length: number): number[] {
+export function highestBars(src: NumSeries, length: number): number[] {
   const n = src.length;
   const r: number[] = new Array(n).fill(NaN);
   for (let i = length - 1; i < n; i++) {
@@ -767,7 +769,7 @@ export function highestBars(src: number[], length: number): number[] {
 }
 
 // ta.lowestbars — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.lowestbars
-export function lowestBars(src: number[], length: number): number[] {
+export function lowestBars(src: NumSeries, length: number): number[] {
   const n = src.length;
   const r: number[] = new Array(n).fill(NaN);
   for (let i = length - 1; i < n; i++) {
@@ -781,7 +783,7 @@ export function lowestBars(src: number[], length: number): number[] {
 }
 
 // ta.range — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.range
-export function rangeIndicator(src: number[], length: number): number[] {
+export function rangeIndicator(src: NumSeries, length: number): number[] {
   const hh = highest(src, length);
   const ll = lowest(src, length);
   const n = src.length;
@@ -793,7 +795,7 @@ export function rangeIndicator(src: number[], length: number): number[] {
 }
 
 // ta.variance — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.variance
-export function variance(src: number[], length: number): number[] {
+export function variance(src: NumSeries, length: number): number[] {
   const sd = stdev(src, length);
   const n = src.length;
   const r: number[] = new Array(n).fill(NaN);
@@ -802,7 +804,7 @@ export function variance(src: number[], length: number): number[] {
 }
 
 // ta.correlation / ta.pearsonr — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.correlation
-export function correlation(s1: number[], s2: number[], length: number): number[] {
+export function correlation(s1: NumSeries, s2: NumSeries, length: number): number[] {
   const n = Math.min(s1.length, s2.length);
   const r: number[] = new Array(n).fill(NaN);
   for (let i = length - 1; i < n; i++) {
@@ -822,7 +824,7 @@ export function correlation(s1: number[], s2: number[], length: number): number[
 }
 
 // ta.cog — Center of Gravity — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.cog
-export function cog(src: number[], length: number): number[] {
+export function cog(src: NumSeries, length: number): number[] {
   const n = src.length;
   const r: number[] = new Array(n).fill(NaN);
   for (let i = length - 1; i < n; i++) {
@@ -841,7 +843,7 @@ export function cog(src: number[], length: number): number[] {
 
 // ta.aroon — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.aroon
 // Returns [upper, lower]; window of length+1 bars.
-export function aroon(high: number[], low: number[], length: number): { upper: number[]; lower: number[] } {
+export function aroon(high: NumSeries, low: NumSeries, length: number): { upper: number[]; lower: number[] } {
   const n = high.length;
   const upper: number[] = new Array(n).fill(NaN);
   const lower: number[] = new Array(n).fill(NaN);
@@ -863,7 +865,7 @@ export function aroon(high: number[], low: number[], length: number): { upper: n
 
 // ta.tsi — True Strength Index — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.tsi
 // Pine uses ema-double-smoothed PC over abs(PC). Output in range ~[-1, 1] (not 100-scaled).
-export function tsi(src: number[], shortLen: number, longLen: number): number[] {
+export function tsi(src: NumSeries, shortLen: number, longLen: number): number[] {
   const n = src.length;
   const pc: number[] = new Array(n).fill(NaN);
   const apc: number[] = new Array(n).fill(NaN);
@@ -883,7 +885,7 @@ export function tsi(src: number[], shortLen: number, longLen: number): number[] 
 }
 
 // ta.vortex — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.vortex
-export function vortex(high: number[], low: number[], close: number[], length: number): { viPlus: number[]; viMinus: number[] } {
+export function vortex(high: NumSeries, low: NumSeries, close: NumSeries, length: number): { viPlus: number[]; viMinus: number[] } {
   const n = close.length;
   const tr = trueRange(high, low, close);
   const vmp: number[] = new Array(n).fill(0);
@@ -904,7 +906,7 @@ export function vortex(high: number[], low: number[], close: number[], length: n
 
 // ta.mode — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.mode
 // Returns the most frequent value in the window; ties → smallest. NaN if all NaN.
-export function mode(src: number[], length: number): number[] {
+export function mode(src: NumSeries, length: number): number[] {
   const n = src.length;
   const r: number[] = new Array(n).fill(NaN);
   for (let i = length - 1; i < n; i++) {
@@ -926,7 +928,7 @@ export function mode(src: number[], length: number): number[] {
 }
 
 // ta.sar — Parabolic SAR (Wilder) — https://www.tradingview.com/pine-script-reference/v5/#fun_ta.sar
-export function sar(high: number[], low: number[], start: number, increment: number, maxAcc: number): number[] {
+export function sar(high: NumSeries, low: NumSeries, start: number, increment: number, maxAcc: number): number[] {
   const n = high.length;
   const r: number[] = new Array(n).fill(NaN);
   if (n < 2) return r;
