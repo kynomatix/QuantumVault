@@ -1,6 +1,13 @@
 import { workerData, parentPort } from "worker_threads";
 import { runBacktest, compilePine, createSharedArrays, type OHLCV, type PinePlan, type PineSharedArrays } from "./engine";
 import type { LabPineInput, LabBacktestResult, LabJobProgress, LabCheckpoint, GuidedInsights } from "@shared/schema";
+import { makeRng, hashStringToSeed, deriveComboSeed, type SeededRng } from "./rng";
+
+// Module-level seeded RNG. Reseeded per (job, combo) inside run() so that
+// optimizer behavior is fully reproducible from (jobSeed, combo) regardless
+// of which pool worker processes the combo. All call sites that previously
+// used rng.random() now use rng.random(). See .local/session_plan.md T001a.
+let rng: SeededRng = makeRng(0xdeadbeef);
 
 interface WorkerInput {
   jobId: string;
@@ -25,6 +32,15 @@ interface WorkerInput {
   };
   candlesByCombo: Record<string, OHLCV[]>;
   resumeCheckpoint?: LabCheckpoint;
+  // T001a/b: seeded PRNG + worker pool support.
+  // randomSeed: master job seed. If omitted, derived from jobId hash.
+  // comboFilter: optional set of "ticker|tf" keys this worker should process.
+  //              When omitted, worker processes the full cartesian product
+  //              (single-worker mode). Used by WorkerPool for round-robin
+  //              combo partitioning so each pool member handles a disjoint
+  //              subset, with deterministic per-combo seeding.
+  randomSeed?: number;
+  comboFilter?: string[];
 }
 
 type PartialResult = LiteBacktestResult | LabBacktestResult;
@@ -207,7 +223,7 @@ function perturbNumericValue(
   if (useGaussian) {
     delta = gaussianRandom(0, effectiveAmount);
   } else {
-    delta = (Math.random() - 0.5) * 2 * effectiveAmount;
+    delta = (rng.random() - 0.5) * 2 * effectiveAmount;
   }
 
   if (Math.abs(delta) < step) {
@@ -242,7 +258,7 @@ function generateRandomParams(inputs: LabPineInput[]): Record<string, any> {
         const max = input.max ?? 100;
         const step = input.step ?? 1;
         const range = Math.floor((max - min) / step);
-        params[input.name] = min + Math.floor(Math.random() * (range + 1)) * step;
+        params[input.name] = min + Math.floor(rng.random() * (range + 1)) * step;
         break;
       }
       case "float": {
@@ -250,16 +266,16 @@ function generateRandomParams(inputs: LabPineInput[]): Record<string, any> {
         const max = input.max ?? 10;
         const step = input.step ?? 0.1;
         const range = Math.floor((max - min) / step);
-        const val = min + Math.floor(Math.random() * (range + 1)) * step;
+        const val = min + Math.floor(rng.random() * (range + 1)) * step;
         params[input.name] = Math.round(val * 10000) / 10000;
         break;
       }
       case "bool":
-        params[input.name] = Math.random() > 0.5;
+        params[input.name] = rng.random() > 0.5;
         break;
       case "string":
         if (input.options && input.options.length > 0) {
-          params[input.name] = input.options[Math.floor(Math.random() * input.options.length)];
+          params[input.name] = input.options[Math.floor(rng.random() * input.options.length)];
         } else {
           params[input.name] = input.default;
         }
@@ -272,8 +288,8 @@ function generateRandomParams(inputs: LabPineInput[]): Record<string, any> {
 }
 
 function gaussianRandom(mean: number, stddev: number): number {
-  const u1 = Math.random();
-  const u2 = Math.random();
+  const u1 = rng.random();
+  const u2 = rng.random();
   const z = Math.sqrt(-2 * Math.log(Math.max(u1, 1e-10))) * Math.cos(2 * Math.PI * u2);
   return mean + z * stddev;
 }
@@ -288,7 +304,7 @@ function generateGuidedParams(inputs: LabPineInput[], insights: GuidedInsights):
 function generatePerturbedParams(inputs: LabPineInput[], insights: GuidedInsights): Record<string, any> {
   const params: Record<string, any> = {};
   const topConfigs = insights.topConfigs!;
-  const seed = topConfigs[Math.floor(Math.random() * topConfigs.length)].params;
+  const seed = topConfigs[Math.floor(rng.random() * topConfigs.length)].params;
 
   const sensitivityMap = new Map(insights.paramSensitivity.map(ps => [ps.name, ps]));
   const impactScores = insights.paramSensitivity.map(ps => ps.impactScore);
@@ -334,17 +350,17 @@ function generatePerturbedParams(inputs: LabPineInput[], insights: GuidedInsight
       }
       case "bool": {
         const seedBool = typeof seedVal === "boolean" ? seedVal : (input.default ?? false);
-        params[input.name] = Math.random() < 0.65 ? seedBool : !seedBool;
+        params[input.name] = rng.random() < 0.65 ? seedBool : !seedBool;
         break;
       }
       case "string": {
         if (input.options && input.options.length > 1) {
           const seedStr = typeof seedVal === "string" ? seedVal : (input.default ?? input.options[0]);
-          if (Math.random() < 0.65) {
+          if (rng.random() < 0.65) {
             params[input.name] = seedStr;
           } else {
             const others = input.options.filter(o => o !== seedStr);
-            params[input.name] = others.length > 0 ? others[Math.floor(Math.random() * others.length)] : seedStr;
+            params[input.name] = others.length > 0 ? others[Math.floor(rng.random() * others.length)] : seedStr;
           }
         } else {
           params[input.name] = input.options?.[0] ?? input.default;
@@ -380,7 +396,7 @@ function generateBucketGuidedParams(inputs: LabPineInput[], insights: GuidedInsi
           const max = input.max ?? 100;
           const step = input.step ?? 1;
           const range = Math.floor((max - min) / step);
-          params[input.name] = min + Math.floor(Math.random() * (range + 1)) * step;
+          params[input.name] = min + Math.floor(rng.random() * (range + 1)) * step;
           break;
         }
         case "float": {
@@ -388,16 +404,16 @@ function generateBucketGuidedParams(inputs: LabPineInput[], insights: GuidedInsi
           const max = input.max ?? 10;
           const step = input.step ?? 0.1;
           const range = Math.floor((max - min) / step);
-          const val = min + Math.floor(Math.random() * (range + 1)) * step;
+          const val = min + Math.floor(rng.random() * (range + 1)) * step;
           params[input.name] = Math.round(val * 10000) / 10000;
           break;
         }
         case "bool":
-          params[input.name] = Math.random() > 0.5;
+          params[input.name] = rng.random() > 0.5;
           break;
         case "string":
           if (input.options && input.options.length > 0) {
-            params[input.name] = input.options[Math.floor(Math.random() * input.options.length)];
+            params[input.name] = input.options[Math.floor(rng.random() * input.options.length)];
           } else {
             params[input.name] = input.default;
           }
@@ -422,14 +438,14 @@ function generateBucketGuidedParams(inputs: LabPineInput[], insights: GuidedInsi
           const narrowMax = Math.min(globalMax, Math.floor(bestMax / step) * step);
           if (narrowMin > narrowMax) {
             const range = Math.floor((globalMax - globalMin) / step);
-            params[input.name] = globalMin + Math.floor(Math.random() * (range + 1)) * step;
+            params[input.name] = globalMin + Math.floor(rng.random() * (range + 1)) * step;
           } else {
             const range = Math.floor((narrowMax - narrowMin) / step);
-            params[input.name] = narrowMin + Math.floor(Math.random() * (range + 1)) * step;
+            params[input.name] = narrowMin + Math.floor(rng.random() * (range + 1)) * step;
           }
         } else {
           const range = Math.floor((globalMax - globalMin) / step);
-          params[input.name] = globalMin + Math.floor(Math.random() * (range + 1)) * step;
+          params[input.name] = globalMin + Math.floor(rng.random() * (range + 1)) * step;
         }
         break;
       }
@@ -442,27 +458,27 @@ function generateBucketGuidedParams(inputs: LabPineInput[], insights: GuidedInsi
           const narrowMax = Math.min(globalMax, bestMax);
           if (narrowMin > narrowMax) {
             const range = Math.floor((globalMax - globalMin) / step);
-            const val = globalMin + Math.floor(Math.random() * (range + 1)) * step;
+            const val = globalMin + Math.floor(rng.random() * (range + 1)) * step;
             params[input.name] = Math.round(val * 10000) / 10000;
           } else {
             const fineStep = Math.max(step / 2, 0.001);
             const range = Math.floor((narrowMax - narrowMin) / fineStep);
-            const val = narrowMin + Math.floor(Math.random() * Math.max(1, range + 1)) * fineStep;
+            const val = narrowMin + Math.floor(rng.random() * Math.max(1, range + 1)) * fineStep;
             params[input.name] = Math.round(Math.min(narrowMax, val) * 10000) / 10000;
           }
         } else {
           const range = Math.floor((globalMax - globalMin) / step);
-          const val = globalMin + Math.floor(Math.random() * (range + 1)) * step;
+          const val = globalMin + Math.floor(rng.random() * (range + 1)) * step;
           params[input.name] = Math.round(val * 10000) / 10000;
         }
         break;
       }
       case "bool":
-        params[input.name] = Math.random() > 0.5;
+        params[input.name] = rng.random() > 0.5;
         break;
       case "string":
         if (input.options && input.options.length > 0) {
-          params[input.name] = input.options[Math.floor(Math.random() * input.options.length)];
+          params[input.name] = input.options[Math.floor(rng.random() * input.options.length)];
         } else {
           params[input.name] = input.default;
         }
@@ -477,7 +493,7 @@ function generateBucketGuidedParams(inputs: LabPineInput[], insights: GuidedInsi
 function jitterParams(baseParams: Record<string, any>, inputs: LabPineInput[], jitterCount: number = 4, jitterRadius: number = 0.15): Record<string, any> {
   const params = { ...baseParams };
   const optimizable = inputs.filter(i => i.optimizable && (i.type === "int" || i.type === "float"));
-  const toJitter = optimizable.sort(() => Math.random() - 0.5).slice(0, jitterCount);
+  const toJitter = optimizable.sort(() => rng.random() - 0.5).slice(0, jitterCount);
 
   for (const input of toJitter) {
     const min = input.min ?? 0;
@@ -494,18 +510,18 @@ function jitterParams(baseParams: Record<string, any>, inputs: LabPineInput[], j
   }
 
   const boolInputs = inputs.filter(i => i.optimizable && i.type === "bool");
-  if (boolInputs.length > 0 && Math.random() < 0.35) {
-    const toBool = boolInputs[Math.floor(Math.random() * boolInputs.length)];
+  if (boolInputs.length > 0 && rng.random() < 0.35) {
+    const toBool = boolInputs[Math.floor(rng.random() * boolInputs.length)];
     params[toBool.name] = !params[toBool.name];
   }
 
   const stringInputs = inputs.filter(i => i.optimizable && i.type === "string" && i.options && i.options.length > 1);
-  if (stringInputs.length > 0 && Math.random() < 0.35) {
-    const toStr = stringInputs[Math.floor(Math.random() * stringInputs.length)];
+  if (stringInputs.length > 0 && rng.random() < 0.35) {
+    const toStr = stringInputs[Math.floor(rng.random() * stringInputs.length)];
     const currentStr = params[toStr.name];
     const others = toStr.options!.filter(o => o !== currentStr);
     if (others.length > 0) {
-      params[toStr.name] = others[Math.floor(Math.random() * others.length)];
+      params[toStr.name] = others[Math.floor(rng.random() * others.length)];
     }
   }
 
@@ -873,7 +889,13 @@ parentPort?.on("message", (msg: any) => {
 });
 
 async function run() {
-  const { jobId, config, candlesByCombo, resumeCheckpoint } = workerData as WorkerInput;
+  const { jobId, config, candlesByCombo, resumeCheckpoint, randomSeed, comboFilter } = workerData as WorkerInput;
+  const masterSeed = (typeof randomSeed === "number" ? randomSeed : hashStringToSeed(jobId)) >>> 0;
+  // Set a default RNG state from the master seed; will be re-seeded per combo
+  // below so the random search for any given (jobSeed, combo) is reproducible
+  // regardless of which pool worker owns it.
+  rng = makeRng(masterSeed);
+  const comboFilterSet = comboFilter && comboFilter.length > 0 ? new Set(comboFilter) : null;
   const startTime = Date.now();
   const allResults: LabBacktestResult[] = [];
   let coordinateTotalTests = 0;
@@ -892,6 +914,8 @@ async function run() {
   const combos: { ticker: string; timeframe: string }[] = [];
   for (const ticker of config.tickers) {
     for (const tf of config.timeframes) {
+      const key = `${ticker}|${tf}`;
+      if (comboFilterSet && !comboFilterSet.has(key)) continue;
       combos.push({ ticker, timeframe: tf });
     }
   }
@@ -916,9 +940,14 @@ async function run() {
   const deepSamplesTotal = deepRounds * deepSeedsPerRound * deepRefinesPerSeed;
   const totalSamples = config.randomSamples + config.topK * config.refinementsPerSeed + deepSamplesTotal;
   const grandTotal = totalSamples * combos.length;
-  let globalCurrent = completedCombos.size * totalSamples;
+  // When running under a worker pool (comboFilter set), only count this
+  // worker's already-completed combos toward its progress denominator.
+  const myComboKeys = new Set(combos.map(c => `${c.ticker}|${c.timeframe}`));
+  let myCompletedCount = 0;
+  for (const k of completedCombos) if (myComboKeys.has(k)) myCompletedCount++;
+  let globalCurrent = myCompletedCount * totalSamples;
 
-  if (resumeCombo && !completedCombos.has(resumeCombo)) {
+  if (resumeCombo && !completedCombos.has(resumeCombo) && myComboKeys.has(resumeCombo)) {
     globalCurrent += resumeIteration;
   }
 
@@ -926,6 +955,12 @@ async function run() {
     const key = `${combo.ticker}|${combo.timeframe}`;
 
     if (completedCombos.has(key)) continue;
+
+    // T001a: deterministic per-combo RNG. The (jobSeed, combo) tuple alone
+    // determines the random search trajectory for this combo, so the same
+    // job seed yields identical results whether the combo is processed by
+    // worker 0 of a 1-worker pool or worker 2 of a 4-worker pool.
+    rng = makeRng(deriveComboSeed(masterSeed, key));
 
     if (aborted) {
       send({ type: "progress", data: {
@@ -1072,7 +1107,7 @@ async function run() {
 
       const progress = s / config.randomSamples;
       const guidedRatio = hasGuided ? (0.50 + progress * 0.20) : 0;
-      const useGuided = hasGuided && Math.random() < guidedRatio;
+      const useGuided = hasGuided && rng.random() < guidedRatio;
 
       let params: Record<string, any>;
       let isDuplicate = true;

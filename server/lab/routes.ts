@@ -8,6 +8,8 @@ import { fetchOHLCV } from "./datafeed";
 import { Worker } from "worker_threads";
 import { resolve, dirname } from "path";
 import type { OHLCV } from "./engine";
+import { WorkerPool, recommendedPoolSize } from "./worker-pool";
+import { hashStringToSeed } from "./rng";
 import { db } from "../db";
 import { eq, or, and, inArray, desc, sql } from "drizzle-orm";
 import { createHash, timingSafeEqual } from "crypto";
@@ -586,7 +588,7 @@ export function registerLabRoutes(app: Express): void {
       || msg.includes("Allocation failed");
   }
 
-  function createWorker(workerDataPayload: any): Worker {
+  function spawnRawWorker(workerDataPayload: any): Worker {
     const isProd = typeof (globalThis as any).__ESBUILD_CJS_BUNDLE__ !== "undefined";
     const resourceLimits = {
       maxOldGenerationSizeMb: WORKER_MAX_OLD_GEN_SIZE_MB,
@@ -601,7 +603,26 @@ export function registerLabRoutes(app: Express): void {
     );
   }
 
-  let activeWorker: Worker | null = null;
+  function createWorkerPool(args: {
+    jobId: string;
+    config: any;
+    candlesByCombo: Record<string, OHLCV[]>;
+    resumeCheckpoint?: LabCheckpoint;
+  }): WorkerPool {
+    // T001a/b: derive deterministic master seed from jobId so re-runs of the
+    // same job are reproducible. Combo-level RNG inside the worker means the
+    // result for a given (jobSeed, combo) is identical regardless of pool size.
+    const randomSeed = hashStringToSeed(args.jobId);
+    return new WorkerPool(spawnRawWorker, {
+      jobId: args.jobId,
+      config: args.config,
+      candlesByCombo: args.candlesByCombo,
+      resumeCheckpoint: args.resumeCheckpoint,
+      randomSeed,
+    });
+  }
+
+  let activeWorker: WorkerPool | null = null;
   let lastWorkerOOM = false;
   let workerStarting = false;
   let lastWorkerMessageTime = 0;
@@ -754,7 +775,7 @@ export function registerLabRoutes(app: Express): void {
         });
       }
 
-      const worker = createWorker({
+      const worker = createWorkerPool({
         jobId: job.id,
         config: {
           tickers: config.tickers,
@@ -778,6 +799,7 @@ export function registerLabRoutes(app: Express): void {
         candlesByCombo,
         resumeCheckpoint,
       });
+      console.log(`[QuantumLab] Spawned worker pool size=${worker.poolSize} for job ${job.id}`);
 
       activeWorker = worker;
       workerStarting = false;
