@@ -383,10 +383,13 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
     // The Investment + Buffer split only applies when the user opted into the
     // suggest-safe-settings flow. In the default flow the full capital is the
     // sizing baseline — no buffer carve-out, no extra validation.
-    if (riskOpen && investmentAmount < 10) {
+    // Pacifica's $10 minimum is on NOTIONAL (position size), not margin —
+    // so a $5 margin × 5x leverage = $25 notional is fine.
+    const notionalAfterBuffer = investmentAmount * effLeverage;
+    if (riskOpen && notionalAfterBuffer < 10) {
       toast({
-        title: 'Investment amount too small',
-        description: `After reserving the equity buffer, only $${investmentAmount} would trade. Increase capital or lower leverage.`,
+        title: 'Trade size too small',
+        description: `After reserving the equity buffer, your trade size would be $${notionalAfterBuffer.toFixed(2)} (${investmentAmount} margin × ${effLeverage}x). Pacifica requires a $10 minimum position size. Increase capital or leverage.`,
         variant: 'destructive',
       });
       return;
