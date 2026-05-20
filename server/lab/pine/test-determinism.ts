@@ -100,60 +100,118 @@ async function runPool(
   });
 }
 
-async function main() {
-  const tickers = ["SOL/USDT:USDT"];
-  const timeframes = ["15m", "2h", "4h"];
-  const combos: { ticker: string; timeframe: string }[] = [];
-  for (const t of tickers) for (const tf of timeframes) combos.push({ ticker: t, timeframe: tf });
+async function fetchCombos(
+  tickers: string[],
+  timeframes: string[],
+  startDate: string,
+  endDate: string,
+): Promise<Record<string, OHLCV[]>> {
+  const candlesByCombo: Record<string, OHLCV[]> = {};
+  for (const t of tickers) {
+    for (const tf of timeframes) {
+      const candles = await fetchOHLCV(t, tf, startDate, endDate);
+      candlesByCombo[`${t}|${tf}`] = candles ?? [];
+      console.log(`  ${t} ${tf}: ${candles?.length ?? 0} bars`);
+    }
+  }
+  return candlesByCombo;
+}
 
-  console.log(`Fetching candles for ${combos.length} combos…`);
+async function compareRuns(
+  label: string,
+  jobIdSeed: string,
+  candlesByCombo: Record<string, OHLCV[]>,
+  parsedInputs: any[],
+  tickers: string[],
+  timeframes: string[],
+  randomSamples: number,
+  poolSizes: number[],
+): Promise<boolean> {
+  console.log(`\n=== Scenario: ${label} (${tickers.length}t × ${timeframes.length}tf × ${randomSamples} samples) ===`);
+  const runs: { N: number; results: LabBacktestResult[]; elapsedMs: number; fp: string }[] = [];
+  for (const N of poolSizes) {
+    console.log(`\n--- ${label} run N=${N} ---`);
+    const r = await runPool(jobIdSeed, candlesByCombo, parsedInputs, tickers, timeframes, randomSamples, N);
+    const fp = fingerprint(r.results);
+    console.log(`  results: ${r.results.length}, elapsed: ${r.elapsedMs}ms`);
+    runs.push({ N, ...r, fp });
+  }
+  const reference = runs[0];
+  let ok = true;
+  for (let i = 1; i < runs.length; i++) {
+    const cmp = runs[i];
+    if (cmp.fp !== reference.fp) {
+      ok = false;
+      console.error(`\nFAIL [${label}]: N=${cmp.N} diverges from N=${reference.N} for same seed.`);
+      console.error(`  N=${reference.N} count=${reference.results.length}`);
+      console.error(`  N=${cmp.N} count=${cmp.results.length}`);
+      const linesA = reference.fp.split("\n");
+      const linesB = cmp.fp.split("\n");
+      const max = Math.max(linesA.length, linesB.length);
+      for (let j = 0; j < max; j++) {
+        if (linesA[j] !== linesB[j]) {
+          console.error(`  first diff at index ${j}:`);
+          console.error(`    N=${reference.N}: ${linesA[j] ?? "<none>"}`);
+          console.error(`    N=${cmp.N}: ${linesB[j] ?? "<none>"}`);
+          break;
+        }
+      }
+    } else {
+      console.log(`  PASS: N=${cmp.N} matches N=${reference.N} (byte-identical top-K).`);
+    }
+  }
+  return ok;
+}
+
+async function main() {
   const startDate = "2025-01-01";
   const endDate = "2025-06-01";
-  const candlesByCombo: Record<string, OHLCV[]> = {};
-  for (const c of combos) {
-    const candles = await fetchOHLCV(c.ticker, c.timeframe, startDate, endDate);
-    candlesByCombo[`${c.ticker}|${c.timeframe}`] = candles ?? [];
-    console.log(`  ${c.ticker} ${c.timeframe}: ${candles?.length ?? 0} bars`);
-  }
+
+  // Multi-combo scenario (T001c original): exercises per-combo partitioning.
+  const multiTickers = ["SOL/USDT:USDT"];
+  const multiTfs = ["15m", "2h", "4h"];
+  console.log(`Fetching candles for multi-combo scenario (${multiTickers.length * multiTfs.length} combos)…`);
+  const multiCandles = await fetchCombos(multiTickers, multiTfs, startDate, endDate);
+
+  // Single-combo scenario (T006): exercises per-config partitioning within
+  // a single combo. With 1 combo and pool N>1, the lead handles a subset of
+  // slots and merges peer slot results before refinement. Determinism here
+  // is the contractual proof that per-slot reseeding + uniform dedup work.
+  const singleTickers = ["SOL/USDT:USDT"];
+  const singleTfs = ["1h"];
+  console.log(`\nFetching candles for single-combo scenario…`);
+  const singleCandles = await fetchCombos(singleTickers, singleTfs, startDate, endDate);
 
   const parsed = parsePineScript(VSS_LIKE);
   const parsedInputs = parsed.inputs;
 
-  const seedJobId = "determinism-seed-42";
+  const multiOk = await compareRuns(
+    "multi-combo",
+    "determinism-seed-42",
+    multiCandles,
+    parsedInputs,
+    multiTickers,
+    multiTfs,
+    50,
+    [1, 4],
+  );
 
-  console.log(`\n--- Run A: pool N=1 ---`);
-  const runA = await runPool(seedJobId, candlesByCombo, parsedInputs, tickers, timeframes, 50, 1);
-  console.log(`  results: ${runA.results.length}, elapsed: ${runA.elapsedMs}ms`);
+  const singleOk = await compareRuns(
+    "single-combo",
+    "determinism-single-seed-7",
+    singleCandles,
+    parsedInputs,
+    singleTickers,
+    singleTfs,
+    200,
+    [1, 2, 4],
+  );
 
-  console.log(`\n--- Run B: pool N=4 ---`);
-  const runB = await runPool(seedJobId, candlesByCombo, parsedInputs, tickers, timeframes, 50, 4);
-  console.log(`  results: ${runB.results.length}, elapsed: ${runB.elapsedMs}ms`);
-
-  const fpA = fingerprint(runA.results);
-  const fpB = fingerprint(runB.results);
-
-  if (fpA === fpB) {
-    console.log(`\nPASS: union of top-K is IDENTICAL between N=1 and N=4 (same seed).`);
-    console.log(`  Run A elapsed: ${runA.elapsedMs}ms`);
-    console.log(`  Run B elapsed: ${runB.elapsedMs}ms`);
+  if (multiOk && singleOk) {
+    console.log(`\nPASS: all determinism scenarios identical across pool sizes.`);
     process.exit(0);
   }
-
-  console.error(`\nFAIL: result sets differ between N=1 and N=4 for the same seed.`);
-  console.error(`  N=1 count=${runA.results.length}`);
-  console.error(`  N=4 count=${runB.results.length}`);
-  // Print first diverging line for triage.
-  const linesA = fpA.split("\n");
-  const linesB = fpB.split("\n");
-  const max = Math.max(linesA.length, linesB.length);
-  for (let i = 0; i < max; i++) {
-    if (linesA[i] !== linesB[i]) {
-      console.error(`  first diff at index ${i}:`);
-      console.error(`    N=1: ${linesA[i] ?? "<none>"}`);
-      console.error(`    N=4: ${linesB[i] ?? "<none>"}`);
-      break;
-    }
-  }
+  console.error(`\nFAIL: determinism violated — see diffs above.`);
   process.exit(2);
 }
 

@@ -64,10 +64,11 @@ async function runPool(
 }
 
 async function main() {
+  // T007: single-combo real-workload bench. Exercises per-config slot
+  // partitioning within a single combo (T005). 1 ticker × 1 timeframe ×
+  // 500 random samples — same seed across pool sizes.
   const tickers = ["SOL/USDT:USDT"];
-  // Use 5m for the benchmark per T001d spec. Need ≥4 combos to exercise N=4
-  // pool partitioning, so use multiple 5m-derived timeframes.
-  const timeframes = ["5m", "15m", "1h", "4h"];
+  const timeframes = ["15m"];
   const startDate = "2025-01-01";
   const endDate = "2025-06-01";
 
@@ -80,18 +81,25 @@ async function main() {
   }
 
   const parsed = parsePineScript(VSS_LIKE);
-  const RAND_SAMPLES = 100;
-  const seedJobId = "bench-seed-100";
+  const RAND_SAMPLES = 500;
+  const seedJobId = "bench-seed-single-500";
 
-  console.log(`\nMeasuring ${RAND_SAMPLES}-config job, ${tickers.length * timeframes.length} combos…`);
+  console.log(`\nMeasuring ${RAND_SAMPLES}-config job, ${tickers.length * timeframes.length} combo (single-combo per-slot partitioning)…`);
 
-  const t1 = await runPool(seedJobId + "-n1", candlesByCombo, parsed.inputs, tickers, timeframes, RAND_SAMPLES, 1);
-  console.log(`  N=1: ${t1}ms`);
-  const t4 = await runPool(seedJobId + "-n4", candlesByCombo, parsed.inputs, tickers, timeframes, RAND_SAMPLES, 4);
-  console.log(`  N=4: ${t4}ms`);
+  const results: { N: number; ms: number }[] = [];
+  for (const N of [1, 2, 4]) {
+    const ms = await runPool(seedJobId, candlesByCombo, parsed.inputs, tickers, timeframes, RAND_SAMPLES, N);
+    console.log(`  N=${N}: ${ms}ms`);
+    results.push({ N, ms });
+  }
 
-  const speedup = (t1 / t4).toFixed(2);
-  console.log(`\nSpeedup N=4 vs N=1: ${speedup}x`);
+  console.log(`\n--- Speedup table (baseline N=1) ---`);
+  const baseline = results[0].ms;
+  for (const r of results) {
+    const speedup = (baseline / r.ms).toFixed(2);
+    const eff = ((baseline / r.ms) / r.N * 100).toFixed(0);
+    console.log(`  N=${r.N}: ${r.ms}ms  speedup=${speedup}x  efficiency=${eff}%`);
+  }
   process.exit(0);
 }
 

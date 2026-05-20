@@ -42,3 +42,37 @@ export function deriveComboSeed(jobSeed: number, comboKey: string): number {
   h ^= h >>> 15;
   return h >>> 0;
 }
+
+// .local/session_plan.md T005 — per-slot deterministic seeding.
+//
+// `deriveConfigSeed(masterSeed, comboKey, slotIdx)` returns a stable seed
+// for the random-search "slot" `slotIdx` of `comboKey` under master job
+// `masterSeed`. The same (masterSeed, comboKey, slotIdx) tuple always
+// yields the same seed regardless of which worker processes it or how the
+// pool partitioned work — this is the foundation of the determinism
+// guarantee for per-config partitioning within a combo.
+export function deriveConfigSeed(masterSeed: number, comboKey: string, slotIdx: number): number {
+  let h = deriveComboSeed(masterSeed, comboKey);
+  h = (h ^ ((slotIdx + 0x9e3779b9) >>> 0)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+
+// Per-stage deterministic seed for non-random stages (refine / deep /
+// coordinate). The lead worker reseeds its PRNG at the start of each
+// stage so the trajectory of refinement is the same whether the random
+// stage was executed by a single worker or partitioned across N peers.
+export function deriveStageSeed(masterSeed: number, comboKey: string, stage: string): number {
+  let h = deriveComboSeed(masterSeed, comboKey);
+  const tag = ":" + stage;
+  for (let i = 0; i < tag.length; i++) {
+    h ^= tag.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  h ^= h >>> 13;
+  h = Math.imul(h, 0x5bd1e995) >>> 0;
+  h ^= h >>> 15;
+  return h >>> 0;
+}

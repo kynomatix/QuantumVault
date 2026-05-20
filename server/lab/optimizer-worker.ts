@@ -1,7 +1,7 @@
 import { workerData, parentPort } from "worker_threads";
 import { runBacktest, compilePine, createSharedArrays, type OHLCV, type PinePlan, type PineSharedArrays } from "./engine";
 import type { LabPineInput, LabBacktestResult, LabJobProgress, LabCheckpoint, GuidedInsights } from "@shared/schema";
-import { makeRng, hashStringToSeed, deriveComboSeed, type SeededRng } from "./rng";
+import { makeRng, hashStringToSeed, deriveComboSeed, deriveConfigSeed, deriveStageSeed, type SeededRng } from "./rng";
 
 // Module-level seeded RNG. Reseeded per (job, combo) inside run() so that
 // optimizer behavior is fully reproducible from (jobSeed, combo) regardless
@@ -41,6 +41,19 @@ interface WorkerInput {
   //              subset, with deterministic per-combo seeding.
   randomSeed?: number;
   comboFilter?: string[];
+  // T005: per-config partitioning within a combo.
+  // When `slotsPerCombo` is provided, the random-search stage iterates ONLY
+  // the listed slot indices for each combo (round-robin partition across the
+  // pool). PRNG is reseeded per slot via deriveConfigSeed so the params for
+  // slot K of combo C are independent of which worker processed them.
+  //
+  // `isLead` selects the worker that runs the merge + refinement / deep /
+  // coordinate stages. Non-lead workers stream their per-slot random results
+  // back to the lead via the pool. `peerCount` is how many peer workers the
+  // lead must wait for before refinement.
+  slotsPerCombo?: Record<string, number[]> | null;
+  isLead?: boolean;
+  peerCount?: number;
 }
 
 type PartialResult = LiteBacktestResult | LabBacktestResult;
@@ -51,7 +64,10 @@ type WorkerMessage =
   | { type: "combo-complete"; combo: string; results: LabBacktestResult[] }
   | { type: "best-discovery"; combo: string; stage: "deep"; deepRound: number; score: number; params: Record<string, any> }
   | { type: "done"; results: LabBacktestResult[]; totalConfigsTested?: number }
-  | { type: "error"; message: string; isResourceError?: boolean };
+  | { type: "error"; message: string; isResourceError?: boolean }
+  // T005: per-slot peer<->lead random-search streaming.
+  | { type: "slot-result"; combo: string; slot: number; result: LiteBacktestResult | null }
+  | { type: "combo-random-done"; combo: string };
 
 let lastSendTime = Date.now();
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -882,15 +898,50 @@ function trimResult(r: LabBacktestResult): LabBacktestResult {
 
 let aborted = false;
 
+// T005: lead-worker state for receiving peer per-slot results during the
+// per-config partitioned random stage. Populated by the parentPort message
+// handler; drained in run() between random and refinement for each combo.
+const peerSlotResults = new Map<string, Array<LiteBacktestResult | null>>();
+const peerComboRandomDoneCount = new Map<string, number>();
+const peerComboRandomDoneResolvers = new Map<string, () => void>();
+let peerExpectedCount = 0;
+
+function notePeerCombo(combo: string): void {
+  const cur = (peerComboRandomDoneCount.get(combo) ?? 0) + 1;
+  peerComboRandomDoneCount.set(combo, cur);
+  if (cur >= peerExpectedCount) {
+    const r = peerComboRandomDoneResolvers.get(combo);
+    if (r) { peerComboRandomDoneResolvers.delete(combo); r(); }
+  }
+}
+
 parentPort?.on("message", (msg: any) => {
-  if (msg?.type === "abort") {
+  if (!msg) return;
+  if (msg.type === "abort") {
     aborted = true;
+    // Unblock any pending peer waits so the worker can exit promptly.
+    for (const [, r] of peerComboRandomDoneResolvers) r();
+    peerComboRandomDoneResolvers.clear();
+    return;
+  }
+  if (msg.type === "peer-slot-result") {
+    let arr = peerSlotResults.get(msg.combo);
+    if (!arr) { arr = []; peerSlotResults.set(msg.combo, arr); }
+    arr.push(msg.result ?? null);
+    return;
+  }
+  if (msg.type === "peer-combo-random-done") {
+    notePeerCombo(msg.combo);
+    return;
   }
 });
 
 async function run() {
-  const { jobId, config, candlesByCombo, resumeCheckpoint, randomSeed, comboFilter } = workerData as WorkerInput;
+  const { jobId, config, candlesByCombo, resumeCheckpoint, randomSeed, comboFilter, slotsPerCombo, isLead: isLeadInput, peerCount } = workerData as WorkerInput;
   const masterSeed = (typeof randomSeed === "number" ? randomSeed : hashStringToSeed(jobId)) >>> 0;
+  const isLead = isLeadInput !== false; // defaults to true for single-worker / per-combo modes
+  peerExpectedCount = peerCount ?? 0;
+  const slotsPerComboMap: Record<string, number[]> | null = slotsPerCombo ?? null;
   // Set a default RNG state from the master seed; will be re-seeded per combo
   // below so the random search for any given (jobSeed, combo) is reproducible
   // regardless of which pool worker owns it.
@@ -994,6 +1045,55 @@ async function run() {
     };
 
     const sharedArrays = pinePlan ? createSharedArrays(candles) : undefined;
+
+    // T005: assigned slot indices for this worker. When the pool runs in
+    // per-slot mode, slotsPerComboMap[key] is the round-robin subset of
+    // [0..randomSamples-1] for this worker. Otherwise (per-combo mode or
+    // single-worker), the worker runs every slot for its combos.
+    const assignedSlotsRaw: number[] = slotsPerComboMap?.[key]
+      ?? Array.from({ length: config.randomSamples }, (_, i) => i);
+    const assignedSlots = assignedSlotsRaw.slice().sort((a, b) => a - b);
+
+    // T005: non-lead fast-path. Run only assigned random slots, stream
+    // per-slot results back via the pool, then move to the next combo.
+    // Refinement / deep / coordinate stages all run on the lead.
+    if (!isLead) {
+      const baselineForFilters = {} as Record<string, never>; // unused
+      const _ = baselineForFilters; void _;
+      // sharedIndicatorCache must NOT be shared across parameter combos —
+      // each runBacktest call creates its own when undefined.
+      const sharedIndicatorCache: Map<string, any> | undefined = undefined;
+      const comboInsightsNL = config.guidedInsightsPerCombo?.[key] ?? config.guidedInsights;
+      const hasGuidedNL = !!comboInsightsNL && comboInsightsNL.paramSensitivity.length > 0;
+      const localStage = `Random Search (peer) — ${combo.ticker.split("/")[0]} ${combo.timeframe}`;
+      for (const s of assignedSlots) {
+        if (aborted) break;
+        // Per-slot deterministic seed. Same (masterSeed, key, s) → same params
+        // regardless of which worker holds the slot or pool size. No dedup
+        // here: dedup decisions would diverge across pool sizes (the "earlier
+        // slot" set is local to each worker). The lead dedups uniformly when
+        // building testedSignatures for refinement.
+        rng = makeRng(deriveConfigSeed(masterSeed, key, s));
+        const progress = s / Math.max(1, config.randomSamples);
+        const guidedRatio = hasGuidedNL ? (0.50 + progress * 0.20) : 0;
+        const useGuided = hasGuidedNL && rng.random() < guidedRatio;
+        const params = useGuided
+          ? generateGuidedParams(inputs, comboInsightsNL!)
+          : generateRandomParams(inputs);
+        const result = runBacktest(candles, params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
+        const lite = toLiteResult(result);
+        const resultMsg: LiteBacktestResult | null = meetsFiltersLite(lite, config) ? lite : null;
+        send({ type: "slot-result", combo: key, slot: s, result: resultMsg });
+        globalCurrent++;
+        sendHeartbeat(jobId, localStage, globalCurrent, grandTotal, startTime, tickerProgress);
+      }
+      send({ type: "combo-random-done", combo: key });
+      tickerProgress[key] = { status: "complete", best: 0 };
+      completedCombos.add(key);
+      delete candlesByCombo[key];
+      continue;
+    }
+
     // CORRECTNESS FIX: do NOT share the indicator cache across parameter combos.
     // The Pine runtime's indicator cache key is derived from the argument variable
     // NAME (e.g. "atr_len") rather than the resolved VALUE. Reusing a single cache
@@ -1102,32 +1202,30 @@ async function run() {
     const hasPerturbation = hasGuided && !!comboInsights?.topConfigs && comboInsights.topConfigs.length > 0;
     const searchLabel = hasPerturbation ? "Perturbation" : hasGuided ? "Guided" : "Random";
 
-    for (let s = randomStart; s < config.randomSamples; s++) {
-      if (aborted) { globalCurrent += (config.randomSamples - s); break; }
+    // T005: lead processes its assigned slots only (in per-slot mode) or
+    // all slots (per-combo / single-worker mode). Each slot is reseeded
+    // deterministically via deriveConfigSeed so that slot K of combo C
+    // always uses the same PRNG state regardless of pool size.
+    const leadSlots = assignedSlots.filter(s => s >= randomStart);
+    for (const s of leadSlots) {
+      if (aborted) { break; }
 
-      const progress = s / config.randomSamples;
+      rng = makeRng(deriveConfigSeed(masterSeed, key, s));
+
+      const progress = s / Math.max(1, config.randomSamples);
       const guidedRatio = hasGuided ? (0.50 + progress * 0.20) : 0;
       const useGuided = hasGuided && rng.random() < guidedRatio;
 
-      let params: Record<string, any>;
-      let isDuplicate = true;
-      for (let attempt = 0; attempt < 4; attempt++) {
-        params = useGuided
-          ? generateGuidedParams(inputs, comboInsights!)
-          : generateRandomParams(inputs);
-        const sig = canonicalizeParams(params, inputs);
-        if (!testedSignatures.has(sig)) {
-          testedSignatures.add(sig);
-          isDuplicate = false;
-          break;
-        }
-      }
-      if (isDuplicate) {
-        globalCurrent++;
-        continue;
-      }
-
-      const result = runBacktest(candles, params!, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
+      const params = useGuided
+        ? generateGuidedParams(inputs, comboInsights!)
+        : generateRandomParams(inputs);
+      // T005: NO dedup against testedSignatures in the random stage. With
+      // per-slot reseed each slot's params is fully deterministic; dedup
+      // here would skip slots whose params happen to match an earlier
+      // slot's — but the "earlier slot" set depends on partition mode and
+      // would diverge between N=1 (sees every prior slot) and N=4 (each
+      // worker sees only its own). Dedup uniformly after the peer merge.
+      const result = runBacktest(candles, params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache);
       const lite = toLiteResult(result);
       if (meetsFiltersLite(lite, config)) {
         comboResults.push(lite);
@@ -1164,7 +1262,55 @@ async function run() {
 
     if (aborted) continue;
 
-    comboResults.sort((a, b) => scoreLite(b) - scoreLite(a));
+    // T005: lead awaits peer slot results from the per-config-partitioned
+    // random stage, then merges them into comboResults / testedSignatures
+    // before starting refinement. This restores parity with the single-
+    // worker random trajectory: refinement sees the full unioned result
+    // set regardless of how the random stage was partitioned.
+    if (peerExpectedCount > 0) {
+      await new Promise<void>((resolve) => {
+        if ((peerComboRandomDoneCount.get(key) ?? 0) >= peerExpectedCount) { resolve(); return; }
+        peerComboRandomDoneResolvers.set(key, resolve);
+      });
+      const peers = peerSlotResults.get(key) ?? [];
+      for (const r of peers) {
+        if (!r) continue;
+        // No dedup — peer results were already filtered for meetsFilters
+        // before being sent. Dedup here would diverge from single-worker
+        // mode where the same slots were processed in slot-index order.
+        comboResults.push(r);
+      }
+      peerSlotResults.delete(key);
+    }
+
+    if (aborted) continue;
+
+    // T005: rebuild testedSignatures from the full unioned comboResults so
+    // refinement's dedup behaves the same regardless of partition mode.
+    testedSignatures.clear();
+    testedSignatures.add(canonicalizeParams(defaultParams, inputs));
+    for (const r of comboResults) {
+      testedSignatures.add(canonicalizeParams(r.params, inputs));
+    }
+    if (isResumingThisCombo && resumeRefineSeeds) {
+      for (const rs of resumeRefineSeeds) testedSignatures.add(canonicalizeParams(rs, inputs));
+    }
+
+    // T005: reseed PRNG for the refinement stage so its trajectory is a
+    // pure function of (masterSeed, comboKey), independent of how many
+    // peer slots streamed in or in what order.
+    rng = makeRng(deriveStageSeed(masterSeed, key, "refine"));
+
+    // Deterministic sort: primary by score desc, tiebreak by canonical
+    // params signature ascending. Ensures selectDiverseSeeds picks the
+    // same elements when ties are present.
+    comboResults.sort((a, b) => {
+      const ds = scoreLite(b) - scoreLite(a);
+      if (ds !== 0) return ds;
+      const sa = canonicalizeParams(a.params, inputs);
+      const sb = canonicalizeParams(b.params, inputs);
+      return sa < sb ? -1 : sa > sb ? 1 : 0;
+    });
     const topSeeds = isResumingThisCombo && resumeRefineSeeds && (resumeStage === "refine" || resumeStage === "deep")
       ? resumeRefineSeeds.map(params => ({ params } as LiteBacktestResult))
       : selectDiverseSeeds(comboResults, config.topK, inputs);
@@ -1242,6 +1388,10 @@ async function run() {
     }
 
     if (config.deepSearch && !aborted) {
+      // T005: deep-search stage is also reseeded deterministically so that
+      // (masterSeed, comboKey) fully determines its trajectory regardless
+      // of pool size / partition mode.
+      rng = makeRng(deriveStageSeed(masterSeed, key, "deep"));
       const deepRadii = [0.12, 0.08, 0.05];
       const numOptimizable = inputs.filter(i => i.optimizable && (i.type === "int" || i.type === "float")).length;
       let previousRoundBest: LiteBacktestResult[] = [];
