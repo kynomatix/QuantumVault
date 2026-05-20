@@ -1341,12 +1341,6 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
               <FilePlus2 className="w-3 h-3 mr-1" />
               New
             </Button>
-            {parsedResult && (
-              <Button variant="secondary" size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} data-testid="button-save-strategy" className="bg-white/5 hover:bg-white/10 text-white/70">
-                {saveMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
-                {strategyId ? "Update" : "Save"}
-              </Button>
-            )}
             <input ref={fileInputRef} type="file" accept=".pine,.txt,.ps" className="hidden" onChange={handleFileUpload} data-testid="input-file-upload" aria-label="Upload Pine Script file" />
             <Button size="sm" onClick={() => fileInputRef.current?.click()} disabled={isParsing} data-testid="button-upload-pine" className="bg-white/5 hover:bg-white/10 text-white/70 border border-white/10">
               <Upload className="w-3 h-3 mr-1" />
@@ -1356,6 +1350,12 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
               {isParsing ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <CheckCircle2 className="w-3 h-3 mr-1" />}
               {isParsing ? "Parsing..." : "Parse Script"}
             </Button>
+            {parsedResult && (
+              <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} data-testid="button-save-strategy" className="bg-sky-500 hover:bg-sky-400 text-white">
+                {saveMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
+                {strategyId ? "Update" : "Save"}
+              </Button>
+            )}
             <Button
               size="sm"
               variant="ghost"
