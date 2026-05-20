@@ -55,7 +55,8 @@ import {
   ShieldAlert,
   HelpCircle,
   Shield,
-  Fuel
+  Fuel,
+  DollarSign
 } from 'lucide-react';
 
 interface MarketInfo {
@@ -103,6 +104,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   const { getMaxLeverage: getMaxLeverageFromCache } = useLeverageLimits();
   const [isCreating, setIsCreating] = useState(false);
   const [isDepositingSol, setIsDepositingSol] = useState(false);
+  const [isDepositingUsdc, setIsDepositingUsdc] = useState(false);
   const [step, setStep] = useState<'create' | 'success' | 'enable_execution'>('create');
   const [createdBot, setCreatedBot] = useState<TradingBot | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
@@ -178,6 +180,17 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   // Calculate max position size (investment × leverage)
   const investmentValue = parseFloat(newBot.investmentAmount) || 0;
   const maxPositionSize = investmentValue * newBot.leverage;
+
+  // USDC capital top-up: mirror SubscribeBotModal so entering more than the
+  // agent wallet has surfaces a one-click deposit instead of a hard-block toast.
+  const availableUsdcBalance = agentBalance !== null ? parseFloat(agentBalance) : null;
+  const usdcDeficit = investmentValue > 0 && availableUsdcBalance !== null
+    ? Math.max(0, investmentValue - availableUsdcBalance)
+    : 0;
+  // Same guards as Subscribe Bot: only prompt when deficit >= $0.01 AND user
+  // entered at least the $10 minimum, so floating-point dust never triggers a
+  // "$0.00" warning.
+  const needsUsdcDeposit = usdcDeficit >= 0.01 && investmentValue >= 10;
   
   // Fetch agent balance when modal opens
   const fetchAgentBalanceOnOpen = async () => {
@@ -278,26 +291,95 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     }
   };
 
+  const handleUsdcDeposit = async () => {
+    if (usdcDeficit <= 0) return;
+
+    if (!wallet.publicKey || !wallet.signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+
+    // Round up to 2 decimals so the on-chain transfer matches the button label
+    // ("Deposit $X.XX USDC"). USDC supports 6 decimals so this is well within
+    // precision and avoids float-drift mismatches.
+    const amount = Math.ceil(usdcDeficit * 100) / 100;
+
+    setIsDepositingUsdc(true);
+    try {
+      const response = await fetch('/api/agent/deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount }),
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const error = await safeResponseJson(response);
+        throw new Error(error.error || 'USDC deposit failed');
+      }
+
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await safeResponseJson(response);
+
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      const signedTx = await wallet.signTransaction(transaction);
+
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+
+      await confirmTransactionWithFallback(connection, {
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+
+      toast({ title: `Deposited $${amount.toFixed(2)} USDC successfully` });
+
+      // Refresh agent balance + SOL gating in one call (the main wallet just
+      // paid SOL fees for this tx, so SOL state may need to update too).
+      const balanceRes = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
+      if (balanceRes.ok) {
+        const data = await safeResponseJson(balanceRes);
+        setAgentBalance(data.balance?.toString() || '0');
+        setAgentSolBalance(data.solBalance ?? null);
+        if (data.botCreationSolRequirement) {
+          setSolRequirement(data.botCreationSolRequirement);
+        }
+      }
+    } catch (error: any) {
+      console.error('USDC deposit failed:', error);
+      toast({
+        title: 'USDC Deposit Failed',
+        description: error.message || 'Please try again',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsDepositingUsdc(false);
+    }
+  };
+
   const createBot = async () => {
     if (!walletAddress || !newBot.name) {
       toast({ title: 'Please enter a bot name', variant: 'destructive' });
       return;
     }
     
-    // Investment amount is what gets deposited to the bot's subaccount
+    // Investment amount is what gets deposited to the bot's subaccount.
+    // Shortfall against the agent USDC balance is handled by the inline
+    // "Deposit $X.XX USDC" button (which swaps in for the Create Bot button
+    // while needsUsdcDeposit is true), so we don't show the old destructive
+    // toast anymore. We still guard defensively: if the balance hasn't loaded
+    // yet, or the entered amount > balance, bail out so the inline deposit
+    // UX can take over instead of the user submitting blind.
     const fundingAmount = parseFloat(newBot.investmentAmount) || 0;
-    const availableBalance = agentBalance ? parseFloat(agentBalance) : 0;
-    
-    // Validate funding amount if provided
-    if (fundingAmount > 0 && fundingAmount > availableBalance) {
-      toast({ 
-        title: 'Insufficient balance', 
-        description: `You only have $${availableBalance.toFixed(2)} available in your agent wallet`,
-        variant: 'destructive' 
-      });
+    if (fundingAmount > 0 && availableUsdcBalance === null) {
+      toast({ title: 'Checking balance…', description: 'Please wait a moment for your wallet balance to load.' });
       return;
     }
-    
+    if (needsUsdcDeposit) {
+      // Should be unreachable because the footer swaps to the Deposit button,
+      // but keep a guard so we never silently bypass the gating.
+      return;
+    }
+
     setIsCreating(true);
     try {
       // Step 1: Create the bot
@@ -449,6 +531,28 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
         </DialogDescription>
       </DialogHeader>
       
+      {/* USDC Capital Shortfall Warning — only show when SOL gating is satisfied
+          so the user resolves SOL first (the SOL deposit is the cheaper prereq). */}
+      {needsUsdcDeposit && (!solRequirement || solRequirement.canCreate) && (
+        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mt-2" data-testid="warning-usdc-insufficient-create-bot">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-yellow-400">
+                Insufficient USDC for Capital
+              </p>
+              <p className="text-xs text-muted-foreground">
+                This bot needs ${investmentValue.toFixed(2)} USDC.
+                Your agent wallet has ${(availableUsdcBalance ?? 0).toFixed(2)} USDC.
+              </p>
+              <p className="text-xs text-yellow-400/80" data-testid="text-usdc-deficit-create-bot">
+                Please deposit at least <span className="font-semibold">${usdcDeficit.toFixed(2)} USDC</span> to your agent wallet.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* SOL Balance Warning */}
       {solRequirement && !solRequirement.canCreate && (
         <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mt-2" data-testid="warning-sol-insufficient">
@@ -731,7 +835,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       </div>
 
       <DialogFooter>
-        <Button variant="outline" onClick={handleClose} disabled={isCreating || isDepositingSol}>
+        <Button variant="outline" onClick={handleClose} disabled={isCreating || isDepositingSol || isDepositingUsdc}>
           Cancel
         </Button>
         {solRequirement && !solRequirement.canCreate ? (
@@ -753,10 +857,36 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
               </>
             )}
           </Button>
+        ) : needsUsdcDeposit ? (
+          <Button
+            onClick={handleUsdcDeposit}
+            disabled={isDepositingUsdc}
+            className="bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600"
+            data-testid="button-deposit-usdc-for-bot"
+          >
+            {isDepositingUsdc ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Depositing...
+              </>
+            ) : (
+              <>
+                <DollarSign className="w-4 h-4 mr-2" />
+                Deposit ${usdcDeficit.toFixed(2)} USDC
+              </>
+            )}
+          </Button>
         ) : (
           <Button 
             onClick={createBot} 
-            disabled={isCreating || !newBot.name}
+            disabled={
+              isCreating ||
+              !newBot.name ||
+              // Don't allow Create until we actually know the agent balance for
+              // the entered investment amount — otherwise the user could click
+              // Create before `needsUsdcDeposit` has had a chance to evaluate.
+              (investmentValue > 0 && (isLoadingBalance || availableUsdcBalance === null))
+            }
             className="bg-gradient-to-r from-primary to-accent"
             data-testid="button-confirm-create-bot"
           >
