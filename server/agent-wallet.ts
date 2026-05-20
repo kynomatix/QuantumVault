@@ -1,5 +1,4 @@
 import { Connection, PublicKey, Keypair, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { encrypt } from './crypto';
 import bs58 from 'bs58';
 import BN from 'bn.js';
 
@@ -46,17 +45,21 @@ function getAssociatedTokenAddressSync(
 
 export interface AgentWallet {
   publicKey: string;
-  encryptedPrivateKey: string;
+  secretKey: Uint8Array;
 }
 
+/**
+ * V3 Phase 5b: generate a fresh agent keypair WITHOUT performing any legacy
+ * AGENT_ENCRYPTION_KEY encryption. Callers are responsible for immediately
+ * V3-encrypting the returned `secretKey` via `encryptAgentKeyV3` (session-v3.ts)
+ * and persisting only the V3 column. No code path is allowed to write the
+ * legacy `agent_private_key_encrypted` column for new wallets.
+ */
 export function generateAgentWallet(): AgentWallet {
   const keypair = Keypair.generate();
-  const privateKeyBase58 = bs58.encode(keypair.secretKey);
-  const encryptedPrivateKey = encrypt(privateKeyBase58);
-  
   return {
     publicKey: keypair.publicKey.toString(),
-    encryptedPrivateKey,
+    secretKey: keypair.secretKey,
   };
 }
 

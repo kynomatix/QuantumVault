@@ -2,7 +2,10 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import { encrypt as legacyEncrypt, decrypt } from "./crypto";
+// V3 Phase 5b: legacy crypto helpers (encrypt/decrypt) are no longer imported
+// here. Every agent-key and bot-subaccount-key write goes through the V3
+// helpers in `./session-v3`. The legacy column is left untouched for existing
+// rows; new writes only ever populate the V3 column.
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import { storage, DatabaseStorage } from "./storage";
@@ -2641,21 +2644,19 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           if (session) {
             const generatedWallet = generateAgentWalletWithMnemonic();
             const agentPublicKey = generatedWallet.keypair.publicKey.toString();
-            
-            // Encrypt private key with legacy method for backward compatibility
-            const privateKeyBase58 = bs58.encode(generatedWallet.secretKeyBuffer);
-            const encryptedPrivateKey = legacyEncrypt(privateKeyBase58);
-            
-            // Encrypt the private key with v3 encryption (UMK-based)
+
+            // V3 Phase 5b: encrypt the private key with v3 (UMK-based) only. The
+            // legacy `agent_private_key_encrypted` column is intentionally left
+            // NULL for new wallets — Phase 6 will drop it entirely.
             const encryptedV3 = encryptAgentKeyV3(session.umk, generatedWallet.secretKeyBuffer, walletAddress);
-            
+
             // Store the mnemonic encrypted with UMK
             await encryptAndStoreMnemonic(walletAddress, generatedWallet.mnemonicBuffer, session.umk);
-            
-            // Store both legacy and v3 encrypted keys (same keypair, different encryption methods)
-            await storage.updateWalletAgentKeys(walletAddress, agentPublicKey, encryptedPrivateKey);
+
+            // Persist the agent public key and V3 ciphertext only.
+            await storage.updateWallet(walletAddress, { agentPublicKey });
             await storage.updateWalletAgentKeyV3(walletAddress, encryptedV3);
-            
+
             console.log(`[Agent] Generated new agent wallet with mnemonic for ${walletAddress}: ${agentPublicKey}`);
           }
         }
@@ -3775,19 +3776,17 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const generatedWallet = generateAgentWalletWithMnemonic();
       const newAgentPublicKey = generatedWallet.keypair.publicKey.toString();
-      
-      // Encrypt private key with legacy method for backward compatibility
-      const privateKeyBase58 = bs58.encode(generatedWallet.secretKeyBuffer);
-      const encryptedPrivateKey = legacyEncrypt(privateKeyBase58);
-      
-      // Encrypt with v3 encryption (UMK-based)
+
+      // V3 Phase 5b: encrypt with v3 (UMK-based) only. The legacy
+      // `agent_private_key_encrypted` column is intentionally left NULL for
+      // newly-generated wallets — Phase 6 will drop it entirely.
       const encryptedV3 = encryptAgentKeyV3(session.umk, generatedWallet.secretKeyBuffer, userWallet);
-      
+
       // Store mnemonic encrypted with UMK
       await encryptAndStoreMnemonic(userWallet, generatedWallet.mnemonicBuffer, session.umk);
-      
-      // Update database with new agent wallet
-      await storage.updateWalletAgentKeys(userWallet, newAgentPublicKey, encryptedPrivateKey);
+
+      // Update database with new agent wallet (public key + V3 ciphertext only).
+      await storage.updateWallet(userWallet, { agentPublicKey: newAgentPublicKey });
       await storage.updateWalletAgentKeyV3(userWallet, encryptedV3);
       
       log(`New agent wallet generated: ${newAgentPublicKey.slice(0, 8)}...`);
@@ -6479,9 +6478,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       let nextSubaccountId: number = 0;
       let botSubaccountPublicKey: string | null = null;
-      let botSubaccountKeyEncrypted: string | null = null;
-      // Phase 4b: capture the generated secret key so we can write V3 ciphertext
-      // (which requires bot.id in AAD) after createTradingBot returns.
+      // V3 Phase 5b: the legacy `bot_subaccount_key_encrypted` column is no
+      // longer written for new bots. Phase 4b's V3 path (post-insert) is the
+      // only writer, and `bot_subaccount_key_encrypted_v3` is the only column
+      // populated. Phase 6 will drop the legacy column entirely.
       let pendingBotSecretKeyForV3: Uint8Array | null = null;
       let subaccountStatus: string = 'none';
       // 12h Option A: holds the adapter-returned canonical numeric subaccount ID for
@@ -6690,7 +6690,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         // forbids. The tag is a property of the protocol the bot was created against,
         // not of how its subaccount is authed — both modes need the tag.
         activeProtocol: defaultAdapter.protocolName,
-        botSubaccountKeyEncrypted,
         subaccountStatus,
         subaccountAuthMode,
         isActive: true,
