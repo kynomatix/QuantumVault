@@ -48,7 +48,7 @@ function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entr
 }
 
 async function driftExecutePerpOrder(
-  encryptedKey: string | Uint8Array, market: string, side: 'long' | 'short', size: number,
+  encryptedKey: Uint8Array, market: string, side: 'long' | 'short', size: number,
   subAccountId: number, reduceOnly: boolean, _slippageBps: number,
   _privateKeyBase58?: string, agentPublicKey?: string
 ): Promise<any> {
@@ -78,7 +78,7 @@ async function driftExecutePerpOrder(
 }
 
 async function driftClosePerpPosition(
-  encryptedKey: string | Uint8Array, market: string, subAccountId: number,
+  encryptedKey: Uint8Array, market: string, subAccountId: number,
   size?: number, _slippageBps?: number, _privateKeyBase58?: string,
   agentPublicKey?: string, side?: 'long' | 'short'
 ): Promise<any> {
@@ -135,7 +135,7 @@ async function driftGetPerpPositions(agentPublicKey: string, subAccountId: numbe
   }
 }
 
-async function driftSettleAllPnl(encryptedKey: string | Uint8Array, subAccountId: number): Promise<any> {
+async function driftSettleAllPnl(encryptedKey: Uint8Array, subAccountId: number): Promise<any> {
   try {
     const adapter = getDefaultAdapter();
     if (!adapter.getCapabilities().supportsSettlePnl) {
@@ -154,7 +154,7 @@ async function driftSettleAllPnl(encryptedKey: string | Uint8Array, subAccountId
 }
 
 async function driftExecuteAgentWithdraw(
-  agentPublicKey: string, encryptedKey: string | Uint8Array, amount: number, subAccountId: number,
+  agentPublicKey: string, encryptedKey: Uint8Array, amount: number, subAccountId: number,
   feeContext?: { tradingBotId?: string | null; context?: string },
 ): Promise<any> {
   try {

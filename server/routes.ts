@@ -29,13 +29,9 @@ function _subIdStr(subAccountId: number): string | undefined {
  * Phase 4 background services) and continue using the legacy decrypt until
  * their phase migrates them.
  */
-function _decryptToSecretKey(input: string | Uint8Array): { secretKey: Uint8Array; publicKey: string } {
-  if (input instanceof Uint8Array) {
-    const keypair = Keypair.fromSecretKey(input);
-    return { secretKey: input, publicKey: keypair.publicKey.toBase58() };
-  }
-  const keypair = resolveAgentKeypair(input);
-  return { secretKey: keypair.secretKey, publicKey: keypair.publicKey.toBase58() };
+function _decryptToSecretKey(input: Uint8Array): { secretKey: Uint8Array; publicKey: string } {
+  const keypair = Keypair.fromSecretKey(input);
+  return { secretKey: input, publicKey: keypair.publicKey.toBase58() };
 }
 
 interface BotSubaccountContext {
@@ -189,7 +185,7 @@ async function sweepPacificaSubaccount(
  * needed (it zeroizes the buffer). For the agent-key path `cleanup` is a noop.
  */
 async function _resolveSigningContext(
-  agentEncryptedKey: string | Uint8Array,
+  agentEncryptedKey: Uint8Array,
   subAccountId: number,
   botCtx: BotSubaccountContext | null,
 ): Promise<{ secretKey: Uint8Array; publicKey: string; subaccountId: string | undefined; cleanup: () => void }> {
@@ -307,26 +303,14 @@ async function buildAgentDriftWithdrawTransaction(_a: string, _b: string, _c: nu
 
 async function executeAgentDeposit(
   agentPublicKey: string,
-  privateKeyOrEncrypted: string | Uint8Array,
+  agentSecretKey: Uint8Array,
   amountUsdc: number,
   subAccountId: number = 0,
-  isPreDecrypted: boolean = false,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
-    let secretKey: Uint8Array;
-    if (privateKeyOrEncrypted instanceof Uint8Array) {
-      // Phase 3: V3-strict callers pass a pre-decrypted Uint8Array directly.
-      secretKey = privateKeyOrEncrypted;
-    } else if (isPreDecrypted) {
-      const bs58Mod = await import('bs58');
-      const bs58Default = bs58Mod.default || bs58Mod;
-      secretKey = bs58Default.decode(privateKeyOrEncrypted);
-    } else {
-      secretKey = resolveAgentKeypair(privateKeyOrEncrypted).secretKey;
-    }
     const result = await getDefaultAdapter().executeDeposit({
       agentPublicKey,
-      agentSecretKey: secretKey,
+      agentSecretKey,
       amount: amountUsdc,
       subaccountId: _subIdStr(subAccountId),
     });
@@ -338,7 +322,7 @@ async function executeAgentDeposit(
 
 async function executeAgentDriftWithdraw(
   agentPublicKey: string,
-  encryptedPrivateKey: string | Uint8Array,
+  encryptedPrivateKey: Uint8Array,
   amountUsdc: number,
   subAccountId: number = 0,
   feeContext?: { tradingBotId?: string | null; context?: string },
@@ -399,7 +383,7 @@ async function recordPacificaWithdrawFeeIfApplicable(args: {
 
 async function executeAgentTransferBetweenSubaccounts(
   agentPublicKey: string,
-  encryptedPrivateKey: string | Uint8Array,
+  encryptedPrivateKey: Uint8Array,
   fromSubAccountId: number,
   toSubAccountId: number,
   amountUsdc: number,
@@ -463,7 +447,7 @@ async function getBatchPerpPositions(walletAddress: string, subAccountIds: numbe
 }
 
 async function executePerpOrder(
-  encryptedPrivateKey: string | Uint8Array,
+  encryptedPrivateKey: Uint8Array,
   market: string,
   side: 'long' | 'short',
   sizeInBase: number,
@@ -538,7 +522,7 @@ async function getExchangeAccountInfoForBot(agentPublicKey: string, subAccountId
 }
 
 async function closePerpPosition(
-  encryptedPrivateKey: string | Uint8Array,
+  encryptedPrivateKey: Uint8Array,
   market: string,
   subAccountId: number = 0,
   positionSizeBase?: number,
@@ -617,7 +601,7 @@ async function discoverOnChainSubaccounts(walletAddress: string): Promise<number
 }
 
 async function closeDriftSubaccount(
-  encryptedPrivateKey: string | Uint8Array,
+  encryptedPrivateKey: Uint8Array,
   subAccountId: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
@@ -633,7 +617,7 @@ async function closeDriftSubaccount(
 }
 
 async function settleAllPnl(
-  encryptedPrivateKey: string | Uint8Array,
+  encryptedPrivateKey: Uint8Array,
   subAccountId: number,
 ): Promise<{ success: boolean; settledMarkets?: any[]; error?: string }> {
   try {
@@ -841,7 +825,7 @@ interface TradeSizingParams {
   // already-decrypted secret key (Uint8Array) from decryptAgentKeyStrict.
   // Subscriber fan-out always passes Uint8Array; remaining string callers
   // are out-of-scope until their phase migrates.
-  agentPrivateKeyEncrypted: string | Uint8Array;
+  agentPrivateKeyEncrypted: Uint8Array;
   subAccountId: number;
   botId: string;
   walletAddress: string;
@@ -1000,7 +984,6 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
               agentPrivateKeyEncrypted,
               depositAmount,
               subAccountId,
-              false
             );
 
             if (depositResult.success) {
@@ -1171,7 +1154,6 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
               agentPrivateKeyEncrypted,
               depositAmount,
               subAccountId,
-              false
             );
 
             if (depositResult.success) {
@@ -1296,7 +1278,7 @@ async function distributeCreatorProfitShare(params: {
   // decryptAgentKeyStrict; legacy IOU-retry callers still pass the encrypted
   // string blob. Downstream helpers (settleAllPnl, executeAgentDriftWithdraw,
   // payCreatorAndReferrals → transferUsdcToWallet) already accept both.
-  subscriberEncryptedPrivateKey: string | Uint8Array;
+  subscriberEncryptedPrivateKey: Uint8Array;
   driftSubaccountId: number;
   realizedPnl: number;
   tradeId: string;
@@ -1532,7 +1514,7 @@ async function payOneReferralLeg(params: {
   subscriberAgentPublicKey: string;
   // V3 Phase 3b: string for legacy callers, Uint8Array for live subscriber
   // fan-out (post-decryptAgentKeyStrict). transferUsdcToWallet handles both.
-  subscriberEncryptedPrivateKey: string | Uint8Array;
+  subscriberEncryptedPrivateKey: Uint8Array;
   leg: ReferralLeg;
 }): Promise<{ status: 'paid' | 'pending' | 'skipped'; signature?: string; error?: string }> {
   const { sourceType, sourceId, refereeWallet, fundingWallet, subscriberAgentPublicKey, subscriberEncryptedPrivateKey, leg } = params;
@@ -1596,7 +1578,7 @@ async function payCreatorAndReferrals(params: {
   subscriberAgentPublicKey: string;
   // V3 Phase 3b: string for legacy/IOU-retry callers, Uint8Array for live
   // subscriber fan-out (post-decryptAgentKeyStrict).
-  subscriberEncryptedPrivateKey: string | Uint8Array;
+  subscriberEncryptedPrivateKey: Uint8Array;
   creatorWalletAddress: string;
   profitShareAmount: number;
   sourceType: string;
@@ -4297,10 +4279,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       const result = await executeAgentDeposit(
         wallet.agentPublicKey,
-        privateKeyBase58,
+        secretKeyCopy,
         amount,
         subAccountId,
-        true // isPreDecrypted
       );
       
       agentKeyResult.cleanup();
@@ -8696,10 +8677,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 }).catch(err => console.error('[Webhook] Profit share error:', err));
               }
 
-              if (bot.profitReinvest) {
+              if (bot.profitReinvest && getDefaultAdapter().getCapabilities().supportsSettlePnl) {
                 try {
                   console.log(`[Webhook] Settling PnL for subaccount ${subAccountId} (profit reinvest enabled)`);
-                  const settleResult = await settleAllPnl(wallet.agentPublicKey!, subAccountId);
+                  const settleResult = await settleAllPnl(agentKeyResult.secretKey, subAccountId);
                   if (settleResult.success) {
                     console.log(`[Webhook] PnL settled for ${settleResult.settledMarkets?.length || 0} market(s)`);
                   } else {
@@ -9097,10 +9078,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             
             // SETTLE PNL after flip close to make profits available for the new position
             // This MUST stay blocking - profits need to be available as margin for the new OPEN
-            if (bot.profitReinvest) {
+            if (bot.profitReinvest && getDefaultAdapter().getCapabilities().supportsSettlePnl) {
               try {
                 console.log(`[Webhook] Settling PnL for subaccount ${subAccountId} after flip close (profit reinvest enabled)`);
-                const settleResult = await settleAllPnl(wallet.agentPublicKey!, subAccountId);
+                const settleResult = await settleAllPnl(agentKeyResult.secretKey, subAccountId);
                 if (settleResult.success) {
                   console.log(`[Webhook] PnL settled for ${settleResult.settledMarkets?.length || 0} market(s)`);
                 } else {
@@ -9984,10 +9965,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             }
             
             // SETTLE PNL: Convert realized PnL to usable USDC balance for profit reinvest
-            if (bot.profitReinvest) {
+            if (bot.profitReinvest && getDefaultAdapter().getCapabilities().supportsSettlePnl) {
               try {
                 console.log(`[User Webhook] Settling PnL for subaccount ${subAccountId} (profit reinvest enabled)`);
-                const settleResult = await settleAllPnl(wallet.agentPublicKey, subAccountId);
+                const settleResult = await settleAllPnl(agentKeyResult.secretKey, subAccountId);
                 if (settleResult.success) {
                   console.log(`[User Webhook] PnL settled for ${settleResult.settledMarkets?.length || 0} market(s)`);
                 } else {
@@ -12487,7 +12468,6 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 retryAgentSecret,
                 depositAmount,
                 subAccountId,
-                false
               );
               
               if (depositResult.success) {

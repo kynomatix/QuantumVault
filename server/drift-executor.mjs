@@ -1149,38 +1149,31 @@ function decryptPrivateKey(input) {
   return input;
 }
 
-// Creates a DriftClient with keypair
-// Supports two modes:
-// 1. Pre-decrypted: privateKeyBase58 provided directly (v3 security path)
-// 2. Legacy: encryptedPrivateKey that needs decryption (backward compatibility)
+// Creates a DriftClient with keypair.
+// V3 Phase 4c: the spawn wire format only carries plaintext base58
+// (`privateKeyBase58`). The legacy `encryptedPrivateKey` branch has been
+// retired — the parent (drift-service.ts) is now solely responsible for
+// turning a Uint8Array secret key into plaintext base58 before spawn.
 async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex = null) {
-  const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey } = keyInput;
-  
+  const { privateKeyBase58, expectedAgentPubkey } = keyInput;
+
   // Use RPC with automatic failover to backup
   const { connection, rpcUrl, usingBackup } = await getWorkingConnection();
   if (usingBackup) {
     console.error('[Executor] Using backup RPC for this trade');
   }
-  
-  let keyBase58;
-  if (privateKeyBase58) {
-    // v3 path: key already decrypted by webhook handler
-    console.error('[Executor] Using pre-decrypted key [v3 security path]');
-    console.error(`[Executor] Key length: ${privateKeyBase58.length} chars, first4: ${privateKeyBase58.slice(0, 4)}...`);
-    
-    // VALIDATION: A base58-encoded 64-byte key should be approximately 87-88 characters
-    if (privateKeyBase58.length < 80 || privateKeyBase58.length > 95) {
-      throw new Error(`[Executor] Invalid base58 key length: ${privateKeyBase58.length} (expected 87-88 chars for 64-byte key)`);
-    }
-    
-    keyBase58 = privateKeyBase58;
-  } else if (encryptedPrivateKey) {
-    // Legacy path: decrypt here (backward compatibility during transition)
-    console.error('[Executor] Using legacy encrypted key [legacy decryption path]');
-    keyBase58 = decryptPrivateKey(encryptedPrivateKey);
-  } else {
-    throw new Error('[Executor] No private key provided (neither privateKeyBase58 nor encryptedPrivateKey)');
+
+  if (!privateKeyBase58) {
+    throw new Error('[Executor] No privateKeyBase58 provided (V3 Phase 4c: encrypted-blob wire format retired)');
   }
+  console.error('[Executor] Using pre-decrypted key [v3 security path]');
+  console.error(`[Executor] Key length: ${privateKeyBase58.length} chars, first4: ${privateKeyBase58.slice(0, 4)}...`);
+
+  // VALIDATION: A base58-encoded 64-byte key should be approximately 87-88 characters
+  if (privateKeyBase58.length < 80 || privateKeyBase58.length > 95) {
+    throw new Error(`[Executor] Invalid base58 key length: ${privateKeyBase58.length} (expected 87-88 chars for 64-byte key)`);
+  }
+  const keyBase58 = privateKeyBase58;
   
   // Decode the base58 key to bytes
   const secretKeyBytes = bs58.decode(keyBase58);
@@ -1303,7 +1296,7 @@ async function createDriftClient(keyInput, subAccountId, requiredPerpMarketIndex
 }
 
 async function executeTrade(command) {
-  const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey, market, side, sizeInBase, subAccountId, reduceOnly } = command;
+  const { privateKeyBase58, expectedAgentPubkey, market, side, sizeInBase, subAccountId, reduceOnly } = command;
   
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
@@ -1314,7 +1307,7 @@ async function executeTrade(command) {
   
   console.error(`[Executor] Creating DriftClient for subaccount ${subAccountId}, market ${market} -> index ${marketIndex}`);
   
-  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId, marketIndex);
+  const driftClient = await createDriftClient({ privateKeyBase58, expectedAgentPubkey }, subAccountId, marketIndex);
   
   try {
     // Try to subscribe with timeout - SDK can hang on subscription
@@ -1567,7 +1560,7 @@ async function executeTrade(command) {
 }
 
 async function closePosition(command) {
-  const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey, market, subAccountId, positionSizeBase } = command;
+  const { privateKeyBase58, expectedAgentPubkey, market, subAccountId, positionSizeBase } = command;
   
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
@@ -1581,7 +1574,7 @@ async function closePosition(command) {
   // Close uses full subscription (no marketIndex) to ensure SDK fully loads user accounts
   // for non-zero subaccounts. Minimal subscription causes getUser() to fail because
   // subscribe() finishes before BulkAccountLoader loads user account data.
-  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId);
+  const driftClient = await createDriftClient({ privateKeyBase58, expectedAgentPubkey }, subAccountId);
   
   try {
     // Add subscribe timeout matching executeTrade() - prevents hanging on SDK subscribe
@@ -1759,11 +1752,11 @@ async function closePosition(command) {
 }
 
 async function settlePnl(command) {
-  const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey, subAccountId } = command;
+  const { privateKeyBase58, expectedAgentPubkey, subAccountId } = command;
   
   console.error(`[Executor] Settling PnL for subaccount ${subAccountId}`);
   
-  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId);
+  const driftClient = await createDriftClient({ privateKeyBase58, expectedAgentPubkey }, subAccountId);
   
   try {
     await driftClient.subscribe();
@@ -1820,14 +1813,14 @@ async function settlePnl(command) {
 }
 
 async function deleteSubaccount(command) {
-  const { privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey, subAccountId } = command;
+  const { privateKeyBase58, expectedAgentPubkey, subAccountId } = command;
   
   console.error(`[Executor] Deleting subaccount ${subAccountId} to reclaim rent`);
   
   // Note: Subaccount 0 CAN be deleted if it's empty and has no referred status
   // However, accounts created through referral programs may not be deletable
   
-  const driftClient = await createDriftClient({ privateKeyBase58, encryptedPrivateKey, expectedAgentPubkey }, subAccountId);
+  const driftClient = await createDriftClient({ privateKeyBase58, expectedAgentPubkey }, subAccountId);
   
   try {
     await driftClient.subscribe();
@@ -1961,28 +1954,23 @@ function getAssociatedTokenAddress(mint, owner) {
 }
 
 async function depositToDrift(command) {
-  const { privateKeyBase58, encryptedPrivateKey, amountUsdc, subAccountId, agentPublicKey } = command;
-  
+  const { privateKeyBase58, amountUsdc, subAccountId, agentPublicKey } = command;
+
   console.error(`[Executor] Deposit ${amountUsdc} USDC to subaccount ${subAccountId}`);
-  
-  const rpcUrl = process.env.SOLANA_RPC_URL || 
-    (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : 
+
+  const rpcUrl = process.env.SOLANA_RPC_URL ||
+    (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` :
     'https://api.mainnet-beta.solana.com');
-  
+
   const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
-  
-  // Decode the private key
-  let keyBase58;
-  if (privateKeyBase58) {
-    console.error('[Executor] Using pre-decrypted key [v3 security path]');
-    console.error(`[Executor] Received privateKeyBase58: length=${privateKeyBase58?.length || 0}, type=${typeof privateKeyBase58}`);
-    keyBase58 = privateKeyBase58;
-  } else if (encryptedPrivateKey) {
-    console.error('[Executor] Using legacy encrypted key [legacy decryption path]');
-    keyBase58 = decryptPrivateKey(encryptedPrivateKey);
-  } else {
-    throw new Error('[Executor] No private key provided');
+
+  // V3 Phase 4c: wire format only carries plaintext base58.
+  if (!privateKeyBase58) {
+    throw new Error('[Executor] No privateKeyBase58 provided (V3 Phase 4c: encrypted-blob wire format retired)');
   }
+  console.error('[Executor] Using pre-decrypted key [v3 security path]');
+  console.error(`[Executor] Received privateKeyBase58: length=${privateKeyBase58.length}, type=${typeof privateKeyBase58}`);
+  const keyBase58 = privateKeyBase58;
   
   // Decode and validate
   const secretKeyBytes = bs58.decode(keyBase58);

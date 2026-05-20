@@ -10,42 +10,18 @@ import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 import { shouldUseSwift } from './swift-config';
 import { executeSwiftOrder, type SwiftOrderResult } from './swift-executor';
 import { AdapterHealthTracker } from './protocol/adapter-health';
-import { decrypt, encrypt } from './crypto';
-
-// V3 Phase 4: All public Drift-service entry points accept either a legacy
-// encrypted-string blob OR a freshly decrypted raw secret key (Uint8Array).
-// Background paths (trade retry, profit-share retry, referral retry, orphan
-// cleanup) now strict-decrypt via V3 and pass Uint8Array — they MUST never
-// fall back to the legacy DB blob. This helper normalizes Uint8Array input
-// back to encrypted-string form so the existing downstream code paths
-// (_toAgentKeypair + subprocess executor, which is out-of-scope until 4c)
-// continue to work without further refactor.
-function _normalizeAgentKey(input: string | Uint8Array): string {
-  if (typeof input === 'string') return input;
-  return encrypt(bs58.encode(input));
+// V3 Phase 4/4c: All public Drift-service entry points accept the freshly
+// V3-strict-decrypted raw secret key (Uint8Array) only. The legacy
+// encrypted-string overload has been retired — only `migrateAgentKeyToV3`
+// in session-v3.ts may still read legacy blobs. The drift-executor.mjs
+// subprocess wire format likewise no longer accepts an encrypted blob;
+// the parent passes plaintext base58 over stdin only.
+function _toAgentKeypair(input: Uint8Array): Keypair {
+  return Keypair.fromSecretKey(input);
 }
 
-// V3 Phase 4: derive a Keypair directly from either a raw Uint8Array secret
-// (V3 strict-decrypt path) or a legacy encrypted string blob. Replaces the
-// legacy agent-wallet keypair builder so Phase 4 acceptance gate (no
-// reference to that symbol anywhere in this file) is satisfied.
-function _toAgentKeypair(input: string | Uint8Array): Keypair {
-  if (input instanceof Uint8Array) {
-    return Keypair.fromSecretKey(input);
-  }
-  return Keypair.fromSecretKey(bs58.decode(decrypt(input)));
-}
-
-// V3 Phase 4c: produce plaintext base58 of the agent secret key for handoff
-// to the drift-executor.mjs subprocess. Phase 4c moves ALL legacy decryption
-// out of the child process — the parent is now solely responsible. Accepts
-// either a raw Uint8Array (V3 strict-decrypt path) or a legacy encrypted
-// string blob (decrypted here in the parent, never in the child).
-function _toBase58Plaintext(input: string | Uint8Array): string {
-  if (input instanceof Uint8Array) {
-    return bs58.encode(input);
-  }
-  return decrypt(input);
+function _toBase58Plaintext(input: Uint8Array): string {
+  return bs58.encode(input);
 }
 import { getMarketPrice } from './drift-price';
 import { buildPerpMarketNames, buildPerpMarketIndices, syncFromSdk, writeExecutorJson, CANONICAL_PERP_MARKETS, PERP_ALIASES } from './market-registry';
@@ -521,7 +497,7 @@ async function ensureAgentHasSolForFees(agentPubkey: PublicKey): Promise<{ succe
 }
 
 async function getAgentDriftClient(
-  encryptedPrivateKeyRaw: string | Uint8Array,
+  encryptedPrivateKeyRaw: Uint8Array,
   subAccountId: number = 0
 ): Promise<{ driftClient: any; cleanup: () => Promise<void> }> {
   // Use cached SDK for static components
@@ -2287,10 +2263,9 @@ async function initializeDriftAccountsIfNeeded(
 
 export async function buildAgentDriftDepositTransaction(
   agentPublicKey: string,
-  encryptedPrivateKeyRaw: string | Uint8Array,
+  encryptedPrivateKeyRaw: Uint8Array,
   amountUsdc: number,
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
-  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
   const agentKeypair = _toAgentKeypair(encryptedPrivateKeyRaw);
@@ -2369,10 +2344,9 @@ export async function buildAgentDriftDepositTransaction(
 
 export async function buildAgentDriftWithdrawTransaction(
   agentPublicKey: string,
-  encryptedPrivateKeyRaw: string | Uint8Array,
+  encryptedPrivateKeyRaw: Uint8Array,
   amountUsdc: number,
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
-  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
   const agentKeypair = _toAgentKeypair(encryptedPrivateKeyRaw);
@@ -2449,10 +2423,9 @@ export async function buildAgentDriftWithdrawTransaction(
 
 export async function executeAgentDriftDeposit(
   agentPublicKey: string,
-  privateKeyOrEncrypted: string,
+  agentSecretKey: Uint8Array,
   amountUsdc: number,
   subAccountId: number = 0,
-  isPreDecrypted: boolean = false,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const connection = getConnection();
@@ -2488,15 +2461,12 @@ export async function executeAgentDriftDeposit(
       };
     }
     
-    console.log(`[Drift] Using subprocess executor for deposit: ${amountUsdc} USDC to subaccount ${subAccountId} (v3=${isPreDecrypted})`);
-    
-    // Use subprocess executor to avoid ESM/CJS DriftClient loading issues
-    // The drift-executor.mjs runs in pure ESM mode where DriftClient loads correctly
-    // V3 Phase 4c: the parent is now solely responsible for decryption — the
-    // child only ever receives plaintext base58 (legacy path decrypts here).
-    const privateKeyBase58 = isPreDecrypted
-      ? privateKeyOrEncrypted
-      : decrypt(privateKeyOrEncrypted);
+    console.log(`[Drift] Using subprocess executor for deposit: ${amountUsdc} USDC to subaccount ${subAccountId}`);
+
+    // Use subprocess executor to avoid ESM/CJS DriftClient loading issues.
+    // V3 Phase 4c: parent is solely responsible for handing plaintext base58
+    // to the child; the child no longer accepts an encrypted blob.
+    const privateKeyBase58 = bs58.encode(agentSecretKey);
     const command = {
       action: 'deposit',
       privateKeyBase58,
@@ -2561,11 +2531,10 @@ export async function executeAgentDriftDeposit(
 
 export async function executeAgentDriftWithdraw(
   agentPublicKey: string,
-  encryptedPrivateKeyRaw: string | Uint8Array,
+  encryptedPrivateKeyRaw: Uint8Array,
   amountUsdc: number,
   subAccountId: number = 0,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
-  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   try {
     const connection = getConnection();
     const agentPubkey = new PublicKey(agentPublicKey);
@@ -2587,7 +2556,7 @@ export async function executeAgentDriftWithdraw(
     console.log(`[Drift] Agent USDC ATA: ${agentAta.toBase58()}`);
     
     // Use DriftClient SDK which automatically handles all remaining accounts (perp markets, oracles)
-    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
+    const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKeyRaw, subAccountId);
     
     try {
       // Convert amount to BN with USDC precision (6 decimals)
@@ -2636,7 +2605,7 @@ export async function executeAgentDriftWithdraw(
 
 export async function executeAgentTransferBetweenSubaccounts(
   agentPublicKey: string,
-  encryptedPrivateKeyRaw: string | Uint8Array,
+  encryptedPrivateKeyRaw: Uint8Array,
   fromSubAccountId: number,
   toSubAccountId: number,
   amountUsdc: number,
@@ -2981,7 +2950,7 @@ async function executeDriftCommandViaSubprocess(command: Record<string, any>): P
 }
 
 async function swiftLateOpenRecovery(
-  encryptedPrivateKeyRaw: string | Uint8Array,
+  encryptedPrivateKeyRaw: Uint8Array,
   expectedAgentPubkey: string | undefined,
   subAccountId: number,
   market: string,
@@ -2991,7 +2960,6 @@ async function swiftLateOpenRecovery(
   swiftOrderId: string | undefined,
   legacyError: string,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; fillPrice?: number; actualFee?: number; executionMethod?: 'swift' | 'legacy'; swiftOrderId?: string } | null> {
-  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   try {
     let pubkey = expectedAgentPubkey;
     if (!pubkey) {
@@ -3035,7 +3003,7 @@ async function swiftLateOpenRecovery(
 }
 
 export async function executePerpOrder(
-  encryptedPrivateKeyRaw: string | Uint8Array,
+  encryptedPrivateKeyRaw: Uint8Array,
   market: string,
   side: 'long' | 'short',
   sizeInBase: number,
@@ -3045,7 +3013,6 @@ export async function executePerpOrder(
   privateKeyBase58?: string,
   expectedAgentPubkey?: string,
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: 'swift' | 'legacy'; swiftOrderId?: string }> {
-  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
   
@@ -3074,7 +3041,7 @@ export async function executePerpOrder(
     console.log(`[Drift] Attempting Swift execution for ${market} ${side}`);
     swiftHealthTracker.recordAttempt(market);
     try {
-      const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
+      const rawKey = privateKeyBase58 || bs58.encode(encryptedPrivateKeyRaw);
       const agentPubkey = expectedAgentPubkey || '';
 
       console.log(`[Drift] Swift oracle price for ${market}: ${estimatedOraclePrice}`);
@@ -3234,7 +3201,7 @@ export async function executePerpOrder(
     // Use in-process DriftClient (faster)
     console.log('[Drift] Using in-process DriftClient');
     try {
-      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
+      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKeyRaw, subAccountId);
       
       try {
         const baseAssetAmount = new BN(Math.round(sizeInBase * 1e9));
@@ -3321,7 +3288,7 @@ export async function executePerpOrder(
     // V3 Phase 4c: child only ever receives plaintext base58. If the caller
     // did not pre-supply a decrypted key, decrypt the legacy blob here in
     // the parent (never in the child).
-    const tradeKeyBase58 = privateKeyBase58 || decrypt(encryptedPrivateKey);
+    const tradeKeyBase58 = privateKeyBase58 || bs58.encode(encryptedPrivateKeyRaw);
     const result = await executeDriftCommandViaSubprocess({
       action: 'trade',
       privateKeyBase58: tradeKeyBase58,
@@ -3350,7 +3317,7 @@ export async function executePerpOrder(
       }
       
       if (swiftAuctionSubmitted && !reduceOnly && (errLower.includes('6010') || errLower.includes('insufficient') || errLower.includes('collateral'))) {
-        const recoveryResult = await swiftLateOpenRecovery(encryptedPrivateKey, expectedAgentPubkey, subAccountId, market, preSwiftPositionSide, preSwiftPositionSize, swiftFillPriceEstimate, swiftOrderIdForGuard, result.error);
+        const recoveryResult = await swiftLateOpenRecovery(encryptedPrivateKeyRaw, expectedAgentPubkey, subAccountId, market, preSwiftPositionSide, preSwiftPositionSize, swiftFillPriceEstimate, swiftOrderIdForGuard, result.error);
         if (recoveryResult) return recoveryResult;
       }
     } else if (result.success) {
@@ -3393,7 +3360,7 @@ export async function executePerpOrder(
     }
     
     if (swiftAuctionSubmitted && !reduceOnly && (errLower.includes('6010') || errLower.includes('insufficient') || errLower.includes('collateral'))) {
-      const recoveryResult = await swiftLateOpenRecovery(encryptedPrivateKey, expectedAgentPubkey, subAccountId, market, preSwiftPositionSide, preSwiftPositionSize, swiftFillPriceEstimate, swiftOrderIdForGuard, errorMessage);
+      const recoveryResult = await swiftLateOpenRecovery(encryptedPrivateKeyRaw, expectedAgentPubkey, subAccountId, market, preSwiftPositionSide, preSwiftPositionSize, swiftFillPriceEstimate, swiftOrderIdForGuard, errorMessage);
       if (recoveryResult) return recoveryResult;
     }
     
@@ -3405,7 +3372,7 @@ export async function executePerpOrder(
 }
 
 export async function closePerpPosition(
-  encryptedPrivateKeyRaw: string | Uint8Array,
+  encryptedPrivateKeyRaw: Uint8Array,
   market: string,
   subAccountId: number = 0,
   positionSizeBase?: number,
@@ -3414,7 +3381,6 @@ export async function closePerpPosition(
   expectedAgentPubkey?: string,
   positionSide?: 'long' | 'short',
 ): Promise<{ success: boolean; signature?: string; error?: string; executionMethod?: 'swift' | 'legacy'; fillPrice?: number }> {
-  const encryptedPrivateKey = _normalizeAgentKey(encryptedPrivateKeyRaw);
   const marketUpper = market.toUpperCase().replace('-PERP', '').replace('USD', '');
   const marketIndex = PERP_MARKET_INDICES[marketUpper] ?? PERP_MARKET_INDICES[`${marketUpper}-PERP`];
   
@@ -3435,7 +3401,7 @@ export async function closePerpPosition(
     console.log(`[Drift] Attempting Swift close for ${market}, closing ${positionSide} position with ${closeSide} reduce-only order, size: ${positionSizeBase}, notional=$${closeNotional?.toFixed(2)}`);
     swiftHealthTracker.recordAttempt(market);
     try {
-      const rawKey = privateKeyBase58 || decrypt(encryptedPrivateKey);
+      const rawKey = privateKeyBase58 || bs58.encode(encryptedPrivateKeyRaw);
       const agentPubkey = expectedAgentPubkey || '';
 
       console.log(`[Drift] Swift close oracle price for ${market}: ${closeOraclePrice}`);
@@ -3567,7 +3533,7 @@ export async function closePerpPosition(
   if (useDriftClient && sdk) {
     console.log('[Drift] Using in-process DriftClient for close');
     try {
-      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKey, subAccountId);
+      const { driftClient, cleanup } = await getAgentDriftClient(encryptedPrivateKeyRaw, subAccountId);
       
       try {
         const user = driftClient.getUser();
@@ -3656,7 +3622,7 @@ export async function closePerpPosition(
     // V3 Phase 4c: child only ever receives plaintext base58. If the caller
     // did not pre-supply a decrypted key, decrypt the legacy blob here in
     // the parent (never in the child).
-    const closeKeyBase58 = privateKeyBase58 || decrypt(encryptedPrivateKey);
+    const closeKeyBase58 = privateKeyBase58 || bs58.encode(encryptedPrivateKeyRaw);
     const result = await executeDriftCommandViaSubprocess({
       action: 'close',
       privateKeyBase58: closeKeyBase58,
@@ -3740,7 +3706,7 @@ export interface HealthMetrics {
  * @returns Result with success status and transaction signature
  */
 export async function closeDriftSubaccount(
-  encryptedPrivateKeyRaw: string | Uint8Array,
+  encryptedPrivateKeyRaw: Uint8Array,
   subAccountId: number
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   console.log(`[Drift] Closing subaccount ${subAccountId} to reclaim rent`);
@@ -3779,7 +3745,7 @@ export async function closeDriftSubaccount(
  * @returns Result with success status and settled markets info
  */
 export async function settleAllPnl(
-  encryptedPrivateKeyRaw: string | Uint8Array,
+  encryptedPrivateKeyRaw: Uint8Array,
   subAccountId: number
 ): Promise<{ success: boolean; settledMarkets?: any[]; error?: string }> {
   console.log(`[Drift] Settling all PnL for subaccount ${subAccountId}`);

@@ -1,5 +1,5 @@
 import { Connection, PublicKey, Keypair, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { encrypt, decrypt } from './crypto';
+import { encrypt } from './crypto';
 import bs58 from 'bs58';
 import BN from 'bn.js';
 
@@ -60,24 +60,13 @@ export function generateAgentWallet(): AgentWallet {
   };
 }
 
-export function getAgentKeypair(encryptedPrivateKey: string): Keypair {
-  const privateKeyBase58 = decrypt(encryptedPrivateKey);
-  const secretKey = bs58.decode(privateKeyBase58);
-  return Keypair.fromSecretKey(secretKey);
-}
-
 /**
- * Phase 3 (V3 retirement): build a Keypair from either a legacy-encrypted
- * string blob OR an already-decrypted Uint8Array secret key. User-online
- * callers obtain the Uint8Array via decryptAgentKeyStrict in session-v3 and
- * pass it here. Out-of-scope subscriber-fanout / background callers keep
- * passing the string until their phase migrates them.
+ * V3 Phase 4: build a Keypair from a V3-strict-decrypted Uint8Array secret
+ * key. The legacy encrypted-string overload has been retired — only
+ * `migrateAgentKeyToV3` in session-v3.ts may still read legacy blobs.
  */
-export function resolveAgentKeypair(input: string | Uint8Array): Keypair {
-  if (input instanceof Uint8Array) {
-    return Keypair.fromSecretKey(input);
-  }
-  return getAgentKeypair(input);
+export function resolveAgentKeypair(input: Uint8Array): Keypair {
+  return Keypair.fromSecretKey(input);
 }
 
 export async function getAgentUsdcBalance(agentPublicKey: string): Promise<number> {
@@ -218,7 +207,7 @@ export async function buildTransferToAgentTransaction(
 export async function buildWithdrawFromAgentTransaction(
   userWalletAddress: string,
   agentPublicKey: string,
-  encryptedPrivateKey: string | Uint8Array,
+  encryptedPrivateKey: Uint8Array,
   amountUsdc: number,
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
   const connection = getConnection();
@@ -319,7 +308,7 @@ function createTransferInstruction(
 export async function buildWithdrawSolFromAgentTransaction(
   agentPublicKey: string,
   userWalletAddress: string,
-  encryptedPrivateKey: string | Uint8Array,
+  encryptedPrivateKey: Uint8Array,
   amountSol: number,
 ): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
   const connection = getConnection();
@@ -362,7 +351,7 @@ export async function buildWithdrawSolFromAgentTransaction(
 // Execute agent USDC withdrawal (server-side, no user signature needed)
 export async function executeAgentWithdraw(
   agentPublicKey: string,
-  encryptedPrivateKey: string | Uint8Array,
+  encryptedPrivateKey: Uint8Array,
   userWalletAddress: string,
   amountUsdc: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
@@ -402,7 +391,7 @@ export async function executeAgentWithdraw(
 // Execute agent SOL withdrawal (server-side, no user signature needed)
 export async function executeAgentSolWithdraw(
   agentPublicKey: string,
-  encryptedPrivateKey: string | Uint8Array,
+  encryptedPrivateKey: Uint8Array,
   userWalletAddress: string,
   amountSol: number,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
@@ -442,7 +431,7 @@ export async function executeAgentSolWithdraw(
 // Transfer USDC from agent wallet to any Solana wallet (for profit sharing)
 export async function transferUsdcToWallet(
   fromAgentPublicKey: string,
-  fromEncryptedPrivateKey: string | Uint8Array,
+  fromEncryptedPrivateKey: Uint8Array,
   toWalletAddress: string,
   amountUsdc: number,
 ): Promise<{ success: boolean; signature?: string; error?: string; solBalance?: number }> {
