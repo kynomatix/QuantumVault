@@ -32,6 +32,11 @@ export const TA_WHITELIST: ReadonlySet<string> = new Set([
   "highest", "lowest", "barssince", "valuewhen", "pivothigh", "pivotlow",
   "percentile_nearest_rank", "percentile_linear_interpolation",
   "vwap",
+  // TV v5 parity additions (session_plan.md T001-T003):
+  "obv", "sar", "aroon", "tsi", "wpr", "bbw", "kcw", "mom",
+  "accdist", "ad", "highestbars", "lowestbars",
+  "cmo", "bop", "cog", "correlation", "pearsonr", "variance",
+  "pvt", "nvi", "pvi", "iii", "wad", "vortex", "range", "mode",
 ]);
 
 function findHistoryAccessed(stmts: Stmt[]): Set<string> {
@@ -50,7 +55,7 @@ function findHistoryAccessed(stmts: Stmt[]): Set<string> {
       if (e.fn.k === "mem" && e.fn.obj.k === "id" && e.fn.obj.name === "ta") {
         markArgs(e.args);
       }
-      if (e.fn.k === "id" && (INLINE_HISTORY_TA.has(e.fn.name) || ["sma","ema","wma","linreg","rma","vwma","swma","hma","dema","tema","alma","rsi","cci","mfi","roc","dev","median","percentrank","cum","stoch","macd","bb","kc","atr","tr","adx","supertrend","dmi","highest","lowest","barssince","valuewhen","pivothigh","pivotlow","percentile_nearest_rank","percentile_linear_interpolation"].includes(e.fn.name))) {
+      if (e.fn.k === "id" && (INLINE_HISTORY_TA.has(e.fn.name) || TA_WHITELIST.has(e.fn.name))) {
         markArgs(e.args);
       }
     }

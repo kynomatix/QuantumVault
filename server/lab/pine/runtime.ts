@@ -11,6 +11,11 @@ export const TA_IMPL_REGISTRY: ReadonlySet<string> = new Set([
   "highest", "lowest", "barssince", "valuewhen", "pivothigh", "pivotlow",
   "percentile_nearest_rank", "percentile_linear_interpolation",
   "vwap",
+  // TV v5 parity additions (session_plan.md T001-T003):
+  "obv", "sar", "aroon", "tsi", "wpr", "bbw", "kcw", "mom",
+  "accdist", "ad", "highestbars", "lowestbars",
+  "cmo", "bop", "cog", "correlation", "pearsonr", "variance",
+  "pvt", "nvi", "pvi", "iii", "wad", "vortex", "range", "mode",
 ]);
 
 (function assertTaParity() {
@@ -1029,9 +1034,13 @@ export function executePine(
   }
 
   function precomputeIndicator(name: string, fn: string, args: Expr[], kw: [string, Expr][]): boolean {
+    if (fn === "ad") fn = "accdist";
+    if (fn === "pearsonr") fn = "correlation";
     const h = numHighArr;
     const l = numLowArr;
     const cl = numCloseArr;
+    const op = Array.from(openArr) as number[];
+    const numVol = (): number[] => Array.from(volArr) as number[];
 
     function getSource(idx: number): Series | null {
       const arg = args[idx];
@@ -1428,6 +1437,124 @@ export function executePine(
         const adxSmooth = args.length > 1 ? getLen(1, diLen) : diLen;
         const { adxVal } = computeDmi(diLen, adxSmooth);
         precomputed[name] = adxVal as number[];
+        return true;
+      }
+      case "obv": {
+        precomputed[name] = ind.obv(cl, numVol()); return true;
+      }
+      case "accdist": {
+        precomputed[name] = ind.accdist(h, l, cl, numVol()); return true;
+      }
+      case "pvt": {
+        precomputed[name] = ind.pvt(cl, numVol()); return true;
+      }
+      case "nvi": {
+        precomputed[name] = ind.nvi(cl, numVol()); return true;
+      }
+      case "pvi": {
+        precomputed[name] = ind.pvi(cl, numVol()); return true;
+      }
+      case "iii": {
+        precomputed[name] = ind.iii(h, l, cl, numVol()); return true;
+      }
+      case "wad": {
+        precomputed[name] = ind.wad(h, l, cl); return true;
+      }
+      case "bop": {
+        precomputed[name] = ind.bop(op, h, l, cl); return true;
+      }
+      case "mom": {
+        const src = getSource(0); const len = getLen(1, 10);
+        if (!src) return false;
+        precomputed[name] = ind.mom(src, len); return true;
+      }
+      case "wpr": {
+        const len = getLen(0, 14);
+        precomputed[name] = ind.wpr(h, l, cl, len); return true;
+      }
+      case "cmo": {
+        const src = getSource(0); const len = getLen(1, 9);
+        if (!src) return false;
+        precomputed[name] = ind.cmo(src, len); return true;
+      }
+      case "bbw": {
+        const src = getSource(0); const len = getLen(1, 20);
+        const mConst = args.length > 2 ? resolveConst(args[2]) : undefined;
+        const mult = typeof mConst === "number" ? mConst : 2.0;
+        if (!src) return false;
+        precomputed[name] = ind.bbw(src, len, mult); return true;
+      }
+      case "kcw": {
+        const src = getSource(0); const len = getLen(1, 20);
+        const mConst = args.length > 2 ? resolveConst(args[2]) : undefined;
+        const mult = typeof mConst === "number" ? mConst : 1.5;
+        if (!src) return false;
+        precomputed[name] = ind.kcw(src, h, l, len, mult); return true;
+      }
+      case "highestbars": {
+        const src = args.length > 1 ? getSource(0) : h;
+        const len = args.length > 1 ? getLen(1) : getLen(0);
+        if (!src) return false;
+        precomputed[name] = ind.highestBars(src, len); return true;
+      }
+      case "lowestbars": {
+        const src = args.length > 1 ? getSource(0) : l;
+        const len = args.length > 1 ? getLen(1) : getLen(0);
+        if (!src) return false;
+        precomputed[name] = ind.lowestBars(src, len); return true;
+      }
+      case "range": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.rangeIndicator(src, len); return true;
+      }
+      case "variance": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.variance(src, len); return true;
+      }
+      case "correlation": {
+        const s1 = getSource(0); const s2 = getSource(1); const len = getLen(2);
+        if (!s1 || !s2) return false;
+        precomputed[name] = ind.correlation(s1, s2, len); return true;
+      }
+      case "cog": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.cog(src, len); return true;
+      }
+      case "aroon": {
+        const len = getLen(0, 14);
+        const a = ind.aroon(h, l, len);
+        precomputed[name] = a.upper;
+        precomputed[name + "__lower"] = a.lower;
+        return true;
+      }
+      case "tsi": {
+        const src = getSource(0); const sLen = getLen(1, 13); const lLen = getLen(2, 25);
+        if (!src) return false;
+        precomputed[name] = ind.tsi(src, sLen, lLen); return true;
+      }
+      case "vortex": {
+        const len = getLen(0, 14);
+        const v = ind.vortex(h, l, cl, len);
+        precomputed[name] = v.viPlus;
+        precomputed[name + "__minus"] = v.viMinus;
+        return true;
+      }
+      case "mode": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.mode(src, len); return true;
+      }
+      case "sar": {
+        const startConst = resolveConst(args[0]);
+        const incConst = resolveConst(args[1]);
+        const maxConst = resolveConst(args[2]);
+        const start = typeof startConst === "number" ? startConst : 0.02;
+        const inc = typeof incConst === "number" ? incConst : 0.02;
+        const mx = typeof maxConst === "number" ? maxConst : 0.2;
+        precomputed[name] = ind.sar(h, l, start, inc, mx);
         return true;
       }
       case "barssince": case "valuewhen": return false;
@@ -1899,9 +2026,13 @@ export function executePine(
   }
 
   function resolveNestedTaSeries(fn: string, innerArgs: Expr[], innerKw: [string, Expr][]): number[] | null {
+    if (fn === "ad") fn = "accdist";
+    if (fn === "pearsonr") fn = "correlation";
     const h = numHighArr;
     const l = numLowArr;
     const cl = numCloseArr;
+    const op = Array.from(openArr) as number[];
+    const numVol = (): number[] => Array.from(volArr) as number[];
     const cacheKey = `nested_${fn}_${innerArgs.map(a => {
       if (a.k === "id") {
         if (inputDefaults[a.name] !== undefined) return `@${a.name}=${inputDefaults[a.name]}`;
@@ -2082,17 +2213,84 @@ export function executePine(
         result = adxVal as number[];
         break;
       }
+      case "obv": result = ind.obv(cl, numVol()); break;
+      case "accdist": result = ind.accdist(h, l, cl, numVol()); break;
+      case "pvt": result = ind.pvt(cl, numVol()); break;
+      case "nvi": result = ind.nvi(cl, numVol()); break;
+      case "pvi": result = ind.pvi(cl, numVol()); break;
+      case "iii": result = ind.iii(h, l, cl, numVol()); break;
+      case "wad": result = ind.wad(h, l, cl); break;
+      case "bop": result = ind.bop(op, h, l, cl); break;
+      case "mom": { const src = nSrc(0); const len = nLen(1, 10); if (src) result = ind.mom(src, len); break; }
+      case "wpr": { const len = nLen(0, 14); result = ind.wpr(h, l, cl, len); break; }
+      case "cmo": { const src = nSrc(0); const len = nLen(1, 9); if (src) result = ind.cmo(src, len); break; }
+      case "bbw": {
+        const src = nSrc(0); const len = nLen(1, 20);
+        const mC = innerArgs.length > 2 ? resolveConst(innerArgs[2]) : undefined;
+        const mult = typeof mC === "number" ? mC : 2.0;
+        if (src) result = ind.bbw(src, len, mult);
+        break;
+      }
+      case "kcw": {
+        const src = nSrc(0); const len = nLen(1, 20);
+        const mC = innerArgs.length > 2 ? resolveConst(innerArgs[2]) : undefined;
+        const mult = typeof mC === "number" ? mC : 1.5;
+        if (src) result = ind.kcw(src, h, l, len, mult);
+        break;
+      }
+      case "highestbars": {
+        const src = innerArgs.length > 1 ? nSrc(0) : h;
+        const len = innerArgs.length > 1 ? nLen(1) : nLen(0);
+        if (src) result = ind.highestBars(src, len);
+        break;
+      }
+      case "lowestbars": {
+        const src = innerArgs.length > 1 ? nSrc(0) : l;
+        const len = innerArgs.length > 1 ? nLen(1) : nLen(0);
+        if (src) result = ind.lowestBars(src, len);
+        break;
+      }
+      case "range": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.rangeIndicator(src, len); break; }
+      case "variance": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.variance(src, len); break; }
+      case "correlation": {
+        const s1 = nSrc(0); const s2 = nSrc(1); const len = nLen(2);
+        if (s1 && s2) result = ind.correlation(s1, s2, len);
+        break;
+      }
+      case "cog": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.cog(src, len); break; }
+      case "aroon": { const len = nLen(0, 14); result = ind.aroon(h, l, len).upper; break; }
+      case "tsi": {
+        const src = nSrc(0); const sL = nLen(1, 13); const lL = nLen(2, 25);
+        if (src) result = ind.tsi(src, sL, lL);
+        break;
+      }
+      case "vortex": { const len = nLen(0, 14); result = ind.vortex(h, l, cl, len).viPlus; break; }
+      case "mode": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.mode(src, len); break; }
+      case "sar": {
+        const sC = resolveConst(innerArgs[0]);
+        const iC = resolveConst(innerArgs[1]);
+        const mC = resolveConst(innerArgs[2]);
+        const s = typeof sC === "number" ? sC : 0.02;
+        const inc = typeof iC === "number" ? iC : 0.02;
+        const mx = typeof mC === "number" ? mC : 0.2;
+        result = ind.sar(h, l, s, inc, mx);
+        break;
+      }
     }
     if (result) indicatorCache.set(cacheKey, result);
     return result;
   }
 
   function computeOnFly(fn: string, args: Expr[], kw: [string, Expr][]): number {
+    if (fn === "ad") fn = "accdist";
+    if (fn === "pearsonr") fn = "correlation";
     let isDynamic = false;
 
     function getH(): number[] { return numHighArr; }
     function getL_arr(): number[] { return numLowArr; }
     function getCl(): number[] { return numCloseArr; }
+    function getOp(): number[] { return Array.from(openArr) as number[]; }
+    function getVol(): number[] { return Array.from(volArr) as number[]; }
 
     function getSrc(idx: number): number[] | null {
       if (idx >= args.length) return getCl();
@@ -2368,6 +2566,69 @@ export function executePine(
         result = adxVal as number[];
         break;
       }
+      case "obv": result = ind.obv(getCl(), getVol()); break;
+      case "accdist": result = ind.accdist(getH(), getL_arr(), getCl(), getVol()); break;
+      case "pvt": result = ind.pvt(getCl(), getVol()); break;
+      case "nvi": result = ind.nvi(getCl(), getVol()); break;
+      case "pvi": result = ind.pvi(getCl(), getVol()); break;
+      case "iii": result = ind.iii(getH(), getL_arr(), getCl(), getVol()); break;
+      case "wad": result = ind.wad(getH(), getL_arr(), getCl()); break;
+      case "bop": result = ind.bop(getOp(), getH(), getL_arr(), getCl()); break;
+      case "mom": { const src = getSrc(0); const len = getL(1, 10); if (src) result = ind.mom(src, len); break; }
+      case "wpr": { const len = getL(0, 14); result = ind.wpr(getH(), getL_arr(), getCl(), len); break; }
+      case "cmo": { const src = getSrc(0); const len = getL(1, 9); if (src) result = ind.cmo(src, len); break; }
+      case "bbw": {
+        const src = getSrc(0); const len = getL(1, 20);
+        const mC = args.length > 2 ? resolveConst(args[2]) : undefined;
+        const mult = typeof mC === "number" ? mC : 2.0;
+        if (src) result = ind.bbw(src, len, mult);
+        break;
+      }
+      case "kcw": {
+        const src = getSrc(0); const len = getL(1, 20);
+        const mC = args.length > 2 ? resolveConst(args[2]) : undefined;
+        const mult = typeof mC === "number" ? mC : 1.5;
+        if (src) result = ind.kcw(src, getH(), getL_arr(), len, mult);
+        break;
+      }
+      case "highestbars": {
+        const src = args.length > 1 ? getSrc(0) : getH();
+        const len = args.length > 1 ? getL(1) : getL(0);
+        if (src) result = ind.highestBars(src, len);
+        break;
+      }
+      case "lowestbars": {
+        const src = args.length > 1 ? getSrc(0) : getL_arr();
+        const len = args.length > 1 ? getL(1) : getL(0);
+        if (src) result = ind.lowestBars(src, len);
+        break;
+      }
+      case "range": { const src = getSrc(0); const len = getL(1); if (src) result = ind.rangeIndicator(src, len); break; }
+      case "variance": { const src = getSrc(0); const len = getL(1); if (src) result = ind.variance(src, len); break; }
+      case "correlation": {
+        const s1 = getSrc(0); const s2 = getSrc(1); const len = getL(2);
+        if (s1 && s2) result = ind.correlation(s1, s2, len);
+        break;
+      }
+      case "cog": { const src = getSrc(0); const len = getL(1); if (src) result = ind.cog(src, len); break; }
+      case "aroon": { const len = getL(0, 14); result = ind.aroon(getH(), getL_arr(), len).upper; break; }
+      case "tsi": {
+        const src = getSrc(0); const sL = getL(1, 13); const lL = getL(2, 25);
+        if (src) result = ind.tsi(src, sL, lL);
+        break;
+      }
+      case "vortex": { const len = getL(0, 14); result = ind.vortex(getH(), getL_arr(), getCl(), len).viPlus; break; }
+      case "mode": { const src = getSrc(0); const len = getL(1); if (src) result = ind.mode(src, len); break; }
+      case "sar": {
+        const sC = resolveConst(args[0]);
+        const iC = resolveConst(args[1]);
+        const mC = resolveConst(args[2]);
+        const s = typeof sC === "number" ? sC : 0.02;
+        const inc = typeof iC === "number" ? iC : 0.02;
+        const mx = typeof mC === "number" ? mC : 0.2;
+        result = ind.sar(getH(), getL_arr(), s, inc, mx);
+        break;
+      }
     }
     if (result) {
       if (!isDynamic) {
@@ -2536,6 +2797,8 @@ export function executePine(
   }
 
   function evalTaCall(fn: string, args: Expr[], kw: [string, Expr][]): any {
+    if (fn === "ad") fn = "accdist";
+    if (fn === "pearsonr") fn = "correlation";
     switch (fn) {
       case "sma": case "ema": case "rma": case "wma": case "rsi":
       case "atr": case "stdev": case "highest": case "lowest":
@@ -2544,8 +2807,35 @@ export function executePine(
       case "falling": case "rising": case "dev": case "median": case "mfi":
       case "vwma": case "hma": case "dema": case "tema": case "alma":
       case "swma": case "cci": case "percentile_nearest_rank":
-      case "percentile_linear_interpolation": {
+      case "percentile_linear_interpolation":
+      case "obv": case "accdist": case "pvt": case "nvi": case "pvi":
+      case "iii": case "wad": case "bop": case "mom": case "wpr": case "cmo":
+      case "bbw": case "kcw": case "highestbars": case "lowestbars":
+      case "range": case "variance": case "correlation": case "cog":
+      case "tsi": case "mode": case "sar": {
         return computeOnFly(fn, args, kw);
+      }
+      case "aroon": {
+        const len = args.length > 0 ? Math.round(toNum(evalExpr(args[0]))) : 14;
+        const ck = `aroon_${len}`;
+        if (!indicatorCache.has(ck)) indicatorCache.set(ck, ind.aroon(numHighArr, numLowArr, len));
+        const a = indicatorCache.get(ck);
+        const b = currentBar;
+        return [
+          b < a.upper.length && !isNaN(a.upper[b]) ? a.upper[b] : NA,
+          b < a.lower.length && !isNaN(a.lower[b]) ? a.lower[b] : NA,
+        ];
+      }
+      case "vortex": {
+        const len = args.length > 0 ? Math.round(toNum(evalExpr(args[0]))) : 14;
+        const ck = `vortex_${len}`;
+        if (!indicatorCache.has(ck)) indicatorCache.set(ck, ind.vortex(numHighArr, numLowArr, numCloseArr, len));
+        const v = indicatorCache.get(ck);
+        const b = currentBar;
+        return [
+          b < v.viPlus.length && !isNaN(v.viPlus[b]) ? v.viPlus[b] : NA,
+          b < v.viMinus.length && !isNaN(v.viMinus[b]) ? v.viMinus[b] : NA,
+        ];
       }
       case "macd": {
         const srcArr = resolveExprSeries(args[0]);
