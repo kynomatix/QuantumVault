@@ -366,3 +366,187 @@ export function bbWidth(bbUpper: number[], bbLower: number[], bbBasis: number[])
   }
   return result;
 }
+
+export function vwma(src: number[], volume: number[], period: number): number[] {
+  const n = src.length;
+  const result: number[] = new Array(n).fill(NaN);
+  if (period <= 0 || n < period) return result;
+  const pv: number[] = new Array(n);
+  for (let i = 0; i < n; i++) pv[i] = src[i] * volume[i];
+  const numer = sma(pv, period);
+  const denom = sma(volume, period);
+  for (let i = 0; i < n; i++) {
+    if (!isNaN(numer[i]) && !isNaN(denom[i]) && denom[i] !== 0) result[i] = numer[i] / denom[i];
+  }
+  return result;
+}
+
+export function hma(src: number[], period: number): number[] {
+  return hullMa(src, period);
+}
+
+export function dema(src: number[], period: number): number[] {
+  const e1 = pineEma(src, period);
+  const e2 = pineEma(e1, period);
+  const n = src.length;
+  const result: number[] = new Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    if (!isNaN(e1[i]) && !isNaN(e2[i])) result[i] = 2 * e1[i] - e2[i];
+  }
+  return result;
+}
+
+export function tema(src: number[], period: number): number[] {
+  const e1 = pineEma(src, period);
+  const e2 = pineEma(e1, period);
+  const e3 = pineEma(e2, period);
+  const n = src.length;
+  const result: number[] = new Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    if (!isNaN(e1[i]) && !isNaN(e2[i]) && !isNaN(e3[i])) result[i] = 3 * e1[i] - 3 * e2[i] + e3[i];
+  }
+  return result;
+}
+
+export function alma(src: number[], period: number, offset: number, sigma: number): number[] {
+  const n = src.length;
+  const result: number[] = new Array(n).fill(NaN);
+  if (period <= 0 || n < period) return result;
+  const m = offset * (period - 1);
+  const s = period / sigma;
+  const weights: number[] = new Array(period);
+  let wSum = 0;
+  for (let k = 0; k < period; k++) {
+    const w = Math.exp(-((k - m) * (k - m)) / (2 * s * s));
+    weights[k] = w;
+    wSum += w;
+  }
+  for (let i = period - 1; i < n; i++) {
+    let sum = 0;
+    let valid = true;
+    for (let k = 0; k < period; k++) {
+      const v = src[i - period + 1 + k];
+      if (isNaN(v)) { valid = false; break; }
+      sum += v * weights[k];
+    }
+    if (valid) result[i] = sum / wSum;
+  }
+  return result;
+}
+
+export function swma(src: number[]): number[] {
+  const n = src.length;
+  const result: number[] = new Array(n).fill(NaN);
+  for (let i = 3; i < n; i++) {
+    const a = src[i - 3], b = src[i - 2], c = src[i - 1], d = src[i];
+    if (!isNaN(a) && !isNaN(b) && !isNaN(c) && !isNaN(d)) {
+      result[i] = (a * 1 + b * 2 + c * 2 + d * 1) / 6;
+    }
+  }
+  return result;
+}
+
+export function cci(src: number[], period: number): number[] {
+  const n = src.length;
+  const result: number[] = new Array(n).fill(NaN);
+  const basis = sma(src, period);
+  for (let i = period - 1; i < n; i++) {
+    if (isNaN(basis[i])) continue;
+    let meanDev = 0;
+    for (let j = i - period + 1; j <= i; j++) meanDev += Math.abs(src[j] - basis[i]);
+    meanDev /= period;
+    result[i] = meanDev === 0 ? 0 : (src[i] - basis[i]) / (0.015 * meanDev);
+  }
+  return result;
+}
+
+export function macd(src: number[], fast: number, slow: number, signalPeriod: number): { macd: number[]; signal: number[]; hist: number[] } {
+  const ef = pineEma(src, fast);
+  const es = pineEma(src, slow);
+  const n = src.length;
+  const macdLine: number[] = new Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    if (!isNaN(ef[i]) && !isNaN(es[i])) macdLine[i] = ef[i] - es[i];
+  }
+  const signal = pineEma(macdLine, signalPeriod);
+  const hist: number[] = new Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    if (!isNaN(macdLine[i]) && !isNaN(signal[i])) hist[i] = macdLine[i] - signal[i];
+  }
+  return { macd: macdLine, signal, hist };
+}
+
+export function supertrend(high: number[], low: number[], close: number[], factor: number, atrPeriod: number): { supertrend: number[]; direction: number[] } {
+  const n = close.length;
+  const atrVals = atr(high, low, close, atrPeriod);
+  const st: number[] = new Array(n).fill(NaN);
+  const dir: number[] = new Array(n).fill(NaN);
+  let finalUpper = NaN, finalLower = NaN;
+  let prevDir = 1;
+  let prevSt = NaN;
+  for (let i = 0; i < n; i++) {
+    const hl2 = (high[i] + low[i]) / 2;
+    const a = atrVals[i];
+    if (isNaN(a)) continue;
+    const up = hl2 + factor * a;
+    const lo = hl2 - factor * a;
+    if (isNaN(finalUpper)) { finalUpper = up; finalLower = lo; prevDir = 1; prevSt = lo; st[i] = lo; dir[i] = 1; continue; }
+    const prevClose = close[i - 1];
+    finalUpper = (up < finalUpper || prevClose > finalUpper) ? up : finalUpper;
+    finalLower = (lo > finalLower || prevClose < finalLower) ? lo : finalLower;
+    let curDir: number;
+    if (prevDir === 1) {
+      curDir = close[i] < finalLower ? -1 : 1;
+    } else {
+      curDir = close[i] > finalUpper ? 1 : -1;
+    }
+    const curSt = curDir === 1 ? finalLower : finalUpper;
+    st[i] = curSt;
+    dir[i] = curDir;
+    prevDir = curDir;
+    prevSt = curSt;
+  }
+  return { supertrend: st, direction: dir };
+}
+
+export function percentileNearestRank(data: number[], period: number, percentage: number): number[] {
+  const n = data.length;
+  const result: number[] = new Array(n).fill(NaN);
+  if (period <= 0 || percentage < 0 || percentage > 100) return result;
+  for (let i = period - 1; i < n; i++) {
+    const window: number[] = [];
+    let hasNaN = false;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (isNaN(data[j])) { hasNaN = true; break; }
+      window.push(data[j]);
+    }
+    if (hasNaN) continue;
+    window.sort((a, b) => a - b);
+    const rank = Math.ceil((percentage / 100) * period);
+    const idx = Math.max(0, Math.min(period - 1, rank - 1));
+    result[i] = window[idx];
+  }
+  return result;
+}
+
+export function percentileLinearInterpolation(data: number[], period: number, percentage: number): number[] {
+  const n = data.length;
+  const result: number[] = new Array(n).fill(NaN);
+  if (period <= 0 || percentage < 0 || percentage > 100) return result;
+  for (let i = period - 1; i < n; i++) {
+    const window: number[] = [];
+    let hasNaN = false;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (isNaN(data[j])) { hasNaN = true; break; }
+      window.push(data[j]);
+    }
+    if (hasNaN) continue;
+    window.sort((a, b) => a - b);
+    const rank = (percentage / 100) * (period - 1);
+    const lo = Math.floor(rank);
+    const hi = Math.ceil(rank);
+    if (lo === hi) result[i] = window[lo];
+    else result[i] = window[lo] + (rank - lo) * (window[hi] - window[lo]);
+  }
+  return result;
+}

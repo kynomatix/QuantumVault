@@ -1,7 +1,40 @@
 import type { Expr, Stmt } from "./parser";
 import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "../indicators";
-import { compilePineHotLoop, type CompilerContext } from "./compiler";
+import { compilePineHotLoop, TA_WHITELIST, type CompilerContext } from "./compiler";
+
+export const TA_IMPL_REGISTRY: ReadonlySet<string> = new Set([
+  "crossover", "crossunder", "cross", "change", "rising", "falling",
+  "sma", "ema", "wma", "linreg", "rma", "vwma", "swma", "hma", "dema", "tema", "alma",
+  "rsi", "cci", "mfi", "roc", "dev", "median", "percentrank", "cum",
+  "stoch", "macd", "bb", "kc", "atr", "tr", "adx", "supertrend", "dmi",
+  "highest", "lowest", "barssince", "valuewhen", "pivothigh", "pivotlow",
+  "percentile_nearest_rank", "percentile_linear_interpolation",
+  "vwap",
+]);
+
+(function assertTaParity() {
+  const missing: string[] = [];
+  for (const name of TA_WHITELIST) {
+    if (!TA_IMPL_REGISTRY.has(name)) missing.push(name);
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `[Pine] TA whitelist/runtime parity violation — compiler whitelists these ta.* functions but runtime has no implementation: ${missing.join(", ")}. ` +
+      `Add cases to evalTaCall (and supporting paths) in runtime.ts, then add the name to TA_IMPL_REGISTRY.`
+    );
+  }
+  const extras: string[] = [];
+  for (const name of TA_IMPL_REGISTRY) {
+    if (!TA_WHITELIST.has(name)) extras.push(name);
+  }
+  if (extras.length > 0) {
+    throw new Error(
+      `[Pine] TA registry has names not in compiler whitelist: ${extras.join(", ")}. ` +
+      `Add to TA_WHITELIST in compiler.ts or remove from TA_IMPL_REGISTRY.`
+    );
+  }
+})();
 
 export interface OHLCV {
   time: number; open: number; high: number; low: number; close: number; volume: number;
@@ -1298,6 +1331,105 @@ export function executePine(
         }
         precomputed[name] = result; return true;
       }
+      case "vwma": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        const vol = Array.from(volArr) as number[];
+        precomputed[name] = ind.vwma(src, vol, len); return true;
+      }
+      case "hma": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.hma(src, len); return true;
+      }
+      case "dema": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.dema(src, len); return true;
+      }
+      case "tema": {
+        const src = getSource(0); const len = getLen(1);
+        if (!src) return false;
+        precomputed[name] = ind.tema(src, len); return true;
+      }
+      case "alma": {
+        const src = getSource(0); const len = getLen(1, 9);
+        const offConst = args.length > 2 ? resolveConst(args[2]) : undefined;
+        const sigConst = args.length > 3 ? resolveConst(args[3]) : undefined;
+        const off = typeof offConst === "number" ? offConst : 0.85;
+        const sig = typeof sigConst === "number" ? sigConst : 6;
+        if (!src) return false;
+        precomputed[name] = ind.alma(src, len, off, sig); return true;
+      }
+      case "swma": {
+        const src = getSource(0);
+        if (!src) return false;
+        precomputed[name] = ind.swma(src); return true;
+      }
+      case "cci": {
+        const src = getSource(0); const len = getLen(1, 20);
+        if (!src) return false;
+        precomputed[name] = ind.cci(src, len); return true;
+      }
+      case "percentile_nearest_rank": {
+        const src = getSource(0); const len = getLen(1);
+        const pConst = args.length > 2 ? resolveConst(args[2]) : undefined;
+        if (!src || typeof pConst !== "number") return false;
+        precomputed[name] = ind.percentileNearestRank(src, len, pConst); return true;
+      }
+      case "percentile_linear_interpolation": {
+        const src = getSource(0); const len = getLen(1);
+        const pConst = args.length > 2 ? resolveConst(args[2]) : undefined;
+        if (!src || typeof pConst !== "number") return false;
+        precomputed[name] = ind.percentileLinearInterpolation(src, len, pConst); return true;
+      }
+      case "macd": {
+        const src = getSource(0);
+        const fast = getLen(1, 12); const slow = getLen(2, 26); const sig = getLen(3, 9);
+        if (!src) return false;
+        const m = ind.macd(src, fast, slow, sig);
+        precomputed[name] = m.macd;
+        precomputed[name + "__signal"] = m.signal;
+        precomputed[name + "__hist"] = m.hist;
+        return true;
+      }
+      case "supertrend": {
+        const factor = getLen(0, 3);
+        const atrPeriod = getLen(1, 10);
+        const s = ind.supertrend(h, l, cl, factor, atrPeriod);
+        precomputed[name] = s.supertrend;
+        precomputed[name + "__direction"] = s.direction;
+        return true;
+      }
+      case "bb": {
+        const src = getSource(0); const len = getLen(1, 20);
+        const mConst = args.length > 2 ? resolveConst(args[2]) : undefined;
+        const mult = typeof mConst === "number" ? mConst : 2.0;
+        if (!src) return false;
+        const b = ind.bollingerBands(src, len, mult);
+        precomputed[name] = b.basis;
+        precomputed[name + "__upper"] = b.upper as number[];
+        precomputed[name + "__lower"] = b.lower as number[];
+        return true;
+      }
+      case "kc": {
+        const src = getSource(0); const len = getLen(1, 20);
+        const mConst = args.length > 2 ? resolveConst(args[2]) : undefined;
+        const mult = typeof mConst === "number" ? mConst : 1.5;
+        if (!src) return false;
+        const b = ind.keltnerChannel(src, h, l, len, len, mult);
+        precomputed[name] = b.basis;
+        precomputed[name + "__upper"] = b.upper as number[];
+        precomputed[name + "__lower"] = b.lower as number[];
+        return true;
+      }
+      case "adx": {
+        const diLen = getLen(0, 14);
+        const adxSmooth = args.length > 1 ? getLen(1, diLen) : diLen;
+        const { adxVal } = computeDmi(diLen, adxSmooth);
+        precomputed[name] = adxVal as number[];
+        return true;
+      }
       case "barssince": case "valuewhen": return false;
       default: return false;
     }
@@ -1850,6 +1982,106 @@ export function executePine(
         }
         break;
       }
+      case "cross": {
+        const a = nSrc(0);
+        const b = innerArgs.length > 1 ? resolveExprSeries(innerArgs[1]) : null;
+        if (a && b) {
+          result = new Array(n).fill(0);
+          for (let i = 1; i < n; i++) {
+            if (!isNaN(a[i]) && !isNaN(b[i]) && !isNaN(a[i-1]) && !isNaN(b[i-1])) {
+              const up = a[i] > b[i] && a[i-1] <= b[i-1];
+              const dn = a[i] < b[i] && a[i-1] >= b[i-1];
+              result[i] = (up || dn) ? 1 : 0;
+            }
+          }
+        }
+        break;
+      }
+      case "vwma": {
+        const src = nSrc(0); const len = nLen(1);
+        if (src) { const vol = Array.from(volArr) as number[]; result = ind.vwma(src, vol, len); }
+        break;
+      }
+      case "hma": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.hma(src, len); break; }
+      case "dema": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.dema(src, len); break; }
+      case "tema": { const src = nSrc(0); const len = nLen(1); if (src) result = ind.tema(src, len); break; }
+      case "swma": { const src = nSrc(0); if (src) result = ind.swma(src); break; }
+      case "cci": { const src = nSrc(0); const len = nLen(1, 20); if (src) result = ind.cci(src, len); break; }
+      case "alma": {
+        const src = nSrc(0); const len = nLen(1, 9);
+        const offC = innerArgs.length > 2 ? resolveConst(innerArgs[2]) : undefined;
+        const sigC = innerArgs.length > 3 ? resolveConst(innerArgs[3]) : undefined;
+        const off = typeof offC === "number" ? offC : 0.85;
+        const sig = typeof sigC === "number" ? sigC : 6;
+        if (src) result = ind.alma(src, len, off, sig);
+        break;
+      }
+      case "percentile_nearest_rank": {
+        const src = nSrc(0); const len = nLen(1);
+        const pC = innerArgs.length > 2 ? resolveConst(innerArgs[2]) : undefined;
+        if (src && typeof pC === "number") result = ind.percentileNearestRank(src, len, pC);
+        break;
+      }
+      case "percentile_linear_interpolation": {
+        const src = nSrc(0); const len = nLen(1);
+        const pC = innerArgs.length > 2 ? resolveConst(innerArgs[2]) : undefined;
+        if (src && typeof pC === "number") result = ind.percentileLinearInterpolation(src, len, pC);
+        break;
+      }
+      case "adx": {
+        const diLen = nLen(0, 14);
+        const adxSmooth = innerArgs.length > 1 ? nLen(1, diLen) : diLen;
+        const { adxVal } = computeDmi(diLen, adxSmooth);
+        result = adxVal as number[];
+        break;
+      }
+      case "stoch": {
+        const src = nSrc(0) || cl;
+        const hi = nSrc(1) || h;
+        const lo = nSrc(2) || l;
+        const len = nLen(3, 14);
+        result = new Array(n).fill(NaN);
+        const hh = ind.highest(hi, len);
+        const ll = ind.lowest(lo, len);
+        for (let i = 0; i < n; i++) {
+          const range = hh[i] - ll[i];
+          if (!isNaN(src[i]) && !isNaN(hh[i]) && !isNaN(ll[i]) && range !== 0) {
+            result[i] = 100 * (src[i] - ll[i]) / range;
+          }
+        }
+        break;
+      }
+      case "bb": {
+        const src = nSrc(0); const len = nLen(1, 20);
+        const mC = innerArgs.length > 2 ? resolveConst(innerArgs[2]) : undefined;
+        const mult = typeof mC === "number" ? mC : 2.0;
+        if (src) { const b = ind.bollingerBands(src, len, mult); result = b.basis; }
+        break;
+      }
+      case "kc": {
+        const src = nSrc(0); const len = nLen(1, 20);
+        const mC = innerArgs.length > 2 ? resolveConst(innerArgs[2]) : undefined;
+        const mult = typeof mC === "number" ? mC : 1.5;
+        if (src) { const b = ind.keltnerChannel(src, h, l, len, len, mult); result = b.basis; }
+        break;
+      }
+      case "macd": {
+        const src = nSrc(0); const fast = nLen(1, 12); const slow = nLen(2, 26); const sig = nLen(3, 9);
+        if (src) result = ind.macd(src, fast, slow, sig).macd;
+        break;
+      }
+      case "supertrend": {
+        const factor = nLen(0, 3); const atrPeriod = nLen(1, 10);
+        result = ind.supertrend(h, l, cl, factor, atrPeriod).supertrend;
+        break;
+      }
+      case "dmi": {
+        const diLen = nLen(0, 14);
+        const adxSmooth = innerArgs.length > 1 ? nLen(1, diLen) : diLen;
+        const { adxVal } = computeDmi(diLen, adxSmooth);
+        result = adxVal as number[];
+        break;
+      }
     }
     if (result) indicatorCache.set(cacheKey, result);
     return result;
@@ -2082,6 +2314,60 @@ export function executePine(
         }
         break;
       }
+      case "vwma": {
+        const src = getSrc(0); const len = getL(1);
+        if (src) { const vol = Array.from(volArr) as number[]; result = ind.vwma(src, vol, len); }
+        break;
+      }
+      case "hma": { const src = getSrc(0); const len = getL(1); if (src) result = ind.hma(src, len); break; }
+      case "dema": { const src = getSrc(0); const len = getL(1); if (src) result = ind.dema(src, len); break; }
+      case "tema": { const src = getSrc(0); const len = getL(1); if (src) result = ind.tema(src, len); break; }
+      case "swma": { const src = getSrc(0); if (src) result = ind.swma(src); break; }
+      case "cci": { const src = getSrc(0); const len = getL(1, 20); if (src) result = ind.cci(src, len); break; }
+      case "alma": {
+        const src = getSrc(0); const len = getL(1, 9);
+        const offC = args.length > 2 ? resolveConst(args[2]) : undefined;
+        const sigC = args.length > 3 ? resolveConst(args[3]) : undefined;
+        const off = typeof offC === "number" ? offC : 0.85;
+        const sig = typeof sigC === "number" ? sigC : 6;
+        if (src) result = ind.alma(src, len, off, sig);
+        break;
+      }
+      case "percentile_nearest_rank": {
+        const src = getSrc(0); const len = getL(1);
+        const pC = args.length > 2 ? resolveConst(args[2]) : undefined;
+        if (src && typeof pC === "number") result = ind.percentileNearestRank(src, len, pC);
+        break;
+      }
+      case "percentile_linear_interpolation": {
+        const src = getSrc(0); const len = getL(1);
+        const pC = args.length > 2 ? resolveConst(args[2]) : undefined;
+        if (src && typeof pC === "number") result = ind.percentileLinearInterpolation(src, len, pC);
+        break;
+      }
+      case "stoch": {
+        const src = getSrc(0) || getCl();
+        const hi = getSrc(1) || getH();
+        const lo = getSrc(2) || getL_arr();
+        const len = getL(3, 14);
+        result = new Array(n).fill(NaN);
+        const hh = ind.highest(hi, len);
+        const ll = ind.lowest(lo, len);
+        for (let i = 0; i < n; i++) {
+          const range = hh[i] - ll[i];
+          if (!isNaN(src[i]) && !isNaN(hh[i]) && !isNaN(ll[i]) && range !== 0) {
+            result[i] = 100 * (src[i] - ll[i]) / range;
+          }
+        }
+        break;
+      }
+      case "adx": {
+        const diLen = getL(0, 14);
+        const adxSmooth = args.length > 1 ? getL(1, diLen) : diLen;
+        const { adxVal } = computeDmi(diLen, adxSmooth);
+        result = adxVal as number[];
+        break;
+      }
     }
     if (result) {
       if (!isDynamic) {
@@ -2255,8 +2541,43 @@ export function executePine(
       case "atr": case "stdev": case "highest": case "lowest":
       case "pivothigh": case "pivotlow": case "vwap": case "tr":
       case "linreg": case "percentrank": case "cum": case "roc":
-      case "falling": case "rising": case "dev": case "median": case "mfi": {
+      case "falling": case "rising": case "dev": case "median": case "mfi":
+      case "vwma": case "hma": case "dema": case "tema": case "alma":
+      case "swma": case "cci": case "percentile_nearest_rank":
+      case "percentile_linear_interpolation": {
         return computeOnFly(fn, args, kw);
+      }
+      case "macd": {
+        const srcArr = resolveExprSeries(args[0]);
+        const fast = args.length > 1 ? Math.round(toNum(evalExpr(args[1]))) : 12;
+        const slow = args.length > 2 ? Math.round(toNum(evalExpr(args[2]))) : 26;
+        const sig = args.length > 3 ? Math.round(toNum(evalExpr(args[3]))) : 9;
+        const ck = `macd_${argKeyForTa(args[0])}_${fast}_${slow}_${sig}`;
+        if (!indicatorCache.has(ck) && srcArr) {
+          indicatorCache.set(ck, ind.macd(srcArr, fast, slow, sig));
+        }
+        const m = indicatorCache.get(ck);
+        if (!m) return [NA, NA, NA];
+        const b = currentBar;
+        return [
+          b < m.macd.length && !isNaN(m.macd[b]) ? m.macd[b] : NA,
+          b < m.signal.length && !isNaN(m.signal[b]) ? m.signal[b] : NA,
+          b < m.hist.length && !isNaN(m.hist[b]) ? m.hist[b] : NA,
+        ];
+      }
+      case "supertrend": {
+        const factor = toNum(evalExpr(args[0]));
+        const atrPeriod = args.length > 1 ? Math.round(toNum(evalExpr(args[1]))) : 10;
+        const ck = `supertrend_${factor}_${atrPeriod}`;
+        if (!indicatorCache.has(ck)) {
+          indicatorCache.set(ck, ind.supertrend(numHighArr, numLowArr, numCloseArr, factor, atrPeriod));
+        }
+        const s = indicatorCache.get(ck);
+        const b = currentBar;
+        return [
+          b < s.supertrend.length && !isNaN(s.supertrend[b]) ? s.supertrend[b] : NA,
+          b < s.direction.length && !isNaN(s.direction[b]) ? s.direction[b] : NA,
+        ];
       }
       case "dmi": {
         const diLen = toNum(evalExpr(args[0]));
@@ -2292,12 +2613,10 @@ export function executePine(
         return currentBar < stochVals.length && !isNaN(stochVals[currentBar]) ? stochVals[currentBar] : NA;
       }
       case "adx": {
-        const len = toNum(evalExpr(args[0]));
-        const ck = `adx_${len}`;
-        if (!indicatorCache.has(ck)) indicatorCache.set(ck, ind.adx(
-          numHighArr, numLowArr, numCloseArr, Math.round(len)));
-        const vals = indicatorCache.get(ck);
-        return currentBar < vals.length && !isNaN(vals[currentBar]) ? vals[currentBar] : NA;
+        const diLen = Math.round(toNum(evalExpr(args[0])));
+        const adxSmooth = args.length > 1 ? Math.round(toNum(evalExpr(args[1]))) : diLen;
+        const { adxVal } = computeDmi(diLen, adxSmooth);
+        return currentBar < adxVal.length && !isNaN(adxVal[currentBar]) ? adxVal[currentBar] : NA;
       }
       case "bb": {
         const srcArr = getSrcForBb(args[0]);

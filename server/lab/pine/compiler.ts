@@ -24,6 +24,16 @@ export interface CompilerContext {
 
 const INLINE_HISTORY_TA = new Set(["crossover", "crossunder", "cross", "change", "rising", "falling"]);
 
+export const TA_WHITELIST: ReadonlySet<string> = new Set([
+  "crossover", "crossunder", "cross", "change", "rising", "falling",
+  "sma", "ema", "wma", "linreg", "rma", "vwma", "swma", "hma", "dema", "tema", "alma",
+  "rsi", "cci", "mfi", "roc", "dev", "median", "percentrank", "cum",
+  "stoch", "macd", "bb", "kc", "atr", "tr", "adx", "supertrend", "dmi",
+  "highest", "lowest", "barssince", "valuewhen", "pivothigh", "pivotlow",
+  "percentile_nearest_rank", "percentile_linear_interpolation",
+  "vwap",
+]);
+
 function findHistoryAccessed(stmts: Stmt[]): Set<string> {
   const accessed = new Set<string>();
   function markArgs(args: Expr[]) {
