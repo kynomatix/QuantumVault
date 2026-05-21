@@ -159,7 +159,21 @@ export async function reconcileWalletDeposits(walletAddress: string): Promise<{ 
           // snapshots can attribute this deposit to when it actually happened,
           // not to when we discovered it (which can be weeks later and would
           // otherwise show up as a phantom P&L drop on the chart).
-          const blockTime = s.blockTime != null ? new Date(s.blockTime * 1000) : null;
+          //
+          // Try signature listing first, then fall back to the parsed tx's
+          // blockTime. If neither is available the RPC is in a degraded state
+          // for this tx — skip the insert entirely and let a future run pick
+          // it up. Inserting with a null tx_block_time is what caused the
+          // visible cliff in the chart, so we never do that.
+          const rawBlockTime = s.blockTime ?? tx.blockTime ?? null;
+          if (rawBlockTime == null) {
+            // Un-remember so we retry on the next run when RPC may return blockTime.
+            const set = scannedSignatures.get(walletAddress);
+            set?.delete(s.signature);
+            console.warn(`[DepositReconciler] Skipping ${s.signature.slice(0, 8)}…: blockTime unavailable; will retry next run`);
+            continue;
+          }
+          const blockTime = new Date(rawBlockTime * 1000);
           await storage.createEquityEvent({
             walletAddress,
             eventType: 'agent_deposit',
