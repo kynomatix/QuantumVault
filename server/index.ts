@@ -12,6 +12,7 @@ import { startProfitShareRetryJob } from "./profit-share-retry-job";
 import { startReferralRewardsRetryJob } from "./referral-rewards-retry-job";
 import { initLeverageCache, setOnCacheRefreshed } from "./leverage-cache-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
+import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
 
 async function trySyncMarketRegistry(): Promise<void> {
   try {
@@ -604,6 +605,8 @@ app.use((req, res, next) => {
         startProfitShareRetryJob();
         log('[Staggered startup] Starting referral rewards retry job');
         startReferralRewardsRetryJob();
+        log('[Staggered startup] Starting Telegram daily summary job');
+        startTelegramDailySummaryJob();
         log('[Staggered startup] Starting stats consistency monitor');
         import('./stats-consistency-monitor').then(({ startStatsConsistencyMonitor }) => {
           startStatsConsistencyMonitor();

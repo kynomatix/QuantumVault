@@ -3151,6 +3151,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         notifyTradeExecuted: wallet.notifyTradeExecuted ?? true,
         notifyTradeFailed: wallet.notifyTradeFailed ?? true,
         notifyPositionClosed: wallet.notifyPositionClosed ?? true,
+        dailySummaryEnabled: wallet.dailySummaryEnabled ?? false,
         telegramConnected: wallet.telegramConnected ?? false,
         referralCode: wallet.referralCode,
         referredBy: wallet.referredBy,
@@ -3163,7 +3164,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
   app.put("/api/wallet/settings", requireWallet, async (req, res) => {
     try {
-      const { displayName, xUsername, defaultLeverage, slippageBps, notificationsEnabled, notifyTradeExecuted, notifyTradeFailed, notifyPositionClosed } = req.body;
+      const { displayName, xUsername, defaultLeverage, slippageBps, notificationsEnabled, notifyTradeExecuted, notifyTradeFailed, notifyPositionClosed, dailySummaryEnabled } = req.body;
       
       const updates: any = {};
       if (displayName !== undefined) updates.displayName = displayName;
@@ -3186,6 +3187,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (notifyTradeExecuted !== undefined) updates.notifyTradeExecuted = !!notifyTradeExecuted;
       if (notifyTradeFailed !== undefined) updates.notifyTradeFailed = !!notifyTradeFailed;
       if (notifyPositionClosed !== undefined) updates.notifyPositionClosed = !!notifyPositionClosed;
+      if (dailySummaryEnabled !== undefined) updates.dailySummaryEnabled = !!dailySummaryEnabled;
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ error: "No valid updates provided" });
@@ -3204,6 +3206,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         notifyTradeExecuted: wallet.notifyTradeExecuted ?? true,
         notifyTradeFailed: wallet.notifyTradeFailed ?? true,
         notifyPositionClosed: wallet.notifyPositionClosed ?? true,
+        dailySummaryEnabled: wallet.dailySummaryEnabled ?? false,
         telegramConnected: wallet.telegramConnected ?? false,
       });
     } catch (error) {
@@ -12412,11 +12415,14 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (text.startsWith('/help')) {
         await sendTelegramResponse(chatId,
           "<b>QuantumVault commands</b>\n\n" +
+          "/summary — daily snapshot for every linked wallet\n" +
+          "/positions — just your open positions\n" +
+          "/today — today's trades and realized PnL\n" +
           "/status — connection status\n" +
           "/accounts — list linked wallets\n" +
           "/disconnect — unlink every wallet from this chat\n" +
           "/help — show this message\n\n" +
-          "You can link this Telegram to multiple QuantumVault accounts."
+          "Turn on the <b>Daily summary</b> toggle in Settings → Notifications to receive /summary as a push once a day."
         );
         return res.json({ ok: true });
       }
@@ -12462,6 +12468,48 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             "Send /disconnect to unlink them all from this chat."
           );
         }
+        return res.json({ ok: true });
+      }
+
+      // /summary — full daily snapshot for every linked wallet
+      if (text.startsWith('/summary')) {
+        const linked = await storage.getWalletsByTelegramChatId(chatId);
+        if (linked.length === 0) {
+          await sendTelegramResponse(chatId,
+            "ℹ️ This chat isn't linked to any QuantumVault wallet yet.\n\n" +
+            "Open QuantumVault → Settings → Notifications → Connect Telegram to link one."
+          );
+          return res.json({ ok: true });
+        }
+        const { buildStatsForChat, formatSummaryMessage } = await import("./telegram-summary");
+        const stats = await buildStatsForChat(linked.map(w => w.address));
+        await sendTelegramResponse(chatId, formatSummaryMessage(stats));
+        return res.json({ ok: true });
+      }
+
+      // /positions — just open positions across linked wallets
+      if (text.startsWith('/positions')) {
+        const linked = await storage.getWalletsByTelegramChatId(chatId);
+        if (linked.length === 0) {
+          await sendTelegramResponse(chatId, "ℹ️ No QuantumVault wallets are linked to this chat.");
+          return res.json({ ok: true });
+        }
+        const { buildStatsForChat, formatPositionsMessage } = await import("./telegram-summary");
+        const stats = await buildStatsForChat(linked.map(w => w.address));
+        await sendTelegramResponse(chatId, formatPositionsMessage(stats));
+        return res.json({ ok: true });
+      }
+
+      // /today — last 24h activity (trades + realized PnL + win/loss)
+      if (text.startsWith('/today')) {
+        const linked = await storage.getWalletsByTelegramChatId(chatId);
+        if (linked.length === 0) {
+          await sendTelegramResponse(chatId, "ℹ️ No QuantumVault wallets are linked to this chat.");
+          return res.json({ ok: true });
+        }
+        const { buildTodayStatsForChat, formatTodayMessage } = await import("./telegram-summary");
+        const stats = await buildTodayStatsForChat(linked.map(w => w.address));
+        await sendTelegramResponse(chatId, formatTodayMessage(stats));
         return res.json({ ok: true });
       }
 

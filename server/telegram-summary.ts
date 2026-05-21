@@ -1,0 +1,268 @@
+import { sql } from "drizzle-orm";
+import { db } from "./db";
+import { botTrades } from "@shared/schema";
+import { storage } from "./storage";
+import { getDefaultAdapter } from "./protocol/adapter-registry";
+
+export interface SummaryOpenPosition {
+  botName: string;
+  market: string;
+  side: 'LONG' | 'SHORT';
+  size: number;
+  entryPrice: number;
+  unrealizedPnl: number;
+}
+
+export interface WalletSummaryStats {
+  walletAddress: string;
+  totalEquity: number | null; // null when no snapshot yet (avoid hot-path on-chain reads)
+  pnl24h: number;
+  pnl24hPercent: number;
+  tradesLast24h: number;
+  winning24h: number;
+  losing24h: number;
+  openPositions: SummaryOpenPosition[];
+}
+
+export interface TodayStats {
+  walletAddress: string;
+  tradesToday: number;
+  realizedPnlToday: number;
+  winning: number;
+  losing: number;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function truncateAddress(addr: string): string {
+  if (!addr || addr.length <= 10) return addr || '';
+  return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+}
+
+function fmtUsd(n: number): string {
+  const sign = n < 0 ? '-' : '';
+  return `${sign}$${Math.abs(n).toFixed(2)}`;
+}
+
+function fmtUsdOrDash(n: number | null): string {
+  if (n == null) return '—';
+  return fmtUsd(n);
+}
+
+function fmtPnl(n: number): string {
+  return n >= 0 ? `+${fmtUsd(n)}` : fmtUsd(n);
+}
+
+function fmtPct(n: number): string {
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+}
+
+function startOfUtcDay(d: Date = new Date()): Date {
+  const out = new Date(d);
+  out.setUTCHours(0, 0, 0, 0);
+  return out;
+}
+
+async function getTradeAggregate(walletAddress: string, since: Date): Promise<{
+  count: number;
+  realizedPnl: number;
+  winning: number;
+  losing: number;
+}> {
+  const rows = await db.execute(sql`
+    SELECT
+      COUNT(*)::int AS "count",
+      COALESCE(SUM(${botTrades.pnl}::numeric), 0) AS "pnl",
+      SUM(CASE WHEN ${botTrades.pnl}::numeric > 0 THEN 1 ELSE 0 END)::int AS "winning",
+      SUM(CASE WHEN ${botTrades.pnl}::numeric < 0 THEN 1 ELSE 0 END)::int AS "losing"
+    FROM ${botTrades}
+    WHERE ${botTrades.walletAddress} = ${walletAddress}
+      AND ${botTrades.pnl} IS NOT NULL
+      AND ${botTrades.executedAt} >= ${since}
+      AND ${botTrades.status} IN ('executed','liquidated','recovered')
+  `);
+  const row: any = (rows as any).rows?.[0] ?? (rows as any)[0] ?? {};
+  return {
+    count: Number(row.count ?? 0),
+    realizedPnl: Number(row.pnl ?? 0),
+    winning: Number(row.winning ?? 0),
+    losing: Number(row.losing ?? 0),
+  };
+}
+
+/**
+ * Build per-wallet stats for /summary and the daily push.
+ *
+ * Hot-path discipline (Task #129 step 2):
+ *   - Equity comes from the latest portfolio snapshot (cache), NOT a live
+ *     on-chain balance read. If no snapshot exists yet we surface `null`
+ *     rather than triggering a fresh RPC fan-out.
+ *   - Trade counts/PnL come from `bot_trades` (DB).
+ *   - Open positions come from `bot_positions` cache.
+ *   - Mark prices use the adapter's in-memory price cache. Callers that
+ *     summarize multiple wallets should pass a single pre-fetched map to
+ *     avoid repeated cache lookups.
+ */
+export async function buildWalletSummaryStats(
+  walletAddress: string,
+  prefetchedPrices?: Record<string, number>,
+): Promise<WalletSummaryStats> {
+  const snap = await storage.getLatestPortfolioDailySnapshot(walletAddress);
+  const totalEquity: number | null = snap ? parseFloat(snap.totalBalance) : null;
+
+  const trades24h = await getTradeAggregate(walletAddress, new Date(Date.now() - DAY_MS));
+
+  // Denominator: prefer balance approximated 24h ago (current - realized24h).
+  // Falls back to current totalBalance if approximation goes non-positive.
+  // When equity is unknown, percent is reported as 0 alongside the dash.
+  let pnl24hPercent = 0;
+  if (totalEquity != null) {
+    const denom = Math.max(totalEquity - trades24h.realizedPnl, 1);
+    pnl24hPercent = (trades24h.realizedPnl / denom) * 100;
+    if (!Number.isFinite(pnl24hPercent)) pnl24hPercent = 0;
+    if (pnl24hPercent > 1000) pnl24hPercent = 1000;
+    if (pnl24hPercent < -100) pnl24hPercent = -100;
+  }
+
+  const positions = await storage.getBotPositions(walletAddress);
+  const bots = await storage.getTradingBots(walletAddress);
+  const botMap = new Map(bots.map(b => [b.id, b]));
+
+  const prices = prefetchedPrices ?? {};
+
+  const openPositions: SummaryOpenPosition[] = [];
+  for (const pos of positions) {
+    const baseSize = parseFloat(pos.baseSize);
+    if (!Number.isFinite(baseSize) || Math.abs(baseSize) < 0.0001) continue;
+    const bot = botMap.get(pos.tradingBotId);
+    if (!bot) continue;
+    const side: 'LONG' | 'SHORT' = baseSize > 0 ? 'LONG' : 'SHORT';
+    const entryPrice = parseFloat(pos.avgEntryPrice);
+    const markPrice = prices[pos.market] && prices[pos.market] > 0 ? prices[pos.market] : entryPrice;
+    const unrealizedPnl = side === 'LONG'
+      ? (markPrice - entryPrice) * Math.abs(baseSize)
+      : (entryPrice - markPrice) * Math.abs(baseSize);
+    openPositions.push({
+      botName: bot.name,
+      market: pos.market,
+      side,
+      size: Math.abs(baseSize),
+      entryPrice,
+      unrealizedPnl,
+    });
+  }
+
+  return {
+    walletAddress,
+    totalEquity,
+    pnl24h: trades24h.realizedPnl,
+    pnl24hPercent,
+    tradesLast24h: trades24h.count,
+    winning24h: trades24h.winning,
+    losing24h: trades24h.losing,
+    openPositions,
+  };
+}
+
+export async function buildTodayStats(walletAddress: string): Promise<TodayStats> {
+  const agg = await getTradeAggregate(walletAddress, startOfUtcDay());
+  return {
+    walletAddress,
+    tradesToday: agg.count,
+    realizedPnlToday: agg.realizedPnl,
+    winning: agg.winning,
+    losing: agg.losing,
+  };
+}
+
+/**
+ * Fetch the adapter's cached price map once for a batch. Adapter
+ * implementations short-circuit via their internal TTL/WS cache so this is
+ * cheap, but we still want a single call per batch instead of per wallet.
+ */
+export async function getMarkPricesSafely(): Promise<Record<string, number>> {
+  try {
+    return await getDefaultAdapter().getAllPrices();
+  } catch {
+    return {};
+  }
+}
+
+export async function buildStatsForChat(walletAddresses: string[]): Promise<WalletSummaryStats[]> {
+  const prices = await getMarkPricesSafely();
+  const out: WalletSummaryStats[] = [];
+  for (const addr of walletAddresses) {
+    try {
+      out.push(await buildWalletSummaryStats(addr, prices));
+    } catch (err: any) {
+      console.error(`[TelegramSummary] Failed to build stats for ${addr.slice(0, 8)}…:`, err?.message || err);
+    }
+  }
+  return out;
+}
+
+export async function buildTodayStatsForChat(walletAddresses: string[]): Promise<TodayStats[]> {
+  const out: TodayStats[] = [];
+  for (const addr of walletAddresses) {
+    try {
+      out.push(await buildTodayStats(addr));
+    } catch (err: any) {
+      console.error(`[TelegramSummary] Failed to build today stats for ${addr.slice(0, 8)}…:`, err?.message || err);
+    }
+  }
+  return out;
+}
+
+export function formatSummaryMessage(stats: WalletSummaryStats[]): string {
+  if (stats.length === 0) {
+    return "ℹ️ No QuantumVault wallets are linked to this chat.\n\nOpen QuantumVault → Settings → Notifications → Connect Telegram to link one.";
+  }
+  const parts: string[] = ["📊 <b>QuantumVault daily summary</b>"];
+  for (const s of stats) {
+    const lines: string[] = [];
+    lines.push(`\n<b>Wallet</b> <code>${truncateAddress(s.walletAddress)}</code>`);
+    lines.push(`Equity: <b>${fmtUsdOrDash(s.totalEquity)}</b>${s.totalEquity == null ? ' <i>(awaiting first snapshot)</i>' : ''}`);
+    lines.push(`24h PnL: <b>${fmtPnl(s.pnl24h)}</b>${s.totalEquity != null ? ` (${fmtPct(s.pnl24hPercent)})` : ''}`);
+    lines.push(`24h trades: <b>${s.tradesLast24h}</b> · wins ${s.winning24h} · losses ${s.losing24h}`);
+    lines.push(`Open positions: <b>${s.openPositions.length}</b>`);
+    for (const p of s.openPositions) {
+      lines.push(`  • ${p.botName} — ${p.side} ${p.market} ${p.size.toFixed(4)} · uPnL ${fmtPnl(p.unrealizedPnl)}`);
+    }
+    parts.push(lines.join('\n'));
+  }
+  return parts.join('\n');
+}
+
+export function formatPositionsMessage(stats: WalletSummaryStats[]): string {
+  if (stats.length === 0) {
+    return "ℹ️ No QuantumVault wallets are linked to this chat.";
+  }
+  const parts: string[] = ["📈 <b>Open positions</b>"];
+  for (const s of stats) {
+    parts.push(`\n<b>Wallet</b> <code>${truncateAddress(s.walletAddress)}</code>`);
+    if (s.openPositions.length === 0) {
+      parts.push("  <i>No open positions.</i>");
+      continue;
+    }
+    for (const p of s.openPositions) {
+      parts.push(
+        `  • ${p.botName} — ${p.side} ${p.market}\n` +
+        `    size ${p.size.toFixed(4)} · entry ${fmtUsd(p.entryPrice)} · uPnL ${fmtPnl(p.unrealizedPnl)}`,
+      );
+    }
+  }
+  return parts.join('\n');
+}
+
+export function formatTodayMessage(stats: TodayStats[]): string {
+  if (stats.length === 0) {
+    return "ℹ️ No QuantumVault wallets are linked to this chat.";
+  }
+  const parts: string[] = ["🗓️ <b>Today's activity (UTC day so far)</b>"];
+  for (const s of stats) {
+    parts.push(`\n<b>Wallet</b> <code>${truncateAddress(s.walletAddress)}</code>`);
+    parts.push(`Trades: <b>${s.tradesToday}</b> · wins ${s.winning} · losses ${s.losing}`);
+    parts.push(`Realized PnL: <b>${fmtPnl(s.realizedPnlToday)}</b>`);
+  }
+  return parts.join('\n');
+}

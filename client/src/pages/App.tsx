@@ -83,6 +83,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 import {
   Tooltip,
@@ -272,6 +273,7 @@ export default function AppPage() {
   const [notifyTradeExecuted, setNotifyTradeExecuted] = useState(true);
   const [notifyTradeFailed, setNotifyTradeFailed] = useState(true);
   const [notifyPositionClosed, setNotifyPositionClosed] = useState(true);
+  const [dailySummaryEnabled, setDailySummaryEnabled] = useState(false);
   const [telegramConnected, setTelegramConnected] = useState(false);
   const [telegramDialogOpen, setTelegramDialogOpen] = useState(false);
   const [telegramConnectLoading, setTelegramConnectLoading] = useState(false);
@@ -470,6 +472,7 @@ export default function AppPage() {
           setNotifyTradeExecuted(data.notifyTradeExecuted ?? true);
           setNotifyTradeFailed(data.notifyTradeFailed ?? true);
           setNotifyPositionClosed(data.notifyPositionClosed ?? true);
+          setDailySummaryEnabled(data.dailySummaryEnabled ?? false);
           setTelegramConnected(data.telegramConnected ?? false);
           setReferralCode(data.referralCode || null);
           setReferredBy(data.referredBy || null);
@@ -778,6 +781,7 @@ export default function AppPage() {
             setNotifyTradeExecuted(data.notifyTradeExecuted ?? true);
             setNotifyTradeFailed(data.notifyTradeFailed ?? true);
             setNotifyPositionClosed(data.notifyPositionClosed ?? true);
+            setDailySummaryEnabled(data.dailySummaryEnabled ?? false);
             setTelegramConnected(data.telegramConnected ?? false);
             setReferralCode(data.referralCode || null);
             setReferredBy(data.referredBy || null);
@@ -857,6 +861,7 @@ export default function AppPage() {
     notifyTradeExecuted?: boolean;
     notifyTradeFailed?: boolean;
     notifyPositionClosed?: boolean;
+    dailySummaryEnabled?: boolean;
   }) => {
     setSavingNotifications(true);
     try {
@@ -876,6 +881,7 @@ export default function AppPage() {
       if (updates.notifyTradeExecuted !== undefined) setNotifyTradeExecuted(updates.notifyTradeExecuted);
       if (updates.notifyTradeFailed !== undefined) setNotifyTradeFailed(updates.notifyTradeFailed);
       if (updates.notifyPositionClosed !== undefined) setNotifyPositionClosed(updates.notifyPositionClosed);
+      if (updates.dailySummaryEnabled !== undefined) setDailySummaryEnabled(updates.dailySummaryEnabled);
     } catch (error) {
       toast({ 
         title: 'Failed to save', 
@@ -3890,8 +3896,8 @@ export default function AppPage() {
                                     </div>
                                     <p className="text-sm text-muted-foreground mt-1">
                                       {telegramConnected 
-                                        ? 'You will receive trade alerts via Telegram.'
-                                        : 'Connect Telegram to receive instant trade alerts when your bots execute trades.'}
+                                        ? 'You will receive trade alerts via Telegram. Try /summary, /positions, or /today in the bot for quick info between alerts.'
+                                        : 'Connect Telegram to receive instant trade alerts when your bots execute trades. You can also pull /summary, /positions, and /today on demand once connected.'}
                                     </p>
                                     {telegramConnected && (() => {
                                       const noTypesOn =
@@ -3907,6 +3913,20 @@ export default function AppPage() {
                                               </p>
                                             </div>
                                           )}
+                                          <div className="flex items-start justify-between gap-3 p-3 bg-muted/40 border border-border/40 rounded-lg">
+                                            <div className="flex-1 min-w-0">
+                                              <p className="text-sm font-medium">Daily summary</p>
+                                              <p className="text-xs text-muted-foreground mt-0.5">
+                                                Sends one Telegram message per day (16:00 UTC) with your equity, 24h PnL, trade count, and open positions. Off by default.
+                                              </p>
+                                            </div>
+                                            <Switch
+                                              checked={dailySummaryEnabled}
+                                              disabled={savingNotifications}
+                                              onCheckedChange={(checked) => handleSaveNotificationPrefs({ dailySummaryEnabled: checked })}
+                                              data-testid="switch-daily-summary"
+                                            />
+                                          </div>
                                           <div className="flex flex-wrap gap-2">
                                             <Button
                                               variant="outline"

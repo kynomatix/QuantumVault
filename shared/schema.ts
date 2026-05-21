@@ -49,6 +49,8 @@ export const wallets = pgTable("wallets", {
   notifyPositionClosed: boolean("notify_position_closed").default(true),
   telegramConnected: boolean("telegram_connected").default(false),
   telegramChatId: text("telegram_chat_id"),
+  dailySummaryEnabled: boolean("daily_summary_enabled").default(false).notNull(),
+  dailySummaryLastSentDate: text("daily_summary_last_sent_date"),
   
   protocolSubaccountId: text("protocol_subaccount_id"),
   
