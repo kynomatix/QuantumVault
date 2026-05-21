@@ -1,11 +1,12 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import bs58 from 'bs58';
 import { useWallet } from '@/hooks/useWallet';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, useUnsubscribeFromBot, usePortfolioPerformance, type HealthMetrics, type PublishedBot, type PortfolioPerformanceData } from '@/hooks/useApi';
+import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useLeaderboardSparklines, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, useUnsubscribeFromBot, usePortfolioPerformance, type HealthMetrics, type PublishedBot, type PortfolioPerformanceData } from '@/hooks/useApi';
+import { Sparkline } from '@/components/Sparkline';
 import { useToast } from '@/hooks/use-toast';
 import { useConfirm } from '@/hooks/useConfirm';
 import { 
@@ -356,6 +357,11 @@ export default function AppPage() {
   const { data: allTradesData } = useTrades(500);
   const { data: botsData, refetch: refetchBots } = useTradingBots();
   const { data: leaderboardData } = useLeaderboard(100);
+  const leaderboardWallets = useMemo(
+    () => (leaderboardData ?? []).map((t: { walletAddress: string }) => t.walletAddress),
+    [leaderboardData],
+  );
+  const { data: leaderboardSparklines } = useLeaderboardSparklines(leaderboardWallets, '30d');
   const { data: pricesData } = usePrices();
   const { data: healthMetrics } = useHealthMetrics();
   const { data: expandedBotHealth, isLoading: healthLoading } = useBotHealth(expandedPositionBotId, !!expandedPositionBotId);
@@ -3357,6 +3363,7 @@ export default function AppPage() {
                           <th className="text-left py-4 px-4 font-medium">Trader</th>
                           <th className="text-right py-4 px-4 font-medium">Volume</th>
                           <th className="text-right py-4 px-4 font-medium">P&L %</th>
+                          <th className="text-right py-4 px-2 sm:px-4 font-medium" title="Lifetime P&L trend">Trend</th>
                           <th className="text-right py-4 px-4 font-medium">Win Rate</th>
                           <th className="text-right py-4 px-4 font-medium">Trades</th>
                           <th className="text-center py-4 px-4 font-medium">Profile</th>
@@ -3395,6 +3402,19 @@ export default function AppPage() {
                               </td>
                               <td className="py-4 px-4 text-right font-mono">${formatVolume(trader.totalVolume)}</td>
                               <td className={`py-4 px-4 text-right font-mono ${trader.pnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{pnlFormatted}</td>
+                              <td className="py-4 px-2 sm:px-4 text-right">
+                                <div className="flex justify-end">
+                                  <Sparkline
+                                    data={leaderboardSparklines?.sparklines[trader.walletAddress] ?? []}
+                                    width={56}
+                                    height={24}
+                                    desktopWidth={96}
+                                    desktopHeight={28}
+                                    rangeLabel="All-time"
+                                    testId={`sparkline-leaderboard-${rank}`}
+                                  />
+                                </div>
+                              </td>
                               <td className="py-4 px-4 text-right font-mono">{trader.winRate.toFixed(1)}%</td>
                               <td className="py-4 px-4 text-right font-mono text-muted-foreground">{trader.tradeCount}</td>
                               <td className="py-4 px-4 text-center">

@@ -330,6 +330,8 @@ export interface IStorage {
 
   upsertPortfolioDailySnapshot(snapshot: InsertPortfolioDailySnapshot): Promise<PortfolioDailySnapshot>;
   getPortfolioDailySnapshots(walletAddress: string, since?: Date): Promise<PortfolioDailySnapshot[]>;
+  getPortfolioDailySnapshotsBatch(walletAddresses: string[], since?: Date): Promise<Map<string, PortfolioDailySnapshot[]>>;
+  getEarliestPortfolioSnapshotDates(walletAddresses: string[]): Promise<Map<string, Date>>;
   getLatestPortfolioDailySnapshot(walletAddress: string): Promise<PortfolioDailySnapshot | undefined>;
   getWalletCumulativeDepositsWithdrawals(walletAddress: string, asOf?: Date): Promise<{ deposits: number; withdrawals: number; internalTransfers: number }>;
   getWalletExternalFlows(walletAddress: string, asOf?: Date): Promise<Array<{ time: Date; amount: number }>>;
@@ -1224,8 +1226,9 @@ export class DatabaseStorage implements IStorage {
 
       // Task 119: Use the wallet's latest portfolio snapshot as the source of
       // truth for both `$ totalPnl` and `pnlPercent` so the leaderboard agrees
-      // with the wallet owner's portfolio page. Falls back to the per-bot
-      // realized-only sum if no snapshot has been taken yet (new wallets).
+      // with the wallet owner's portfolio page and the Task 120 sparkline
+      // tip. Falls back to the per-bot realized-only sum if no snapshot has
+      // been taken yet (new wallets).
       const latestSnap = await this.getLatestPortfolioDailySnapshot(wallet.address);
       let leaderTotalPnl = totalPnl;
       let pnlPercent = 0;
@@ -2324,6 +2327,44 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(portfolioDailySnapshots)
       .where(and(...conditions))
       .orderBy(portfolioDailySnapshots.snapshotDate);
+  }
+
+  async getPortfolioDailySnapshotsBatch(
+    walletAddresses: string[],
+    since?: Date,
+  ): Promise<Map<string, PortfolioDailySnapshot[]>> {
+    const out = new Map<string, PortfolioDailySnapshot[]>();
+    if (walletAddresses.length === 0) return out;
+    const conditions = [inArray(portfolioDailySnapshots.walletAddress, walletAddresses)];
+    if (since) {
+      conditions.push(gte(portfolioDailySnapshots.snapshotDate, since));
+    }
+    const rows = await db.select().from(portfolioDailySnapshots)
+      .where(and(...conditions))
+      .orderBy(portfolioDailySnapshots.snapshotDate);
+    for (const addr of walletAddresses) out.set(addr, []);
+    for (const row of rows) {
+      const arr = out.get(row.walletAddress);
+      if (arr) arr.push(row);
+    }
+    return out;
+  }
+
+  async getEarliestPortfolioSnapshotDates(walletAddresses: string[]): Promise<Map<string, Date>> {
+    const out = new Map<string, Date>();
+    if (walletAddresses.length === 0) return out;
+    const rows = await db
+      .select({
+        walletAddress: portfolioDailySnapshots.walletAddress,
+        earliest: sql<Date>`MIN(${portfolioDailySnapshots.snapshotDate})`,
+      })
+      .from(portfolioDailySnapshots)
+      .where(inArray(portfolioDailySnapshots.walletAddress, walletAddresses))
+      .groupBy(portfolioDailySnapshots.walletAddress);
+    for (const r of rows) {
+      if (r.earliest) out.set(r.walletAddress, r.earliest instanceof Date ? r.earliest : new Date(r.earliest as any));
+    }
+    return out;
   }
 
   async getLatestPortfolioDailySnapshot(walletAddress: string): Promise<PortfolioDailySnapshot | undefined> {

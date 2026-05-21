@@ -10665,6 +10665,95 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
+  // Batched sparkline data for leaderboard rows. Returns one compact P&L %
+  // series per requested wallet over the chosen window. One DB query for all
+  // wallets, not N — keeps the leaderboard fast as it grows.
+  app.get("/api/leaderboard/sparklines", async (req, res) => {
+    try {
+      const rawWallets = (req.query.wallets as string | undefined) ?? "";
+      const wallets = rawWallets
+        .split(",")
+        .map(w => w.trim())
+        .filter(w => w.length > 0)
+        .slice(0, 200);
+      if (wallets.length === 0) {
+        res.json({ range: "all", sparklines: {} });
+        return;
+      }
+      // Range covers the wallet's full snapshot history by default — a short
+      // recent slump shouldn't dominate the sparkline when the producer has
+      // months of strong prior performance. "all" omits the time filter
+      // entirely; explicit windows are still supported for callers that want
+      // a tighter view.
+      const validRanges = ["7d", "30d", "90d", "all"] as const;
+      type RangeParam = typeof validRanges[number];
+      const rawRange = (req.query.range as string | undefined)?.toLowerCase();
+      const range: RangeParam = (validRanges as readonly string[]).includes(rawRange ?? "")
+        ? (rawRange as RangeParam)
+        : "all";
+      let since: Date | undefined;
+      if (range !== "all") {
+        const days = range === "7d" ? 7 : range === "90d" ? 90 : 30;
+        since = new Date();
+        since.setDate(since.getDate() - days);
+      }
+
+      const grouped = await storage.getPortfolioDailySnapshotsBatch(wallets, since);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const sparklines: Record<string, Array<{ date: string; pnlPercent: number }>> = {};
+      for (const wallet of wallets) {
+        const snaps = grouped.get(wallet) ?? [];
+        const series: Array<{ date: string; pnlPercent: number }> = [];
+
+        // Prepend a zero anchor one day before the first snapshot so the line
+        // visibly starts from 0% rather than mid-curve. For "all" this is
+        // always the wallet's inception; for windowed ranges we still anchor
+        // at the window start so the shape reads correctly.
+        if (snaps.length > 0) {
+          const firstSnapDate = new Date(snaps[0].snapshotDate);
+          firstSnapDate.setHours(0, 0, 0, 0);
+          const dayBeforeFirst = new Date(firstSnapDate);
+          dayBeforeFirst.setDate(dayBeforeFirst.getDate() - 1);
+          if (!since || dayBeforeFirst >= since) {
+            series.push({ date: dayBeforeFirst.toISOString(), pnlPercent: 0 });
+          }
+        }
+
+        for (const s of snaps) {
+          const deposits = parseFloat(s.cumulativeDeposits);
+          const netPnl = parseFloat(s.netPnl);
+          const pnlPercent = deposits > 0 ? (netPnl / deposits) * 100 : 0;
+          series.push({
+            date: (s.snapshotDate instanceof Date ? s.snapshotDate : new Date(s.snapshotDate)).toISOString(),
+            pnlPercent,
+          });
+        }
+
+        // Append a current-day point when today's snapshot is missing. We
+        // can't afford per-wallet live RPC here (the leaderboard would burn
+        // the Pacifica/Solana quota), so we carry the last known pnlPercent
+        // forward to today — the tip refreshes once the snapshot job runs.
+        if (snaps.length > 0) {
+          const lastSnap = snaps[snaps.length - 1];
+          const lastSnapDay = new Date(lastSnap.snapshotDate);
+          lastSnapDay.setHours(0, 0, 0, 0);
+          if (lastSnapDay.getTime() < today.getTime()) {
+            const lastPoint = series[series.length - 1];
+            series.push({ date: today.toISOString(), pnlPercent: lastPoint.pnlPercent });
+          }
+        }
+
+        sparklines[wallet] = series;
+      }
+      res.json({ range, sparklines });
+    } catch (error) {
+      console.error("Get leaderboard sparklines error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   app.get("/api/prices", async (req, res) => {
     try {
       const prices = await getAllPrices();

@@ -182,6 +182,35 @@ export function useLeaderboard(limit?: number) {
   });
 }
 
+export interface LeaderboardSparklinesResponse {
+  range: string;
+  sparklines: Record<string, Array<{ date: string; pnlPercent: number }>>;
+}
+
+async function fetchLeaderboardSparklines(
+  wallets: string[],
+  range: string,
+): Promise<LeaderboardSparklinesResponse> {
+  if (wallets.length === 0) return { range, sparklines: {} };
+  const params = new URLSearchParams({
+    wallets: wallets.join(","),
+    range,
+  });
+  const res = await fetch(`/api/leaderboard/sparklines?${params.toString()}`);
+  if (!res.ok) throw new Error("Failed to fetch leaderboard sparklines");
+  return safeResponseJson(res);
+}
+
+export function useLeaderboardSparklines(wallets: string[], range: string = "30d") {
+  const key = wallets.slice().sort().join(",");
+  return useQuery({
+    queryKey: ["leaderboardSparklines", key, range],
+    queryFn: () => fetchLeaderboardSparklines(wallets, range),
+    enabled: wallets.length > 0,
+    staleTime: 60_000,
+  });
+}
+
 export function useSubscribeToBot() {
   const queryClient = useQueryClient();
   const { publicKeyString } = useWallet();
