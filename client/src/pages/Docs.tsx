@@ -31,7 +31,8 @@ type DocSection =
   | 'quantumlab-optimizer'
   | 'quantumlab-engine'
   | 'quantumlab-results'
-  | 'quantumlab-insights';
+  | 'quantumlab-insights'
+  | 'quantumlab-agent-api';
 
 interface NavItem {
   id: DocSection;
@@ -57,6 +58,7 @@ const navItems: NavItem[] = [
   { id: 'quantumlab-engine', label: 'Backtesting Engine', icon: Target },
   { id: 'quantumlab-results', label: 'Results & Heatmap', icon: BarChart3 },
   { id: 'quantumlab-insights', label: 'Insights & Guided Mode', icon: Lightbulb },
+  { id: 'quantumlab-agent-api', label: 'QuantumLab Agent API', icon: Cpu },
 ];
 
 function CopyButton({ text }: { text: string }) {
@@ -1593,7 +1595,7 @@ POST /api/lab/run-optimization
   "refinementsPerSeed": 5,
   "minTrades": 20,
   "maxDrawdownCap": 50,
-  "mode": "random_search"
+  "mode": "sweep"
 }
 # → returns { queued: true, runId: 456, queueOrder: 1 }`} language="http" />
 
@@ -2534,6 +2536,176 @@ function QuantumLabInsightsSection() {
   );
 }
 
+function QuantumLabAgentApiSection() {
+  return (
+    <div>
+      <Heading>QuantumLab Agent API</Heading>
+      <Paragraph>
+        Every QuantumLab endpoint is accessible over HTTP using a <strong>Bearer token</strong>. This lets AI agents
+        (Claude, MCP tools, custom scripts) drive the entire backtest pipeline — parse Pine Script, run
+        optimizations, read results, generate insights — without needing a browser session.
+      </Paragraph>
+
+      <Alert type="success">
+        <strong>Security model:</strong> API tokens grant access to <em>QuantumLab only</em> — they cannot place
+        trades, sign transactions, or move funds. Live trading still requires a wallet session. The AI does the
+        research, you approve deployment.
+      </Alert>
+
+      <SubHeading>Getting a Token</SubHeading>
+      <StepList steps={[
+        'Open Settings → API Tokens in QuantumVault',
+        'Click Generate Token and give it a label (e.g. "Claude MCP")',
+        'Copy the token immediately — it\'s shown only once and starts with "qv_"',
+        'Store it securely (password manager or env var — never commit to git)',
+      ]} />
+
+      <SubHeading>Authentication</SubHeading>
+      <Paragraph>Include the token on every QuantumLab API request:</Paragraph>
+      <CodeBlock code={`Authorization: Bearer qv_<your-token>`} language="http" />
+      <Paragraph>Requests without a valid token receive <code className="text-violet-400">401 Unauthorized</code>.</Paragraph>
+
+      <SubHeading>Typical Agent Workflow</SubHeading>
+      <CodeBlock code={`1. Parse Pine Script     →  POST /api/lab/parse-pine
+2. Save strategy         →  POST /api/lab/strategies
+3. Submit backtest run   →  POST /api/lab/run-optimization
+4. Poll progress         →  GET  /api/lab/job/:id/progress
+5. Read results          →  GET  /api/lab/runs/:id/results
+6. Generate insights     →  POST /api/lab/strategies/:id/insights-report
+7. Iterate with guidance →  repeat step 3 with useInsights: true`} language="text" />
+
+      <SubHeading>Parse Pine Script</SubHeading>
+      <CodeBlock code={`POST /api/lab/parse-pine
+{ "code": "<full pine script source>" }
+
+// Returns parsed inputs + groups — feed directly into POST /api/lab/strategies`} language="http" />
+
+      <SubHeading>Strategies</SubHeading>
+      <div className="mb-6 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-white/10">
+              <th className="text-left py-2 text-white/60 font-medium">Method</th>
+              <th className="text-left py-2 text-white/60 font-medium">Path</th>
+              <th className="text-left py-2 text-white/60 font-medium">Purpose</th>
+            </tr>
+          </thead>
+          <tbody className="text-white/70 font-mono text-xs">
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/strategies</td><td className="font-sans">List strategies for this wallet</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/strategies/:id</td><td className="font-sans">Get one strategy</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">POST</td><td>/api/lab/strategies</td><td className="font-sans">Create a strategy</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">DELETE</td><td>/api/lab/strategies/:id</td><td className="font-sans">Delete a strategy</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <CodeBlock code={`POST /api/lab/strategies
+{
+  "name": "My Strategy",
+  "pineScript": "<full source>",
+  "parsedInputs": { ... },    // from parse-pine
+  "groups": { ... },          // from parse-pine
+  "description": "optional"
+}`} language="json" />
+
+      <SubHeading>Run Optimization</SubHeading>
+      <CodeBlock code={`POST /api/lab/run-optimization
+{
+  "strategyId": 42,
+  "tickers": ["SOL", "ETH"],
+  "timeframes": ["1h", "4h"],
+  "startDate": "2024-01-01",
+  "endDate": "2025-01-01",
+  "randomSamples": 2000,
+  "topK": 10,
+  "refinementsPerSeed": 50,
+  "minTrades": 10,
+  "maxDrawdownCap": 30,
+  "mode": "sweep",          // "sweep" or "smoke" (quick 100-sample test)
+  "useInsights": false,     // set true after you have an Insights report
+  "deepSearch": false
+}`} language="json" />
+      <Paragraph>
+        <strong>Immediate start</strong> → returns <code className="text-violet-400">{"{ jobId, runId }"}</code>.{' '}
+        <strong>Queued</strong> (another run active) → returns <code className="text-violet-400">{"{ queued: true, runId, queueOrder }"}</code>.
+        Poll <code className="text-violet-400">GET /api/lab/runs/:id</code> until <code className="text-violet-400">status</code> is <code className="text-violet-400">"running"</code>, then switch to the progress endpoint.
+      </Paragraph>
+
+      <SubHeading>Progress</SubHeading>
+      <CodeBlock code={`GET /api/lab/job/:jobId/progress
+
+// Response:
+{
+  "stage": "random_search",   // or "refinement"
+  "iterationsDone": 840,
+  "iterationsTotal": 2000,
+  "elapsedMs": 12400,
+  "bestScore": 0.71,
+  "status": "running"         // "running" | "complete" | "failed" | "paused"
+}`} language="json" />
+      <Paragraph>Poll every 2–5 seconds until status is <code className="text-violet-400">complete</code> or <code className="text-violet-400">failed</code>.</Paragraph>
+
+      <SubHeading>Results</SubHeading>
+      <div className="mb-6 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-white/10">
+              <th className="text-left py-2 text-white/60 font-medium">Method</th>
+              <th className="text-left py-2 text-white/60 font-medium">Path</th>
+              <th className="text-left py-2 text-white/60 font-medium">Purpose</th>
+            </tr>
+          </thead>
+          <tbody className="text-white/70 font-mono text-xs">
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/runs/:id/results</td><td className="font-sans">All results for a run</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/strategies/:id/top-results</td><td className="font-sans">Best results across all runs</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/results/:resultId</td><td className="font-sans">Single result with full trade list</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <Paragraph>Each result includes: <code className="text-violet-400">score</code>, <code className="text-violet-400">netProfitPercent</code>, <code className="text-violet-400">winRatePercent</code>, <code className="text-violet-400">maxDrawdownPercent</code>, <code className="text-violet-400">profitFactor</code>, <code className="text-violet-400">totalTrades</code>, <code className="text-violet-400">sharpeRatio</code>, <code className="text-violet-400">params</code>, <code className="text-violet-400">ticker</code>, <code className="text-violet-400">timeframe</code>.</Paragraph>
+
+      <SubHeading>Insights</SubHeading>
+      <CodeBlock code={`// Generate (and save) an insights report
+POST /api/lab/strategies/:id/insights-report
+{ "ticker": "SOL", "timeframe": "2h" }   // optional — omit for cross-market report
+
+// List saved reports
+GET /api/lab/strategies/:id/insights-reports`} language="http" />
+      <Paragraph>Regenerate after accumulating more results so Guided Mode (<code className="text-violet-400">useInsights: true</code>) has fresh data.</Paragraph>
+
+      <SubHeading>Queue & Other Endpoints</SubHeading>
+      <div className="mb-6 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-white/10">
+              <th className="text-left py-2 text-white/60 font-medium">Method</th>
+              <th className="text-left py-2 text-white/60 font-medium">Path</th>
+              <th className="text-left py-2 text-white/60 font-medium">Purpose</th>
+            </tr>
+          </thead>
+          <tbody className="text-white/70 font-mono text-xs">
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/queue</td><td className="font-sans">Active + queued runs</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">DELETE</td><td>/api/lab/queue/:id</td><td className="font-sans">Cancel a queued run</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">POST</td><td>/api/lab/job/:id/cancel</td><td className="font-sans">Cancel the active job</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">POST</td><td>/api/lab/runs/:id/refine</td><td className="font-sans">Coordinate-tune a ticker/timeframe result</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/export/csv/:runId</td><td className="font-sans">Download results as CSV</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/tickers</td><td className="font-sans">Available ticker list</td></tr>
+            <tr className="border-b border-white/5"><td className="py-2 text-violet-400">GET</td><td>/api/lab/timeframes</td><td className="font-sans">Available timeframe list</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <SubHeading>Best Practices</SubHeading>
+      <div className="space-y-2 mb-6 text-white/70 text-sm leading-relaxed">
+        <p><strong className="text-white/80">One active job at a time.</strong> Extra submissions queue automatically. Check <code className="text-violet-400">queueOrder</code> in the response and poll <code className="text-violet-400">GET /api/lab/queue</code> for position.</p>
+        <p><strong className="text-white/80">Smoke test first.</strong> Use <code className="text-violet-400">mode: "smoke"</code> before a long sweep to verify the script parses and produces valid trades.</p>
+        <p><strong className="text-white/80">Guided mode needs warmup.</strong> Run 2-3 standard sweeps before setting <code className="text-violet-400">useInsights: true</code>. The analysis needs ~4,000+ configurations to find real patterns.</p>
+        <p><strong className="text-white/80">Tokens are wallet-scoped.</strong> Results are always scoped to the wallet that owns the token — same per-user isolation as the browser UI.</p>
+        <p><strong className="text-white/80">Guard your token.</strong> Anyone with it can queue backtests on your account (costs RPC credits and queue time). Revoke from Settings → API Tokens if leaked. Up to 10 active tokens per wallet.</p>
+      </div>
+    </div>
+  );
+}
+
 const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet: string }[] = [
   { id: 'getting-started', label: 'Getting Started', snippet: 'Overview of how QuantumVault works: connect wallet, fund account, create bot, connect TradingView.', keywords: ['getting started', 'overview', 'intro', 'introduction', 'how it works', 'quickstart', 'first steps', 'onboarding', 'setup'] },
   { id: 'wallet-setup', label: 'Wallet Setup', snippet: 'Connect your Phantom or Solana wallet. Understand the two-wallet system: your personal wallet and your agent wallet.', keywords: ['wallet', 'phantom', 'solana', 'agent wallet', 'connect wallet', 'wallet standard', 'mobile wallet adapter', 'mwa', 'seeker'] },
@@ -2552,6 +2724,7 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'quantumlab-engine', label: 'Backtesting Engine', snippet: 'Dual engine architecture: native TypeScript engine for speed, Pine Script interpreter for broad strategy support.', keywords: ['engine', 'backtesting engine', 'typescript engine', 'pine interpreter', 'performance', 'fast', 'speed', 'worker thread', 'isolated'] },
   { id: 'quantumlab-results', label: 'Results & Heatmap', snippet: 'View backtest results: equity curve, trade list, PnL breakdown, and parameter heatmap.', keywords: ['results', 'heatmap', 'equity curve', 'chart', 'pnl', 'trade list', 'outcome', 'return', 'performance', 'report'] },
   { id: 'quantumlab-insights', label: 'Insights & Guided Mode', snippet: 'Guided mode walks you through optimization step by step. Insights highlight key risk and return metrics.', keywords: ['insights', 'guided', 'guided mode', 'risk', 'metrics', 'analysis', 'recommendation', 'step by step', 'beginner'] },
+  { id: 'quantumlab-agent-api', label: 'QuantumLab Agent API', snippet: 'HTTP API for AI agents to parse Pine Script, submit backtest runs, poll progress, and read results using a Bearer token.', keywords: ['agent api', 'api token', 'bearer token', 'qv_', 'mcp', 'claude', 'programmatic', 'automation', 'parse-pine', 'run-optimization', 'backtest api', 'quantumlab api', 'lab api', 'http api', 'external', 'script', 'headless', 'token'] },
 ];
 
 function searchDocs(query: string) {
@@ -2605,6 +2778,8 @@ export default function DocsPage() {
         return <QuantumLabResultsSection />;
       case 'quantumlab-insights':
         return <QuantumLabInsightsSection />;
+      case 'quantumlab-agent-api':
+        return <QuantumLabAgentApiSection />;
       default:
         return <GettingStartedSection />;
     }

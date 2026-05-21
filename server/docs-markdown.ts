@@ -374,11 +374,40 @@ Customize your profile, manage security, and earn rewards by inviting others to 
 
 ### Notifications
 
-Connect Telegram to receive real-time alerts about your trades:
+QuantumVault sends trade alerts and on-demand reports via **@QuantumVaultAlertsBot** on Telegram. No third-party service required — it uses Telegram's Bot API directly.
 
-- Trade executed notifications
-- Trade failed alerts
-- Position closed updates
+#### Connecting Telegram
+
+1. Open Settings → Telegram and click **Connect Telegram**
+2. A QR code appears — scan it with your phone's camera, or tap the link on mobile
+3. Telegram opens the bot and sends \`/start\` automatically
+4. The bot replies "✅ Connected to QuantumVault!" and your wallet is linked
+5. The settings panel updates to Connected status
+
+> **Tip:** You can link the same Telegram chat to multiple QuantumVault wallets by repeating this flow from each wallet's Settings.
+
+#### Alert Types
+
+| Alert | Trigger |
+|-------|---------|
+| Trade Executed | Bot successfully opens a position |
+| Trade Failed | Execution error (includes reason) |
+| Position Closed | Position closes — includes realized PnL |
+| Daily Summary (opt-in) | One message per day at 16:00 UTC: equity, 24h PnL, trade count, open positions |
+
+#### Bot Commands
+
+Once connected, message the bot directly for on-demand info:
+
+| Command | What it does |
+|---------|-------------|
+| \`/status\` | Shows which wallets are linked to this chat |
+| \`/accounts\` | Lists all linked QuantumVault wallets |
+| \`/summary\` | Equity, 24h PnL, and open positions snapshot |
+| \`/positions\` | All open positions across linked wallets |
+| \`/today\` | Today's trades and realized PnL |
+| \`/help\` | Shows all available commands |
+| \`/disconnect\` | Unlinks every wallet from this chat |
 
 ### Security Features
 
@@ -1020,6 +1049,211 @@ Guided Mode is an optional feature that uses your saved Insights reports to make
 > **Warning:** Don't enable Guided Mode on your first optimization runs. The sensitivity analysis needs at least ~4,000 total configurations tested across multiple runs to distinguish real patterns from noise. Using it too early may narrow the search prematurely.
 
 > **Note:** Guided Mode is off by default. The toggle only appears when the selected strategy has at least one saved Insights report. Regenerate your report after running more optimizations to update the top configs that perturbation uses.
+
+---
+
+## QuantumLab Agent API
+
+Every QuantumLab endpoint is fully accessible over HTTP using a **Bearer token**. This lets AI agents (Claude, MCP tools, custom scripts) drive the entire backtest pipeline — parse Pine Script, run optimizations, read results, generate insights — without needing a browser session.
+
+### Getting a Token
+
+1. Open **Settings → API Tokens** in QuantumVault.
+2. Click **Generate Token** and give it a label (e.g. "Claude MCP").
+3. Copy the token immediately — it won't be shown again.
+4. Tokens start with \`qv_\` and are stored as SHA-256 hashes server-side.
+
+### Authentication
+
+Add the token to every request:
+
+\`\`\`
+Authorization: Bearer qv_<your-token>
+\`\`\`
+
+All \`/api/lab/*\` endpoints require this header (or an active browser session). Requests without a valid token receive \`401 Unauthorized\`.
+
+### Typical Agent Workflow
+
+\`\`\`
+1. Parse Pine Script     →  POST /api/lab/parse-pine
+2. Save strategy         →  POST /api/lab/strategies
+3. Submit backtest run   →  POST /api/lab/run-optimization
+4. Poll progress         →  GET  /api/lab/job/:id/progress
+5. Read results          →  GET  /api/lab/runs/:id/results
+6. Generate insights     →  POST /api/lab/strategies/:id/insights-report
+7. Iterate with guidance →  repeat step 3 with useInsights: true
+\`\`\`
+
+### Reference
+
+#### Metadata
+
+\`\`\`
+GET /api/lab/tickers       — Array of available ticker strings (SOL, BTC, ETH …)
+GET /api/lab/timeframes    — Array of available timeframe strings (1m, 5m, 1h …)
+\`\`\`
+
+#### Parse Pine Script
+
+\`\`\`
+POST /api/lab/parse-pine
+Content-Type: application/json
+
+{ "code": "<full pine script source>" }
+\`\`\`
+
+Returns the parsed \`inputs\` array and \`groups\` object. Feed these directly into the \`POST /api/lab/strategies\` body.
+
+#### Strategies
+
+\`\`\`
+GET  /api/lab/strategies              — List strategies owned by this token's wallet
+GET  /api/lab/strategies/:id          — Get one strategy
+POST /api/lab/strategies              — Create a strategy
+DELETE /api/lab/strategies/:id        — Delete a strategy
+\`\`\`
+
+**Create body:**
+
+\`\`\`json
+{
+  "name": "My Strategy",
+  "pineScript": "<full source>",
+  "parsedInputs": { ... },
+  "groups": { ... },
+  "description": "optional"
+}
+\`\`\`
+
+#### Run Optimization
+
+\`\`\`
+POST /api/lab/run-optimization
+\`\`\`
+
+\`\`\`json
+{
+  "strategyId": 42,
+  "tickers": ["SOL", "ETH"],
+  "timeframes": ["1h", "4h"],
+  "startDate": "2024-01-01",
+  "endDate": "2025-01-01",
+  "randomSamples": 2000,
+  "topK": 10,
+  "refinementsPerSeed": 50,
+  "minTrades": 10,
+  "maxDrawdownCap": 30,
+  "mode": "sweep",
+  "useInsights": false,
+  "deepSearch": false
+}
+\`\`\`
+
+**mode values:** \`"sweep"\` (full run) or \`"smoke"\` (quick 100-sample validation).
+
+**Response (starts immediately):**
+\`\`\`json
+{ "jobId": "abc123", "runId": 99 }
+\`\`\`
+
+**Response (queued because another run is active):**
+\`\`\`json
+{ "queued": true, "runId": 99, "queueOrder": 2 }
+\`\`\`
+
+If queued, poll the run status at \`GET /api/lab/runs/:id\` until \`status\` becomes \`"running"\`, then switch to the progress endpoint.
+
+#### Progress
+
+\`\`\`
+GET /api/lab/job/:jobId/progress
+\`\`\`
+
+Returns:
+\`\`\`json
+{
+  "stage": "random_search",
+  "iterationsDone": 840,
+  "iterationsTotal": 2000,
+  "elapsedMs": 12400,
+  "bestScore": 0.71,
+  "status": "running"
+}
+\`\`\`
+
+\`status\` values: \`"running"\` / \`"complete"\` / \`"failed"\` / \`"paused"\`.
+Poll every 2–5 seconds until \`status\` is \`"complete"\` or \`"failed"\`.
+
+#### Results
+
+\`\`\`
+GET  /api/lab/runs/:id/results          — All results for a run
+GET  /api/lab/strategies/:id/top-results — Best results across all runs for a strategy
+GET  /api/lab/strategies/:id/all-results — Every result for a strategy (paginated)
+GET  /api/lab/results/:resultId          — Single result with full trade list + equity curve
+\`\`\`
+
+Each result includes: \`score\`, \`netProfitPercent\`, \`winRatePercent\`, \`maxDrawdownPercent\`, \`profitFactor\`, \`totalTrades\`, \`sharpeRatio\`, \`params\`, \`ticker\`, \`timeframe\`.
+
+#### Insights
+
+\`\`\`
+POST /api/lab/strategies/:id/insights-report   — Generate (and save) an insights report
+GET  /api/lab/strategies/:id/insights-reports  — List saved reports
+\`\`\`
+
+**Generate body (all optional):**
+\`\`\`json
+{
+  "ticker": "SOL",
+  "timeframe": "2h"
+}
+\`\`\`
+
+Omit \`ticker\`/\`timeframe\` for a cross-market general report. The report is automatically saved. Re-generate after accumulating more results so Guided Mode has fresh data to work from.
+
+#### Queue Management
+
+\`\`\`
+GET    /api/lab/queue              — List queued and active runs
+POST   /api/lab/queue/reorder      — Reorder queued items
+DELETE /api/lab/queue/:id          — Cancel a queued run
+POST   /api/lab/job/:id/cancel     — Cancel the currently running job
+\`\`\`
+
+#### Refine (Coordinate Tuning)
+
+\`\`\`
+POST /api/lab/runs/:id/refine
+\`\`\`
+
+\`\`\`json
+{ "ticker": "SOL", "timeframe": "1h" }
+\`\`\`
+
+Runs coordinate tuning on the best result for that ticker/timeframe combination. Adds to queue if the system is busy.
+
+#### Export
+
+\`\`\`
+GET /api/lab/export/csv/:runId      — Download results as CSV
+\`\`\`
+
+#### Cache
+
+\`\`\`
+GET    /api/lab/cache/stats   — Candle cache statistics
+DELETE /api/lab/cache          — Clear the candle cache
+\`\`\`
+
+### Rate Limiting & Best Practices
+
+- **One active job at a time.** Additional jobs queue automatically — check \`queueOrder\` in the response and poll \`GET /api/lab/queue\` to monitor position.
+- **Poll at reasonable intervals.** 2–5 seconds for active progress, 10–30 seconds for queue position.
+- **Use smoke mode first.** Before a long multi-hour sweep, run \`mode: "smoke"\` to verify your Pine Script parses and the strategy produces valid trades.
+- **Guided mode needs warmup.** Run 2-3 standard sweeps before setting \`useInsights: true\`. The sensitivity analysis needs ~4,000+ configurations to identify real patterns.
+- **Tokens are wallet-scoped.** Results returned are always scoped to the wallet that owns the token — the same user isolation as the browser UI.
 
 ---
 
