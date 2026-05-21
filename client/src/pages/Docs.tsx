@@ -2539,7 +2539,7 @@ function QuantumLabInsightsSection() {
 function QuantumLabAgentApiSection() {
   return (
     <div>
-      <Heading>QuantumLab Agent API</Heading>
+      <SectionHeading>QuantumLab Agent API</SectionHeading>
       <Paragraph>
         Every QuantumLab endpoint is accessible over HTTP using a <strong>Bearer token</strong>. This lets AI agents
         (Claude, MCP tools, custom scripts) drive the entire backtest pipeline — parse Pine Script, run
