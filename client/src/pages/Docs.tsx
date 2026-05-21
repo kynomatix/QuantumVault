@@ -2534,6 +2534,36 @@ function QuantumLabInsightsSection() {
   );
 }
 
+const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet: string }[] = [
+  { id: 'getting-started', label: 'Getting Started', snippet: 'Overview of how QuantumVault works: connect wallet, fund account, create bot, connect TradingView.', keywords: ['getting started', 'overview', 'intro', 'introduction', 'how it works', 'quickstart', 'first steps', 'onboarding', 'setup'] },
+  { id: 'wallet-setup', label: 'Wallet Setup', snippet: 'Connect your Phantom or Solana wallet. Understand the two-wallet system: your personal wallet and your agent wallet.', keywords: ['wallet', 'phantom', 'solana', 'agent wallet', 'connect wallet', 'wallet standard', 'mobile wallet adapter', 'mwa', 'seeker'] },
+  { id: 'funding', label: 'Funding Your Account', snippet: 'Deposit SOL for fees and USDC for trading. Understand how capital flows from your wallet to trading subaccounts.', keywords: ['fund', 'funding', 'deposit', 'usdc', 'sol', 'capital', 'money', 'balance', 'transfer', 'withdraw', 'withdrawal'] },
+  { id: 'creating-bots', label: 'Creating Bots', snippet: 'Set up a trading bot: pick a market, leverage, investment amount, direction. Enable Profit Reinvest, Auto Withdraw, and Auto Top-Up.', keywords: ['bot', 'create bot', 'leverage', 'market', 'investment', 'direction', 'long', 'short', 'profit reinvest', 'auto withdraw', 'auto top-up', 'top up', 'compound', 'reinvest', 'perp', 'perpetual', 'sol-perp', 'btc-perp', 'eth-perp'] },
+  { id: 'tradingview', label: 'TradingView Integration', snippet: 'Set up TradingView webhook alerts to trigger your bot. Includes the JSON payload format and alert message template.', keywords: ['tradingview', 'webhook', 'alert', 'pine script', 'signal', 'json', 'payload', 'url', 'strategy', 'indicator', 'automation', 'trigger'] },
+  { id: 'bot-management', label: 'Bot Management', snippet: 'Monitor positions, pause and resume bots, close trades manually, view PnL history and trade logs.', keywords: ['manage', 'management', 'pause', 'resume', 'stop', 'close', 'position', 'pnl', 'profit', 'loss', 'trade history', 'logs', 'monitor', 'status', 'active', 'inactive'] },
+  { id: 'marketplace', label: 'Marketplace', snippet: 'Subscribe to signal bots published by other traders. Publish your own bot to earn profit-sharing fees.', keywords: ['marketplace', 'signal', 'subscribe', 'subscription', 'publish', 'creator', 'profit share', 'profit sharing', 'fee', 'community', 'leaderboard', 'copy trading', 'follower'] },
+  { id: 'settings', label: 'Settings & Referrals', snippet: 'Profile settings, Telegram notifications, referral program, and danger zone actions (close all, reset account).', keywords: ['settings', 'profile', 'display name', 'username', 'referral', 'referral code', 'notifications', 'telegram', 'alert', 'bot commands', 'daily summary', '/start', '/status', '/summary', '/positions', '/today', '/disconnect', 'connect telegram', 'qr code', 'qr', 'danger zone', 'reset', 'slippage', 'default leverage'] },
+  { id: 'security', label: 'Security', snippet: 'Execution authorization, agent wallet backup (24-word phrase), key encryption, and how your funds are protected.', keywords: ['security', 'encryption', 'private key', 'backup', 'recovery phrase', 'mnemonic', 'seed phrase', '24 word', 'authorize', 'authorization', 'execution key', 'safe', 'protect', 'reset agent wallet'] },
+  { id: 'trade-execution', label: 'Trade Execution', snippet: 'How trades are routed from webhook signals through the execution engine, including retries and error handling.', keywords: ['trade execution', 'execution', 'order', 'fill', 'route', 'retry', 'error', 'failed trade', 'slippage', 'entry price', 'size', 'notional', 'fee'] },
+  { id: 'ai-agents', label: 'AI Agent Integration', snippet: 'Use AI agents (Claude, GPT, etc.) to send trade signals to QuantumVault via the agent API.', keywords: ['ai', 'agent', 'claude', 'gpt', 'openai', 'llm', 'language model', 'api', 'integration', 'programmatic', 'automated', 'server execution key'] },
+  { id: 'quantumlab-overview', label: 'QuantumLab Overview', snippet: 'QuantumLab is the built-in backtesting and strategy optimization engine. Test strategies before deploying them live.', keywords: ['quantumlab', 'quantum lab', 'backtest', 'backtesting', 'lab', 'test', 'simulation', 'historical', 'strategy', 'candle', 'ohlc'] },
+  { id: 'quantumlab-strategies', label: 'Strategy Library', snippet: 'Write and save Pine Script strategies in QuantumLab. Load from the library to backtest or optimize.', keywords: ['strategy', 'library', 'pine script', 'pine', 'script', 'code', 'write', 'save', 'load', 'indicator', 'signal', 'entry', 'exit'] },
+  { id: 'quantumlab-optimizer', label: 'Optimizer', snippet: 'Run random search and refinement optimization to find the best parameters for your strategy.', keywords: ['optimizer', 'optimize', 'optimization', 'parameter', 'tune', 'search', 'random search', 'refinement', 'coordinate', 'best', 'sharpe', 'drawdown', 'win rate'] },
+  { id: 'quantumlab-engine', label: 'Backtesting Engine', snippet: 'Dual engine architecture: native TypeScript engine for speed, Pine Script interpreter for broad strategy support.', keywords: ['engine', 'backtesting engine', 'typescript engine', 'pine interpreter', 'performance', 'fast', 'speed', 'worker thread', 'isolated'] },
+  { id: 'quantumlab-results', label: 'Results & Heatmap', snippet: 'View backtest results: equity curve, trade list, PnL breakdown, and parameter heatmap.', keywords: ['results', 'heatmap', 'equity curve', 'chart', 'pnl', 'trade list', 'outcome', 'return', 'performance', 'report'] },
+  { id: 'quantumlab-insights', label: 'Insights & Guided Mode', snippet: 'Guided mode walks you through optimization step by step. Insights highlight key risk and return metrics.', keywords: ['insights', 'guided', 'guided mode', 'risk', 'metrics', 'analysis', 'recommendation', 'step by step', 'beginner'] },
+];
+
+function searchDocs(query: string) {
+  const q = query.toLowerCase().trim();
+  if (!q) return [];
+  return searchIndex.filter(entry =>
+    entry.label.toLowerCase().includes(q) ||
+    entry.snippet.toLowerCase().includes(q) ||
+    entry.keywords.some(k => k.includes(q) || q.includes(k))
+  );
+}
+
 export default function DocsPage() {
   const [activeSection, setActiveSection] = useState<DocSection>('getting-started');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -2654,42 +2684,64 @@ export default function DocsPage() {
                   />
                 </div>
               </div>
-              <nav className="space-y-1">
-                {navItems.filter(item =>
-                  !searchQuery.trim() || item.label.toLowerCase().includes(searchQuery.toLowerCase())
-                ).map((item) => {
-                  const Icon = item.icon;
-                  const isFirstQuantumLab = item.id === 'quantumlab-overview';
-                  return (
-                    <div key={item.id}>
-                      {isFirstQuantumLab && (
-                        <div className="pt-3 pb-2 mt-2 mb-1 border-t border-white/10">
-                          <div className="flex items-center gap-2 px-3">
-                            <FlaskConical className="w-3.5 h-3.5 text-violet-400" />
-                            <span className="text-xs font-semibold text-violet-400 uppercase tracking-wider">QuantumLab</span>
-                          </div>
-                        </div>
-                      )}
+              {searchQuery.trim() ? (
+                <div className="space-y-1">
+                  {searchDocs(searchQuery).length === 0 ? (
+                    <p className="px-3 py-4 text-sm text-white/40 text-center">No results for "{searchQuery}"</p>
+                  ) : (
+                    searchDocs(searchQuery).map(result => (
                       <button
+                        key={result.id}
                         onClick={() => {
-                          setActiveSection(item.id);
+                          setActiveSection(result.id);
+                          setSearchQuery('');
                           setMobileMenuOpen(false);
                         }}
-                        className={cn(
-                          "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
-                          activeSection === item.id
-                            ? "bg-primary/20 text-primary"
-                            : "text-white/60 hover:text-white hover:bg-white/5"
-                        )}
-                        data-testid={`nav-${item.id}`}
+                        className="w-full text-left px-3 py-2.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 hover:border-primary/30 transition-colors"
+                        data-testid={`search-result-${result.id}`}
                       >
-                        <Icon className="w-4 h-4" />
-                        {item.label}
+                        <p className="text-sm font-medium text-white/90">{result.label}</p>
+                        <p className="text-xs text-white/45 mt-0.5 leading-relaxed line-clamp-2">{result.snippet}</p>
                       </button>
-                    </div>
-                  );
-                })}
-              </nav>
+                    ))
+                  )}
+                </div>
+              ) : (
+                <nav className="space-y-1">
+                  {navItems.map((item) => {
+                    const Icon = item.icon;
+                    const isFirstQuantumLab = item.id === 'quantumlab-overview';
+                    return (
+                      <div key={item.id}>
+                        {isFirstQuantumLab && (
+                          <div className="pt-3 pb-2 mt-2 mb-1 border-t border-white/10">
+                            <div className="flex items-center gap-2 px-3">
+                              <FlaskConical className="w-3.5 h-3.5 text-violet-400" />
+                              <span className="text-xs font-semibold text-violet-400 uppercase tracking-wider">QuantumLab</span>
+                            </div>
+                          </div>
+                        )}
+                        <button
+                          onClick={() => {
+                            setActiveSection(item.id);
+                            setMobileMenuOpen(false);
+                          }}
+                          className={cn(
+                            "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
+                            activeSection === item.id
+                              ? "bg-primary/20 text-primary"
+                              : "text-white/60 hover:text-white hover:bg-white/5"
+                          )}
+                          data-testid={`nav-${item.id}`}
+                        >
+                          <Icon className="w-4 h-4" />
+                          {item.label}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </nav>
+              )}
             </div>
           </aside>
           
