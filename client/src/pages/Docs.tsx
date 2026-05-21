@@ -874,13 +874,69 @@ function SettingsSection() {
       
       <SubHeading>Notifications</SubHeading>
       <Paragraph>
-        Connect Telegram to receive real-time alerts about your trades:
+        QuantumVault sends trade alerts and on-demand reports directly to Telegram via <strong className="text-white">@QuantumVaultAlertsBot</strong>. No third-party messaging app is required beyond Telegram itself.
       </Paragraph>
-      <ul className="list-disc list-inside text-white/70 mb-4 space-y-1 ml-4">
-        <li>Trade executed notifications</li>
-        <li>Trade failed alerts</li>
-        <li>Position closed updates</li>
-      </ul>
+
+      <SubHeading>Connecting Telegram</SubHeading>
+      <StepList steps={[
+        'Open Settings → Telegram and click Connect Telegram',
+        'A QR code appears — scan it with your phone\'s camera, or tap the link on mobile',
+        'Telegram opens the bot and sends /start automatically',
+        'The bot replies "✅ Connected to QuantumVault!" and your wallet is linked',
+        'The settings panel updates to show Connected status',
+      ]} />
+      <Alert type="info">
+        If you have multiple QuantumVault wallets, you can link the same Telegram chat to all of them by repeating the flow from each wallet's Settings.
+      </Alert>
+
+      <SubHeading>Alert Types</SubHeading>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Trade Executed</h4>
+          <p className="text-white/60 text-sm">Sent when your bot successfully opens a position. Includes bot name, market, direction (LONG/SHORT), size, and entry price.</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Trade Failed</h4>
+          <p className="text-white/60 text-sm">Sent when a trade execution errors out. Includes the bot name, market, and error reason so you can diagnose the issue.</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Position Closed</h4>
+          <p className="text-white/60 text-sm">Sent when a position closes. Includes realized PnL with a win/loss emoji so you can track results at a glance.</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Daily Summary <span className="text-xs text-white/40 ml-1">(opt-in)</span></h4>
+          <p className="text-white/60 text-sm">One message per day at 16:00 UTC covering your equity, 24h PnL, trade count, and open positions. Toggle it on under Settings → Telegram → Daily summary.</p>
+        </div>
+      </div>
+
+      <SubHeading>Bot Commands</SubHeading>
+      <Paragraph>Once connected, you can pull information on demand by messaging the bot:</Paragraph>
+      <div className="rounded-lg border border-white/10 overflow-hidden mb-6">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-white/10 bg-white/5">
+              <th className="text-left px-4 py-2 text-white/60 font-medium">Command</th>
+              <th className="text-left px-4 py-2 text-white/60 font-medium">What it does</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {[
+              ['/status', 'Shows which wallets are linked to this chat'],
+              ['/accounts', 'Lists all your linked QuantumVault wallets'],
+              ['/summary', 'Equity, 24h PnL, and open positions snapshot'],
+              ['/positions', 'All open positions across linked wallets'],
+              ['/today', "Today's trades and realized PnL"],
+              ['/help', 'Shows all available commands'],
+              ['/disconnect', 'Unlinks every wallet from this chat'],
+            ].map(([cmd, desc]) => (
+              <tr key={cmd}>
+                <td className="px-4 py-2.5"><code className="text-violet-300 font-mono text-xs">{cmd}</code></td>
+                <td className="px-4 py-2.5 text-white/60">{desc}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       
       <SubHeading>Security Features</SubHeading>
       <Paragraph>
@@ -2481,6 +2537,7 @@ function QuantumLabInsightsSection() {
 export default function DocsPage() {
   const [activeSection, setActiveSection] = useState<DocSection>('getting-started');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   
   const renderSection = () => {
     switch (activeSection) {
@@ -2584,8 +2641,23 @@ export default function DocsPage() {
                   <X className="w-5 h-5" />
                 </Button>
               </div>
+              <div className="mb-3">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30 pointer-events-none" />
+                  <input
+                    type="text"
+                    placeholder="Search docs…"
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder-white/30 focus:outline-none focus:border-primary/50 focus:bg-white/8 transition-colors"
+                    data-testid="input-docs-search"
+                  />
+                </div>
+              </div>
               <nav className="space-y-1">
-                {navItems.map((item) => {
+                {navItems.filter(item =>
+                  !searchQuery.trim() || item.label.toLowerCase().includes(searchQuery.toLowerCase())
+                ).map((item) => {
                   const Icon = item.icon;
                   const isFirstQuantumLab = item.id === 'quantumlab-overview';
                   return (
