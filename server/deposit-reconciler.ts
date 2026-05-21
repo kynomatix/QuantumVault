@@ -155,12 +155,18 @@ export async function reconcileWalletDeposits(walletAddress: string): Promise<{ 
           if (userDelta >= 0) continue;
           if (Math.abs(agentDelta + userDelta) > 0.01) continue;
 
+          // Task 119: persist the on-chain confirmation time so historical
+          // snapshots can attribute this deposit to when it actually happened,
+          // not to when we discovered it (which can be weeks later and would
+          // otherwise show up as a phantom P&L drop on the chart).
+          const blockTime = s.blockTime != null ? new Date(s.blockTime * 1000) : null;
           await storage.createEquityEvent({
             walletAddress,
             eventType: 'agent_deposit',
             amount: String(agentDelta),
             assetType: 'USDC',
             txSignature: s.signature,
+            txBlockTime: blockTime,
             notes: 'Reconciled from on-chain history',
           });
           inserted++;
@@ -172,6 +178,17 @@ export async function reconcileWalletDeposits(walletAddress: string): Promise<{ 
 
       if (inserted > 0) {
         console.log(`[DepositReconciler] Wallet ${walletAddress.slice(0, 8)}…: backfilled ${inserted} missing deposit(s)`);
+        // Task 119: a late deposit insertion changes the flow history that
+        // historical snapshots were computed against. Recompute this wallet's
+        // snapshots so the chart's prior days reflect the corrected flow
+        // timeline instead of showing a sudden "correction" at the next live
+        // point. Fire-and-forget — failures only delay the recompute to the
+        // next reconciler run.
+        import('./portfolio-snapshot-backfill').then(({ recomputeWalletSnapshots }) => {
+          recomputeWalletSnapshots(walletAddress).catch(err =>
+            console.warn(`[DepositReconciler] Snapshot recompute failed for ${walletAddress.slice(0, 8)}…:`, err)
+          );
+        }).catch(() => { /* dynamic import errors are non-fatal */ });
       }
       lastRunAt.set(walletAddress, Date.now());
     } catch (err) {

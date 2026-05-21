@@ -12681,55 +12681,24 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Get current live data
       const wallet = await storage.getWallet(walletAddress);
       const bots = await storage.getTradingBots(walletAddress);
-      
-      let currentBalance = 0;
-      let activeBotCount = 0;
-      
-      // Get agent wallet balance
-      if (wallet?.agentPublicKey) {
-        try {
-          const agentBalance = await getUsdcBalance(wallet.agentPublicKey);
-          currentBalance += agentBalance;
-        } catch (error) {
-          console.error("[Portfolio] Error getting agent balance:", error);
-        }
-      }
-      
-      for (const bot of bots) {
-        if (bot.isActive) activeBotCount++;
-      }
-      
-      if (wallet?.agentPublicKey) {
-        try {
-          const exchangeInfo = await getExchangeAccountInfo(wallet.agentPublicKey, 0);
-          currentBalance += exchangeInfo.totalCollateral || 0;
-        } catch (error) {
-          console.error("[Portfolio] Error getting exchange balance:", error);
-        }
-      }
 
-      for (const bot of bots) {
-        const pfBotCtx = getBotSubaccountContext(bot);
-        if (pfBotCtx) {
-          try {
-            const botInfo = await getExchangeAccountInfoForBot('', 0, pfBotCtx);
-            currentBalance += botInfo.totalCollateral || 0;
-          } catch (err) {
-            console.warn(`[Portfolio] Failed to query Pacifica bot ${bot.id}:`, err);
-          }
-        }
-      }
-      
+      // Task 119: use the SAME balance aggregator as the snapshot writer, so
+      // the leaderboard (which reads stored snapshot fields) and the live
+      // portfolio endpoint are guaranteed to agree on currentBalance/netPnl/%.
+      const { computeWalletTotalBalance } = await import('./portfolio-snapshot-job');
+      const { totalBalance: currentBalance, activeBotCount } = await computeWalletTotalBalance(walletAddress);
+
       // Backfill any deposits the client-side confirmation missed before reading totals.
       // Cached per-wallet for 5 minutes inside the reconciler so this stays cheap.
       await reconcileWalletDeposits(walletAddress);
 
-      // Get cumulative deposits and withdrawals
+      // Get cumulative external deposits and withdrawals (Task 119: this now
+      // explicitly excludes internal transfers like auto-topup/reinvest).
       const { deposits, withdrawals } = await storage.getWalletCumulativeDepositsWithdrawals(walletAddress);
-      
-      // Calculate TRUE P&L: current balance - total deposits + total withdrawals
+
+      // Task 119: trading P&L $ is flow-neutral by construction:
+      //   currentBalance - (cumulativeExternalDeposits - cumulativeExternalWithdrawals)
       const netPnl = currentBalance - deposits + withdrawals;
-      const pnlPercent = deposits > 0 ? (netPnl / deposits) * 100 : 0;
       
       // Get trade stats
       const { totalTrades, totalVolume } = await storage.getWalletTradeStats(walletAddress);
@@ -12772,13 +12741,22 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // to the wallet's first-deposit date when activity is much more recent).
       // Only add the anchor when it would fall within the selected range window —
       // for tight ranges (e.g. 7D) the anchor must not precede sinceDate.
-      if (snapshots.length > 0) {
-        const firstSnapDate = new Date(snapshots[0].snapshotDate);
+      // Task 119: gate out pre-migration (Drift era) history. The protocol
+      // adapter architecture landed 2026-04-14; anything before that is from
+      // a different system and should not appear on the chart.
+      const MIGRATION_CUTOFF = new Date('2026-04-14T00:00:00Z');
+      const visibleSnapshots = snapshots.filter(s => s.snapshotDate >= MIGRATION_CUTOFF);
+
+      // Add a zero-anchor one calendar day before the FIRST VISIBLE snapshot
+      // (post-migration). Anchoring on pre-migration snapshots would leak the
+      // Drift era back into the chart on range=all.
+      if (visibleSnapshots.length > 0) {
+        const firstSnapDate = new Date(visibleSnapshots[0].snapshotDate);
         firstSnapDate.setHours(0, 0, 0, 0);
         const dayBeforeFirst = new Date(firstSnapDate);
         dayBeforeFirst.setDate(dayBeforeFirst.getDate() - 1);
         const anchorIsInWindow = !sinceDate || dayBeforeFirst >= sinceDate;
-        if (anchorIsInWindow) {
+        if (anchorIsInWindow && dayBeforeFirst >= MIGRATION_CUTOFF) {
           chartData.push({
             date: dayBeforeFirst,
             netPnl: 0,
@@ -12787,22 +12765,21 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           });
         }
       }
-      
-      // Add snapshots with pnlPercent calculated from cumulative deposits
-      for (const s of snapshots) {
-        const snapshotDeposits = parseFloat(s.cumulativeDeposits);
-        const snapshotPnl = parseFloat(s.netPnl);
-        const snapshotPnlPercent = snapshotDeposits > 0 ? (snapshotPnl / snapshotDeposits) * 100 : 0;
-        
+
+      // Task 119: read TRADING P&L $ and linked TWR % directly from snapshot
+      // fields. Flow-neutral by construction.
+      for (const s of visibleSnapshots) {
         chartData.push({
           date: s.snapshotDate,
-          netPnl: snapshotPnl,
-          pnlPercent: snapshotPnlPercent,
+          netPnl: parseFloat(s.cumulativeTradingPnl ?? s.netPnl),
+          pnlPercent: parseFloat(s.pnlPercent ?? '0'),
           balance: parseFloat(s.totalBalance),
         });
       }
-      
-      // Add current day if not in snapshots
+
+      // Append a live "today" point so the chart's tail tracks current balance
+      // without waiting for the next 12-hour snapshot. We compute it the same
+      // way the snapshot writer would.
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const hasToday = snapshots.some(s => {
@@ -12810,22 +12787,37 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         snapDate.setHours(0, 0, 0, 0);
         return snapDate.getTime() === today.getTime();
       });
-      
+
+      // Task 119: simple lifetime ratio — trading P&L / total external deposits.
+      // Matches snapshot writer and backfill so all surfaces agree.
+      let livePnlPercent = (netPnl / Math.max(deposits, 1)) * 100;
+      if (livePnlPercent > 1000) livePnlPercent = 1000;
+      if (livePnlPercent < -100) livePnlPercent = -100;
+
       if (!hasToday) {
         chartData.push({
           date: today,
           netPnl,
-          pnlPercent,
+          pnlPercent: livePnlPercent,
           balance: currentBalance,
         });
+      } else if (chartData.length > 0) {
+        // Update the existing "today" snapshot point with live numbers so the
+        // headline and chart tail always agree.
+        chartData[chartData.length - 1] = {
+          date: chartData[chartData.length - 1].date,
+          netPnl,
+          pnlPercent: livePnlPercent,
+          balance: currentBalance,
+        };
       }
-      
+
       res.json({
         currentBalance,
         totalDeposits: deposits,
         totalWithdrawals: withdrawals,
         netPnl,
-        pnlPercent,
+        pnlPercent: livePnlPercent,
         activeBotCount,
         totalBots: bots.length,
         totalTrades,

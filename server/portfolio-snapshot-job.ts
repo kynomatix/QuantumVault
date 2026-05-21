@@ -67,73 +67,119 @@ export async function takePortfolioSnapshots(): Promise<void> {
   }
 }
 
-async function processWalletSnapshot(walletAddress: string): Promise<void> {
+/**
+ * Task 119: shared balance aggregator. The portfolio endpoint and the snapshot
+ * writer MUST sum across the same account universe (agent SPL + every bot's
+ * own subaccount via the adapter) so the leaderboard (which reads from the
+ * latest snapshot) agrees with the live portfolio number. Previously the
+ * endpoint only queried agent subaccount 0 + external_key Pacifica bots and
+ * missed main_plus_id Drift bots with subaccountId != 0, causing leaderboard
+ * <-> portfolio drift.
+ */
+export async function computeWalletTotalBalance(
+  walletAddress: string,
+): Promise<{ totalBalance: number; activeBotCount: number }> {
   const wallet = await storage.getWallet(walletAddress);
-  if (!wallet) return;
-  
+  if (!wallet) return { totalBalance: 0, activeBotCount: 0 };
+
   const bots = await storage.getTradingBots(walletAddress);
-  if (bots.length === 0) return;
-  
   let totalBalance = 0;
   let activeBotCount = 0;
-  
+
   if (wallet.agentPublicKey) {
     try {
-      const agentBalance = await getAgentSplBalance(wallet.agentPublicKey);
-      totalBalance += agentBalance;
+      totalBalance += await getAgentSplBalance(wallet.agentPublicKey);
     } catch (error) {
-      console.error(`[Portfolio Snapshots] Error getting agent wallet balance:`, error);
+      console.error(`[computeWalletTotalBalance] agent SPL balance error:`, error);
     }
   }
-  
+
   for (const bot of bots) {
     try {
       if (bot.isActive) activeBotCount++;
-      
       const adapterArgs = resolveBotAdapterArgs(bot, wallet);
       if (adapterArgs) {
-        const balance = await getAccountBalance(adapterArgs.account, adapterArgs.subaccountId);
-        totalBalance += balance;
+        totalBalance += await getAccountBalance(adapterArgs.account, adapterArgs.subaccountId);
       }
     } catch (error) {
-      console.error(`[Portfolio Snapshots] Error getting balance for bot ${bot.id}:`, error);
+      console.error(`[computeWalletTotalBalance] bot ${bot.id} balance error:`, error);
     }
   }
+
+  return { totalBalance, activeBotCount };
+}
+
+async function processWalletSnapshot(walletAddress: string): Promise<void> {
+  const wallet = await storage.getWallet(walletAddress);
+  if (!wallet) return;
+
+  const bots = await storage.getTradingBots(walletAddress);
+  if (bots.length === 0) return;
+
+  const { totalBalance, activeBotCount } = await computeWalletTotalBalance(walletAddress);
   
   // Backfill any deposits the client-side confirmation missed before reading totals.
   await reconcileWalletDeposits(walletAddress);
-  const { deposits, withdrawals } = await storage.getWalletCumulativeDepositsWithdrawals(walletAddress);
   const { totalTrades, totalVolume } = await storage.getWalletTradeStats(walletAddress);
   const creatorEarnings = await storage.getWalletCreatorEarnings(walletAddress);
-  
-  const netPnl = totalBalance - deposits + withdrawals;
-  
+
   // Round to nearest 12-hour mark (00:00 or 12:00 UTC)
   const now = new Date();
   const snapshotTime = new Date(now);
   snapshotTime.setMinutes(0, 0, 0);
-  // Round to 00:00 or 12:00
   const hour = snapshotTime.getUTCHours();
   if (hour < 12) {
     snapshotTime.setUTCHours(0);
   } else {
     snapshotTime.setUTCHours(12);
   }
-  
+
+  // Use as-of-snapshot cumulative flows (block-time aware) so a late-backfilled
+  // deposit gets attributed to the snapshot when it actually happened.
+  const { deposits, withdrawals, internalTransfers } =
+    await storage.getWalletCumulativeDepositsWithdrawals(walletAddress, snapshotTime);
+
+  const netExternalFlowCum = deposits - withdrawals;
+  const tradingPnl = totalBalance - netExternalFlowCum;
+
+  // Compute day's net external flow against the previous snapshot.
+  const prev = await storage.getLatestPortfolioDailySnapshot(walletAddress);
+  let prevCumExtDeposits = 0;
+  let prevCumExtWithdrawals = 0;
+  if (prev) {
+    prevCumExtDeposits = parseFloat(prev.cumulativeExternalDeposits ?? prev.cumulativeDeposits);
+    prevCumExtWithdrawals = parseFloat(prev.cumulativeExternalWithdrawals ?? prev.cumulativeWithdrawals);
+  }
+  const netExternalFlow = (deposits - prevCumExtDeposits) - (withdrawals - prevCumExtWithdrawals);
+
+  // Task 119: simple lifetime ratio — trading PnL / cumulative external
+  // deposits. Flow-neutral and matches the backfill + live endpoint.
+  let pnlPercent = (tradingPnl / Math.max(deposits, 1)) * 100;
+  if (pnlPercent > 1000) pnlPercent = 1000;
+  if (pnlPercent < -100) pnlPercent = -100;
+
+  // Keep legacy `netPnl` writing the same value as trading P&L for read-compat,
+  // so any pre-Task-119 consumer still sees a coherent number.
   await storage.upsertPortfolioDailySnapshot({
     walletAddress,
     snapshotDate: snapshotTime,
     totalBalance: String(totalBalance),
     cumulativeDeposits: String(deposits),
     cumulativeWithdrawals: String(withdrawals),
-    netPnl: String(netPnl),
+    netPnl: String(tradingPnl),
     activeBotCount,
     totalTrades,
     totalVolume: String(totalVolume),
     creatorEarnings: String(creatorEarnings),
+    cumulativeExternalDeposits: String(deposits),
+    cumulativeExternalWithdrawals: String(withdrawals),
+    cumulativeInternalTransfers: String(internalTransfers),
+    cumulativeTradingPnl: String(tradingPnl),
+    netExternalFlow: String(netExternalFlow),
+    pnlPercent: String(pnlPercent),
   });
-  
-  console.log(`[Portfolio Snapshots] Saved snapshot for ${walletAddress.slice(0, 8)}...: balance=${totalBalance.toFixed(2)}, pnl=${netPnl.toFixed(2)}`);
+
+  console.log(`[Portfolio Snapshots] Saved snapshot for ${walletAddress.slice(0, 8)}...: balance=${totalBalance.toFixed(2)}, tradingPnl=${tradingPnl.toFixed(2)}, pnlPct=${pnlPercent.toFixed(2)}%, netFlow=${netExternalFlow.toFixed(2)}`);
 }
 
 export function startPortfolioSnapshotJob(): void {

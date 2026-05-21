@@ -283,6 +283,11 @@ export const equityEvents = pgTable("equity_events", {
   txSignature: text("tx_signature"),
   balanceAfter: decimal("balance_after", { precision: 20, scale: 6 }),
   notes: text("notes"),
+  // On-chain confirmation time. When NULL, fall back to createdAt. Critical for
+  // Task 119: deposits backfilled by the reconciler weeks after the fact must
+  // still be attributed to their actual on-chain time so historical snapshots
+  // don't double-count them as profit.
+  txBlockTime: timestamp("tx_block_time"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -819,6 +824,21 @@ export const portfolioDailySnapshots = pgTable("portfolio_daily_snapshots", {
   totalTrades: integer("total_trades").notNull().default(0),
   totalVolume: decimal("total_volume", { precision: 20, scale: 6 }).notNull().default("0"),
   creatorEarnings: decimal("creator_earnings", { precision: 20, scale: 6 }).notNull().default("0"),
+  // Task 119: trading-P&L fields. These are the authoritative source for the
+  // portfolio chart and leaderboard going forward; the older `netPnl` /
+  // `cumulativeDeposits` columns are retained for backwards compatibility but
+  // are no longer used for display math.
+  // Cumulative EXTERNAL deposits (main wallet -> agent ATA) only.
+  cumulativeExternalDeposits: decimal("cumulative_external_deposits", { precision: 20, scale: 6 }).notNull().default("0"),
+  cumulativeExternalWithdrawals: decimal("cumulative_external_withdrawals", { precision: 20, scale: 6 }).notNull().default("0"),
+  // Cumulative INTERNAL transfers (agent <-> subaccount, auto top-ups, reinvestments).
+  cumulativeInternalTransfers: decimal("cumulative_internal_transfers", { precision: 20, scale: 6 }).notNull().default("0"),
+  // Trading P&L $: totalBalance - (cumExtDeposits - cumExtWithdrawals). Flow-neutral.
+  cumulativeTradingPnl: decimal("cumulative_trading_pnl", { precision: 20, scale: 6 }).notNull().default("0"),
+  // Day's net external flow (deposits - withdrawals between prev snapshot and this one).
+  netExternalFlow: decimal("net_external_flow", { precision: 20, scale: 6 }).notNull().default("0"),
+  // Chained time-weighted return up to this snapshot (percentage, e.g. 27.5 = +27.5%).
+  pnlPercent: decimal("pnl_percent", { precision: 12, scale: 6 }).notNull().default("0"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ({
   uniqueWalletDate: unique("portfolio_snapshots_wallet_date").on(table.walletAddress, table.snapshotDate),

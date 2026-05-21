@@ -594,6 +594,10 @@ app.use((req, res, next) => {
       setTimeout(() => {
         log('[Staggered startup] Starting PnL snapshot job');
         startPnlSnapshotJob();
+        log('[Staggered startup] Running Task 119 portfolio backfill (one-shot)');
+        import('./portfolio-snapshot-backfill').then(({ runPortfolioBackfillOnce }) => {
+          runPortfolioBackfillOnce().catch(err => console.error('[PortfolioBackfill] error:', err));
+        });
         log('[Staggered startup] Starting portfolio snapshot job');
         startPortfolioSnapshotJob();
         log('[Staggered startup] Starting profit share retry job');

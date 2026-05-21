@@ -331,7 +331,8 @@ export interface IStorage {
   upsertPortfolioDailySnapshot(snapshot: InsertPortfolioDailySnapshot): Promise<PortfolioDailySnapshot>;
   getPortfolioDailySnapshots(walletAddress: string, since?: Date): Promise<PortfolioDailySnapshot[]>;
   getLatestPortfolioDailySnapshot(walletAddress: string): Promise<PortfolioDailySnapshot | undefined>;
-  getWalletCumulativeDepositsWithdrawals(walletAddress: string): Promise<{ deposits: number; withdrawals: number }>;
+  getWalletCumulativeDepositsWithdrawals(walletAddress: string, asOf?: Date): Promise<{ deposits: number; withdrawals: number; internalTransfers: number }>;
+  getWalletExternalFlows(walletAddress: string, asOf?: Date): Promise<Array<{ time: Date; amount: number }>>;
   getWalletTradeStats(walletAddress: string): Promise<{ totalTrades: number; totalVolume: number }>;
   getWalletCreatorEarnings(walletAddress: string): Promise<number>;
   getPublishedBotEarnings(publishedBotId: string): Promise<number>;
@@ -1220,17 +1221,28 @@ export class DatabaseStorage implements IStorage {
       }
 
       const winRate = totalTrades > 0 ? (totalWinningTrades / totalTrades) * 100 : 0;
-      
-      // Get cumulative deposits to calculate % P&L
-      const { deposits } = await this.getWalletCumulativeDepositsWithdrawals(wallet.address);
-      const pnlPercent = deposits > 0 ? (totalPnl / deposits) * 100 : 0;
+
+      // Task 119: Use the wallet's latest portfolio snapshot as the source of
+      // truth for both `$ totalPnl` and `pnlPercent` so the leaderboard agrees
+      // with the wallet owner's portfolio page. Falls back to the per-bot
+      // realized-only sum if no snapshot has been taken yet (new wallets).
+      const latestSnap = await this.getLatestPortfolioDailySnapshot(wallet.address);
+      let leaderTotalPnl = totalPnl;
+      let pnlPercent = 0;
+      if (latestSnap) {
+        leaderTotalPnl = parseFloat(latestSnap.cumulativeTradingPnl ?? latestSnap.netPnl);
+        pnlPercent = parseFloat(latestSnap.pnlPercent ?? '0');
+      } else {
+        const { deposits } = await this.getWalletCumulativeDepositsWithdrawals(wallet.address);
+        pnlPercent = deposits > 0 ? (totalPnl / deposits) * 100 : 0;
+      }
 
       results.push({
         walletAddress: wallet.address,
         displayName: wallet.displayName,
         xUsername: wallet.xUsername,
         totalVolume,
-        totalPnl,
+        totalPnl: leaderTotalPnl,
         pnlPercent,
         winRate,
         tradeCount: totalTrades,
@@ -2292,6 +2304,12 @@ export class DatabaseStorage implements IStorage {
           totalTrades: snapshot.totalTrades,
           totalVolume: snapshot.totalVolume,
           creatorEarnings: snapshot.creatorEarnings,
+          cumulativeExternalDeposits: snapshot.cumulativeExternalDeposits,
+          cumulativeExternalWithdrawals: snapshot.cumulativeExternalWithdrawals,
+          cumulativeInternalTransfers: snapshot.cumulativeInternalTransfers,
+          cumulativeTradingPnl: snapshot.cumulativeTradingPnl,
+          netExternalFlow: snapshot.netExternalFlow,
+          pnlPercent: snapshot.pnlPercent,
         }
       })
       .returning();
@@ -2316,25 +2334,61 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async getWalletCumulativeDepositsWithdrawals(walletAddress: string): Promise<{ deposits: number; withdrawals: number }> {
+  async getWalletCumulativeDepositsWithdrawals(
+    walletAddress: string,
+    asOf?: Date,
+  ): Promise<{ deposits: number; withdrawals: number; internalTransfers: number }> {
     const events = await db.select().from(equityEvents)
       .where(eq(equityEvents.walletAddress, walletAddress));
-    
+
     let deposits = 0;
     let withdrawals = 0;
-    
+    let internalTransfers = 0;
+
+    const { classifyEquityEvent } = await import('./equity-event-classifier');
+
     for (const event of events) {
+      // Use on-chain block time when available — critical so the deposit
+      // reconciler backfilling a deposit weeks later still attributes it to
+      // when it actually happened on-chain, not when we discovered it.
+      const eventTime = event.txBlockTime ?? event.createdAt;
+      if (asOf && eventTime > asOf) continue;
+
       const amount = parseFloat(event.amount);
-      // Only count EXTERNAL deposits/withdrawals (Phantom <-> Agent wallet)
-      // Ignore internal movements (Agent wallet <-> Drift subaccounts) to avoid double-counting
-      if (event.eventType === 'agent_deposit') {
+      const category = classifyEquityEvent(event);
+      if (category === 'external_deposit') {
         deposits += Math.abs(amount);
-      } else if (event.eventType === 'agent_withdraw') {
+      } else if (category === 'external_withdraw') {
         withdrawals += Math.abs(amount);
+      } else if (category === 'internal_transfer') {
+        internalTransfers += Math.abs(amount);
       }
     }
-    
-    return { deposits, withdrawals };
+
+    return { deposits, withdrawals, internalTransfers };
+  }
+
+  async getWalletExternalFlows(
+    walletAddress: string,
+    asOf?: Date,
+  ): Promise<Array<{ time: Date; amount: number }>> {
+    const events = await db.select().from(equityEvents)
+      .where(eq(equityEvents.walletAddress, walletAddress));
+    const { classifyEquityEvent } = await import('./equity-event-classifier');
+    const out: Array<{ time: Date; amount: number }> = [];
+    for (const event of events) {
+      const eventTime = event.txBlockTime ?? event.createdAt;
+      if (asOf && eventTime > asOf) continue;
+      const category = classifyEquityEvent(event);
+      const amount = Math.abs(parseFloat(event.amount));
+      if (category === 'external_deposit') {
+        out.push({ time: eventTime, amount });
+      } else if (category === 'external_withdraw') {
+        out.push({ time: eventTime, amount: -amount });
+      }
+    }
+    out.sort((a, b) => a.time.getTime() - b.time.getTime());
+    return out;
   }
 
   async getWalletTradeStats(walletAddress: string): Promise<{ totalTrades: number; totalVolume: number }> {

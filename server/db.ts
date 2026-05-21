@@ -187,6 +187,20 @@ export async function ensureSchema() {
           AND EXISTS (SELECT 1 FROM wallets a WHERE a.address = w3.referred_by)
        ON CONFLICT (descendant_wallet, level) DO NOTHING`,
 
+      // --- Task 119: portfolio P&L correctness ---
+      // Add on-chain block time to equity_events so the reconciler can
+      // attribute late-discovered deposits to when they actually happened.
+      `ALTER TABLE equity_events ADD COLUMN IF NOT EXISTS tx_block_time timestamp`,
+      // Add trading-P&L fields to portfolio_daily_snapshots. All columns are
+      // additive with safe defaults so this migration is reversible and
+      // backwards-compatible with the existing reader.
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS cumulative_external_deposits numeric(20,6) NOT NULL DEFAULT 0`,
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS cumulative_external_withdrawals numeric(20,6) NOT NULL DEFAULT 0`,
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS cumulative_internal_transfers numeric(20,6) NOT NULL DEFAULT 0`,
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS cumulative_trading_pnl numeric(20,6) NOT NULL DEFAULT 0`,
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS net_external_flow numeric(20,6) NOT NULL DEFAULT 0`,
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS pnl_percent numeric(12,6) NOT NULL DEFAULT 0`,
+
       `INSERT INTO lab_strategies (user_id, name, description, pine_script, parsed_inputs, groups, strategy_settings)
        SELECT 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
               src.name, src.description, src.pine_script, src.parsed_inputs, src.groups, src.strategy_settings

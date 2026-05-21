@@ -2648,7 +2648,7 @@ export default function AppPage() {
                                 <Info className="w-3 h-3 text-muted-foreground cursor-help" />
                               </TooltipTrigger>
                               <TooltipContent side="top" className="max-w-xs">
-                                <p className="text-xs">True P&L = Current Balance - Total Deposits + Total Withdrawals. This shows your actual trading performance, not inflated by deposits.</p>
+                                <p className="text-xs">P&amp;L excludes deposits, withdrawals, top-ups, and reinvestments — it reflects trading performance only.</p>
                               </TooltipContent>
                             </Tooltip>
                           </TooltipProvider>
