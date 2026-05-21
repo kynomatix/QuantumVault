@@ -303,6 +303,7 @@ export interface IStorage {
   deleteTelegramConnectionToken(id: string): Promise<void>;
   deleteExpiredTelegramTokens(): Promise<number>;
   getWalletByTelegramChatId(chatId: string): Promise<Wallet | undefined>;
+  getWalletsByTelegramChatId(chatId: string): Promise<Wallet[]>;
 
   // Platform Analytics
   upsertPlatformMetric(metricType: PlatformMetricType, value: number, metadata?: Record<string, unknown>): Promise<PlatformMetric>;
@@ -1938,6 +1939,11 @@ export class DatabaseStorage implements IStorage {
       .where(eq(wallets.telegramChatId, chatId))
       .limit(1);
     return result[0];
+  }
+
+  async getWalletsByTelegramChatId(chatId: string): Promise<Wallet[]> {
+    return db.select().from(wallets)
+      .where(eq(wallets.telegramChatId, chatId));
   }
 
   // Trade retry queue - persists failed trades for retry across server restarts

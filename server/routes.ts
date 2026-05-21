@@ -12275,34 +12275,58 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   app.post("/api/telegram/connect", requireWallet, async (req, res) => {
     try {
       const walletAddress = req.walletAddress!;
-      
+
+      // Be lenient about what the operator pastes into TELEGRAM_BOT_USERNAME:
+      // accept `Foo`, `@Foo`, or even the full `https://t.me/Foo` URL.
+      const rawUsername = process.env.TELEGRAM_BOT_USERNAME;
+      if (!rawUsername) {
+        return res.status(503).json({ error: "Telegram bot is not configured on the server." });
+      }
+      const botUsername = rawUsername
+        .trim()
+        .replace(/^https?:\/\/t\.me\//i, '')
+        .replace(/^@/, '')
+        .replace(/\/.*$/, '');
+
       // Generate a random 32-character token
       const token = crypto.randomBytes(16).toString('hex');
-      
+
       // Set expiry to 15 minutes from now
       const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-      
+
       // Delete any existing tokens for this wallet
       await storage.deleteExpiredTelegramTokens();
-      
+
       // Create new token
       await storage.createTelegramConnectionToken({
         walletAddress,
         token,
         expiresAt,
       });
-      
-      // Get bot username from environment (fallback to a default)
-      const botUsername = process.env.TELEGRAM_BOT_USERNAME || 'QuantumVaultBot';
-      
+
       // Generate deep link
       const deepLink = `https://t.me/${botUsername}?start=${token}`;
-      
+
+      // Generate QR code as data URL for desktop scanning
+      let qrCodeDataUrl: string | null = null;
+      try {
+        const QRCode = (await import('qrcode')).default;
+        qrCodeDataUrl = await QRCode.toDataURL(deepLink, {
+          errorCorrectionLevel: 'M',
+          margin: 1,
+          width: 256,
+        });
+      } catch (qrErr) {
+        console.error('[Telegram] Failed to generate QR code:', qrErr);
+      }
+
       console.log(`[Telegram] Generated connection token for ${walletAddress}, expires at ${expiresAt.toISOString()}`);
-      
+
       res.json({
         success: true,
         deepLink,
+        qrCodeDataUrl,
+        botUsername,
         expiresAt: expiresAt.toISOString(),
       });
     } catch (error) {
@@ -12314,65 +12338,155 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   // Webhook endpoint for Telegram bot updates
   app.post("/api/telegram/webhook", async (req, res) => {
     try {
+      // Verify the webhook secret token. Per Telegram convention we always
+      // return 200 so they don't retry, but we silently ignore any payload
+      // that doesn't carry the expected secret header.
+      const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
+      const providedSecret = req.header('x-telegram-bot-api-secret-token');
+      if (!expectedSecret || providedSecret !== expectedSecret) {
+        console.warn('[Telegram] Webhook called with missing/invalid secret token — ignoring payload');
+        return res.json({ ok: true });
+      }
+
       const update = req.body;
-      
-      // Handle /start command with token
-      if (update.message?.text?.startsWith('/start')) {
-        const chatId = update.message.chat.id.toString();
-        const text = update.message.text;
-        const parts = text.split(' ');
-        
+      const message = update?.message;
+      const text: string | undefined = message?.text;
+
+      if (!message || !text) {
+        return res.json({ ok: true });
+      }
+
+      const chatId = message.chat.id.toString();
+
+      // /start [token]
+      if (text.startsWith('/start')) {
+        const parts = text.split(/\s+/);
+
         if (parts.length >= 2) {
           const token = parts[1];
-          
+
           console.log(`[Telegram] Received /start with token ${token.substring(0, 8)}... from chat ${chatId}`);
-          
-          // Look up the token
+
           const connectionToken = await storage.getTelegramConnectionTokenByToken(token);
-          
+
           if (!connectionToken) {
-            console.log(`[Telegram] Token not found: ${token.substring(0, 8)}...`);
             await sendTelegramResponse(chatId, "❌ Invalid or expired connection link. Please generate a new one from QuantumVault.");
             return res.json({ ok: true });
           }
-          
-          // Check if token is expired
+
           if (new Date() > connectionToken.expiresAt) {
-            console.log(`[Telegram] Token expired for wallet ${connectionToken.walletAddress}`);
             await storage.deleteTelegramConnectionToken(connectionToken.id);
             await sendTelegramResponse(chatId, "❌ This connection link has expired. Please generate a new one from QuantumVault.");
             return res.json({ ok: true });
           }
-          
-          // Link the Telegram chat to the wallet
+
           await storage.updateWallet(connectionToken.walletAddress, {
             telegramConnected: true,
             telegramChatId: chatId,
             notificationsEnabled: true,
           });
-          
-          // Delete the used token
+
           await storage.deleteTelegramConnectionToken(connectionToken.id);
-          
+
           console.log(`[Telegram] Successfully linked chat ${chatId} to wallet ${connectionToken.walletAddress}`);
-          
-          await sendTelegramResponse(chatId, 
-            "✅ <b>Successfully connected to QuantumVault!</b>\n\n" +
-            "You will now receive trading notifications:\n" +
-            "• Trade executions\n" +
-            "• Failed trades\n" +
-            "• Position closures\n\n" +
-            "To disconnect, use the settings in QuantumVault."
+
+          const truncated = truncateAddress(connectionToken.walletAddress);
+          await sendTelegramResponse(chatId,
+            "✅ <b>Connected to QuantumVault!</b>\n\n" +
+            `Linked wallet: <code>${truncated}</code>\n\n` +
+            "You will receive alerts for trade executions, failed trades, and position closures.\n\n" +
+            "Tip: you can link this same Telegram to additional QuantumVault accounts by repeating the flow from each account.\n\n" +
+            "Send /help to see available commands."
           );
         } else {
-          // /start without token
           await sendTelegramResponse(chatId,
-            "👋 <b>Welcome to QuantumVault Bot!</b>\n\n" +
-            "To connect your wallet, please use the connection link from the QuantumVault settings page."
+            "👋 <b>Welcome to QuantumVault!</b>\n\n" +
+            "To link your wallet, open QuantumVault → Settings → Notifications and tap <b>Connect Telegram</b>.\n\n" +
+            "Send /help to see available commands."
           );
         }
+        return res.json({ ok: true });
       }
-      
+
+      // /help
+      if (text.startsWith('/help')) {
+        await sendTelegramResponse(chatId,
+          "<b>QuantumVault commands</b>\n\n" +
+          "/status — connection status\n" +
+          "/accounts — list linked wallets\n" +
+          "/disconnect — unlink every wallet from this chat\n" +
+          "/help — show this message\n\n" +
+          "You can link this Telegram to multiple QuantumVault accounts."
+        );
+        return res.json({ ok: true });
+      }
+
+      // /status
+      if (text.startsWith('/status')) {
+        const wallets = await storage.getWalletsByTelegramChatId(chatId);
+        if (wallets.length === 0) {
+          await sendTelegramResponse(chatId,
+            "ℹ️ This chat isn't linked to any QuantumVault wallet yet.\n\n" +
+            "Open QuantumVault → Settings → Notifications → Connect Telegram to link one."
+          );
+        } else {
+          const lines = wallets.map(w => {
+            const types: string[] = [];
+            if (w.notifyTradeExecuted) types.push('executions');
+            if (w.notifyTradeFailed) types.push('failures');
+            if (w.notifyPositionClosed) types.push('closes');
+            const status = w.notificationsEnabled && types.length > 0
+              ? `alerts on (${types.join(', ')})`
+              : '⚠️ alerts off';
+            return `• <code>${truncateAddress(w.address)}</code> — ${status}`;
+          });
+          await sendTelegramResponse(chatId,
+            `<b>Linked wallets (${wallets.length})</b>\n\n${lines.join('\n')}`
+          );
+        }
+        return res.json({ ok: true });
+      }
+
+      // /accounts
+      if (text.startsWith('/accounts')) {
+        const wallets = await storage.getWalletsByTelegramChatId(chatId);
+        if (wallets.length === 0) {
+          await sendTelegramResponse(chatId, "ℹ️ No QuantumVault wallets are linked to this chat.");
+        } else {
+          const lines = wallets.map(w => {
+            const since = w.lastSeen ? new Date(w.lastSeen).toISOString().slice(0, 10) : 'unknown';
+            return `• <code>${truncateAddress(w.address)}</code> — linked (last seen ${since})`;
+          });
+          await sendTelegramResponse(chatId,
+            `<b>Linked QuantumVault wallets</b>\n\n${lines.join('\n')}\n\n` +
+            "Send /disconnect to unlink them all from this chat."
+          );
+        }
+        return res.json({ ok: true });
+      }
+
+      // /disconnect — unlink every wallet pointing at this chat
+      if (text.startsWith('/disconnect')) {
+        const wallets = await storage.getWalletsByTelegramChatId(chatId);
+        if (wallets.length === 0) {
+          await sendTelegramResponse(chatId, "ℹ️ No QuantumVault wallets are linked to this chat.");
+          return res.json({ ok: true });
+        }
+        for (const w of wallets) {
+          await storage.updateWallet(w.address, {
+            telegramConnected: false,
+            telegramChatId: null,
+            notificationsEnabled: false,
+          });
+        }
+        const list = wallets.map(w => `• <code>${truncateAddress(w.address)}</code>`).join('\n');
+        await sendTelegramResponse(chatId,
+          `🔌 <b>Disconnected ${wallets.length} wallet${wallets.length === 1 ? '' : 's'}</b>\n\n${list}\n\n` +
+          "You will no longer receive QuantumVault alerts in this chat."
+        );
+        return res.json({ ok: true });
+      }
+
       res.json({ ok: true });
     } catch (error) {
       console.error("[Telegram] Webhook error:", error);
@@ -12395,19 +12509,69 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   app.get("/api/telegram/status", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
-      
+
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
-      
+
       res.json({
         connected: wallet.telegramConnected || false,
         hasChatId: !!wallet.telegramChatId,
         notificationsEnabled: wallet.notificationsEnabled || false,
+        notifyTradeExecuted: wallet.notifyTradeExecuted ?? true,
+        notifyTradeFailed: wallet.notifyTradeFailed ?? true,
+        notifyPositionClosed: wallet.notifyPositionClosed ?? true,
       });
     } catch (error) {
       console.error("[Telegram] Status check error:", error);
       res.status(500).json({ error: "Failed to check Telegram status" });
+    }
+  });
+
+  // Send a sample message to the user's linked Telegram chat
+  app.post("/api/telegram/test-notification", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.telegramChatId) {
+        return res.status(400).json({ error: "Telegram is not connected for this wallet." });
+      }
+
+      const enabled: string[] = [];
+      const disabled: string[] = [];
+      (wallet.notifyTradeExecuted ? enabled : disabled).push('Trade executed');
+      (wallet.notifyTradeFailed ? enabled : disabled).push('Trade failed');
+      (wallet.notifyPositionClosed ? enabled : disabled).push('Position closed');
+
+      const masterOff = !wallet.notificationsEnabled;
+      const truncated = truncateAddress(wallet.address);
+
+      let body =
+        "🧪 <b>QuantumVault test notification</b>\n\n" +
+        `Wallet: <code>${truncated}</code>\n\n` +
+        "If you're seeing this, your Telegram connection is working.";
+
+      if (masterOff) {
+        body += "\n\n⚠️ <b>Notifications are turned off</b> for this wallet — real alerts won't be sent until you re-enable them in Settings.";
+      } else if (disabled.length > 0) {
+        body += `\n\n⚠️ These alert types are <b>off</b> and won't reach you: ${disabled.join(', ')}.`;
+      }
+      if (!masterOff && enabled.length > 0) {
+        body += `\n\nActive alert types: ${enabled.join(', ')}.`;
+      }
+
+      const ok = await sendTelegramResponse(wallet.telegramChatId, body);
+      if (!ok) {
+        return res.status(502).json({ error: "Failed to deliver test message to Telegram." });
+      }
+
+      res.json({ success: true, masterOff, enabled, disabled });
+    } catch (error) {
+      console.error("[Telegram] Test notification error:", error);
+      res.status(500).json({ error: "Failed to send test notification" });
     }
   });
 
@@ -12676,15 +12840,36 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   app.post("/api/telegram/disconnect", requireWallet, async (req, res) => {
     try {
       const walletAddress = req.walletAddress!;
-      
+
+      // Capture the chat ID before we clear it so we can tell the user which
+      // specific wallet just got unlinked (a chat may still be linked to
+      // other QuantumVault accounts).
+      const existing = await storage.getWallet(walletAddress);
+      const previousChatId = existing?.telegramChatId ?? null;
+
       await storage.updateWallet(walletAddress, {
         telegramConnected: false,
         telegramChatId: null,
         notificationsEnabled: false,
       });
-      
+
+      if (previousChatId) {
+        try {
+          const remaining = await storage.getWalletsByTelegramChatId(previousChatId);
+          const truncated = truncateAddress(walletAddress);
+          const tail = remaining.length > 0
+            ? `\n\n${remaining.length} other QuantumVault wallet${remaining.length === 1 ? '' : 's'} ${remaining.length === 1 ? 'is' : 'are'} still linked to this chat.`
+            : '\n\nNo other QuantumVault wallets are linked to this chat.';
+          await sendTelegramResponse(previousChatId,
+            `🔌 <b>Wallet unlinked from QuantumVault</b>\n\nWallet: <code>${truncated}</code>${tail}`
+          );
+        } catch (notifyErr) {
+          console.error('[Telegram] Failed to send disconnect notice:', notifyErr);
+        }
+      }
+
       console.log(`[Telegram] Disconnected for wallet ${walletAddress}`);
-      
+
       res.json({ success: true });
     } catch (error) {
       console.error("[Telegram] Disconnect error:", error);
@@ -13755,6 +13940,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   });
 
   return httpServer;
+}
+
+// Format a wallet address as `abcd…wxyz` for user-facing display in Telegram.
+function truncateAddress(addr: string): string {
+  if (!addr || addr.length <= 10) return addr || '';
+  return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
 }
 
 // Helper function to send Telegram messages (for webhook responses)

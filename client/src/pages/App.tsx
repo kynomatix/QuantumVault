@@ -74,6 +74,13 @@ import {
   AlertDialogAction,
   AlertDialogCancel,
 } from '@/components/ui/alert-dialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -266,6 +273,17 @@ export default function AppPage() {
   const [notifyTradeFailed, setNotifyTradeFailed] = useState(true);
   const [notifyPositionClosed, setNotifyPositionClosed] = useState(true);
   const [telegramConnected, setTelegramConnected] = useState(false);
+  const [telegramDialogOpen, setTelegramDialogOpen] = useState(false);
+  const [telegramConnectLoading, setTelegramConnectLoading] = useState(false);
+  const [telegramConnectData, setTelegramConnectData] = useState<{
+    deepLink: string;
+    qrCodeDataUrl: string | null;
+    botUsername: string;
+    expiresAt: string;
+  } | null>(null);
+  const [telegramConnectError, setTelegramConnectError] = useState<string | null>(null);
+  const [telegramSecondsLeft, setTelegramSecondsLeft] = useState(0);
+  const [telegramTestSending, setTelegramTestSending] = useState(false);
   const [expandedSection, setExpandedSection] = useState<'account' | 'trading' | 'notifications' | 'security' | 'api' | 'danger' | null>(null);
   // API tokens (for AI agents like Claude/MCP, n8n, scripts).
   const [apiTokens, setApiTokens] = useState<Array<{ id: number; name: string; tokenPrefix: string; lastUsedAt: string | null; createdAt: string }>>([]);
@@ -468,6 +486,121 @@ export default function AppPage() {
     
     loadSettings();
   }, [connected]);
+
+  // Countdown timer for the Telegram connect token (refreshes once a second).
+  useEffect(() => {
+    if (!telegramDialogOpen || !telegramConnectData) {
+      setTelegramSecondsLeft(0);
+      return;
+    }
+    const tick = () => {
+      const ms = new Date(telegramConnectData.expiresAt).getTime() - Date.now();
+      setTelegramSecondsLeft(Math.max(0, Math.floor(ms / 1000)));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [telegramDialogOpen, telegramConnectData]);
+
+  // While the connect dialog is open and we have an unexpired token, poll the
+  // status endpoint every 2 seconds. As soon as the user finishes the /start
+  // handshake in Telegram, we flip to "Connected" without them having to click
+  // anything in the UI.
+  useEffect(() => {
+    if (!telegramDialogOpen || !telegramConnectData) return;
+    let cancelled = false;
+    const expiresAtMs = new Date(telegramConnectData.expiresAt).getTime();
+    const id = window.setInterval(async () => {
+      // Stop polling once the token window closes — but don't put
+      // telegramSecondsLeft in the deps array, or this interval will be torn
+      // down and recreated every second and the 2s tick will never fire.
+      if (Date.now() >= expiresAtMs) return;
+      try {
+        const res = await fetch('/api/telegram/status', { credentials: 'include' });
+        if (!res.ok) return;
+        const data = await safeResponseJson(res);
+        if (!cancelled && data?.connected) {
+          setTelegramConnected(true);
+          setTelegramDialogOpen(false);
+          setTelegramConnectData(null);
+          toast({
+            title: 'Telegram Connected!',
+            description: "You'll now receive trade alerts via Telegram.",
+          });
+        }
+      } catch {
+        // Ignore transient poll errors.
+      }
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [telegramDialogOpen, telegramConnectData, toast]);
+
+  const requestTelegramConnectLink = useCallback(async () => {
+    setTelegramConnectLoading(true);
+    setTelegramConnectError(null);
+    try {
+      const res = await fetch('/api/telegram/connect', { method: 'POST', credentials: 'include' });
+      const data = await safeResponseJson(res);
+      if (!res.ok || !data?.deepLink) {
+        setTelegramConnectError(data?.error || 'Failed to generate Telegram connection link.');
+        setTelegramConnectData(null);
+        return;
+      }
+      setTelegramConnectData({
+        deepLink: data.deepLink,
+        qrCodeDataUrl: data.qrCodeDataUrl ?? null,
+        botUsername: data.botUsername ?? '',
+        expiresAt: data.expiresAt,
+      });
+    } catch (err) {
+      setTelegramConnectError('Failed to generate Telegram connection link.');
+      setTelegramConnectData(null);
+    } finally {
+      setTelegramConnectLoading(false);
+    }
+  }, []);
+
+  const openTelegramConnectDialog = useCallback(async () => {
+    setTelegramDialogOpen(true);
+    setTelegramConnectData(null);
+    await requestTelegramConnectLink();
+  }, [requestTelegramConnectLink]);
+
+  const sendTelegramTestNotification = useCallback(async () => {
+    setTelegramTestSending(true);
+    try {
+      const res = await fetch('/api/telegram/test-notification', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await safeResponseJson(res);
+      if (res.ok) {
+        toast({
+          title: 'Test notification sent',
+          description: data?.masterOff
+            ? "Sent — but notifications are turned off, so real alerts won't be delivered."
+            : 'Check your Telegram chat for the test message.',
+        });
+      } else {
+        toast({
+          title: 'Could not send test',
+          description: data?.error || 'Telegram delivery failed. Try reconnecting.',
+          variant: 'destructive',
+        });
+      }
+    } catch {
+      toast({
+        title: 'Could not send test',
+        description: 'Network error contacting the server.',
+        variant: 'destructive',
+      });
+    } finally {
+      setTelegramTestSending(false);
+    }
+  }, [toast]);
 
   // Load API tokens when API section is expanded.
   useEffect(() => {
@@ -3760,116 +3893,79 @@ export default function AppPage() {
                                         ? 'You will receive trade alerts via Telegram.'
                                         : 'Connect Telegram to receive instant trade alerts when your bots execute trades.'}
                                     </p>
-                                    {telegramConnected && (
-                                      <div className="mt-3">
-                                        <Button
-                                          variant="outline"
-                                          size="sm"
-                                          onClick={async () => {
-                                            try {
-                                              const res = await fetch('/api/telegram/disconnect', { 
-                                                method: 'POST',
-                                                credentials: 'include' 
-                                              });
-                                              if (res.ok) {
-                                                setTelegramConnected(false);
-                                                toast({
-                                                  title: "Telegram Disconnected",
-                                                  description: "You will no longer receive alerts via Telegram.",
-                                                });
-                                              }
-                                            } catch (error) {
-                                              toast({
-                                                title: "Error",
-                                                description: "Failed to disconnect Telegram",
-                                                variant: "destructive",
-                                              });
-                                            }
-                                          }}
-                                          data-testid="button-disconnect-telegram"
-                                        >
-                                          Disconnect Telegram
-                                        </Button>
-                                      </div>
-                                    )}
+                                    {telegramConnected && (() => {
+                                      const noTypesOn =
+                                        !notificationsEnabled ||
+                                        (!notifyTradeExecuted && !notifyTradeFailed && !notifyPositionClosed);
+                                      return (
+                                        <div className="mt-3 space-y-3">
+                                          {noTypesOn && (
+                                            <div className="flex items-start gap-2 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-xs text-amber-300" data-testid="warning-telegram-toggles-off">
+                                              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                                              <p>
+                                                Telegram is connected but no notification types are enabled — you won't receive messages until you turn at least one on.
+                                              </p>
+                                            </div>
+                                          )}
+                                          <div className="flex flex-wrap gap-2">
+                                            <Button
+                                              variant="outline"
+                                              size="sm"
+                                              onClick={sendTelegramTestNotification}
+                                              disabled={telegramTestSending}
+                                              data-testid="button-telegram-test-notification"
+                                            >
+                                              {telegramTestSending ? (
+                                                <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Sending…</>
+                                              ) : (
+                                                <><Bell className="w-4 h-4 mr-2" /> Send test notification</>
+                                              )}
+                                            </Button>
+                                            <Button
+                                              variant="outline"
+                                              size="sm"
+                                              onClick={async () => {
+                                                try {
+                                                  const res = await fetch('/api/telegram/disconnect', {
+                                                    method: 'POST',
+                                                    credentials: 'include',
+                                                  });
+                                                  if (res.ok) {
+                                                    setTelegramConnected(false);
+                                                    toast({
+                                                      title: 'Telegram Disconnected',
+                                                      description: 'You will no longer receive alerts via Telegram.',
+                                                    });
+                                                  }
+                                                } catch (error) {
+                                                  toast({
+                                                    title: 'Error',
+                                                    description: 'Failed to disconnect Telegram',
+                                                    variant: 'destructive',
+                                                  });
+                                                }
+                                              }}
+                                              data-testid="button-disconnect-telegram"
+                                            >
+                                              Disconnect Telegram
+                                            </Button>
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
                                     {!telegramConnected && (
                                       <div className="mt-3 space-y-3">
                                         <Button
                                           variant="default"
-                                          onClick={async () => {
-                                            try {
-                                              const res = await fetch('/api/telegram/connect', { 
-                                                method: 'POST',
-                                                credentials: 'include' 
-                                              });
-                                              const data = await safeResponseJson(res);
-                                              
-                                              if (res.ok && data.deepLink) {
-                                                window.open(data.deepLink, '_blank');
-                                                toast({
-                                                  title: "Telegram Opened",
-                                                  description: "Click 'Start' in the bot to connect. Return here when done.",
-                                                });
-                                              } else {
-                                                toast({
-                                                  title: "Setup Not Available",
-                                                  description: data.error || "Telegram notifications are not yet configured.",
-                                                  variant: "destructive",
-                                                });
-                                              }
-                                            } catch (error) {
-                                              toast({
-                                                title: "Error",
-                                                description: "Failed to generate Telegram link",
-                                                variant: "destructive",
-                                              });
-                                            }
-                                          }}
+                                          onClick={openTelegramConnectDialog}
                                           data-testid="button-connect-telegram"
                                         >
                                           <ExternalLink className="w-4 h-4 mr-2" />
                                           Connect Telegram
                                         </Button>
-                                        <Button
-                                          variant="outline"
-                                          size="sm"
-                                          onClick={async () => {
-                                            try {
-                                              const res = await fetch('/api/telegram/status', { 
-                                                method: 'GET',
-                                                credentials: 'include' 
-                                              });
-                                              const data = await safeResponseJson(res);
-                                              
-                                              if (data.connected) {
-                                                setTelegramConnected(true);
-                                                toast({
-                                                  title: "Telegram Connected!",
-                                                  description: "You'll now receive trade alerts via Telegram.",
-                                                });
-                                              } else {
-                                                toast({
-                                                  title: "Not Connected Yet",
-                                                  description: "Click 'Connect Telegram' and press Start in the bot.",
-                                                  variant: "destructive",
-                                                });
-                                              }
-                                            } catch (error) {
-                                              toast({
-                                                title: "Error",
-                                                description: "Failed to check connection status",
-                                                variant: "destructive",
-                                              });
-                                            }
-                                          }}
-                                          data-testid="button-check-telegram-status"
-                                        >
-                                          <Check className="w-4 h-4 mr-2" />
-                                          Check Connection
-                                        </Button>
                                         <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 text-xs text-blue-300">
-                                          <p className="font-medium mb-1">Quick Setup</p>
-                                          <p>Click "Connect Telegram", then press "Start" in our bot. You can link multiple wallets to the same Telegram account.</p>
+                                          <p className="font-medium mb-1">Multiple accounts welcome</p>
+                                          <p>You can link this same Telegram to multiple QuantumVault accounts — switch accounts and connect again from each one.</p>
                                         </div>
                                         <p className="text-xs text-muted-foreground">
                                           Once connected, you'll receive:
@@ -4643,6 +4739,103 @@ export default function AppPage() {
           </motion.div>
         </div>
       )}
+
+      <Dialog
+        open={telegramDialogOpen}
+        onOpenChange={(open) => {
+          setTelegramDialogOpen(open);
+          if (!open) {
+            setTelegramConnectData(null);
+            setTelegramConnectError(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md" data-testid="modal-connect-telegram">
+          <DialogHeader>
+            <DialogTitle>Connect Telegram</DialogTitle>
+            <DialogDescription>
+              Open the link on your phone, or scan the QR code from your desktop. Then tap <b>Start</b> in our bot.
+            </DialogDescription>
+          </DialogHeader>
+
+          {telegramConnectLoading && !telegramConnectData && (
+            <div className="flex items-center justify-center py-10">
+              <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+            </div>
+          )}
+
+          {telegramConnectError && !telegramConnectLoading && (
+            <div className="space-y-4">
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-300">
+                {telegramConnectError}
+              </div>
+              <Button onClick={requestTelegramConnectLink} data-testid="button-telegram-retry">
+                <RefreshCw className="w-4 h-4 mr-2" /> Try again
+              </Button>
+            </div>
+          )}
+
+          {telegramConnectData && !telegramConnectError && (
+            <div className="space-y-4">
+              {telegramConnectData.qrCodeDataUrl && (
+                <div className="flex justify-center">
+                  <div className="p-3 bg-white rounded-lg" data-testid="img-telegram-qr">
+                    <img
+                      src={telegramConnectData.qrCodeDataUrl}
+                      alt="QR code to open the QuantumVault Telegram bot"
+                      width={224}
+                      height={224}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <Button
+                asChild
+                className="w-full"
+                data-testid="button-telegram-deeplink"
+              >
+                <a href={telegramConnectData.deepLink} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink className="w-4 h-4 mr-2" />
+                  Open @{telegramConnectData.botUsername}
+                </a>
+              </Button>
+
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span data-testid="text-telegram-expiry">
+                  {telegramSecondsLeft > 0
+                    ? `Link expires in ${Math.floor(telegramSecondsLeft / 60)}:${String(telegramSecondsLeft % 60).padStart(2, '0')}`
+                    : 'This link has expired.'}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={requestTelegramConnectLink}
+                  disabled={telegramConnectLoading}
+                  data-testid="button-telegram-regenerate"
+                >
+                  {telegramConnectLoading ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <><RefreshCw className="w-3 h-3 mr-1" /> Generate new link</>
+                  )}
+                </Button>
+              </div>
+
+              {telegramSecondsLeft > 0 && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Waiting for you to tap <b>Start</b> in Telegram…
+                </div>
+              )}
+
+              <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 text-xs text-blue-300">
+                You can link this same Telegram to multiple QuantumVault accounts — just switch accounts and repeat this flow from each one.
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog open={showRecoverDialog} onOpenChange={setShowRecoverDialog}>
         <AlertDialogContent className="border-amber-500/30 bg-background" data-testid="modal-recover-funds">
