@@ -644,7 +644,7 @@ import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
-import { sendTradeNotification, type TradeNotification } from "./notification-service";
+import { sendTradeNotification, getCloseReasonLabel, type TradeNotification } from "./notification-service";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
@@ -5013,20 +5013,30 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             warning: "Position may remain open until retry succeeds"
           });
         }
-        
+
         // Permanent failure - mark trade as failed
         await storage.updateBotTrade(pendingCloseTrade.id, {
           status: "failed",
           errorMessage: result.error || "Unknown error",
         });
-        
+
+        // Fire trade_failed Telegram alert; fire-and-forget so a notification
+        // failure never masks the 500 we return to the client.
+        sendTradeNotification(bot.walletAddress, {
+          type: 'trade_failed',
+          botName: bot.name,
+          market: bot.market,
+          side: closeSide === 'long' ? 'LONG' : 'SHORT',
+          error: result.error || "Unknown error",
+        }).catch(err => console.error('[ClosePosition] Failed to send trade_failed notification:', err));
+
         return res.status(500).json({ 
           error: "Failed to execute close order",
           details: result.error || "Unknown error",
           tradeId: pendingCloseTrade.id,
         });
       }
-      
+
       // Handle case where subprocess found no position to close (success=true, signature=null)
       // This can happen if position was closed by another process (e.g., liquidation, webhook)
       if (result.success && !txSignature) {
@@ -5191,7 +5201,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // crashes or the process is killed.
       const manualClosePrice = parseFloat(String(fillPrice || result.fillPrice || 0));
       const manualCloseNotional = closeSize * (Number.isFinite(manualClosePrice) ? manualClosePrice : 0);
-      await storage.recordCloseEventAtomic({
+      const manualCloseAtomicResult = await storage.recordCloseEventAtomic({
         botId: bot.id,
         update: {
           tradeId: pendingCloseTrade.id,
@@ -5221,6 +5231,24 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           lastTradeAt: new Date().toISOString(),
         },
       });
+
+      // Fire position_closed Telegram alert ONLY when this handler is the
+      // writer that promoted the close to canonical (isNew=true). If the
+      // reconciler / retry queue already wrote the canonical row, isNew=false
+      // and that path already fired (or will fire) the notification —
+      // suppressing here is what guarantees exactly-once delivery per close.
+      if (manualCloseAtomicResult.isNew) {
+        sendTradeNotification(bot.walletAddress, {
+          type: 'position_closed',
+          botName: bot.name,
+          market: bot.market,
+          side: closeSide === 'long' ? 'LONG' : 'SHORT',
+          size: closeSize,
+          price: fillPrice,
+          pnl: tradePnl,
+          closeReason: getCloseReasonLabel('manual'),
+        }).catch(err => console.error('[ClosePosition] Failed to send position_closed notification:', err));
+      }
 
       // Sync position from on-chain (updates database with actual Drift state)
       await syncPositionFromOnChain(
@@ -5635,6 +5663,16 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       const oraclePrice = await getMarketPrice(bot.market);
       if (!oraclePrice || oraclePrice <= 0) {
+        // Early failure (no on-chain order placed yet) — still surface a
+        // trade_failed alert so the user sees why the manual trade didn't
+        // execute. Fire-and-forget; never mask the HTTP error.
+        sendTradeNotification(bot.walletAddress, {
+          type: 'trade_failed',
+          botName: bot.name,
+          market: bot.market,
+          side: side === 'long' ? 'LONG' : 'SHORT',
+          error: 'Could not get market price',
+        }).catch(err => console.error('[ManualTrade] Failed to send trade_failed notification:', err));
         return res.status(500).json({ error: "Could not get market price" });
       }
 
@@ -5659,6 +5697,16 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         if (sizingResult.shouldPauseBot && sizingResult.pauseReason) {
           await storage.updateTradingBot(bot.id, { isActive: false, pauseReason: sizingResult.pauseReason } as any);
         }
+        // Early failure (no on-chain order placed yet) — fire trade_failed
+        // so the user is notified of sizing / top-up failures (insufficient
+        // collateral, etc.) the same way as executor failures.
+        sendTradeNotification(bot.walletAddress, {
+          type: 'trade_failed',
+          botName: bot.name,
+          market: bot.market,
+          side: side === 'long' ? 'LONG' : 'SHORT',
+          error: sizingResult.error || "Trade sizing failed",
+        }).catch(err => console.error('[ManualTrade] Failed to send trade_failed notification:', err));
         return res.status(400).json({ error: sizingResult.error || "Trade sizing failed" });
       }
 
@@ -5701,6 +5749,15 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           txSignature: null,
           errorMessage: userFriendlyError,
         });
+        // Mirror webhook/copy-trade pattern: fire-and-forget; never let a
+        // notification failure mask the real trade error returned to client.
+        sendTradeNotification(bot.walletAddress, {
+          type: 'trade_failed',
+          botName: bot.name,
+          market: bot.market,
+          side: side === 'long' ? 'LONG' : 'SHORT',
+          error: userFriendlyError,
+        }).catch(err => console.error('[ManualTrade] Failed to send trade_failed notification:', err));
         return res.status(500).json({ error: userFriendlyError });
       }
 
@@ -5755,10 +5812,42 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       });
 
       console.log(`[ManualTrade] Trade executed via ${orderResult.executionMethod || 'legacy'}: ${side.toUpperCase()} ${contractSize.toFixed(4)} @ $${fillPrice.toFixed(2)}`);
-      
+
       // NOTE: Manual trades are NOT routed to subscribers - only webhook signals are
       // This prevents creators from accidentally affecting subscribers with test/personal trades
-      
+
+      // Branch notification on sync outcome: when the manual order closed
+      // (or reduced to zero) an existing position, fire `position_closed`
+      // with realized PnL — NOT `trade_executed`. This is the case where a
+      // user uses the manual-trade endpoint to send an opposite-side order
+      // to flatten a position. The reconciler won't observe an external
+      // close here (the close was confirmed synchronously in-handler with
+      // the trade row written), so this path owns the notification.
+      if (syncResult?.isClosingTrade) {
+        sendTradeNotification(bot.walletAddress, {
+          type: 'position_closed',
+          botName: bot.name,
+          market: bot.market,
+          side: side === 'long' ? 'LONG' : 'SHORT',
+          size: contractSize,
+          price: fillPrice,
+          pnl: syncResult.tradePnl ?? 0,
+          closeReason: getCloseReasonLabel('manual'),
+        }).catch(err => console.error('[ManualTrade] Failed to send position_closed notification:', err));
+      } else {
+        // Open / increase: fire trade_executed (mirrors webhook open path
+        // at routes.ts:9416). Fire-and-forget so HTTP response isn't
+        // blocked on Telegram latency.
+        sendTradeNotification(bot.walletAddress, {
+          type: 'trade_executed',
+          botName: bot.name,
+          market: bot.market,
+          side: side === 'long' ? 'LONG' : 'SHORT',
+          size: tradeNotional,
+          price: fillPrice,
+        }).catch(err => console.error('[ManualTrade] Failed to send trade_executed notification:', err));
+      }
+
       res.json({
         success: true,
         side,
@@ -5775,6 +5864,25 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
     } catch (error) {
       console.error("Manual trade error:", error);
+      // Best-effort trade_failed alert for unexpected errors (e.g. sizing /
+      // RPC failures BEFORE executePerpOrder ran). Wrapped so a Telegram
+      // failure can't mask the 500 we already return to the client.
+      try {
+        const failedBot = await storage.getTradingBotById(req.params.id);
+        if (failedBot && failedBot.walletAddress === req.walletAddress) {
+          sendTradeNotification(failedBot.walletAddress, {
+            type: 'trade_failed',
+            botName: failedBot.name,
+            market: failedBot.market,
+            side: (req.body?.side === 'long' || req.body?.side === 'short')
+              ? (req.body.side === 'long' ? 'LONG' : 'SHORT')
+              : undefined,
+            error: error instanceof Error ? error.message : 'Internal server error',
+          }).catch(err => console.error('[ManualTrade] Failed to send trade_failed notification:', err));
+        }
+      } catch (notifLookupErr) {
+        console.error('[ManualTrade] Could not dispatch trade_failed notification:', notifLookupErr);
+      }
       res.status(500).json({ error: "Internal server error" });
     }
   });

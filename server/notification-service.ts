@@ -11,6 +11,32 @@ export interface TradeNotification {
   price?: number;
   pnl?: number;
   error?: string;
+  /** Human-readable close reason, only used for `position_closed`. */
+  closeReason?: string;
+}
+
+/**
+ * Pure helper: maps a reconciler close-detection reason (and optional TP/SL
+ * subtype) to the user-facing string surfaced in Telegram alerts. Keep
+ * exported so manual-close / reconciler / future callers stay consistent.
+ */
+export function getCloseReasonLabel(
+  reason: 'tpsl' | 'liquidation' | 'external_close' | 'manual',
+  tpslSubtype?: 'TP' | 'SL',
+): string {
+  switch (reason) {
+    case 'tpsl':
+      if (tpslSubtype === 'TP') return 'Closed by Take Profit';
+      if (tpslSubtype === 'SL') return 'Closed by Stop Loss';
+      return 'Closed by TP/SL';
+    case 'liquidation':
+      return 'Liquidated';
+    case 'manual':
+      return 'Closed manually';
+    case 'external_close':
+    default:
+      return 'Closed on exchange';
+  }
 }
 
 async function sendTelegramMessage(chatId: string, text: string): Promise<boolean> {
@@ -130,9 +156,10 @@ function formatNotificationMessage(notification: TradeNotification): { title: st
         ? (pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`)
         : '';
       const emoji = pnl !== undefined ? (pnl >= 0 ? '🟢' : '🔴') : '';
+      const reasonSuffix = notification.closeReason ? ` (${notification.closeReason})` : '';
       return {
         title: `📊 Position Closed`,
-        body: `${emoji} ${botName}: ${market} ${pnlStr}`.trim()
+        body: `${emoji} ${botName}: ${market} ${pnlStr}${reasonSuffix}`.trim()
       };
     }
     

@@ -2,6 +2,7 @@ import { storage, DatabaseStorage } from "./storage";
 import { normalizeMarket } from "./protocol/symbol-registry";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
 import type { TradeRecord } from "./protocol/protocol-types";
+import { sendTradeNotification, getCloseReasonLabel } from "./notification-service";
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -59,6 +60,8 @@ interface CloseDetectionResult {
    * nosig fallback hash so repeated reconciler runs against the same
    * close hit the same time bucket. */
   fillTimestampMs?: number;
+  /** When `reason === 'tpsl'`, which side was hit (used for notification text). */
+  tpslSubtype?: 'TP' | 'SL';
 }
 
 async function detectOnChainClose(
@@ -148,6 +151,7 @@ async function detectOnChainClose(
     const hasClosingTrades = aggregatedSize >= absSize * 0.80;
 
     let closeReason: 'tpsl' | 'liquidation' | 'external_close' = 'external_close';
+    let tpslSubtype: 'TP' | 'SL' | undefined;
 
     const bot = await storage.getTradingBotById(botId);
     const riskConfig = bot?.riskConfig as Record<string, unknown> | undefined;
@@ -183,6 +187,7 @@ async function detectOnChainClose(
 
         if (hitTp || hitSl) {
           closeReason = 'tpsl';
+          tpslSubtype = hitTp ? 'TP' : 'SL';
           console.log(`[Reconcile] TP/SL detected for bot ${botId}: ${hitTp ? 'TP' : 'SL'} hit at $${avgFillPrice.toFixed(4)} (entry=$${entryPrice.toFixed(4)}, TP=$${tpPrice.toFixed(4)}, SL=$${slPrice.toFixed(4)})`);
         }
       }
@@ -213,6 +218,7 @@ async function detectOnChainClose(
         protocolFillId: matchedTradeIds[0],
         matchedFillIdsForDiagnostics: matchedTradeIds.join(','),
         fillTimestampMs: closingFills[0]?.timestamp,
+        tpslSubtype,
       };
     }
 
@@ -326,6 +332,7 @@ async function detectOnChainClose(
           pnl,
           fee: 0,
           fillTimestampMs: fallbackAnchorMs,
+          tpslSubtype: chosenLabel as 'TP' | 'SL',
         };
       }
 
@@ -706,6 +713,28 @@ export async function reconcileBotPosition(
           console.log(`[Reconcile] Close already recorded for bot ${botId} ${market} (dedupKey=${dedupKey}), skipping duplicate stats update`);
           lastReconcileTime.set(botId, Date.now());
           return { synced: true, discrepancy: false };
+        }
+
+        // Fire Telegram notification exactly once per detected close: gated on
+        // `isNew=true` so racing reconciler ticks / cross-path replays
+        // (manual-close already wrote the canonical row) never double-fire.
+        // Fire-and-forget; never let a Telegram failure mask reconciliation.
+        try {
+          const reasonLabel = getCloseReasonLabel(closeDetection.reason, closeDetection.tpslSubtype);
+          const botRow = await storage.getTradingBotById(botId);
+          const botName = botRow?.name ?? 'Bot';
+          sendTradeNotification(walletAddress, {
+            type: 'position_closed',
+            botName,
+            market,
+            side: dbBaseSize > 0 ? 'LONG' : 'SHORT',
+            size: Math.abs(dbBaseSize),
+            price: closeFillPrice,
+            pnl: closePnl,
+            closeReason: reasonLabel,
+          }).catch(err => console.error(`[Reconcile] Notification error for bot ${botId}:`, err));
+        } catch (notifErr) {
+          console.error(`[Reconcile] Failed to dispatch close notification for bot ${botId}:`, notifErr);
         }
 
         await storage.upsertBotPosition({
