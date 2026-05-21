@@ -12775,6 +12775,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // the leaderboard (which reads stored snapshot fields) and the live
       // portfolio endpoint are guaranteed to agree on currentBalance/netPnl/%.
       const { computeWalletTotalBalance } = await import('./portfolio-snapshot-job');
+      // Live endpoint best-effort: a partial balance (one bot's read failed)
+      // is still useful to render — we only refuse to PERSIST a partial total
+      // (that's the snapshot writer's job).
       const { totalBalance: currentBalance, activeBotCount } = await computeWalletTotalBalance(walletAddress);
 
       // Backfill any deposits the client-side confirmation missed before reading totals.

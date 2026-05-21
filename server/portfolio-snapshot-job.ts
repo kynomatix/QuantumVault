@@ -1,8 +1,38 @@
+import { Connection, PublicKey } from "@solana/web3.js";
 import { storage } from "./storage";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
-import { getAgentUsdcBalance } from "./agent-wallet";
 import { reconcileWalletDeposits } from "./deposit-reconciler";
 import type { TradingBot, Wallet } from "@shared/schema";
+
+const MAINNET_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const DEVNET_USDC_MINT = "8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2";
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const _IS_MAINNET = (process.env.DRIFT_ENV || process.env.SOLANA_ENV || "mainnet-beta") === "mainnet-beta";
+const _USDC_MINT = new PublicKey(_IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT);
+
+function _getSnapshotRpcUrl(): string {
+  if (process.env.SOLANA_RPC_URL) return process.env.SOLANA_RPC_URL;
+  if (_IS_MAINNET && process.env.HELIUS_API_KEY) {
+    return `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
+  }
+  return _IS_MAINNET ? "https://api.mainnet-beta.solana.com" : "https://api.devnet.solana.com";
+}
+
+let _snapshotConnection: Connection | null = null;
+function _getSnapshotConnection(): Connection {
+  if (!_snapshotConnection) _snapshotConnection = new Connection(_getSnapshotRpcUrl(), "confirmed");
+  return _snapshotConnection;
+}
+
+function _getAgentUsdcAta(agentPublicKey: string): PublicKey {
+  const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+  const owner = new PublicKey(agentPublicKey);
+  const [address] = PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), _USDC_MINT.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+  );
+  return address;
+}
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -26,20 +56,52 @@ function resolveBotAdapterArgs(bot: TradingBot, wallet: Wallet): { account: stri
   return null;
 }
 
-async function getAccountBalance(account: string, subaccountId: string | undefined): Promise<number> {
+/**
+ * Returns the bot's perp-account balance, or `null` if the read failed.
+ *
+ * Returning null (instead of swallowing the error as `0`) is critical for the
+ * snapshot writer: a transient RPC/SDK failure that drops one bot's balance to
+ * 0 used to get persisted as a real loss, producing phantom P&L drops on the
+ * chart (e.g. AqTT 2026-05-15 00:00 totalBalance=$7.34 → $48.09 by 12:00).
+ * The caller skips the snapshot when any read returns null and the next
+ * scheduled run retries.
+ */
+async function getAccountBalance(account: string, subaccountId: string | undefined): Promise<number | null> {
   try {
     const info = await getDefaultAdapter().getAccountInfo(account, subaccountId);
-    return info.balance || 0;
+    // Treat non-finite/NaN/undefined as failure — `|| 0` would hide a malformed
+    // upstream response as a real zero balance and re-introduce phantom dips.
+    if (typeof info.balance !== "number" || !Number.isFinite(info.balance)) return null;
+    return info.balance;
   } catch {
-    return 0;
+    return null;
   }
 }
 
-async function getAgentSplBalance(agentPublicKey: string): Promise<number> {
+/**
+ * Strict variant of `getAgentUsdcBalance` for the snapshot writer.
+ *
+ * The shared helper in `agent-wallet.ts` swallows RPC errors and returns `0`
+ * (many callers depend on that best-effort behavior). The snapshot writer
+ * needs the opposite: distinguish "agent legitimately holds 0 USDC" from
+ * "RPC failed". A 404 (no token account) is the only path that means real 0.
+ */
+async function getAgentSplBalance(agentPublicKey: string): Promise<number | null> {
   try {
-    return await getAgentUsdcBalance(agentPublicKey);
+    const ata = _getAgentUsdcAta(agentPublicKey);
+    const conn = _getSnapshotConnection();
+    // Deterministic existence check: if the ATA doesn't exist on chain the
+    // agent legitimately holds 0 USDC. Only after we confirm the account
+    // exists do we read the balance — that way provider-specific error
+    // wording can never be misclassified as a "real zero".
+    const acct = await conn.getAccountInfo(ata, "confirmed");
+    if (acct === null) return 0;
+    const result = await conn.getTokenAccountBalance(ata);
+    const ui = result?.value?.uiAmount;
+    if (typeof ui !== "number" || !Number.isFinite(ui)) return null;
+    return ui;
   } catch {
-    return 0;
+    return null;
   }
 }
 
@@ -78,35 +140,35 @@ export async function takePortfolioSnapshots(): Promise<void> {
  */
 export async function computeWalletTotalBalance(
   walletAddress: string,
-): Promise<{ totalBalance: number; activeBotCount: number }> {
+): Promise<{ totalBalance: number; activeBotCount: number; ok: boolean }> {
   const wallet = await storage.getWallet(walletAddress);
-  if (!wallet) return { totalBalance: 0, activeBotCount: 0 };
+  if (!wallet) return { totalBalance: 0, activeBotCount: 0, ok: true };
 
   const bots = await storage.getTradingBots(walletAddress);
   let totalBalance = 0;
   let activeBotCount = 0;
+  let ok = true;
 
   if (wallet.agentPublicKey) {
-    try {
-      totalBalance += await getAgentSplBalance(wallet.agentPublicKey);
-    } catch (error) {
-      console.error(`[computeWalletTotalBalance] agent SPL balance error:`, error);
-    }
+    const spl = await getAgentSplBalance(wallet.agentPublicKey);
+    if (spl == null) ok = false;
+    else totalBalance += spl;
   }
 
   for (const bot of bots) {
-    try {
-      if (bot.isActive) activeBotCount++;
-      const adapterArgs = resolveBotAdapterArgs(bot, wallet);
-      if (adapterArgs) {
-        totalBalance += await getAccountBalance(adapterArgs.account, adapterArgs.subaccountId);
-      }
-    } catch (error) {
-      console.error(`[computeWalletTotalBalance] bot ${bot.id} balance error:`, error);
+    if (bot.isActive) activeBotCount++;
+    const adapterArgs = resolveBotAdapterArgs(bot, wallet);
+    if (!adapterArgs) continue;
+    const bal = await getAccountBalance(adapterArgs.account, adapterArgs.subaccountId);
+    if (bal == null) {
+      ok = false;
+      console.warn(`[computeWalletTotalBalance] balance read failed for bot ${bot.id} (wallet ${walletAddress.slice(0, 8)}…) — partial total only`);
+    } else {
+      totalBalance += bal;
     }
   }
 
-  return { totalBalance, activeBotCount };
+  return { totalBalance, activeBotCount, ok };
 }
 
 async function processWalletSnapshot(walletAddress: string): Promise<void> {
@@ -116,8 +178,17 @@ async function processWalletSnapshot(walletAddress: string): Promise<void> {
   const bots = await storage.getTradingBots(walletAddress);
   if (bots.length === 0) return;
 
-  const { totalBalance, activeBotCount } = await computeWalletTotalBalance(walletAddress);
-  
+  const { totalBalance, activeBotCount, ok } = await computeWalletTotalBalance(walletAddress);
+
+  // Refuse to persist a snapshot built on a failed balance read. A single
+  // bot returning 0 due to an RPC/SDK timeout used to write a phantom loss
+  // (e.g. AqTT 2026-05-15 00:00 dropped to $7.34, recovered to $48.09 at the
+  // next bucket). The next scheduled snapshot retries on fresh reads.
+  if (!ok) {
+    console.warn(`[Portfolio Snapshots] Skipping ${walletAddress.slice(0, 8)}… — at least one balance read failed; retry next cycle`);
+    return;
+  }
+
   // Backfill any deposits the client-side confirmation missed before reading totals.
   await reconcileWalletDeposits(walletAddress);
   const { totalTrades, totalVolume } = await storage.getWalletTradeStats(walletAddress);
