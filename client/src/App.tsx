@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WalletProvider } from "@/components/WalletProvider";
 import { ConfirmDialogProvider } from "@/hooks/useConfirm";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import NotFound from "@/pages/not-found";
 import Landing from "@/pages/Landing";
 import AppPage from "@/pages/App";
@@ -35,16 +36,18 @@ function Router() {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <WalletProvider>
-        <TooltipProvider>
-          <ConfirmDialogProvider>
-            <Toaster />
-            <Router />
-          </ConfirmDialogProvider>
-        </TooltipProvider>
-      </WalletProvider>
-    </QueryClientProvider>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <WalletProvider>
+          <TooltipProvider>
+            <ConfirmDialogProvider>
+              <Toaster />
+              <Router />
+            </ConfirmDialogProvider>
+          </TooltipProvider>
+        </WalletProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }
 
