@@ -16,6 +16,7 @@ import PitchDeckV2 from "@/pages/PitchDeckV2";
 import Admin from "@/pages/Admin";
 import QuantumLab from "@/pages/QuantumLab";
 import MarketplaceBotPage from "@/pages/MarketplaceBotPage";
+import TelegramMiniApp from "@/pages/TelegramMiniApp";
 
 function Router() {
   return (
@@ -29,6 +30,7 @@ function Router() {
       <Route path="/admin" component={Admin} />
       <Route path="/quantumlab" component={QuantumLab} />
       <Route path="/marketplace/:id" component={MarketplaceBotPage} />
+      <Route path="/tg" component={TelegramMiniApp} />
       <Route component={NotFound} />
     </Switch>
   );

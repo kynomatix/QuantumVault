@@ -39,7 +39,35 @@ export function getCloseReasonLabel(
   }
 }
 
-async function sendTelegramMessage(chatId: string, text: string): Promise<boolean> {
+/**
+ * Build the standard inline keyboard attached to outbound notifications and
+ * the /menu home screen (Task #136). The 🚀 Open Mini App `web_app` button
+ * deep-links into the QuantumVault Mini App via Telegram's WebApp surface;
+ * 📊 Positions and 📈 Today reuse the existing text commands via
+ * callback_query so the buttons work even before the user has opened the
+ * Mini App for the first time. web_app buttons can only appear inside
+ * `inline_keyboard` (not reply_keyboard) — keep the markup shape.
+ */
+export function buildDefaultInlineKeyboard(): Record<string, any> {
+  const miniAppUrl = process.env.TELEGRAM_MINI_APP_URL || 'https://myquantumvault.com/tg';
+  return {
+    inline_keyboard: [
+      [
+        { text: '📊 Positions', callback_data: 'nav:positions' },
+        { text: '📈 Today', callback_data: 'nav:today' },
+      ],
+      [
+        { text: '🚀 Open Mini App', web_app: { url: miniAppUrl } },
+      ],
+    ],
+  };
+}
+
+async function sendTelegramMessage(
+  chatId: string,
+  text: string,
+  replyMarkup?: Record<string, any>,
+): Promise<boolean> {
   const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   
   if (!TELEGRAM_BOT_TOKEN) {
@@ -48,16 +76,18 @@ async function sendTelegramMessage(chatId: string, text: string): Promise<boolea
   }
 
   try {
+    const body: Record<string, any> = {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+    };
+    if (replyMarkup) body.reply_markup = replyMarkup;
     const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: 'HTML',
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
@@ -119,7 +149,15 @@ export async function sendTradeNotification(
     
     console.log(`[Notifications] Sending Telegram to ${walletAddress}: ${title} - ${body}`);
 
-    const success = await sendTelegramMessage(wallet.telegramChatId, message);
+    // Task #136: every outbound trade notification carries the standard
+    // inline keyboard (📊 Positions / 📈 Today / 🚀 Open Mini App) so the
+    // user can jump straight into the Mini App or fetch a fresh summary
+    // without leaving the chat.
+    const success = await sendTelegramMessage(
+      wallet.telegramChatId,
+      message,
+      buildDefaultInlineKeyboard(),
+    );
     
     if (success) {
       console.log(`[Notifications] Successfully sent Telegram notification to ${walletAddress}`);

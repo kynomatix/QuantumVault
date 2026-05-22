@@ -644,7 +644,8 @@ import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
-import { sendTradeNotification, getCloseReasonLabel, type TradeNotification } from "./notification-service";
+import { sendTradeNotification, getCloseReasonLabel, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
+import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
@@ -12460,6 +12461,51 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       const update = req.body;
+
+      // Callback_query handler (Task #136): inline-keyboard taps from
+      // notifications and /menu route through here. Always answer the
+      // callback (even on failure) so Telegram clears the spinner.
+      const cb = update?.callback_query;
+      if (cb && cb.data) {
+        const cbChatId = cb.message?.chat?.id?.toString();
+        const cbData: string = cb.data;
+        const ack = async () => {
+          try {
+            await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ callback_query_id: cb.id }),
+            });
+          } catch (err) {
+            console.error('[Telegram] answerCallbackQuery failed:', err);
+          }
+        };
+        try {
+          if (cbChatId && (cbData === 'nav:positions' || cbData === 'nav:today')) {
+            const linked = await storage.getWalletsByTelegramChatId(cbChatId);
+            if (linked.length === 0) {
+              await sendTelegramResponse(cbChatId, "ℹ️ No QuantumVault wallets are linked to this chat.");
+            } else {
+              const addrs = linked.map(w => w.address);
+              if (cbData === 'nav:positions') {
+                const { buildStatsForChat, formatPositionsMessage } = await import("./telegram-summary");
+                const stats = await buildStatsForChat(addrs);
+                await sendTelegramResponse(cbChatId, formatPositionsMessage(stats), buildDefaultInlineKeyboard());
+              } else {
+                const { buildTodayStatsForChat, formatTodayMessage } = await import("./telegram-summary");
+                const stats = await buildTodayStatsForChat(addrs);
+                await sendTelegramResponse(cbChatId, formatTodayMessage(stats), buildDefaultInlineKeyboard());
+              }
+            }
+          }
+        } catch (err: any) {
+          console.error('[Telegram] callback_query handler failed:', err?.message || err);
+        } finally {
+          await ack();
+        }
+        return res.json({ ok: true });
+      }
+
       const message = update?.message;
       const text: string | undefined = message?.text;
 
@@ -12523,6 +12569,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (text.startsWith('/help')) {
         await sendTelegramResponse(chatId,
           "<b>QuantumVault commands</b>\n\n" +
+          "/menu — quick action menu with Mini App button\n" +
           "/summary — daily snapshot for every linked wallet\n" +
           "/positions — just your open positions\n" +
           "/today — today's trades and realized PnL\n" +
@@ -12532,6 +12579,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           "/help — show this message\n\n" +
           "Turn on the <b>Daily summary</b> toggle in Settings → Notifications to receive /summary as a push once a day."
         );
+        return res.json({ ok: true });
+      }
+
+      // /menu — quick action menu (Task #136). Shows the standard inline
+      // keyboard so the user can tap into the Mini App or pull a fresh
+      // summary without typing commands.
+      if (text.startsWith('/menu')) {
+        const linked = await storage.getWalletsByTelegramChatId(chatId);
+        const header = linked.length === 0
+          ? "ℹ️ This chat isn't linked to any QuantumVault wallet yet.\n\nOpen QuantumVault → Settings → Notifications → Connect Telegram to link one."
+          : `<b>QuantumVault</b>\n\nLinked wallets: ${linked.length}\n\nTap a button below or open the Mini App for the full dashboard.`;
+        await sendTelegramResponse(chatId, header, buildDefaultInlineKeyboard());
         return res.json({ ok: true });
       }
 
@@ -12591,7 +12650,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
         const { buildStatsForChat, formatSummaryMessage } = await import("./telegram-summary");
         const stats = await buildStatsForChat(linked.map(w => w.address));
-        await sendTelegramResponse(chatId, formatSummaryMessage(stats));
+        await sendTelegramResponse(chatId, formatSummaryMessage(stats), buildDefaultInlineKeyboard());
         return res.json({ ok: true });
       }
 
@@ -12604,7 +12663,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
         const { buildStatsForChat, formatPositionsMessage } = await import("./telegram-summary");
         const stats = await buildStatsForChat(linked.map(w => w.address));
-        await sendTelegramResponse(chatId, formatPositionsMessage(stats));
+        await sendTelegramResponse(chatId, formatPositionsMessage(stats), buildDefaultInlineKeyboard());
         return res.json({ ok: true });
       }
 
@@ -12617,7 +12676,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
         const { buildTodayStatsForChat, formatTodayMessage } = await import("./telegram-summary");
         const stats = await buildTodayStatsForChat(linked.map(w => w.address));
-        await sendTelegramResponse(chatId, formatTodayMessage(stats));
+        await sendTelegramResponse(chatId, formatTodayMessage(stats), buildDefaultInlineKeyboard());
         return res.json({ ok: true });
       }
 
@@ -14095,6 +14154,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
+  // Task #136: Telegram Mini App read-only API surface.
+  // Isolated auth — does NOT share middleware with requireWallet (session)
+  // or the planned Bearer middleware. Every /api/tg/* request HMAC-verifies
+  // initData against TELEGRAM_BOT_TOKEN. All endpoints are read-only.
+  registerTelegramMiniAppRoutes(app);
+
   return httpServer;
 }
 
@@ -14105,7 +14170,11 @@ function truncateAddress(addr: string): string {
 }
 
 // Helper function to send Telegram messages (for webhook responses)
-async function sendTelegramResponse(chatId: string, text: string): Promise<boolean> {
+async function sendTelegramResponse(
+  chatId: string,
+  text: string,
+  replyMarkup?: Record<string, any>,
+): Promise<boolean> {
   const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   
   if (!TELEGRAM_BOT_TOKEN) {
@@ -14114,16 +14183,18 @@ async function sendTelegramResponse(chatId: string, text: string): Promise<boole
   }
 
   try {
+    const body: Record<string, any> = {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+    };
+    if (replyMarkup) body.reply_markup = replyMarkup;
     const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: 'HTML',
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {

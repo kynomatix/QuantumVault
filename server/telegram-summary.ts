@@ -254,6 +254,244 @@ export function formatPositionsMessage(stats: WalletSummaryStats[]): string {
   return parts.join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// Mini App JSON helpers (Task #136)
+//
+// These mirror the data the text formatters consume but return raw JSON so
+// the Mini App API (`/api/tg/*`) and any future surface can share the same
+// data layer as the existing /summary, /positions, /today text commands.
+// Do NOT change the existing text-formatting functions: bot text commands
+// still rely on them.
+// ---------------------------------------------------------------------------
+
+export interface OverviewJson {
+  walletAddress: string;
+  walletShort: string;
+  totalEquity: number | null;
+  pnl24h: number;
+  pnl24hPercent: number;
+  tradesLast24h: number;
+  winning24h: number;
+  losing24h: number;
+  openPositionCount: number;
+}
+
+export interface PositionJson {
+  botName: string;
+  market: string;
+  side: 'LONG' | 'SHORT';
+  size: number;
+  entryPrice: number;
+  markPrice: number;
+  unrealizedPnl: number;
+}
+
+export interface BotCardJson {
+  id: string;
+  name: string;
+  market: string;
+  side: string;
+  leverage: number;
+  status: 'running' | 'paused';
+  pauseReason: string | null;
+  totalPnl: number;
+  totalTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  lastTradeAt: string | null;
+  openPosition: PositionJson | null;
+}
+
+export interface TodayJson {
+  walletAddress: string;
+  walletShort: string;
+  tradesToday: number;
+  realizedPnlToday: number;
+  winning: number;
+  losing: number;
+}
+
+function truncate(addr: string): string {
+  return truncateAddress(addr);
+}
+
+/**
+ * Aggregate /api/tg/overview payload: one combined snapshot across every
+ * wallet linked to the chat. Numbers come from the same cache the daily
+ * summary uses (latest portfolio snapshot + bot_trades rollups), so the
+ * Mini App's headline numbers track the daily push exactly.
+ */
+export async function buildOverviewJsonForChat(
+  walletAddresses: string[],
+): Promise<{
+  wallets: OverviewJson[];
+  totals: {
+    totalEquity: number | null;
+    pnl24h: number;
+    tradesLast24h: number;
+    openPositionCount: number;
+  };
+}> {
+  const prices = await getMarkPricesSafely();
+  const wallets: OverviewJson[] = [];
+  let sumEquity: number | null = null;
+  let sumPnl = 0;
+  let sumTrades = 0;
+  let sumOpen = 0;
+  for (const addr of walletAddresses) {
+    try {
+      const s = await buildWalletSummaryStats(addr, prices);
+      wallets.push({
+        walletAddress: s.walletAddress,
+        walletShort: truncate(s.walletAddress),
+        totalEquity: s.totalEquity,
+        pnl24h: s.pnl24h,
+        pnl24hPercent: s.pnl24hPercent,
+        tradesLast24h: s.tradesLast24h,
+        winning24h: s.winning24h,
+        losing24h: s.losing24h,
+        openPositionCount: s.openPositions.length,
+      });
+      if (s.totalEquity != null) {
+        sumEquity = (sumEquity ?? 0) + s.totalEquity;
+      }
+      sumPnl += s.pnl24h;
+      sumTrades += s.tradesLast24h;
+      sumOpen += s.openPositions.length;
+    } catch (err: any) {
+      console.error(`[TelegramSummary] overview build failed for ${addr.slice(0, 8)}:`, err?.message || err);
+    }
+  }
+  return {
+    wallets,
+    totals: {
+      totalEquity: sumEquity,
+      pnl24h: sumPnl,
+      tradesLast24h: sumTrades,
+      openPositionCount: sumOpen,
+    },
+  };
+}
+
+export async function buildPositionsJsonForChat(walletAddresses: string[]): Promise<{
+  wallets: { walletAddress: string; walletShort: string; positions: PositionJson[] }[];
+}> {
+  const prices = await getMarkPricesSafely();
+  const out: { walletAddress: string; walletShort: string; positions: PositionJson[] }[] = [];
+  for (const addr of walletAddresses) {
+    try {
+      const s = await buildWalletSummaryStats(addr, prices);
+      const positions: PositionJson[] = s.openPositions.map(p => {
+        const mark = prices[p.market] && prices[p.market] > 0 ? prices[p.market] : p.entryPrice;
+        return {
+          botName: p.botName,
+          market: p.market,
+          side: p.side,
+          size: p.size,
+          entryPrice: p.entryPrice,
+          markPrice: mark,
+          unrealizedPnl: p.unrealizedPnl,
+        };
+      });
+      out.push({ walletAddress: addr, walletShort: truncate(addr), positions });
+    } catch (err: any) {
+      console.error(`[TelegramSummary] positions build failed for ${addr.slice(0, 8)}:`, err?.message || err);
+    }
+  }
+  return { wallets: out };
+}
+
+export async function buildBotsJsonForChat(walletAddresses: string[]): Promise<{
+  bots: BotCardJson[];
+}> {
+  const prices = await getMarkPricesSafely();
+  const cards: BotCardJson[] = [];
+  for (const addr of walletAddresses) {
+    try {
+      const bots = await storage.getTradingBots(addr);
+      const positions = await storage.getBotPositions(addr);
+      const posByBot = new Map<string, typeof positions[number]>();
+      for (const p of positions) {
+        const baseSize = parseFloat(p.baseSize);
+        if (!Number.isFinite(baseSize) || Math.abs(baseSize) < 0.0001) continue;
+        posByBot.set(p.tradingBotId, p);
+      }
+      for (const b of bots) {
+        const stats = b.stats ?? { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
+        const pos = posByBot.get(b.id);
+        let openPosition: PositionJson | null = null;
+        if (pos) {
+          const baseSize = parseFloat(pos.baseSize);
+          const side: 'LONG' | 'SHORT' = baseSize > 0 ? 'LONG' : 'SHORT';
+          const entry = parseFloat(pos.avgEntryPrice);
+          const mark = prices[pos.market] && prices[pos.market] > 0 ? prices[pos.market] : entry;
+          const uPnl = side === 'LONG'
+            ? (mark - entry) * Math.abs(baseSize)
+            : (entry - mark) * Math.abs(baseSize);
+          openPosition = {
+            botName: b.name,
+            market: pos.market,
+            side,
+            size: Math.abs(baseSize),
+            entryPrice: entry,
+            markPrice: mark,
+            unrealizedPnl: uPnl,
+          };
+        }
+        cards.push({
+          id: b.id,
+          name: b.name,
+          market: b.market,
+          side: b.side,
+          leverage: b.leverage,
+          status: b.isActive ? 'running' : 'paused',
+          pauseReason: b.pauseReason ?? null,
+          totalPnl: Number(stats.totalPnl ?? 0),
+          totalTrades: Number(stats.totalTrades ?? 0),
+          winningTrades: Number(stats.winningTrades ?? 0),
+          losingTrades: Number(stats.losingTrades ?? 0),
+          lastTradeAt: stats.lastTradeAt ?? null,
+          openPosition,
+        });
+      }
+    } catch (err: any) {
+      console.error(`[TelegramSummary] bots build failed for ${addr.slice(0, 8)}:`, err?.message || err);
+    }
+  }
+  return { bots: cards };
+}
+
+export async function buildTodayJsonForChat(walletAddresses: string[]): Promise<{
+  wallets: TodayJson[];
+  totals: { tradesToday: number; realizedPnlToday: number; winning: number; losing: number };
+}> {
+  const wallets: TodayJson[] = [];
+  let tradesToday = 0;
+  let realizedPnlToday = 0;
+  let winning = 0;
+  let losing = 0;
+  for (const addr of walletAddresses) {
+    try {
+      const t = await buildTodayStats(addr);
+      wallets.push({
+        walletAddress: t.walletAddress,
+        walletShort: truncate(t.walletAddress),
+        tradesToday: t.tradesToday,
+        realizedPnlToday: t.realizedPnlToday,
+        winning: t.winning,
+        losing: t.losing,
+      });
+      tradesToday += t.tradesToday;
+      realizedPnlToday += t.realizedPnlToday;
+      winning += t.winning;
+      losing += t.losing;
+    } catch (err: any) {
+      console.error(`[TelegramSummary] today build failed for ${addr.slice(0, 8)}:`, err?.message || err);
+    }
+  }
+  return { wallets, totals: { tradesToday, realizedPnlToday, winning, losing } };
+}
+
 export function formatTodayMessage(stats: TodayStats[]): string {
   if (stats.length === 0) {
     return "ℹ️ No QuantumVault wallets are linked to this chat.";

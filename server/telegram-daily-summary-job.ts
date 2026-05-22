@@ -2,6 +2,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "./db";
 import { wallets } from "@shared/schema";
 import { buildStatsForChat, formatSummaryMessage } from "./telegram-summary";
+import { buildDefaultInlineKeyboard } from "./notification-service";
 
 const TICK_MS = 60 * 1000;
 
@@ -20,14 +21,20 @@ function utcDateStr(d: Date = new Date()): string {
   return d.toISOString().slice(0, 10);
 }
 
-async function sendTelegram(chatId: string, text: string): Promise<boolean> {
+async function sendTelegram(
+  chatId: string,
+  text: string,
+  replyMarkup?: Record<string, any>,
+): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) return false;
   try {
+    const body: Record<string, any> = { chat_id: chatId, text, parse_mode: 'HTML' };
+    if (replyMarkup) body.reply_markup = replyMarkup;
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -109,7 +116,7 @@ async function tick(): Promise<void> {
       try {
         const stats = await buildStatsForChat(addresses);
         const body = formatSummaryMessage(stats);
-        const ok = await sendTelegram(chatId, body);
+        const ok = await sendTelegram(chatId, body, buildDefaultInlineKeyboard());
         if (ok) {
           console.log(`[DailySummary] Sent to chat ${chatId} (${addresses.length} wallet(s))`);
         } else {
