@@ -819,6 +819,7 @@ export function registerLabRoutes(app: Express): void {
       }
 
       let doneReceived = false;
+      let comboPersistFailure: string | null = null;
 
       worker.on("message", async (msg: any) => {
         lastWorkerMessageTime = Date.now();
@@ -865,9 +866,9 @@ export function registerLabRoutes(app: Express): void {
                   pendingCheckpoint = null;
                   if (job.abortSignal.aborted || doneReceived) break;
                   try {
-                    if (cp.results.length > 0) {
-                      await labStorage.saveComboResults(runId!, cp.results, true);
-                    }
+                    // Do NOT persist lite/partial results to lab_optimization_results.
+                    // They lack trades/equityCurve and would surface as empty rows in
+                    // the UI. Instead store them in checkpoint state for resume.
                     checkpointState = {
                       ...checkpointState,
                       currentCombo: cp.combo,
@@ -876,6 +877,7 @@ export function registerLabRoutes(app: Express): void {
                       currentDeepRound: cp.deepRound,
                       refineSeeds: cp.refineSeeds,
                       coordinateCompleted: cp.coordinateCompleted,
+                      partialResults: Array.isArray(cp.results) ? cp.results : undefined,
                       lastHeartbeat: Date.now(),
                     };
                     const checkpoint: LabCheckpoint = {
@@ -900,7 +902,28 @@ export function registerLabRoutes(app: Express): void {
               if (job.abortSignal.aborted) return;
               try {
                 if (msg.results.length > 0) {
-                  await labStorage.saveComboResults(runId!, msg.results);
+                  try {
+                    await labStorage.saveComboResults(runId!, msg.results);
+                  } catch (saveErr: any) {
+                    // Hard failure persisting full combo results (e.g. invariant
+                    // check in saveComboResults). Pause the run immediately and
+                    // abort the worker so we never silently advance to a
+                    // "complete" state with missing data.
+                    comboPersistFailure = comboPersistFailure ?? `${msg.combo}: ${saveErr.message}`;
+                    console.log(`[QuantumLab] combo-complete save failed for ${msg.combo} (run ${runId}): ${saveErr.message}`);
+                    try { await labStorage.pauseRun(runId!); } catch {}
+                    labStorage.updateProgress(job.id, {
+                      jobId: job.id, status: "error",
+                      stage: `Persist failed for ${msg.combo}: ${saveErr.message}`,
+                      current: 0, total: 0, percent: 0, elapsed: 0, error: saveErr.message,
+                    });
+                    if (activeWorker) {
+                      try { activeWorker.postMessage({ type: "abort" }); } catch {}
+                      try { activeWorker.terminate(); } catch {}
+                      clearActiveWorker();
+                    }
+                    return;
+                  }
                 }
                 checkpointState = {
                   currentCombo: undefined,
@@ -940,6 +963,80 @@ export function registerLabRoutes(app: Express): void {
               console.log(`[QuantumLab] Optimization finished: ${results.length} new results`);
               labStorage.setResults(job.id, results);
               if (runId) {
+                // If any combo-complete save failed mid-run, refuse to finalize.
+                if (comboPersistFailure) {
+                  const invMsg = `Run paused: combo persist failure (${comboPersistFailure}). Will not finalize as complete.`;
+                  console.log(`[QuantumLab] ${invMsg} (run ${runId})`);
+                  try { await labStorage.pauseRun(runId); } catch {}
+                  labStorage.updateProgress(job.id, {
+                    jobId: job.id, status: "error", stage: invMsg,
+                    current: 0, total: 0, percent: 0, elapsed: 0, error: invMsg,
+                  });
+                  clearActiveWorker();
+                  setTimeout(() => pumpQueue(), 1000);
+                  break;
+                }
+                // Completion invariant: (a) every expected combo (ticker × tf)
+                // must have at least one persisted row with a non-empty
+                // equityCurve, and (b) no persisted row with totalTrades > 0
+                // may be missing trades/equityCurve. If either fails, pause
+                // the run instead of marking it complete.
+                try {
+                  const persisted = await labStorage.getRunResults(runId);
+                  const bad = persisted.filter(r => {
+                    if ((r.totalTrades ?? 0) === 0) return false;
+                    const ec = r.equityCurve as any[] | null | undefined;
+                    const tr = r.trades as any[] | null | undefined;
+                    return !Array.isArray(ec) || ec.length === 0 || !Array.isArray(tr) || tr.length === 0;
+                  });
+                  if (bad.length > 0) {
+                    const sample = bad.slice(0, 3).map(r => `${r.ticker}|${r.timeframe}#${r.rank}`).join(", ");
+                    const invMsg = `Completion invariant failed: ${bad.length}/${persisted.length} results missing trades/equityCurve (e.g. ${sample}). Pausing run for investigation.`;
+                    console.log(`[QuantumLab] ${invMsg} (run ${runId})`);
+                    try { await labStorage.pauseRun(runId); } catch {}
+                    labStorage.updateProgress(job.id, {
+                      jobId: job.id, status: "error", stage: invMsg,
+                      current: 0, total: 0, percent: 0, elapsed: 0, error: invMsg,
+                    });
+                    clearActiveWorker();
+                    setTimeout(() => pumpQueue(), 1000);
+                    break;
+                  }
+                  // Per-combo coverage: every expected combo must have ≥1 row
+                  // with a non-empty equityCurve. This catches the case where
+                  // a combo's saveComboResults silently produced zero usable
+                  // rows (e.g. only zero-trade results, or all writes failed).
+                  const expectedCombos = new Set<string>();
+                  for (const ticker of config.tickers) {
+                    for (const tf of config.timeframes) {
+                      expectedCombos.add(`${ticker}|${tf}`);
+                    }
+                  }
+                  const goodCombos = new Set<string>();
+                  for (const r of persisted) {
+                    const ec = r.equityCurve as any[] | null | undefined;
+                    if (Array.isArray(ec) && ec.length > 0) {
+                      goodCombos.add(`${r.ticker}|${r.timeframe}`);
+                    }
+                  }
+                  const missingCombos: string[] = [];
+                  expectedCombos.forEach(k => { if (!goodCombos.has(k)) missingCombos.push(k); });
+                  if (missingCombos.length > 0) {
+                    const sample = missingCombos.slice(0, 5).join(", ");
+                    const invMsg = `Completion invariant failed: ${missingCombos.length}/${expectedCombos.size} combos have no result with a non-empty equity curve (e.g. ${sample}). Pausing run for investigation.`;
+                    console.log(`[QuantumLab] ${invMsg} (run ${runId})`);
+                    try { await labStorage.pauseRun(runId); } catch {}
+                    labStorage.updateProgress(job.id, {
+                      jobId: job.id, status: "error", stage: invMsg,
+                      current: 0, total: 0, percent: 0, elapsed: 0, error: invMsg,
+                    });
+                    clearActiveWorker();
+                    setTimeout(() => pumpQueue(), 1000);
+                    break;
+                  }
+                } catch (invErr: any) {
+                  console.log(`[QuantumLab] Completion invariant check failed: ${invErr.message}`);
+                }
                 try {
                   let totalConfigsTested: number;
                   if (msg.totalConfigsTested !== undefined) {
@@ -1814,7 +1911,10 @@ export function registerLabRoutes(app: Express): void {
       const run = await verifyRunOwnership(req, res);
       if (!run) return;
 
-      const { ticker: reqTicker, timeframe: reqTimeframe, reportData } = req.body;
+      const { ticker: reqTicker, timeframe: reqTimeframe, reportData, seedParams: reqSeedParams } = req.body;
+      const seedParams = reqSeedParams && typeof reqSeedParams === "object" && !Array.isArray(reqSeedParams)
+        ? (reqSeedParams as Record<string, any>)
+        : null;
       const runTickers = Array.isArray(run.tickers) ? run.tickers as string[] : [];
       const runTimeframes = Array.isArray(run.timeframes) ? run.timeframes as string[] : [];
       const ticker = reqTicker || runTickers[0];
@@ -1909,6 +2009,14 @@ export function registerLabRoutes(app: Express): void {
       if (isBusy) {
         const queueOrder = await labStorage.getNextQueueOrder(walletAddress);
         const computed = await computeGuidedInsightsForConfig(strategyId, [ticker], [timeframe]);
+        if (seedParams) {
+          const comboKey = `${ticker}|${timeframe}`;
+          const perCombo = computed.guidedInsightsPerCombo ?? {};
+          const existing = perCombo[comboKey] ?? { paramSensitivity: [] };
+          perCombo[comboKey] = { ...existing, topConfigs: [{ params: seedParams, score: Number.MAX_SAFE_INTEGER }] };
+          computed.guidedInsightsPerCombo = perCombo;
+          console.log(`[QuantumLab] Refine (queued): using caller-supplied seedParams for ${comboKey}`);
+        }
         const newRun = await labStorage.createRun({
           strategyId,
           userId: walletAddress,
@@ -2031,6 +2139,14 @@ export function registerLabRoutes(app: Express): void {
           guidedInsightsPerCombo = { [comboKey]: insights };
           console.log(`[QuantumLab] Refine: loaded focused insights for ${comboKey}`);
         }
+      }
+
+      if (seedParams) {
+        const perCombo = guidedInsightsPerCombo ?? {};
+        const existing = perCombo[comboKey] ?? { paramSensitivity: [] };
+        perCombo[comboKey] = { ...existing, topConfigs: [{ params: seedParams, score: Number.MAX_SAFE_INTEGER }] };
+        guidedInsightsPerCombo = perCombo;
+        console.log(`[QuantumLab] Refine: using caller-supplied seedParams for ${comboKey}`);
       }
 
       const latestGeneral = allReports.find(r => !(r.reportData as any)?.filter?.ticker) ?? allReports[0];

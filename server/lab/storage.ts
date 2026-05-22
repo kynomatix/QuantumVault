@@ -427,6 +427,20 @@ export class LabDatabaseStorage implements ILabStorage {
     const combo = results[0];
     const comboKey = `${combo.ticker}|${combo.timeframe}`;
 
+    // Hard invariant: canonical result rows MUST carry full trades + equityCurve.
+    // Partial/lite results are persisted in the checkpoint state, never in
+    // lab_optimization_results, to avoid the historical "empty curve" bug.
+    if (!isPartial) {
+      for (const r of results) {
+        if (r.totalTrades > 0 && (!Array.isArray(r.trades) || r.trades.length === 0)) {
+          throw new Error(`saveComboResults(${comboKey} run ${runId}): result has totalTrades=${r.totalTrades} but no trades[]`);
+        }
+        if (r.totalTrades > 0 && (!Array.isArray(r.equityCurve) || r.equityCurve.length === 0)) {
+          throw new Error(`saveComboResults(${comboKey} run ${runId}): result has totalTrades=${r.totalTrades} but no equityCurve[]`);
+        }
+      }
+    }
+
     await db.transaction(async (tx) => {
       const existing = await tx.select({ id: labOptimizationResults.id, ticker: labOptimizationResults.ticker, timeframe: labOptimizationResults.timeframe })
         .from(labOptimizationResults)
@@ -453,8 +467,8 @@ export class LabDatabaseStorage implements ILabStorage {
         totalTrades: r.totalTrades,
         sharpeRatio: r.sharpeRatio ?? calcSharpeFromTrades(r.trades),
         params: r.params,
-        trades: r.trades ?? [],
-        equityCurve: r.equityCurve ?? [],
+        trades: r.trades,
+        equityCurve: r.equityCurve,
       }));
 
       const batchSize = 50;

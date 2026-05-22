@@ -2762,7 +2762,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     enabled: !!run?.strategyId,
   });
 
-  const handleRefine = useCallback(async (ticker: string, timeframe: string) => {
+  const handleRefine = useCallback(async (ticker: string, timeframe: string, seedParams?: Record<string, any>) => {
     const comboKey = `${ticker}|${timeframe}`;
     setRefiningCombo(comboKey);
     try {
@@ -2802,6 +2802,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
         ticker,
         timeframe,
         reportData,
+        seedParams,
       });
       const data = await safeResponseJson(res);
       if (data.queued) {
@@ -2845,11 +2846,30 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(r);
     }
-    for (const [key, arr] of map) {
-      arr.sort((a, b) => rankScore(b, rankingMode) - rankScore(a, rankingMode));
-    }
+    const getLevProfit = (r: LabOptResult) => {
+      const maxLev = getMaxLeverage(r.ticker);
+      const lev = r.maxDrawdownPercent > 0 ? Math.min(maxLev, Math.max(1, Math.floor((100 / r.maxDrawdownPercent) * 0.8))) : 1;
+      return r.netProfitPercent * lev;
+    };
+    map.forEach((arr: LabOptResult[], key: string) => {
+      // Always pick the combo's #1 by Best-Profit ranking (preserves the
+      // existing top-row choice / heatmap ordering).
+      arr.sort((a: LabOptResult, b: LabOptResult) => rankScore(b, rankingMode) - rankScore(a, rankingMode));
+      if (arr.length <= 1) return;
+      // For the remaining sub-results, apply the column-header sort
+      // (descending). The top-row stays pinned at index 0.
+      const top = arr[0];
+      const rest = arr.slice(1);
+      rest.sort((a: LabOptResult, b: LabOptResult) => {
+        if (sortKey === "maxDrawdownPercent") return a[sortKey] - b[sortKey];
+        if (sortKey === "levProfit") return getLevProfit(b) - getLevProfit(a);
+        if (sortKey === "sharpeRatio") return (b.sharpeRatio ?? -Infinity) - (a.sharpeRatio ?? -Infinity);
+        return ((b as any)[sortKey] as number) - ((a as any)[sortKey] as number);
+      });
+      map.set(key, [top, ...rest]);
+    });
     return map;
-  }, [results, rankingMode]);
+  }, [results, rankingMode, sortKey]);
 
   const bestPerCombo = useMemo(() => {
     const arr: LabOptResult[] = [];
@@ -2929,8 +2949,10 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
   }, [rankingMode, results, bestPerCombo, resultsByCombo]);
 
   const handleSort = (key: SortKey) => {
-    if (sortKey === key) setSortDir(d => d === "desc" ? "asc" : "desc");
-    else { setSortKey(key); setSortDir("desc"); }
+    // Header sort is descending only — clicking a header just activates that
+    // metric. Re-clicking is a no-op (no asc toggle).
+    setSortKey(key);
+    setSortDir("desc");
   };
 
   const riskAnalysis = useMemo(() => {
@@ -3181,7 +3203,19 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.profitFactor >= 1.5 ? "text-sky-400/70" : "text-white/50"}`}>{sr.profitFactor.toFixed(2)}</td>
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.sharpeRatio == null ? "text-white/20" : sr.sharpeRatio >= 1 ? "text-sky-400/70" : sr.sharpeRatio >= 0 ? "text-white/40" : "text-purple-400/70"}`}>{sr.sharpeRatio != null ? sr.sharpeRatio.toFixed(2) : "—"}</td>
                           <td className="py-2 px-2 text-right font-mono text-xs text-white/40">{sr.totalTrades}</td>
-                          {onRefine && <td></td>}
+                          {onRefine && (
+                            <td className="py-2 px-2 text-center">
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleRefine(sr.ticker, sr.timeframe, sr.params as Record<string, any>); }}
+                                disabled={refiningCombo === `${sr.ticker}|${sr.timeframe}`}
+                                className="text-sky-400/70 hover:text-sky-300 transition-colors p-0.5 rounded hover:bg-sky-500/10 disabled:opacity-50"
+                                title="Refine: coordinate-tune around this exact configuration"
+                                data-testid={`button-refine-sub-${sr.id}`}
+                              >
+                                {refiningCombo === `${sr.ticker}|${sr.timeframe}` ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+                              </button>
+                            </td>
+                          )}
                           {strategy?.pineScript && (
                             <td className="py-2 px-2 text-center">
                               <button
@@ -3261,7 +3295,11 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                   </ResponsiveContainer>
                 </div>
               ) : (
-                <p className="text-sm text-white/40 text-center py-8">No equity curve data saved</p>
+                <p className="text-sm text-white/40 text-center py-8">
+                  No equity curve was saved for this result. This usually means the run
+                  was produced before per-result equity persistence was added — re-run a
+                  Refine on this combo to regenerate the curve.
+                </p>
               )}
             </Card>
           </TabsContent>
@@ -3595,7 +3633,9 @@ function EquityCurvePopup({ resultId, ticker, timeframe }: { resultId: number; t
             </ResponsiveContainer>
           </div>
         ) : (
-          <p className="text-xs text-white/40 text-center py-6">No equity curve data</p>
+          <p className="text-xs text-white/40 text-center py-6">
+            No equity curve saved (legacy run — re-run Refine to regenerate).
+          </p>
         )}
       </PopoverContent>
     </Popover>
