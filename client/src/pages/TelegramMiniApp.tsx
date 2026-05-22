@@ -503,8 +503,13 @@ export default function TelegramMiniApp() {
         }
       `}</style>
       <header className="sticky top-0 z-10 border-b border-white/10 bg-[color:var(--tg-bg)]/95 px-4 py-3 backdrop-blur">
-        <div className="text-base font-semibold">QuantumVault</div>
-        <div className="text-xs text-[color:var(--tg-hint)]">Read-only dashboard</div>
+        <div className="flex items-center gap-3">
+          <img src="/images/qv_mark_transparent.png" alt="QuantumVault" className="h-10 w-10 flex-shrink-0" />
+          <div>
+            <div className="text-base font-semibold leading-tight">QuantumVault</div>
+            <div className="text-xs text-[color:var(--tg-hint)]">Read-only dashboard</div>
+          </div>
+        </div>
         <nav className="mt-3 flex gap-1" role="tablist">
           {TABS.map(t => (
             <button
