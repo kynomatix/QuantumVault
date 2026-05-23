@@ -6611,13 +6611,16 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (wallet.agentPublicKey && wallet.agentPrivateKeyEncryptedV3) {
         const { Keypair } = await import('@solana/web3.js');
 
+        console.log(`[BotCreate][RekeyGuard] wallet=${req.walletAddress!.slice(0,8)}... agentPub=${wallet.agentPublicKey.slice(0,8)}... umkVersion=${(wallet as any).umkVersion} executionEnabled=${(wallet as any).executionEnabled} hasUmkExec=${!!(wallet as any).umkEncryptedForExecution} hasAgentV3=${!!wallet.agentPrivateKeyEncryptedV3} emergencyStop=${(wallet as any).emergencyStopTriggered}`);
         const _botCreateUmk = await getUmkForWebhook(req.walletAddress!);
         if (!_botCreateUmk) {
+          console.error(`[BotCreate][RekeyGuard] FAIL_AT=getUmkForWebhook wallet=${req.walletAddress!.slice(0,8)}...`);
           return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
         }
         const _botCreateAgentKey = await decryptAgentKeyStrict(req.walletAddress!, _botCreateUmk.umk, wallet, wallet.agentPublicKey);
         if (!_botCreateAgentKey) {
           _botCreateUmk.cleanup();
+          console.error(`[BotCreate][RekeyGuard] FAIL_AT=decryptAgentKeyStrict wallet=${req.walletAddress!.slice(0,8)}... expectedAgentPub=${wallet.agentPublicKey.slice(0,8)}...`);
           return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
         }
         const agentKeypair = resolveAgentKeypair(_botCreateAgentKey.secretKey);
