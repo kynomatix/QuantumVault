@@ -6840,15 +6840,27 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       await storage.updateTradingBot(bot.id, { webhookUrl } as any);
 
       // Phase 4b: write V3 ciphertext for the bot-subaccount key now that we have bot.id.
-      // We require the UMK from the active session — without it we cannot encrypt V3.
+      // We require the UMK to encrypt V3. Prefer the execution-UMK envelope
+      // (same source the rekey guard at line ~6615 uses) and fall back to the
+      // in-memory session UMK only if execution isn't enabled. Without this
+      // fallback any bot creation where the browser session doesn't carry a
+      // materialised UMK fails AFTER the Pacifica deposit+transfer has already
+      // landed funds in the new subaccount — orphaning the deposit.
+      // try/finally zeroizes both the temp UMK and the pending bot secret.
       if (pendingBotSecretKeyForV3) {
+        let _botSubUmk: { umk: Buffer; cleanup: () => void } | null = null;
         try {
-          const sessionRes = getSessionByWalletAddress(req.walletAddress!);
-          if (!sessionRes) {
-            throw new Error('No active session available to derive bot-subaccount subkey');
+          _botSubUmk = await getUmkForWebhook(req.walletAddress!);
+          let umkBuf: Buffer | null = _botSubUmk ? _botSubUmk.umk : null;
+          if (!umkBuf) {
+            const sessionRes = getSessionByWalletAddress(req.walletAddress!);
+            if (!sessionRes) {
+              throw new Error('No active session available to derive bot-subaccount subkey');
+            }
+            umkBuf = sessionRes.session.umk;
           }
           const v3Ciphertext = encryptBotSubaccountKeyV3(
-            sessionRes.session.umk,
+            umkBuf,
             Buffer.from(pendingBotSecretKeyForV3),
             req.walletAddress!,
             bot.id,
@@ -6861,6 +6873,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           try { await storage.deleteTradingBot(bot.id); } catch {}
           return res.status(500).json({ error: `Failed to secure bot subaccount key: ${v3Err.message}` });
         } finally {
+          try { _botSubUmk?.cleanup(); } catch {}
           // Zeroize the secret key buffer we held in memory.
           try { pendingBotSecretKeyForV3.fill(0); } catch {}
         }
