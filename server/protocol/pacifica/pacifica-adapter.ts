@@ -1225,16 +1225,44 @@ export class PacificaAdapter implements ProtocolAdapter {
       const amountLamports = usdcToLamports(params.amount);
       const depositIx = buildDepositInstruction(agentPubkey, agentUsdcAta, amountLamports);
 
-      const { blockhash } = await connection.getLatestBlockhash('confirmed');
-      const tx = new Transaction();
-      tx.recentBlockhash = blockhash;
-      tx.feePayer = agentPubkey;
-      tx.add(depositIx);
+      // Retry loop with fresh blockhash on expiry. Solana blockhashes are valid
+      // for ~150 slots (~60s); under RPC congestion the tx can age out before
+      // it lands and fail with "block height exceeded". Each attempt fetches a
+      // fresh blockhash and re-signs so we don't retry an already-expired tx.
+      const MAX_DEPOSIT_ATTEMPTS = 3;
+      let lastDepositErr: unknown = null;
+      let txSignature: string | null = null;
+      for (let attempt = 1; attempt <= MAX_DEPOSIT_ATTEMPTS; attempt++) {
+        try {
+          const { blockhash } = await connection.getLatestBlockhash('confirmed');
+          const tx = new Transaction();
+          tx.recentBlockhash = blockhash;
+          tx.feePayer = agentPubkey;
+          tx.add(depositIx);
 
-      const txSignature = await sendAndConfirmTransaction(connection, tx, [agentKeypair], {
-        commitment: 'confirmed',
-        maxRetries: 3,
-      });
+          txSignature = await sendAndConfirmTransaction(connection, tx, [agentKeypair], {
+            commitment: 'confirmed',
+            maxRetries: 3,
+          });
+          break;
+        } catch (sendErr: unknown) {
+          lastDepositErr = sendErr;
+          const msg = sendErr instanceof Error ? sendErr.message : String(sendErr);
+          const isExpired =
+            msg.includes('block height exceeded') ||
+            msg.includes('TransactionExpiredBlockheightExceededError') ||
+            msg.includes('Blockhash not found');
+          if (!isExpired || attempt === MAX_DEPOSIT_ATTEMPTS) {
+            throw sendErr;
+          }
+          console.warn(`[PacificaAdapter] deposit attempt ${attempt}/${MAX_DEPOSIT_ATTEMPTS} expired before landing — retrying with fresh blockhash: ${msg}`);
+        }
+      }
+
+      if (!txSignature) {
+        const msg = lastDepositErr instanceof Error ? lastDepositErr.message : String(lastDepositErr);
+        throw new Error(msg || 'deposit failed without a signature');
+      }
 
       return {
         success: true,
