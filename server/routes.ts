@@ -6611,16 +6611,36 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       if (wallet.agentPublicKey && wallet.agentPrivateKeyEncryptedV3) {
         const { Keypair } = await import('@solana/web3.js');
 
-        console.log(`[BotCreate][RekeyGuard] wallet=${req.walletAddress!.slice(0,8)}... agentPub=${wallet.agentPublicKey.slice(0,8)}... umkVersion=${(wallet as any).umkVersion} executionEnabled=${(wallet as any).executionEnabled} hasUmkExec=${!!(wallet as any).umkEncryptedForExecution} hasAgentV3=${!!wallet.agentPrivateKeyEncryptedV3} emergencyStop=${(wallet as any).emergencyStopTriggered}`);
+        console.log(`[BotCreate][RekeyGuard] wallet=${req.walletAddress!.slice(0,8)}... agentPub=${wallet.agentPublicKey.slice(0,8)}... umkVersion=${(wallet as any).umkVersion} executionEnabled=${(wallet as any).executionEnabled} hasUmkExec=${!!(wallet as any).umkEncryptedForExecution} hasAgentV3=${!!wallet.agentPrivateKeyEncryptedV3} hasLegacy=${!!(wallet as any).agentPrivateKeyEncrypted} emergencyStop=${(wallet as any).emergencyStopTriggered}`);
         const _botCreateUmk = await getUmkForWebhook(req.walletAddress!);
         if (!_botCreateUmk) {
           console.error(`[BotCreate][RekeyGuard] FAIL_AT=getUmkForWebhook wallet=${req.walletAddress!.slice(0,8)}...`);
           return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
         }
-        const _botCreateAgentKey = await decryptAgentKeyStrict(req.walletAddress!, _botCreateUmk.umk, wallet, wallet.agentPublicKey);
-        if (!_botCreateAgentKey) {
+
+        // Self-heal step (mirrors /api/exchange/deposit): probe the stored V3
+        // ciphertext; if it was encrypted under a different UMK (UMK-init race
+        // damage mode), re-migrate from legacy using the current UMK before
+        // the strict decrypt below. Without this, users hit by the race see
+        // a hard "needs to be re-keyed" wall when deploying a bot.
+        // try/finally guarantees the UMK buffer is zeroized even if repair,
+        // wallet refresh, or strict-decrypt throws — secrets must not outlive
+        // the synchronous decrypt window.
+        let _botCreateAgentKey: { secretKey: Uint8Array; cleanup: () => void } | null;
+        let _botCreateRepair: 'ok' | 'repaired' | 'unrepairable' = 'ok';
+        let _botCreateWallet = wallet;
+        try {
+          _botCreateRepair = await repairStaleV3AgentKeyFromLegacy(req.walletAddress!, _botCreateUmk.umk);
+          if (_botCreateRepair === 'repaired') {
+            const refreshed = await storage.getWallet(req.walletAddress!);
+            if (refreshed) _botCreateWallet = refreshed;
+          }
+          _botCreateAgentKey = await decryptAgentKeyStrict(req.walletAddress!, _botCreateUmk.umk, _botCreateWallet, _botCreateWallet.agentPublicKey);
+        } finally {
           _botCreateUmk.cleanup();
-          console.error(`[BotCreate][RekeyGuard] FAIL_AT=decryptAgentKeyStrict wallet=${req.walletAddress!.slice(0,8)}... expectedAgentPub=${wallet.agentPublicKey.slice(0,8)}...`);
+        }
+        if (!_botCreateAgentKey) {
+          console.error(`[BotCreate][RekeyGuard] FAIL_AT=decryptAgentKeyStrict wallet=${req.walletAddress!.slice(0,8)}... expectedAgentPub=${_botCreateWallet.agentPublicKey?.slice(0,8) ?? 'null'}... repair=${_botCreateRepair}`);
           return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
         }
         const agentKeypair = resolveAgentKeypair(_botCreateAgentKey.secretKey);
