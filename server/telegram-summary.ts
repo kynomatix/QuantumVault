@@ -461,6 +461,59 @@ export async function buildBotsJsonForChat(walletAddresses: string[]): Promise<{
   return { bots: cards };
 }
 
+/**
+ * Mini App "Last 7 days" payload. Uses the same `getTradeAggregate` rollup
+ * over `bot_trades` as the daily /today text command, but with a rolling
+ * 7×24h window instead of the UTC-day-so-far. Kept separate from
+ * `buildTodayJsonForChat` so the existing /today bot text command and the
+ * daily push are unaffected.
+ */
+export async function buildLast7dJsonForChat(walletAddresses: string[]): Promise<{
+  wallets: Array<{
+    walletAddress: string;
+    walletShort: string;
+    trades: number;
+    realizedPnl: number;
+    winning: number;
+    losing: number;
+  }>;
+  totals: { trades: number; realizedPnl: number; winning: number; losing: number };
+}> {
+  const since = new Date(Date.now() - 7 * DAY_MS);
+  const wallets: Array<{
+    walletAddress: string;
+    walletShort: string;
+    trades: number;
+    realizedPnl: number;
+    winning: number;
+    losing: number;
+  }> = [];
+  let trades = 0;
+  let realizedPnl = 0;
+  let winning = 0;
+  let losing = 0;
+  for (const addr of walletAddresses) {
+    try {
+      const agg = await getTradeAggregate(addr, since);
+      wallets.push({
+        walletAddress: addr,
+        walletShort: truncate(addr),
+        trades: agg.count,
+        realizedPnl: agg.realizedPnl,
+        winning: agg.winning,
+        losing: agg.losing,
+      });
+      trades += agg.count;
+      realizedPnl += agg.realizedPnl;
+      winning += agg.winning;
+      losing += agg.losing;
+    } catch (err: any) {
+      console.error(`[TelegramSummary] last7d build failed for ${addr.slice(0, 8)}:`, err?.message || err);
+    }
+  }
+  return { wallets, totals: { trades, realizedPnl, winning, losing } };
+}
+
 export async function buildTodayJsonForChat(walletAddresses: string[]): Promise<{
   wallets: TodayJson[];
   totals: { tradesToday: number; realizedPnlToday: number; winning: number; losing: number };

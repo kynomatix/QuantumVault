@@ -92,13 +92,13 @@ function pnlClass(n: number): string {
   return "text-[color:var(--tg-hint)]";
 }
 
-type Tab = "overview" | "positions" | "bots" | "today";
+type Tab = "overview" | "positions" | "bots" | "last7d";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "positions", label: "Positions" },
   { id: "bots", label: "Bots" },
-  { id: "today", label: "Today" },
+  { id: "last7d", label: "Last 7d" },
 ];
 
 interface OverviewResponse {
@@ -155,16 +155,16 @@ interface BotsResponse {
   }>;
 }
 
-interface TodayResponse {
+interface Last7dResponse {
   wallets: Array<{
     walletAddress: string;
     walletShort: string;
-    tradesToday: number;
-    realizedPnlToday: number;
+    trades: number;
+    realizedPnl: number;
     winning: number;
     losing: number;
   }>;
-  totals: { tradesToday: number; realizedPnlToday: number; winning: number; losing: number };
+  totals: { trades: number; realizedPnl: number; winning: number; losing: number };
 }
 
 function useTgFetch<T>(path: string, initData: string | null, enabled: boolean) {
@@ -396,25 +396,25 @@ function BotsTab({ initData }: { initData: string }) {
   );
 }
 
-function TodayTab({ initData }: { initData: string }) {
-  const q = useTgFetch<TodayResponse>("/api/tg/today", initData, true);
+function Last7dTab({ initData }: { initData: string }) {
+  const q = useTgFetch<Last7dResponse>("/api/tg/last7d", initData, true);
   if (q.isLoading) return <Skeleton className="h-40" />;
   if (q.error) return <ErrorBanner message={(q.error as Error).message} onRetry={() => q.refetch()} />;
   const data = q.data!;
   return (
     <div className="space-y-3">
-      <Card testid="card-today-totals">
-        <div className="text-xs uppercase tracking-wide text-[color:var(--tg-hint)]">Today</div>
+      <Card testid="card-last7d-totals">
+        <div className="text-xs uppercase tracking-wide text-[color:var(--tg-hint)]">Last 7 days</div>
         <div className="mt-1 flex items-baseline gap-3">
-          <div className={`text-3xl font-semibold ${pnlClass(data.totals.realizedPnlToday)}`} data-testid="text-today-pnl">
-            {fmtUsd(data.totals.realizedPnlToday, { sign: true })}
+          <div className={`text-3xl font-semibold ${pnlClass(data.totals.realizedPnl)}`} data-testid="text-last7d-pnl">
+            {fmtUsd(data.totals.realizedPnl, { sign: true })}
           </div>
           <div className="text-xs text-[color:var(--tg-hint)]">realized</div>
         </div>
         <div className="mt-3 flex gap-4 text-sm">
           <div>
             <div className="text-[color:var(--tg-hint)]">Trades</div>
-            <div className="font-medium" data-testid="text-today-trades">{data.totals.tradesToday}</div>
+            <div className="font-medium" data-testid="text-last7d-trades">{data.totals.trades}</div>
           </div>
           <div>
             <div className="text-[color:var(--tg-hint)]">Win / Loss</div>
@@ -426,18 +426,21 @@ function TodayTab({ initData }: { initData: string }) {
           </div>
         </div>
       </Card>
-      {data.wallets.length > 1 && (
+      {data.totals.trades === 0 && (
+        <Card><div className="text-sm text-[color:var(--tg-hint)]" data-testid="text-no-last7d">No trades in the last 7 days.</div></Card>
+      )}
+      {data.totals.trades > 0 && data.wallets.filter(w => w.trades > 0).length > 1 && (
         <div className="space-y-2">
-          {data.wallets.map(w => (
-            <Card key={w.walletAddress} testid={`card-today-wallet-${w.walletAddress}`}>
+          {data.wallets.filter(w => w.trades > 0).map(w => (
+            <Card key={w.walletAddress} testid={`card-last7d-wallet-${w.walletAddress}`}>
               <div className="flex items-center justify-between">
                 <div className="font-mono text-sm">{w.walletShort}</div>
-                <div className={`text-sm font-medium ${pnlClass(w.realizedPnlToday)}`}>
-                  {fmtUsd(w.realizedPnlToday, { sign: true })}
+                <div className={`text-sm font-medium ${pnlClass(w.realizedPnl)}`}>
+                  {fmtUsd(w.realizedPnl, { sign: true })}
                 </div>
               </div>
               <div className="mt-1 text-xs text-[color:var(--tg-hint)]">
-                {w.tradesToday} trades · {w.winning}W / {w.losing}L
+                {w.trades} trades · {w.winning}W / {w.losing}L
               </div>
             </Card>
           ))}
@@ -537,7 +540,7 @@ export default function TelegramMiniApp() {
             {tab === "overview" && <OverviewTab initData={initData} />}
             {tab === "positions" && <PositionsTab initData={initData} />}
             {tab === "bots" && <BotsTab initData={initData} />}
-            {tab === "today" && <TodayTab initData={initData} />}
+            {tab === "last7d" && <Last7dTab initData={initData} />}
           </>
         ) : null}
       </main>

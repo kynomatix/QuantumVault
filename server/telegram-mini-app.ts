@@ -6,6 +6,7 @@ import {
   buildPositionsJsonForChat,
   buildBotsJsonForChat,
   buildTodayJsonForChat,
+  buildLast7dJsonForChat,
 } from "./telegram-summary";
 
 // ---------------------------------------------------------------------------
@@ -178,6 +179,16 @@ export function registerTelegramMiniAppRoutes(app: Express): void {
     } catch (err: any) {
       console.error("[TgMiniApp] /today failed:", err?.message || err);
       res.status(500).json({ error: "Failed to load today stats" });
+    }
+  });
+
+  app.get("/api/tg/last7d", requireTelegramAuth, async (req, res) => {
+    try {
+      const data = await buildLast7dJsonForChat(req.tgWalletAddresses!);
+      res.json(data);
+    } catch (err: any) {
+      console.error("[TgMiniApp] /last7d failed:", err?.message || err);
+      res.status(500).json({ error: "Failed to load last-7-day stats" });
     }
   });
 
