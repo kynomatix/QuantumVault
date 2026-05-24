@@ -612,7 +612,7 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
   const { data: listingsData, isLoading: listingsLoading, refetch: refetchListings } = useQuery({
     queryKey: ['superteam-listings'],
     queryFn: async () => {
-      const res = await fetch('/api/admin/superteam/listings?take=20', { headers: authHeaders });
+      const res = await fetch('/api/admin/superteam/listings?take=100', { headers: authHeaders });
       if (!res.ok) throw new Error('Failed to fetch');
       return safeResponseJson(res);
     },
@@ -703,6 +703,29 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
   const listings = listingsData?.listings || [];
   const submissions = submissionsData?.submissions || [];
 
+  const { activeListings, expiredListings } = (() => {
+    const now = Date.now();
+    const active: any[] = [];
+    const expired: any[] = [];
+    for (const listing of listings) {
+      const deadlineMs = listing.deadline ? new Date(listing.deadline).getTime() : NaN;
+      if (Number.isFinite(deadlineMs) && deadlineMs < now) {
+        expired.push(listing);
+      } else {
+        active.push(listing);
+      }
+    }
+    const byDeadlineDesc = (a: any, b: any) => {
+      const aMs = a.deadline ? new Date(a.deadline).getTime() : 0;
+      const bMs = b.deadline ? new Date(b.deadline).getTime() : 0;
+      return bMs - aMs;
+    };
+    active.sort(byDeadlineDesc);
+    expired.sort(byDeadlineDesc);
+    return { activeListings: active, expiredListings: expired };
+  })();
+  const sortedListings = [...activeListings, ...expiredListings];
+
   return (
     <div className="space-y-6">
       <Card className="bg-zinc-900/80 border-zinc-800">
@@ -788,7 +811,7 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle className="text-white flex items-center gap-2">
                 <Eye className="w-5 h-5 text-blue-400" />
-                Agent-Eligible Listings ({listings.length})
+                Agent-Eligible Listings ({activeListings.length} active{expiredListings.length > 0 ? ` · ${expiredListings.length} expired` : ''})
               </CardTitle>
               <Button variant="outline" size="sm" onClick={() => refetchListings()} className="border-zinc-700 text-zinc-300">
                 <RefreshCw className="w-4 h-4" />
@@ -799,14 +822,27 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
                 <div className="text-center py-8 text-zinc-400">Loading listings...</div>
               ) : listings.length > 0 ? (
                 <div className="space-y-3">
-                  {listings.map((listing: any) => (
-                    <div key={listing.id || listing.slug} className="p-4 bg-zinc-800/50 rounded-lg border border-zinc-700/50 hover:border-zinc-600 transition-colors">
+                  {sortedListings.map((listing: any) => {
+                    const isExpired = expiredListings.includes(listing);
+                    return (
+                    <div
+                      key={listing.id || listing.slug}
+                      className={`p-4 bg-zinc-800/50 rounded-lg border border-zinc-700/50 hover:border-zinc-600 transition-colors ${isExpired ? 'opacity-50' : ''}`}
+                      data-testid={`row-listing-${listing.slug}`}
+                    >
                       <div className="flex items-start justify-between gap-4">
                         <div className="flex-1 min-w-0">
-                          <h4 className="text-white font-medium text-sm truncate">{listing.title}</h4>
+                          <div className="flex items-center gap-2">
+                            <h4 className={`font-medium text-sm truncate ${isExpired ? 'text-zinc-400' : 'text-white'}`}>{listing.title}</h4>
+                            {isExpired && (
+                              <Badge className="bg-zinc-700/60 text-zinc-300 border-zinc-600/50 text-[10px] px-1.5 py-0" data-testid={`badge-expired-${listing.slug}`}>
+                                Expired
+                              </Badge>
+                            )}
+                          </div>
                           <div className="flex items-center gap-3 mt-1">
                             <span className="text-zinc-400 text-xs">{listing.type || 'Bounty'}</span>
-                            {listing.rewardAmount && <span className="text-emerald-400 text-xs font-medium">{listing.rewardAmount} {listing.token || 'USDC'}</span>}
+                            {listing.rewardAmount && <span className={`text-xs font-medium ${isExpired ? 'text-zinc-400' : 'text-emerald-400'}`}>{listing.rewardAmount} {listing.token || 'USDC'}</span>}
                             {listing.deadline && <span className="text-zinc-500 text-xs">Due: {formatDate(listing.deadline)}</span>}
                           </div>
                         </div>
@@ -819,7 +855,7 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
                               setViewingDetails(listing.slug);
                               fetchDetailsMutation.mutate(listing.slug);
                             }}
-                            disabled={fetchDetailsMutation.isPending && viewingDetails === listing.slug}
+                            disabled={isExpired || (fetchDetailsMutation.isPending && viewingDetails === listing.slug)}
                             data-testid={`button-view-listing-${listing.slug}`}
                           >
                             <Eye className="w-3 h-3 mr-1" />
@@ -835,7 +871,8 @@ function SuperteamPanel({ authHeaders }: { authHeaders: Record<string, string> }
                         </div>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="text-center py-8 text-zinc-500">No agent-eligible listings found</div>
