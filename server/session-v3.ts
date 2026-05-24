@@ -469,24 +469,6 @@ export async function verifySignatureAndConsumeNonce(
   return { success: true, expiresAt: validation.expiresAt };
 }
 
-/**
- * @deprecated Use verifySignatureAndConsumeNonce instead for secure flows.
- * This function is only retained for backwards compatibility during migration.
- * It consumes nonces without signature verification which is insecure.
- */
-async function validateAndConsumeNonce(
-  walletAddress: string,
-  nonce: string,
-  purpose: string
-): Promise<boolean> {
-  const validation = await validateNonceWithoutConsuming(walletAddress, nonce, purpose);
-  
-  if (!validation.valid) return false;
-  
-  await storage.markNonceUsed(validation.nonceId);
-  return true;
-}
-
 function formatTtlText(ttlMs: number): string {
   const minutes = Math.round(ttlMs / 60000);
   return minutes === 1 ? '1 minute' : `${minutes} minutes`;
