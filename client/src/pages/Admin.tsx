@@ -2,7 +2,18 @@ import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { Lock, Activity, Bot, Users, Webhook, TrendingUp, ArrowLeft, RefreshCw, Clock, CheckCircle, XCircle, AlertTriangle, Rocket, ExternalLink, Send, Eye, Copy } from 'lucide-react';
+import { Lock, Activity, Bot, Users, Webhook, TrendingUp, ArrowLeft, RefreshCw, Clock, CheckCircle, XCircle, AlertTriangle, Rocket, ExternalLink, Send, Eye, Copy, FlaskConical, Power } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { useToast } from '@/hooks/use-toast';
 import { Link } from 'wouter';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -44,6 +55,8 @@ function AdminPage() {
   });
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState('stats');
+  const [showRestartDialog, setShowRestartDialog] = useState(false);
+  const { toast } = useToast();
 
   const authHeaders = {
     'Authorization': `Bearer ${sessionStorage.getItem('admin_token') || password}`,
@@ -108,6 +121,45 @@ function AdminPage() {
       return safeResponseJson(res);
     },
     enabled: authenticated && activeTab === 'marketplace',
+  });
+
+  const { data: labStatus, refetch: refetchLabStatus } = useQuery({
+    queryKey: ['admin-lab-status'],
+    queryFn: async () => {
+      const res = await fetch('/api/admin/lab/status', { headers: authHeaders });
+      if (!res.ok) throw new Error('Failed to fetch lab status');
+      return safeResponseJson(res);
+    },
+    enabled: authenticated,
+    refetchInterval: 5000,
+  });
+
+  const restartLabMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/admin/lab/restart', {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) {
+        throw new Error(data?.error || 'Restart failed');
+      }
+      return data;
+    },
+    onSuccess: (data: any) => {
+      toast({
+        title: 'QuantumLab restarted',
+        description: `New PID: ${data?.newPid ?? 'unknown'}${typeof data?.pausedRuns === 'number' ? ` · Paused ${data.pausedRuns} run(s) for auto-resume` : ''}`,
+      });
+      refetchLabStatus();
+    },
+    onError: (err: any) => {
+      toast({
+        title: 'Restart failed',
+        description: err?.message || 'Unknown error',
+        variant: 'destructive' as any,
+      });
+    },
   });
 
   const { data: pendingShares, isLoading: sharesLoading, refetch: refetchShares } = useQuery({
@@ -225,6 +277,80 @@ function AdminPage() {
             </Button>
           </div>
         </div>
+
+        <Card className="bg-zinc-900/80 border-zinc-800 mb-6">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-white flex items-center gap-2">
+              <FlaskConical className="w-5 h-5 text-violet-400" />
+              QuantumLab
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div className="space-y-1 text-sm" data-testid="status-lab-supervisor">
+                <div className="flex items-center gap-2">
+                  <span className="text-zinc-400">Status:</span>
+                  {labStatus?.restartInFlight ? (
+                    <Badge className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30">
+                      <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> Restarting
+                    </Badge>
+                  ) : labStatus?.suspended ? (
+                    <Badge className="bg-red-500/20 text-red-400 border-red-500/30">
+                      <AlertTriangle className="w-3 h-3 mr-1" /> Suspended (cooldown)
+                    </Badge>
+                  ) : labStatus?.isReady ? (
+                    <Badge className="bg-green-500/20 text-green-400 border-green-500/30">
+                      <CheckCircle className="w-3 h-3 mr-1" /> Running
+                    </Badge>
+                  ) : (
+                    <Badge className="bg-red-500/20 text-red-400 border-red-500/30">
+                      <XCircle className="w-3 h-3 mr-1" /> Unhealthy
+                    </Badge>
+                  )}
+                </div>
+                <div className="text-zinc-500 text-xs font-mono">
+                  PID: {labStatus?.pid ?? '—'} · Port: {labStatus?.labPort ?? '—'} · Restarts: {labStatus?.restartCount ?? 0} · Failures: {labStatus?.consecutiveFailures ?? 0}
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                className="border-red-700 text-red-400 hover:bg-red-500/10"
+                onClick={() => setShowRestartDialog(true)}
+                disabled={restartLabMutation.isPending || labStatus?.restartInFlight}
+                data-testid="button-restart-lab"
+              >
+                <Power className="w-4 h-4 mr-2" />
+                {restartLabMutation.isPending || labStatus?.restartInFlight ? 'Restarting…' : 'Restart Lab'}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <AlertDialog open={showRestartDialog} onOpenChange={setShowRestartDialog}>
+          <AlertDialogContent className="bg-zinc-900 border-zinc-800" data-testid="dialog-restart-lab-confirm">
+            <AlertDialogHeader>
+              <AlertDialogTitle className="text-white">Restart QuantumLab?</AlertDialogTitle>
+              <AlertDialogDescription className="text-zinc-400">
+                This will restart the backtesting engine for ALL users. Any in-flight runs across the platform will be paused and resumed automatically from their last checkpoint. Trading, webhooks, and other services are not affected.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel className="bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700">
+                Cancel
+              </AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-red-600 hover:bg-red-500 text-white"
+                onClick={() => {
+                  setShowRestartDialog(false);
+                  restartLabMutation.mutate();
+                }}
+                data-testid="button-confirm-restart-lab"
+              >
+                Restart
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
           <TabsList className="bg-zinc-800/50 border border-zinc-700 p-1">

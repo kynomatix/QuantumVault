@@ -99,6 +99,10 @@ const app = express();
 const httpServer = createServer(app);
 const labSupervisor = createLabSupervisor();
 
+export function getLabSupervisor() {
+  return labSupervisor;
+}
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;

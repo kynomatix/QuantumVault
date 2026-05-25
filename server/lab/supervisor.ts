@@ -3,11 +3,22 @@ import { resolve, dirname } from "path";
 import { createHash } from "crypto";
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from "fs";
 
+export interface LabSupervisorStatus {
+  pid: number | null;
+  isReady: boolean;
+  restartCount: number;
+  consecutiveFailures: number;
+  suspended: boolean;
+  labPort: number;
+}
+
 export interface LabSupervisor {
   labPort: number;
   isReady: boolean;
   start(): Promise<void>;
   shutdown(): Promise<void>;
+  requestManualRestart(): Promise<{ newPid: number | null }>;
+  getStatus(): LabSupervisorStatus;
 }
 
 const LAB_PORT = 5050;
@@ -81,6 +92,7 @@ export function createLabSupervisor(): LabSupervisor {
   let firstFailureTime = 0;
   let backoffSuspended = false;
   let suspensionTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingAutoRestartTimer: ReturnType<typeof setTimeout> | null = null;
 
   function getRestartDelay(): number {
     const base = Math.min(MIN_RESTART_DELAY * Math.pow(2, restartCount), MAX_RESTART_DELAY);
@@ -279,12 +291,18 @@ export function createLabSupervisor(): LabSupervisor {
           const delay = getRestartDelay();
           restartCount++;
           console.log(`[LabSupervisor] Restarting in ${Math.round(delay)}ms (attempt ${restartCount}, failures: ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES})`);
-          setTimeout(() => {
-            if (!shuttingDown && !spawnInFlight && !backoffSuspended) {
-              spawnAndWaitForReady().catch((err) => {
-                console.error(`[LabSupervisor] Failed to restart lab: ${err.message}`);
-              });
+          if (pendingAutoRestartTimer) clearTimeout(pendingAutoRestartTimer);
+          pendingAutoRestartTimer = setTimeout(() => {
+            pendingAutoRestartTimer = null;
+            // Skip if a healthy child already exists (e.g. manual restart raced us)
+            if (shuttingDown || spawnInFlight || backoffSuspended) return;
+            if (child || isReady) {
+              console.log(`[LabSupervisor] Auto-restart skipped: child already healthy (manual restart likely raced)`);
+              return;
             }
+            spawnAndWaitForReady().catch((err) => {
+              console.error(`[LabSupervisor] Failed to restart lab: ${err.message}`);
+            });
           }, delay);
         }
       });
@@ -298,12 +316,103 @@ export function createLabSupervisor(): LabSupervisor {
     });
   }
 
+  async function killCurrentChild(graceMs = 5000): Promise<void> {
+    const target = child;
+    // Detach from module-level `child` so the existing "exit" handler's
+    // `isCurrentChild` check is false and it does NOT schedule an auto-restart
+    // that would race with our manual respawn.
+    child = null;
+    ownsChild = false;
+
+    if (!target) {
+      const stalePid = readPidFile();
+      if (stalePid) {
+        try { process.kill(stalePid, "SIGTERM"); } catch {}
+        await new Promise((r) => setTimeout(r, graceMs));
+        try { process.kill(stalePid, "SIGKILL"); } catch {}
+        removePidFile();
+      }
+      return;
+    }
+    await new Promise<void>((resolveKill) => {
+      let exited = false;
+      const onExit = () => {
+        exited = true;
+        resolveKill();
+      };
+      target.once("exit", onExit);
+      try { target.kill("SIGTERM"); } catch {}
+      setTimeout(() => {
+        if (!exited) {
+          try { target.kill("SIGKILL"); } catch {}
+          setTimeout(() => {
+            if (!exited) resolveKill();
+          }, 1000);
+        }
+      }, graceMs);
+    });
+  }
+
+  async function requestManualRestart(): Promise<{ newPid: number | null }> {
+    if (shuttingDown) {
+      throw new Error("Supervisor is shutting down");
+    }
+    console.log(`[LabSupervisor] Manual restart requested by admin`);
+
+    if (suspensionTimer) {
+      clearTimeout(suspensionTimer);
+      suspensionTimer = null;
+    }
+    if (pendingAutoRestartTimer) {
+      clearTimeout(pendingAutoRestartTimer);
+      pendingAutoRestartTimer = null;
+    }
+    backoffSuspended = false;
+    consecutiveFailures = 0;
+    firstFailureTime = 0;
+    restartCount = 0;
+    consecutiveHealthFailures = 0;
+
+    await killCurrentChild(5000);
+
+    // The child's "exit" handler may have scheduled an auto-restart between
+    // our kill signal and now. Clear it again so it can't race our respawn.
+    if (pendingAutoRestartTimer) {
+      clearTimeout(pendingAutoRestartTimer);
+      pendingAutoRestartTimer = null;
+    }
+    consecutiveFailures = 0;
+    restartCount = 0;
+
+    isReady = false;
+    child = null;
+    ownsChild = false;
+    spawnInFlight = false;
+    removePidFile();
+
+    await spawnAndWaitForReady();
+    if (!healthTimer) startHealthCheck();
+    const newChild = child as ChildProcess | null;
+    return { newPid: newChild?.pid ?? null };
+  }
+
   const supervisor: LabSupervisor = {
     get labPort() {
       return labPort;
     },
     get isReady() {
       return isReady;
+    },
+    requestManualRestart,
+    getStatus(): LabSupervisorStatus {
+      return {
+        pid: child?.pid ?? readPidFile() ?? null,
+        isReady,
+        restartCount,
+        consecutiveFailures,
+        suspended: backoffSuspended,
+        labPort,
+      };
     },
     async start() {
       shuttingDown = false;
@@ -334,6 +443,10 @@ export function createLabSupervisor(): LabSupervisor {
       if (suspensionTimer) {
         clearTimeout(suspensionTimer);
         suspensionTimer = null;
+      }
+      if (pendingAutoRestartTimer) {
+        clearTimeout(pendingAutoRestartTimer);
+        pendingAutoRestartTimer = null;
       }
       isReady = false;
       child = null;

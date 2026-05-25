@@ -9,7 +9,7 @@ import crypto from "crypto";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import { storage, DatabaseStorage } from "./storage";
-import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens } from "@shared/schema";
+import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
 import { db } from "./db";
 import { desc, eq, sql, asc, and } from "drizzle-orm";
@@ -13378,6 +13378,87 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     next();
   };
   
+  let lastLabRestartAt = 0;
+  let labRestartInFlight = false;
+  const LAB_RESTART_MIN_INTERVAL_MS = 30_000;
+
+  app.get("/api/admin/lab/status", requireAdminAuth, async (_req, res) => {
+    try {
+      const { getLabSupervisor } = await import("./index");
+      const status = getLabSupervisor().getStatus();
+      res.json({
+        ...status,
+        restartInFlight: labRestartInFlight,
+        cooldownRemainingMs: Math.max(0, LAB_RESTART_MIN_INTERVAL_MS - (Date.now() - lastLabRestartAt)),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to read lab status" });
+    }
+  });
+
+  app.post("/api/admin/lab/restart", requireAdminAuth, async (_req, res) => {
+    if (labRestartInFlight) {
+      return res.status(409).json({ error: "A lab restart is already in progress" });
+    }
+    const sinceLast = Date.now() - lastLabRestartAt;
+    if (sinceLast < LAB_RESTART_MIN_INTERVAL_MS) {
+      return res.status(429).json({
+        error: "Too soon since last restart",
+        retryAfterMs: LAB_RESTART_MIN_INTERVAL_MS - sinceLast,
+      });
+    }
+    labRestartInFlight = true;
+    lastLabRestartAt = Date.now();
+    console.log(`[LabSupervisor] Manual restart requested by admin`);
+    try {
+      let pausedRuns = 0;
+      try {
+        const runningRuns = await db
+          .select()
+          .from(labOptimizationRuns)
+          .where(eq(labOptimizationRuns.status, "running"));
+        for (const run of runningRuns) {
+          const cp = run.checkpoint && typeof run.checkpoint === "object"
+            ? { ...(run.checkpoint as any) }
+            : null;
+          if (cp) {
+            cp.autoResumeAttempts = 0;
+            delete cp.userCancelled;
+            delete cp.resourceError;
+          }
+          await db
+            .update(labOptimizationRuns)
+            .set({
+              status: "paused",
+              ...(cp ? { checkpoint: cp } : {}),
+            })
+            .where(eq(labOptimizationRuns.id, run.id));
+          pausedRuns++;
+        }
+        if (pausedRuns > 0) {
+          console.log(`[LabSupervisor] Manual restart: paused ${pausedRuns} in-flight run(s) for auto-resume`);
+        }
+      } catch (pauseErr: any) {
+        // Abort the restart so the auto-resume guarantee holds. The lab child
+        // is still alive; the admin can retry once the DB issue clears.
+        console.log(`[LabSupervisor] Manual restart aborted: pause step failed: ${pauseErr.message}`);
+        return res.status(500).json({
+          ok: false,
+          error: `Pause/checkpoint step failed — restart aborted to preserve in-flight runs: ${pauseErr.message}`,
+        });
+      }
+
+      const { getLabSupervisor } = await import("./index");
+      const { newPid } = await getLabSupervisor().requestManualRestart();
+      res.json({ ok: true, newPid, pausedRuns });
+    } catch (err: any) {
+      console.log(`[LabSupervisor] Manual restart failed: ${err?.message}`);
+      res.status(500).json({ ok: false, error: err?.message || "Restart failed" });
+    } finally {
+      labRestartInFlight = false;
+    }
+  });
+
   app.post("/api/admin/rescue-transfer", requireAdminAuth, async (req, res) => {
     try {
       const { botId, amount } = req.body;
