@@ -4514,7 +4514,18 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
               </div>
             )}
             <div className={cn("p-3 rounded", createError ? "bg-yellow-500/10 border border-yellow-500/20" : "bg-sky-500/10 border border-sky-500/20")}>
-              <p className={cn("text-[10px] font-medium", createError ? "text-yellow-300" : "text-sky-300")}>{createdBot.name}</p>
+              <div className="flex items-center gap-2">
+                <p className={cn("text-[10px] font-medium", createError ? "text-yellow-300" : "text-sky-300")}>{createdBot.name}</p>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(createdBot.name, 'Bot Name')}
+                  className="p-0.5 rounded hover:bg-white/10 text-white/60 hover:text-white/90 transition-colors"
+                  data-testid={`copy-bot-name-${leverage}x`}
+                  aria-label="Copy bot name"
+                >
+                  {copiedField === 'Bot Name' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                </button>
+              </div>
               <p className="text-[9px] text-white/40 mt-1">ID: {createdBot.id}</p>
             </div>
 
@@ -4524,15 +4535,26 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                   <FileCode className="w-3.5 h-3.5 text-violet-400" />
                   <p className="text-[10px] font-semibold text-white uppercase tracking-wider">Step 1 (if not done yet) — Export Pine Script</p>
                 </div>
-                <Button
-                  size="sm"
-                  className="w-full h-7 text-[10px] bg-white/10 hover:bg-white/20 text-white/80"
-                  onClick={() => exportPineWithParams(pineScript, params, ticker || "SYMBOL", timeframe || "1h", strategyName)}
-                  data-testid={`export-pine-post-${leverage}x`}
-                >
-                  <Download className="w-3 h-3 mr-1" />
-                  Export .pine
-                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    className="flex-1 h-7 text-[10px] bg-white/10 hover:bg-white/20 text-white/80"
+                    onClick={() => copyToClipboard(injectParamsIntoPineScript(pineScript, params), 'Pine Script Post')}
+                    data-testid={`copy-pine-post-${leverage}x`}
+                  >
+                    {copiedField === 'Pine Script Post' ? <Check className="w-3 h-3 mr-1" /> : <Copy className="w-3 h-3 mr-1" />}
+                    {copiedField === 'Pine Script Post' ? 'Copied!' : 'Copy'}
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="flex-1 h-7 text-[10px] bg-white/10 hover:bg-white/20 text-white/80"
+                    onClick={() => exportPineWithParams(pineScript, params, ticker || "SYMBOL", timeframe || "1h", strategyName)}
+                    data-testid={`export-pine-post-${leverage}x`}
+                  >
+                    <Download className="w-3 h-3 mr-1" />
+                    Export
+                  </Button>
+                </div>
               </div>
             )}
 
@@ -4580,15 +4602,26 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                   <p className="text-[10px] font-semibold text-white uppercase tracking-wider">Step 1 — Export Pine Script</p>
                 </div>
                 <p className="text-[9px] text-white/40 leading-relaxed">Load this strategy into TradingView before setting up the alert.</p>
-                <Button
-                  size="sm"
-                  className="w-full h-7 text-[10px] bg-white/10 hover:bg-white/20 text-white/80"
-                  onClick={() => exportPineWithParams(pineScript, params, ticker || "SYMBOL", timeframe || "1h", strategyName)}
-                  data-testid={`export-pine-${leverage}x`}
-                >
-                  <Download className="w-3 h-3 mr-1" />
-                  Export .pine
-                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    className="flex-1 h-7 text-[10px] bg-white/10 hover:bg-white/20 text-white/80"
+                    onClick={() => copyToClipboard(injectParamsIntoPineScript(pineScript, params), 'Pine Script')}
+                    data-testid={`copy-pine-${leverage}x`}
+                  >
+                    {copiedField === 'Pine Script' ? <Check className="w-3 h-3 mr-1" /> : <Copy className="w-3 h-3 mr-1" />}
+                    {copiedField === 'Pine Script' ? 'Copied!' : 'Copy'}
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="flex-1 h-7 text-[10px] bg-white/10 hover:bg-white/20 text-white/80"
+                    onClick={() => exportPineWithParams(pineScript, params, ticker || "SYMBOL", timeframe || "1h", strategyName)}
+                    data-testid={`export-pine-${leverage}x`}
+                  >
+                    <Download className="w-3 h-3 mr-1" />
+                    Export
+                  </Button>
+                </div>
               </div>
             )}
             <div className="p-4 border-b border-white/10">
