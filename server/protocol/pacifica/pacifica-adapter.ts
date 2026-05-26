@@ -114,11 +114,20 @@ export interface PacificaAdapterConfig {
   baseUrl: string;
   wsUrl: string;
   builderCode?: string;
+  // Task 143: referral identifier (Pacifica wallet address) used by
+  // claim_referral_code. Independent of builder code — referral claim is
+  // best-effort and never gates order flow.
+  referralAddress?: string;
+  // Task 143: ceiling the user signs at builder-code approval time. Locked
+  // at 2x Pacifica's actual fee_rate (0.001) so we can raise our take to
+  // 0.002 in future without re-signing every existing user.
+  builderMaxFeeRate?: string;
 }
 
 const DEFAULT_CONFIG: PacificaAdapterConfig = {
   baseUrl: 'https://api.pacifica.fi/api/v1',
   wsUrl: 'wss://ws.pacifica.fi/ws',
+  builderMaxFeeRate: '0.002',
 };
 
 export class PacificaAdapter implements ProtocolAdapter {
@@ -135,6 +144,11 @@ export class PacificaAdapter implements ProtocolAdapter {
   private marketDetailsMap: Map<string, ProtocolMarket> = new Map();
   private initialized = false;
   private telemetryInterval: NodeJS.Timeout | null = null;
+  // Task 143: per-wallet async mutex for enrollment. Concurrent first-trades
+  // from the same user await a single in-flight approval+claim rather than
+  // each firing their own (which would yield duplicate POSTs and racy flag
+  // writes). Keyed on agent public key (the user's Pacifica main wallet).
+  private enrollmentInFlight: Map<string, Promise<{ builderApproved: boolean; referralClaimed: boolean }>> = new Map();
 
   constructor(config?: Partial<PacificaAdapterConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -584,6 +598,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async placeMarketOrder(params: MarketOrderParams): Promise<OrderResult> {
+    const enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey);
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
@@ -620,8 +635,14 @@ export class PacificaAdapter implements ProtocolAdapter {
       operationData.client_order_id = params.clientOrderId;
     }
 
-    if (params.builderCode || this.config.builderCode) {
-      operationData.builder_code = params.builderCode || this.config.builderCode;
+    // Task 143: fail-CLOSED on builder approval. Only inject our config'd
+    // builder_code if the user is confirmed-approved; otherwise the order
+    // would 403. Caller-supplied params.builderCode is passed through
+    // verbatim (caller is responsible for its own approval).
+    if (params.builderCode) {
+      operationData.builder_code = params.builderCode;
+    } else if (enrollment.builderApproved && this.config.builderCode) {
+      operationData.builder_code = this.config.builderCode;
     }
 
     const body = signer.buildRequestBody(
@@ -641,6 +662,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async placeLimitOrder(params: LimitOrderParams): Promise<OrderResult> {
+    const enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey);
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
     const isReduceOnly = params.reduceOnly ?? false;
@@ -665,8 +687,11 @@ export class PacificaAdapter implements ProtocolAdapter {
       operationData.client_order_id = params.clientOrderId;
     }
 
-    if (params.builderCode || this.config.builderCode) {
-      operationData.builder_code = params.builderCode || this.config.builderCode;
+    // Task 143: fail-CLOSED on builder approval (see placeMarketOrder).
+    if (params.builderCode) {
+      operationData.builder_code = params.builderCode;
+    } else if (enrollment.builderApproved && this.config.builderCode) {
+      operationData.builder_code = this.config.builderCode;
     }
 
     const body = signer.buildRequestBody(
@@ -824,6 +849,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async placeStopOrder(params: StopOrderParams): Promise<OrderResult> {
+    const enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey);
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
@@ -838,8 +864,11 @@ export class PacificaAdapter implements ProtocolAdapter {
       operationData.client_order_id = params.clientOrderId;
     }
 
-    if (params.builderCode || this.config.builderCode) {
-      operationData.builder_code = params.builderCode || this.config.builderCode;
+    // Task 143: fail-CLOSED on builder approval (see placeMarketOrder).
+    if (params.builderCode) {
+      operationData.builder_code = params.builderCode;
+    } else if (enrollment.builderApproved && this.config.builderCode) {
+      operationData.builder_code = this.config.builderCode;
     }
 
     const body = signer.buildRequestBody(
@@ -859,6 +888,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async setTpSl(params: TpSlParams): Promise<OrderResult> {
+    const enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey);
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
@@ -966,6 +996,13 @@ export class PacificaAdapter implements ProtocolAdapter {
       symbol: protocolSymbol,
       side: closingSide,
     };
+
+    // Task 143: inject builder_code at the TOP LEVEL of the TP/SL data object
+    // (NOT inside take_profit / stop_loss sub-objects — per Pacifica docs).
+    // Same fail-CLOSED gate as the order paths.
+    if (enrollment.builderApproved && this.config.builderCode) {
+      operationData.builder_code = this.config.builderCode;
+    }
 
     if (tpRequested && !tpInvalid) {
       const tpStopQ = this.quantizePrice(params.internalSymbol, params.takeProfitPrice as number);
@@ -1957,6 +1994,235 @@ export class PacificaAdapter implements ProtocolAdapter {
       pacificaCache.set(cacheKey, path, data);
       return data;
     });
+  }
+
+  // ==========================================================================
+  // Task 143: Pacifica Builder Code & Referral Wiring
+  // ==========================================================================
+  //
+  // Pacifica grants QuantumVault a builder_code ("QuantumVault") and a
+  // referral identifier. Every order tagged with our builder_code earns us a
+  // share of the order fee (per Pacifica's configured `fee_rate`), and every
+  // referred user counts toward our points/share. Both require a one-time
+  // SIGNED approval/claim from the user before they take effect:
+  //   - approve_builder_code → POST /account/builder_codes/approve
+  //   - claim_referral_code  → POST /referral/user/code/claim
+  //
+  // Both flows are tied to the user's MAIN wallet (the agent public key on
+  // Pacifica), not per-subaccount, so they fire at most once per user.
+  // QuantumVault holds the user's agent keypair server-side, so we sign
+  // both ops with PacificaSigner — no wallet popup, no frontend change.
+  //
+  // Failure-mode policy (deliberate, asymmetric):
+  //   - Builder approval: fail-CLOSED. If approval hasn't landed, we MUST
+  //     NOT inject builder_code on the order (Pacifica returns 403). Lose
+  //     the fee on that one order; retry on the next.
+  //   - Referral claim:   fail-OPEN.  Never block trade flow on referral.
+
+  /**
+   * Centralized pre-trade enrollment. Called at the top of every order/TpSl
+   * adapter method. Reads current flags, fires any missing approval/claim
+   * via a per-wallet async mutex (so concurrent first-trades coalesce into
+   * a single in-flight call), and returns the resulting flag state.
+   *
+   * Safe to call on every trade: the steady-state path is one DB SELECT
+   * plus the mutex map lookup (no POST) once both flags are true.
+   */
+  private async ensurePacificaEnrollment(
+    agentPublicKey: string,
+    agentSecretKey: Uint8Array,
+  ): Promise<{ builderApproved: boolean; referralClaimed: boolean }> {
+    try {
+      const { storage } = await import('../../storage.js');
+      // The Pacifica main account == our server-managed agent keypair public
+      // key. The `wallets` table primary key is the user's Solana address;
+      // the agent pubkey lives in `wallets.agent_public_key`. We must look up
+      // by that column or we'll silently miss every row.
+      const wallet = await storage.getWalletByAgentPublicKey(agentPublicKey);
+      // Steady-state fast path: both flags already true → no work.
+      if (wallet?.pacificaBuilderApproved && wallet?.pacificaReferralClaimed) {
+        return { builderApproved: true, referralClaimed: true };
+      }
+      // No wallet row means we have no row to flip — skip and treat as not
+      // enrolled. This path shouldn't fire in practice (the trade implies
+      // a known user) but we never want to block a trade on a missing row.
+      if (!wallet) {
+        return { builderApproved: false, referralClaimed: false };
+      }
+
+      // Per-wallet mutex: collapse concurrent callers into a single attempt.
+      const existing = this.enrollmentInFlight.get(agentPublicKey);
+      if (existing) return existing;
+
+      const work = (async () => {
+        let builderApproved = !!wallet.pacificaBuilderApproved;
+        let referralClaimed = !!wallet.pacificaReferralClaimed;
+
+        if (!builderApproved && this.config.builderCode) {
+          builderApproved = await this.approveBuilderCodeForUser({
+            agentPublicKey,
+            agentSecretKey,
+          });
+        }
+        if (!referralClaimed && this.config.referralAddress) {
+          referralClaimed = await this.claimReferralCodeForUser({
+            agentPublicKey,
+            agentSecretKey,
+          });
+        }
+        return { builderApproved, referralClaimed };
+      })().finally(() => {
+        this.enrollmentInFlight.delete(agentPublicKey);
+      });
+
+      this.enrollmentInFlight.set(agentPublicKey, work);
+      return await work;
+    } catch (err: any) {
+      // Never let enrollment failures break a trade. Builder injection is
+      // gated on the returned `builderApproved` flag (so fail-closed naturally
+      // falls back to "place the order without our code"); referral is
+      // best-effort anyway.
+      console.error('[PacificaEnrollment] Unexpected error in ensurePacificaEnrollment:', err?.message || err);
+      return { builderApproved: false, referralClaimed: false };
+    }
+  }
+
+  /**
+   * Sign and POST approve_builder_code. Returns true on success or if the
+   * user is already approved upstream (idempotency tolerance).
+   *
+   * Public so the new-user provision flow in routes.ts can warm the flag
+   * proactively after main-account creation. The mutex+flag fast-path
+   * inside ensurePacificaEnrollment makes redundant calls cheap.
+   */
+  async approveBuilderCodeForUser(input: {
+    agentPublicKey: string;
+    agentSecretKey: Uint8Array;
+  }): Promise<boolean> {
+    const builderCode = this.config.builderCode;
+    if (!builderCode) return false;
+    const maxFeeRate = this.config.builderMaxFeeRate ?? '0.002';
+
+    const signer = new PacificaSigner(input.agentSecretKey);
+    // Inner `data` dict ONLY — buildRequestBody wraps the envelope, sorts
+    // keys, signs, and flattens. Never hand-build the outer message.
+    const operationData: Record<string, unknown> = {
+      builder_code: builderCode,
+      max_fee_rate: maxFeeRate,
+    };
+
+    const ok = await this.postWithApprovalRetry(
+      '/account/builder_codes/approve',
+      () => signer.buildRequestBody(
+        OPERATION_TYPES.APPROVE_BUILDER_CODE,
+        operationData,
+        input.agentPublicKey,
+        null,
+        5000, // approval expiry_window per Pacifica docs (orders use 30000)
+      ),
+      '[PacificaBuilderApprove]',
+      /already.*approv/i,
+    );
+
+    if (ok) {
+      try {
+        const { storage } = await import('../../storage.js');
+        await storage.markPacificaBuilderApproved(input.agentPublicKey);
+      } catch (err: any) {
+        console.error('[PacificaBuilderApprove] Flag persist failed (will retry next trade):', err?.message || err);
+        return false;
+      }
+    }
+    return ok;
+  }
+
+  /**
+   * Sign and POST claim_referral_code. Returns true on success or if the
+   * user has already claimed upstream. Fail-OPEN — never block trade flow.
+   */
+  async claimReferralCodeForUser(input: {
+    agentPublicKey: string;
+    agentSecretKey: Uint8Array;
+  }): Promise<boolean> {
+    const refAddress = this.config.referralAddress;
+    if (!refAddress) return false;
+
+    const signer = new PacificaSigner(input.agentSecretKey);
+    const operationData: Record<string, unknown> = { code: refAddress };
+
+    const ok = await this.postWithApprovalRetry(
+      '/referral/user/code/claim',
+      () => signer.buildRequestBody(
+        OPERATION_TYPES.CLAIM_REFERRAL_CODE,
+        operationData,
+        input.agentPublicKey,
+        null,
+        5000,
+      ),
+      '[PacificaReferralClaim]',
+      /already.*claim/i,
+    );
+
+    if (ok) {
+      try {
+        const { storage } = await import('../../storage.js');
+        await storage.markPacificaReferralClaimed(input.agentPublicKey);
+      } catch (err: any) {
+        console.error('[PacificaReferralClaim] Flag persist failed (will retry next trade):', err?.message || err);
+        return false;
+      }
+    }
+    return ok;
+  }
+
+  /**
+   * Shared POST helper for approval/claim with:
+   *   - "already approved/claimed" tolerance (treat as success)
+   *   - bounded 429 backoff (cap 3 attempts, jittered <2s total)
+   *   - loud tagged logging on every other failure (returns false; caller
+   *     leaves the flag false so the next trade retries naturally)
+   *
+   * Body is built lazily via a thunk because each retry needs a fresh
+   * timestamp/signature (Pacifica rejects stale signed bodies).
+   */
+  private async postWithApprovalRetry(
+    path: string,
+    buildBody: () => unknown,
+    logTag: string,
+    alreadyMatcher: RegExp,
+  ): Promise<boolean> {
+    const delays = [250, 600, 1100]; // ~1.95s cumulative cap
+    let lastError = '';
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      try {
+        const body = buildBody();
+        await this.post(path, body);
+        return true;
+      } catch (err: any) {
+        const msg = err?.message || String(err);
+        lastError = msg;
+        // Tolerate "already approved/claimed" semantic on non-2xx — Pacifica
+        // returns this when the user has already enrolled (e.g. from a prior
+        // server instance, manual API call, or duplicate POST after restart).
+        if (alreadyMatcher.test(msg)) {
+          console.log(`${logTag} Already enrolled upstream (treating as success): ${msg}`);
+          return true;
+        }
+        // Retry on 429 with jittered backoff; everything else is a hard fail
+        // (we'll retry on the user's next trade).
+        if (/\b429\b/.test(msg) && attempt < delays.length - 1) {
+          const jitter = Math.floor(Math.random() * 150);
+          const wait = delays[attempt] + jitter;
+          console.warn(`${logTag} 429 rate-limited, retrying in ${wait}ms (attempt ${attempt + 1}/${delays.length})`);
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        console.error(`${logTag} POST ${path} failed: ${msg}`);
+        return false;
+      }
+    }
+    console.error(`${logTag} POST ${path} exhausted retries: ${lastError}`);
+    return false;
   }
 
   private async post(path: string, body: unknown): Promise<any> {

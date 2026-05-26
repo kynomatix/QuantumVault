@@ -33,7 +33,14 @@ async function initializeProtocolAdapter(): Promise<void> {
     const { PacificaAdapter } = await import("./protocol/pacifica/pacifica-adapter");
     const { registerAdapter, setAdapterHealth } = await import("./protocol/adapter-registry");
     const { updateMarketCache } = await import("./market-registry");
-    const adapter = new PacificaAdapter();
+    // Task 143: thread builder code & referral identifier. Values are public
+    // identifiers (not secrets) locked in with Pacifica; env vars are overrides
+    // for testing / future migrations. If both are blanked the helpers become
+    // no-ops and orders ship without builder_code (status quo).
+    const adapter = new PacificaAdapter({
+      builderCode: process.env.PACIFICA_BUILDER_CODE ?? 'QuantumVault',
+      referralAddress: process.env.PACIFICA_REFERRAL_ADDRESS ?? 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
+    });
     registerAdapter(adapter);
     await adapter.initialize();
     const markets = await adapter.getMarkets();

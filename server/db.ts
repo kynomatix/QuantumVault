@@ -205,6 +205,12 @@ export async function ensureSchema() {
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_summary_enabled boolean NOT NULL DEFAULT false`,
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_summary_last_sent_date text`,
 
+      // --- Task 143: Pacifica Builder Code & Referral idempotency flags ---
+      // Idempotent ALTERs. Default false so existing rows are migrated lazily on
+      // the next trade (the adapter's ensurePacificaEnrollment hook fires).
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS pacifica_builder_approved boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS pacifica_referral_claimed boolean NOT NULL DEFAULT false`,
+
       `INSERT INTO lab_strategies (user_id, name, description, pine_script, parsed_inputs, groups, strategy_settings)
        SELECT 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
               src.name, src.description, src.pine_script, src.parsed_inputs, src.groups, src.strategy_settings

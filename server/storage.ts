@@ -92,6 +92,7 @@ export interface IStorage {
   createUser(user: InsertUser): Promise<User>;
 
   getWallet(address: string): Promise<Wallet | undefined>;
+  getWalletByAgentPublicKey(agentPublicKey: string): Promise<Wallet | undefined>;
   getWalletByWebhookSecret(secret: string): Promise<Wallet | undefined>;
   getWalletByReferralCode(referralCode: string): Promise<Wallet | undefined>;
   createWallet(wallet: InsertWallet): Promise<Wallet>;
@@ -101,6 +102,8 @@ export interface IStorage {
   updateWalletAgentKeyV3(address: string, agentPrivateKeyEncryptedV3: string): Promise<void>;
   updateWalletWebhookSecret(address: string, userWebhookSecret: string): Promise<void>;
   updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined>;
+  markPacificaBuilderApproved(agentPublicKey: string): Promise<void>;
+  markPacificaReferralClaimed(agentPublicKey: string): Promise<void>;
 
   getAllBots(): Promise<Bot[]>;
   getFeaturedBots(): Promise<Bot[]>;
@@ -378,6 +381,11 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  async getWalletByAgentPublicKey(agentPublicKey: string): Promise<Wallet | undefined> {
+    const result = await db.select().from(wallets).where(eq(wallets.agentPublicKey, agentPublicKey)).limit(1);
+    return result[0];
+  }
+
   async getWalletByWebhookSecret(secret: string): Promise<Wallet | undefined> {
     const result = await db.select().from(wallets).where(eq(wallets.userWebhookSecret, secret)).limit(1);
     return result[0];
@@ -426,6 +434,14 @@ export class DatabaseStorage implements IStorage {
   async updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined> {
     const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
     return result[0];
+  }
+
+  async markPacificaBuilderApproved(agentPublicKey: string): Promise<void> {
+    await db.update(wallets).set({ pacificaBuilderApproved: true }).where(eq(wallets.agentPublicKey, agentPublicKey));
+  }
+
+  async markPacificaReferralClaimed(agentPublicKey: string): Promise<void> {
+    await db.update(wallets).set({ pacificaReferralClaimed: true }).where(eq(wallets.agentPublicKey, agentPublicKey));
   }
 
   async getAllBots(): Promise<Bot[]> {

@@ -6699,12 +6699,56 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             };
 
             console.log(`[Bot Creation] Pacifica atomic provision done: subaccount=${botSubaccountPublicKey} wasNew=${result.wasNewAccount} transferred=${result.transferSucceeded}${result.warning ? ` warning="${result.warning}"` : ''}`);
+
+            // Task 143: proactively warm builder-code approval + referral claim
+            // for the user's main account now that it exists on Pacifica. This
+            // makes the FIRST trade already tagged with our builder_code. The
+            // adapter retries on the next trade if this fails — never block
+            // bot creation on enrollment.
+            try {
+              const pacificaAdapter = adapter as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
+              const agentPub = agentKeypair.publicKey.toString();
+              await Promise.allSettled([
+                pacificaAdapter.approveBuilderCodeForUser({
+                  agentPublicKey: agentPub,
+                  agentSecretKey: agentKeypair.secretKey,
+                }),
+                pacificaAdapter.claimReferralCodeForUser({
+                  agentPublicKey: agentPub,
+                  agentSecretKey: agentKeypair.secretKey,
+                }),
+              ]);
+            } catch (enrollErr: any) {
+              console.warn('[Bot Creation] Pacifica enrollment warm-up failed (non-fatal, retries on next trade):', enrollErr?.message || enrollErr);
+            }
           } else {
             const sub = await adapter.createSubaccount({
               mainSecretKey: agentKeypair.secretKey,
               subSecretKey: botKeypair?.secretKey,
               agentPublicKey: agentKeypair.publicKey.toString(),
             });
+
+            // Task 143: warm enrollment for the non-atomic branch too (Drift
+            // bots skip this — adapter check inside is safe because helpers
+            // are no-ops without config). Non-fatal.
+            if (adapter.protocolName === 'pacifica') {
+              try {
+                const pacificaAdapter = adapter as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
+                const agentPub = agentKeypair.publicKey.toString();
+                await Promise.allSettled([
+                  pacificaAdapter.approveBuilderCodeForUser({
+                    agentPublicKey: agentPub,
+                    agentSecretKey: agentKeypair.secretKey,
+                  }),
+                  pacificaAdapter.claimReferralCodeForUser({
+                    agentPublicKey: agentPub,
+                    agentSecretKey: agentKeypair.secretKey,
+                  }),
+                ]);
+              } catch (enrollErr: any) {
+                console.warn('[Bot Creation] Pacifica enrollment warm-up failed (non-fatal, retries on next trade):', enrollErr?.message || enrollErr);
+              }
+            }
 
             botSubaccountPublicKey = sub.subaccountId;
             if (botKeypair) {

@@ -173,6 +173,8 @@ export const OPERATION_TYPES = {
   CREATE_API_KEY: 'create_api_key',
   REVOKE_API_KEY: 'revoke_api_key',
   LIST_API_KEYS: 'list_api_keys',
+  APPROVE_BUILDER_CODE: 'approve_builder_code',
+  CLAIM_REFERRAL_CODE: 'claim_referral_code',
 } as const;
 
 export type OperationType = (typeof OPERATION_TYPES)[keyof typeof OPERATION_TYPES];

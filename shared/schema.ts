@@ -51,6 +51,15 @@ export const wallets = pgTable("wallets", {
   telegramChatId: text("telegram_chat_id"),
   dailySummaryEnabled: boolean("daily_summary_enabled").default(false).notNull(),
   dailySummaryLastSentDate: text("daily_summary_last_sent_date"),
+
+  // Task 143: Pacifica Builder Code & Referral Wiring. Per-user idempotency
+  // flags so the adapter only signs+POSTs each enrollment once. The adapter
+  // resets them to false implicitly on failure (it just doesn't flip them),
+  // so the next interaction retries. The two flags are independent: builder
+  // approval gates the on-trade `builder_code` injection (fail-closed), while
+  // referral claim is best-effort and never blocks trading (fail-open).
+  pacificaBuilderApproved: boolean("pacifica_builder_approved").default(false).notNull(),
+  pacificaReferralClaimed: boolean("pacifica_referral_claimed").default(false).notNull(),
   
   protocolSubaccountId: text("protocol_subaccount_id"),
   
