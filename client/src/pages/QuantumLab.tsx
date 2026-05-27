@@ -2286,6 +2286,131 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
   );
 }
 
+const TIMEFRAME_ORDER: Record<string, number> = LAB_AVAILABLE_TIMEFRAMES.reduce((acc, tf, i) => {
+  acc[tf] = i;
+  return acc;
+}, {} as Record<string, number>);
+
+type SweepSlot = { key: string; tf: string; status: "pending" | "running" | "complete"; best?: number };
+type SweepGroup = { ticker: string; name: string; slots: SweepSlot[] };
+
+function SweepProgressPanel({ tickerProgress }: { tickerProgress: NonNullable<LabJobProgress["tickerProgress"]> }) {
+  const keysSignature = useMemo(() => Object.keys(tickerProgress).sort().join(","), [tickerProgress]);
+
+  const groups = useMemo<SweepGroup[]>(() => {
+    const byTicker = new Map<string, SweepSlot[]>();
+    for (const key of Object.keys(tickerProgress)) {
+      const [ticker, tf] = key.split("|");
+      if (!byTicker.has(ticker)) byTicker.set(ticker, []);
+      byTicker.get(ticker)!.push({ key, tf, status: "pending" });
+    }
+    const result: SweepGroup[] = [];
+    for (const [ticker, slots] of byTicker.entries()) {
+      slots.sort((a, b) => {
+        const ai = TIMEFRAME_ORDER[a.tf] ?? 999;
+        const bi = TIMEFRAME_ORDER[b.tf] ?? 999;
+        if (ai !== bi) return ai - bi;
+        return a.tf.localeCompare(b.tf);
+      });
+      result.push({ ticker, name: ticker.split("/")[0], slots });
+    }
+    result.sort((a, b) => a.name.localeCompare(b.name));
+    return result;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keysSignature]);
+
+  let total = 0, complete = 0, running = 0, pending = 0;
+  for (const key of Object.keys(tickerProgress)) {
+    total++;
+    const s = tickerProgress[key].status;
+    if (s === "complete") complete++;
+    else if (s === "running") running++;
+    else pending++;
+  }
+  const pct = total > 0 ? Math.round((complete / total) * 100) : 0;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[10px] uppercase tracking-wider text-white/30 flex items-center gap-1.5">
+          <BarChart3 className="w-3 h-3" /> Sweep Progress
+        </p>
+        <div className="flex items-center gap-3 text-[10px] font-mono tabular-nums" data-testid="sweep-summary">
+          <span className="text-white/70" data-testid="sweep-summary-counts">{complete} / {total}</span>
+          <span className="flex items-center gap-1 text-violet-400" data-testid="sweep-summary-running">
+            <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
+            {running} running
+          </span>
+          <span className="text-white/40" data-testid="sweep-summary-pending">{pending} pending</span>
+        </div>
+      </div>
+
+      <div className="relative w-full h-1 rounded-full bg-white/5 overflow-hidden">
+        <div
+          className="absolute inset-y-0 left-0 bg-gradient-to-r from-violet-500 to-sky-400 transition-[width] duration-500 ease-out"
+          style={{ width: `${pct}%` }}
+          data-testid="sweep-progress-bar"
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        {groups.map((g) => (
+          <div
+            key={g.ticker}
+            className="flex items-center gap-3 py-1.5 px-3 rounded-md bg-white/5"
+            data-testid={`sweep-row-${g.name}`}
+          >
+            <div className="flex-shrink-0 w-16 sm:w-20">
+              <span className="text-xs font-mono font-semibold text-white" data-testid={`sweep-ticker-${g.name}`}>{g.name}</span>
+            </div>
+            <div className="flex-1 min-w-0 flex flex-wrap gap-1">
+              {g.slots.map((slot) => {
+                const live = tickerProgress[slot.key];
+                const status = live?.status ?? "pending";
+                const best = live?.best;
+                const cellBase = "flex items-center gap-1 px-1.5 py-1 rounded text-[10px] font-mono leading-none border min-w-[64px] sm:min-w-[78px] transition-colors duration-300";
+                const cellStyle =
+                  status === "complete"
+                    ? "bg-sky-500/10 border-sky-500/30 text-sky-300"
+                    : status === "running"
+                    ? "bg-violet-500/15 border-violet-500/40 text-violet-200"
+                    : "bg-white/5 border-white/10 text-white/50";
+                return (
+                  <div
+                    key={slot.key}
+                    className={`${cellBase} ${cellStyle}`}
+                    data-testid={`sweep-${g.name}-${slot.tf}`}
+                  >
+                    <span className="flex-shrink-0 w-2.5 h-2.5 flex items-center justify-center">
+                      {status === "complete" ? (
+                        <CheckCircle2 className="w-2.5 h-2.5" />
+                      ) : status === "running" ? (
+                        <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                      ) : (
+                        <span className="w-1 h-1 rounded-full bg-white/30" />
+                      )}
+                    </span>
+                    <span className="font-semibold">{slot.tf}</span>
+                    <span className="ml-auto tabular-nums">
+                      {typeof best === "number" ? (
+                        <span className={best >= 0 ? "text-sky-300" : "text-purple-300"}>
+                          {best > 0 ? "+" : ""}{best.toFixed(1)}%
+                        </span>
+                      ) : (
+                        <span className="text-white/25">—</span>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange, hideAutoRefine, strategyName }: { progress: LabJobProgress; onCancel: () => void; autoRefine: boolean; onAutoRefineChange: (v: boolean) => void; hideAutoRefine?: boolean; strategyName?: string }) {
   const [cancelling, setCancelling] = useState(false);
 
@@ -2382,37 +2507,7 @@ export function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange,
         )}
 
         {progress.tickerProgress && Object.keys(progress.tickerProgress).length > 1 && (
-          <div className="space-y-1.5">
-            <p className="text-[10px] uppercase tracking-wider text-white/30 flex items-center gap-1.5">
-              <BarChart3 className="w-3 h-3" /> Sweep Progress
-            </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-              {Object.entries(progress.tickerProgress).map(([key, val]) => {
-                const [ticker, tf] = key.split("|");
-                const name = ticker.split("/")[0];
-                return (
-                  <div key={key} className="flex items-center justify-between gap-1 py-1.5 px-3 rounded-md bg-white/5" data-testid={`sweep-${name}-${tf}`}>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-mono text-white">{name}</span>
-                      <Badge variant="outline" className="text-[10px] border-white/20 text-white/60">{tf}</Badge>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {val.best !== undefined && (
-                        <span className={`text-xs font-mono ${val.best >= 0 ? "text-sky-400" : "text-purple-400"}`}>
-                          {val.best > 0 ? "+" : ""}{val.best.toFixed(1)}%
-                        </span>
-                      )}
-                      <Badge className={`text-[10px] ${val.status === "complete" ? "bg-sky-500/20 text-sky-400" : val.status === "running" ? "bg-violet-500/20 text-violet-400" : "bg-white/5 text-white/60"}`}>
-                        {val.status === "complete" && <CheckCircle2 className="w-2.5 h-2.5 mr-1" />}
-                        {val.status === "running" && <Loader2 className="w-2.5 h-2.5 mr-1 animate-spin" />}
-                        {val.status}
-                      </Badge>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+          <SweepProgressPanel tickerProgress={progress.tickerProgress} />
         )}
       </div>
     </Card>
